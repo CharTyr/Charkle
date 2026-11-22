@@ -19,6 +19,7 @@ public final class SyncAndAIStore {
     public var hasGoogleOAuthClient: Bool = false
     public var hasWebDAVPassword: Bool = false
     public var cacheStats: CacheStats = CacheStats()
+    public var externalAgentConfig: ExternalAgentConfig = ExternalAgentConfig()
 
     public var lastSyncReport: SyncReport?
     public var lastMigrationReport: StorageMigrationReport?
@@ -52,6 +53,7 @@ public final class SyncAndAIStore {
         hasGoogleOAuthClient = hasOAuth
         hasWebDAVPassword = hasWebDAV
         chatGPTSession = chatGPT
+        externalAgentConfig = ExternalAgentConfigStore.load()
         hasStoredAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
         if chatGPT.status == .connected && chatGPT.sharingEnabled && chatGPTModels.isEmpty {
             await refreshChatGPTModels(quiet: true)
@@ -359,6 +361,58 @@ public final class SyncAndAIStore {
             statusMessage = "已释放临时本地缓存（已保留在本地的内容未受影响）"
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - External Agent (MCP & CLI) Configuration
+
+    public func saveExternalAgentConfig(_ config: ExternalAgentConfig, quiet: Bool = false) {
+        do {
+            try ExternalAgentConfigStore.save(config)
+            externalAgentConfig = config
+            errorMessage = nil
+            if !quiet {
+                statusMessage = config.enabled
+                    ? "外部 Agent 权限已更新：\(config.accessLevel.displayTitle)"
+                    : "已关闭外部 Agent 接入"
+            }
+        } catch {
+            errorMessage = "保存外部 Agent 配置失败：\(error.localizedDescription)"
+        }
+    }
+
+    public func resolvedHelperCLIPath() -> String {
+        let bundled = Bundle.main.bundleURL
+            .appending(path: "Contents/Helpers/charkle")
+            .path
+        if FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
+        }
+        let appApplications = "/Applications/Charkle.app/Contents/Helpers/charkle"
+        if FileManager.default.isExecutableFile(atPath: appApplications) {
+            return appApplications
+        }
+        return bundled
+    }
+
+    public func installCLIInLocalBin() {
+        let sourcePath = resolvedHelperCLIPath()
+        guard FileManager.default.isExecutableFile(atPath: sourcePath) else {
+            errorMessage = "未在当前应用包中找到 charkle 助手程序，请先使用正式打包后的 Charkle.app 运行。"
+            return
+        }
+        let localBin = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".local/bin", directoryHint: .isDirectory)
+        let targetURL = localBin.appending(path: "charkle")
+        do {
+            try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: targetURL.path) || (try? FileManager.default.attributesOfItem(atPath: targetURL.path)) != nil {
+                try FileManager.default.removeItem(at: targetURL)
+            }
+            try FileManager.default.createSymbolicLink(atPath: targetURL.path, withDestinationPath: sourcePath)
+            errorMessage = nil
+            statusMessage = "已链接终端命令至 ~/.local/bin/charkle，可直接运行 charkle overview"
+        } catch {
+            errorMessage = "创建命令行链接失败：\(error.localizedDescription)"
         }
     }
 }

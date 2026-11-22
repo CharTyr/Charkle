@@ -24,6 +24,7 @@ public struct SettingsView: View {
     public enum SettingsTab: String, CaseIterable, Identifiable {
         case cloudSync
         case intelligence
+        case externalAgent
         case storage
         case captureShortcuts
 
@@ -33,6 +34,7 @@ public struct SettingsView: View {
             switch self {
             case .cloudSync: "存储与同步"
             case .intelligence: "智能与搜索"
+            case .externalAgent: "外部 Agent 与 MCP"
             case .storage: "缓存空间"
             case .captureShortcuts: "采集与快捷键"
             }
@@ -42,6 +44,7 @@ public struct SettingsView: View {
             switch self {
             case .cloudSync: "drive-sync"
             case .intelligence: "sparkle-board"
+            case .externalAgent: "connector"
             case .storage: "library"
             case .captureShortcuts: "notch"
             }
@@ -51,6 +54,7 @@ public struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .cloudSync
     @State private var draftSyncConfig: DriveSyncConfig = DriveSyncConfig()
     @State private var draftAIConfig: AIProviderConfig = AIProviderConfig()
+    @State private var draftExternalAgentConfig: ExternalAgentConfig = ExternalAgentConfig()
     @State private var apiKeyInput: String = ""
     @State private var webDAVPasswordInput: String = ""
     @State private var cacheBudgetGB: Double = 10.0
@@ -138,6 +142,8 @@ public struct SettingsView: View {
                         cloudSyncPane
                     case .intelligence:
                         intelligencePane
+                    case .externalAgent:
+                        externalAgentPane
                     case .storage:
                         storagePane
                     case .captureShortcuts:
@@ -154,6 +160,7 @@ public struct SettingsView: View {
             await syncAndAI.loadAll()
             draftSyncConfig = syncAndAI.syncConfig
             draftAIConfig = syncAndAI.aiConfig
+            draftExternalAgentConfig = syncAndAI.externalAgentConfig
             cacheBudgetGB = max(2, min(100, Double(syncAndAI.cacheStats.budgetBytes) / (1024 * 1024 * 1024)))
             didLoadInitial = true
         }
@@ -1670,6 +1677,203 @@ public struct SettingsView: View {
         guard didLoadInitial else { return }
         let snapshot = draftAIConfig
         Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil, quiet: true) }
+    }
+
+    // MARK: - Tab 3: 外部 Agent 与 MCP (原生 stdio MCP Server + 命令行工具)
+
+    private var externalAgentPane: some View {
+        let helperPath = syncAndAI.resolvedHelperCLIPath()
+        let claudeCodeCmd = "claude mcp add charkle -- \"\(helperPath)\" mcp"
+        let jsonConfig = """
+        {
+          "mcpServers": {
+            "charkle": {
+              "command": "\(helperPath)",
+              "args": ["mcp"]
+            }
+          }
+        }
+        """
+
+        let enabledBinding = Binding<Bool>(
+            get: { draftExternalAgentConfig.enabled },
+            set: { newValue in
+                draftExternalAgentConfig.enabled = newValue
+                syncAndAI.saveExternalAgentConfig(draftExternalAgentConfig)
+            }
+        )
+        let accessBinding = Binding<ExternalAgentAccessLevel>(
+            get: { draftExternalAgentConfig.accessLevel },
+            set: { newLevel in
+                draftExternalAgentConfig.accessLevel = newLevel
+                syncAndAI.saveExternalAgentConfig(draftExternalAgentConfig)
+            }
+        )
+
+        return VStack(alignment: .leading, spacing: 18) {
+            settingsHeader(
+                title: "外部 Agent 与 MCP",
+                subtitle: "让 Claude Code、Cursor、Codex、Antigravity 等外部 AI 助手直接检索你的视觉素材库、查看联系表与情绪板，并实时同步更新画布。"
+            )
+
+            // Access & Safety Policy
+            settingsGroupCard {
+                settingsRow(
+                    title: "允许外部 AI Agent 接入",
+                    subtitle: "内置原生 Swift 助手程序（零 Node/Python 依赖），仅限本机调用，切换设置即时生效"
+                ) {
+                    Toggle("", isOn: enabledBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+
+                if draftExternalAgentConfig.enabled {
+                    Divider()
+
+                    settingsRow(
+                        title: "外部 Agent 权限级别",
+                        subtitle: draftExternalAgentConfig.accessLevel.summary
+                    ) {
+                        Picker("", selection: accessBinding) {
+                            Text("仅只读").tag(ExternalAgentAccessLevel.readOnly)
+                            Text("允许整理与生板").tag(ExternalAgentAccessLevel.readWriteOrganize)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 224)
+                    }
+
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.green)
+                            .padding(.top, 1)
+                        Text("安全边界：仅通过本机标准输入输出通信，不开放任何网络端口；外部 Agent 永远无法执行彻底删除，所有删除操作均仅移入回收站。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+
+            // Quick Connect Setup
+            settingsGroupCard {
+                Text("快速接入配置")
+                    .font(.system(size: 12.5, weight: .semibold))
+
+                // Claude Code 1-line command
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Claude Code（终端一行添加）")
+                            .font(.system(size: 11.5, weight: .medium))
+                        Spacer()
+                        Button {
+                            copyToClipboard(claudeCodeCmd, toast: "已复制 Claude Code 接入命令")
+                        } label: {
+                            Label("一键复制命令", systemImage: "doc.on.doc")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    Text(claudeCodeCmd)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .padding(9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+
+                Divider()
+
+                // Cursor / Antigravity / Codex JSON config
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Cursor / Antigravity / Codex（MCP JSON 配置）")
+                            .font(.system(size: 11.5, weight: .medium))
+                        Spacer()
+                        Button {
+                            copyToClipboard(jsonConfig, toast: "已复制 MCP JSON 配置")
+                        } label: {
+                            Label("复制 JSON 配置", systemImage: "doc.on.doc")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    Text(jsonConfig)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .padding(9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+
+                Divider()
+
+                // Terminal CLI Helper
+                settingsRow(
+                    title: "命令行工具（charkle CLI）",
+                    subtitle: "支持脚本、Skill 与非 MCP 代理调用，例如 charkle search / contact-sheet / board export --json"
+                ) {
+                    HStack(spacing: 6) {
+                        Button("复制路径") {
+                            copyToClipboard(helperPath, toast: "已复制 charkle 命令行路径")
+                        }
+                        .controlSize(.small)
+
+                        Button("链接到 ~/.local/bin") {
+                            syncAndAI.installCLIInLocalBin()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+            }
+
+            // Capabilities Summary Grid
+            settingsGroupCard {
+                Text("已开放的外部 Agent 能力")
+                    .font(.system(size: 12.5, weight: .semibold))
+
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    capabilityTile(
+                        icon: "photo.on.rectangle.angled",
+                        title: "视觉联系表看图",
+                        detail: "单次返回带编号的缩略图拼版与清单，让外部 AI 直接用视觉挑选素材"
+                    )
+                    capabilityTile(
+                        icon: "swatchpalette.fill",
+                        title: "读取情绪板与色板",
+                        detail: "导出结构化分区、批注、主色 HEX 与高清 PNG，无缝衔接设计或写代码"
+                    )
+                    capabilityTile(
+                        icon: "folder.badge.gearshape",
+                        title: "整理归类与生成画布",
+                        detail: "开启写入权限后，可批量打标、整理收件箱、导入素材并创建情绪板"
+                    )
+                    capabilityTile(
+                        icon: "bolt.horizontal.circle.fill",
+                        title: "画布实时热刷新",
+                        detail: "外部 Agent 完成整理或生成情绪板后，当前 Charkle 窗口立即自动更新"
+                    )
+                }
+            }
+        }
+    }
+
+    private func copyToClipboard(_ text: String, toast: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        syncAndAI.errorMessage = nil
+        syncAndAI.statusMessage = toast
     }
 
     // MARK: - Clean Reusable Product Settings Chrome

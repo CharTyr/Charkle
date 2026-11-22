@@ -7,23 +7,31 @@ APP_NAME="Charkle"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 
-echo "==> Building $APP_NAME ($CONFIG)..."
+echo "==> Building $APP_NAME and charkle CLI/MCP helper ($CONFIG)..."
 cd "$ROOT_DIR"
 swift build -c "$CONFIG" --product "$APP_NAME"
+swift build -c "$CONFIG" --product "charkle-cli"
 
 BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
 BIN_PATH="$BIN_DIR/$APP_NAME"
+CLI_BIN_PATH="$BIN_DIR/charkle-cli"
 if [[ ! -f "$BIN_PATH" ]]; then
   echo "ERROR: Binary not found at $BIN_PATH" >&2
+  exit 1
+fi
+if [[ ! -f "$CLI_BIN_PATH" ]]; then
+  echo "ERROR: Helper CLI binary not found at $CLI_BIN_PATH" >&2
   exit 1
 fi
 
 echo "==> Assembling $APP_BUNDLE..."
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$APP_BUNDLE/Contents/Helpers"
 
 cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$CLI_BIN_PATH" "$APP_BUNDLE/Contents/Helpers/charkle"
+chmod +x "$APP_BUNDLE/Contents/Helpers/charkle"
 cp "$ROOT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
 # Copy SwiftPM resource bundles (including kubai-icons SVG assets)

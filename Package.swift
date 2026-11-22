@@ -18,6 +18,10 @@ let package = Package(
         .executable(
             name: "Charkle",
             targets: ["CharkleApp"]
+        ),
+        .executable(
+            name: "charkle-cli",
+            targets: ["CharkleCLI"]
         )
     ],
     targets: [
@@ -51,6 +55,15 @@ let package = Package(
             ],
             swiftSettings: [
                 .defaultIsolation(MainActor.self),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+                .enableUpcomingFeature("InferIsolatedConformances")
+            ]
+        ),
+        .executableTarget(
+            name: "CharkleCLI",
+            dependencies: ["CharkleCore"],
+            path: "Sources/CharkleCLI",
+            swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
                 .enableUpcomingFeature("InferIsolatedConformances")
             ]

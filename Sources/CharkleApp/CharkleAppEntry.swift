@@ -18,6 +18,8 @@ public final class CharkleRuntime {
 
     private var notchController: NotchShelfController?
     private let hotkeyManager = GlobalHotkeyManager()
+    @ObservationIgnored
+    private nonisolated(unsafe) var externalRefreshObserver: NSObjectProtocol?
 
     public init() {
         let resolvedEngine: any CharkleEngineProtocol
@@ -35,6 +37,37 @@ public final class CharkleRuntime {
         self.syncAndAI = SyncAndAIStore(engine: resolvedEngine)
 
         setupNotchAndHotkeys()
+        setupExternalAgentLiveRefresh()
+    }
+
+    deinit {
+        if let observer = externalRefreshObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+        }
+    }
+
+    private func setupExternalAgentLiveRefresh() {
+        externalRefreshObserver = DistributedNotificationCenter.default().addObserver(
+            forName: ExternalAgentNotifier.libraryChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let info = notification.userInfo
+            let boardIDString = info?["boardID"] as? String
+            let summary = info?["summary"] as? String
+            let boardID = boardIDString.flatMap(UUID.init(uuidString:))
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.library.refreshAll()
+                await self.moodboards.refreshBoards()
+                if let boardID {
+                    await self.moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                }
+                if let summary, !summary.isEmpty {
+                    self.coordinator.showToast(summary, icon: "bolt.horizontal.circle.fill")
+                }
+            }
+        }
     }
 
     private func setupNotchAndHotkeys() {

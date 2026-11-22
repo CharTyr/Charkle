@@ -990,16 +990,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 }
 
 public extension LiveCharkleEngine {
-    static func make(appSupportDirectory: URL? = nil) throws -> LiveCharkleEngine {
+    static func make(appSupportDirectory: URL? = nil, startAutoSync: Bool = true) throws -> LiveCharkleEngine {
         let directory = try appSupportDirectory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                                            appropriateFor: nil, create: true)
             .appending(path: "Charkle", directoryHint: .isDirectory)
         let media = try MediaPipeline(directory: directory)
         let database = try LibraryDatabase(url: directory.appending(path: "Library.sqlite3"))
         let engine = LiveCharkleEngine(database: database, media: media)
-        Task { [weak engine] in
-            guard let engine else { return }
-            await engine.refreshAutoSync(config: engine.syncConfig())
+        if startAutoSync {
+            Task { [weak engine] in
+                guard let engine else { return }
+                await engine.refreshAutoSync(config: engine.syncConfig())
+            }
         }
         return engine
     }
