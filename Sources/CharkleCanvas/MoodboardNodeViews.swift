@@ -156,6 +156,10 @@ struct BoardAssetNodeView: View {
     let onToggleHero: () -> Void
     let onTriggerSwap: () -> Void
     let onOpenQuickLook: () -> Void
+    let onRotateBy: (Double) -> Void
+    let onResetRotation: () -> Void
+    let onFlipHorizontal: () -> Void
+    let onFlipVertical: () -> Void
     let onToggleLock: () -> Void
     let onDelete: () -> Void
 
@@ -185,6 +189,10 @@ struct BoardAssetNodeView: View {
                     cornerRadius: outerRadius,
                     isHovered: isHovered,
                     crop: crop
+                )
+                .scaleEffect(
+                    x: node.flipHorizontal ? -1 : 1,
+                    y: node.flipVertical ? -1 : 1
                 )
                 .matchedGeometryEffect(id: "board-\(node.id.uuidString)", in: heroNamespace)
             } else {
@@ -297,6 +305,15 @@ struct BoardAssetNodeView: View {
         .contextMenu {
             Button("快速预览 (Space)") { onOpenQuickLook() }
             Button("从候选池换一张…") { onTriggerSwap() }
+            Divider()
+            Button("顺时针旋转 90° (R)") { onRotateBy(90) }
+            Button("逆时针旋转 90° (⇧R)") { onRotateBy(-90) }
+            if abs(node.rotationDegrees) > 0.1 {
+                Button("重置旋转角度 (0°)") { onResetRotation() }
+            }
+            Button(node.flipHorizontal ? "取消水平翻转 (⇧H)" : "水平翻转 (⇧H)") { onFlipHorizontal() }
+            Button(node.flipVertical ? "取消上下翻转 (⇧V)" : "上下翻转 (⇧V)") { onFlipVertical() }
+            Divider()
             Button(weight >= 2 ? "取消主图 2× 权重" : "设为主图 2× 权重") { onToggleHero() }
             Button(node.isLocked ? "解锁位置" : "锁定位置") { onToggleLock() }
             Divider()

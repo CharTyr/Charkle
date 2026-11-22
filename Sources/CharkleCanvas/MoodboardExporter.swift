@@ -348,6 +348,12 @@ public enum MoodboardExporter {
                     drawR = CGRect(x: rect.minX, y: rect.midY - scaledH * 0.5, width: rect.width, height: scaledH)
                 }
                 ctx.saveGState()
+                ctx.translateBy(x: rect.midX, y: rect.midY)
+                ctx.scaleBy(
+                    x: node.flipHorizontal ? -1 : 1,
+                    y: node.flipVertical ? -1 : 1
+                )
+                ctx.translateBy(x: -rect.midX, y: -rect.midY)
                 ctx.translateBy(x: drawR.minX, y: drawR.maxY)
                 ctx.scaleBy(x: 1, y: -1)
                 ctx.draw(cgImg, in: CGRect(x: 0, y: 0, width: drawR.width, height: drawR.height))

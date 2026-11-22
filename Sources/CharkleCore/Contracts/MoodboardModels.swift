@@ -122,6 +122,8 @@ public struct BoardNode: Codable, Hashable, Identifiable, Sendable {
     public var frame: BoardRect
     public var zIndex: Int
     public var rotationDegrees: Double
+    public var flipHorizontal: Bool
+    public var flipVertical: Bool
     public var isLocked: Bool
     public var editorialOrder: Int
     public var updatedAt: Date
@@ -137,6 +139,8 @@ public struct BoardNode: Codable, Hashable, Identifiable, Sendable {
         frame: BoardRect,
         zIndex: Int = 0,
         rotationDegrees: Double = 0,
+        flipHorizontal: Bool = false,
+        flipVertical: Bool = false,
         isLocked: Bool = false,
         editorialOrder: Int = 0,
         updatedAt: Date = Date()
@@ -146,9 +150,29 @@ public struct BoardNode: Codable, Hashable, Identifiable, Sendable {
         self.frame = frame
         self.zIndex = zIndex
         self.rotationDegrees = rotationDegrees
+        self.flipHorizontal = flipHorizontal
+        self.flipVertical = flipVertical
         self.isLocked = isLocked
         self.editorialOrder = editorialOrder
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, frame, zIndex, rotationDegrees, flipHorizontal, flipVertical, isLocked, editorialOrder, updatedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decode(BoardNodeKind.self, forKey: .kind)
+        frame = try c.decode(BoardRect.self, forKey: .frame)
+        zIndex = try c.decodeIfPresent(Int.self, forKey: .zIndex) ?? 0
+        rotationDegrees = try c.decodeIfPresent(Double.self, forKey: .rotationDegrees) ?? 0
+        flipHorizontal = try c.decodeIfPresent(Bool.self, forKey: .flipHorizontal) ?? false
+        flipVertical = try c.decodeIfPresent(Bool.self, forKey: .flipVertical) ?? false
+        isLocked = try c.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        editorialOrder = try c.decodeIfPresent(Int.self, forKey: .editorialOrder) ?? 0
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 

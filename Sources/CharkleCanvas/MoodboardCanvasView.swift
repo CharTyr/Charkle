@@ -116,6 +116,11 @@ public struct MoodboardCanvasView: View {
     @State private var resizeStartFrame: BoardRect?
     @State private var liveResizeFrame: BoardRect?
 
+    @State private var rotatingNodeID: UUID?
+    @State private var rotationStartDegrees: Double = 0
+    @State private var rotationDragStartAngle: Double = 0
+    @State private var liveRotationDegrees: Double?
+
     // Auto Editorial Kubai Tip 005 drag-to-reorder ripple state
     @State private var editorialDraggingID: UUID?
     @State private var editorialDragTranslation: CGSize = .zero
@@ -218,12 +223,21 @@ public struct MoodboardCanvasView: View {
                 }
             }
 
-            // Bottom-Center Floating Liquid Glass Tool Dock (single GlassEffectContainer!)
-            VStack {
+            // Bottom-Center Floating Liquid Glass Transform Pill (when nodes selected) + Tool Dock
+            VStack(spacing: 8) {
                 Spacer()
+                if !selectedUnlockedNodes.isEmpty && activeTool == .select {
+                    selectedTransformBar
+                        .transition(
+                            .opacity
+                                .combined(with: .scale(scale: 0.94, anchor: .bottom))
+                                .combined(with: .offset(y: 6))
+                        )
+                }
                 floatingToolDock
                     .padding(.bottom, 18)
             }
+            .animation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion), value: selectedNodeIDs)
 
             // External drop highlight border
             if isDropTargeted {
@@ -279,9 +293,29 @@ public struct MoodboardCanvasView: View {
             deleteCurrentSelection()
             return .handled
         }
-        .onKeyPress(characters: CharacterSet(charactersIn: "vhcpeVHCPE")) { press in
+        .onKeyPress(characters: CharacterSet(charactersIn: "vhcperVHCPER")) { press in
+            let lower = press.characters.lowercased()
+            // Transform shortcuts work whenever unlocked nodes are selected (both modes)
+            if !selectedUnlockedNodes.isEmpty {
+                if lower == "r" && press.modifiers.isEmpty {
+                    rotateSelectedNodes(by: 90)
+                    return .handled
+                }
+                if lower == "r" && press.modifiers == [.shift] {
+                    rotateSelectedNodes(by: -90)
+                    return .handled
+                }
+                if lower == "h" && press.modifiers == [.shift] {
+                    flipSelectedNodes(horizontal: true)
+                    return .handled
+                }
+                if lower == "v" && press.modifiers == [.shift] {
+                    flipSelectedNodes(horizontal: false)
+                    return .handled
+                }
+            }
             guard !isAutoEditorial, press.modifiers.isEmpty else { return .ignored }
-            switch press.characters.lowercased() {
+            switch lower {
             case "v": activeTool = .select; return .handled
             case "h": activeTool = .pan; return .handled
             case "c": activeTool = .connector; return .handled
@@ -358,6 +392,30 @@ public struct MoodboardCanvasView: View {
 
                             renderNodeBody(node: node, isAutoMode: true)
                                 .frame(width: CGFloat(rect.width), height: CGFloat(rect.height))
+                                .rotationEffect(.degrees(effectiveRotation(for: node)))
+                                .contentShape(Rectangle())
+                                .simultaneousGesture(
+                                    TapGesture(count: 1).onEnded {
+                                        let mods = NSEvent.modifierFlags
+                                        if mods.contains(.command) || mods.contains(.shift) {
+                                            if selectedNodeIDs.contains(node.id) {
+                                                selectedNodeIDs.remove(node.id)
+                                            } else {
+                                                selectedNodeIDs.insert(node.id)
+                                            }
+                                        } else {
+                                            selectedNodeIDs = [node.id]
+                                        }
+                                        selectedConnectorID = nil
+                                    }
+                                )
+                                .gesture(
+                                    editorialReorderGesture(
+                                        nodeID: nodeID,
+                                        solved: solved,
+                                        topPad: topPad
+                                    )
+                                )
                                 .scaleEffect(isDragging ? 0.94 : 1.0)
                                 .offset(
                                     x: isDragging ? editorialDragTranslation.width : rippleX,
@@ -380,18 +438,6 @@ public struct MoodboardCanvasView: View {
                                 .animation(
                                     CanvasMotion.accessible(CanvasMotion.moveOnScreen, reduced: reduceMotion),
                                     value: rect
-                                )
-                                .simultaneousGesture(
-                                    TapGesture(count: 1).onEnded {
-                                        selectedNodeIDs = [node.id]
-                                    }
-                                )
-                                .gesture(
-                                    editorialReorderGesture(
-                                        nodeID: nodeID,
-                                        solved: solved,
-                                        topPad: topPad
-                                    )
                                 )
                         }
                     }
@@ -545,6 +591,7 @@ public struct MoodboardCanvasView: View {
                 let screenH = CGFloat(worldRect.height) * cameraZoom
                 let isSelected = selectedNodeIDs.contains(node.id)
                 let isHovered = hoveredNodeID == node.id
+                let currentRotation = effectiveRotation(for: node)
 
                 ZStack {
                     renderNodeBody(node: node, isAutoMode: false)
@@ -555,14 +602,14 @@ public struct MoodboardCanvasView: View {
                         connectorPortsOverlay(node: node, worldRect: worldRect, width: screenW, height: screenH)
                     }
 
-                    // Bottom-right corner resize handle on selected unlocked nodes
+                    // Bottom-right corner resize handle + Top-center rotation handle on selected unlocked nodes
                     if isSelected && !node.isLocked && activeTool == .select && !isSpaceKeyPanning {
                         resizeHandleOverlay(node: node, width: screenW, height: screenH)
+                        rotationHandleOverlay(node: node, screenCenter: screenCenter, height: screenH, currentRotation: currentRotation)
                     }
                 }
                 .frame(width: max(24, screenW), height: max(24, screenH))
-                .rotationEffect(.degrees(node.rotationDegrees))
-                .position(screenCenter)
+                .contentShape(Rectangle())
                 .onHover { hovering in
                     if hovering {
                         hoveredNodeID = node.id
@@ -589,6 +636,8 @@ public struct MoodboardCanvasView: View {
                 )
                 .gesture(activeTool == .select && !isSpaceKeyPanning ? nodeDragGesture(for: node) : nil)
                 .allowsHitTesting(activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning)
+                .rotationEffect(.degrees(currentRotation))
+                .position(screenCenter)
             }
 
             // Interactive connector midpoint labels (clickable to edit / delete)
@@ -659,6 +708,7 @@ public struct MoodboardCanvasView: View {
                 }
             }
         }
+        .coordinateSpace(name: "charkle-freeform-stage")
         .clipped()
         .simultaneousGesture(
             MagnifyGesture()
@@ -857,6 +907,269 @@ public struct MoodboardCanvasView: View {
         }
     }
 
+    // MARK: - Selection Transform Helpers & Interactive Rotation Handle
+
+    private var selectedUnlockedNodes: [BoardNode] {
+        document.nodes.filter { selectedNodeIDs.contains($0.id) && !$0.isLocked }
+    }
+
+    private func effectiveRotation(for node: BoardNode) -> Double {
+        if rotatingNodeID == node.id, let live = liveRotationDegrees {
+            return live
+        }
+        return node.rotationDegrees
+    }
+
+    private func normalizeDegrees(_ degrees: Double) -> Double {
+        var d = degrees.truncatingRemainder(dividingBy: 360.0)
+        if d > 180.0 { d -= 360.0 }
+        if d <= -180.0 { d += 360.0 }
+        if abs(d) < 0.05 { d = 0 }
+        return d
+    }
+
+    private func rotateSelectedNodes(by delta: Double) {
+        rotateNodes(Set(selectedUnlockedNodes.map(\.id)), by: delta)
+    }
+
+    private func rotateNodes(_ ids: Set<UUID>, by delta: Double) {
+        guard !ids.isEmpty else { return }
+        var nextDoc = document
+        var changed = false
+        for idx in nextDoc.nodes.indices where ids.contains(nextDoc.nodes[idx].id) && !nextDoc.nodes[idx].isLocked {
+            nextDoc.nodes[idx].rotationDegrees = normalizeDegrees(nextDoc.nodes[idx].rotationDegrees + delta)
+            nextDoc.nodes[idx].updatedAt = Date()
+            changed = true
+        }
+        if changed {
+            withAnimation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion)) {
+                callbacks.onCommitDocument(nextDoc)
+            }
+        }
+    }
+
+    private func resetRotation(for ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        var nextDoc = document
+        var changed = false
+        for idx in nextDoc.nodes.indices where ids.contains(nextDoc.nodes[idx].id) && !nextDoc.nodes[idx].isLocked {
+            if abs(nextDoc.nodes[idx].rotationDegrees) > 0.01 {
+                nextDoc.nodes[idx].rotationDegrees = 0
+                nextDoc.nodes[idx].updatedAt = Date()
+                changed = true
+            }
+        }
+        if changed {
+            withAnimation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion)) {
+                callbacks.onCommitDocument(nextDoc)
+            }
+        }
+    }
+
+    private func flipSelectedNodes(horizontal: Bool) {
+        flipNodes(Set(selectedUnlockedNodes.map(\.id)), horizontal: horizontal)
+    }
+
+    private func flipNodes(_ ids: Set<UUID>, horizontal: Bool) {
+        guard !ids.isEmpty else { return }
+        var nextDoc = document
+        var changed = false
+        for idx in nextDoc.nodes.indices where ids.contains(nextDoc.nodes[idx].id) && !nextDoc.nodes[idx].isLocked {
+            if horizontal {
+                nextDoc.nodes[idx].flipHorizontal.toggle()
+            } else {
+                nextDoc.nodes[idx].flipVertical.toggle()
+            }
+            nextDoc.nodes[idx].updatedAt = Date()
+            changed = true
+        }
+        if changed {
+            withAnimation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion)) {
+                callbacks.onCommitDocument(nextDoc)
+            }
+        }
+    }
+
+    /// Top-center interactive rotation knob attached to a selected unlocked node in Freeform mode.
+    /// Drag freely to rotate (hold Shift for 15° steps; magnetic snap near 0°/±90°/180°); double-click resets to 0°.
+    private func rotationHandleOverlay(
+        node: BoardNode,
+        screenCenter: CGPoint,
+        height: CGFloat,
+        currentRotation: Double
+    ) -> some View {
+        let isDraggingThis = rotatingNodeID == node.id
+        return VStack(spacing: 0) {
+            ZStack {
+                Circle()
+                    .fill(isDraggingThis ? Color.accentColor : Color.white)
+                    .frame(width: 22, height: 22)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                    )
+                    .shadow(color: .black.opacity(0.18), radius: 4, y: 1)
+
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isDraggingThis ? .white : Color.accentColor)
+            }
+            .overlay(alignment: .top) {
+                if isDraggingThis {
+                    Text("\(Int(currentRotation.rounded()))°")
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.76), in: Capsule(style: .continuous))
+                        .rotationEffect(.degrees(-currentRotation))
+                        .offset(y: -28)
+                        .allowsHitTesting(false)
+                }
+            }
+            .contentShape(Circle().inset(by: -6))
+            .onTapGesture(count: 2) {
+                resetRotation(for: [node.id])
+            }
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .named("charkle-freeform-stage"))
+                    .onChanged { value in
+                        let angleNow = atan2(
+                            Double(value.location.y - screenCenter.y),
+                            Double(value.location.x - screenCenter.x)
+                        ) * 180.0 / .pi
+                        if rotatingNodeID == nil {
+                            rotatingNodeID = node.id
+                            rotationStartDegrees = node.rotationDegrees
+                            rotationDragStartAngle = angleNow
+                        }
+                        var raw = normalizeDegrees(rotationStartDegrees + (angleNow - rotationDragStartAngle))
+                        if NSEvent.modifierFlags.contains(.shift) {
+                            raw = normalizeDegrees((raw / 15.0).rounded() * 15.0)
+                        } else {
+                            // Soft magnetic snap near cardinal angles (0°, ±90°, 180°)
+                            let cardinals: [Double] = [0, 90, -90, 180, -180]
+                            for target in cardinals where abs(raw - target) <= 3.0 {
+                                raw = target == -180 ? 180 : target
+                                break
+                            }
+                        }
+                        liveRotationDegrees = raw
+                    }
+                    .onEnded { _ in
+                        let finalAngle = liveRotationDegrees
+                        rotatingNodeID = nil
+                        liveRotationDegrees = nil
+                        if let finalAngle, abs(finalAngle - node.rotationDegrees) > 0.05 {
+                            var nextDoc = document
+                            if let idx = nextDoc.nodes.firstIndex(where: { $0.id == node.id }) {
+                                nextDoc.nodes[idx].rotationDegrees = normalizeDegrees(finalAngle)
+                                nextDoc.nodes[idx].updatedAt = Date()
+                                callbacks.onCommitDocument(nextDoc)
+                            }
+                        }
+                    }
+            )
+            .help("拖拽自由旋转（按住 ⇧ 以 15° 吸附，双击归零）")
+
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.75))
+                .frame(width: 1.5, height: 14)
+                .allowsHitTesting(false)
+        }
+        .offset(y: -(height * 0.5 + 18))
+    }
+
+    /// Floating Liquid Glass Transform Pill (Rotate ±90°, Reset Angle, Flip Horizontal / Vertical)
+    /// shown cleanly above the bottom tool dock whenever ≥1 unlocked node is selected.
+    private var selectedTransformBar: some View {
+        let targets = selectedUnlockedNodes
+        let single = targets.count == 1 ? targets.first : nil
+        let singleAngle = single.map { effectiveRotation(for: $0) } ?? 0
+        let anyFlippedH = targets.contains(where: \.flipHorizontal)
+        let anyFlippedV = targets.contains(where: \.flipVertical)
+
+        return HStack(spacing: 4) {
+            if targets.count > 1 {
+                Text("已选 \(targets.count) 项")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                Divider().frame(height: 16)
+            }
+
+            transformPillButton(icon: "rotate.left", label: "逆时针 90° (⇧R)") {
+                rotateSelectedNodes(by: -90)
+            }
+            transformPillButton(icon: "rotate.right", label: "顺时针 90° (R)") {
+                rotateSelectedNodes(by: 90)
+            }
+
+            if abs(singleAngle) > 0.1 || targets.contains(where: { abs($0.rotationDegrees) > 0.1 }) {
+                Button {
+                    resetRotation(for: Set(targets.map(\.id)))
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("\(Int(singleAngle.rounded()))°")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .monospacedDigit()
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .help("点击重置旋转角度至 0°")
+            }
+
+            Divider().frame(height: 16).padding(.horizontal, 2)
+
+            transformPillButton(
+                icon: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                label: "水平翻转 (⇧H)",
+                isActive: anyFlippedH
+            ) {
+                flipSelectedNodes(horizontal: true)
+            }
+
+            transformPillButton(
+                icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                label: "上下翻转 (⇧V)",
+                isActive: anyFlippedV
+            ) {
+                flipSelectedNodes(horizontal: false)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .canvasLiquidGlass(in: Capsule(style: .continuous))
+    }
+
+    private func transformPillButton(
+        icon: String,
+        label: String,
+        isActive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isActive ? Color.accentColor : .primary)
+                .frame(width: 28, height: 26)
+                .background(
+                    isActive ? Color.accentColor.opacity(0.14) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(label)
+    }
+
     // MARK: - Selection & Quick Look Helpers
 
     private func clearCanvasSelection() {
@@ -967,7 +1280,7 @@ public struct MoodboardCanvasView: View {
     }
 
     private func nodeDragGesture(for node: BoardNode) -> some Gesture {
-        DragGesture(minimumDistance: 3)
+        DragGesture(minimumDistance: 3, coordinateSpace: .named("charkle-freeform-stage"))
             .onChanged { value in
                 guard !node.isLocked else { return }
                 if activeNodeDragID == nil {
@@ -1183,6 +1496,10 @@ public struct MoodboardCanvasView: View {
                         callbacks.onOpenQuickLook(asset)
                     }
                 },
+                onRotateBy: { delta in rotateNodes([node.id], by: delta) },
+                onResetRotation: { resetRotation(for: [node.id]) },
+                onFlipHorizontal: { flipNodes([node.id], horizontal: true) },
+                onFlipVertical: { flipNodes([node.id], horizontal: false) },
                 onToggleLock: { toggleLock(nodeID: node.id) },
                 onDelete: { removeNode(id: node.id) }
             )
