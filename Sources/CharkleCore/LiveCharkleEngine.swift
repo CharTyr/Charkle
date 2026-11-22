@@ -473,7 +473,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func saveAIConfig(_ config: AIProviderConfig, apiKey: String?) async throws {
-        if let apiKey, config.provider != .disabled {
+        if let apiKey, config.provider != .disabled, config.provider != .chatGPTSubscription {
             let key = IntelligenceEngine.key(config.provider)
             let value = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             if value.isEmpty { try intelligence.keychain.delete(key) }
@@ -483,7 +483,51 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func hasStoredAIKey(for provider: CloudAIProviderKind) async -> Bool {
-        provider != .disabled && (try? intelligence.keychain.read(IntelligenceEngine.key(provider)))?.isEmpty == false
+        switch provider {
+        case .disabled:
+            return false
+        case .chatGPTSubscription:
+            return await intelligence.chatGPT.hasUsableSession()
+        case .gemini, .openAICompatible:
+            return (try? intelligence.keychain.read(IntelligenceEngine.key(provider)))?.isEmpty == false
+        }
+    }
+
+    public func chatGPTSession() async -> ChatGPTAccountSession {
+        await intelligence.chatGPT.currentSession()
+    }
+
+    public func signInWithChatGPT(reconsent: Bool = false, switchAccount: Bool = false) async throws -> ChatGPTAccountSession {
+        let session = try await intelligence.chatGPT.signIn(
+            reconsent: reconsent,
+            switchAccount: switchAccount,
+            openBrowser: { url in
+                await MainActor.run {
+                    _ = NSWorkspace.shared.open(url)
+                }
+            }
+        )
+        var config = await aiConfig()
+        config.provider = .chatGPTSubscription
+        config.baseURL = ChatGPTSignInClient.resource
+        if session.sharingEnabled, let models = try? await intelligence.chatGPT.listModels(), !models.isEmpty {
+            if config.chatModel.isEmpty || !models.contains(where: { $0.slug == config.chatModel }) {
+                config.chatModel = models.first?.slug ?? config.chatModel
+            }
+        } else if config.chatModel.isEmpty || config.chatModel.hasPrefix("gemini-") || config.chatModel.hasPrefix("claude-") {
+            config.chatModel = "gpt-5.4-mini"
+        }
+        config.embeddingModel = ""
+        try await database.setState("aiConfig", config)
+        return session
+    }
+
+    public func disconnectChatGPT(resetRegistration: Bool = false) async throws {
+        try await intelligence.chatGPT.disconnect(resetRegistration: resetRegistration)
+    }
+
+    public func listChatGPTModels() async throws -> [ChatGPTModelInfo] {
+        try await intelligence.chatGPT.listModels()
     }
 
     private static let webDAVPasswordKey = "sync.webdav.password"

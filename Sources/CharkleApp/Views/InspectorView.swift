@@ -78,11 +78,13 @@ public struct InspectorView: View {
                 emptyInspectorPlaceholder
             }
         }
-        .frame(minWidth: 272, idealWidth: 296, maxWidth: 340)
+        .frame(width: 300)
+        .frame(maxHeight: .infinity)
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(CharkleTheme.hairline(for: colorScheme))
                 .frame(width: 1)
+                .ignoresSafeArea(.container, edges: .top)
         }
         .alert(
             "彻底删除 \(pendingPermanentDeleteIDs.count) 项素材？",

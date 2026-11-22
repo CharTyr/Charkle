@@ -2,8 +2,12 @@ import Foundation
 
 public nonisolated struct IntelligenceEngine: Sendable {
     let keychain: KeychainStore
+    let chatGPT: ChatGPTSignInClient
 
-    public init(keychain: KeychainStore = KeychainStore()) { self.keychain = keychain }
+    public init(keychain: KeychainStore = KeychainStore(), chatGPT: ChatGPTSignInClient? = nil) {
+        self.keychain = keychain
+        self.chatGPT = chatGPT ?? ChatGPTSignInClient(keychain: keychain)
+    }
 
     @concurrent
     public func analyze(thumbnailURL: URL, includeColors: Bool = true) async -> LocalAnalysisResult {
@@ -15,13 +19,16 @@ public nonisolated struct IntelligenceEngine: Sendable {
 
     func provider(for config: AIProviderConfig) throws -> (any CloudAIProvider)? {
         guard config.provider != .disabled else { return nil }
-        let key = try keychain.read(Self.key(config.provider)).flatMap { String(data: $0, encoding: .utf8) }
         switch config.provider {
         case .disabled: return nil
+        case .chatGPTSubscription:
+            return ChatGPTSubscriptionProvider(client: chatGPT, model: config.chatModel)
         case .gemini:
+            let key = try keychain.read(Self.key(config.provider)).flatMap { String(data: $0, encoding: .utf8) }
             guard let key, !key.isEmpty else { throw LibraryDatabaseError("请先在设置中填写 Gemini API 密钥。") }
             return try GeminiProvider(config: config, apiKey: key)
         case .openAICompatible:
+            let key = try keychain.read(Self.key(config.provider)).flatMap { String(data: $0, encoding: .utf8) }
             switch config.customEndpointFormat {
             case .openAIChatCompletions:
                 return try OpenAICompatibleProvider(config: config, apiKey: key)

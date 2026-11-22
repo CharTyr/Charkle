@@ -40,15 +40,69 @@ public struct CacheStats: Codable, Hashable, Sendable {
 
 public enum CloudAIProviderKind: String, Codable, CaseIterable, Hashable, Sendable {
     case disabled
+    case chatGPTSubscription
     case gemini
     case openAICompatible
 
     public var localizedLabel: String {
         switch self {
-        case .disabled: "仅端侧离线（推荐默认）"
+        case .disabled: "关闭（仅本机）"
+        case .chatGPTSubscription: "ChatGPT 订阅账号"
         case .gemini: "Google Gemini"
-        case .openAICompatible: "OpenAI / Ollama 兼容接口"
+        case .openAICompatible: "自定义兼容服务"
         }
+    }
+}
+
+public enum ChatGPTConnectionStatus: String, Codable, Hashable, Sendable {
+    case disconnected
+    case connected
+    case reauthRequired
+}
+
+public struct ChatGPTAccountSession: Codable, Hashable, Sendable {
+    public var status: ChatGPTConnectionStatus
+    public var sharingEnabled: Bool
+    public var email: String?
+    public var name: String?
+    public var subject: String?
+    public var lastUpdatedAt: Date?
+
+    public init(
+        status: ChatGPTConnectionStatus = .disconnected,
+        sharingEnabled: Bool = false,
+        email: String? = nil,
+        name: String? = nil,
+        subject: String? = nil,
+        lastUpdatedAt: Date? = nil
+    ) {
+        self.status = status
+        self.sharingEnabled = sharingEnabled
+        self.email = email
+        self.name = name
+        self.subject = subject
+        self.lastUpdatedAt = lastUpdatedAt
+    }
+
+    public var displayName: String {
+        if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let email = email?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
+            return email
+        }
+        return "ChatGPT 账号"
+    }
+}
+
+public struct ChatGPTModelInfo: Codable, Hashable, Identifiable, Sendable {
+    public var id: String { slug }
+    public let slug: String
+    public let displayName: String
+
+    public init(slug: String, displayName: String) {
+        self.slug = slug
+        self.displayName = displayName
     }
 }
 

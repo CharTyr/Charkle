@@ -57,6 +57,10 @@ public protocol CharkleEngineProtocol: Sendable {
     func aiConfig() async -> AIProviderConfig
     func saveAIConfig(_ config: AIProviderConfig, apiKey: String?) async throws
     func hasStoredAIKey(for provider: CloudAIProviderKind) async -> Bool
+    func chatGPTSession() async -> ChatGPTAccountSession
+    func signInWithChatGPT(reconsent: Bool, switchAccount: Bool) async throws -> ChatGPTAccountSession
+    func disconnectChatGPT(resetRegistration: Bool) async throws
+    func listChatGPTModels() async throws -> [ChatGPTModelInfo]
 
     // MARK: - Cloud & Local Storage Sync (Google Drive / WebDAV / Local Folder + Migration)
     func syncConfig() async -> DriveSyncConfig

@@ -153,7 +153,7 @@ public struct MoodboardGeneratorSheet: View {
                     .frame(width: 260)
 
                 if let prop = moodboards.proposal {
-                    Text(prop.usedCloudAI ? "已启用云端语义增强" : "端侧离线即时策展")
+                    Text(prop.usedCloudAI ? "已启用云端增强智能" : "端侧离线即时策展")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 8)

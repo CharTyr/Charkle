@@ -59,8 +59,10 @@ public struct MainWindowView: View {
         ZStack {
             // Native 3-pane studio layout (avoids macOS 26/27 NavigationSplitView + hiddenTitleBar
             // ScrollView safe-area hit-test vertical offset bug, ensuring 0px-accurate sidebar clicks).
+            // Sidebar and Inspector keep deterministic fixed internal widths inside animated width slots
+            // so rapid collapse/expand cycles never get stuck half-open or overflow past window bounds.
             HStack(spacing: 0) {
-                if isSidebarVisible {
+                HStack(spacing: 0) {
                     SidebarView(
                         coordinator: coordinator,
                         library: library,
@@ -103,44 +105,68 @@ public struct MainWindowView: View {
                         CharkleSidebarMaterialBackground()
                             .ignoresSafeArea(.container, edges: .top)
                     }
-                    .transition(.move(edge: .leading).combined(with: .opacity))
 
                     Rectangle()
                         .fill(CharkleTheme.hairline(for: colorScheme))
                         .frame(width: 1)
                         .ignoresSafeArea(.container, edges: .top)
                 }
+                .frame(width: 233)
+                .frame(maxHeight: .infinity)
+                .opacity(isSidebarVisible ? 1 : 0)
+                .allowsHitTesting(isSidebarVisible)
+                .disabled(!isSidebarVisible)
+                .accessibilityHidden(!isSidebarVisible)
+                .frame(width: isSidebarVisible ? 233 : 0, alignment: .trailing)
+                .mask {
+                    Rectangle()
+                        .ignoresSafeArea(.container, edges: .top)
+                }
+                .layoutPriority(1)
 
                 centerWorkspace
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .layoutPriority(0)
 
-                if coordinator.isInspectorVisible {
-                    InspectorView(
-                        coordinator: coordinator,
-                        library: library,
-                        moodboards: moodboards,
-                        onCopyHex: { copyColorHex($0) },
-                        onFilterByColor: { hex in
-                            Task {
-                                coordinator.selectedDestination = .allItems
-                                await library.applyDestination(.allItems)
-                                await library.filterByColorHex(hex)
-                                coordinator.isVisualFilterBarPresented = true
-                            }
-                        },
-                        onOpenQuickLook: { asset in
-                            openQuickLook(asset)
-                        },
-                        onCopyBoardImage: {
-                            copyCurrentBoardImage(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
-                        },
-                        onSaveBoardImage: { fmt in
-                            saveCurrentBoardImage(format: fmt, options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                InspectorView(
+                    coordinator: coordinator,
+                    library: library,
+                    moodboards: moodboards,
+                    onCopyHex: { copyColorHex($0) },
+                    onFilterByColor: { hex in
+                        Task {
+                            coordinator.selectedDestination = .allItems
+                            await library.applyDestination(.allItems)
+                            await library.filterByColorHex(hex)
+                            coordinator.isVisualFilterBarPresented = true
                         }
-                    )
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    },
+                    onOpenQuickLook: { asset in
+                        openQuickLook(asset)
+                    },
+                    onCopyBoardImage: {
+                        copyCurrentBoardImage(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                    },
+                    onSaveBoardImage: { fmt in
+                        saveCurrentBoardImage(format: fmt, options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                    }
+                )
+                .frame(width: 300)
+                .frame(maxHeight: .infinity)
+                .opacity(coordinator.isInspectorVisible ? 1 : 0)
+                .allowsHitTesting(coordinator.isInspectorVisible)
+                .disabled(!coordinator.isInspectorVisible)
+                .accessibilityHidden(!coordinator.isInspectorVisible)
+                .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
+                .mask {
+                    Rectangle()
+                        .ignoresSafeArea(.container, edges: .top)
                 }
+                .layoutPriority(1)
             }
+            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: isSidebarVisible)
+            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.isInspectorVisible)
 
             // Full-Media Quick Look Hero Continuity Overlay (Kubai Tip 015)
             if let qlID = coordinator.quickLookAssetID,
@@ -479,15 +505,15 @@ public struct MainWindowView: View {
     // MARK: - Floating Liquid Glass Top Bar
 
     private var floatingTopBar: some View {
-        CharkleGlassContainer(spacing: 10) {
-            HStack(spacing: 10) {
+        CharkleGlassContainer(spacing: 8) {
+            HStack(spacing: 8) {
                 // Search capsule
                 HStack(spacing: 7) {
                     CharkleIcon("search", style: .duotone, size: 14, color: .secondary)
                     TextField("搜索素材、标签、OCR 文字或拼音…", text: $searchDraft)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12.5))
-                        .frame(minWidth: 160, maxWidth: 280)
+                        .frame(minWidth: 68, idealWidth: 160, maxWidth: 260)
 
                     if !searchDraft.isEmpty {
                         Button {
@@ -514,12 +540,14 @@ public struct MainWindowView: View {
                         CharkleIcon("filter", style: .duotone, size: 14, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary)
                         Text("筛选")
                             .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
                         if library.filter.hasActiveVisualFilters {
                             Circle()
                                 .fill(Color.accentColor)
                                 .frame(width: 6, height: 6)
                         }
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 7)
                     .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
@@ -565,11 +593,12 @@ public struct MainWindowView: View {
                         get: { coordinator.targetColumnWidth },
                         set: { coordinator.targetColumnWidth = $0 }
                     ), in: 168...316)
-                    .frame(width: 72)
+                    .frame(width: 58)
                     Image(systemName: "square.grid.2x2")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
@@ -587,7 +616,9 @@ public struct MainWindowView: View {
                         CharkleIcon("sparkle-board", style: .duotone, size: 14, color: Color.accentColor)
                         Text("快速生成情绪板")
                             .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
                     .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
@@ -618,6 +649,7 @@ public struct MainWindowView: View {
                             .font(.system(size: 11.5, weight: .medium))
                             .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
@@ -630,9 +662,7 @@ public struct MainWindowView: View {
 
                 // Inspector Toggle
                 Button {
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
-                        coordinator.isInspectorVisible.toggle()
-                    }
+                    coordinator.isInspectorVisible.toggle()
                 } label: {
                     Image(systemName: "sidebar.right")
                         .font(.system(size: 13, weight: .medium))
@@ -643,6 +673,7 @@ public struct MainWindowView: View {
                 .buttonStyle(CharkleTactileButtonStyle())
                 .help("显示 / 隐藏右侧检查器")
             }
+            .frame(minWidth: 0, maxWidth: .infinity)
         }
     }
 
@@ -1582,9 +1613,7 @@ public struct MainWindowView: View {
                     onRedo: { moodboards.redo() },
                     onSelectSwapTarget: { nodeID in
                         if nodeID != nil && !coordinator.isInspectorVisible {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
-                                coordinator.isInspectorVisible = true
-                            }
+                            coordinator.isInspectorVisible = true
                         }
                         Task { await moodboards.selectSwapTarget(nodeID) }
                     },
@@ -1632,9 +1661,7 @@ public struct MainWindowView: View {
             )
             .overlay(alignment: .topTrailing) {
                 Button {
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
-                        coordinator.isInspectorVisible.toggle()
-                    }
+                    coordinator.isInspectorVisible.toggle()
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "sidebar.right")

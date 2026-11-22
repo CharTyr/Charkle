@@ -327,6 +327,14 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
     public func aiConfig() async -> AIProviderConfig { currentAIConfig }
     public func saveAIConfig(_ config: AIProviderConfig, apiKey: String?) async throws { currentAIConfig = config }
     public func hasStoredAIKey(for provider: CloudAIProviderKind) async -> Bool { false }
+    public func chatGPTSession() async -> ChatGPTAccountSession { ChatGPTAccountSession() }
+    public func signInWithChatGPT(reconsent: Bool, switchAccount: Bool) async throws -> ChatGPTAccountSession {
+        ChatGPTAccountSession(status: .connected, sharingEnabled: true, email: "demo@example.com", name: "Demo User")
+    }
+    public func disconnectChatGPT(resetRegistration: Bool) async throws {}
+    public func listChatGPTModels() async throws -> [ChatGPTModelInfo] {
+        [ChatGPTModelInfo(slug: "gpt-5.4-mini", displayName: "GPT-5.4 mini")]
+    }
 
     public func syncConfig() async -> DriveSyncConfig { currentSyncConfig }
     public func saveSyncConfig(_ config: DriveSyncConfig) async throws { currentSyncConfig = config }

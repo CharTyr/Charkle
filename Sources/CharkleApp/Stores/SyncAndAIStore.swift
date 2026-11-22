@@ -12,6 +12,10 @@ public final class SyncAndAIStore {
     public var gdirectSnapshot: GDirectEnvironmentSnapshot = GDirectEnvironmentSnapshot()
     public var aiConfig: AIProviderConfig = AIProviderConfig()
     public var hasStoredAIKey: Bool = false
+    public var chatGPTSession: ChatGPTAccountSession = ChatGPTAccountSession()
+    public var chatGPTModels: [ChatGPTModelInfo] = []
+    public var isSigningInChatGPT: Bool = false
+    public var isLoadingChatGPTModels: Bool = false
     public var hasGoogleOAuthClient: Bool = false
     public var hasWebDAVPassword: Bool = false
     public var cacheStats: CacheStats = CacheStats()
@@ -35,9 +39,10 @@ public final class SyncAndAIStore {
         async let stats = engine.cacheStats()
         async let oauthConfigured = engine.hasGoogleOAuthClientConfig()
         async let webdavPwd = engine.hasWebDAVPassword()
+        async let gptSession = engine.chatGPTSession()
 
-        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV) = await (
-            cfg, status, gd, ai, stats, oauthConfigured, webdavPwd
+        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV, chatGPT) = await (
+            cfg, status, gd, ai, stats, oauthConfigured, webdavPwd, gptSession
         )
         syncConfig = sCfg
         syncStatus = sStatus
@@ -46,7 +51,11 @@ public final class SyncAndAIStore {
         cacheStats = cStats
         hasGoogleOAuthClient = hasOAuth
         hasWebDAVPassword = hasWebDAV
+        chatGPTSession = chatGPT
         hasStoredAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
+        if chatGPT.status == .connected && chatGPT.sharingEnabled && chatGPTModels.isEmpty {
+            await refreshChatGPTModels(quiet: true)
+        }
     }
 
     public func probeGDirect() async {
@@ -269,6 +278,70 @@ public final class SyncAndAIStore {
 
     public func refreshAIKeyPresence(for provider: CloudAIProviderKind) async {
         hasStoredAIKey = await engine.hasStoredAIKey(for: provider)
+        if provider == .chatGPTSubscription {
+            chatGPTSession = await engine.chatGPTSession()
+            if chatGPTSession.status == .connected && chatGPTSession.sharingEnabled && chatGPTModels.isEmpty {
+                await refreshChatGPTModels(quiet: true)
+            }
+        }
+    }
+
+    @discardableResult
+    public func signInWithChatGPT(reconsent: Bool = false, switchAccount: Bool = false) async -> Bool {
+        isSigningInChatGPT = true
+        defer { isSigningInChatGPT = false }
+        errorMessage = nil
+        do {
+            let session = try await engine.signInWithChatGPT(reconsent: reconsent, switchAccount: switchAccount)
+            chatGPTSession = session
+            aiConfig = await engine.aiConfig()
+            hasStoredAIKey = await engine.hasStoredAIKey(for: .chatGPTSubscription)
+            if session.sharingEnabled {
+                await refreshChatGPTModels(quiet: true)
+                statusMessage = "已连接 ChatGPT 订阅账号：\(session.displayName)"
+            } else {
+                statusMessage = "已登录 ChatGPT（\(session.displayName)），如需使用订阅额度请重新授权额度共享"
+            }
+            return true
+        } catch {
+            chatGPTSession = await engine.chatGPTSession()
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    public func disconnectChatGPT(resetRegistration: Bool = false) async {
+        isBusy = true
+        defer { isBusy = false }
+        errorMessage = nil
+        do {
+            try await engine.disconnectChatGPT(resetRegistration: resetRegistration)
+            chatGPTSession = await engine.chatGPTSession()
+            chatGPTModels = []
+            hasStoredAIKey = await engine.hasStoredAIKey(for: aiConfig.provider)
+            statusMessage = "已退出 ChatGPT 账号连接"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func refreshChatGPTModels(quiet: Bool = false) async {
+        isLoadingChatGPTModels = true
+        defer { isLoadingChatGPTModels = false }
+        if !quiet { errorMessage = nil }
+        do {
+            let models = try await engine.listChatGPTModels()
+            chatGPTModels = models
+            chatGPTSession = await engine.chatGPTSession()
+            if !quiet {
+                statusMessage = "已获取 \(models.count) 个可用的 ChatGPT 订阅模型"
+            }
+        } catch {
+            chatGPTSession = await engine.chatGPTSession()
+            if !quiet {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     public func setCacheBudgetGB(_ gb: Double) async {

@@ -971,7 +971,7 @@ public struct SettingsView: View {
         VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
                 title: "智能与搜索",
-                subtitle: "日常配色筛选、文字识别与相似推荐完全在你的 Mac 本机离线运行，零隐私外传；需要更深语义理解时可按需开启云端增强。"
+                subtitle: "日常配色筛选、文字识别与相似推荐完全在你的 Mac 本机离线运行，零隐私外传；需要更深画面理解时可按需开启云端增强智能。"
             )
 
             // Built-in Offline Capabilities
@@ -991,16 +991,17 @@ public struct SettingsView: View {
             // Optional Cloud AI Enhancement
             settingsGroupCard {
                 settingsRow(
-                    title: "云端语义增强",
+                    title: "云端增强智能",
                     subtitle: "自动生成画面描述与建议标签，让灵感词生板更懂你的想法"
                 ) {
                     Picker("", selection: $draftAIConfig.provider) {
                         Text("关闭（仅本机）").tag(CloudAIProviderKind.disabled)
+                        Text("ChatGPT 订阅账号").tag(CloudAIProviderKind.chatGPTSubscription)
                         Text("Google Gemini").tag(CloudAIProviderKind.gemini)
                         Text("自定义兼容服务").tag(CloudAIProviderKind.openAICompatible)
                     }
                     .labelsHidden()
-                    .frame(width: 186)
+                    .frame(width: 196)
                     .onChange(of: draftAIConfig.provider) { _, newProvider in
                         applySmartAIDefaults(for: newProvider, format: draftAIConfig.customEndpointFormat)
                         Task {
@@ -1010,6 +1011,12 @@ public struct SettingsView: View {
                             }
                         }
                     }
+                }
+
+                if draftAIConfig.provider == .chatGPTSubscription {
+                    Divider()
+
+                    chatGPTSubscriptionSection
                 }
 
                 if draftAIConfig.provider != .disabled {
@@ -1034,28 +1041,30 @@ public struct SettingsView: View {
                         }
                     }
 
-                    Divider()
+                    if draftAIConfig.provider != .chatGPTSubscription {
+                        Divider()
 
-                    settingsRow(
-                        title: "API 密钥",
-                        subtitle: syncAndAI.hasStoredAIKey
-                            ? "已安全保存在 macOS 钥匙串中"
-                            : "密钥仅存于本机钥匙串，绝不上传"
-                    ) {
-                        HStack(spacing: 8) {
-                            SecureField(syncAndAI.hasStoredAIKey ? "••••••••（留空不变）" : "粘贴密钥…", text: $apiKeyInput)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 176)
-                            Button("保存") {
-                                let keyToSave = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                                Task {
-                                    await syncAndAI.saveAIConfig(draftAIConfig, apiKey: keyToSave.isEmpty ? nil : keyToSave)
-                                    apiKeyInput = ""
+                        settingsRow(
+                            title: "API 密钥",
+                            subtitle: syncAndAI.hasStoredAIKey
+                                ? "已安全保存在 macOS 钥匙串中"
+                                : "密钥仅存于本机钥匙串，绝不上传"
+                        ) {
+                            HStack(spacing: 8) {
+                                SecureField(syncAndAI.hasStoredAIKey ? "••••••••（留空不变）" : "粘贴密钥…", text: $apiKeyInput)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 176)
+                                Button("保存") {
+                                    let keyToSave = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    Task {
+                                        await syncAndAI.saveAIConfig(draftAIConfig, apiKey: keyToSave.isEmpty ? nil : keyToSave)
+                                        apiKeyInput = ""
+                                    }
                                 }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .fixedSize()
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                            .fixedSize()
                         }
                     }
 
@@ -1149,6 +1158,234 @@ public struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var chatGPTSubscriptionSection: some View {
+        let session = syncAndAI.chatGPTSession
+        VStack(alignment: .leading, spacing: 12) {
+            if session.status == .connected {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.07))
+                            .frame(width: 38, height: 38)
+                        chatGPTBrandMark(size: 20, color: .primary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(session.displayName)
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .lineLimit(1)
+                            Circle()
+                                .fill(session.sharingEnabled ? Color.green : Color.orange)
+                                .frame(width: 7, height: 7)
+                            Text(session.sharingEnabled ? "ChatGPT 订阅" : "未开启额度共享")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(session.sharingEnabled ? Color.green : Color.orange)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    (session.sharingEnabled ? Color.green : Color.orange).opacity(0.12),
+                                    in: Capsule()
+                                )
+                        }
+                        Text(
+                            session.email ?? (session.sharingEnabled
+                                ? "已通过 Sign in with ChatGPT 连接，直接使用你的订阅额度"
+                                : "已登录但未授予额度共享权限，请重新授权")
+                        )
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    if !session.sharingEnabled {
+                        Button("授权额度共享") {
+                            Task {
+                                if await syncAndAI.signInWithChatGPT(reconsent: true, switchAccount: false) {
+                                    draftAIConfig = syncAndAI.aiConfig
+                                }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(syncAndAI.isSigningInChatGPT)
+                    } else {
+                        Button {
+                            NSWorkspace.shared.open(ChatGPTSignInClient.usageSettingsURL)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("管理用量")
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .fixedSize()
+                    }
+
+                    Menu {
+                        Button("刷新可用模型列表") {
+                            Task { await syncAndAI.refreshChatGPTModels(quiet: false) }
+                        }
+                        Button("在浏览器中管理 ChatGPT 用量…") {
+                            NSWorkspace.shared.open(ChatGPTSignInClient.usageSettingsURL)
+                        }
+                        Divider()
+                        Button("切换其他 ChatGPT 账号…") {
+                            Task {
+                                if await syncAndAI.signInWithChatGPT(reconsent: false, switchAccount: true) {
+                                    draftAIConfig = syncAndAI.aiConfig
+                                }
+                            }
+                        }
+                        Button("退出 ChatGPT 登录", role: .destructive) {
+                            Task { await syncAndAI.disconnectChatGPT(resetRegistration: false) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+                .padding(.vertical, 2)
+
+                if session.sharingEnabled {
+                    Divider()
+
+                    settingsRow(
+                        title: "理解模型",
+                        subtitle: syncAndAI.chatGPTModels.isEmpty
+                            ? "将使用所填模型调用 ChatGPT 订阅额度"
+                            : "已自动拉取当前 ChatGPT 订阅可用模型（共 \(syncAndAI.chatGPTModels.count) 个）"
+                    ) {
+                        HStack(spacing: 6) {
+                            if !syncAndAI.chatGPTModels.isEmpty {
+                                Picker("", selection: $draftAIConfig.chatModel) {
+                                    ForEach(syncAndAI.chatGPTModels) { model in
+                                        Text(model.displayName).tag(model.slug)
+                                    }
+                                    if !draftAIConfig.chatModel.isEmpty
+                                        && !syncAndAI.chatGPTModels.contains(where: { $0.slug == draftAIConfig.chatModel }) {
+                                        Text(draftAIConfig.chatModel).tag(draftAIConfig.chatModel)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(width: 204)
+                                .onChange(of: draftAIConfig.chatModel) { _, _ in
+                                    persistAIConfigIfReady()
+                                }
+                            } else {
+                                TextField("gpt-5.4-mini", text: $draftAIConfig.chatModel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 204)
+                                    .onSubmit { persistAIConfigIfReady() }
+                            }
+
+                            Button {
+                                Task { await syncAndAI.refreshChatGPTModels(quiet: false) }
+                            } label: {
+                                if syncAndAI.isLoadingChatGPTModels {
+                                    ProgressView().controlSize(.mini)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 11.5))
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .fixedSize()
+                            .help("刷新 ChatGPT 可用模型列表")
+                            .disabled(syncAndAI.isLoadingChatGPTModels)
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06))
+                            .frame(width: 38, height: 38)
+                        chatGPTBrandMark(size: 20, color: .primary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(session.status == .reauthRequired ? "ChatGPT 登录已过期" : "使用你的 ChatGPT 订阅额度")
+                            .font(.system(size: 13.5, weight: .semibold))
+                        Text(
+                            session.status == .reauthRequired
+                                ? "请重新登录以恢复通过 ChatGPT 订阅驱动云端增强智能。"
+                                : "无需申请或配置 API 密钥，基于官方 Sign in with ChatGPT 协议直接登录（支持 Plus / Pro 等订阅），凭证仅加密保存在本机钥匙串。"
+                        )
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 10)
+
+                    Button {
+                        Task {
+                            if await syncAndAI.signInWithChatGPT(reconsent: false, switchAccount: false) {
+                                draftAIConfig = syncAndAI.aiConfig
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            if syncAndAI.isSigningInChatGPT {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(colorScheme == .dark ? .black : .white)
+                            } else {
+                                chatGPTBrandMark(size: 15, color: colorScheme == .dark ? .black : .white)
+                            }
+                            Text(syncAndAI.isSigningInChatGPT ? "等待浏览器授权…" : "使用 ChatGPT 登录")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            colorScheme == .dark ? Color.white : Color.black,
+                            in: Capsule(style: .continuous)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .disabled(syncAndAI.isSigningInChatGPT)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func chatGPTBrandMark(size: CGFloat, color: Color) -> some View {
+        let url = Bundle.module.url(forResource: "chatgpt-mark", withExtension: "svg")
+            ?? Bundle.module.url(forResource: "chatgpt-mark", withExtension: "svg", subdirectory: "Icons")
+        if let url, let nsImage = NSImage(contentsOf: url) {
+            let _ = { nsImage.isTemplate = true }()
+            Image(nsImage: nsImage)
+                .renderingMode(.template)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .foregroundStyle(color)
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: "sparkles")
+                .font(.system(size: size * 0.8, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: size, height: size)
         }
     }
 
@@ -1351,10 +1588,11 @@ public struct SettingsView: View {
             "",
             "https://generativelanguage.googleapis.com",
             "https://api.openai.com",
+            "https://api.openai.com/v1",
             "https://api.anthropic.com"
         ]
         let knownDefaultChats: Set<String> = [
-            "", "gemini-2.5-flash", "gpt-4.1-mini", "claude-sonnet-4-5"
+            "", "gemini-2.5-flash", "gpt-4.1-mini", "gpt-5.4-mini", "claude-sonnet-4-5"
         ]
         let knownDefaultEmbeddings: Set<String> = [
             "", "gemini-embedding-001", "text-embedding-3-small"
@@ -1363,6 +1601,12 @@ public struct SettingsView: View {
         switch provider {
         case .disabled:
             break
+        case .chatGPTSubscription:
+            draftAIConfig.baseURL = ChatGPTSignInClient.resource
+            if knownDefaultChats.contains(draftAIConfig.chatModel) {
+                draftAIConfig.chatModel = syncAndAI.chatGPTModels.first?.slug ?? "gpt-5.4-mini"
+            }
+            draftAIConfig.embeddingModel = ""
         case .gemini:
             if knownDefaultURLs.contains(draftAIConfig.baseURL) {
                 draftAIConfig.baseURL = "https://generativelanguage.googleapis.com"
