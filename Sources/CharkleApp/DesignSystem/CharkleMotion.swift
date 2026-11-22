@@ -48,10 +48,48 @@ public enum CharkleMotion {
     /// Reduced-motion clean cross-fade (`0.15s`).
     public static let reducedMotionFade = Animation.easeOut(duration: 0.15)
 
-    // MARK: - Accessibility Helper
+    // MARK: - Accessibility & Transition Helpers
 
     public static func accessible(_ animation: Animation, reduced: Bool) -> Animation {
         reduced ? reducedMotionFade : animation
+    }
+
+    /// Asymmetric enter/exit animation per Kubai Tip 011 (exits shorter than entrances,
+    /// reduced motion collapses both to a clean 150ms fade).
+    public static func enterExit(
+        _ isVisible: Bool,
+        enter: Animation = enterSm,
+        exit: Animation = exitSm,
+        reduced: Bool
+    ) -> Animation {
+        accessible(isVisible ? enter : exit, reduced: reduced)
+    }
+
+    /// Symmetric origin-anchored scale+opacity transition (`0.96 -> 1.0`, never `scale(0)`),
+    /// degrading to pure opacity under Reduce Motion.
+    public static func originTransition(
+        anchor: UnitPoint = .top,
+        scale: CGFloat = 0.96,
+        reduced: Bool
+    ) -> AnyTransition {
+        guard !reduced else { return .opacity }
+        return .asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: scale, anchor: anchor)),
+            removal: .opacity.combined(with: .scale(scale: scale, anchor: anchor))
+        )
+    }
+
+    /// Gentle vertical reveal (`offsetY -> 0` + `opacity`) for arriving content & stepped AI rows,
+    /// degrading to pure opacity under Reduce Motion.
+    public static func revealTransition(
+        offsetY: CGFloat = 8,
+        reduced: Bool
+    ) -> AnyTransition {
+        guard !reduced else { return .opacity }
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(y: offsetY)),
+            removal: .opacity
+        )
     }
 
     // MARK: - Kubai Tip 005 Drag-to-Reorder Ripple

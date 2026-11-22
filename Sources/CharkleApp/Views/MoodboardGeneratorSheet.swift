@@ -9,6 +9,7 @@ import SwiftUI
 public struct MoodboardGeneratorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openSettings) private var openSettings
 
     public let coordinator: AppCoordinatorStore
@@ -182,7 +183,7 @@ public struct MoodboardGeneratorSheet: View {
                                             .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
                                     )
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(CharkleTactileButtonStyle())
                         }
                     }
                 }
@@ -262,10 +263,12 @@ public struct MoodboardGeneratorSheet: View {
                                                 .foregroundStyle(Color.accentColor)
                                                 .background(Circle().fill(Color.white).padding(1))
                                                 .padding(4)
+                                                .transition(.scale(scale: reduceMotion ? 1.0 : 0.7).combined(with: .opacity))
                                         }
                                     }
+                                    .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: isPicked)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(CharkleTactileButtonStyle())
                             }
                         }
                     }
@@ -305,7 +308,7 @@ public struct MoodboardGeneratorSheet: View {
                                                 .strokeBorder(active ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: active ? 2.2 : 0.75)
                                         )
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(CharkleTactileButtonStyle())
                                 .help(hex)
                             }
                         }
@@ -459,18 +462,22 @@ public struct MoodboardGeneratorSheet: View {
                         .strokeBorder(isSelected ? Color.accentColor.opacity(0.45) : CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CharkleTactileButtonStyle())
     }
 
     // MARK: - Right Agent Harness Workbench & Live Sectioned Preview
 
     private var rightAgentWorkbench: some View {
-        VStack(spacing: 0) {
+        let hasProposal = moodboards.proposal != nil
+        let showTimeline = !moodboards.agentTrace.isEmpty || moodboards.isGeneratingProposal
+
+        return VStack(spacing: 0) {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     // Live / Completed Agent Harness Timeline
-                    if !moodboards.agentTrace.isEmpty || moodboards.isGeneratingProposal {
+                    if showTimeline {
                         agentTimelineCard
+                            .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
                     }
 
                     if let err = moodboards.lastError {
@@ -484,41 +491,53 @@ public struct MoodboardGeneratorSheet: View {
                         }
                         .padding(10)
                         .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
                     }
 
                     if let prop = moodboards.proposal {
-                        curatedProposalView(prop)
+                        VStack(alignment: .leading, spacing: 14) {
+                            curatedProposalView(prop)
+                        }
+                        .transition(CharkleMotion.revealTransition(offsetY: 8, reduced: reduceMotion))
                     } else if !moodboards.isGeneratingProposal {
                         emptyWorkbenchPlaceholder
+                            .transition(.opacity)
                     }
                 }
                 .padding(18)
+                .animation(CharkleMotion.enterExit(showTimeline, reduced: reduceMotion), value: showTimeline)
+                .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: moodboards.lastError)
+                .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: moodboards.proposal?.draftDocument.updatedAt)
             }
 
             // Multi-Turn Refinement Steering Bar (visible once a draft exists)
-            if moodboards.proposal != nil {
-                Divider()
-                HStack(spacing: 8) {
-                    Image(systemName: "bubble.left.and.sparkles")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.accentColor)
-                    TextField("继续微调初稿… 如：去掉暗色界面、换更通透的色调、按光影与角色分组", text: $refinementInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12))
-                        .onSubmit { triggerRefinement() }
-                    Button("继续调整") {
-                        triggerRefinement()
+            if hasProposal {
+                VStack(spacing: 0) {
+                    Divider()
+                    HStack(spacing: 8) {
+                        Image(systemName: "bubble.left.and.sparkles")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.accentColor)
+                        TextField("继续微调初稿… 如：去掉暗色界面、换更通透的色调、按光影与角色分组", text: $refinementInput)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .onSubmit { triggerRefinement() }
+                        Button("继续调整") {
+                            triggerRefinement()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(moodboards.isGeneratingProposal || refinementInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .fixedSize()
-                    .disabled(moodboards.isGeneratingProposal || refinementInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(CharkleTheme.surfaceElevated(for: colorScheme))
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(CharkleTheme.surfaceElevated(for: colorScheme))
+                .transition(CharkleMotion.originTransition(anchor: .bottom, scale: 0.97, reduced: reduceMotion))
             }
         }
+        .animation(CharkleMotion.enterExit(hasProposal, reduced: reduceMotion), value: hasProposal)
     }
 
     private var agentTimelineCard: some View {
@@ -526,21 +545,26 @@ public struct MoodboardGeneratorSheet: View {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(moodboards.agentTrace) { step in
                     HStack(alignment: .top, spacing: 8) {
-                        Group {
+                        ZStack {
                             switch step.status {
                             case .running:
-                                ProgressView().controlSize(.mini)
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .transition(.opacity)
                             case .done:
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.green)
+                                    .transition(.scale(scale: reduceMotion ? 1.0 : 0.72).combined(with: .opacity))
                             case .warning:
                                 Image(systemName: "exclamationmark.circle.fill")
                                     .foregroundStyle(.orange)
+                                    .transition(.scale(scale: reduceMotion ? 1.0 : 0.8).combined(with: .opacity))
                             }
                         }
                         .font(.system(size: 12))
                         .frame(width: 15, height: 15)
                         .padding(.top, 1)
+                        .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: step.status)
 
                         VStack(alignment: .leading, spacing: 1.5) {
                             Text(step.title)
@@ -553,9 +577,11 @@ public struct MoodboardGeneratorSheet: View {
                             }
                         }
                     }
+                    .transition(CharkleMotion.revealTransition(offsetY: 6, reduced: reduceMotion))
                 }
             }
             .padding(.top, 6)
+            .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: moodboards.agentTrace)
         } label: {
             HStack(spacing: 6) {
                 if moodboards.isGeneratingProposal {
@@ -733,8 +759,10 @@ public struct MoodboardGeneratorSheet: View {
                     if isHovered || isLocked {
                         HStack(spacing: 4) {
                             Button {
-                                if isLocked { lockedAssetIDs.remove(scored.id) }
-                                else { lockedAssetIDs.insert(scored.id) }
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion)) {
+                                    if isLocked { lockedAssetIDs.remove(scored.id) }
+                                    else { lockedAssetIDs.insert(scored.id) }
+                                }
                             } label: {
                                 Image(systemName: isLocked ? "lock.fill" : "lock.open")
                                     .font(.system(size: 9.5, weight: .semibold))
@@ -742,7 +770,7 @@ public struct MoodboardGeneratorSheet: View {
                                     .frame(width: 22, height: 22)
                                     .background(isLocked ? Color.accentColor : Color.black.opacity(0.62), in: Circle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(CharkleTactileButtonStyle())
                             .help(isLocked ? "取消锁定" : "锁定保留（微调时不被换掉）")
 
                             Button {
@@ -757,9 +785,10 @@ public struct MoodboardGeneratorSheet: View {
                                     .frame(width: 22, height: 22)
                                     .background(Color.black.opacity(0.62), in: Circle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(CharkleTactileButtonStyle())
                             .help("排除此素材并重新调整")
                         }
+                        .transition(.opacity)
                     }
                 }
                 .padding(6)
@@ -782,7 +811,9 @@ public struct MoodboardGeneratorSheet: View {
             }
         }
         .onHover { hovering in
-            hoveredAssetID = hovering ? scored.id : (hoveredAssetID == scored.id ? nil : hoveredAssetID)
+            withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+                hoveredAssetID = hovering ? scored.id : (hoveredAssetID == scored.id ? nil : hoveredAssetID)
+            }
         }
     }
 

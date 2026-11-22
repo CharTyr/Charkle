@@ -446,30 +446,47 @@ public struct MainWindowView: View {
 
                 if coordinator.isVisualFilterBarPresented {
                     floatingVisualFilterBar
-                        .popoverOriginScale(
-                            isPresented: coordinator.isVisualFilterBarPresented,
-                            anchor: .top,
-                            reducedMotion: reduceMotion
-                        )
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.96, reduced: reduceMotion))
                 }
 
                 if isInbox && !library.assets.isEmpty {
                     inboxTriageBar
-                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
                 }
 
                 if isTrash && !library.assets.isEmpty {
                     trashActionBar
-                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
                 }
 
                 if let activeFolderID {
                     folderSubfoldersBar(folderID: activeFolderID)
-                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
                 }
             }
             .padding(.horizontal, 18)
             .padding(.top, 14)
+            .animation(
+                CharkleMotion.enterExit(
+                    coordinator.isVisualFilterBarPresented,
+                    enter: CharkleMotion.popoverEnter,
+                    exit: CharkleMotion.popoverExit,
+                    reduced: reduceMotion
+                ),
+                value: coordinator.isVisualFilterBarPresented
+            )
+            .animation(
+                CharkleMotion.enterExit(isInbox && !library.assets.isEmpty, reduced: reduceMotion),
+                value: isInbox && !library.assets.isEmpty
+            )
+            .animation(
+                CharkleMotion.enterExit(isTrash && !library.assets.isEmpty, reduced: reduceMotion),
+                value: isTrash && !library.assets.isEmpty
+            )
+            .animation(
+                CharkleMotion.enterExit(activeFolderID != nil, reduced: reduceMotion),
+                value: activeFolderID
+            )
 
             // Bottom-Center Floating Multi-Select Batch Action Pill (≥2 items selected)
             if library.selectedAssetIDs.count >= 2 {
@@ -533,8 +550,16 @@ public struct MainWindowView: View {
 
                 // Visual Filter Toggle (⇧⌘S)
                 Button {
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.popoverEnter, reduced: reduceMotion)) {
-                        coordinator.isVisualFilterBarPresented.toggle()
+                    let willOpen = !coordinator.isVisualFilterBarPresented
+                    withAnimation(
+                        CharkleMotion.enterExit(
+                            willOpen,
+                            enter: CharkleMotion.popoverEnter,
+                            exit: CharkleMotion.popoverExit,
+                            reduced: reduceMotion
+                        )
+                    ) {
+                        coordinator.isVisualFilterBarPresented = willOpen
                     }
                 } label: {
                     HStack(spacing: 5) {
@@ -1181,26 +1206,10 @@ public struct MainWindowView: View {
     }
 
     private var inboxZeroCelebrationView: some View {
-        VStack(spacing: 14) {
-            CharkleIcon("inbox", style: .layered, size: 64, color: Color(charkleHex: "#6B8E76"))
-            Text("收件箱已清空")
-                .font(.system(size: 20, weight: .semibold))
-                .tracking(-0.2)
-            Text("所有灵感都已妥善归档或进入情绪板。随时拖动文件到 MacBook 刘海或按 ⌥⇧A 截图采集。")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
-            HStack(spacing: 10) {
-                Button("浏览全部素材") { navigate(to: .allItems) }
-                    .buttonStyle(.bordered)
-                Button("10 秒生成情绪板") { coordinator.presentMoodboardGenerator(entry: .prompt) }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding(.top, 4)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(CharkleTheme.galleryGround(for: colorScheme))
+        InboxZeroCelebrationView(
+            onBrowseAll: { navigate(to: .allItems) },
+            onGenerateBoard: { coordinator.presentMoodboardGenerator(entry: .prompt) }
+        )
     }
 
     private var emptyLibraryView: some View {
@@ -1817,6 +1826,58 @@ public struct MainWindowView: View {
         case .success: .green
         case .warning: .orange
         case .error: .red
+        }
+    }
+}
+
+/// Rare Inbox Zero completion surface (Delight tier): stepped `enterMd` icon scale + `45ms`
+/// delayed `settleStrong` copy/CTA reveal, non-blocking and degrading to a 150ms fade under Reduce Motion.
+private struct InboxZeroCelebrationView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let onBrowseAll: () -> Void
+    let onGenerateBoard: () -> Void
+
+    @State private var appeared: Bool = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            CharkleIcon("inbox", style: .layered, size: 64, color: Color(charkleHex: "#6B8E76"))
+                .scaleEffect(appeared ? 1.0 : (reduceMotion ? 1.0 : 0.92))
+                .opacity(appeared ? 1.0 : 0.0)
+                .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: appeared)
+
+            VStack(spacing: 14) {
+                Text("收件箱已清空")
+                    .font(.system(size: 20, weight: .semibold))
+                    .tracking(-0.2)
+                Text("所有灵感都已妥善归档或进入情绪板。随时拖动文件到 MacBook 刘海或按 ⌥⇧A 截图采集。")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                HStack(spacing: 10) {
+                    Button("浏览全部素材", action: onBrowseAll)
+                        .buttonStyle(.bordered)
+                    Button("10 秒生成情绪板", action: onGenerateBoard)
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(.top, 4)
+            }
+            .offset(y: appeared ? 0 : (reduceMotion ? 0 : 8))
+            .opacity(appeared ? 1.0 : 0.0)
+            .animation(
+                reduceMotion
+                    ? CharkleMotion.reducedMotionFade
+                    : CharkleMotion.settleStrong.delay(0.045),
+                value: appeared
+            )
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(CharkleTheme.galleryGround(for: colorScheme))
+        .onAppear {
+            appeared = true
         }
     }
 }

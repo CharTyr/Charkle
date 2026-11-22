@@ -161,10 +161,10 @@ public struct InspectorView: View {
                                     Image(systemName: star <= asset.rating ? "star.fill" : "star")
                                         .font(.system(size: 12))
                                         .foregroundStyle(star <= asset.rating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.45))
-                                        .scaleEffect(star == asset.rating ? 1.08 : 1.0)
+                                        .scaleEffect(star == asset.rating && !reduceMotion ? 1.08 : 1.0)
                                         .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: asset.rating)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(CharkleTactileButtonStyle())
                             }
                         }
 
@@ -196,7 +196,7 @@ public struct InspectorView: View {
                                     in: Capsule(style: .continuous)
                                 )
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(CharkleTactileButtonStyle())
                             .help(asset.pinnedOffline ? "已始终保留在本机，离线可用；点击取消" : "始终将原文件保留在本机，不会被缓存自动清理")
                         }
                     }
@@ -218,7 +218,7 @@ public struct InspectorView: View {
                                 .padding(.vertical, 7)
                                 .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
 
                         Button(role: .destructive) {
                             pendingPermanentDeleteIDs = [asset.id]
@@ -230,7 +230,7 @@ public struct InspectorView: View {
                                 .padding(.vertical, 7)
                                 .background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
                     }
                 } else {
                     HStack(spacing: 8) {
@@ -300,7 +300,7 @@ public struct InspectorView: View {
                                 .padding(.vertical, 5.5)
                                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
 
                         Button {
                             Task {
@@ -314,7 +314,7 @@ public struct InspectorView: View {
                                 .padding(.vertical, 5.5)
                                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
 
                         Button {
                             Task {
@@ -328,7 +328,7 @@ public struct InspectorView: View {
                                 .padding(.vertical, 5.5)
                                 .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
                     }
                 }
 
@@ -360,7 +360,7 @@ public struct InspectorView: View {
                                             .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
                                     )
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(CharkleTactileButtonStyle())
                                 .contextMenu {
                                     Button("复制 \(hex)") { onCopyHex(hex) }
                                     Button("以此色筛选素材库") { onFilterByColor(hex) }
@@ -437,7 +437,7 @@ public struct InspectorView: View {
                                             .padding(.vertical, 3.5)
                                             .background(Color.accentColor.opacity(0.10), in: Capsule(style: .continuous))
                                         }
-                                        .buttonStyle(.plain)
+                                        .buttonStyle(CharkleTactileButtonStyle())
                                     }
                                 }
                             }
@@ -782,7 +782,7 @@ public struct InspectorView: View {
                             .padding(.vertical, 5)
                             .background(Color.primary.opacity(0.07), in: Capsule(style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
 
                         Button {
                             let nextPinned = !board.pinnedOffline
@@ -808,7 +808,7 @@ public struct InspectorView: View {
                                 in: Capsule(style: .continuous)
                             )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
                         .help(board.pinnedOffline ? "整板素材已始终保留在本机，离线可用" : "始终将此情绪板引用的素材保留在本机")
                     }
                 }
@@ -834,7 +834,7 @@ public struct InspectorView: View {
                             moodboards.swappingNodeID = nil
                         }
                         .font(.system(size: 11))
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
                         .foregroundStyle(.secondary)
                     }
                     .padding(10)
@@ -844,6 +844,7 @@ public struct InspectorView: View {
                             .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
                     )
                     .id(swapNodeID)
+                    .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
                 }
 
                 // Candidate Swap Pool (20-40同方向候选池)
@@ -983,7 +984,7 @@ public struct InspectorView: View {
                                 .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .foregroundStyle(Color.accentColor)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
 
                         HStack(spacing: 6) {
                             Button {
@@ -1020,6 +1021,10 @@ public struct InspectorView: View {
                 }
             }
             .padding(14)
+            .animation(
+                CharkleMotion.enterExit(moodboards.swappingNodeID != nil, reduced: reduceMotion),
+                value: moodboards.swappingNodeID != nil
+            )
         }
         .onAppear {
             boardTitleDraft = board.title
@@ -1150,8 +1155,16 @@ public struct InspectorView: View {
 
                     if !moodboards.activeBoardAgentTrace.isEmpty {
                         Button {
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                showBoardAgentTrace.toggle()
+                            let willExpand = !showBoardAgentTrace
+                            withAnimation(
+                                CharkleMotion.enterExit(
+                                    willExpand,
+                                    enter: CharkleMotion.popoverEnter,
+                                    exit: CharkleMotion.popoverExit,
+                                    reduced: reduceMotion
+                                )
+                            ) {
+                                showBoardAgentTrace = willExpand
                             }
                         } label: {
                             HStack(spacing: 3) {
@@ -1221,7 +1234,7 @@ public struct InspectorView: View {
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .foregroundStyle(.primary.opacity(0.85))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CharkleTactileButtonStyle())
     }
 
     private func runBoardRefinement(_ instruction: String) {

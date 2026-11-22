@@ -240,13 +240,7 @@ public struct MoodboardCanvasView: View {
             .animation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion), value: selectedNodeIDs)
 
             // External drop highlight border
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(0.75), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
-                    .background(Color.accentColor.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .padding(10)
-                    .allowsHitTesting(false)
-            }
+            CanvasDropRingOverlay(isTargeted: isDropTargeted, padding: 10, fillOpacity: 0.04)
         }
         .onGeometryChange(for: CGSize.self) { proxy in
             CGSize(width: floor(proxy.size.width), height: floor(proxy.size.height))

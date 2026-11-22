@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 /// storage telemetry, and capture shortcuts.
 public struct SettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public let coordinator: AppCoordinatorStore
     public let syncAndAI: SyncAndAIStore
@@ -128,13 +129,16 @@ public struct SettingsView: View {
             Divider()
 
             // Right Content Pane
+            let hasFeedbackBanner = syncAndAI.statusMessage != nil || syncAndAI.errorMessage != nil
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 18) {
                     if let status = syncAndAI.statusMessage {
                         feedbackBanner(status, isError: false)
+                            .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
                     }
                     if let err = syncAndAI.errorMessage {
                         feedbackBanner(err, isError: true)
+                            .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.97, reduced: reduceMotion))
                     }
 
                     switch selectedTab {
@@ -151,6 +155,10 @@ public struct SettingsView: View {
                     }
                 }
                 .padding(24)
+                .animation(
+                    CharkleMotion.enterExit(hasFeedbackBanner, reduced: reduceMotion),
+                    value: "\(syncAndAI.statusMessage ?? "")|\(syncAndAI.errorMessage ?? "")"
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(CharkleTheme.galleryGround(for: colorScheme))

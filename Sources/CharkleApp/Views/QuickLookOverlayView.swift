@@ -81,7 +81,7 @@ public struct QuickLookOverlayView: View {
                             .frame(width: 28, height: 28)
                             .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CharkleTactileButtonStyle())
                     .help("关闭预览 (Space / Esc)")
                 }
                 .padding(.horizontal, 24)
@@ -385,7 +385,7 @@ public struct QuickLookOverlayView: View {
                     hudDivider
                 }
 
-                // Rating stars
+                // Rating stars (matching InspectorView Kubai microOvershoot)
                 HStack(spacing: 3) {
                     ForEach(1...5, id: \.self) { star in
                         Button {
@@ -395,8 +395,10 @@ public struct QuickLookOverlayView: View {
                             Image(systemName: star <= asset.rating ? "star.fill" : "star")
                                 .font(.system(size: 12))
                                 .foregroundStyle(star <= asset.rating ? Color(charkleHex: "#F2C14E") : .white.opacity(0.45))
+                                .scaleEffect(star == asset.rating && !reduceMotion ? 1.08 : 1.0)
+                                .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: asset.rating)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
                     }
                 }
 
@@ -417,7 +419,7 @@ public struct QuickLookOverlayView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CharkleTactileButtonStyle())
 
                     Button(role: .destructive) {
                         confirmPermanentDelete = true
@@ -428,7 +430,7 @@ public struct QuickLookOverlayView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CharkleTactileButtonStyle())
                 } else {
                     hudIconButton(
                         asset.pinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle",
@@ -527,7 +529,7 @@ public struct QuickLookOverlayView: View {
                 .foregroundStyle(.white.opacity(0.9))
                 .frame(width: 28, height: 28)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CharkleTactileButtonStyle())
         .help(help)
     }
 

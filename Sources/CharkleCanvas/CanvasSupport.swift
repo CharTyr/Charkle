@@ -66,6 +66,37 @@ public enum CanvasMotion {
     }
 }
 
+/// Shared interruptible drop-target ring overlay for Gallery Masonry and Moodboard Canvas.
+/// Pure GPU transform (`scaleEffect`) + `opacity` only, with asymmetric `enterSm`/`exitSm`
+/// timing and automatic Reduce Motion degradation.
+public struct CanvasDropRingOverlay: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public let isTargeted: Bool
+    public let padding: CGFloat
+    public let fillOpacity: Double
+
+    public init(isTargeted: Bool, padding: CGFloat = 12, fillOpacity: Double = 0.05) {
+        self.isTargeted = isTargeted
+        self.padding = padding
+        self.fillOpacity = fillOpacity
+    }
+
+    public var body: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(Color.accentColor.opacity(0.75), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+            .background(Color.accentColor.opacity(fillOpacity), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(padding)
+            .scaleEffect(isTargeted ? 1.0 : (reduceMotion ? 1.0 : 0.985))
+            .opacity(isTargeted ? 1.0 : 0.0)
+            .allowsHitTesting(false)
+            .animation(
+                CanvasMotion.accessible(isTargeted ? CanvasMotion.enterSm : CanvasMotion.exitSm, reduced: reduceMotion),
+                value: isTargeted
+            )
+    }
+}
+
 // MARK: - Geometry Conversions
 
 public extension BoardRect {

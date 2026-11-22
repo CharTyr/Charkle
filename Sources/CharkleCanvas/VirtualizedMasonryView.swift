@@ -339,13 +339,7 @@ public struct VirtualizedMasonryView: View {
             handleExternalDrop(providers: providers)
         }
         .overlay {
-            if isExternalDropTargeted {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(0.75), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
-                    .background(Color.accentColor.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .padding(12)
-                    .allowsHitTesting(false)
-            }
+            CanvasDropRingOverlay(isTargeted: isExternalDropTargeted, padding: 12, fillOpacity: 0.05)
         }
         .focusable()
         .focusEffectDisabled()
