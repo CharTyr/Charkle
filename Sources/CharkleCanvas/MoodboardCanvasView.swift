@@ -189,6 +189,10 @@ public struct MoodboardCanvasView: View {
         ZStack {
             CanvasSurface.ground(for: colorScheme)
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    clearCanvasSelection()
+                }
 
             if isAutoEditorial {
                 autoEditorialStage
@@ -242,13 +246,19 @@ public struct MoodboardCanvasView: View {
             // External drop highlight border
             CanvasDropRingOverlay(isTargeted: isDropTargeted, padding: 10, fillOpacity: 0.04)
         }
-        .onGeometryChange(for: CGSize.self) { proxy in
-            CGSize(width: floor(proxy.size.width), height: floor(proxy.size.height))
-        } action: { _, newSize in
-            if newSize.width > 120, newSize.height > 120,
-               (abs(newSize.width - viewportSize.width) >= 1 || abs(newSize.height - viewportSize.height) >= 1) {
-                viewportSize = newSize
-            }
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            // Measure proposed safe-area viewport completely decoupled from ScrollView content
+            // so Auto Editorial width/height never oscillates with scrollbar show/hide.
+            Color.clear
+                .onGeometryChange(for: CGSize.self) { proxy in
+                    CGSize(width: floor(proxy.size.width), height: floor(proxy.size.height))
+                } action: { _, newSize in
+                    if newSize.width > 120, newSize.height > 120,
+                       (abs(newSize.width - viewportSize.width) >= 2 || abs(newSize.height - viewportSize.height) >= 2) {
+                        viewportSize = newSize
+                    }
+                }
         }
         .onAppear {
             syncCameraFromDocument()
@@ -343,8 +353,11 @@ public struct MoodboardCanvasView: View {
 
         return ScrollView(.vertical) {
             ZStack(alignment: .topLeading) {
+                // Never feed `viewportSize` back into ScrollView content width/height,
+                // otherwise macOS ScrollView layout/scrollbar toggles oscillate with `onGeometryChange`.
                 Color.clear
-                    .frame(width: max(viewportSize.width, 320), height: max(solved.contentSize.height + topPad, viewportSize.height))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: max(solved.contentSize.height + topPad, 1))
                     .contentShape(Rectangle())
                     .onTapGesture {
                         clearCanvasSelection()
@@ -352,7 +365,7 @@ public struct MoodboardCanvasView: View {
 
                 if document.nodes.isEmpty {
                     emptyBoardPlaceholder
-                        .frame(width: viewportSize.width, height: max(420, viewportSize.height - 120))
+                        .frame(maxWidth: .infinity, minHeight: 420)
                 } else {
                     // Insertion drop line (Kubai 005: faint 15%-ink line growing from center)
                     if let targetIdx = editorialTargetOrderIndex,
@@ -438,6 +451,7 @@ public struct MoodboardCanvasView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, minHeight: max(solved.contentSize.height + topPad, 1), alignment: .topLeading)
         }
         .canvasScrollEdgeSoft(for: .top)
         .overlay {
