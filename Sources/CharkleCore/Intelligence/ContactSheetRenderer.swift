@@ -175,6 +175,7 @@ public nonisolated enum ContactSheetRenderer {
         case .webBookmark: "WEB"
         case .designFile: "DES"
         case .audio: "AUD"
+        case .model3D: "3D"
         case .image: nil
         }
     }

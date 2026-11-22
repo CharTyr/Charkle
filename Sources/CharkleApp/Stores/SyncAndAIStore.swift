@@ -11,7 +11,12 @@ public final class SyncAndAIStore {
     public var syncStatus: SyncStatus = SyncStatus()
     public var gdirectSnapshot: GDirectEnvironmentSnapshot = GDirectEnvironmentSnapshot()
     public var aiConfig: AIProviderConfig = AIProviderConfig()
+    public var aiUsage: CloudAIUsageSummary = CloudAIUsageStore.shared.snapshot()
     public var hasStoredAIKey: Bool = false
+    public var typeSafeConfig: TypeSafeExperimentalConfig = TypeSafeExperimentalConfig()
+    public var hasStoredTypeSafeKey: Bool = false
+    public var typeSafeModels: [TypeSafeModelInfo] = []
+    public var isTestingTypeSafe: Bool = false
     public var chatGPTSession: ChatGPTAccountSession = ChatGPTAccountSession()
     public var chatGPTModels: [ChatGPTModelInfo] = []
     public var isSigningInChatGPT: Bool = false
@@ -30,8 +35,68 @@ public final class SyncAndAIStore {
     public var isBusy: Bool = false
     public var isMigrating: Bool = false
 
+    @ObservationIgnored
+    private nonisolated(unsafe) var syncProgressObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var aiUsageObserver: NSObjectProtocol?
+
     public init(engine: any CharkleEngineProtocol) {
         self.engine = engine
+
+        syncProgressObserver = NotificationCenter.default.addObserver(
+            forName: CharkleSyncNotifications.didUpdateSyncStatus,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let data = notification.userInfo?[CharkleSyncNotifications.statusDataKey] as? Data,
+                  let decoded = try? JSONDecoder().decode(SyncStatus.self, from: data) else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.syncStatus = decoded
+            }
+        }
+
+        aiUsageObserver = NotificationCenter.default.addObserver(
+            forName: CloudAIUsageNotifications.didUpdateUsage,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            let latest = CloudAIUsageStore.shared.snapshot()
+            Task { @MainActor [weak self] in
+                self?.aiUsage = latest
+            }
+        }
+    }
+
+    deinit {
+        if let observer = syncProgressObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = aiUsageObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    public func refreshSyncStatus() async {
+        syncStatus = await engine.syncStatus()
+    }
+
+    public func refreshAIUsage() {
+        aiUsage = CloudAIUsageStore.shared.snapshot()
+    }
+
+    public func resetAIUsage(category: CloudAIUsageCategory? = nil) {
+        CloudAIUsageStore.shared.reset(category: category)
+        aiUsage = CloudAIUsageStore.shared.snapshot()
+        switch category {
+        case .standard:
+            statusMessage = "已清零普通云端模型用量统计"
+        case .jev:
+            statusMessage = "已清零 Jev 判断模型用量统计"
+        case nil:
+            statusMessage = "已清零全部云端模型用量统计"
+        }
     }
 
     public func loadAll() async {
@@ -43,19 +108,24 @@ public final class SyncAndAIStore {
         async let oauthConfigured = engine.hasGoogleOAuthClientConfig()
         async let webdavPwd = engine.hasWebDAVPassword()
         async let gptSession = engine.chatGPTSession()
+        async let tsCfg = engine.typeSafeConfig()
+        async let tsHasKey = engine.hasStoredTypeSafeKey()
 
-        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV, chatGPT) = await (
-            cfg, status, gd, ai, stats, oauthConfigured, webdavPwd, gptSession
+        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV, chatGPT, loadedTS, loadedTSKey) = await (
+            cfg, status, gd, ai, stats, oauthConfigured, webdavPwd, gptSession, tsCfg, tsHasKey
         )
         syncConfig = sCfg
         syncStatus = sStatus
         gdirectSnapshot = gdSnap
         aiConfig = aiCfg
+        typeSafeConfig = loadedTS
+        hasStoredTypeSafeKey = loadedTSKey
         cacheStats = cStats
         hasGoogleOAuthClient = hasOAuth
         hasWebDAVPassword = hasWebDAV
         chatGPTSession = chatGPT
         externalAgentConfig = ExternalAgentConfigStore.load()
+        aiUsage = CloudAIUsageStore.shared.snapshot()
         hasStoredAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
         if chatGPT.status == .connected && chatGPT.sharingEnabled && chatGPTModels.isEmpty {
             await refreshChatGPTModels(quiet: true)
@@ -91,6 +161,19 @@ public final class SyncAndAIStore {
             statusMessage = gdirectSnapshot.isMountActive
                 ? "Google Drive 挂载成功：\(gdirectSnapshot.mountPath)"
                 : "已执行挂载命令，请检查挂载状态"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func runGDirectUnmount() async {
+        isBusy = true
+        defer { isBusy = false }
+        errorMessage = nil
+        do {
+            gdirectSnapshot = try await engine.runGDirectUnmount()
+            syncStatus = await engine.syncStatus()
+            statusMessage = "已卸载本机 GoogleDrive NFS 挂载，不再弹出系统断连提示"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -377,6 +460,48 @@ public final class SyncAndAIStore {
             if !quiet {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    // MARK: - Experimental TypeSafe System One (Jev)
+
+    public func saveTypeSafeConfig(
+        _ config: TypeSafeExperimentalConfig,
+        apiKey: String?,
+        quiet: Bool = false
+    ) async {
+        errorMessage = nil
+        do {
+            try await engine.saveTypeSafeConfig(config, apiKey: apiKey)
+            typeSafeConfig = await engine.typeSafeConfig()
+            hasStoredTypeSafeKey = await engine.hasStoredTypeSafeKey()
+            if !quiet {
+                statusMessage = "已保存 TypeSafe (Jev) 实验配置（密钥仅存于 macOS 钥匙串）"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    public func testTypeSafeConnection(
+        config: TypeSafeExperimentalConfig,
+        apiKey: String?
+    ) async -> Bool {
+        isTestingTypeSafe = true
+        defer { isTestingTypeSafe = false }
+        errorMessage = nil
+        do {
+            let models = try await engine.testTypeSafeConnection(config: config, apiKey: apiKey)
+            typeSafeModels = models
+            let names = models.map(\.name).joined(separator: "、")
+            statusMessage = models.isEmpty
+                ? "TypeSafe API 连接成功"
+                : "TypeSafe 连接成功 · 可用模型：\(names)"
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 

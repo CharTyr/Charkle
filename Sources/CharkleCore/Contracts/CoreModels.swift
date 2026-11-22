@@ -8,6 +8,7 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
     case document
     case designFile
     case audio
+    case model3D
 
     public var localizedLabel: String {
         switch self {
@@ -18,6 +19,7 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
         case .document: "文档"
         case .designFile: "设计文件"
         case .audio: "音频"
+        case .model3D: "3D 模型"
         }
     }
 
@@ -30,12 +32,14 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
             return .image
         case "mp4", "mov", "m4v", "webm", "mkv", "avi":
             return .video
-        case "pdf", "md", "markdown", "txt", "rtf", "docx", "pptx", "key", "pages":
+        case "pdf", "md", "markdown", "txt", "rtf", "docx", "pptx", "key", "pages", "json", "yaml", "yml", "toml", "csv":
             return .document
         case "svg", "psd", "psb", "sketch", "fig", "ai", "eps", "xd", "afdesign", "afphoto":
             return .designFile
-        case "mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff":
+        case "mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff", "aif", "opus", "caf", "alac", "wma", "m4b", "mid", "midi":
             return .audio
+        case "usdz", "usda", "usdc", "obj", "stl", "scn", "dae", "gltf", "glb", "fbx", "ply", "3ds", "blend":
+            return .model3D
         case "webloc", "url":
             return .webBookmark
         default:
@@ -45,10 +49,256 @@ public enum MediaKind: String, Codable, CaseIterable, Hashable, Sendable {
                 if mime.hasPrefix("image/") { return .image }
                 if mime.hasPrefix("video/") { return .video }
                 if mime.hasPrefix("audio/") { return .audio }
+                if mime.hasPrefix("model/") { return .model3D }
                 if mime == "application/pdf" || mime.hasPrefix("text/") { return .document }
             }
             return .document
         }
+    }
+}
+
+public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
+    case x
+    case threads
+    case bluesky
+
+    public var displayName: String {
+        switch self {
+        case .x: "X"
+        case .threads: "Threads"
+        case .bluesky: "Bluesky"
+        }
+    }
+
+    public var openActionLabel: String {
+        switch self {
+        case .x: "在 X 打开"
+        case .threads: "在 Threads 打开"
+        case .bluesky: "在 Bluesky 打开"
+        }
+    }
+}
+
+public struct GitHubRepoMetadata: Codable, Hashable, Sendable {
+    public var owner: String
+    public var repo: String
+    public var fullName: String
+    public var ownerAvatarURL: String?
+    public var description: String?
+    public var stars: Int
+    public var forks: Int
+    public var watchers: Int?
+    public var language: String?
+    public var licenseName: String?
+    public var topics: [String]
+    public var defaultBranch: String
+    public var homepageURL: String?
+    public var openGraphImageURL: String?
+    public var readmeMarkdown: String?
+    public var fetchedAt: Date
+
+    public init(
+        owner: String,
+        repo: String,
+        fullName: String? = nil,
+        ownerAvatarURL: String? = nil,
+        description: String? = nil,
+        stars: Int = 0,
+        forks: Int = 0,
+        watchers: Int? = nil,
+        language: String? = nil,
+        licenseName: String? = nil,
+        topics: [String] = [],
+        defaultBranch: String = "main",
+        homepageURL: String? = nil,
+        openGraphImageURL: String? = nil,
+        readmeMarkdown: String? = nil,
+        fetchedAt: Date = Date()
+    ) {
+        self.owner = owner
+        self.repo = repo
+        self.fullName = fullName ?? "\(owner)/\(repo)"
+        self.ownerAvatarURL = ownerAvatarURL
+        self.description = description
+        self.stars = stars
+        self.forks = forks
+        self.watchers = watchers
+        self.language = language
+        self.licenseName = licenseName
+        self.topics = topics
+        self.defaultBranch = defaultBranch
+        self.homepageURL = homepageURL
+        self.openGraphImageURL = openGraphImageURL ?? "https://opengraph.githubassets.com/1/\(owner)/\(repo)"
+        self.readmeMarkdown = readmeMarkdown
+        self.fetchedAt = fetchedAt
+    }
+}
+
+public struct SocialMediaAttachment: Codable, Hashable, Sendable, Identifiable {
+    public enum Kind: String, Codable, Hashable, Sendable {
+        case photo
+        case video
+        case gif
+
+        public var localizedLabel: String {
+            switch self {
+            case .photo: "图片"
+            case .video: "视频"
+            case .gif: "动图"
+            }
+        }
+    }
+
+    public let id: String
+    public let kind: Kind
+    public let url: String
+    public let thumbnailURL: String?
+
+    public init(id: String? = nil, kind: Kind, url: String, thumbnailURL: String? = nil) {
+        self.id = id ?? "\(kind.rawValue):\(url)"
+        self.kind = kind
+        self.url = url
+        self.thumbnailURL = thumbnailURL
+    }
+}
+
+public struct SocialPostMetadata: Codable, Hashable, Sendable {
+    public var platform: SocialPlatform
+    public var authorName: String
+    public var authorHandle: String
+    public var authorAvatarURL: String?
+    public var publishedAtText: String?
+    public var bodyText: String
+    public var quotedAuthor: String?
+    public var quotedText: String?
+    public var articleTitle: String?
+    public var mediaURLs: [String]
+    public var mediaThumbnailURLs: [String]
+    public var attachments: [SocialMediaAttachment]
+    public var hasVideo: Bool
+    public var videoURL: String?
+    public var replyCount: Int?
+    public var repostCount: Int?
+    public var likeCount: Int?
+    public var viewCount: Int?
+    public var originalURL: String
+    public var mediaFetchFailed: Bool
+
+    public init(
+        platform: SocialPlatform,
+        authorName: String,
+        authorHandle: String,
+        authorAvatarURL: String? = nil,
+        publishedAtText: String? = nil,
+        bodyText: String,
+        quotedAuthor: String? = nil,
+        quotedText: String? = nil,
+        articleTitle: String? = nil,
+        mediaURLs: [String] = [],
+        mediaThumbnailURLs: [String] = [],
+        attachments: [SocialMediaAttachment] = [],
+        hasVideo: Bool = false,
+        videoURL: String? = nil,
+        replyCount: Int? = nil,
+        repostCount: Int? = nil,
+        likeCount: Int? = nil,
+        viewCount: Int? = nil,
+        originalURL: String,
+        mediaFetchFailed: Bool = false
+    ) {
+        self.platform = platform
+        self.authorName = authorName
+        self.authorHandle = authorHandle
+        self.authorAvatarURL = authorAvatarURL
+        self.publishedAtText = publishedAtText
+        self.bodyText = bodyText
+        self.quotedAuthor = quotedAuthor
+        self.quotedText = quotedText
+        self.articleTitle = articleTitle
+        self.mediaURLs = mediaURLs
+        self.mediaThumbnailURLs = mediaThumbnailURLs
+        self.attachments = attachments
+        self.hasVideo = hasVideo
+        self.videoURL = videoURL
+        self.replyCount = replyCount
+        self.repostCount = repostCount
+        self.likeCount = likeCount
+        self.viewCount = viewCount
+        self.originalURL = originalURL
+        self.mediaFetchFailed = mediaFetchFailed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.platform = try c.decode(SocialPlatform.self, forKey: .platform)
+        self.authorName = try c.decode(String.self, forKey: .authorName)
+        self.authorHandle = try c.decode(String.self, forKey: .authorHandle)
+        self.authorAvatarURL = try c.decodeIfPresent(String.self, forKey: .authorAvatarURL)
+        self.publishedAtText = try c.decodeIfPresent(String.self, forKey: .publishedAtText)
+        self.bodyText = try c.decode(String.self, forKey: .bodyText)
+        self.quotedAuthor = try c.decodeIfPresent(String.self, forKey: .quotedAuthor)
+        self.quotedText = try c.decodeIfPresent(String.self, forKey: .quotedText)
+        self.articleTitle = try c.decodeIfPresent(String.self, forKey: .articleTitle)
+        self.mediaURLs = try c.decodeIfPresent([String].self, forKey: .mediaURLs) ?? []
+        self.mediaThumbnailURLs = try c.decodeIfPresent([String].self, forKey: .mediaThumbnailURLs) ?? []
+        self.attachments = try c.decodeIfPresent([SocialMediaAttachment].self, forKey: .attachments) ?? []
+        self.hasVideo = try c.decodeIfPresent(Bool.self, forKey: .hasVideo) ?? false
+        self.videoURL = try c.decodeIfPresent(String.self, forKey: .videoURL)
+        self.replyCount = try c.decodeIfPresent(Int.self, forKey: .replyCount)
+        self.repostCount = try c.decodeIfPresent(Int.self, forKey: .repostCount)
+        self.likeCount = try c.decodeIfPresent(Int.self, forKey: .likeCount)
+        self.viewCount = try c.decodeIfPresent(Int.self, forKey: .viewCount)
+        self.originalURL = try c.decode(String.self, forKey: .originalURL)
+        self.mediaFetchFailed = try c.decodeIfPresent(Bool.self, forKey: .mediaFetchFailed) ?? false
+    }
+
+    /// Unified typed attachment list across both newly saved posts and legacy saved social posts.
+    public var effectiveAttachments: [SocialMediaAttachment] {
+        if !attachments.isEmpty { return attachments }
+        var items: [SocialMediaAttachment] = []
+        var seen = Set<String>()
+        if let vURL = videoURL, !vURL.isEmpty, seen.insert(vURL).inserted {
+            let thumb = mediaThumbnailURLs.first
+            items.append(SocialMediaAttachment(kind: .video, url: vURL, thumbnailURL: thumb))
+        }
+        for (idx, urlStr) in mediaURLs.enumerated() where seen.insert(urlStr).inserted {
+            let lower = urlStr.lowercased()
+            let isVid = lower.contains(".mp4") || lower.contains(".m3u8") || lower.contains("/ext_tw_video/") || lower.contains("/amplify_video/") || lower.contains("video.twimg.com")
+            let thumb = idx < mediaThumbnailURLs.count ? mediaThumbnailURLs[idx] : nil
+            items.append(SocialMediaAttachment(kind: isVid ? .video : .photo, url: urlStr, thumbnailURL: thumb))
+        }
+        return items
+    }
+}
+
+public struct AssetRichMetadata: Codable, Hashable, Sendable {
+    public var githubRepo: GitHubRepoMetadata?
+    public var socialPost: SocialPostMetadata?
+    public var textExcerpt: String?
+    public var isMarkdown: Bool
+    public var model3DFormat: String?
+
+    public init(
+        githubRepo: GitHubRepoMetadata? = nil,
+        socialPost: SocialPostMetadata? = nil,
+        textExcerpt: String? = nil,
+        isMarkdown: Bool = false,
+        model3DFormat: String? = nil
+    ) {
+        self.githubRepo = githubRepo
+        self.socialPost = socialPost
+        self.textExcerpt = textExcerpt
+        self.isMarkdown = isMarkdown
+        self.model3DFormat = model3DFormat
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.githubRepo = try container.decodeIfPresent(GitHubRepoMetadata.self, forKey: .githubRepo)
+        self.socialPost = try container.decodeIfPresent(SocialPostMetadata.self, forKey: .socialPost)
+        self.textExcerpt = try container.decodeIfPresent(String.self, forKey: .textExcerpt)
+        self.isMarkdown = try container.decodeIfPresent(Bool.self, forKey: .isMarkdown) ?? false
+        self.model3DFormat = try container.decodeIfPresent(String.self, forKey: .model3DFormat)
     }
 }
 
@@ -169,6 +419,8 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
     public var updatedHLC: Int64
+    public var lastOpenedAt: Date?
+    public var richMetadata: AssetRichMetadata?
 
     public var aspectRatio: Double {
         guard pixelWidth > 0, pixelHeight > 0 else { return 1.0 }
@@ -181,6 +433,39 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
 
     public var isInInbox: Bool {
         folderID == nil && !isTrashed
+    }
+
+    public var recentActivityDate: Date {
+        max(createdAt, lastOpenedAt ?? .distantPast)
+    }
+
+    public var isGitHubRepo: Bool {
+        richMetadata?.githubRepo != nil
+    }
+
+    public var isSocialPost: Bool {
+        richMetadata?.socialPost != nil
+    }
+
+    public var displayTypeLabel: String {
+        if let post = richMetadata?.socialPost {
+            return "\(post.platform.displayName) 推文"
+        }
+        if isGitHubRepo {
+            return "GitHub 仓库"
+        }
+        return mediaKind.localizedLabel
+    }
+
+    public var isMarkdownDocument: Bool {
+        if richMetadata?.isMarkdown == true { return true }
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return mediaKind == .document && (ext == "md" || ext == "markdown")
+    }
+
+    public var isPlainTextDocument: Bool {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return mediaKind == .document && ["txt", "md", "markdown", "json", "yaml", "yml", "toml", "csv", "rtf"].contains(ext)
     }
 
     public init(
@@ -211,7 +496,9 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
         isTrashed: Bool = false,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        updatedHLC: Int64 = 0
+        updatedHLC: Int64 = 0,
+        lastOpenedAt: Date? = nil,
+        richMetadata: AssetRichMetadata? = nil
     ) {
         self.id = id
         self.title = title
@@ -241,6 +528,8 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.updatedHLC = updatedHLC
+        self.lastOpenedAt = lastOpenedAt
+        self.richMetadata = richMetadata
     }
 }
 
@@ -250,6 +539,7 @@ public struct FolderRecord: Codable, Hashable, Identifiable, Sendable {
     public var parentID: UUID?
     public var driveFolderID: String?
     public var colorHex: String?
+    public var customSymbol: String?
     public var sortOrder: Int
     public var assetCount: Int
     public var createdAt: Date
@@ -261,6 +551,7 @@ public struct FolderRecord: Codable, Hashable, Identifiable, Sendable {
         parentID: UUID? = nil,
         driveFolderID: String? = nil,
         colorHex: String? = nil,
+        customSymbol: String? = nil,
         sortOrder: Int = 0,
         assetCount: Int = 0,
         createdAt: Date = Date(),
@@ -271,6 +562,7 @@ public struct FolderRecord: Codable, Hashable, Identifiable, Sendable {
         self.parentID = parentID
         self.driveFolderID = driveFolderID
         self.colorHex = colorHex
+        self.customSymbol = customSymbol
         self.sortOrder = sortOrder
         self.assetCount = assetCount
         self.createdAt = createdAt
@@ -286,6 +578,135 @@ public struct TagCount: Codable, Hashable, Identifiable, Sendable {
     public init(name: String, count: Int) {
         self.name = name
         self.count = count
+    }
+}
+
+public struct SmartFolderRule: Codable, Hashable, Sendable {
+    public enum MatchMode: String, Codable, CaseIterable, Hashable, Sendable {
+        case all
+        case any
+
+        public var localizedLabel: String {
+            switch self {
+            case .all: "满足全部条件"
+            case .any: "满足任一条件"
+            }
+        }
+    }
+
+    public var matchMode: MatchMode
+    public var tags: [String]
+    public var descriptionQuery: String
+    public var colorHexes: [String]
+    public var colorTolerance: Double
+    public var mediaKinds: [MediaKind]
+    public var minRating: Int
+
+    public init(
+        matchMode: MatchMode = .all,
+        tags: [String] = [],
+        descriptionQuery: String = "",
+        colorHexes: [String] = [],
+        colorTolerance: Double = 24.0,
+        mediaKinds: [MediaKind] = [],
+        minRating: Int = 0
+    ) {
+        self.matchMode = matchMode
+        self.tags = tags
+        self.descriptionQuery = descriptionQuery
+        self.colorHexes = colorHexes
+        self.colorTolerance = colorTolerance
+        self.mediaKinds = mediaKinds
+        self.minRating = minRating
+    }
+
+    public var hasAnyCondition: Bool {
+        !tags.isEmpty
+            || !descriptionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !colorHexes.isEmpty
+            || !mediaKinds.isEmpty
+            || minRating > 0
+    }
+
+    /// Evaluates whether a non-trashed asset satisfies this smart folder rule.
+    public func matches(_ asset: AssetRecord) -> Bool {
+        guard !asset.isTrashed else { return false }
+        var checks: [Bool] = []
+
+        let cleanTags = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        if !cleanTags.isEmpty {
+            let assetTags = Set(asset.tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+            let matched = matchMode == .all
+                ? cleanTags.allSatisfy { assetTags.contains($0) }
+                : cleanTags.contains { assetTags.contains($0) }
+            checks.append(matched)
+        }
+
+        let query = descriptionQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !query.isEmpty {
+            let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
+            let haystack = [
+                asset.title,
+                asset.notes,
+                asset.aiDescription ?? "",
+                asset.ocrText ?? "",
+                asset.richMetadata?.githubRepo?.fullName ?? "",
+                asset.richMetadata?.githubRepo?.description ?? "",
+                asset.richMetadata?.socialPost?.authorName ?? "",
+                asset.richMetadata?.socialPost?.bodyText ?? ""
+            ].joined(separator: "\n").lowercased()
+            let matched = tokens.allSatisfy { haystack.contains($0) }
+            checks.append(matched)
+        }
+
+        let cleanColors = colorHexes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if !cleanColors.isEmpty {
+            let targetLabs = cleanColors.map { LabColor.fromHex($0) }
+            let tolerance = max(4.0, colorTolerance)
+            let matched = !asset.dominantColors.isEmpty && targetLabs.contains { target in
+                asset.dominantColors.contains { $0.deltaE(to: target) <= tolerance }
+            }
+            checks.append(matched)
+        }
+
+        if !mediaKinds.isEmpty {
+            checks.append(mediaKinds.contains(asset.mediaKind))
+        }
+
+        if minRating > 0 {
+            checks.append(asset.rating >= minRating)
+        }
+
+        guard !checks.isEmpty else { return false }
+        return matchMode == .all ? checks.allSatisfy { $0 } : checks.contains(true)
+    }
+}
+
+public struct SmartFolderRecord: Codable, Hashable, Identifiable, Sendable {
+    public let id: UUID
+    public var name: String
+    public var colorHex: String?
+    public var rule: SmartFolderRule
+    public var sortOrder: Int
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        colorHex: String? = nil,
+        rule: SmartFolderRule = SmartFolderRule(),
+        sortOrder: Int = 0,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.colorHex = colorHex
+        self.rule = rule
+        self.sortOrder = sortOrder
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
     }
 }
 
@@ -309,6 +730,20 @@ public enum SortOrder: String, Codable, CaseIterable, Hashable, Sendable {
     }
 }
 
+public enum GalleryLayoutMode: String, Codable, CaseIterable, Hashable, Sendable {
+    case verticalMasonry
+    case horizontalJustified
+    case galleryFilmstrip
+
+    public var localizedLabel: String {
+        switch self {
+        case .verticalMasonry: "纵向瀑布流"
+        case .horizontalJustified: "横向瀑布流"
+        case .galleryFilmstrip: "画廊视图"
+        }
+    }
+}
+
 public enum SidebarDestination: Hashable, Sendable {
     case allItems
     case inbox
@@ -318,6 +753,7 @@ public enum SidebarDestination: Hashable, Sendable {
     case recent
     case trash
     case folder(UUID)
+    case smartFolder(UUID)
     case tag(String)
 }
 
@@ -330,6 +766,7 @@ public struct FilterCriteria: Codable, Hashable, Sendable {
     public var minRating: Int
     public var tags: Set<String>
     public var folderID: UUID?
+    public var includeSubfolders: Bool
     public var onlyInbox: Bool
     public var onlyUntagged: Bool
     public var onlyRecentDays: Int?
@@ -347,6 +784,7 @@ public struct FilterCriteria: Codable, Hashable, Sendable {
         minRating: Int = 0,
         tags: Set<String> = [],
         folderID: UUID? = nil,
+        includeSubfolders: Bool = false,
         onlyInbox: Bool = false,
         onlyUntagged: Bool = false,
         onlyRecentDays: Int? = nil,
@@ -363,6 +801,7 @@ public struct FilterCriteria: Codable, Hashable, Sendable {
         self.minRating = minRating
         self.tags = tags
         self.folderID = folderID
+        self.includeSubfolders = includeSubfolders
         self.onlyInbox = onlyInbox
         self.onlyUntagged = onlyUntagged
         self.onlyRecentDays = onlyRecentDays

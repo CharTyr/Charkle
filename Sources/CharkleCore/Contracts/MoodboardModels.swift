@@ -46,7 +46,61 @@ public struct NormalizedCropRect: Codable, Hashable, Sendable {
         self.height = height
     }
 
+    /// Construct from TypeSafe `Box` edges (`top`, `bottom`, `left`, `right` in `[0, 1]`, top-left origin).
+    public init(boxTop top: Double, bottom: Double, left: Double, right: Double) {
+        let clampedLeft = max(0.0, min(1.0, left))
+        let clampedRight = max(clampedLeft, min(1.0, right))
+        let clampedTop = max(0.0, min(1.0, top))
+        let clampedBottom = max(clampedTop, min(1.0, bottom))
+        self.x = clampedLeft
+        self.y = clampedTop
+        self.width = max(0.02, clampedRight - clampedLeft)
+        self.height = max(0.02, clampedBottom - clampedTop)
+    }
+
     public static let full = NormalizedCropRect()
+
+    public var minX: Double { x }
+    public var minY: Double { y }
+    public var maxX: Double { min(1.0, x + width) }
+    public var maxY: Double { min(1.0, y + height) }
+    public var area: Double { max(0.0, width) * max(0.0, height) }
+
+    public var centerPoint: BoardPoint {
+        BoardPoint(x: max(0.0, min(1.0, x + width * 0.5)), y: max(0.0, min(1.0, y + height * 0.5)))
+    }
+
+    /// True when this rect represents a genuine sub-region (not effectively the whole frame).
+    public var isMeaningfulSubregion: Bool {
+        width >= 0.04 && height >= 0.04 && area < 0.96
+    }
+
+    /// Clamp edges safely inside `[0, 1]`.
+    public func clamped() -> NormalizedCropRect {
+        let left = max(0.0, min(0.98, x))
+        let top = max(0.0, min(0.98, y))
+        let right = max(left + 0.02, min(1.0, x + width))
+        let bottom = max(top + 0.02, min(1.0, y + height))
+        return NormalizedCropRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
+    /// Expand each edge outward by `fraction` of full image dimensions, clamped inside `[0, 1]`.
+    public func padded(by fraction: Double) -> NormalizedCropRect {
+        let pad = max(0.0, min(0.35, fraction))
+        let left = max(0.0, x - pad)
+        let top = max(0.0, y - pad)
+        let right = min(1.0, x + width + pad)
+        let bottom = min(1.0, y + height + pad)
+        return NormalizedCropRect(x: left, y: top, width: max(0.02, right - left), height: max(0.02, bottom - top))
+    }
+
+    /// Map a normalized point in full-image coordinates into the visible coordinate space of this crop.
+    public func mappingImagePointToVisible(_ point: BoardPoint) -> BoardPoint {
+        guard width > 0.01, height > 0.01 else { return point }
+        let vx = (point.x - x) / width
+        let vy = (point.y - y) / height
+        return BoardPoint(x: max(0.02, min(0.98, vx)), y: max(0.02, min(0.98, vy)))
+    }
 }
 
 public enum EditorialStyle: String, Codable, CaseIterable, Hashable, Sendable {
@@ -194,8 +248,12 @@ public struct BoardConnector: Codable, Hashable, Identifiable, Sendable {
     public let id: UUID
     public var fromNodeID: UUID
     public var fromAnchor: ConnectorAnchor
+    /// Optional normalized point (`0...1` inside `fromNode.frame`) for pinpoint callouts.
+    public var fromNormalizedPoint: BoardPoint?
     public var toNodeID: UUID
     public var toAnchor: ConnectorAnchor
+    /// Optional normalized point (`0...1` inside `toNode.frame`) so arrows can point directly onto an object inside an image.
+    public var toNormalizedPoint: BoardPoint?
     public var label: String?
     public var colorHex: String
     public var style: ConnectorStyle
@@ -206,8 +264,10 @@ public struct BoardConnector: Codable, Hashable, Identifiable, Sendable {
         id: UUID = UUID(),
         fromNodeID: UUID,
         fromAnchor: ConnectorAnchor = .auto,
+        fromNormalizedPoint: BoardPoint? = nil,
         toNodeID: UUID,
         toAnchor: ConnectorAnchor = .auto,
+        toNormalizedPoint: BoardPoint? = nil,
         label: String? = nil,
         colorHex: String = "#5C6672",
         style: ConnectorStyle = .curved,
@@ -217,13 +277,36 @@ public struct BoardConnector: Codable, Hashable, Identifiable, Sendable {
         self.id = id
         self.fromNodeID = fromNodeID
         self.fromAnchor = fromAnchor
+        self.fromNormalizedPoint = fromNormalizedPoint
         self.toNodeID = toNodeID
         self.toAnchor = toAnchor
+        self.toNormalizedPoint = toNormalizedPoint
         self.label = label
         self.colorHex = colorHex
         self.style = style
         self.dashed = dashed
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, fromNodeID, fromAnchor, fromNormalizedPoint, toNodeID, toAnchor, toNormalizedPoint
+        case label, colorHex, style, dashed, updatedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        fromNodeID = try c.decode(UUID.self, forKey: .fromNodeID)
+        fromAnchor = try c.decodeIfPresent(ConnectorAnchor.self, forKey: .fromAnchor) ?? .auto
+        fromNormalizedPoint = try c.decodeIfPresent(BoardPoint.self, forKey: .fromNormalizedPoint)
+        toNodeID = try c.decode(UUID.self, forKey: .toNodeID)
+        toAnchor = try c.decodeIfPresent(ConnectorAnchor.self, forKey: .toAnchor) ?? .auto
+        toNormalizedPoint = try c.decodeIfPresent(BoardPoint.self, forKey: .toNormalizedPoint)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? "#5C6672"
+        style = try c.decodeIfPresent(ConnectorStyle.self, forKey: .style) ?? .curved
+        dashed = try c.decodeIfPresent(Bool.self, forKey: .dashed) ?? false
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -450,6 +533,8 @@ public struct MoodboardCurationRequest: Codable, Hashable, Sendable {
     public var lockedAssetIDs: [UUID]
     public var existingBoard: MoodboardDocument?
     public var refinementInstruction: String?
+    /// Phase 2: Automatically run Jev Box detail-focus crop on selected primary assets matching `prompt`.
+    public var autoFocusDetailCrop: Bool
 
     public init(
         prompt: String = "",
@@ -466,7 +551,8 @@ public struct MoodboardCurationRequest: Codable, Hashable, Sendable {
         excludedAssetIDs: [UUID] = [],
         lockedAssetIDs: [UUID] = [],
         existingBoard: MoodboardDocument? = nil,
-        refinementInstruction: String? = nil
+        refinementInstruction: String? = nil,
+        autoFocusDetailCrop: Bool = false
     ) {
         self.prompt = prompt
         self.seedAssetIDs = seedAssetIDs
@@ -483,6 +569,33 @@ public struct MoodboardCurationRequest: Codable, Hashable, Sendable {
         self.lockedAssetIDs = lockedAssetIDs
         self.existingBoard = existingBoard
         self.refinementInstruction = refinementInstruction
+        self.autoFocusDetailCrop = autoFocusDetailCrop
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case prompt, seedAssetIDs, scopeFolderIDs, requiredTags, targetPalette, colorTolerance
+        case preferredCount, candidateCount, layoutStyle, useFreeformLayout, includeCuratorNotes
+        case excludedAssetIDs, lockedAssetIDs, existingBoard, refinementInstruction, autoFocusDetailCrop
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        prompt = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+        seedAssetIDs = try c.decodeIfPresent([UUID].self, forKey: .seedAssetIDs) ?? []
+        scopeFolderIDs = try c.decodeIfPresent([UUID].self, forKey: .scopeFolderIDs) ?? []
+        requiredTags = try c.decodeIfPresent([String].self, forKey: .requiredTags) ?? []
+        targetPalette = try c.decodeIfPresent([LabColor].self, forKey: .targetPalette) ?? []
+        colorTolerance = try c.decodeIfPresent(Double.self, forKey: .colorTolerance) ?? 28.0
+        preferredCount = try c.decodeIfPresent(Int.self, forKey: .preferredCount) ?? 12
+        candidateCount = try c.decodeIfPresent(Int.self, forKey: .candidateCount) ?? 24
+        layoutStyle = try c.decodeIfPresent(EditorialStyle.self, forKey: .layoutStyle) ?? .magazine
+        useFreeformLayout = try c.decodeIfPresent(Bool.self, forKey: .useFreeformLayout) ?? false
+        includeCuratorNotes = try c.decodeIfPresent(Bool.self, forKey: .includeCuratorNotes) ?? true
+        excludedAssetIDs = try c.decodeIfPresent([UUID].self, forKey: .excludedAssetIDs) ?? []
+        lockedAssetIDs = try c.decodeIfPresent([UUID].self, forKey: .lockedAssetIDs) ?? []
+        existingBoard = try c.decodeIfPresent(MoodboardDocument.self, forKey: .existingBoard)
+        refinementInstruction = try c.decodeIfPresent(String.self, forKey: .refinementInstruction)
+        autoFocusDetailCrop = try c.decodeIfPresent(Bool.self, forKey: .autoFocusDetailCrop) ?? false
     }
 }
 

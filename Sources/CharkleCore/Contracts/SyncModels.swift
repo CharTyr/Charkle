@@ -270,6 +270,36 @@ public struct SyncStatus: Codable, Hashable, Sendable {
     public var account: DriveAccountInfo?
     public var activeMode: DriveTransportMode
     public var lastError: String?
+    /// Short live description of the active sync step or filename being transferred.
+    public var currentDetail: String?
+    /// Normalized overall progress in `0.0...1.0` while syncing (`nil` when idle or indeterminate).
+    public var progressFraction: Double?
+
+    public var isSyncing: Bool {
+        switch phase {
+        case .scanning, .uploading, .downloading, .merging:
+            return true
+        case .idle, .error:
+            return false
+        }
+    }
+
+    public var localizedPhaseTitle: String {
+        switch phase {
+        case .idle:
+            return lastSyncedAt == nil ? "等待同步" : "已同步"
+        case .scanning:
+            return "正在扫描云端目录"
+        case .uploading(let done, let total):
+            return total > 0 ? "正在上传 (\(done)/\(total))" : "正在上传"
+        case .downloading(let done, let total):
+            return total > 0 ? "正在拉取 (\(done)/\(total))" : "正在拉取"
+        case .merging:
+            return "正在整理与写入索引"
+        case .error:
+            return "同步遇到异常"
+        }
+    }
 
     public init(
         phase: SyncPhase = .idle,
@@ -277,7 +307,9 @@ public struct SyncStatus: Codable, Hashable, Sendable {
         pendingOpCount: Int = 0,
         account: DriveAccountInfo? = nil,
         activeMode: DriveTransportMode = .localOnly,
-        lastError: String? = nil
+        lastError: String? = nil,
+        currentDetail: String? = nil,
+        progressFraction: Double? = nil
     ) {
         self.phase = phase
         self.lastSyncedAt = lastSyncedAt
@@ -285,6 +317,24 @@ public struct SyncStatus: Codable, Hashable, Sendable {
         self.account = account
         self.activeMode = activeMode
         self.lastError = lastError
+        self.currentDetail = currentDetail
+        self.progressFraction = progressFraction
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case phase, lastSyncedAt, pendingOpCount, account, activeMode, lastError, currentDetail, progressFraction
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        phase = try c.decodeIfPresent(SyncPhase.self, forKey: .phase) ?? .idle
+        lastSyncedAt = try c.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
+        pendingOpCount = try c.decodeIfPresent(Int.self, forKey: .pendingOpCount) ?? 0
+        account = try c.decodeIfPresent(DriveAccountInfo.self, forKey: .account)
+        activeMode = try c.decodeIfPresent(DriveTransportMode.self, forKey: .activeMode) ?? .localOnly
+        lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
+        currentDetail = try c.decodeIfPresent(String.self, forKey: .currentDetail)
+        progressFraction = try c.decodeIfPresent(Double.self, forKey: .progressFraction)
     }
 }
 
@@ -338,6 +388,8 @@ public struct SyncReport: Codable, Hashable, Sendable {
 
 public nonisolated enum CharkleSyncNotifications {
     public static let didCompleteSync = Notification.Name("com.charkle.sync.didCompleteSync")
+    public static let didUpdateSyncStatus = Notification.Name("com.charkle.sync.didUpdateSyncStatus")
+    public static let statusDataKey = "statusData"
     public static let discoveredCountKey = "discoveredCount"
     public static let downloadedOpsKey = "downloadedOps"
     public static let reconciledRenamesKey = "reconciledRenames"
@@ -443,6 +495,7 @@ public protocol DriveTransport: Sendable {
     func listFiles(inFolderID folderID: String) async throws -> [RemoteDriveFile]
     func downloadData(fileID: String) async throws -> Data
     func downloadFile(fileID: String, to destinationURL: URL) async throws
+    func downloadFile(_ file: RemoteDriveFile, to destinationURL: URL) async throws
     func uploadData(
         _ data: Data,
         name: String,
@@ -469,6 +522,10 @@ public protocol DriveTransport: Sendable {
 }
 
 public extension DriveTransport {
+    func downloadFile(_ file: RemoteDriveFile, to destinationURL: URL) async throws {
+        try await downloadFile(fileID: file.id, to: destinationURL)
+    }
+
     func resolveFolder(id: String) async throws -> RemoteDriveFile {
         throw DriveTransportError.notConfigured(
             "\(displayName) 暂不支持通过共享目录链接/ID 直连，请先在设置中「独立登录 Google 账号」，或在 Google Drive 中将该共享目录「添加到云端硬盘快捷方式」后再填写快捷方式路径。"

@@ -85,6 +85,14 @@ nonisolated struct CollectionChanges<Element: Codable & Hashable & Identifiable 
     }
 }
 
+struct DeletedAssetFingerprint: Codable, Hashable, Sendable {
+    let assetID: UUID
+    let sha256: String
+    let md5: String?
+    let fileName: String
+    let deletedAt: Date
+}
+
 nonisolated struct SyncClocks: Codable, Sendable {
     private var clocks: [String: SyncStamp] = [:]
 
@@ -323,8 +331,19 @@ extension LibraryDatabase {
             try put(folder)
             try setState(key, clocks)
         case .deleteAsset(let id, let driveID):
-            let knownID = try asset(id: id)?.driveFileID ?? driveID
+            let existingAsset = try asset(id: id)
+            let knownID = existingAsset?.driveFileID ?? driveID
             if let knownID { try setState("deleted.drive." + knownID, true) }
+            if let existingAsset, !existingAsset.contentHash.isEmpty {
+                let fp = DeletedAssetFingerprint(
+                    assetID: id,
+                    sha256: existingAsset.contentHash,
+                    md5: nil,
+                    fileName: existingAsset.fileName,
+                    deletedAt: Date()
+                )
+                try setState("deleted.content." + existingAsset.contentHash, fp)
+            }
             try tombstone("asset", id: id, stamp: stamp)
             try removeAsset(id)
             try setState("media.cleanup." + id.uuidString, true)

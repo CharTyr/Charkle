@@ -5,6 +5,29 @@ import ImageIO
 /// Extracts perceptual dominant colors from images using downsampled CIELAB k-means clustering.
 public nonisolated enum ColorExtractor: Sendable {
 
+    /// Extract up to `count` dominant colors sorted by perceptual visual weight,
+    /// optionally restricted to a normalized top-left `crop` region (e.g. from TypeSafe `Box` or Vision saliency).
+    public static func extractDominantColors(
+        from image: CGImage,
+        crop: NormalizedCropRect?,
+        count: Int = 6
+    ) -> [LabColor] {
+        guard let crop, crop != .full, crop.width > 0.04, crop.height > 0.04 else {
+            return extractDominantColors(from: image, count: count)
+        }
+        let clamped = crop.clamped()
+        let pixelRect = CGRect(
+            x: (clamped.x * Double(image.width)).rounded(.down),
+            y: (clamped.y * Double(image.height)).rounded(.down),
+            width: max(4, (clamped.width * Double(image.width)).rounded()),
+            height: max(4, (clamped.height * Double(image.height)).rounded())
+        ).intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard pixelRect.width >= 4, pixelRect.height >= 4, let cropped = image.cropping(to: pixelRect) else {
+            return extractDominantColors(from: image, count: count)
+        }
+        return extractDominantColors(from: cropped, count: count)
+    }
+
     /// Extract up to `count` dominant colors sorted by perceptual visual weight.
     public static func extractDominantColors(from image: CGImage, count: Int = 6) -> [LabColor] {
         let targetSide = 48

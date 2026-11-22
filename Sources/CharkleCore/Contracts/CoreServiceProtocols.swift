@@ -1,5 +1,10 @@
 import Foundation
 
+public nonisolated enum CharkleCoreNotifications {
+    /// Posted when background post-ingest Vision / Cloud AI enrichment updates persisted assets.
+    public static let libraryDidEnrichInBackground = Notification.Name("com.charkle.core.libraryDidEnrichInBackground")
+}
+
 /// Unified deep-module facade exposed by CharkleCore to CharkleCanvas and CharkleApp.
 public protocol CharkleEngineProtocol: Sendable {
     // MARK: - Library & Inbox
@@ -12,6 +17,12 @@ public protocol CharkleEngineProtocol: Sendable {
     func createFolder(name: String, parentID: UUID?) async throws -> FolderRecord
     func renameFolder(id: UUID, newName: String) async throws -> FolderRecord
     func deleteFolder(id: UUID) async throws
+    func moveFolder(id: UUID, newParentID: UUID?, insertAtIndex: Int?) async throws -> [FolderRecord]
+    func updateFolderAppearance(id: UUID, colorHex: String?, customSymbol: String?) async throws -> FolderRecord
+
+    func fetchSmartFolders() async throws -> [SmartFolderRecord]
+    func saveSmartFolder(_ folder: SmartFolderRecord) async throws -> [SmartFolderRecord]
+    func deleteSmartFolder(id: UUID) async throws -> [SmartFolderRecord]
 
     func ingest(
         _ inputs: [CaptureInput],
@@ -20,12 +31,15 @@ public protocol CharkleEngineProtocol: Sendable {
     ) async throws -> [AssetRecord]
     func updateAssets(_ patch: AssetBatchPatch) async throws -> [AssetRecord]
     func permanentlyDeleteAssets(ids: [UUID]) async throws
+    func markAssetOpened(id: UUID) async
+    func refreshRichAsset(id: UUID) async throws -> AssetRecord
 
     func quickJump(query: String, limit: Int) async throws -> [QuickJumpMatch]
     func similarAssets(to assetID: UUID, limit: Int) async throws -> [ScoredAsset]
     func suggestFolder(for assetID: UUID) async throws -> FolderSuggestion?
 
     // MARK: - Media & Cache
+    nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL?
     func thumbnailURL(for assetID: UUID, tier: ThumbnailTier) async -> URL?
     func originalURL(for assetID: UUID) async throws -> URL
     func cacheStats() async -> CacheStats
@@ -66,6 +80,18 @@ public protocol CharkleEngineProtocol: Sendable {
     func disconnectChatGPT(resetRegistration: Bool) async throws
     func listChatGPTModels() async throws -> [ChatGPTModelInfo]
 
+    // MARK: - Experimental TypeSafe System One (Jev) Visual Grounding
+    func typeSafeConfig() async -> TypeSafeExperimentalConfig
+    func saveTypeSafeConfig(_ config: TypeSafeExperimentalConfig, apiKey: String?) async throws
+    func hasStoredTypeSafeKey() async -> Bool
+    func testTypeSafeConnection(config: TypeSafeExperimentalConfig, apiKey: String?) async throws -> [TypeSafeModelInfo]
+    func locateVisualRegion(assetID: UUID, query: String?) async throws -> VisualRegionResult
+    func locateVisualMatch(referenceAssetID: UUID, in targetAssetID: UUID) async throws -> VisualRegionResult
+    func detectCleanContentBounds(assetID: UUID) async throws -> CleanBoundsResult
+    func extractSubjectPalette(assetID: UUID, query: String?) async throws -> SubjectPaletteResult
+    func semanticSearch(query: String, criteria: FilterCriteria, limit: Int) async throws -> SemanticSearchReport
+    func batchTriageInbox(assetIDs: [UUID], maxCount: Int) async throws -> [InboxTriageRecommendation]
+
     // MARK: - Cloud & Local Storage Sync (Google Drive / WebDAV / Local Folder + Migration)
     func syncConfig() async -> DriveSyncConfig
     func saveSyncConfig(_ config: DriveSyncConfig) async throws
@@ -73,6 +99,7 @@ public protocol CharkleEngineProtocol: Sendable {
     func probeGDirectEnvironment() async -> GDirectEnvironmentSnapshot
     func runGDirectScan() async throws -> GDirectEnvironmentSnapshot
     func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot
+    func runGDirectUnmount() async throws -> GDirectEnvironmentSnapshot
     func importGoogleOAuthSecret(from url: URL) async throws
     func importGoogleOAuthFromGDirect() async throws
     func hasGoogleOAuthClientConfig() async -> Bool
@@ -88,6 +115,36 @@ public protocol CharkleEngineProtocol: Sendable {
 
     // MARK: - First-Launch Curated Demo
     func seedSampleLibraryIfEmpty() async throws -> Bool
+}
+
+public extension CharkleEngineProtocol {
+    nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL? {
+        nil
+    }
+
+    func markAssetOpened(id: UUID) async {}
+
+    func moveFolder(id: UUID, newParentID: UUID?, insertAtIndex: Int?) async throws -> [FolderRecord] {
+        try await fetchFolders()
+    }
+
+    func updateFolderAppearance(id: UUID, colorHex: String?, customSymbol: String?) async throws -> FolderRecord {
+        guard let folder = try await fetchFolders().first(where: { $0.id == id }) else {
+            throw NSError(domain: "CharkleCore", code: 404, userInfo: [NSLocalizedDescriptionKey: "Folder not found"])
+        }
+        return folder
+    }
+
+    func fetchSmartFolders() async throws -> [SmartFolderRecord] { [] }
+    func saveSmartFolder(_ folder: SmartFolderRecord) async throws -> [SmartFolderRecord] { [] }
+    func deleteSmartFolder(id: UUID) async throws -> [SmartFolderRecord] { [] }
+
+    func refreshRichAsset(id: UUID) async throws -> AssetRecord {
+        guard let asset = try await fetchAsset(id: id) else {
+            throw NSError(domain: "CharkleCore", code: 404, userInfo: [NSLocalizedDescriptionKey: "Asset not found"])
+        }
+        return asset
+    }
 }
 
 public enum CharkleEngineFactory {

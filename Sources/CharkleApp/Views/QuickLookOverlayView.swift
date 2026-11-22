@@ -33,9 +33,18 @@ public struct QuickLookOverlayView: View {
     @State private var showSecondaryControls: Bool = false
     @State private var keyMonitor: Any?
     @State private var confirmPermanentDelete: Bool = false
+    @State private var isSidePanelOpen: Bool = false
+    @State private var sidePanelTab: SidePanelTab = .similar
+    @Namespace private var qlSideTabNamespace
+
+    private enum SidePanelTab: String, CaseIterable {
+        case info = "信息"
+        case similar = "类似项目"
+    }
 
     private var supportsVisualTransform: Bool {
-        asset.mediaKind == .image || asset.mediaKind == .designFile || asset.mediaKind == .animatedImage
+        !asset.isGitHubRepo && !asset.isSocialPost
+            && (asset.mediaKind == .image || asset.mediaKind == .designFile || asset.mediaKind == .animatedImage)
     }
 
     private var displayRotationDegrees: Int {
@@ -118,6 +127,20 @@ public struct QuickLookOverlayView: View {
 
                     Spacer()
 
+                    Button {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                            isSidePanelOpen.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(isSidePanelOpen ? Color.accentColor : .white.opacity(0.86))
+                            .frame(width: 28, height: 28)
+                            .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
+                    }
+                    .buttonStyle(CharkleTactileButtonStyle())
+                    .help("显示 / 隐藏右侧信息与类似项目")
+
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                             .font(.system(size: 11, weight: .bold))
@@ -134,22 +157,32 @@ public struct QuickLookOverlayView: View {
 
                 Spacer(minLength: 12)
 
-                // Center Media Surface (Continuous Hero Element)
-                mediaStage
-                    .matchedGeometryEffect(id: asset.id, in: heroNamespace)
-                    .padding(.horizontal, 48)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background {
-                        Color.clear
-                            .onGeometryChange(for: CGSize.self) { proxy in
-                                CGSize(width: floor(max(0, proxy.size.width - 96)), height: floor(proxy.size.height))
-                            } action: { _, newSize in
-                                if newSize.width > 80, newSize.height > 80,
-                                   (abs(newSize.width - stageViewportSize.width) >= 2 || abs(newSize.height - stageViewportSize.height) >= 2) {
-                                    stageViewportSize = newSize
+                // Center Media Surface + Optional Right Info|Similar Drawer (Img 2)
+                HStack(spacing: 16) {
+                    mediaStage
+                        .matchedGeometryEffect(id: asset.id, in: heroNamespace)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background {
+                            Color.clear
+                                .onGeometryChange(for: CGSize.self) { proxy in
+                                    CGSize(width: floor(max(0, proxy.size.width)), height: floor(proxy.size.height))
+                                } action: { _, newSize in
+                                    if newSize.width > 80, newSize.height > 80,
+                                       (abs(newSize.width - stageViewportSize.width) >= 2 || abs(newSize.height - stageViewportSize.height) >= 2) {
+                                        stageViewportSize = newSize
+                                    }
                                 }
-                            }
+                        }
+
+                    if isSidePanelOpen {
+                        quickLookSidePanel
+                            .frame(width: 292)
+                            .frame(maxHeight: 680)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
+                }
+                .padding(.horizontal, isSidePanelOpen ? 24 : 48)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 Spacer(minLength: 12)
 
@@ -172,6 +205,8 @@ public struct QuickLookOverlayView: View {
             }
         }
         .task(id: asset.id) {
+            library.markAssetOpened(asset.id)
+            library.refreshInspectorContext(for: asset.id)
             zoomScale = 1.0
             panOffset = .zero
             panStartOffset = .zero
@@ -234,54 +269,245 @@ public struct QuickLookOverlayView: View {
         }
     }
 
-    // MARK: - 7-MediaKind Stage
+    // MARK: - Rich Multi-Format Media Stage
 
     @ViewBuilder
     private var mediaStage: some View {
-        switch asset.mediaKind {
-        case .image, .designFile:
-            zoomableImageStage
-        case .animatedImage:
-            if let url = originalURL {
-                AnimatedGIFPlayerView(url: url)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .rotationEffect(.degrees(rotationDegrees))
-                    .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
-                    .scaleEffect(zoomScale * quarterTurnFitScale)
-                    .offset(panOffset)
-                    .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
-            } else {
+        if let repo = asset.richMetadata?.githubRepo {
+            QuickLookGitHubRepoCard(asset: asset, repo: repo) {
+                Task {
+                    if await library.refreshRichAsset(asset.id) != nil {
+                        coordinator.showToast("已刷新 GitHub 仓库信息与 README", icon: "arrow.clockwise")
+                    }
+                }
+            }
+        } else if let post = asset.richMetadata?.socialPost {
+            QuickLookSocialPostCard(
+                asset: asset,
+                post: post,
+                originalURL: originalURL,
+                onExtractMedia: { attachment, idx in
+                    Task {
+                        if let extracted = await library.extractMediaFromSocialPost(
+                            postAsset: asset,
+                            attachment: attachment,
+                            index: idx
+                        ) {
+                            coordinator.showToast("已提取「\(extracted.title)」并保留推文来源", icon: "photo.badge.plus")
+                        } else if let err = library.lastError {
+                            coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                        }
+                    }
+                },
+                onExtractAllMedia: {
+                    Task {
+                        let extracted = await library.extractAllMediaFromSocialPost(postAsset: asset)
+                        if !extracted.isEmpty {
+                            coordinator.showToast("已提取 \(extracted.count) 项推文媒体为独立素材", icon: "square.and.arrow.down.on.square")
+                        } else if let err = library.lastError {
+                            coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                        }
+                    }
+                },
+                onRetryFetch: {
+                    Task {
+                        if await library.refreshRichAsset(asset.id) != nil {
+                            coordinator.showToast("已重新获取推文媒体", icon: "arrow.clockwise")
+                        }
+                    }
+                }
+            )
+        } else {
+            switch asset.mediaKind {
+            case .image, .designFile:
                 zoomableImageStage
+            case .animatedImage:
+                if let url = originalURL {
+                    AnimatedGIFPlayerView(url: url)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .rotationEffect(.degrees(rotationDegrees))
+                        .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
+                        .scaleEffect(zoomScale * quarterTurnFitScale)
+                        .offset(panOffset)
+                        .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
+                } else {
+                    zoomableImageStage
+                }
+            case .video:
+                if let url = originalURL {
+                    QuickLookVideoPlayerView(url: url)
+                        .frame(maxWidth: 1020, maxHeight: 640)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .shadow(color: .black.opacity(0.45), radius: 28, y: 12)
+                } else {
+                    zoomableImageStage
+                }
+            case .audio:
+                QuickLookAudioStudioCard(asset: asset, fileURL: originalURL)
+                    .frame(maxWidth: 580)
+            case .model3D:
+                QuickLookModel3DViewer(asset: asset, originalURL: originalURL)
+            case .document:
+                if let url = originalURL, url.pathExtension.lowercased() == "pdf" {
+                    QuickLookPDFView(url: url)
+                        .frame(maxWidth: 860, maxHeight: 680)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .shadow(color: .black.opacity(0.40), radius: 24, y: 10)
+                } else if asset.fileName.lowercased().hasSuffix(".swatch") {
+                    ProceduralMediaFallbackCard(asset: asset)
+                        .frame(width: 420, height: 420)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .shadow(color: .black.opacity(0.40), radius: 28, y: 12)
+                } else {
+                    QuickLookMarkdownReaderCard(asset: asset, originalURL: originalURL)
+                }
+            case .webBookmark:
+                webBookmarkDetailCard
             }
-        case .video:
-            if let url = originalURL {
-                QuickLookVideoPlayerView(url: url)
-                    .frame(maxWidth: 1020, maxHeight: 640)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .shadow(color: .black.opacity(0.45), radius: 28, y: 12)
-            } else {
-                zoomableImageStage
-            }
-        case .audio:
-            QuickLookAudioStudioCard(asset: asset, fileURL: originalURL)
-                .frame(maxWidth: 580)
-        case .document:
-            if let url = originalURL, url.pathExtension.lowercased() == "pdf" {
-                QuickLookPDFView(url: url)
-                    .frame(maxWidth: 860, maxHeight: 680)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(color: .black.opacity(0.40), radius: 24, y: 10)
-            } else if asset.fileName.lowercased().hasSuffix(".swatch") {
-                ProceduralMediaFallbackCard(asset: asset)
-                    .frame(width: 420, height: 420)
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .shadow(color: .black.opacity(0.40), radius: 28, y: 12)
-            } else {
-                textDocumentReaderCard
-            }
-        case .webBookmark:
-            webBookmarkDetailCard
         }
+    }
+
+    // MARK: - QuickLook Side Info | Similar Drawer (Reference Img 2)
+
+    private var quickLookSidePanel: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 2) {
+                ForEach(SidePanelTab.allCases, id: \.self) { tab in
+                    let active = sidePanelTab == tab
+                    Button {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                            sidePanelTab = tab
+                        }
+                    } label: {
+                        Text(tab.rawValue)
+                            .font(.system(size: 12, weight: active ? .semibold : .medium))
+                            .foregroundStyle(active ? .white : .white.opacity(0.65))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background {
+                                if active {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(Color.white.opacity(0.16))
+                                        .matchedGeometryEffect(id: "ql-side-tab", in: qlSideTabNamespace)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(3)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .padding(14)
+
+            ScrollView(.vertical) {
+                if sidePanelTab == .similar {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("与「\(asset.title)」相似的素材")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .lineLimit(1)
+
+                        if library.similarAssets.isEmpty {
+                            Text("暂无视觉或色彩相似素材")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 36)
+                        } else {
+                            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                                ForEach(library.similarAssets) { scored in
+                                    let ratio = max(0.68, min(1.5, CGFloat(scored.asset.aspectRatio)))
+                                    AssetThumbnailSurface(
+                                        asset: scored.asset,
+                                        loader: library.thumbnailLoader,
+                                        tier: .grid520,
+                                        cornerRadius: 9
+                                    )
+                                    .frame(height: (126 / ratio).rounded())
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
+                                    )
+                                    .onTapGesture {
+                                        library.selectedAssetIDs = [scored.asset.id]
+                                        coordinator.openQuickLook(assetID: scored.asset.id, playlist: coordinator.quickLookPlaylist)
+                                    }
+                                    .help(scored.asset.title)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
+                } else {
+                    VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(asset.title)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white)
+                            Text("\(asset.mediaKind.localizedLabel) · \(asset.pixelWidth) × \(asset.pixelHeight)")
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.62))
+                        }
+
+                        if !asset.dominantColors.isEmpty {
+                            HStack(spacing: 6) {
+                                ForEach(asset.dominantColors.prefix(5), id: \.hex) { swatch in
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(Color(charkleHex: swatch.hex))
+                                        .frame(height: 24)
+                                }
+                            }
+                        }
+
+                        if !asset.tags.isEmpty {
+                            QuickLookFlowWrap(spacing: 6) {
+                                ForEach(asset.tags, id: \.self) { tag in
+                                    Text("#\(tag)")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.86))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3.5)
+                                        .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
+                                }
+                            }
+                        }
+
+                        if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("来源链接")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.52))
+                                Link(urlStr, destination: url)
+                                    .font(.system(size: 11.5))
+                                    .lineLimit(2)
+                            }
+                        }
+
+                        if !asset.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("备注 / 来源详情")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.52))
+                                Text(asset.notes)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.84))
+                                    .lineSpacing(4)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 16)
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .background(Color(charkleHex: "#15161A").opacity(0.92), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
+        )
     }
 
     private var zoomableImageStage: some View {
@@ -345,33 +571,6 @@ public struct QuickLookOverlayView: View {
                 }
             }
         }
-    }
-
-    private var textDocumentReaderCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text(CanvasFormatters.fileExtensionBadge(for: asset.fileName))
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                Text(asset.title)
-                    .font(.system(size: 17, weight: .semibold))
-                Spacer()
-            }
-            Divider()
-            ScrollView(.vertical) {
-                Text(asset.notes.isEmpty ? (asset.ocrText ?? "暂无可预览正文，可点击底部使用默认应用打开。") : asset.notes)
-                    .font(.system(size: 14))
-                    .lineSpacing(6)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding(24)
-        .frame(maxWidth: 680, maxHeight: 540)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.35), radius: 24, y: 10)
     }
 
     private var webBookmarkDetailCard: some View {

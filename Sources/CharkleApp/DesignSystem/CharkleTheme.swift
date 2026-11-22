@@ -12,7 +12,7 @@ public enum CharkleTheme {
     }
 
     public static func surfaceElevated(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#1E2024") : Color(charkleHex: "#FFFFFF")
+        scheme == .dark ? Color(charkleHex: "#1E2025") : Color(charkleHex: "#FFFFFF")
     }
 
     public static func surfaceSubtle(for scheme: ColorScheme) -> Color {
@@ -20,7 +20,11 @@ public enum CharkleTheme {
     }
 
     public static func inspectorBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#191B1F") : Color(charkleHex: "#FAF9F7")
+        scheme == .dark ? Color(charkleHex: "#131519") : Color(charkleHex: "#F1F0EC")
+    }
+
+    public static func inspectorFieldSurface(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(charkleHex: "#16181D") : Color(charkleHex: "#F6F5F1")
     }
 
     public static func hairline(for scheme: ColorScheme) -> Color {

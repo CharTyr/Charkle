@@ -13,9 +13,15 @@ public final class LibraryStore {
     public let engine: any CharkleEngineProtocol
     public let thumbnailLoader: ThumbnailImageLoader
 
-    public var assets: [AssetRecord] = []
+    public var assets: [AssetRecord] = [] {
+        didSet { assetsRevision &+= 1 }
+    }
+    public private(set) var assetsRevision: Int = 0
     public var allAssetsByID: [UUID: AssetRecord] = [:]
+    public private(set) var cachedRecentActivityAssets: [AssetRecord] = []
     public var folders: [FolderRecord] = []
+    public var smartFolders: [SmartFolderRecord] = []
+    public var activeSmartFolderID: UUID?
     public var tagCounts: [TagCount] = []
     public var inboxCount: Int = 0
 
@@ -28,14 +34,54 @@ public final class LibraryStore {
     public var similarAssets: [ScoredAsset] = []
     public var suggestedFolder: FolderSuggestion?
 
+    // Phase 2: Hybrid Semantic Search & Inbox Smart Batch Triage
+    public var semanticSearchEnabled: Bool = false
+    public var isRunningSemanticSearch: Bool = false
+    public var semanticSearchReport: SemanticSearchReport?
+    public var isRunningInboxTriage: Bool = false
+    public var inboxTriageRecommendations: [InboxTriageRecommendation] = []
+
+    public enum RetagBatchOutcome: Sendable {
+        case aiDisabled
+        case cancelled(completed: Int, total: Int)
+        case finished(succeeded: Int, failed: Int, total: Int, firstError: String?)
+    }
+
     public var isLoading: Bool = false
+    public var enrichingAssetIDs: Set<UUID> = []
+    public var enrichCompletedCount: Int = 0
+    public var enrichTotalCount: Int = 0
+    public var isEnrichingTags: Bool { !enrichingAssetIDs.isEmpty }
     public var lastError: String?
 
     private var inspectorContextTask: Task<Void, Never>?
+    private var retagTask: Task<RetagBatchOutcome, Never>?
+    @ObservationIgnored private var enrichmentObserver: NSObjectProtocol?
+    private static let recentTagsDefaultsKey = "com.charkle.recentlyTouchedTags"
+    private static let tagUsageFreqDefaultsKey = "com.charkle.tagUsageFrequency"
+    private var recentlyTouchedTags: [String] = []
+    private var tagUsageFrequency: [String: Int] = [:]
 
     public init(engine: any CharkleEngineProtocol) {
         self.engine = engine
         self.thumbnailLoader = ThumbnailImageLoader(engine: engine)
+        self.recentlyTouchedTags = UserDefaults.standard.stringArray(forKey: Self.recentTagsDefaultsKey) ?? []
+        self.tagUsageFrequency = UserDefaults.standard.dictionary(forKey: Self.tagUsageFreqDefaultsKey) as? [String: Int] ?? [:]
+        self.enrichmentObserver = NotificationCenter.default.addObserver(
+            forName: CharkleCoreNotifications.libraryDidEnrichInBackground,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshAll()
+            }
+        }
+    }
+
+    isolated deinit {
+        if let observer = enrichmentObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     public var primarySelectedAsset: AssetRecord? {
@@ -61,12 +107,14 @@ public final class LibraryStore {
 
     public func applyDestination(_ destination: SidebarDestination) async {
         filter.folderID = nil
+        filter.includeSubfolders = false
         filter.onlyInbox = false
         filter.onlyUntagged = false
         filter.onlyRecentDays = nil
         filter.onlyTrashed = false
         filter.includeTrashed = false
         filter.tags.removeAll()
+        activeSmartFolderID = nil
 
         switch destination {
         case .allItems:
@@ -83,8 +131,13 @@ public final class LibraryStore {
             filter.includeTrashed = true
         case .folder(let folderID):
             filter.folderID = folderID
+            filter.includeSubfolders = true
+        case .smartFolder(let smartFolderID):
+            activeSmartFolderID = smartFolderID
         case .tag(let tagName):
             filter.tags = [tagName]
+            recordRecentlyTouchedTags([tagName])
+            tagCounts = sortTagCounts(tagCounts)
         case .moodboardsHome, .moodboard:
             return
         }
@@ -98,16 +151,19 @@ public final class LibraryStore {
             async let fetchedAssets = engine.fetchAssets(matching: filter)
             async let fetchedAll = engine.fetchAssets(matching: FilterCriteria(includeTrashed: true))
             async let fetchedFolders = engine.fetchFolders()
+            async let fetchedSmartFolders = engine.fetchSmartFolders()
             async let fetchedTags = engine.fetchTagCounts()
             async let fetchedInbox = engine.inboxCount()
 
-            let (visible, all, folderList, tags, inbox) = try await (
-                fetchedAssets, fetchedAll, fetchedFolders, fetchedTags, fetchedInbox
+            let (visible, all, folderList, smartList, tags, inbox) = try await (
+                fetchedAssets, fetchedAll, fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox
             )
-            assets = visible
+            smartFolders = smartList
             allAssetsByID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+            rebuildRecentActivityCache()
+            assets = applyActiveSmartFolderIfNeeded(visible)
             folders = folderList
-            tagCounts = tags
+            tagCounts = sortTagCounts(tags)
             inboxCount = inbox
         } catch {
             lastError = error.localizedDescription
@@ -117,7 +173,8 @@ public final class LibraryStore {
 
     public func refreshAssets() async {
         do {
-            assets = try await engine.fetchAssets(matching: filter)
+            let fetched = try await engine.fetchAssets(matching: filter)
+            assets = applyActiveSmartFolderIfNeeded(fetched)
             for asset in assets {
                 allAssetsByID[asset.id] = asset
             }
@@ -126,18 +183,324 @@ public final class LibraryStore {
         }
     }
 
+    private func applyActiveSmartFolderIfNeeded(_ list: [AssetRecord]) -> [AssetRecord] {
+        guard let smartID = activeSmartFolderID,
+              let smart = smartFolders.first(where: { $0.id == smartID }) else {
+            return list
+        }
+        return list.filter { smart.rule.matches($0) }
+    }
+
+    public func matchingCount(for smartFolder: SmartFolderRecord) -> Int {
+        allAssetsByID.values.reduce(into: 0) { count, asset in
+            if smartFolder.rule.matches(asset) { count += 1 }
+        }
+    }
+
+    public func matchingCount(for rule: SmartFolderRule) -> Int {
+        allAssetsByID.values.reduce(into: 0) { count, asset in
+            if rule.matches(asset) { count += 1 }
+        }
+    }
+
+    /// Top 10 tags strictly by asset count for Sidebar quick access.
+    public var topTenSidebarTags: [TagCount] {
+        Array(tagCounts.sorted {
+            if $0.count != $1.count { return $0.count > $1.count }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }.prefix(10))
+    }
+
+    /// Up to 5 recently & frequently used tags for Sidebar quick access.
+    public var recentFrequentSidebarTags: [TagCount] {
+        let byLower = Dictionary(uniqueKeysWithValues: tagCounts.map { ($0.name.lowercased(), $0) })
+        let ranked = recentlyTouchedTags.enumerated().compactMap { index, name -> (TagCount, Double)? in
+            guard let item = byLower[name.lowercased()] else { return nil }
+            let recencyBonus = Double(max(0, 60 - index)) * 1.5
+            let freqBonus = Double(tagUsageFrequency[name.lowercased()] ?? 1) * 4.0
+            return (item, recencyBonus + freqBonus)
+        }
+        var seen = Set<String>()
+        var result: [TagCount] = []
+        for (item, _) in ranked.sorted(by: { $0.1 > $1.1 }) {
+            if seen.insert(item.name.lowercased()).inserted {
+                result.append(item)
+                if result.count >= 5 { break }
+            }
+        }
+        return result
+    }
+
+    /// Rebuilds the cached recent-activity list (called on data mutations, never inside SwiftUI view body).
+    private func rebuildRecentActivityCache() {
+        cachedRecentActivityAssets = allAssetsByID.values
+            .filter { !$0.isTrashed }
+            .sorted { lhs, rhs in
+                let ld = lhs.recentActivityDate
+                let rd = rhs.recentActivityDate
+                if ld != rd { return ld > rd }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+    }
+
+    /// Recent assets ranked by most recent save or open activity (for the Notch Shelf filmstrip & waterfall).
+    public func recentActivityAssets(limit: Int? = nil) -> [AssetRecord] {
+        let source = cachedRecentActivityAssets.isEmpty && !allAssetsByID.isEmpty
+            ? allAssetsByID.values.filter { !$0.isTrashed }.sorted {
+                let ld = $0.recentActivityDate
+                let rd = $1.recentActivityDate
+                if ld != rd { return ld > rd }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            : cachedRecentActivityAssets
+        if let limit {
+            return Array(source.prefix(max(0, limit)))
+        }
+        return source
+    }
+
+    public func markAssetOpened(_ id: UUID) {
+        let now = Date()
+        if var existing = allAssetsByID[id] {
+            existing.lastOpenedAt = now
+            allAssetsByID[id] = existing
+        }
+        if let idx = assets.firstIndex(where: { $0.id == id }) {
+            assets[idx].lastOpenedAt = now
+        }
+        if let existing = allAssetsByID[id], !existing.isTrashed {
+            cachedRecentActivityAssets.removeAll { $0.id == id }
+            cachedRecentActivityAssets.insert(existing, at: 0)
+        }
+        Task {
+            await engine.markAssetOpened(id: id)
+        }
+    }
+
+    @discardableResult
+    public func refreshRichAsset(_ id: UUID) async -> AssetRecord? {
+        do {
+            let updated = try await engine.refreshRichAsset(id: id)
+            allAssetsByID[updated.id] = updated
+            if let idx = assets.firstIndex(where: { $0.id == updated.id }) {
+                assets[idx] = updated
+            }
+            rebuildRecentActivityCache()
+            thumbnailLoader.invalidate(assetID: updated.id)
+            return updated
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Extracts a single photo, video, or GIF from a saved social post (X / Threads / Bluesky)
+    /// into a standalone media asset while preserving full originating post author, text, and link.
+    @discardableResult
+    public func extractMediaFromSocialPost(
+        postAsset: AssetRecord,
+        attachment: SocialMediaAttachment,
+        index: Int
+    ) async -> AssetRecord? {
+        guard let post = postAsset.richMetadata?.socialPost,
+              let mediaURL = URL(string: attachment.url) else { return nil }
+        do {
+            let tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "charkle-social-extract-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+
+            let kindTag: String = switch attachment.kind {
+            case .photo: "img"
+            case .video: "video"
+            case .gif: "gif"
+            }
+            let baseName = "\(post.platform.displayName)-\(post.authorHandle)-\(kindTag)\(index + 1)"
+
+            let created: [AssetRecord]
+            if attachment.kind == .video || attachment.kind == .gif {
+                var localVideoFile: URL?
+                if index == 0,
+                   let cached = try? await engine.originalURL(for: postAsset.id),
+                   ["mp4", "mov", "m4v", "webm"].contains(cached.pathExtension.lowercased()) {
+                    let copied = tempDir.appending(path: "\(baseName).\(cached.pathExtension.lowercased())")
+                    try? FileManager.default.copyItem(at: cached, to: copied)
+                    if FileManager.default.fileExists(atPath: copied.path) {
+                        localVideoFile = copied
+                    }
+                }
+                if localVideoFile == nil {
+                    let xKind: XPostMedia.Kind = attachment.kind == .gif ? .gif : .video
+                    let mediaItem = XPostMedia(
+                        kind: xKind,
+                        url: mediaURL,
+                        thumbnailURL: attachment.thumbnailURL.flatMap(URL.init(string:))
+                    )
+                    localVideoFile = await XPostResolver.downloadMedia(mediaItem, to: tempDir, baseName: baseName)
+                }
+                guard let videoFile = localVideoFile else {
+                    lastError = "无法下载该推文视频，请检查网络或点击原链接观看。"
+                    return nil
+                }
+                created = try await engine.ingest(
+                    [.fileURL(videoFile)],
+                    targetFolderID: postAsset.folderID,
+                    targetBoardID: nil
+                )
+            } else {
+                let mediaItem = XPostMedia(kind: .photo, url: mediaURL)
+                guard let localFile = await XPostResolver.downloadMedia(mediaItem, to: tempDir, baseName: baseName),
+                      let imageData = try? Data(contentsOf: localFile) else {
+                    lastError = "无法下载该推文图片，请检查网络或点击原链接查看。"
+                    return nil
+                }
+                created = try await engine.ingest(
+                    [.imageData(imageData, suggestedName: localFile.lastPathComponent, sourceURL: post.originalURL)],
+                    targetFolderID: postAsset.folderID,
+                    targetBoardID: nil
+                )
+            }
+
+            guard let standalone = created.first else { return nil }
+
+            let attributionNotes = [
+                "来源推文：\(post.authorName) (@\(post.authorHandle)) · \(post.platform.displayName)",
+                post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines),
+                "原推文链接：\(post.originalURL)"
+            ].filter { !$0.isEmpty }.joined(separator: "\n\n")
+
+            let extractedTitle = "@\(post.authorHandle) \(attachment.kind.localizedLabel) #\(index + 1)"
+            let patched = try await engine.updateAssets(
+                AssetBatchPatch(
+                    assetIDs: [standalone.id],
+                    title: extractedTitle,
+                    notes: attributionNotes,
+                    addTags: [post.platform.displayName]
+                )
+            )
+            var finalAsset = patched.first ?? standalone
+            if finalAsset.sourceURL == nil {
+                finalAsset.sourceURL = post.originalURL
+                finalAsset.sourceDomain = URL(string: post.originalURL)?.host()
+            }
+            allAssetsByID[finalAsset.id] = finalAsset
+            await refreshAll()
+            return finalAsset
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// Extracts all photo & video attachments from a social post into standalone assets with tweet provenance.
+    @discardableResult
+    public func extractAllMediaFromSocialPost(postAsset: AssetRecord) async -> [AssetRecord] {
+        guard let post = postAsset.richMetadata?.socialPost else { return [] }
+        let items = post.effectiveAttachments
+        guard !items.isEmpty else { return [] }
+        var extracted: [AssetRecord] = []
+        for (idx, attachment) in items.enumerated() {
+            if let asset = await extractMediaFromSocialPost(postAsset: postAsset, attachment: attachment, index: idx) {
+                extracted.append(asset)
+            }
+        }
+        return extracted
+    }
+
+    /// Extracts a single embedded image from a saved social post into a standalone image asset,
+    /// preserving full originating post attribution (author, handle, post excerpt, and original post URL).
+    @discardableResult
+    public func extractImageFromSocialPost(
+        postAsset: AssetRecord,
+        mediaURLString: String,
+        index: Int
+    ) async -> AssetRecord? {
+        let attachment = SocialMediaAttachment(kind: .photo, url: mediaURLString, thumbnailURL: mediaURLString)
+        return await extractMediaFromSocialPost(postAsset: postAsset, attachment: attachment, index: index)
+    }
+
     public func refreshSidebarMetadata() async {
         do {
             async let fetchedFolders = engine.fetchFolders()
+            async let fetchedSmartFolders = engine.fetchSmartFolders()
             async let fetchedTags = engine.fetchTagCounts()
             async let fetchedInbox = engine.inboxCount()
-            let (folderList, tags, inbox) = try await (fetchedFolders, fetchedTags, fetchedInbox)
+            let (folderList, smartList, tags, inbox) = try await (fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox)
             folders = folderList
-            tagCounts = tags
+            smartFolders = smartList
+            tagCounts = sortTagCounts(tags)
             inboxCount = inbox
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    // MARK: - Smart Folders CRUD
+
+    public func saveSmartFolder(_ folder: SmartFolderRecord) async {
+        do {
+            smartFolders = try await engine.saveSmartFolder(folder)
+            if activeSmartFolderID == folder.id {
+                await refreshAssets()
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    public func deleteSmartFolder(id: UUID) async {
+        do {
+            smartFolders = try await engine.deleteSmartFolder(id: id)
+            if activeSmartFolderID == id {
+                activeSmartFolderID = nil
+                await refreshAssets()
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    public func moveFolder(id: UUID, newParentID: UUID?, insertAtIndex: Int? = nil) async -> Bool {
+        do {
+            folders = try await engine.moveFolder(id: id, newParentID: newParentID, insertAtIndex: insertAtIndex)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    public func updateFolderAppearance(id: UUID, colorHex: String?, customSymbol: String?) async {
+        do {
+            _ = try await engine.updateFolderAppearance(id: id, colorHex: colorHex, customSymbol: customSymbol)
+            await refreshSidebarMetadata()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    public func isFolderSubtreePinnedOffline(_ folderID: UUID) -> Bool {
+        let subtreeSet = Set(descendantFolderIDsPostOrder(rootID: folderID))
+        let folderAssets = allAssetsByID.values.filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }
+        return !folderAssets.isEmpty && folderAssets.allSatisfy(\.pinnedOffline)
+    }
+
+    @discardableResult
+    public func setFoldersPinnedOffline(_ folderIDs: [UUID], pinned: Bool) async -> Int {
+        var subtreeSet = Set<UUID>()
+        for fid in folderIDs {
+            subtreeSet.formUnion(descendantFolderIDsPostOrder(rootID: fid))
+        }
+        let targetAssetIDs = allAssetsByID.values
+            .filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }
+            .map(\.id)
+        guard !targetAssetIDs.isEmpty else { return 0 }
+        await applyPatch(AssetBatchPatch(assetIDs: targetAssetIDs, pinnedOffline: pinned))
+        if !pinned {
+            _ = try? await engine.evictCacheNow()
+            await refreshAll()
+        }
+        return targetAssetIDs.count
     }
 
     // MARK: - Folder CRUD
@@ -441,10 +804,14 @@ public final class LibraryStore {
     }
 
     public func addTags(_ tags: [String], to ids: [UUID]) async {
+        let splitSeparators = CharacterSet(charactersIn: ",，")
+        let trimSet = CharacterSet(charactersIn: "#＃").union(.whitespacesAndNewlines)
         let cleaned = tags
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.components(separatedBy: splitSeparators) }
+            .map { $0.trimmingCharacters(in: trimSet) }
             .filter { !$0.isEmpty }
         guard !cleaned.isEmpty else { return }
+        recordRecentlyTouchedTags(cleaned)
         await applyPatch(AssetBatchPatch(assetIDs: ids, addTags: cleaned))
     }
 
@@ -453,11 +820,70 @@ public final class LibraryStore {
     }
 
     public func acceptSuggestedTag(_ tag: String, for assetID: UUID) async {
+        recordRecentlyTouchedTags([tag])
         await applyPatch(AssetBatchPatch(assetIDs: [assetID], addTags: [tag], dismissSuggestedTags: [tag]))
     }
 
+    public func dismissSuggestedTag(_ tag: String, for assetID: UUID) async {
+        await applyPatch(AssetBatchPatch(assetIDs: [assetID], dismissSuggestedTags: [tag]))
+    }
+
+    public func clearSuggestedTags(for ids: [UUID]) async {
+        let allSuggestions = Array(Set(ids.compactMap { allAssetsByID[$0] }.flatMap(\.suggestedTags)))
+        guard !allSuggestions.isEmpty else { return }
+        await applyPatch(AssetBatchPatch(assetIDs: ids, dismissSuggestedTags: allSuggestions))
+    }
+
     public func acceptAllSuggestedTags(for ids: [UUID]) async {
+        let accepted = ids.compactMap { allAssetsByID[$0] }.flatMap(\.suggestedTags)
+        if !accepted.isEmpty {
+            recordRecentlyTouchedTags(accepted)
+        }
         await applyPatch(AssetBatchPatch(assetIDs: ids, acceptSuggestedTags: true))
+    }
+
+    private func recordRecentlyTouchedTags(_ tags: [String]) {
+        var next = recentlyTouchedTags
+        var freq = tagUsageFrequency
+        for raw in tags.reversed() {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            next.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+            next.insert(trimmed, at: 0)
+            freq[trimmed.lowercased(), default: 0] += 1
+        }
+        if next.count > 60 {
+            next = Array(next.prefix(60))
+        }
+        recentlyTouchedTags = next
+        tagUsageFrequency = freq
+        UserDefaults.standard.set(next, forKey: Self.recentTagsDefaultsKey)
+        UserDefaults.standard.set(freq, forKey: Self.tagUsageFreqDefaultsKey)
+    }
+
+    private func sortTagCounts(_ tags: [TagCount]) -> [TagCount] {
+        var recentRank: [String: Int] = [:]
+        for (idx, tag) in recentlyTouchedTags.enumerated() {
+            let key = tag.lowercased()
+            if recentRank[key] == nil {
+                recentRank[key] = idx
+            }
+        }
+        return tags.sorted { lhs, rhs in
+            if lhs.count != rhs.count { return lhs.count > rhs.count }
+            let lr = recentRank[lhs.name.lowercased()]
+            let rr = recentRank[rhs.name.lowercased()]
+            switch (lr, rr) {
+            case (let a?, let b?) where a != b:
+                return a < b
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+        }
     }
 
     public func togglePinOffline(ids: [UUID], pinned: Bool) async {
@@ -525,14 +951,192 @@ public final class LibraryStore {
     }
 
     public func enrichWithCloudAI(ids: [UUID]) async {
-        guard !ids.isEmpty else { return }
-        do {
-            let updated = try await engine.enrichAssetsWithCloudAI(ids: ids)
-            for item in updated { allAssetsByID[item.id] = item }
+        _ = await retagAssetsWithCloudAI(ids: ids)
+    }
+
+    public func cancelRetagging() {
+        retagTask?.cancel()
+        retagTask = nil
+    }
+
+    /// Re-runs Cloud AI tagging for the selected assets using the current monolingual language format
+    /// and existing-tag merging rules, replacing old unaccepted `suggestedTags` while preserving confirmed `tags`.
+    @discardableResult
+    public func retagAssetsWithCloudAI(ids: [UUID]) async -> RetagBatchOutcome {
+        var seen = Set<UUID>()
+        let targets = ids.filter { id in
+            guard seen.insert(id).inserted else { return false }
+            return allAssetsByID[id]?.isTrashed != true
+        }
+        guard !targets.isEmpty else {
+            return .finished(succeeded: 0, failed: 0, total: 0, firstError: nil)
+        }
+
+        let aiConfig = await engine.aiConfig()
+        guard aiConfig.provider != .disabled else {
+            return .aiDisabled
+        }
+
+        retagTask?.cancel()
+        let task = Task<RetagBatchOutcome, Never> { @MainActor in
+            let total = targets.count
+            enrichingAssetIDs = Set(targets)
+            enrichCompletedCount = 0
+            enrichTotalCount = total
+            defer {
+                enrichingAssetIDs.removeAll()
+                enrichCompletedCount = 0
+                enrichTotalCount = 0
+                retagTask = nil
+            }
+
+            let engine = self.engine
+            let concurrency = min(3, total)
+            var succeeded = 0
+            var failed = 0
+            var firstError: String?
+
+            await withTaskGroup(of: (UUID, Result<[AssetRecord], Error>).self) { group in
+                var nextIndex = 0
+                func enqueueNext() {
+                    guard !Task.isCancelled, nextIndex < total else { return }
+                    let assetID = targets[nextIndex]
+                    nextIndex += 1
+                    group.addTask {
+                        do {
+                            let updated = try await engine.enrichAssetsWithCloudAI(ids: [assetID])
+                            return (assetID, .success(updated))
+                        } catch {
+                            return (assetID, .failure(error))
+                        }
+                    }
+                }
+
+                for _ in 0..<concurrency {
+                    enqueueNext()
+                }
+
+                while let (assetID, outcome) = await group.next() {
+                    enrichingAssetIDs.remove(assetID)
+                    enrichCompletedCount += 1
+                    switch outcome {
+                    case .success(let updated):
+                        if !updated.isEmpty {
+                            succeeded += updated.count
+                            for item in updated {
+                                allAssetsByID[item.id] = item
+                                if let idx = assets.firstIndex(where: { $0.id == item.id }) {
+                                    assets[idx] = item
+                                }
+                            }
+                        } else {
+                            failed += 1
+                        }
+                    case .failure(let error):
+                        if !(error is CancellationError) {
+                            failed += 1
+                            if firstError == nil {
+                                firstError = error.localizedDescription
+                            }
+                            lastError = error.localizedDescription
+                        }
+                    }
+                    enqueueNext()
+                }
+            }
+
             await refreshAll()
+
+            if Task.isCancelled {
+                return .cancelled(completed: succeeded, total: total)
+            }
+            return .finished(succeeded: succeeded, failed: failed, total: total, firstError: firstError)
+        }
+        retagTask = task
+        return await task.value
+    }
+
+    public func extractSubjectPalette(for assetID: UUID, query: String? = nil) async -> Result<SubjectPaletteResult, Error> {
+        do {
+            let result = try await engine.extractSubjectPalette(assetID: assetID, query: query)
+            allAssetsByID[result.updatedAsset.id] = result.updatedAsset
+            await refreshAssets()
+            return .success(result)
         } catch {
             lastError = error.localizedDescription
+            return .failure(error)
         }
+    }
+
+    public func detectCleanContentBounds(for assetID: UUID) async -> Result<CleanBoundsResult, Error> {
+        do {
+            let result = try await engine.detectCleanContentBounds(assetID: assetID)
+            return .success(result)
+        } catch {
+            lastError = error.localizedDescription
+            return .failure(error)
+        }
+    }
+
+    // MARK: - Hybrid Semantic Search
+
+    @discardableResult
+    public func runSemanticSearch(query: String? = nil) async -> SemanticSearchReport? {
+        let resolvedQuery = (query ?? filter.searchQuery).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !resolvedQuery.isEmpty else {
+            await clearSemanticSearch()
+            return nil
+        }
+        isRunningSemanticSearch = true
+        lastError = nil
+        defer { isRunningSemanticSearch = false }
+        do {
+            let report = try await engine.semanticSearch(query: resolvedQuery, criteria: filter, limit: 60)
+            semanticSearchReport = report
+            assets = report.hits.map(\.asset)
+            for asset in assets { allAssetsByID[asset.id] = asset }
+            return report
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    public func clearSemanticSearch() async {
+        semanticSearchReport = nil
+        await refreshAssets()
+    }
+
+    // MARK: - Inbox Smart Batch Triage
+
+    @discardableResult
+    public func runInboxBatchTriage(assetIDs: [UUID] = [], maxCount: Int = 24) async -> [InboxTriageRecommendation]? {
+        isRunningInboxTriage = true
+        lastError = nil
+        defer { isRunningInboxTriage = false }
+        do {
+            let recs = try await engine.batchTriageInbox(assetIDs: assetIDs, maxCount: maxCount)
+            inboxTriageRecommendations = recs
+            return recs
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    public func applyInboxTriageRecommendations(_ selected: [InboxTriageRecommendation]) async -> Int {
+        var moved = 0
+        var byFolder: [UUID: [UUID]] = [:]
+        for rec in selected {
+            guard let fid = rec.recommendedFolderID else { continue }
+            byFolder[fid, default: []].append(rec.assetID)
+        }
+        for (folderID, ids) in byFolder {
+            await moveAssets(ids, toFolderID: folderID)
+            moved += ids.count
+        }
+        inboxTriageRecommendations = []
+        return moved
     }
 
     public func quickJump(query: String, limit: Int = 24) async -> [QuickJumpMatch] {

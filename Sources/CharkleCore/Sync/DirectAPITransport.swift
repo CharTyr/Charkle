@@ -1,29 +1,46 @@
 import Foundation
+import Synchronization
 
 public nonisolated struct DirectAPITransport: DriveTransport {
     public let displayName = "Google Drive API v3"
     private let oauth: @Sendable () async throws -> String
     private let session: URLSession
     private let endpoints: [GDirectEndpoint]
+    private let endpointBreaker = EndpointCircuitBreaker()
     private let transferDirectory: URL?
+    private let multipartThresholdBytes: Int64
 
     private static let api = URL(string: "https://www.googleapis.com/drive/v3")!
     private static let uploadAPI = URL(string: "https://www.googleapis.com/upload/drive/v3")!
     private static let fileFields = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,shortcutDetails(targetId,targetMimeType)"
     private static let shortcutMimeType = "application/vnd.google-apps.shortcut"
+    private static let directDataMultipartLimit: Int = 5 * 1_048_576
+    private static let singleShotDownloadLimit: Int64 = 16 * 1_048_576
+
+    /// Shared-friendly pooled URLSession tuned for concurrent Google Drive HTTP/2 transfers.
+    public static func makePooledSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 8
+        config.timeoutIntervalForRequest = 45
+        config.timeoutIntervalForResource = 300
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }
 
     public init(oauth: GoogleOAuthClient, endpoints: [GDirectEndpoint] = [], session: URLSession = .shared,
-                transferDirectory: URL? = nil) {
+                transferDirectory: URL? = nil, multipartThresholdBytes: Int64 = 0) {
         self.init(accessToken: { try await oauth.accessToken() }, endpoints: endpoints, session: session,
-                  transferDirectory: transferDirectory)
+                  transferDirectory: transferDirectory, multipartThresholdBytes: multipartThresholdBytes)
     }
 
     public init(accessToken: @escaping @Sendable () async throws -> String, endpoints: [GDirectEndpoint] = [],
-                session: URLSession = .shared, transferDirectory: URL? = nil) {
+                session: URLSession = .shared, transferDirectory: URL? = nil, multipartThresholdBytes: Int64 = 0) {
         oauth = accessToken
         self.endpoints = endpoints.filter(\.healthy)
         self.session = session
         self.transferDirectory = transferDirectory
+        self.multipartThresholdBytes = max(0, multipartThresholdBytes)
     }
 
     public func accountInfo() async throws -> DriveAccountInfo {
@@ -167,36 +184,91 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     public func downloadFile(fileID: String, to destinationURL: URL) async throws {
         let path = "files/\(try segment(fileID))"
         let file: FileDTO = try await get(path, ["fields": Self.fileFields, "supportsAllDrives": "true"])
+        try await downloadKnownFile(
+            fileID: fileID,
+            mimeType: file.mimeType,
+            expectedSize: file.size.flatMap(Int64.init),
+            md5Checksum: file.md5Checksum,
+            validator: file.md5Checksum ?? file.modifiedTime ?? "",
+            to: destinationURL
+        )
+    }
+
+    public func downloadFile(_ file: RemoteDriveFile, to destinationURL: URL) async throws {
+        let validator = file.md5Checksum ?? file.modifiedTime.map { String($0.timeIntervalSince1970) } ?? ""
+        try await downloadKnownFile(
+            fileID: file.id,
+            mimeType: file.mimeType,
+            expectedSize: file.size,
+            md5Checksum: file.md5Checksum,
+            validator: validator,
+            to: destinationURL
+        )
+    }
+
+    private func downloadKnownFile(
+        fileID: String,
+        mimeType: String,
+        expectedSize: Int64?,
+        md5Checksum: String?,
+        validator: String,
+        to destinationURL: URL
+    ) async throws {
+        let path = "files/\(try segment(fileID))"
         let url = destinationURL
         let folder = url.deletingLastPathComponent()
         let fm = FileManager.default
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
-        if file.mimeType.hasPrefix("application/vnd.google-apps."), file.mimeType != RemoteDriveFile.folderMimeType {
+        if mimeType.hasPrefix("application/vnd.google-apps."), mimeType != RemoteDriveFile.folderMimeType {
             let request = try await request(Self.api, path + "/export", ["mimeType": "application/pdf"])
-            let (temporary, response) = try await session.download(for: request)
+            let (temporary, response) = try await downloadWithRetry(request)
             defer { try? fm.removeItem(at: temporary) }
             try validate(response, data: nil)
             try DriveFiles.writeFile(temporary, to: url)
             return
         }
 
-        let validator = file.md5Checksum ?? file.modifiedTime ?? ""
+        // Fast single-shot path for files <= 16 MB: avoids Range overhead, extra `.drive-download-*`
+        // temp file copy, and double I/O while preserving atomic install & MD5 integrity check.
+        if let expectedSize, expectedSize >= 0, expectedSize <= Self.singleShotDownloadLimit {
+            let req = try await request(Self.api, path, ["alt": "media", "supportsAllDrives": "true"])
+            let (temporary, response) = try await downloadWithRetry(req)
+            defer { try? fm.removeItem(at: temporary) }
+            try validate(response, data: nil)
+            let received = Int64((try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            if expectedSize != received {
+                throw DriveTransportError.invalidResponse("Incomplete Drive download.")
+            }
+            if let checksum = md5Checksum, try MediaPipeline.digests(temporary).md5 != checksum {
+                throw DriveTransportError.invalidResponse("Drive download checksum changed.")
+            }
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: temporary)
+            } else {
+                do {
+                    try fm.moveItem(at: temporary, to: url)
+                } catch {
+                    try DriveFiles.writeFile(temporary, to: url)
+                }
+            }
+            return
+        }
+
         let transferID = DriveFiles.stableUUID(fileID + ":" + validator + ":" + url.lastPathComponent).uuidString
         let partial = folder.appending(path: ".drive-download-" + transferID)
-        let expected = file.size.flatMap(Int64.init)
         var offset = Int64((try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        if validator.isEmpty || expected == nil || offset > expected ?? 0 {
+        if validator.isEmpty || expectedSize == nil || offset > expectedSize ?? 0 {
             try? fm.removeItem(at: partial)
             offset = 0
         }
         if !fm.fileExists(atPath: partial.path) { try Data().write(to: partial) }
         let chunkSize: Int64 = 16 * 1_024 * 1_024
-        while expected == nil || offset < expected ?? 0 {
+        while expectedSize == nil || offset < expectedSize ?? 0 {
             var req = try await request(Self.api, path, ["alt": "media", "supportsAllDrives": "true"])
-            let end = min((expected ?? Int64.max) - 1, offset + chunkSize - 1)
-            if expected != nil { req.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range") }
-            let (temporary, response) = try await session.download(for: req)
+            let end = min((expectedSize ?? Int64.max) - 1, offset + chunkSize - 1)
+            if expectedSize != nil { req.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range") }
+            let (temporary, response) = try await downloadWithRetry(req)
             defer { try? fm.removeItem(at: temporary) }
             try validate(response, data: nil)
             let received = Int64((try temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
@@ -216,10 +288,10 @@ public nonisolated struct DirectAPITransport: DriveTransport {
             offset += received
             if http?.statusCode != 206 { break }
         }
-        if let expected, expected != offset {
+        if let expectedSize, expectedSize != offset {
             throw DriveTransportError.invalidResponse("Incomplete Drive download.")
         }
-        if let checksum = file.md5Checksum, try MediaPipeline.digests(partial).md5 != checksum {
+        if let checksum = md5Checksum, try MediaPipeline.digests(partial).md5 != checksum {
             try? fm.removeItem(at: partial)
             throw DriveTransportError.invalidResponse("Drive download checksum changed.")
         }
@@ -230,6 +302,15 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
     public func uploadData(_ data: Data, name: String, mimeType: String, parentID: String,
                            existingFileID: String?) async throws -> RemoteDriveFile {
+        if data.count <= Self.directDataMultipartLimit {
+            try DriveFiles.validateName(name)
+            let path = try existingFileID.map { "files/" + (try segment($0)) } ?? "files"
+            var metadata: [String: Any] = ["name": name, "mimeType": mimeType]
+            if existingFileID == nil { metadata["parents"] = [parentID] }
+            let method = existingFileID == nil ? "POST" : "PATCH"
+            let metadataJSON = try JSONSerialization.data(withJSONObject: metadata)
+            return try await uploadMultipart(data: data, path: path, method: method, metadata: metadataJSON, mimeType: mimeType)
+        }
         let temp = FileManager.default.temporaryDirectory.appending(path: "CharkleUpload-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: temp) }
         try data.write(to: temp)
@@ -245,7 +326,13 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         if existingFileID == nil { metadata["parents"] = [parentID] }
         let method = existingFileID == nil ? "POST" : "PATCH"
         let metadataJSON = try JSONSerialization.data(withJSONObject: metadata)
-        if fileSize == 0 { return try await uploadEmpty(path: path, method: method, metadata: metadataJSON, mimeType: mimeType) }
+        if fileSize == 0 {
+            return try await uploadMultipart(data: Data(), path: path, method: method, metadata: metadataJSON, mimeType: mimeType)
+        }
+        if multipartThresholdBytes > 0 && fileSize <= multipartThresholdBytes {
+            let payload = try Data(contentsOf: localURL)
+            return try await uploadMultipart(data: payload, path: path, method: method, metadata: metadataJSON, mimeType: mimeType)
+        }
         let checkpoint = try uploadCheckpoint(file: localURL, parent: parentID, name: name, existingID: existingFileID)
         let remembered = checkpoint.flatMap { try? String(contentsOf: $0, encoding: .utf8) }.flatMap(Self.uploadURL)
         do {
@@ -257,7 +344,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         }
     }
 
-    private func uploadEmpty(path: String, method: String, metadata: Data, mimeType: String) async throws -> RemoteDriveFile {
+    private func uploadMultipart(data: Data, path: String, method: String, metadata: Data, mimeType: String) async throws -> RemoteDriveFile {
         let boundary = "charkle-" + UUID().uuidString
         var request = try await request(
             Self.uploadAPI,
@@ -265,10 +352,15 @@ public nonisolated struct DirectAPITransport: DriveTransport {
             ["uploadType": "multipart", "supportsAllDrives": "true", "fields": Self.fileFields],
             method: method
         )
+        request.timeoutInterval = max(60, TimeInterval(data.count / 131_072) + 45)
         request.setValue("multipart/related; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        var body = Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8)
+        var body = Data()
+        body.reserveCapacity(metadata.count + data.count + 256)
+        body.append(Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8))
         body.append(metadata)
-        body.append(Data("\r\n--\(boundary)\r\nContent-Type: \(mimeType)\r\n\r\n\r\n--\(boundary)--\r\n".utf8))
+        body.append(Data("\r\n--\(boundary)\r\nContent-Type: \(mimeType)\r\n\r\n".utf8))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         request.httpBody = body
         return try JSONDecoder().decode(FileDTO.self, from: try await perform(request, accelerate: false)).record
     }
@@ -422,23 +514,135 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         return request
     }
 
-    private func perform(_ request: URLRequest, accelerate: Bool) async throws -> Data {
-        if accelerate, let url = request.url, let host = url.host(), host == "www.googleapis.com",
-           let header = request.value(forHTTPHeaderField: "Authorization") {
-            for endpoint in endpoints.prefix(2) {
-                let ip = endpoint.ip.contains(":") ? "[\(endpoint.ip)]" : endpoint.ip
-                let args = ["-q", "--silent", "--show-error", "--fail", "--noproxy", "*", "--connect-timeout", "2",
-                            "--max-time", "5", "--resolve", "\(host):443:\(ip)", "--header", "@-", "--", url.absoluteString]
-                if let result = try? await GDirectIntegration.run("/usr/bin/curl", args, timeout: 6,
-                                                                  input: Data("Authorization: \(header)\n".utf8)) {
-                    return result.output
+    private func downloadWithRetry(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (temporary, response) = try await session.download(for: request)
+                if let http = response as? HTTPURLResponse, (http.statusCode == 429 || http.statusCode >= 500), attempt < 3 {
+                    try? FileManager.default.removeItem(at: temporary)
+                    attempt += 1
+                    try await Task.sleep(for: .milliseconds(300 * attempt * attempt))
+                    continue
                 }
+                return (temporary, response)
+            } catch {
                 try Task.checkCancellation()
+                guard Self.retryable(error), attempt < 3 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(300 * attempt * attempt))
             }
         }
-        let (data, response) = try await session.data(for: request)
-        try validate(response, data: data)
-        return data
+    }
+
+    private func perform(_ request: URLRequest, accelerate: Bool) async throws -> Data {
+        let canUseGDirect = accelerate && !endpoints.isEmpty
+            && request.url?.host() == "www.googleapis.com"
+            && request.value(forHTTPHeaderField: "Authorization") != nil
+
+        // If URLSession already failed with a connectivity error during this sync, use gdirect immediately.
+        if canUseGDirect && endpointBreaker.prefersGDirect {
+            if let data = try await performViaGDirect(request) {
+                return data
+            }
+        }
+
+        // Prefer pooled HTTP/2 URLSession first (~250ms multiplexed reuse vs ~2-4s cold curl subprocess handshakes).
+        // If the system route cannot reach googleapis.com (e.g. GFW without proxy), automatically fall back to gdirect.
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse, (http.statusCode == 429 || http.statusCode >= 500), attempt < 3 {
+                    attempt += 1
+                    try await Task.sleep(for: .milliseconds(300 * attempt * attempt))
+                    continue
+                }
+                try validate(response, data: data)
+                return data
+            } catch {
+                try Task.checkCancellation()
+                if canUseGDirect && (error is URLError) {
+                    if let data = try await performViaGDirect(request) {
+                        endpointBreaker.markPreferGDirect()
+                        return data
+                    }
+                }
+                guard Self.retryable(error), attempt < 3 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(300 * attempt * attempt))
+            }
+        }
+    }
+
+    private func performViaGDirect(_ request: URLRequest) async throws -> Data? {
+        guard let url = request.url, let host = url.host(),
+              let header = request.value(forHTTPHeaderField: "Authorization") else {
+            return nil
+        }
+        for endpoint in endpointBreaker.activeEndpoints(from: endpoints) {
+            let ip = endpoint.ip.contains(":") ? "[\(endpoint.ip)]" : endpoint.ip
+            let args = ["-q", "--silent", "--show-error", "--fail", "--noproxy", "*", "--connect-timeout", "2",
+                        "--max-time", "6", "--resolve", "\(host):443:\(ip)", "--header", "@-", "--", url.absoluteString]
+            if let result = try? await GDirectIntegration.run("/usr/bin/curl", args, timeout: 7,
+                                                              input: Data("Authorization: \(header)\n".utf8)) {
+                endpointBreaker.recordSuccess(ip: endpoint.ip)
+                return result.output
+            }
+            endpointBreaker.recordFailure(ip: endpoint.ip)
+            try Task.checkCancellation()
+        }
+        return nil
+    }
+
+    private final class EndpointCircuitBreaker: Sendable {
+        private struct State {
+            var failedIPs: Set<String> = []
+            var preferredIP: String?
+            var preferGDirect: Bool = false
+        }
+
+        private let state = Mutex(State())
+
+        var prefersGDirect: Bool {
+            state.withLock { $0.preferGDirect }
+        }
+
+        func markPreferGDirect() {
+            state.withLock { $0.preferGDirect = true }
+        }
+
+        func activeEndpoints(from all: [GDirectEndpoint]) -> [GDirectEndpoint] {
+            state.withLock { s in
+                let available = all.filter { !s.failedIPs.contains($0.ip) }
+                if let preferred = s.preferredIP,
+                   let idx = available.firstIndex(where: { $0.ip == preferred }),
+                   idx > 0 {
+                    var reordered = available
+                    let item = reordered.remove(at: idx)
+                    reordered.insert(item, at: 0)
+                    return Array(reordered.prefix(2))
+                }
+                return Array(available.prefix(2))
+            }
+        }
+
+        func recordSuccess(ip: String) {
+            state.withLock { s in
+                s.preferredIP = ip
+            }
+        }
+
+        func recordFailure(ip: String) {
+            state.withLock { s in
+                s.failedIPs.insert(ip)
+                if s.preferredIP == ip {
+                    s.preferredIP = nil
+                }
+            }
+        }
     }
 
     private func validate(_ response: URLResponse, data: Data?) throws {

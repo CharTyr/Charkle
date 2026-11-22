@@ -54,8 +54,20 @@ public final class AppCoordinatorStore {
     public var isInspectorVisible: Bool = true
     public var isMoodboardGeneratorPresented: Bool = false
     public var generatorInitialEntry: MoodboardGeneratorEntry = .prompt
+    public var isSmartFolderEditorPresented: Bool = false
+    public var editingSmartFolder: SmartFolderRecord?
 
-    /// Target card width in masonry grid (170pt dense – 320pt editorial).
+    /// Collapsible icon-only sidebar rail (⌘\).
+    public var isSidebarCollapsed: Bool {
+        didSet { UserDefaults.standard.set(isSidebarCollapsed, forKey: Keys.sidebarCollapsed) }
+    }
+
+    /// Gallery layout mode: vertical masonry vs. horizontal justified rows.
+    public var galleryLayoutMode: GalleryLayoutMode {
+        didSet { UserDefaults.standard.set(galleryLayoutMode.rawValue, forKey: Keys.galleryLayoutMode) }
+    }
+
+    /// Target card width in masonry grid (130pt dense – 420pt editorial).
     public var targetColumnWidth: Double = 228
 
     /// User-configurable Notch Shelf & Global Hotkey toggles persisted in UserDefaults.
@@ -77,6 +89,8 @@ public final class AppCoordinatorStore {
         static let notchShelfEnabled = "charkle.notchShelfEnabled"
         static let notchHoverTriggerEnabled = "charkle.notchHoverTriggerEnabled"
         static let globalHotkeysEnabled = "charkle.globalHotkeysEnabled"
+        static let sidebarCollapsed = "charkle.sidebarCollapsed"
+        static let galleryLayoutMode = "charkle.galleryLayoutMode"
     }
 
     public init() {
@@ -84,6 +98,9 @@ public final class AppCoordinatorStore {
         self.notchShelfEnabled = defaults.object(forKey: Keys.notchShelfEnabled) as? Bool ?? true
         self.notchHoverTriggerEnabled = defaults.object(forKey: Keys.notchHoverTriggerEnabled) as? Bool ?? true
         self.globalHotkeysEnabled = defaults.object(forKey: Keys.globalHotkeysEnabled) as? Bool ?? true
+        self.isSidebarCollapsed = defaults.object(forKey: Keys.sidebarCollapsed) as? Bool ?? false
+        self.galleryLayoutMode = defaults.string(forKey: Keys.galleryLayoutMode)
+            .flatMap(GalleryLayoutMode.init(rawValue:)) ?? .verticalMasonry
     }
 
     public var isViewingMoodboard: Bool {

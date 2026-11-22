@@ -25,6 +25,7 @@ public struct SettingsView: View {
     public enum SettingsTab: String, CaseIterable, Identifiable {
         case cloudSync
         case intelligence
+        case appearance
         case externalAgent
         case storage
         case captureShortcuts
@@ -35,6 +36,7 @@ public struct SettingsView: View {
             switch self {
             case .cloudSync: "存储与同步"
             case .intelligence: "智能与搜索"
+            case .appearance: "外观与图标"
             case .externalAgent: "外部 Agent 与 MCP"
             case .storage: "缓存空间"
             case .captureShortcuts: "采集与快捷键"
@@ -45,6 +47,7 @@ public struct SettingsView: View {
             switch self {
             case .cloudSync: "drive-sync"
             case .intelligence: "sparkle-board"
+            case .appearance: "moodboard"
             case .externalAgent: "connector"
             case .storage: "library"
             case .captureShortcuts: "notch"
@@ -52,11 +55,16 @@ public struct SettingsView: View {
         }
     }
 
+    private let appIconManager = CharkleAppIconManager.shared
+
     @State private var selectedTab: SettingsTab = .cloudSync
     @State private var draftSyncConfig: DriveSyncConfig = DriveSyncConfig()
     @State private var draftAIConfig: AIProviderConfig = AIProviderConfig()
+    @State private var draftTypeSafeConfig: TypeSafeExperimentalConfig = TypeSafeExperimentalConfig()
     @State private var draftExternalAgentConfig: ExternalAgentConfig = ExternalAgentConfig()
     @State private var apiKeyInput: String = ""
+    @State private var typeSafeAPIKeyInput: String = ""
+    @State private var showTypeSafeAdvanced: Bool = false
     @State private var webDAVPasswordInput: String = ""
     @State private var cacheBudgetGB: Double = 10.0
     @State private var didLoadInitial: Bool = false
@@ -89,7 +97,7 @@ public struct SettingsView: View {
             // Left Navigation Rail
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    CharkleIcon("moodboard", style: .layered, size: 22)
+                    CharkleBrandMark(size: 22)
                     Text("设置")
                         .font(.system(size: 14, weight: .semibold))
                 }
@@ -146,6 +154,8 @@ public struct SettingsView: View {
                         cloudSyncPane
                     case .intelligence:
                         intelligencePane
+                    case .appearance:
+                        appearancePane
                     case .externalAgent:
                         externalAgentPane
                     case .storage:
@@ -168,6 +178,7 @@ public struct SettingsView: View {
             await syncAndAI.loadAll()
             draftSyncConfig = syncAndAI.syncConfig
             draftAIConfig = syncAndAI.aiConfig
+            draftTypeSafeConfig = syncAndAI.typeSafeConfig
             draftExternalAgentConfig = syncAndAI.externalAgentConfig
             cacheBudgetGB = max(2, min(100, Double(syncAndAI.cacheStats.budgetBytes) / (1024 * 1024 * 1024)))
             didLoadInitial = true
@@ -188,6 +199,9 @@ public struct SettingsView: View {
         let activeBackendBinding = Binding<DriveTransportMode>(
             get: { draftSyncConfig.mode == .gdirectMount ? .directAPIWithGDirect : draftSyncConfig.mode },
             set: { newMode in
+                if newMode == .directAPIWithGDirect && draftSyncConfig.mode == .gdirectMount {
+                    return
+                }
                 draftSyncConfig.mode = newMode
                 persistSyncConfigIfReady()
             }
@@ -225,6 +239,11 @@ public struct SettingsView: View {
                 case .localOnly:
                     localLibrarySection
                 }
+            }
+
+            // Live Cloud Sync Progress Card (visible whenever cloud storage is active)
+            if draftSyncConfig.mode != .localOnly {
+                cloudSyncProgressCard
             }
 
             // Sync Preferences (when using Cloud)
@@ -328,34 +347,26 @@ public struct SettingsView: View {
                             Divider()
 
                             settingsRow(
-                                title: "启用 gdirect 直连加速",
+                                title: "gdirect 直连兜底诊断",
                                 subtitle: healthyNodeCount > 0
-                                    ? "检测到本机 gdirect，当前有 \(healthyNodeCount) 条低延迟直连线路"
-                                    : "通过本机 gdirect 优选直连线路提升 Google Drive 读写速度"
+                                    ? "检测到本机 gdirect，当前有 \(healthyNodeCount) 个可用兜底节点（仅在标准 HTTPS 直连受阻时自动启用）"
+                                    : "可手动扫描优选节点，供网络直连受阻时自动回退兜底"
                             ) {
-                                Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
-                                    .labelsHidden()
-                                    .toggleStyle(.switch)
+                                HStack(spacing: 8) {
+                                    Button("重新测速优选") {
+                                        Task { await syncAndAI.runGDirectScan() }
+                                    }
+                                    .buttonStyle(.bordered)
                                     .controlSize(.small)
-                                    .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, _ in persistSyncConfigIfReady() }
-                            }
 
-                            HStack(spacing: 8) {
-                                Button("重新测速优选") {
-                                    Task { await syncAndAI.runGDirectScan() }
+                                    Button("刷新状态") {
+                                        Task { await syncAndAI.probeGDirect() }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-
-                                Button("刷新线路状态") {
-                                    Task { await syncAndAI.probeGDirect() }
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-
-                                Spacer()
+                                .disabled(syncAndAI.isBusy)
                             }
-                            .disabled(syncAndAI.isBusy)
                         }
                     }
                 } label: {
@@ -378,116 +389,320 @@ public struct SettingsView: View {
     @ViewBuilder
     private var googleDriveSection: some View {
         let snap = syncAndAI.gdirectSnapshot
+        let healthyNodeCount = snap.endpoints.filter(\.healthy).count
         let gdirectEmail = draftSyncConfig.selectedGDirectAccount ?? snap.defaultAccount ?? snap.accounts.first
+        let isGDirectMountMode = draftSyncConfig.mode == .gdirectMount
         let directAccount: DriveAccountInfo? = {
             guard let acc = syncAndAI.syncStatus.account,
-                  acc.source != "WebDAV", acc.source != "本地文件夹" else { return nil }
+                  acc.source != "WebDAV",
+                  acc.source != "本地文件夹",
+                  acc.source != "gdirect",
+                  acc.source != "gdirect mount" else { return nil }
             return acc
         }()
-        let activeAccount: DriveAccountInfo? = directAccount
-            ?? gdirectEmail.map { DriveAccountInfo(email: $0, displayName: nil, source: "gdirect") }
-        let isUsingLocalGDirect = activeAccount?.source == "gdirect" || activeAccount?.source == "gdirect mount"
-        let isSignedIn = activeAccount != nil
-
-        HStack(spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(isSignedIn ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
-                    .frame(width: 42, height: 42)
-                Image(systemName: isSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
-                    .font(.system(size: 19, weight: .medium))
-                    .foregroundStyle(isSignedIn ? Color.accentColor : .secondary)
+        let activeAccount: DriveAccountInfo? = {
+            if isGDirectMountMode {
+                return gdirectEmail.map { DriveAccountInfo(email: $0, displayName: nil, source: "gdirect mount") }
             }
+            return directAccount
+                ?? gdirectEmail.map { DriveAccountInfo(email: $0, displayName: nil, source: "gdirect") }
+        }()
+        let isUsingGDirectFallbackInDirectMode = !isGDirectMountMode && directAccount == nil && activeAccount != nil
+        let isUsingLocalGDirect = isGDirectMountMode || isUsingGDirectFallbackInDirectMode
+        let isSignedIn = activeAccount != nil
+        let driveAccessModeBinding = Binding<DriveTransportMode>(
+            get: { draftSyncConfig.mode == .gdirectMount ? .gdirectMount : .directAPIWithGDirect },
+            set: { newMode in
+                draftSyncConfig.mode = newMode
+                persistSyncConfigIfReady()
+            }
+        )
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(activeAccount?.displayName ?? activeAccount?.email ?? "未登录 Google 账号")
-                        .font(.system(size: 13.5, weight: .semibold))
-                    if isSignedIn {
-                        Circle().fill(Color.green).frame(width: 7, height: 7)
-                    }
-                    if isUsingLocalGDirect {
-                        Text("本机 gdirect")
+        settingsRow(
+            title: "Google Drive 接入方式",
+            subtitle: isGDirectMountMode
+                ? "通过本机 gdirect 挂载读写（与正常 Google 账号直连可共存，互不覆盖登录态）"
+                : "正常 HTTPS API 直连 Google Drive（推荐、免挂载）；可同时保留本机 gdirect 作为兜底"
+        ) {
+            Picker("", selection: driveAccessModeBinding) {
+                Text("正常直连（推荐）").tag(DriveTransportMode.directAPIWithGDirect)
+                Text("gdirect 模式").tag(DriveTransportMode.gdirectMount)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 244)
+        }
+
+        Divider()
+
+        if isGDirectMountMode {
+            // Dedicated gdirect mount mode (coexists with Charkle's Google OAuth token)
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(snap.isMountActive ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: snap.isMountActive ? "externaldrive.badge.checkmark" : "externaldrive")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(snap.isMountActive ? Color.accentColor : .secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(gdirectEmail ?? (snap.cliPath == nil ? "未检测到本机 gdirect" : "未登录本机 gdirect 账号"))
+                            .font(.system(size: 13.5, weight: .semibold))
+                        Text(snap.isMountActive ? "已挂载" : "未挂载")
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(snap.isMountActive ? .green : .secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                            .background((snap.isMountActive ? Color.green : Color.primary).opacity(0.10), in: Capsule(style: .continuous))
+                    }
+                    Text(
+                        snap.cliPath == nil
+                            ? "未在本机找到 gdirect CLI，可先安装 gdirect 或切换为「正常直连（推荐）」"
+                            : (snap.isMountActive
+                                ? "挂载路径：\(draftSyncConfig.mountPath)（与直连 OAuth 账号可共存）"
+                                : "当前尚未挂载本地卷，点击右侧「立即挂载」或直接切回正常直连 API")
+                    )
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                }
+
+                Spacer()
+
+                HStack(spacing: 8) {
+                    if snap.isMountActive {
+                        Button {
+                            Task { _ = await syncAndAI.syncNow() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                                Text("立即同步")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .fixedSize()
+                        .disabled(syncAndAI.isBusy)
+
+                        Button("卸载") {
+                            Task { await syncAndAI.runGDirectUnmount() }
+                        }
+                        .buttonStyle(.bordered)
+                        .fixedSize()
+                        .disabled(syncAndAI.isBusy)
+                    } else if snap.cliPath != nil, gdirectEmail != nil {
+                        Button {
+                            Task { await syncAndAI.runGDirectMount(path: draftSyncConfig.mountPath) }
+                        } label: {
+                            HStack(spacing: 5) {
+                                if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                                Text("立即挂载")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .fixedSize()
+                        .disabled(syncAndAI.isBusy)
+                    } else {
+                        Button("刷新状态") {
+                            Task { await syncAndAI.probeGDirect() }
+                        }
+                        .buttonStyle(.bordered)
+                        .fixedSize()
+                        .disabled(syncAndAI.isBusy)
                     }
                 }
-                if let account = activeAccount, let name = account.displayName, !name.isEmpty {
-                    Text(account.email)
+            }
+
+            if snap.accounts.count > 1 {
+                settingsRow(
+                    title: "本机 gdirect 账号",
+                    subtitle: "选择用于挂载与同步的 gdirect 账号"
+                ) {
+                    Picker("", selection: Binding(
+                        get: { gdirectEmail ?? snap.accounts.first ?? "" },
+                        set: { newEmail in
+                            draftSyncConfig.selectedGDirectAccount = newEmail
+                            persistSyncConfigIfReady()
+                        }
+                    )) {
+                        ForEach(snap.accounts, id: \.self) { email in
+                            Text(email).tag(email)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 220)
+                }
+            }
+
+            settingsRow(
+                title: "本地挂载目录",
+                subtitle: "gdirect 将 Google Drive 映射到此目录（默认 ~/GoogleDrive）"
+            ) {
+                TextField(NSHomeDirectory() + "/GoogleDrive", text: $draftSyncConfig.mountPath)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .onSubmit { persistSyncConfigIfReady() }
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                Text("休眠唤醒后若 macOS 提示 NFS 断连，可随时切换回「正常直连（推荐）」免挂载同步，并保留 gdirect 作为兜底。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 6)
+                Button("切回正常直连") {
+                    draftSyncConfig.mode = .directAPIWithGDirect
+                    persistSyncConfigIfReady()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .fixedSize()
+            }
+            .padding(10)
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        } else {
+            // Normal Direct Google Drive API mode (with optional gdirect fallback)
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(isSignedIn ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
+                        .frame(width: 42, height: 42)
+                    Image(systemName: isSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                        .font(.system(size: 19, weight: .medium))
+                        .foregroundStyle(isSignedIn ? Color.accentColor : .secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(activeAccount?.displayName ?? activeAccount?.email ?? "未登录 Google 账号")
+                            .font(.system(size: 13.5, weight: .semibold))
+                        if isSignedIn {
+                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                        }
+                        if isUsingGDirectFallbackInDirectMode {
+                            Text("gdirect 兜底")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                        }
+                    }
+                    if let account = activeAccount, let name = account.displayName, !name.isEmpty {
+                        Text(account.email)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(googleHeroSubtitle(account: activeAccount, isUsingLocalGDirect: isUsingGDirectFallbackInDirectMode))
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
-                Text(googleHeroSubtitle(account: activeAccount, isUsingLocalGDirect: isUsingLocalGDirect))
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-            }
 
-            Spacer()
+                Spacer()
 
-            if isSignedIn {
-                HStack(spacing: 8) {
-                    Button {
-                        Task { _ = await syncAndAI.syncNow() }
-                    } label: {
-                        HStack(spacing: 5) {
-                            if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
-                            Text("立即同步")
+                if directAccount != nil {
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { _ = await syncAndAI.syncNow() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                                Text("立即同步")
+                            }
                         }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .fixedSize()
-                    .disabled(syncAndAI.isBusy)
+                        .buttonStyle(.borderedProminent)
+                        .fixedSize()
+                        .disabled(syncAndAI.isBusy)
 
-                    Menu {
-                        if snap.accounts.count > 1 {
-                            Menu("切换本机 gdirect 账号") {
-                                ForEach(snap.accounts, id: \.self) { email in
-                                    Button {
-                                        draftSyncConfig.selectedGDirectAccount = email
-                                        persistSyncConfigIfReady()
-                                    } label: {
-                                        if email == gdirectEmail {
-                                            Label(email, systemImage: "checkmark")
-                                        } else {
-                                            Text(email)
-                                        }
-                                    }
+                        Menu {
+                            Button("切换 Google 账号…") {
+                                triggerGoogleSignIn()
+                            }
+                            if snap.isMountActive {
+                                Button("卸载本机 GoogleDrive 挂载") {
+                                    Task { await syncAndAI.runGDirectUnmount() }
                                 }
                             }
-                            Divider()
-                        }
-                        Button(isUsingLocalGDirect ? "改用 Charkle 独立登录 Google 账号…" : "切换 Google 账号…") {
-                            triggerGoogleSignIn()
-                        }
-                        if !isUsingLocalGDirect {
                             Divider()
                             Button("退出登录", role: .destructive) {
                                 Task { await syncAndAI.signOutGoogleDrive() }
                             }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 16))
+                                .foregroundStyle(.secondary)
                         }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.system(size: 16))
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        Button {
+                            triggerGoogleSignIn()
+                        } label: {
+                            HStack(spacing: 6) {
+                                if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                                Text("使用 Google 账号登录")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .fixedSize()
+                        .disabled(syncAndAI.isBusy)
+
+                        if isUsingGDirectFallbackInDirectMode && snap.isMountActive {
+                            Button("立即同步") {
+                                Task { _ = await syncAndAI.syncNow() }
+                            }
+                            .buttonStyle(.bordered)
+                            .fixedSize()
+                            .disabled(syncAndAI.isBusy)
+                        }
+                    }
+                }
+            }
+
+            if isUsingGDirectFallbackInDirectMode {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("当前暂以本机 gdirect 兜底，可随时登录独立 Google 账号")
+                            .font(.system(size: 11.5, weight: .semibold))
+                        Text("登录独立 Google 账号后将启用 HTTP/2 免挂载高速直连，且仍保留本机 gdirect 在网络受限时自动兜底。")
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
+                    Spacer(minLength: 0)
                 }
-            } else {
-                Button {
-                    triggerGoogleSignIn()
-                } label: {
-                    HStack(spacing: 6) {
-                        if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
-                        Text("使用 Google 账号登录")
-                    }
+                .padding(10)
+                .background(Color.accentColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            if snap.cliPath != nil {
+                Divider()
+
+                settingsRow(
+                    title: "网络受限时使用本机 gdirect 兜底",
+                    subtitle: draftSyncConfig.useGDirectIPAcceleration
+                        ? (healthyNodeCount > 0
+                            ? "默认优先普通 HTTPS 直连；仅当直连受阻时自动回退至 gdirect（\(healthyNodeCount) 个可用节点）"
+                            : "默认优先普通 HTTPS 直连；当无法直接访问 googleapis.com 时自动尝试本机 gdirect")
+                        : "已关闭，仅使用标准 Google Drive HTTPS 直连"
+                ) {
+                    Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, _ in persistSyncConfigIfReady() }
                 }
-                .buttonStyle(.borderedProminent)
-                .fixedSize()
-                .disabled(syncAndAI.isBusy)
             }
         }
 
@@ -1086,12 +1301,17 @@ public struct SettingsView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 10) {
-                    capabilityTile(icon: "paintpalette", title: "自动配色提取", detail: "按画面主色调筛选与生成和谐色卡")
-                    capabilityTile(icon: "sparkles.rectangle.stack", title: "视觉相似推荐", detail: "离线发现构图与风格接近的参考素材")
-                    capabilityTile(icon: "text.viewfinder", title: "图内文字识别", detail: "自动识别中英文海报、截图中的文字")
-                    capabilityTile(icon: "magnifyingglass", title: "中文与拼音快搜", detail: "按关键词或拼音首字母秒搜任意灵感")
+                Grid(alignment: .topLeading, horizontalSpacing: 10, verticalSpacing: 10) {
+                    GridRow {
+                        capabilityTile(icon: "paintpalette", title: "自动配色提取", detail: "按画面主色调筛选与生成和谐色卡", minHeight: 58)
+                        capabilityTile(icon: "sparkles.rectangle.stack", title: "视觉相似推荐", detail: "离线发现构图与风格接近的参考素材", minHeight: 58)
+                    }
+                    GridRow {
+                        capabilityTile(icon: "text.viewfinder", title: "图内文字识别", detail: "自动识别中英文海报、截图中的文字", minHeight: 58)
+                        capabilityTile(icon: "magnifyingglass", title: "中文与拼音快搜", detail: "按关键词或拼音首字母秒搜任意灵感", minHeight: 58)
+                    }
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             // Optional Cloud AI Enhancement
@@ -1257,11 +1477,592 @@ public struct SettingsView: View {
                             }
                             .padding(.top, 8)
                         } label: {
-                            Text("高级模型参数")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.secondary)
+                                Text("高级模型参数")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
+
+                if draftAIConfig.provider != .disabled
+                    || draftTypeSafeConfig.enabled
+                    || syncAndAI.aiUsage.standard.totalRequests > 0
+                    || syncAndAI.aiUsage.jev.totalRequests > 0 {
+                    Divider()
+                    cloudAIUsageSection
+                }
+            }
+
+            // Experimental System One Sidecar: TypeSafe (Jev) Box & Grounding
+            typeSafeExperimentalCard
+        }
+    }
+
+    // MARK: - Live Cloud Sync Progress Card
+
+    private var cloudSyncProgressCard: some View {
+        let status = syncAndAI.syncStatus
+        let isSyncing = status.isSyncing || syncAndAI.isBusy
+        let percentText: String? = status.progressFraction.map { "\(Int(($0 * 100).rounded()))%" }
+
+        return settingsGroupCard {
+            HStack(alignment: .center, spacing: 10) {
+                if isSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Circle()
+                        .fill(cloudSyncIndicatorColor(status))
+                        .frame(width: 8, height: 8)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(isSyncing ? status.localizedPhaseTitle : cloudSyncIdleHeadline(status))
+                            .font(.system(size: 12.5, weight: .semibold))
+                        if isSyncing, let percentText {
+                            Text(percentText)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    Text(cloudSyncSubheadline(status: status, isSyncing: isSyncing))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    Task { _ = await syncAndAI.syncNow() }
+                } label: {
+                    Text(isSyncing ? "同步中…" : "立即同步")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(isSyncing)
+            }
+
+            if isSyncing {
+                if let fraction = status.progressFraction {
+                    ProgressView(value: min(1.0, max(0.0, fraction)))
+                        .progressViewStyle(.linear)
+                        .tint(Color.accentColor)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(Color.accentColor)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Label(
+                    status.lastSyncedAt.map { "上次同步：\(relativeTimeText($0))" } ?? "尚未完成首次同步",
+                    systemImage: "clock"
+                )
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+
+                if status.pendingOpCount > 0 {
+                    Label("待上传 \(status.pendingOpCount) 项", systemImage: "arrow.up.circle")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .monospacedDigit()
+                } else if !isSyncing, status.lastSyncedAt != nil {
+                    Label("本地变更已全部同步", systemImage: "checkmark.circle")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if let report = syncAndAI.lastSyncReport {
+                    Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets) 新发现")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
+    private func cloudSyncIndicatorColor(_ status: SyncStatus) -> Color {
+        switch status.phase {
+        case .error: return .red
+        case .scanning, .uploading, .downloading, .merging: return .orange
+        case .idle:
+            if status.pendingOpCount > 0 { return .orange }
+            return status.lastSyncedAt != nil ? .green : .secondary
+        }
+    }
+
+    private func cloudSyncIdleHeadline(_ status: SyncStatus) -> String {
+        if case .error = status.phase {
+            return "上次同步遇到异常"
+        }
+        if status.pendingOpCount > 0 {
+            return "有 \(status.pendingOpCount) 项本地变更待同步"
+        }
+        return status.lastSyncedAt != nil ? "已与云端保持同步" : "等待首次同步"
+    }
+
+    private func cloudSyncSubheadline(status: SyncStatus, isSyncing: Bool) -> String {
+        if isSyncing {
+            if let detail = status.currentDetail, !detail.isEmpty {
+                return detail
+            }
+            return "正在与 \(draftSyncConfig.activeStorageLocationSummary) 同步…"
+        }
+        if let err = status.lastError, !err.isEmpty {
+            return err
+        }
+        return "同步目标：\(draftSyncConfig.activeStorageLocationSummary)"
+    }
+
+    // MARK: - Cloud AI Usage Section (Standard vs Jev Separated)
+
+    private var cloudAIUsageSection: some View {
+        let usage = syncAndAI.aiUsage
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                HStack(spacing: 5) {
+                    Image(systemName: "chart.bar")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("用量统计")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                Spacer()
+                if usage.totalRequests > 0 {
+                    Button("全部清零") {
+                        syncAndAI.resetAIUsage(category: nil)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
+                    .help("清空普通模型与 Jev 判断模型的本地统计记录")
+                }
+            }
+
+            usageBucketSection(
+                icon: "sparkles",
+                title: "普通云端模型",
+                subtitle: "画面理解、标签建议与情绪板策展",
+                bucket: usage.standard,
+                emptyHint: "调用 Gemini / ChatGPT / 自定义模型后将单独统计在此。",
+                onReset: { syncAndAI.resetAIUsage(category: .standard) }
+            )
+
+            usageBucketSection(
+                icon: "viewfinder",
+                title: "Jev 判断模型",
+                subtitle: "TypeSafe System One 视觉定位、评分与分拣",
+                bucket: usage.jev,
+                emptyHint: "开启并调用 TypeSafe (Jev) 后将单独统计在此，不与普通模型混计。",
+                onReset: { syncAndAI.resetAIUsage(category: .jev) }
+            )
+        }
+    }
+
+    private func usageBucketSection(
+        icon: String,
+        title: String,
+        subtitle: String,
+        bucket: CloudAIUsageBucket,
+        emptyHint: String,
+        onReset: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Spacer()
+                if bucket.totalRequests > 0 {
+                    Button("清零", action: onReset)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 8) {
+                usageMetricTile(
+                    title: "今日调用",
+                    value: "\(bucket.todayRequests) 次",
+                    detail: "今日 Token \(CloudAIUsageSummary.formatTokenCount(bucket.todayTotalTokens))"
+                )
+                usageMetricTile(
+                    title: "累计调用",
+                    value: "\(bucket.totalRequests) 次",
+                    detail: bucket.lastModel ?? "尚未调用"
+                )
+                usageMetricTile(
+                    title: "累计 Token",
+                    value: CloudAIUsageSummary.formatTokenCount(bucket.totalTokens),
+                    detail: "入 \(CloudAIUsageSummary.formatTokenCount(bucket.totalInputTokens)) / 出 \(CloudAIUsageSummary.formatTokenCount(bucket.totalOutputTokens))"
+                )
+            }
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let usedAt = bucket.lastUsedAt {
+                let provider = bucket.lastProviderLabel ?? title
+                let modelPart = bucket.lastModel.map { " (\($0))" } ?? ""
+                let tokenPart = bucket.lastCallTokens > 0 ? "，本次 \(CloudAIUsageSummary.formatTokenCount(bucket.lastCallTokens)) tokens" : ""
+                Text("最近一次：\(provider)\(modelPart)\(tokenPart)（\(relativeTimeText(usedAt))）")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text(emptyHint)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.75)
+        )
+    }
+
+    private func usageMetricTile(title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 14, weight: .semibold))
+                .monospacedDigit()
+            Text(detail)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func relativeTimeText(_ date: Date) -> String {
+        let elapsed = max(0, Date().timeIntervalSince(date))
+        if elapsed < 15 { return "刚刚" }
+        if elapsed < 60 { return "\(Int(elapsed)) 秒前" }
+        if elapsed < 3600 { return "\(Int(elapsed / 60)) 分钟前" }
+        if elapsed < 86400 { return "\(Int(elapsed / 3600)) 小时前" }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm"
+        return fmt.string(from: date)
+    }
+
+    // MARK: - Tab 3: 外观与图标 (App Icon Switcher)
+
+    private var appearancePane: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            settingsHeader(
+                title: "外观与图标",
+                subtitle: "自定义 Charkle 在程序坞、应用切换器与界面中的图标风格，切换后立即生效。"
+            )
+
+            settingsGroupCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("应用图标")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text("默认使用柔和亮色图标，也可切换为深邃暗色背景版本。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 12) {
+                        ForEach(CharkleAppIconVariant.allCases) { variant in
+                            let selected = appIconManager.currentVariant == variant
+                            Button {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                    appIconManager.select(variant)
+                                }
+                                syncAndAI.statusMessage = "已切换应用图标为「\(variant.title)」"
+                            } label: {
+                                VStack(spacing: 10) {
+                                    ZStack(alignment: .topTrailing) {
+                                        if let img = appIconManager.previewImage(for: variant) {
+                                            Image(nsImage: img)
+                                                .resizable()
+                                                .interpolation(.high)
+                                                .aspectRatio(contentMode: .fit)
+                                                .frame(width: 72, height: 72)
+                                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                                .shadow(color: Color.black.opacity(0.14), radius: 8, y: 4)
+                                        }
+
+                                        if selected {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .font(.system(size: 16, weight: .semibold))
+                                                .foregroundStyle(.white, Color.accentColor)
+                                                .offset(x: 6, y: -6)
+                                        }
+                                    }
+
+                                    VStack(spacing: 2) {
+                                        Text(variant.title)
+                                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+                                            .foregroundStyle(.primary)
+                                        Text(variant.subtitle)
+                                            .font(.system(size: 10.5))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                                .padding(.vertical, 16)
+                                .padding(.horizontal, 12)
+                                .background(
+                                    selected ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.03),
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .strokeBorder(
+                                            selected ? Color.accentColor : CharkleTheme.hairline(for: colorScheme),
+                                            lineWidth: selected ? 1.75 : 0.75
+                                        )
+                                )
+                            }
+                            .buttonStyle(CharkleTactileButtonStyle())
+                        }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var typeSafeExperimentalCard: some View {
+        settingsGroupCard {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text("实验性视觉定位 · TypeSafe System One (Jev)")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text("Dreamer-ready")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.13), in: Capsule())
+                    }
+                    Text("与上方生成式 AI 互补：用 Jev Box + Noul 实现情绪板语义局部裁切、截图自动去噪、主体提色与指物批注。未开启时默认用本机 Apple Vision 兜底。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 10)
+                Toggle("", isOn: $draftTypeSafeConfig.enabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: draftTypeSafeConfig.enabled) { _, _ in
+                        persistTypeSafeConfigIfReady()
+                    }
+            }
+
+            if draftTypeSafeConfig.enabled {
+                Divider()
+
+                settingsRow(
+                    title: "TypeSafe API 密钥",
+                    subtitle: syncAndAI.hasStoredTypeSafeKey
+                        ? "已安全保存在 macOS 钥匙串中（发送 TypeSafe-Danger-Zone-Images: true）"
+                        : "密钥仅存于本机钥匙串，绝不上传"
+                ) {
+                    HStack(spacing: 8) {
+                        SecureField(
+                            syncAndAI.hasStoredTypeSafeKey ? "••••••••（留空不变）" : "粘贴 apikey_…",
+                            text: $typeSafeAPIKeyInput
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 176)
+
+                        Button("保存") {
+                            let keyToSave = typeSafeAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Task {
+                                await syncAndAI.saveTypeSafeConfig(
+                                    draftTypeSafeConfig,
+                                    apiKey: keyToSave.isEmpty ? nil : keyToSave
+                                )
+                                typeSafeAPIKeyInput = ""
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .fixedSize()
+
+                        Button {
+                            let keyDraft = typeSafeAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Task {
+                                _ = await syncAndAI.testTypeSafeConnection(
+                                    config: draftTypeSafeConfig,
+                                    apiKey: keyDraft.isEmpty ? nil : keyDraft
+                                )
+                            }
+                        } label: {
+                            if syncAndAI.isTestingTypeSafe {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Text("测试连接")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(syncAndAI.isTestingTypeSafe)
+                    }
+                }
+
+                Divider()
+
+                settingsRow(
+                    title: "Jev 模型",
+                    subtitle: "Box 定位需要 Jev 1.14+（默认 jev-latest，需要锁定阈值时可填 jev-1.14.0）"
+                ) {
+                    HStack(spacing: 8) {
+                        TextField("jev-latest", text: $draftTypeSafeConfig.model)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 168)
+                            .onSubmit { persistTypeSafeConfigIfReady() }
+
+                        if !syncAndAI.typeSafeModels.isEmpty {
+                            Menu {
+                                ForEach(syncAndAI.typeSafeModels) { item in
+                                    Button(item.name) {
+                                        draftTypeSafeConfig.model = item.name
+                                        persistTypeSafeConfigIfReady()
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                        }
+                    }
+                }
+
+                Divider()
+
+                settingsRow(
+                    title: "低置信度自动外扩防切边",
+                    subtitle: "当 Box 置信度低于 \(Int((draftTypeSafeConfig.minConfidence * 100).rounded()))% 时，四边自动外扩 \(Int((draftTypeSafeConfig.lowConfidencePadding * 100).rounded()))%"
+                ) {
+                    HStack(spacing: 8) {
+                        Slider(value: $draftTypeSafeConfig.minConfidence, in: 0.30...0.90, step: 0.05)
+                            .frame(width: 136)
+                            .onChange(of: draftTypeSafeConfig.minConfidence) { _, _ in
+                                persistTypeSafeConfigIfReady()
+                            }
+                        Text("\(Int((draftTypeSafeConfig.minConfidence * 100).rounded()))%")
+                            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                            .monospacedDigit()
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                }
+
+                Divider()
+
+                DisclosureGroup(isExpanded: $showTypeSafeAdvanced) {
+                    VStack(spacing: 10) {
+                        settingsRow(title: "服务地址", subtitle: "默认 https://api.typesafe.ai") {
+                            TextField("https://api.typesafe.ai", text: $draftTypeSafeConfig.baseURL)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 230)
+                                .onSubmit { persistTypeSafeConfigIfReady() }
+                        }
+                        settingsRow(
+                            title: "情绪板语义局部裁切",
+                            subtitle: "支持右键「聚焦主体」「一句话语义裁切」非破坏性写入局部框"
+                        ) {
+                            Toggle("", isOn: $draftTypeSafeConfig.enableMoodboardFocusCrop)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .onChange(of: draftTypeSafeConfig.enableMoodboardFocusCrop) { _, _ in persistTypeSafeConfigIfReady() }
+                        }
+                        settingsRow(
+                            title: "截图与网页自动去噪裁净",
+                            subtitle: "自动识别浏览器外壳、状态栏与多余白边并裁净核心作品"
+                        ) {
+                            Toggle("", isOn: $draftTypeSafeConfig.enableAutoCleanCrop)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .onChange(of: draftTypeSafeConfig.enableAutoCleanCrop) { _, _ in persistTypeSafeConfigIfReady() }
+                        }
+                        settingsRow(
+                            title: "主体级色板提取与指物批注",
+                            subtitle: "过滤背景干扰色提取主体色卡，并将批注箭头精准指向图内物体"
+                        ) {
+                            Toggle("", isOn: $draftTypeSafeConfig.enableSubjectPalette)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .onChange(of: draftTypeSafeConfig.enableSubjectPalette) { _, _ in
+                                    draftTypeSafeConfig.enablePinpointAnnotations = draftTypeSafeConfig.enableSubjectPalette
+                                    persistTypeSafeConfigIfReady()
+                                }
+                        }
+                        settingsRow(
+                            title: "混合视觉语义搜索",
+                            subtitle: "在顶部搜索栏按自然语言直接看图检索，未打标图片也能按氛围与画面命中"
+                        ) {
+                            Toggle("", isOn: $draftTypeSafeConfig.enableSemanticSearch)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .onChange(of: draftTypeSafeConfig.enableSemanticSearch) { _, _ in persistTypeSafeConfigIfReady() }
+                        }
+                        settingsRow(
+                            title: "收件箱零幻觉智能分拣",
+                            subtitle: "用封闭 Choice + 伴随 Noul 将待整理素材精准推荐到已有文件夹"
+                        ) {
+                            Toggle("", isOn: $draftTypeSafeConfig.enableInboxSmartTriage)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .onChange(of: draftTypeSafeConfig.enableInboxSmartTriage) { _, _ in persistTypeSafeConfigIfReady() }
+                        }
+                        settingsRow(
+                            title: "情绪板策展视觉精排",
+                            subtitle: "用 Jev Score 精排候选池，并支持灵感词生板「细节特写模式」"
+                        ) {
+                            Toggle("", isOn: $draftTypeSafeConfig.enableCuratorVisualRerank)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .onChange(of: draftTypeSafeConfig.enableCuratorVisualRerank) { _, _ in persistTypeSafeConfigIfReady() }
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Text("实验功能开关与高级参数")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -1746,8 +2547,10 @@ public struct SettingsView: View {
 
     private func storageModeDescription(_ mode: DriveTransportMode) -> String {
         switch mode {
-        case .directAPIWithGDirect, .gdirectMount:
-            "通过 Google Drive 在多台 Mac 之间自动同步原始文件与情绪板"
+        case .directAPIWithGDirect:
+            "通过 Google Drive 直连 API 自动同步（支持本机 gdirect 自动兜底）"
+        case .gdirectMount:
+            "通过本机 gdirect 挂载读写 Google Drive（可与直连 API 模式共存切换）"
         case .webDAV:
             "连接坚果云、Nextcloud、群晖 NAS 或任意自建 WebDAV 云盘"
         case .localOnly:
@@ -1757,9 +2560,9 @@ public struct SettingsView: View {
 
     private func googleHeroSubtitle(account: DriveAccountInfo?, isUsingLocalGDirect: Bool) -> String {
         guard account != nil else {
-            return "登录 Google 账号后，素材与情绪板将自动同步到你的云盘目录"
+            return "登录 Google 账号后，素材与情绪板将通过 HTTP/2 自动直连同步"
         }
-        let prefix = isUsingLocalGDirect ? "已直接复用本机 gdirect 登录态（免重复登录）" : "已连接"
+        let prefix = isUsingLocalGDirect ? "当前暂用本机 gdirect 兜底" : "已通过 Google Drive 直连"
         if let synced = syncAndAI.syncStatus.lastSyncedAt {
             return "\(prefix) · 上次同步 \(synced.formatted(date: .omitted, time: .shortened))"
         }
@@ -1776,6 +2579,12 @@ public struct SettingsView: View {
         guard didLoadInitial else { return }
         let snapshot = draftAIConfig
         Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil, quiet: true) }
+    }
+
+    private func persistTypeSafeConfigIfReady() {
+        guard didLoadInitial else { return }
+        let snapshot = draftTypeSafeConfig
+        Task { await syncAndAI.saveTypeSafeConfig(snapshot, apiKey: nil, quiet: true) }
     }
 
     // MARK: - Tab 3: 外部 Agent 与 MCP (原生 stdio MCP Server + 命令行工具)
@@ -1942,28 +2751,37 @@ public struct SettingsView: View {
                 Text("已开放的外部 Agent 能力")
                     .font(.system(size: 12.5, weight: .semibold))
 
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                    capabilityTile(
-                        icon: "photo.on.rectangle.angled",
-                        title: "视觉联系表看图",
-                        detail: "单次返回带编号的缩略图拼版与清单，让外部 AI 直接用视觉挑选素材"
-                    )
-                    capabilityTile(
-                        icon: "swatchpalette.fill",
-                        title: "读取情绪板与色板",
-                        detail: "导出结构化分区、批注、主色 HEX 与高清 PNG，无缝衔接设计或写代码"
-                    )
-                    capabilityTile(
-                        icon: "folder.badge.gearshape",
-                        title: "整理归类与生成画布",
-                        detail: "开启写入权限后，可批量打标、整理收件箱、导入素材并创建情绪板"
-                    )
-                    capabilityTile(
-                        icon: "bolt.horizontal.circle.fill",
-                        title: "画布实时热刷新",
-                        detail: "外部 Agent 完成整理或生成情绪板后，当前 Charkle 窗口立即自动更新"
-                    )
+                Grid(alignment: .topLeading, horizontalSpacing: 10, verticalSpacing: 10) {
+                    GridRow {
+                        capabilityTile(
+                            icon: "photo.on.rectangle.angled",
+                            title: "视觉联系表看图",
+                            detail: "单次返回带编号的缩略图拼版与清单，让外部 AI 直接看图挑选素材",
+                            minHeight: 72
+                        )
+                        capabilityTile(
+                            icon: "swatchpalette.fill",
+                            title: "读取情绪板与色板",
+                            detail: "导出结构化分区、批注、主色 HEX 与高清图，无缝衔接设计或开发",
+                            minHeight: 72
+                        )
+                    }
+                    GridRow {
+                        capabilityTile(
+                            icon: "folder.badge.gearshape",
+                            title: "整理归类与生成画布",
+                            detail: "开启写入权限后，可批量打标、整理收件箱、导入素材并创建情绪板",
+                            minHeight: 72
+                        )
+                        capabilityTile(
+                            icon: "bolt.horizontal.circle.fill",
+                            title: "画布实时热刷新",
+                            detail: "外部 Agent 完成整理或生成情绪板后，当前 Charkle 窗口即时更新",
+                            minHeight: 72
+                        )
+                    }
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -2025,14 +2843,14 @@ public struct SettingsView: View {
         }
     }
 
-    private func capabilityTile(icon: String, title: String, detail: String) -> some View {
+    private func capabilityTile(icon: String, title: String, detail: String, minHeight: CGFloat? = nil) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
                 .font(.system(size: 13.5, weight: .medium))
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 24, height: 24)
                 .background(Color.accentColor.opacity(0.11), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
                 Text(detail)
@@ -2041,8 +2859,9 @@ public struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: minHeight, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 

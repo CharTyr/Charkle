@@ -25,7 +25,11 @@ public final class CharkleRuntime {
     @ObservationIgnored
     private nonisolated(unsafe) var appBecomeActiveObserver: NSObjectProtocol?
     @ObservationIgnored
+    private nonisolated(unsafe) var systemDidWakeObserver: NSObjectProtocol?
+    @ObservationIgnored
     private var lastForegroundSyncDate: Date = .distantPast
+    @ObservationIgnored
+    private var lastSystemWakeDate: Date = .distantPast
 
     public init() {
         let resolvedEngine: any CharkleEngineProtocol
@@ -45,6 +49,7 @@ public final class CharkleRuntime {
         setupNotchAndHotkeys()
         setupExternalAgentLiveRefresh()
         setupRemoteSyncObservers()
+        CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
     }
 
     deinit {
@@ -56,6 +61,9 @@ public final class CharkleRuntime {
         }
         if let observer = appBecomeActiveObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = systemDidWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
     }
 
@@ -85,6 +93,16 @@ public final class CharkleRuntime {
             }
         }
 
+        systemDidWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.lastSystemWakeDate = Date()
+            }
+        }
+
         appBecomeActiveObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
@@ -93,7 +111,9 @@ public final class CharkleRuntime {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let now = Date()
-                guard now.timeIntervalSince(self.lastForegroundSyncDate) >= 20 else { return }
+                // Avoid poking network/NFS mounts immediately upon Mac sleep wake
+                guard now.timeIntervalSince(self.lastSystemWakeDate) >= 15 else { return }
+                guard now.timeIntervalSince(self.lastForegroundSyncDate) >= 60 else { return }
                 self.lastForegroundSyncDate = now
                 _ = await self.syncAndAI.syncQuietlyIfReady()
             }
@@ -310,6 +330,11 @@ struct CharkleApp: App {
                     runtime.coordinator.isInspectorVisible.toggle()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
+
+                Button("收起 / 展开侧边栏为仅图标") {
+                    runtime.coordinator.isSidebarCollapsed.toggle()
+                }
+                .keyboardShortcut("\\", modifiers: .command)
 
                 Divider()
 

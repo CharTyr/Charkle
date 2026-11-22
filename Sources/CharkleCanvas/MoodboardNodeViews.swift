@@ -164,6 +164,12 @@ struct BoardAssetNodeView: View {
     let onResetRotation: () -> Void
     let onFlipHorizontal: () -> Void
     let onFlipVertical: () -> Void
+    let onSmartFocusSubject: () -> Void
+    let onSemanticCropPrompt: () -> Void
+    let onVisualMatchCrop: () -> Void
+    let onCleanContentCrop: () -> Void
+    let onPinpointAnnotate: () -> Void
+    let onResetCrop: () -> Void
     let onToggleLock: () -> Void
     let onDelete: () -> Void
 
@@ -270,6 +276,22 @@ struct BoardAssetNodeView: View {
                                 .padding(5)
                                 .background(Color.black.opacity(0.52), in: Circle())
                         }
+                        if let crop, crop != .full {
+                            Button(action: onResetCrop) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "viewfinder")
+                                        .font(.system(size: 9, weight: .semibold))
+                                    Text("局部取景 · 还原")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: innerBadgeRadius, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .help("点击还原完整画面（非破坏性裁切）")
+                        }
                         Spacer()
                         Button(action: onOpenQuickLook) {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -286,6 +308,7 @@ struct BoardAssetNodeView: View {
                 .transition(.opacity)
             }
         }
+        .background(CanvasSurface.subtleCard(for: colorScheme), in: shape)
         .overlay {
             if isSwapTarget {
                 shape.strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
@@ -296,9 +319,9 @@ struct BoardAssetNodeView: View {
             }
         }
         .shadow(
-            color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.08),
-            radius: isSelected ? 12 : 5,
-            y: isSelected ? 5 : 2
+            color: Color.black.opacity(colorScheme == .dark ? 0.26 : 0.075),
+            radius: isSelected ? 10 : 4,
+            y: isSelected ? 4 : 2
         )
         .contentShape(shape)
         .onHover { hovering in
@@ -316,6 +339,46 @@ struct BoardAssetNodeView: View {
                 }
             }
             Button("从候选池换一张…") { onTriggerSwap() }
+            if asset != nil {
+                Menu {
+                    Button {
+                        onSmartFocusSubject()
+                    } label: {
+                        Label("聚焦画面主体", systemImage: "viewfinder")
+                    }
+                    Button {
+                        onSemanticCropPrompt()
+                    } label: {
+                        Label("一句话语义裁切…", systemImage: "text.viewfinder")
+                    }
+                    Button {
+                        onVisualMatchCrop()
+                    } label: {
+                        Label("以图找局部（按参考图裁切）…", systemImage: "photo.on.rectangle.angled")
+                    }
+                    Button {
+                        onCleanContentCrop()
+                    } label: {
+                        Label("自动去噪裁净", systemImage: "crop")
+                    }
+                    Divider()
+                    Button {
+                        onPinpointAnnotate()
+                    } label: {
+                        Label("指物批注（定位 + 箭头便签）…", systemImage: "scope")
+                    }
+                    if let crop, crop != .full {
+                        Divider()
+                        Button {
+                            onResetCrop()
+                        } label: {
+                            Label("还原完整画面", systemImage: "arrow.uturn.backward")
+                        }
+                    }
+                } label: {
+                    Label("智能取景与标注 (Jev Box)", systemImage: "viewfinder.circle")
+                }
+            }
             Divider()
             if asset != nil {
                 Button {
@@ -473,7 +536,7 @@ struct BoardNoteNodeView: View {
     }
 }
 
-// MARK: - Group Section Frame Node
+// MARK: - Smart Auto-Layout Group Frame Node (Reference Img 4 Style)
 
 struct BoardGroupFrameView: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -481,8 +544,10 @@ struct BoardGroupFrameView: View {
 
     let title: String
     let tint: GroupTint
+    let itemCount: Int
     let isSelected: Bool
     let onUpdate: (String, GroupTint) -> Void
+    let onReflowInside: () -> Void
     let onDelete: () -> Void
 
     @State private var draftTitle: String = ""
@@ -490,17 +555,25 @@ struct BoardGroupFrameView: View {
 
     var body: some View {
         let accent = GroupTintPalette.accent(for: tint)
-        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(accent)
-                    .frame(width: 8, height: 8)
+            HStack(spacing: 6) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(accent)
+
+                if itemCount > 0 {
+                    Text("\(itemCount) ·")
+                        .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(accent)
+                }
+
                 TextField("分组名称", text: $draftTitle)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(0.88))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(accent.opacity(colorScheme == .dark ? 0.96 : 0.92))
                     .onChange(of: draftTitle) { _, newValue in
                         if newValue != title {
                             onUpdate(newValue, tint)
@@ -510,37 +583,56 @@ struct BoardGroupFrameView: View {
                 Spacer()
 
                 if isHovered || isSelected {
-                    HStack(spacing: 4) {
-                        ForEach(GroupTint.allCases, id: \.self) { candidate in
-                            Button {
-                                onUpdate(draftTitle, candidate)
-                            } label: {
-                                Circle()
-                                    .fill(GroupTintPalette.accent(for: candidate))
-                                    .frame(width: 10, height: 10)
-                                    .overlay(
-                                        Circle().strokeBorder(Color.white.opacity(candidate == tint ? 0.9 : 0.0), lineWidth: 1.5)
-                                    )
+                    HStack(spacing: 6) {
+                        if itemCount > 0 {
+                            Button(action: onReflowInside) {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "rectangle.3.group")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                    Text("自适应排布")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .foregroundStyle(accent)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2.5)
+                                .background(accent.opacity(0.14), in: Capsule(style: .continuous))
                             }
                             .buttonStyle(.plain)
-                            .help(GroupTintPalette.label(for: candidate))
+                            .help("按当前框尺寸实时缩放并重排框内所有素材")
+                        }
+
+                        HStack(spacing: 4) {
+                            ForEach(GroupTint.allCases, id: \.self) { candidate in
+                                Button {
+                                    onUpdate(draftTitle, candidate)
+                                } label: {
+                                    Circle()
+                                        .fill(GroupTintPalette.accent(for: candidate))
+                                        .frame(width: 9, height: 9)
+                                        .overlay(
+                                            Circle().strokeBorder(Color.white.opacity(candidate == tint ? 0.9 : 0.0), lineWidth: 1.5)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .help(GroupTintPalette.label(for: candidate))
+                            }
                         }
                     }
                     .transition(.opacity)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(accent.opacity(colorScheme == .dark ? 0.14 : 0.10))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(accent.opacity(colorScheme == .dark ? 0.12 : 0.07))
 
             Spacer()
         }
-        .background(accent.opacity(colorScheme == .dark ? 0.08 : 0.05), in: shape)
+        .background(accent.opacity(colorScheme == .dark ? 0.05 : 0.03), in: shape)
         .clipShape(shape)
         .overlay(
             shape.strokeBorder(
-                isSelected ? Color.accentColor : accent.opacity(0.38),
-                style: StrokeStyle(lineWidth: isSelected ? 2 : 1.25, dash: isSelected ? [] : [6, 4])
+                isSelected ? Color.accentColor : accent.opacity(0.62),
+                lineWidth: isSelected ? 1.8 : 1.15
             )
         )
         .onAppear { draftTitle = title }
@@ -553,6 +645,14 @@ struct BoardGroupFrameView: View {
             }
         }
         .contextMenu {
+            if itemCount > 0 {
+                Button {
+                    onReflowInside()
+                } label: {
+                    Label("自适应缩放排布框内素材", systemImage: "rectangle.3.group")
+                }
+                Divider()
+            }
             Menu("分组色标") {
                 ForEach(GroupTint.allCases, id: \.self) { t in
                     Button(GroupTintPalette.label(for: t)) { onUpdate(draftTitle, t) }

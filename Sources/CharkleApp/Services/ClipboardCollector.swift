@@ -46,8 +46,11 @@ public enum ClipboardCollector {
             if let hex = parseHexColor(raw) {
                 return [.colorSwatch(hex: hex, title: hex)]
             }
-            if let xURL = XPostURLParser.extractStatusURL(from: raw) {
-                return [.webURL(xURL, title: nil, notes: nil)]
+            if let socialURL = SocialPostURLParser.extractPostURL(from: raw) {
+                return [.webURL(socialURL, title: nil, notes: nil)]
+            }
+            if let githubURL = GitHubRepoURLParser.extractRepoURL(from: raw) {
+                return [.webURL(githubURL, title: nil, notes: nil)]
             }
             if let url = URL(string: raw), url.scheme == "http" || url.scheme == "https" {
                 return [.webURL(url, title: nil, notes: nil)]
@@ -59,14 +62,14 @@ public enum ClipboardCollector {
         return []
     }
 
-    /// Returns a detected X (Twitter) status URL if the pasteboard currently holds one.
+    /// Returns a detected social post URL (X / Threads / Bluesky) if the pasteboard currently holds one.
     public static func detectedXPostURL(from pasteboard: NSPasteboard = .general) -> URL? {
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-           let match = urls.first(where: { XPostURLParser.parse($0) != nil }) {
+           let match = urls.first(where: { SocialPostURLParser.parse($0) != nil }) {
             return match
         }
         if let raw = pasteboard.string(forType: .string),
-           let match = XPostURLParser.extractStatusURL(from: raw) {
+           let match = SocialPostURLParser.extractPostURL(from: raw) {
             return match
         }
         return nil

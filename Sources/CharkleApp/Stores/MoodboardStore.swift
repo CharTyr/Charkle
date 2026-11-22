@@ -30,6 +30,8 @@ public final class MoodboardStore {
     public var lastError: String?
 
     private var saveDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var viewportSaveTask: Task<Void, Never>?
+    @ObservationIgnored private var latestViewportOverride: (boardID: UUID, center: BoardPoint, zoom: Double)?
     private let maxUndoDepth: Int = 45
 
     public init(engine: any CharkleEngineProtocol) {
@@ -48,6 +50,8 @@ public final class MoodboardStore {
     }
 
     public func openBoard(id: UUID) async {
+        viewportSaveTask?.cancel()
+        latestViewportOverride = nil
         do {
             if let doc = try await engine.fetchBoard(id: id) {
                 activeBoard = doc
@@ -155,6 +159,7 @@ public final class MoodboardStore {
     // MARK: - Value-Type Undo / Redo & Debounced Save
 
     public func commitMutation(_ nextDoc: MoodboardDocument, recordUndo: Bool = true) {
+        viewportSaveTask?.cancel()
         if recordUndo, let previous = activeBoard, previous != nextDoc {
             undoStack.append(previous)
             if undoStack.count > maxUndoDepth {
@@ -163,9 +168,38 @@ public final class MoodboardStore {
             redoStack.removeAll()
         }
         var stamped = nextDoc
+        if let override = latestViewportOverride,
+           override.boardID == nextDoc.id,
+           let previous = activeBoard,
+           nextDoc.viewportCenter == previous.viewportCenter,
+           nextDoc.viewportZoom == previous.viewportZoom {
+            stamped.viewportCenter = override.center
+            stamped.viewportZoom = override.zoom
+        } else {
+            latestViewportOverride = (nextDoc.id, nextDoc.viewportCenter, nextDoc.viewportZoom)
+        }
         stamped.updatedAt = Date()
         activeBoard = stamped
         scheduleSave(stamped)
+    }
+
+    /// Persists freeform camera pan/zoom quietly to disk without pushing onto the Undo stack
+    /// or re-publishing `@Observable activeBoard` (keeps 120fps panning hitch-free).
+    public func persistViewportQuietly(center: BoardPoint, zoom: Double) {
+        guard let currentID = activeBoard?.id else { return }
+        latestViewportOverride = (currentID, center, zoom)
+        viewportSaveTask?.cancel()
+        viewportSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self, var snapshot = self.activeBoard, snapshot.id == currentID else { return }
+            snapshot.viewportCenter = center
+            snapshot.viewportZoom = zoom
+            do {
+                _ = try await self.engine.saveBoard(snapshot)
+            } catch {
+                boardStoreLogger.error("persistViewportQuietly failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     public func undo() {
@@ -496,6 +530,159 @@ public final class MoodboardStore {
         } catch {
             lastError = error.localizedDescription
             return nil
+        }
+    }
+
+    // MARK: - Experimental TypeSafe (Jev Box) Grounding & Pinpoint Annotations
+
+    public func smartFocusNode(
+        nodeID: UUID,
+        assetID: UUID,
+        query: String?
+    ) async -> Result<VisualRegionResult, Error> {
+        do {
+            let result = try await engine.locateVisualRegion(assetID: assetID, query: query)
+            if result.found, var board = activeBoard,
+               let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
+               case .assetRef(let refAssetID, _, let weight, let autoplay) = board.nodes[idx].kind {
+                board.nodes[idx].kind = .assetRef(
+                    assetID: refAssetID,
+                    crop: result.crop,
+                    weight: weight,
+                    autoplayLoop: autoplay
+                )
+                board.nodes[idx].updatedAt = Date()
+                commitMutation(board, recordUndo: true)
+            }
+            return .success(result)
+        } catch {
+            lastError = error.localizedDescription
+            return .failure(error)
+        }
+    }
+
+    public func visualMatchCropNode(
+        nodeID: UUID,
+        targetAssetID: UUID,
+        referenceAssetID: UUID
+    ) async -> Result<VisualRegionResult, Error> {
+        do {
+            let result = try await engine.locateVisualMatch(referenceAssetID: referenceAssetID, in: targetAssetID)
+            if result.found, var board = activeBoard,
+               let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
+               case .assetRef(let refAssetID, _, let weight, let autoplay) = board.nodes[idx].kind {
+                board.nodes[idx].kind = .assetRef(
+                    assetID: refAssetID,
+                    crop: result.crop,
+                    weight: weight,
+                    autoplayLoop: autoplay
+                )
+                board.nodes[idx].updatedAt = Date()
+                commitMutation(board, recordUndo: true)
+            }
+            return .success(result)
+        } catch {
+            lastError = error.localizedDescription
+            return .failure(error)
+        }
+    }
+
+    public func cleanCropNode(
+        nodeID: UUID,
+        assetID: UUID
+    ) async -> Result<CleanBoundsResult, Error> {
+        do {
+            let result = try await engine.detectCleanContentBounds(assetID: assetID)
+            if let recommended = result.recommendedCrop, var board = activeBoard,
+               let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
+               case .assetRef(let refAssetID, _, let weight, let autoplay) = board.nodes[idx].kind {
+                board.nodes[idx].kind = .assetRef(
+                    assetID: refAssetID,
+                    crop: recommended,
+                    weight: weight,
+                    autoplayLoop: autoplay
+                )
+                board.nodes[idx].updatedAt = Date()
+                commitMutation(board, recordUndo: true)
+            }
+            return .success(result)
+        } catch {
+            lastError = error.localizedDescription
+            return .failure(error)
+        }
+    }
+
+    public func pinpointAnnotateNode(
+        nodeID: UUID,
+        assetID: UUID,
+        targetQuery: String,
+        noteText: String,
+        assetsByID: [UUID: AssetRecord]
+    ) async -> Result<VisualRegionResult, Error> {
+        do {
+            let result = try await engine.locateVisualRegion(assetID: assetID, query: targetQuery)
+            guard result.found, var board = activeBoard else {
+                return .success(result)
+            }
+
+            if case .autoEditorial = board.mode {
+                board = EditorialLayoutSolver.freezeIntoFreeform(
+                    document: board,
+                    containerWidth: 1080,
+                    assetsByID: assetsByID
+                )
+            }
+
+            guard let targetNode = board.nodes.first(where: { $0.id == nodeID }) else {
+                return .success(result)
+            }
+
+            let visiblePoint: BoardPoint = {
+                if case .assetRef(_, let existingCrop?, _, _) = targetNode.kind, existingCrop != .full {
+                    return existingCrop.mappingImagePointToVisible(result.rawBox.centerPoint)
+                }
+                return result.rawBox.centerPoint
+            }()
+
+            let placeOnRight = visiblePoint.x >= 0.48
+            let noteWidth = 216.0
+            let noteHeight = 124.0
+            let gap = 42.0
+            let targetWorldY = targetNode.frame.y + targetNode.frame.height * visiblePoint.y
+            let noteX = placeOnRight
+                ? targetNode.frame.maxX + gap
+                : targetNode.frame.minX - gap - noteWidth
+            let noteY = targetWorldY - noteHeight * 0.5
+
+            let confNote = result.confidence.map { "置信度 \(Int(($0 * 100).rounded()))%" } ?? result.source.localizedLabel
+            let body = noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "已由 \(result.source.localizedLabel) 精准定位（\(confNote)）"
+                : noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let noteNode = BoardNode(
+                kind: .note(title: targetQuery, text: body, style: .warm, fontSize: 13.5),
+                frame: BoardRect(x: noteX, y: noteY, width: noteWidth, height: noteHeight),
+                zIndex: (board.nodes.map(\.zIndex).max() ?? 0) + 1,
+                editorialOrder: board.nodes.count
+            )
+            let connector = BoardConnector(
+                fromNodeID: noteNode.id,
+                fromAnchor: placeOnRight ? .leading : .trailing,
+                toNodeID: nodeID,
+                toAnchor: .auto,
+                toNormalizedPoint: visiblePoint,
+                label: nil,
+                colorHex: "#D95D48",
+                style: .curved,
+                dashed: false
+            )
+            board.nodes.append(noteNode)
+            board.connectors.append(connector)
+            commitMutation(board, recordUndo: true)
+            return .success(result)
+        } catch {
+            lastError = error.localizedDescription
+            return .failure(error)
         }
     }
 }

@@ -12,12 +12,25 @@ public struct CharkleCanvasModuleInfo: Sendable {
 public enum CharkleDragIdentifiers {
     public static let singleAssetPrefix = "charkle-asset:"
     public static let multipleAssetsPrefix = "charkle-assets:"
+    public static let folderPrefix = "charkle-folder:"
+    public static let multipleFoldersPrefix = "charkle-folders:"
 
     public static func encode(assetIDs: [UUID]) -> String {
         if assetIDs.count == 1, let first = assetIDs.first {
             return singleAssetPrefix + first.uuidString
         }
         return multipleAssetsPrefix + assetIDs.map(\.uuidString).joined(separator: ",")
+    }
+
+    public static func encode(folderID: UUID) -> String {
+        folderPrefix + folderID.uuidString
+    }
+
+    public static func encode(folderIDs: [UUID]) -> String {
+        if folderIDs.count == 1, let first = folderIDs.first {
+            return folderPrefix + first.uuidString
+        }
+        return multipleFoldersPrefix + folderIDs.map(\.uuidString).joined(separator: ",")
     }
 
     public static func decodeAssetIDs(from raw: String) -> [UUID]? {
@@ -32,6 +45,99 @@ public enum CharkleDragIdentifiers {
             return ids.isEmpty ? nil : ids
         }
         return nil
+    }
+
+    public static func decodeFolderID(from raw: String) -> UUID? {
+        decodeFolderIDs(from: raw)?.first
+    }
+
+    public static func decodeFolderIDs(from raw: String) -> [UUID]? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix(folderPrefix) {
+            return UUID(uuidString: String(trimmed.dropFirst(folderPrefix.count))).map { [$0] }
+        }
+        if trimmed.hasPrefix(multipleFoldersPrefix) {
+            let rest = String(trimmed.dropFirst(multipleFoldersPrefix.count))
+            let ids = rest.split(separator: ",").compactMap { UUID(uuidString: String($0)) }
+            return ids.isEmpty ? nil : ids
+        }
+        return nil
+    }
+
+    public static func isInternalDrag(_ raw: String) -> Bool {
+        decodeAssetIDs(from: raw) != nil || decodeFolderIDs(from: raw) != nil
+    }
+}
+
+/// Pure, testable geometry rules for the Notch Shelf's drag-expand trigger strip
+/// and strict drop acceptance bounds (zero transparent shadow-margin bleed).
+public nonisolated enum NotchDropGeometry {
+    /// Strict hit-test & drop acceptance rect in `NotchDropHostingView` local coordinates,
+    /// matching ONLY the visible pure-black notch capsule body (excluding transparent shadow margins).
+    public static func strictCardRect(
+        panelBounds: NSRect,
+        bodyWidth: CGFloat,
+        cardHeight: CGFloat
+    ) -> NSRect {
+        guard panelBounds.width > 0, panelBounds.height > 0, bodyWidth > 0, cardHeight > 0 else {
+            return .zero
+        }
+        return NSRect(
+            x: panelBounds.midX - bodyWidth / 2.0,
+            y: panelBounds.maxY - cardHeight,
+            width: bodyWidth,
+            height: cardHeight
+        )
+    }
+
+    /// Strict visible pure-black notch capsule rect in global screen coordinates.
+    public static func strictScreenCardRect(
+        panelFrame: NSRect,
+        bodyWidth: CGFloat,
+        cardHeight: CGFloat
+    ) -> NSRect {
+        guard panelFrame.width > 0, panelFrame.height > 0, bodyWidth > 0, cardHeight > 0 else {
+            return .zero
+        }
+        return NSRect(
+            x: panelFrame.midX - bodyWidth / 2.0,
+            y: panelFrame.maxY - cardHeight,
+            width: bodyWidth,
+            height: cardHeight
+        )
+    }
+
+    /// Comfortable top-center arrival band below the menu bar / physical notch for opening the Notch Shelf
+    /// while dragging an external payload. Stops well below `screenFrame.maxY` so users never collide with
+    /// macOS Mission Control / Spaces top-edge triggers, while actual drop acceptance stays strictly inside
+    /// `strictCardRect` (never leaking into underlying apps).
+    public static func isPointInDragTriggerZone(
+        _ screenPoint: NSPoint,
+        screenFrame: NSRect,
+        hasPhysicalNotch: Bool,
+        notchWidth: CGFloat,
+        notchHeight: CGFloat
+    ) -> Bool {
+        let triggerHeight: CGFloat = hasPhysicalNotch ? (max(notchHeight, 34) + 32) : 48
+        let halfSpan: CGFloat = hasPhysicalNotch ? (notchWidth / 2.0 + 64) : 164
+        return screenPoint.y >= screenFrame.maxY - triggerHeight
+            && screenPoint.y <= screenFrame.maxY
+            && abs(screenPoint.x - screenFrame.midX) <= halfSpan
+    }
+
+    /// Tight top-center trigger strip for hover-to-open (when hover trigger is enabled).
+    public static func isPointInHoverTriggerZone(
+        _ screenPoint: NSPoint,
+        screenFrame: NSRect,
+        hasPhysicalNotch: Bool,
+        notchWidth: CGFloat,
+        notchHeight: CGFloat
+    ) -> Bool {
+        let triggerHeight: CGFloat = hasPhysicalNotch ? max(notchHeight, 34) : 8
+        let halfSpan: CGFloat = hasPhysicalNotch ? (notchWidth / 2.0 + 10) : 108
+        return screenPoint.y >= screenFrame.maxY - triggerHeight
+            && screenPoint.y <= screenFrame.maxY
+            && abs(screenPoint.x - screenFrame.midX) <= halfSpan
     }
 }
 

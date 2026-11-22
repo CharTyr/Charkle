@@ -136,8 +136,34 @@ public final actor LibraryDatabase {
     }
 
     private static func searchFields(_ asset: AssetRecord) -> [String] {
-        [asset.title, asset.fileName, asset.notes, asset.tags.joined(separator: " "),
-         asset.ocrText ?? "", asset.aiDescription ?? "", asset.sourceDomain ?? ""]
+        var extraOCR = asset.ocrText ?? ""
+        if let repo = asset.richMetadata?.githubRepo {
+            let repoText = [
+                repo.fullName,
+                repo.description ?? "",
+                repo.language ?? "",
+                repo.topics.joined(separator: " "),
+                String((repo.readmeMarkdown ?? "").prefix(4000))
+            ].filter { !$0.isEmpty }.joined(separator: "\n")
+            if !repoText.isEmpty {
+                extraOCR = extraOCR.isEmpty ? repoText : (extraOCR + "\n" + repoText)
+            }
+        }
+        if let post = asset.richMetadata?.socialPost {
+            let postText = [
+                post.platform.displayName,
+                post.authorName,
+                "@\(post.authorHandle)",
+                post.articleTitle ?? "",
+                post.bodyText,
+                post.quotedText ?? ""
+            ].filter { !$0.isEmpty }.joined(separator: "\n")
+            if !postText.isEmpty {
+                extraOCR = extraOCR.isEmpty ? postText : (extraOCR + "\n" + postText)
+            }
+        }
+        return [asset.title, asset.fileName, asset.notes, asset.tags.joined(separator: " "),
+                extraOCR, asset.aiDescription ?? "", asset.sourceDomain ?? ""]
     }
 
     public func asset(id: UUID) throws -> AssetRecord? { try asset(where: "id=?", equals: id.uuidString) }
@@ -181,6 +207,26 @@ public final actor LibraryDatabase {
         })
     }
 
+    private func folderSubtreeIDs(rootID: UUID) throws -> [UUID] {
+        let all = try connection.query("SELECT payload FROM folders") { try decode(FolderRecord.self, $0) }
+        var childrenByParent: [UUID: [UUID]] = [:]
+        for f in all {
+            if let pid = f.parentID {
+                childrenByParent[pid, default: []].append(f.id)
+            }
+        }
+        var result: [UUID] = [rootID]
+        var seen: Set<UUID> = [rootID]
+        var queue: [UUID] = [rootID]
+        while let current = queue.popLast() {
+            for childID in childrenByParent[current] ?? [] where seen.insert(childID).inserted {
+                result.append(childID)
+                queue.append(childID)
+            }
+        }
+        return result
+    }
+
     private func assetQuery<T>(
         _ filters: FilterCriteria, limit: Int? = nil, projection: String = "a.payload", read: (SQLRow) throws -> T
     ) throws -> [T] {
@@ -194,7 +240,15 @@ public final actor LibraryDatabase {
         if filters.onlyTrashed { constrain("a.trashed=1") }
         else if !filters.includeTrashed { constrain("a.trashed=0") }
         if filters.onlyInbox { constrain("a.folder_id IS NULL AND a.trashed=0") }
-        if let folder = filters.folderID { constrain("a.folder_id=?", .text(folder.uuidString)) }
+        if let folder = filters.folderID {
+            if filters.includeSubfolders {
+                let subtreeIDs = try folderSubtreeIDs(rootID: folder)
+                clauses.append("a.folder_id IN (\(Self.placeholders(subtreeIDs.count)))")
+                args += subtreeIDs.map { SQLValue.text($0.uuidString) }
+            } else {
+                constrain("a.folder_id=?", .text(folder.uuidString))
+            }
+        }
         if let shape = filters.shape { constrain("a.shape=?", .text(shape.rawValue)) }
         if filters.minRating > 0 { constrain("a.rating>=?", .integer(Int64(filters.minRating))) }
         if filters.onlyPinnedOffline { constrain("a.pinned=1") }

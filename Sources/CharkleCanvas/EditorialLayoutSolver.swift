@@ -36,19 +36,25 @@ public nonisolated enum EditorialLayoutSolver {
         assetsByID: [UUID: AssetRecord],
         padding: Double = 28
     ) -> EditorialLayoutResult {
-        let usableWidth = max(320, containerWidth - padding * 2)
+        let effectivePadding: Double = switch config.style {
+        case .magazine: max(36, padding + 10)
+        case .balanced: max(22, padding)
+        case .compact: max(12, min(padding, 14))
+        }
+        let usableWidth = max(320, containerWidth - effectivePadding * 2)
         let styleSpacing: Double = switch config.style {
-        case .balanced: max(12, config.spacing)
-        case .magazine: max(16, config.spacing + 4)
-        case .compact: max(8, min(config.spacing, 10))
+        case .magazine: max(26, config.spacing + 10)
+        case .balanced: max(15, config.spacing)
+        case .compact: 6
         }
 
-        let adaptiveMaxCols = max(2, Int((usableWidth + styleSpacing) / 210.0))
-        let requestedCols = max(2, min(6, config.columns))
         let cols: Int = switch config.style {
-        case .compact: min(max(requestedCols + 1, 3), max(adaptiveMaxCols, 3))
-        case .magazine: min(max(requestedCols, 3), max(adaptiveMaxCols, 3))
-        case .balanced: min(requestedCols, max(adaptiveMaxCols, 2))
+        case .magazine:
+            max(2, min(3, Int((usableWidth + styleSpacing) / 280.0)))
+        case .balanced:
+            max(3, min(4, Int((usableWidth + styleSpacing) / 220.0)))
+        case .compact:
+            max(5, min(7, Int((usableWidth + styleSpacing) / 142.0)))
         }
 
         let colWidth = (usableWidth - styleSpacing * Double(cols - 1)) / Double(cols)
@@ -59,38 +65,37 @@ public nonisolated enum EditorialLayoutSolver {
             return lhs.id.uuidString < rhs.id.uuidString
         }
 
-        var columnHeights = Array(repeating: padding, count: cols)
+        var columnHeights = Array(repeating: effectivePadding, count: cols)
         var frames: [UUID: BoardRect] = [:]
         frames.reserveCapacity(sortedNodes.count)
 
-        var heroQuota = config.style == .magazine ? 2 : 1
+        var heroQuota = config.style == .magazine ? 3 : 0
         var magazineHeroAssigned = false
 
         for (index, node) in sortedNodes.enumerated() {
             switch node.kind {
             case .groupFrame:
-                // In auto-editorial mode, section frames span the full row as crisp editorial headers.
-                let maxY = columnHeights.max() ?? padding
-                let headerHeight = max(56.0, min(92.0, node.frame.height > 0 ? node.frame.height : 64.0))
-                let rect = BoardRect(x: padding, y: maxY, width: usableWidth, height: headerHeight)
+                let maxY = columnHeights.max() ?? effectivePadding
+                let headerHeight = max(54.0, min(86.0, node.frame.height > 0 ? node.frame.height : 60.0))
+                let rect = BoardRect(x: effectivePadding, y: maxY, width: usableWidth, height: headerHeight)
                 frames[node.id] = rect
                 let nextY = maxY + headerHeight + styleSpacing
                 for c in 0..<cols { columnHeights[c] = nextY }
 
             case .paletteStrip:
-                let maxY = columnHeights.max() ?? padding
-                let stripHeight = 76.0
-                let rect = BoardRect(x: padding, y: maxY, width: usableWidth, height: stripHeight)
+                let maxY = columnHeights.max() ?? effectivePadding
+                let stripHeight = config.style == .compact ? 56.0 : 76.0
+                let rect = BoardRect(x: effectivePadding, y: maxY, width: usableWidth, height: stripHeight)
                 frames[node.id] = rect
                 let nextY = maxY + stripHeight + styleSpacing
                 for c in 0..<cols { columnHeights[c] = nextY }
 
             case .note(_, let text, _, let fontSize):
                 let col = shortestColumnIndex(in: columnHeights)
-                let x = padding + Double(col) * (colWidth + styleSpacing)
+                let x = effectivePadding + Double(col) * (colWidth + styleSpacing)
                 let y = columnHeights[col]
                 let estimatedLines = max(3, min(10, Int(Double(text.count) / 18.0) + 2))
-                let height = max(140.0, Double(estimatedLines) * max(18.0, fontSize * 1.45) + 46.0)
+                let height = max(124.0, Double(estimatedLines) * max(18.0, fontSize * 1.45) + 42.0)
                 let rect = BoardRect(x: x, y: y, width: colWidth, height: height)
                 frames[node.id] = rect
                 columnHeights[col] = y + height + styleSpacing
@@ -98,10 +103,12 @@ public nonisolated enum EditorialLayoutSolver {
             case .assetRef(let assetID, let crop, let weight, _):
                 let aspect = resolvedAspectRatio(for: assetID, crop: crop, assetsByID: assetsByID, style: config.style)
                 let wantsHero: Bool
-                if cols >= 3 {
-                    if weight >= 2 && heroQuota > 0 {
+                if config.style == .magazine && cols >= 3 && heroQuota > 0 {
+                    if !magazineHeroAssigned && index == 0 {
                         wantsHero = true
-                    } else if config.style == .magazine && !magazineHeroAssigned && index == 0 {
+                    } else if weight >= 2 {
+                        wantsHero = true
+                    } else if index > 0 && index % 5 == 0 {
                         wantsHero = true
                     } else {
                         wantsHero = false
@@ -114,10 +121,10 @@ public nonisolated enum EditorialLayoutSolver {
                     heroQuota -= 1
                     magazineHeroAssigned = true
                     let spanWidth = colWidth * 2 + styleSpacing
-                    let clampedAspect = max(0.75, min(2.0, aspect))
+                    let clampedAspect = max(0.85, min(1.85, aspect))
                     let height = spanWidth / clampedAspect
                     let y = max(columnHeights[spanStart], columnHeights[spanStart + 1])
-                    let x = padding + Double(spanStart) * (colWidth + styleSpacing)
+                    let x = effectivePadding + Double(spanStart) * (colWidth + styleSpacing)
                     let rect = BoardRect(x: x, y: y, width: spanWidth, height: height)
                     frames[node.id] = rect
                     let nextY = y + height + styleSpacing
@@ -125,7 +132,7 @@ public nonisolated enum EditorialLayoutSolver {
                     columnHeights[spanStart + 1] = nextY
                 } else {
                     let col = shortestColumnIndex(in: columnHeights)
-                    let x = padding + Double(col) * (colWidth + styleSpacing)
+                    let x = effectivePadding + Double(col) * (colWidth + styleSpacing)
                     let y = columnHeights[col]
                     let height = colWidth / aspect
                     let rect = BoardRect(x: x, y: y, width: colWidth, height: height)
@@ -135,7 +142,7 @@ public nonisolated enum EditorialLayoutSolver {
             }
         }
 
-        let maxHeight = (columnHeights.max() ?? padding) + padding + 88.0 // clearance for floating tool dock
+        let maxHeight = (columnHeights.max() ?? effectivePadding) + effectivePadding + 88.0
         return EditorialLayoutResult(
             frames: frames,
             orderedNodeIDs: sortedNodes.map(\.id),
@@ -143,6 +150,109 @@ public nonisolated enum EditorialLayoutSolver {
             columnWidth: colWidth,
             columnCount: cols
         )
+    }
+
+    /// Smart Auto-Layout Frame reflow: packs all enclosed nodes cleanly inside `groupRect`
+    /// using justified rows and proportionally scales them so every child stays strictly within
+    /// the resized frame bounds in real time (reference Img 4).
+    public static func reflowNodesInsideGroupFrame(
+        groupRect: BoardRect,
+        childNodes: [BoardNode],
+        assetsByID: [UUID: AssetRecord],
+        headerHeight: Double = 38,
+        padding: Double = 12,
+        spacing: Double = 10
+    ) -> [UUID: BoardRect] {
+        guard !childNodes.isEmpty else { return [:] }
+        let innerX = groupRect.x + padding
+        let innerY = groupRect.y + headerHeight + padding * 0.6
+        let innerW = max(80, groupRect.width - padding * 2)
+        let innerH = max(60, groupRect.height - headerHeight - padding * 1.6)
+
+        let ordered = childNodes.sorted { lhs, rhs in
+            if abs(lhs.frame.minY - rhs.frame.minY) > 24 { return lhs.frame.minY < rhs.frame.minY }
+            if abs(lhs.frame.minX - rhs.frame.minX) > 12 { return lhs.frame.minX < rhs.frame.minX }
+            return lhs.editorialOrder < rhs.editorialOrder
+        }
+
+        let ratios: [Double] = ordered.map { node in
+            switch node.kind {
+            case .assetRef(let assetID, let crop, _, _):
+                return resolvedAspectRatio(for: assetID, crop: crop, assetsByID: assetsByID, style: .balanced)
+            default:
+                return max(0.65, min(2.2, node.frame.width / max(1, node.frame.height)))
+            }
+        }
+
+        // Choose the row count (1 ... ordered.count) that maximizes area fill inside (innerW x innerH)
+        let n = ordered.count
+        var bestFrames: [UUID: BoardRect] = [:]
+        var bestCoverage: Double = -1
+
+        for rowCount in 1...min(n, 6) {
+            let totalGapsY = spacing * Double(rowCount - 1)
+            let availH = max(32, innerH - totalGapsY)
+            // Partition items greedily by balanced aspect-ratio sum per row
+            let totalRatio = ratios.reduce(0, +)
+            let targetRowRatio = totalRatio / Double(rowCount)
+
+            var rows: [[Int]] = []
+            var currentRow: [Int] = []
+            var currentSum: Double = 0
+            for idx in 0..<n {
+                currentRow.append(idx)
+                currentSum += ratios[idx]
+                let remainingRows = rowCount - rows.count - 1
+                let remainingItems = n - idx - 1
+                if remainingRows > 0 && (remainingItems == remainingRows || currentSum >= targetRowRatio * 0.88) {
+                    rows.append(currentRow)
+                    currentRow = []
+                    currentSum = 0
+                }
+            }
+            if !currentRow.isEmpty { rows.append(currentRow) }
+
+            // Natural height of each row if spanning full innerW
+            var naturalRowHeights: [Double] = []
+            for r in rows {
+                let gapsX = spacing * Double(max(0, r.count - 1))
+                let sumR = r.reduce(0.0) { $0 + ratios[$1] }
+                let rowH = max(24, (innerW - gapsX) / max(0.1, sumR))
+                naturalRowHeights.append(rowH)
+            }
+
+            let sumNaturalH = naturalRowHeights.reduce(0, +)
+            let verticalScale = sumNaturalH > availH ? (availH / sumNaturalH) : 1.0
+
+            var candidate: [UUID: BoardRect] = [:]
+            var totalPaintedArea: Double = 0
+            var cursorY = innerY
+
+            for (rIdx, r) in rows.enumerated() {
+                let rowH = max(24, naturalRowHeights[rIdx] * verticalScale)
+                let gapsX = spacing * Double(max(0, r.count - 1))
+                let rawRowW = r.reduce(0.0) { $0 + ratios[$1] * rowH } + gapsX
+                let horizScale = rawRowW > innerW ? ((innerW - gapsX) / max(1, rawRowW - gapsX)) : 1.0
+                let effectiveH = rowH * horizScale
+
+                var cursorX = innerX
+                for itemIdx in r {
+                    let w = max(24, ratios[itemIdx] * effectiveH)
+                    let rect = BoardRect(x: cursorX, y: cursorY, width: w, height: effectiveH)
+                    candidate[ordered[itemIdx].id] = rect
+                    totalPaintedArea += w * effectiveH
+                    cursorX += w + spacing
+                }
+                cursorY += effectiveH + spacing
+            }
+
+            if totalPaintedArea > bestCoverage {
+                bestCoverage = totalPaintedArea
+                bestFrames = candidate
+            }
+        }
+
+        return bestFrames
     }
 
     /// Freezes the exact computed Auto Editorial visual frames directly into every node's `frame`
@@ -230,11 +340,11 @@ public nonisolated enum EditorialLayoutSolver {
         }
         switch style {
         case .compact:
-            return max(0.72, min(1.75, ratio))
+            return max(0.80, min(1.32, ratio))
         case .magazine:
-            return max(0.58, min(2.05, ratio))
+            return max(0.56, min(2.15, ratio))
         case .balanced:
-            return max(0.62, min(1.95, ratio))
+            return max(0.64, min(1.85, ratio))
         }
     }
 

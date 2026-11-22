@@ -4,8 +4,11 @@ import CoreText
 import CryptoKit
 import Foundation
 import ImageIO
+import ModelIO
 import PDFKit
 import QuickLookThumbnailing
+import SceneKit
+import SceneKit.ModelIO
 import UniformTypeIdentifiers
 
 public nonisolated struct MediaPipeline: Sendable {
@@ -50,19 +53,29 @@ public nonisolated struct MediaPipeline: Sendable {
             .first { $0.deletingPathExtension().lastPathComponent == asset.id.uuidString }
     }
 
-    func installOriginal(_ source: URL, for asset: AssetRecord) throws -> URL {
+    func installOriginal(_ source: URL, for asset: AssetRecord, moveSource: Bool = false) throws -> URL {
         let destination = originalPath(for: asset)
         if source == destination { return destination }
         let previous = cachedOriginal(for: asset)
-        let temporary = staging.appending(path: UUID().uuidString)
-        try FileManager.default.copyItem(at: source, to: temporary)
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        if FileManager.default.fileExists(atPath: destination.path) {
-            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-        } else {
-            try FileManager.default.moveItem(at: temporary, to: destination)
+        let fm = FileManager.default
+        if moveSource {
+            if fm.fileExists(atPath: destination.path) {
+                _ = try fm.replaceItemAt(destination, withItemAt: source)
+            } else {
+                try fm.moveItem(at: source, to: destination)
+            }
+            if let previous, previous != destination { try? fm.removeItem(at: previous) }
+            return destination
         }
-        if let previous, previous != destination { try? FileManager.default.removeItem(at: previous) }
+        let temporary = staging.appending(path: UUID().uuidString)
+        try fm.copyItem(at: source, to: temporary)
+        defer { try? fm.removeItem(at: temporary) }
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try fm.moveItem(at: temporary, to: destination)
+        }
+        if let previous, previous != destination { try? fm.removeItem(at: previous) }
         return destination
     }
 
@@ -213,11 +226,15 @@ public nonisolated struct MediaPipeline: Sendable {
             if let poster = bookmark.poster { render = MediaRender(poster) }
         case .document:
             if ext == "pdf" { render = Self.pdf(file) }
-            if ["md", "markdown", "txt", "rtf"].contains(ext) {
+            if ["md", "markdown", "txt", "rtf", "json", "yaml", "yml", "toml", "csv"].contains(ext) {
                 let handle = try FileHandle(forReadingFrom: file)
                 defer { try? handle.close() }
                 if let data = try handle.read(upToCount: 65_536) {
                     let text = String(decoding: data, as: UTF8.self)
+                    var rich = asset.richMetadata ?? AssetRichMetadata()
+                    rich.textExcerpt = String(text.prefix(1_200))
+                    rich.isMarkdown = (ext == "md" || ext == "markdown")
+                    asset.richMetadata = rich
                     if let card = MediaArtwork.card(title: asset.title, label: ext.uppercased(), text: text) {
                         render = MediaRender(card, text: String(text.prefix(8_000)))
                     }
@@ -232,6 +249,11 @@ public nonisolated struct MediaPipeline: Sendable {
             let audio = await Self.audio(file)
             asset.durationSeconds = audio.duration
             asset.waveformPeaks = audio.peaks
+        case .model3D:
+            var rich = asset.richMetadata ?? AssetRichMetadata()
+            rich.model3DFormat = ext.uppercased()
+            asset.richMetadata = rich
+            render = await Self.model3D(file, title: asset.title, format: ext)
         }
         if let render {
             asset.pixelWidth = render.width
@@ -351,28 +373,131 @@ public nonisolated struct MediaPipeline: Sendable {
         }
     }
 
+    func writeCustomPoster(_ image: CGImage, for asset: inout AssetRecord) throws {
+        guard let grid = MediaArtwork.resize(image, maxSide: 520),
+              let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
+            return
+        }
+        asset.pixelWidth = image.width
+        asset.pixelHeight = image.height
+        try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
+        let previewPath = thumbnailPath(asset.id, tier: .preview1400)
+        if max(image.width, image.height) > 520, let large = MediaArtwork.resize(image, maxSide: 1_400),
+           let preview = MediaArtwork.encode(large, type: .jpeg) {
+            try preview.write(to: previewPath, options: .atomic)
+        } else {
+            try removeIfPresent(previewPath)
+        }
+        asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
+    }
+
+    private static func model3D(_ url: URL, title: String, format: String) async -> MediaRender? {
+        if let ql = await quickLook(url) {
+            return ql
+        }
+        if let rendered = renderModelIOSnapshot(url) {
+            return MediaRender(rendered)
+        }
+        if let card = MediaArtwork.model3DCard(title: title, format: format) {
+            return MediaRender(card)
+        }
+        return nil
+    }
+
+    private static func renderModelIOSnapshot(_ url: URL) -> CGImage? {
+        let mdlAsset = MDLAsset(url: url)
+        guard mdlAsset.count > 0 else { return nil }
+        let scene = SCNScene(mdlAsset: mdlAsset)
+        let renderer = SCNRenderer(device: nil, options: nil)
+        renderer.scene = scene
+        renderer.autoenablesDefaultLighting = true
+        let (center, radius) = scene.rootNode.boundingSphere
+        let camNode = SCNNode()
+        camNode.camera = SCNCamera()
+        camNode.camera?.automaticallyAdjustsZRange = true
+        let dist = max(CGFloat(radius) * 2.6, 2.0)
+        let cx = CGFloat(center.x) + dist * 0.6
+        let cy = CGFloat(center.y) + dist * 0.45
+        let cz = CGFloat(center.z) + dist * 0.85
+        camNode.position = SCNVector3(cx, cy, cz)
+        camNode.look(at: center)
+        scene.rootNode.addChildNode(camNode)
+        renderer.pointOfView = camNode
+        let nsImage = renderer.snapshot(atTime: 0, with: CGSize(width: 900, height: 900), antialiasingMode: .multisampling4X)
+        return nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    }
+
     private static func audio(_ url: URL) async -> (duration: Double?, peaks: [Float]) {
         let asset = AVURLAsset(url: url)
-        let duration = try? await asset.load(.duration).seconds
-        guard let file = try? AVAudioFile(forReading: url),
-              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 8_192),
-              file.length > 0 else { return (duration.flatMap { $0.isFinite ? $0 : nil }, []) }
-        let frameCount = file.length
-        let bars = 48
-        var peaks = [Float](repeating: 0, count: bars)
-        var offset: AVAudioFramePosition = 0
-        while offset < frameCount {
-            guard (try? file.read(into: buffer)) != nil, let channels = buffer.floatChannelData,
-                  buffer.frameLength > 0 else { break }
-            for frame in 0..<Int(buffer.frameLength) {
-                let bin = min(bars - 1, Int((offset + Int64(frame)) * Int64(bars) / frameCount))
-                for channel in 0..<Int(buffer.format.channelCount) {
-                    peaks[bin] = max(peaks[bin], min(1, abs(channels[channel][frame])))
+        let loadedDuration = try? await asset.load(.duration).seconds
+        let cleanDuration = loadedDuration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        if let file = try? AVAudioFile(forReading: url),
+           let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 8_192),
+           file.length > 0 {
+            let frameCount = file.length
+            let bars = 48
+            var peaks = [Float](repeating: 0, count: bars)
+            var offset: AVAudioFramePosition = 0
+            while offset < frameCount {
+                guard (try? file.read(into: buffer)) != nil, let channels = buffer.floatChannelData,
+                      buffer.frameLength > 0 else { break }
+                for frame in 0..<Int(buffer.frameLength) {
+                    let bin = min(bars - 1, Int((offset + Int64(frame)) * Int64(bars) / frameCount))
+                    for channel in 0..<Int(buffer.format.channelCount) {
+                        peaks[bin] = max(peaks[bin], min(1, abs(channels[channel][frame])))
+                    }
+                }
+                offset += Int64(buffer.frameLength)
+            }
+            return (cleanDuration ?? Double(frameCount) / file.fileFormat.sampleRate, peaks)
+        }
+        // Fallback via AVAssetReader for compressed formats AVAudioFile may not decode directly
+        if let track = try? await asset.loadTracks(withMediaType: .audio).first,
+           let reader = try? AVAssetReader(asset: asset) {
+            let outputSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 32,
+                AVLinearPCMIsFloatKey: true,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false
+            ]
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: outputSettings)
+            if reader.canAdd(output) {
+                reader.add(output)
+                if reader.startReading() {
+                    var samples: [Float] = []
+                    samples.reserveCapacity(4096)
+                    while let sampleBuffer = output.copyNextSampleBuffer(),
+                          let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                        let length = CMBlockBufferGetDataLength(block)
+                        let floatCount = length / MemoryLayout<Float>.size
+                        if floatCount > 0 {
+                            var chunk = [Float](repeating: 0, count: floatCount)
+                            _ = chunk.withUnsafeMutableBytes { ptr in
+                                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: ptr.baseAddress!)
+                            }
+                            let strideStep = max(1, floatCount / 64)
+                            var peak: Float = 0
+                            for i in stride(from: 0, to: floatCount, by: strideStep) {
+                                peak = max(peak, min(1, abs(chunk[i])))
+                            }
+                            samples.append(peak)
+                        }
+                        if samples.count >= 4096 { break }
+                    }
+                    if !samples.isEmpty {
+                        let bars = 48
+                        var peaks = [Float](repeating: 0, count: bars)
+                        for (idx, val) in samples.enumerated() {
+                            let bin = min(bars - 1, idx * bars / samples.count)
+                            peaks[bin] = max(peaks[bin], val)
+                        }
+                        return (cleanDuration, peaks)
+                    }
                 }
             }
-            offset += Int64(buffer.frameLength)
         }
-        return (duration.flatMap { $0.isFinite ? $0 : nil } ?? Double(frameCount) / file.fileFormat.sampleRate, peaks)
+        return (cleanDuration, [])
     }
 
     func thumbnailBytes() -> Int64 {

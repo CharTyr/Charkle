@@ -54,6 +54,9 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
     public func curate(
         request: MoodboardCurationRequest,
         provider: (any CloudAIProvider)?,
+        typeSafeConfig: TypeSafeExperimentalConfig? = nil,
+        typeSafeAPIKey: String? = nil,
+        grounding: VisualGroundingEngine? = nil,
         onStep: (@Sendable (MoodboardAgentStep) async -> Void)? = nil
     ) async throws -> MoodboardProposal {
         let recorder = AgentTraceRecorder(onStep: onStep)
@@ -93,7 +96,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
 
         // MARK: Stage 2 — Multi-Route Grounded Recall
         await emit(.retrieving, title: "多路召回候选素材", detail: "按文件夹、标签、视觉相似与色彩过滤候选池…", status: .running)
-        let recall = try await tools.recallCandidates(
+        var recall = try await tools.recallCandidates(
             request: request,
             expandedQueries: expandedQueries,
             preferredFolderNames: preferredFolderNames,
@@ -122,9 +125,69 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
             )
         }
 
+        // MARK: Stage 2.5 — Optional TypeSafe (Jev Score) Visual Rerank
+        var usedTypeSafeVisualRerank = false
+        let queryBrief = [request.prompt, request.refinementInstruction ?? ""]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "；")
+        if let tsCfg = typeSafeConfig, tsCfg.enabled, tsCfg.enableCuratorVisualRerank,
+           let tsKey = typeSafeAPIKey, !tsKey.isEmpty,
+           let grounding, !queryBrief.isEmpty {
+            await emit(
+                .retrieving,
+                title: "TypeSafe Jev 正在视觉精排候选池（\(min(recall.candidates.count, 24)) 张）",
+                detail: "直接看图按 0–3 校准分数评估主题与氛围契合度，发现未打标高匹配作品…",
+                status: .running
+            )
+            let visualInputs: [VisualCandidateInput] = recall.candidates.prefix(24).map { asset in
+                VisualCandidateInput(
+                    assetID: asset.id,
+                    title: asset.title,
+                    tags: asset.tags,
+                    description: asset.aiDescription,
+                    imageData: tools.preparedTypeSafeJPEG(for: asset, targetLongSide: 384)
+                )
+            }
+            if let jevScores = try? await grounding.scoreCandidatesForQuery(
+                query: queryBrief,
+                candidates: visualInputs,
+                config: tsCfg,
+                apiKey: tsKey,
+                batchSize: 4,
+                maxConcurrency: 3
+            ), !jevScores.isEmpty {
+                usedTypeSafeVisualRerank = true
+                let scoreMap = Dictionary(uniqueKeysWithValues: jevScores.map { ($0.assetID, $0) })
+                var updatedScores = recall.scoresByID
+                for asset in recall.candidates {
+                    guard let js = scoreMap[asset.id] else { continue }
+                    let prior = updatedScores[asset.id]
+                    let blended = prior != nil ? max(js.score, (prior!.score * 0.35 + js.score * 0.65)) : js.score
+                    var reasons = prior?.matchReasons ?? []
+                    if js.score >= 0.45 {
+                        reasons.insert("Jev 视觉契合 \(Int((js.score * 100).rounded()))%", at: 0)
+                    }
+                    updatedScores[asset.id] = ScoredAsset(asset: asset, score: blended, matchReasons: reasons)
+                }
+                let reordered = recall.candidates.sorted { lhs, rhs in
+                    let ls = updatedScores[lhs.id]?.score ?? 0
+                    let rs = updatedScores[rhs.id]?.score ?? 0
+                    if abs(ls - rs) > 0.001 { return ls > rs }
+                    return lhs.rating > rhs.rating
+                }
+                recall = AgentRecallResult(
+                    eligibleTotal: recall.eligibleTotal,
+                    candidates: reordered,
+                    scoresByID: updatedScores,
+                    folderPathByID: recall.folderPathByID
+                )
+            }
+        }
+
         await emit(
             .retrieving,
-            title: "已锁定 \(recall.candidates.count) 项候选素材进入审片",
+            title: "已锁定 \(recall.candidates.count) 项候选素材进入审片" + (usedTypeSafeVisualRerank ? "（已由 Jev 视觉精排）" : ""),
             detail: recall.eligibleTotal > recall.candidates.count
                 ? "从 \(recall.eligibleTotal) 项合规素材中粗筛出 Top \(recall.candidates.count)"
                 : "覆盖全部 \(recall.eligibleTotal) 项合规素材，确保无标签素材也不会遗漏",
@@ -225,6 +288,16 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                         ? "入选 \(compiled.primaryMatches.count) 张 · 分区 \(compiled.sections.count) 组 · 候选池 \(compiled.candidatePool.count) 张"
                         + (cachedCount > 0 ? " · 顺手沉淀 \(cachedCount) 条画面理解" : "")
                         : "已自动修正 \(compiled.issues.count) 项约束 · 入选 \(compiled.primaryMatches.count) 张"
+                    let finalDoc = await applyAutoDetailCropsIfRequested(
+                        document: compiled.document,
+                        assets: recall.candidates,
+                        request: request,
+                        typeSafeConfig: typeSafeConfig,
+                        typeSafeAPIKey: typeSafeAPIKey,
+                        grounding: grounding,
+                        recorder: recorder
+                    )
+
                     await emit(.verifying, title: "校验通过", detail: verifyDetail, status: .done)
                     await emit(.completed, title: "AI 情绪板策展完成", detail: plan.boardSubtitle.isEmpty ? verifyDetail : plan.boardSubtitle, status: .done)
 
@@ -233,7 +306,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                         : (plan.boardSubtitle.isEmpty ? "已从 \(recall.candidates.count) 项候选中精选 \(compiled.primaryMatches.count) 张契合素材并完成分区排版。" : plan.boardSubtitle)
 
                     return MoodboardProposal(
-                        draftDocument: compiled.document,
+                        draftDocument: finalDoc,
                         primaryMatches: compiled.primaryMatches,
                         candidatePool: compiled.candidatePool,
                         extractedPalette: compiled.extractedPalette,
@@ -254,17 +327,110 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                     status: .warning
                 )
             }
-        } else {
+        } else if !usedTypeSafeVisualRerank {
             await emit(
                 .fallbackOffline,
                 title: "当前为纯本机离线模式",
-                detail: "可在「设置 → 智能与搜索」开启 ChatGPT 订阅或 Gemini 解锁 AI 肉眼看图策展",
+                detail: "可在「设置 → 智能与搜索」开启 ChatGPT / Gemini 或 TypeSafe (Jev) 解锁看图策展",
                 status: .warning
             )
         }
 
-        // MARK: Stage 4 — Strict-Threshold Offline Fallback Curator (Never Pads Irrelevant Junk!)
-        return try await runStrictOfflineCurator(request: request, recall: recall, recorder: recorder)
+        // MARK: Stage 4 — Strict-Threshold Curator (Jev Visual Rerank OR Offline Fallback)
+        var fallbackProposal = try await runStrictOfflineCurator(
+            request: request,
+            recall: recall,
+            recorder: recorder,
+            usedTypeSafeJev: usedTypeSafeVisualRerank
+        )
+        fallbackProposal.draftDocument = await applyAutoDetailCropsIfRequested(
+            document: fallbackProposal.draftDocument,
+            assets: recall.candidates,
+            request: request,
+            typeSafeConfig: typeSafeConfig,
+            typeSafeAPIKey: typeSafeAPIKey,
+            grounding: grounding,
+            recorder: recorder
+        )
+        fallbackProposal.agentTrace = await recorder.snapshot()
+        return fallbackProposal
+    }
+
+    /// Stage 3.5 — Optional Jev Box Detail-Focus Auto-Crop for "细节特写模式" moodboards.
+    private func applyAutoDetailCropsIfRequested(
+        document: MoodboardDocument,
+        assets: [AssetRecord],
+        request: MoodboardCurationRequest,
+        typeSafeConfig: TypeSafeExperimentalConfig?,
+        typeSafeAPIKey: String?,
+        grounding: VisualGroundingEngine?,
+        recorder: AgentTraceRecorder
+    ) async -> MoodboardDocument {
+        let query = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard request.autoFocusDetailCrop,
+              !query.isEmpty,
+              let tsCfg = typeSafeConfig, tsCfg.enabled,
+              let tsKey = typeSafeAPIKey, !tsKey.isEmpty,
+              let grounding else {
+            return document
+        }
+
+        let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+        let targets: [(index: Int, asset: AssetRecord)] = document.nodes.enumerated().compactMap { idx, node in
+            guard case .assetRef(let assetID, let existingCrop, _, _) = node.kind,
+                  existingCrop == nil,
+                  let asset = assetsByID[assetID],
+                  asset.mediaKind == .image || asset.mediaKind == .webBookmark || asset.mediaKind == .animatedImage else {
+                return nil
+            }
+            return (idx, asset)
+        }
+        guard !targets.isEmpty else { return document }
+
+        await recorder.emit(
+            .composing,
+            title: "Jev Box 细节特写聚焦（\(targets.count) 张主图）",
+            detail: "正在按「\(query)」自动定位局部细节并写入非破坏性裁切框…",
+            status: .running
+        )
+
+        var cropsByIndex: [Int: NormalizedCropRect] = [:]
+        await withTaskGroup(of: (Int, NormalizedCropRect?).self) { group in
+            for (idx, asset) in targets.prefix(12) {
+                guard let jpeg = tools.preparedTypeSafeJPEG(for: asset, targetLongSide: 640) else { continue }
+                group.addTask {
+                    let res = try? await grounding.locateRegion(
+                        query: query,
+                        imageData: jpeg,
+                        imageFormat: "jpg",
+                        cgImage: nil,
+                        config: tsCfg,
+                        apiKey: tsKey
+                    )
+                    if let res, res.found, res.crop.isMeaningfulSubregion {
+                        return (idx, res.crop)
+                    }
+                    return (idx, nil)
+                }
+            }
+            for await (idx, crop) in group {
+                if let crop { cropsByIndex[idx] = crop }
+            }
+        }
+
+        var updated = document
+        for (idx, crop) in cropsByIndex {
+            if case .assetRef(let assetID, _, let weight, let autoplay) = updated.nodes[idx].kind {
+                updated.nodes[idx].kind = .assetRef(assetID: assetID, crop: crop, weight: weight, autoplayLoop: autoplay)
+            }
+        }
+        await recorder.emit(
+            .composing,
+            title: "细节特写聚焦完成（\(cropsByIndex.count)/\(targets.count) 张已自动局部取景）",
+            detail: cropsByIndex.isEmpty ? "入选作品均为整幅契合，保持原始画幅" : "每张卡片随时可右键还原完整画面",
+            status: .done
+        )
+        return updated
     }
 
     // MARK: - Large-Library Text Brief Planner
@@ -317,7 +483,8 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
     private func runStrictOfflineCurator(
         request: MoodboardCurationRequest,
         recall: AgentRecallResult,
-        recorder: AgentTraceRecorder
+        recorder: AgentTraceRecorder,
+        usedTypeSafeJev: Bool = false
     ) async throws -> MoodboardProposal {
         let locked = Set(request.lockedAssetIDs)
         let seeds = Set(request.seedAssetIDs)
@@ -377,27 +544,33 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
             }
 
         let titleDraft = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = titleDraft.isEmpty ? (request.existingBoard?.title ?? "本机策展情绪板") : String(titleDraft.prefix(36))
+        let title = titleDraft.isEmpty
+            ? (request.existingBoard?.title ?? (usedTypeSafeJev ? "Jev 视觉情绪板" : "本机策展情绪板"))
+            : String(titleDraft.prefix(36))
         let rejectedText = rejectedCount > 0
-            ? "已按本机匹配度过滤掉 \(rejectedCount) 张不相关素材（开启云端增强智能后支持 AI 直接看图筛选未打标素材）"
+            ? (usedTypeSafeJev
+                ? "Jev 视觉打分已过滤掉 \(rejectedCount) 张不相关素材"
+                : "已按本机匹配度过滤掉 \(rejectedCount) 张不相关素材（开启云端增强智能后支持 AI 直接看图筛选未打标素材）")
             : nil
 
         let offlinePlan = AgentBoardPlan(
             boardTitle: title,
             boardSubtitle: chosen.isEmpty
-                ? "本机离线文本/色彩检索未匹配到足够素材，可开启云端增强智能看图筛选，或放宽限定条件"
-                : "本机离线精选 \(chosen.count) 项契合素材",
+                ? (usedTypeSafeJev ? "Jev 视觉精排未找到高匹配素材，请尝试更换灵感词" : "本机离线文本/色彩检索未匹配到足够素材，可开启云端增强智能看图筛选，或放宽限定条件")
+                : (usedTypeSafeJev ? "TypeSafe Jev 视觉精排精选 \(chosen.count) 项契合素材" : "本机离线精选 \(chosen.count) 项契合素材"),
             curatorNote: request.includeCuratorNotes && !chosen.isEmpty
                 ? AgentBoardPlan.NoteSpec(
                     title: "策展说明",
-                    text: titleDraft.isEmpty ? "按色彩、视觉特征与所选种子整理的视觉参考集合。" : "围绕「\(titleDraft)」整理的本机视觉参考集合。",
+                    text: titleDraft.isEmpty
+                        ? "按色彩、视觉特征与所选种子整理的视觉参考集合。"
+                        : (usedTypeSafeJev ? "围绕「\(titleDraft)」由 TypeSafe Jev 视觉精排生成的参考集合。" : "围绕「\(titleDraft)」整理的本机视觉参考集合。"),
                     style: .paper
                 )
                 : nil,
             recommendedLayout: request.layoutStyle,
             sections: primaryPicks.isEmpty
                 ? []
-                : [AgentBoardPlan.SectionSpec(title: "精选视觉参考", tint: .neutral, rationale: "", picks: primaryPicks)],
+                : [AgentBoardPlan.SectionSpec(title: usedTypeSafeJev ? "Jev 视觉精选" : "精选视觉参考", tint: .neutral, rationale: "", picks: primaryPicks)],
             candidatePicks: candidatePicks,
             rejectedNote: rejectedText,
             visualInsights: []
@@ -411,7 +584,9 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         )
         await recorder.emit(
             .completed,
-            title: chosen.isEmpty ? "离线未匹配到符合描述的素材" : "离线初稿已生成（\(compiled.primaryMatches.count) 张）",
+            title: chosen.isEmpty
+                ? (usedTypeSafeJev ? "Jev 未匹配到符合描述的素材" : "离线未匹配到符合描述的素材")
+                : (usedTypeSafeJev ? "Jev 视觉策展初稿已生成（\(compiled.primaryMatches.count) 张）" : "离线初稿已生成（\(compiled.primaryMatches.count) 张）"),
             detail: rejectedText ?? "已完成版面编排与配色提炼",
             status: chosen.isEmpty ? .warning : .done
         )
@@ -421,7 +596,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
             primaryMatches: compiled.primaryMatches,
             candidatePool: compiled.candidatePool,
             extractedPalette: compiled.extractedPalette,
-            usedCloudAI: false,
+            usedCloudAI: usedTypeSafeJev,
             curatedSummary: offlinePlan.boardSubtitle,
             agentTrace: await recorder.snapshot(),
             sections: compiled.sections,
@@ -442,7 +617,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
     3. **GROUNDED INTEGER SLOTS ONLY**: Every `slot` MUST be an integer visible on the Contact Sheet (`1..N`). Never invent slots or repeat a slot across sections.
     4. **HONOR USER LOCKS & SEEDS**: Any slot flagged `LOCKED_MUST_KEEP` or `USER_SEED` MUST be included on the board.
     5. **EDITORIAL COMPOSITION**: Group selected assets into 1–3 meaningful Chinese visual sections (e.g., 「核心主视觉」「光影与色调氛围」「材质与构图细节」), mark 1–2 strongest focal images with `weight: 2` (Hero), and write a concise, tasteful Chinese art-direction note.
-    6. **VISUAL INSIGHTS**: For images that lack a description (`desc=` missing in manifest), briefly fill `visualInsights` with concise Chinese visual description and 2–5 short tags so the user's library becomes searchable.
+    6. **VISUAL INSIGHTS**: For images that lack a description (`desc=` missing in manifest), briefly fill `visualInsights` with concise single-language Chinese visual description and 2–5 short monolingual Chinese tags (no bilingual pairs, no `#`). Prefer reusing existing tags already seen in the manifest over inventing synonymous variants.
 
     OUTPUT ONLY ONE VALID JSON OBJECT (no markdown fences or commentary outside JSON) matching this schema:
     {

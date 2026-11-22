@@ -335,7 +335,24 @@ public enum MoodboardExporter {
 
             if let nsImg = loader.cachedImage(for: assetID, tier: .preview1400)
                 ?? loader.cachedImage(for: assetID, tier: .grid520),
-               let cgImg = nsImg.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+               let baseCG = nsImg.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                let cgImg: CGImage = {
+                    guard case .assetRef(_, let crop?, _, _) = node.kind,
+                          crop != .full, crop.width > 0.04, crop.height > 0.04 else {
+                        return baseCG
+                    }
+                    let clamped = crop.clamped()
+                    let pixelRect = CGRect(
+                        x: (clamped.x * Double(baseCG.width)).rounded(.down),
+                        y: (clamped.y * Double(baseCG.height)).rounded(.down),
+                        width: max(4, (clamped.width * Double(baseCG.width)).rounded()),
+                        height: max(4, (clamped.height * Double(baseCG.height)).rounded())
+                    ).intersection(CGRect(x: 0, y: 0, width: baseCG.width, height: baseCG.height))
+                    if pixelRect.width >= 4, pixelRect.height >= 4, let cropped = baseCG.cropping(to: pixelRect) {
+                        return cropped
+                    }
+                    return baseCG
+                }()
                 // Aspect-fill draw (compensate for flipped CGContext so images stay upright)
                 let imgAspect = CGFloat(cgImg.width) / max(1, CGFloat(cgImg.height))
                 let boxAspect = rect.width / max(1, rect.height)
@@ -445,8 +462,10 @@ public enum MoodboardExporter {
         let (start, end, c1, c2) = ConnectorGeometry.resolvePathPoints(
             fromRect: fromRect,
             fromAnchor: connector.fromAnchor,
+            fromNormalizedPoint: connector.fromNormalizedPoint,
             toRect: toRect,
             toAnchor: connector.toAnchor,
+            toNormalizedPoint: connector.toNormalizedPoint,
             style: connector.style
         )
         ctx.saveGState()
@@ -491,6 +510,19 @@ public enum MoodboardExporter {
         ctx.addLine(to: end)
         ctx.addLine(to: p2)
         ctx.strokePath()
+
+        if connector.toNormalizedPoint != nil {
+            // Precision pinpoint callout target ring on the object
+            let halo = CGRect(x: end.x - 8, y: end.y - 8, width: 16, height: 16)
+            ctx.setFillColor(strokeColor.withAlphaComponent(0.20).cgColor)
+            ctx.fillEllipse(in: halo)
+            let dot = CGRect(x: end.x - 3.5, y: end.y - 3.5, width: 7, height: 7)
+            ctx.setFillColor(strokeColor.cgColor)
+            ctx.fillEllipse(in: dot)
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.92).cgColor)
+            ctx.setLineWidth(1.4)
+            ctx.strokeEllipse(in: dot)
+        }
         ctx.restoreGState()
     }
 
@@ -543,7 +575,20 @@ public enum MoodboardExporter {
 
 /// Shared connector path routing geometry used by both live SwiftUI Canvas and High-DPI Exporter.
 public nonisolated enum ConnectorGeometry {
-    public static func anchorPoint(for rect: CGRect, anchor: ConnectorAnchor, towards other: CGRect) -> CGPoint {
+    public static func anchorPoint(
+        for rect: CGRect,
+        anchor: ConnectorAnchor,
+        normalizedPoint: BoardPoint? = nil,
+        towards other: CGRect
+    ) -> CGPoint {
+        if let normalizedPoint {
+            let nx = max(0.0, min(1.0, normalizedPoint.x))
+            let ny = max(0.0, min(1.0, normalizedPoint.y))
+            return CGPoint(
+                x: rect.minX + rect.width * CGFloat(nx),
+                y: rect.minY + rect.height * CGFloat(ny)
+            )
+        }
         let resolved: ConnectorAnchor
         if anchor == .auto {
             let dx = other.midX - rect.midX
@@ -568,15 +613,24 @@ public nonisolated enum ConnectorGeometry {
     public static func resolvePathPoints(
         fromRect: CGRect,
         fromAnchor: ConnectorAnchor,
+        fromNormalizedPoint: BoardPoint? = nil,
         toRect: CGRect,
         toAnchor: ConnectorAnchor,
+        toNormalizedPoint: BoardPoint? = nil,
         style: ConnectorStyle
     ) -> (start: CGPoint, end: CGPoint, control1: CGPoint, control2: CGPoint) {
-        let start = anchorPoint(for: fromRect, anchor: fromAnchor, towards: toRect)
-        let end = anchorPoint(for: toRect, anchor: toAnchor, towards: fromRect)
+        let start = anchorPoint(for: fromRect, anchor: fromAnchor, normalizedPoint: fromNormalizedPoint, towards: toRect)
+        let end = anchorPoint(for: toRect, anchor: toAnchor, normalizedPoint: toNormalizedPoint, towards: fromRect)
         let dist = max(48, hypot(end.x - start.x, end.y - start.y) * 0.36)
 
-        func normalOffset(rect: CGRect, point: CGPoint) -> CGSize {
+        func normalOffset(rect: CGRect, point: CGPoint, isPinpoint: Bool, otherPoint: CGPoint) -> CGSize {
+            if isPinpoint {
+                let dx = otherPoint.x - point.x
+                let dy = otherPoint.y - point.y
+                let length = max(1, hypot(dx, dy))
+                let pull = min(dist * 0.65, length * 0.35)
+                return CGSize(width: (dx / length) * pull, height: (dy / length) * pull)
+            }
             if abs(point.y - rect.minY) < 1.5 { return CGSize(width: 0, height: -dist) }
             if abs(point.y - rect.maxY) < 1.5 { return CGSize(width: 0, height: dist) }
             if abs(point.x - rect.minX) < 1.5 { return CGSize(width: -dist, height: 0) }
@@ -584,8 +638,8 @@ public nonisolated enum ConnectorGeometry {
             return CGSize(width: (end.x - start.x) * 0.25, height: 0)
         }
 
-        let n1 = normalOffset(rect: fromRect, point: start)
-        let n2 = normalOffset(rect: toRect, point: end)
+        let n1 = normalOffset(rect: fromRect, point: start, isPinpoint: fromNormalizedPoint != nil, otherPoint: end)
+        let n2 = normalOffset(rect: toRect, point: end, isPinpoint: toNormalizedPoint != nil, otherPoint: start)
         let c1 = CGPoint(x: start.x + n1.width, y: start.y + n1.height)
         let c2 = CGPoint(x: end.x + n2.width, y: end.y + n2.height)
         return (start, end, c1, c2)

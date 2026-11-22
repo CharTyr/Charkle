@@ -9,11 +9,39 @@ public final actor DriveSyncEngine {
     private var currentStatus = SyncStatus()
     private var running = false
     private var originalDownloads: [UUID: Task<URL, Error>] = [:]
+    private var lastStatusBroadcastAt: ContinuousClock.Instant?
 
     public init(database: LibraryDatabase, media: MediaPipeline, intelligence: IntelligenceEngine = IntelligenceEngine()) {
         self.database = database
         self.media = media
         self.intelligence = intelligence
+    }
+
+    private func updateProgress(
+        phase: SyncPhase? = nil,
+        detail: String? = nil,
+        progress: Double? = nil,
+        forceBroadcast: Bool = false
+    ) {
+        let phaseChanged = phase.map { $0 != currentStatus.phase } ?? false
+        if let phase { currentStatus.phase = phase }
+        currentStatus.currentDetail = detail
+        currentStatus.progressFraction = progress.map { min(1.0, max(0.0, $0)) }
+
+        let now = ContinuousClock.now
+        let elapsedEnough = lastStatusBroadcastAt.map { $0.duration(to: now) >= .milliseconds(50) } ?? true
+        guard forceBroadcast || phaseChanged || elapsedEnough else { return }
+        lastStatusBroadcastAt = now
+        broadcastCurrentStatus()
+    }
+
+    private func broadcastCurrentStatus() {
+        guard let data = try? JSONEncoder().encode(currentStatus) else { return }
+        NotificationCenter.default.post(
+            name: CharkleSyncNotifications.didUpdateSyncStatus,
+            object: nil,
+            userInfo: [CharkleSyncNotifications.statusDataKey: data]
+        )
     }
 
     public func status() async -> SyncStatus {
@@ -46,32 +74,48 @@ public final actor DriveSyncEngine {
         guard !running else { throw DriveTransportError.notConfigured("当前已有同步任务正在运行，请稍候。") }
         running = true
         defer { running = false }
-        currentStatus.phase = .scanning
         currentStatus.activeMode = config.mode
+        currentStatus.lastError = nil
+        updateProgress(phase: .scanning, detail: "正在连接\(config.mode.localizedLabel)…", progress: 0.04, forceBroadcast: true)
         let start = ContinuousClock.now
         do {
             let account = try await transport.accountInfo()
             currentStatus.account = account
+            updateProgress(phase: .scanning, detail: "正在检查云端目录结构…", progress: 0.10, forceBroadcast: true)
             let sharedRootID = config.mode == .directAPIWithGDirect ? config.resolvedSharedFolderID : nil
             let rootPath = Self.resolvedRootPath(for: config)
-            let layout = try await makeLayout(using: transport, rootPath: rootPath, sharedRootID: sharedRootID)
+            let layoutResult = try await makeLayout(using: transport, rootPath: rootPath, sharedRootID: sharedRootID)
+            let layout = layoutResult.layout
             let scope = "remote." + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
-            try await updateManifest(layout, transport: transport)
+            try await updateManifest(layout, existingManifest: layoutResult.manifestFile, scope: scope, transport: transport)
 
             var report = SyncReport()
+            updateProgress(phase: .downloading(completed: 0, total: 0), detail: "正在拉取其他设备的变更记录…", progress: 0.16, forceBroadcast: true)
             var pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
             report.downloadedOps += pulled.count
             var changedBoards = pulled.boards
 
             let pending = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
+            currentStatus.pendingOpCount = pending.count
+            updateProgress(phase: .scanning, detail: "正在扫描云端文件变更…", progress: 0.26, forceBroadcast: true)
             let inventory = try await fetchInventory(
                 layout,
                 transport: transport,
                 scope: scope,
                 forceFullCrawl: sharedRootID != nil
             )
-            currentStatus.phase = .merging
-            let reconciled = try await reconcile(inventory, layout: layout, transport: transport, config: config, pending: pending)
+            let remoteThumbnails = config.syncThumbnails
+                ? keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails))
+                : [:]
+            updateProgress(phase: .merging, detail: "正在比对云端与本地目录…", progress: 0.32, forceBroadcast: true)
+            let reconciled = try await reconcile(
+                inventory,
+                layout: layout,
+                transport: transport,
+                config: config,
+                pending: pending,
+                remoteThumbnails: remoteThumbnails
+            )
             report.discoveredRemoteAssets = reconciled.discovered
             report.discoveredAssetIDs = reconciled.discoveredIDs
             report.reconciledRenames = reconciled.renames
@@ -79,12 +123,22 @@ public final actor DriveSyncEngine {
             for deferredID in reconciled.deferredFileIDs {
                 savedFiles.removeValue(forKey: deferredID)
             }
-            let state = SavedInventory(files: savedFiles, startPageToken: inventory.current.startPageToken)
+            for removedID in reconciled.removedFileIDs {
+                savedFiles.removeValue(forKey: removedID)
+            }
+            var state = SavedInventory(files: savedFiles, startPageToken: inventory.current.startPageToken)
             try await database.setState(scope + ".inventory", state)
 
             if !pending.isEmpty {
-                currentStatus.phase = .uploading(completed: 0, total: pending.count)
-                try await uploadPhysical(for: pending.map { $0.1 }, layout: layout, transport: transport, scope: scope)
+                updateProgress(phase: .uploading(completed: 0, total: pending.count), detail: "准备上传本地新增与变更…", progress: 0.62, forceBroadcast: true)
+                let removedByUpload = try await uploadPhysical(for: pending.map { $0.1 }, layout: layout, transport: transport, scope: scope)
+                if !removedByUpload.isEmpty {
+                    for removedID in removedByUpload {
+                        savedFiles.removeValue(forKey: removedID)
+                    }
+                    state = SavedInventory(files: savedFiles, startPageToken: inventory.current.startPageToken)
+                    try await database.setState(scope + ".inventory", state)
+                }
             }
             // Physical uploads can enqueue Drive identity bindings. Each shard has an immutable name.
             let ready = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
@@ -107,13 +161,23 @@ public final actor DriveSyncEngine {
                 default: break
                 }
             }
-            report.uploadedOps = try await pushOps(publishable, to: transport, layout: layout, syncEmbeddings: config.syncEmbeddings)
-            pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
-            report.downloadedOps += pulled.count
-            changedBoards.formUnion(pulled.boards)
-            try await writeBoards(layout, transport: transport)
-            if config.syncThumbnails { try await syncThumbnails(layout, transport: transport, scope: scope) }
-            if config.syncEmbeddings { try await writeEmbeddings(layout, transport: transport) }
+            if !publishable.isEmpty {
+                updateProgress(phase: .uploading(completed: 0, total: publishable.count), detail: "正在上传同步日志…", progress: 0.82, forceBroadcast: true)
+                report.uploadedOps = try await pushOps(publishable, to: transport, layout: layout, syncEmbeddings: config.syncEmbeddings)
+                pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
+                report.downloadedOps += pulled.count
+                changedBoards.formUnion(pulled.boards)
+            }
+
+            updateProgress(phase: .merging, detail: "正在同步情绪板与缩略图…", progress: 0.88, forceBroadcast: true)
+            try await writeBoards(layout, transport: transport, scope: scope, changedBoards: changedBoards)
+            if config.syncThumbnails {
+                try await syncThumbnails(layout, transport: transport, scope: scope, prefetchedRemoteFiles: remoteThumbnails)
+            }
+            if config.syncEmbeddings {
+                updateProgress(phase: .merging, detail: "正在同步智能搜索索引…", progress: 0.94)
+                try await writeEmbeddings(layout, transport: transport)
+            }
             try await fetchPinnedOriginals(using: transport)
             try await database.removeDeletedMedia(using: media)
             report.updatedBoards = changedBoards.count
@@ -121,12 +185,19 @@ public final actor DriveSyncEngine {
             report.durationSeconds = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
             currentStatus.lastSyncedAt = Date()
             currentStatus.lastError = nil
+            currentStatus.pendingOpCount = (try? await database.pendingOpCount()) ?? 0
             currentStatus.phase = .idle
+            currentStatus.currentDetail = nil
+            currentStatus.progressFraction = nil
             try await database.setState("lastSyncStatus", currentStatus)
+            broadcastCurrentStatus()
             return report
         } catch {
             currentStatus.phase = .error(error.localizedDescription)
             currentStatus.lastError = error.localizedDescription
+            currentStatus.currentDetail = error.localizedDescription
+            currentStatus.progressFraction = nil
+            broadcastCurrentStatus()
             throw error
         }
     }
@@ -159,10 +230,42 @@ public final actor DriveSyncEngine {
     }
 
     private func fetchPinnedOriginals(using transport: any DriveTransport) async throws {
+        var missing: [UUID] = []
         for id in try await database.protectedAssetIDs() {
             guard let asset = try await database.asset(id: id), asset.driveFileID != nil,
                   media.cachedOriginal(for: asset) == nil else { continue }
-            _ = try await downloadOriginal(for: id, using: transport)
+            missing.append(id)
+        }
+        guard !missing.isEmpty else { return }
+        let limit = transport is MountedVolumeTransport ? 2 : 4
+        let total = missing.count
+        var done = 0
+        updateProgress(
+            phase: .downloading(completed: 0, total: total),
+            detail: "下载常驻本地原图 (0/\(total))",
+            progress: 0.97,
+            forceBroadcast: true
+        )
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var nextIndex = 0
+            while nextIndex < min(limit, missing.count) {
+                let id = missing[nextIndex]
+                nextIndex += 1
+                group.addTask { _ = try await self.downloadOriginal(for: id, using: transport) }
+            }
+            while try await group.next() != nil {
+                done += 1
+                updateProgress(
+                    phase: .downloading(completed: done, total: total),
+                    detail: "下载常驻本地原图 (\(done)/\(total))",
+                    progress: 0.97 + 0.02 * (Double(done) / Double(max(1, total)))
+                )
+                if nextIndex < missing.count {
+                    let id = missing[nextIndex]
+                    nextIndex += 1
+                    group.addTask { _ = try await self.downloadOriginal(for: id, using: transport) }
+                }
+            }
         }
     }
 
@@ -194,7 +297,11 @@ public final actor DriveSyncEngine {
         }
     }
 
-    private func makeLayout(using transport: any DriveTransport, rootPath: String, sharedRootID: String? = nil) async throws -> Layout {
+    private func makeLayout(
+        using transport: any DriveTransport,
+        rootPath: String,
+        sharedRootID: String? = nil
+    ) async throws -> (layout: Layout, manifestFile: RemoteDriveFile?) {
         let root: RemoteDriveFile
         if let sharedRootID, !sharedRootID.isEmpty {
             root = try await transport.resolveFolder(id: sharedRootID)
@@ -217,23 +324,81 @@ public final actor DriveSyncEngine {
             }
             root = resolvedRoot
         }
-        async let inbox = transport.findOrCreateFolder(named: "Inbox", parentID: root.id)
-        let metadata = try await transport.findOrCreateFolder(named: ".charkle", parentID: root.id)
-        async let ops = transport.findOrCreateFolder(named: "ops", parentID: metadata.id)
-        async let boards = transport.findOrCreateFolder(named: "boards", parentID: metadata.id)
-        async let embeddings = transport.findOrCreateFolder(named: "embeddings", parentID: metadata.id)
-        async let thumbnails = transport.findOrCreateFolder(named: "thumbnails", parentID: metadata.id)
-        return try await Layout(root: root.id, inbox: inbox.id, metadata: metadata.id, ops: ops.id,
-                                boards: boards.id, embeddings: embeddings.id, thumbnails: thumbnails.id)
+
+        // Single directory listing for root resolves both `Inbox` and `.charkle` without 2 separate queries
+        let rootChildren = try await transport.listFiles(inFolderID: root.id)
+        let existingInbox = Self.oldestSubfolder(named: "Inbox", in: rootChildren)
+        let existingMeta = Self.oldestSubfolder(named: ".charkle", in: rootChildren)
+
+        async let inboxFolder: RemoteDriveFile = {
+            if let existingInbox { return existingInbox }
+            return try await transport.findOrCreateFolder(named: "Inbox", parentID: root.id)
+        }()
+        let metadata: RemoteDriveFile = if let existingMeta {
+            existingMeta
+        } else {
+            try await transport.findOrCreateFolder(named: ".charkle", parentID: root.id)
+        }
+
+        // Single directory listing for `.charkle` resolves all 4 system subfolders AND `manifest.json`
+        let metaChildren = try await transport.listFiles(inFolderID: metadata.id)
+        let existingOps = Self.oldestSubfolder(named: "ops", in: metaChildren)
+        let existingBoards = Self.oldestSubfolder(named: "boards", in: metaChildren)
+        let existingEmbeddings = Self.oldestSubfolder(named: "embeddings", in: metaChildren)
+        let existingThumbnails = Self.oldestSubfolder(named: "thumbnails", in: metaChildren)
+        let manifestFile = metaChildren.first(where: { !$0.isFolder && $0.name == "manifest.json" })
+
+        async let ops: RemoteDriveFile = {
+            if let existingOps { return existingOps }
+            return try await transport.findOrCreateFolder(named: "ops", parentID: metadata.id)
+        }()
+        async let boards: RemoteDriveFile = {
+            if let existingBoards { return existingBoards }
+            return try await transport.findOrCreateFolder(named: "boards", parentID: metadata.id)
+        }()
+        async let embeddings: RemoteDriveFile = {
+            if let existingEmbeddings { return existingEmbeddings }
+            return try await transport.findOrCreateFolder(named: "embeddings", parentID: metadata.id)
+        }()
+        async let thumbnails: RemoteDriveFile = {
+            if let existingThumbnails { return existingThumbnails }
+            return try await transport.findOrCreateFolder(named: "thumbnails", parentID: metadata.id)
+        }()
+        let layout = try await Layout(
+            root: root.id,
+            inbox: inboxFolder.id,
+            metadata: metadata.id,
+            ops: ops.id,
+            boards: boards.id,
+            embeddings: embeddings.id,
+            thumbnails: thumbnails.id
+        )
+        return (layout, manifestFile)
     }
 
-    private func updateManifest(_ layout: Layout, transport: any DriveTransport) async throws {
-        if let known = try await transport.listFiles(inFolderID: layout.metadata).first(where: { $0.name == "manifest.json" }) {
+    private static func oldestSubfolder(named name: String, in files: [RemoteDriveFile]) -> RemoteDriveFile? {
+        files
+            .filter { $0.isFolder && $0.name == name }
+            .min { ($0.modifiedTime ?? .distantPast, $0.id) < ($1.modifiedTime ?? .distantPast, $1.id) }
+    }
+
+    private func updateManifest(
+        _ layout: Layout,
+        existingManifest: RemoteDriveFile?,
+        scope: String,
+        transport: any DriveTransport
+    ) async throws {
+        if let known = existingManifest {
+            let stamp = known.id + ":" + (known.md5Checksum ?? String(known.modifiedTime?.timeIntervalSince1970 ?? 0))
+            if try await database.state(scope + ".manifestVerified", as: String.self) == stamp {
+                return
+            }
             let data = try await transport.downloadData(fileID: known.id)
             let manifest = try JSONDecoder().decode(Manifest.self, from: data)
             guard manifest.version == 1 else {
                 throw DriveTransportError.invalidResponse("Unsupported Charkle sync protocol \(manifest.version).")
             }
+            try await database.setState(scope + ".manifestVerified", stamp)
             return
         }
         let mounted = transport is MountedVolumeTransport
@@ -242,8 +407,10 @@ public final actor DriveSyncEngine {
             "embeddings": layout.embeddings, "thumbnails": layout.thumbnails
         ])
         let data = try encoded(manifest)
-        _ = try await write(data, name: "manifest.json", mime: "application/json", parent: layout.metadata,
-                            existing: nil, transport: transport)
+        let uploaded = try await write(data, name: "manifest.json", mime: "application/json", parent: layout.metadata,
+                                       existing: nil, transport: transport)
+        let stamp = uploaded.id + ":" + (uploaded.md5Checksum ?? String(uploaded.modifiedTime?.timeIntervalSince1970 ?? 0))
+        try await database.setState(scope + ".manifestVerified", stamp)
     }
 
     private struct LogLine: Codable, Sendable {
@@ -359,28 +526,73 @@ public final actor DriveSyncEngine {
                 uploaded += bytes.split(separator: 0x0A).count
             }
             try await database.acknowledgeOps(through: end)
-            currentStatus.phase = .uploading(completed: min(operations.count, start + 200), total: operations.count)
+            let doneOps = min(operations.count, start + 200)
+            let opRatio = 0.82 + 0.05 * (Double(doneOps) / Double(max(1, operations.count)))
+            updateProgress(
+                phase: .uploading(completed: doneOps, total: operations.count),
+                detail: "同步变更日志 (\(doneOps)/\(operations.count))",
+                progress: opRatio
+            )
         }
         return uploaded
     }
 
-    private func writeBoards(_ layout: Layout, transport: any DriveTransport) async throws {
+    private func writeBoards(
+        _ layout: Layout,
+        transport: any DriveTransport,
+        scope: String,
+        changedBoards: Set<UUID>
+    ) async throws {
         let dirty: [String: String] = try await database.state("projection.boards") ?? [:]
+        let initialized = try await database.state(scope + ".boardsSynced", as: Bool.self) ?? false
+        guard !dirty.isEmpty || !changedBoards.isEmpty || !initialized else { return }
+
         let files = keyedByName(try await transport.listFiles(inFolderID: layout.boards))
         let documents = try await database.fetchBoards()
         // Check the full file checksum so another device's last write cannot leave a stale board projection.
+        let concurrency = transport is MountedVolumeTransport ? 2 : 4
+        var writeJobs: [(id: String, name: String, data: Data, existing: RemoteDriveFile?, mark: String?)] = []
+        writeJobs.reserveCapacity(documents.count)
         for document in documents {
             let id = document.id.uuidString
             let name = id.lowercased() + ".json"
             let data = try encoded(document)
-            _ = try await write(data, name: name, mime: "application/json", parent: layout.boards, existing: files[name],
-                                transport: transport, allowOverwriteExisting: true)
-            if let mark = dirty[id] { try await database.clearProjection("boards", id: id, ifVersion: mark) }
+            writeJobs.append((id: id, name: name, data: data, existing: files[name], mark: dirty[id]))
+        }
+
+        let clearedMarks = try await Self.runBounded(items: writeJobs, maxConcurrent: concurrency) { job -> (String, String)? in
+            _ = try await Self.writeBlob(
+                job.data,
+                name: job.name,
+                mime: "application/json",
+                parent: layout.boards,
+                existing: job.existing,
+                transport: transport,
+                allowOverwriteExisting: true
+            )
+            return job.mark.map { (job.id, $0) }
         }
         let active = Set(documents.map { $0.id.uuidString })
+        var deletions: [(id: String, version: String, remoteID: String?)] = []
         for (id, version) in dirty where !active.contains(id) {
-            if let file = files[id.lowercased() + ".json"] { try await trashIfPresent(file.id, transport: transport) }
-            try await database.clearProjection("boards", id: id, ifVersion: version)
+            deletions.append((id: id, version: version, remoteID: files[id.lowercased() + ".json"]?.id))
+        }
+        if !deletions.isEmpty {
+            _ = try await Self.runBounded(items: deletions, maxConcurrent: concurrency) { item in
+                if let remoteID = item.remoteID {
+                    try await Self.trashIfPresentStatic(remoteID, transport: transport)
+                }
+            }
+        }
+        let deletionsToClear = deletions
+        try await database.transaction { store in
+            for pair in clearedMarks.compactMap({ $0 }) {
+                try store.clearProjection("boards", id: pair.0, ifVersion: pair.1)
+            }
+            for item in deletionsToClear {
+                try store.clearProjection("boards", id: item.id, ifVersion: item.version)
+            }
+            try store.setState(scope + ".boardsSynced", true)
         }
     }
 
@@ -398,63 +610,325 @@ public final actor DriveSyncEngine {
         let vectors = try await database.vectors()
         let grouped = Dictionary(grouping: dirty.keys) { String($0.lowercased().prefix(2)) }
         let shards = Dictionary(grouping: vectors.keys) { String($0.uuidString.lowercased().prefix(2)) }
-        for (prefix, touched) in grouped {
+        let concurrency = transport is MountedVolumeTransport ? 2 : 6
+
+        struct ShardJob: Sendable {
+            let name: String
+            let existing: RemoteDriveFile?
+            let touched: [(id: String, version: String)]
+            let removedIDs: [String]
+            let entries: [String: EmbeddingBlob]
+        }
+
+        var jobs: [ShardJob] = []
+        jobs.reserveCapacity(grouped.count)
+        for (prefix, touchedKeys) in grouped.sorted(by: { $0.key < $1.key }) {
             let name = "shard-\(prefix).bin"
-            let existing = files[name]
-            var shard: [String: EmbeddingBlob] = [:]
-            if let existing {
-                let data = try await transport.downloadData(fileID: existing.id)
-                shard = try PropertyListDecoder().decode([String: EmbeddingBlob].self, from: data)
-            }
+            var entries: [String: EmbeddingBlob] = [:]
             for id in shards[prefix, default: []] {
                 if let vector = vectors[id] {
-                    shard[id.uuidString] = EmbeddingBlob(feature: vector.featurePrint,
-                                                        semantic: vector.embedding.map { vector.precision.encode($0) },
-                                                        precision: vector.precision, model: vector.embeddingModel)
+                    entries[id.uuidString] = EmbeddingBlob(
+                        feature: vector.featurePrint,
+                        semantic: vector.embedding.map { vector.precision.encode($0) },
+                        precision: vector.precision,
+                        model: vector.embeddingModel
+                    )
                 }
             }
-            for id in touched where UUID(uuidString: id).map({ vectors[$0] == nil }) == true { shard.removeValue(forKey: id) }
-            let encoder = PropertyListEncoder()
-            encoder.outputFormat = .binary
-            _ = try await write(encoder.encode(shard), name: name, mime: "application/octet-stream",
-                                parent: layout.embeddings, existing: existing, transport: transport,
-                                allowOverwriteExisting: true)
-            for id in touched {
-                if let version = dirty[id] { try await database.clearProjection("embeddings", id: id, ifVersion: version) }
+            let removed = touchedKeys.filter { UUID(uuidString: $0).map { vectors[$0] == nil } == true }
+            let touchedPairs = touchedKeys.compactMap { id -> (String, String)? in
+                dirty[id].map { (id, $0) }
+            }
+            jobs.append(ShardJob(
+                name: name,
+                existing: files[name],
+                touched: touchedPairs,
+                removedIDs: removed,
+                entries: entries
+            ))
+        }
+
+        let total = jobs.count
+        var completed = 0
+        var clearedBatch: [(String, String)] = []
+        updateProgress(
+            phase: .merging,
+            detail: "同步智能搜索索引 (0/\(total))",
+            progress: 0.94,
+            forceBroadcast: true
+        )
+        try await withThrowingTaskGroup(of: [(String, String)].self) { group in
+            var nextIndex = 0
+            let enqueue: (inout ThrowingTaskGroup<[(String, String)], Error>) -> Void = { grp in
+                guard nextIndex < total else { return }
+                let job = jobs[nextIndex]
+                nextIndex += 1
+                grp.addTask {
+                    var shard: [String: EmbeddingBlob] = [:]
+                    if let existing = job.existing {
+                        let data = try await transport.downloadData(fileID: existing.id)
+                        shard = try PropertyListDecoder().decode([String: EmbeddingBlob].self, from: data)
+                    }
+                    for (key, value) in job.entries {
+                        shard[key] = value
+                    }
+                    for id in job.removedIDs {
+                        shard.removeValue(forKey: id)
+                    }
+                    let encoder = PropertyListEncoder()
+                    encoder.outputFormat = .binary
+                    _ = try await Self.writeBlob(
+                        encoder.encode(shard),
+                        name: job.name,
+                        mime: "application/octet-stream",
+                        parent: layout.embeddings,
+                        existing: job.existing,
+                        transport: transport,
+                        allowOverwriteExisting: true
+                    )
+                    return job.touched
+                }
+            }
+            for _ in 0..<min(concurrency, total) { enqueue(&group) }
+            while let touched = try await group.next() {
+                enqueue(&group)
+                clearedBatch.append(contentsOf: touched)
+                completed += 1
+                if clearedBatch.count >= 25 {
+                    let flush = clearedBatch
+                    clearedBatch.removeAll(keepingCapacity: true)
+                    try await database.transaction { store in
+                        for (id, version) in flush {
+                            try store.clearProjection("embeddings", id: id, ifVersion: version)
+                        }
+                    }
+                }
+                updateProgress(
+                    phase: .merging,
+                    detail: "同步智能搜索索引 (\(completed)/\(total))",
+                    progress: 0.94 + 0.03 * (Double(completed) / Double(max(1, total)))
+                )
+            }
+        }
+        if !clearedBatch.isEmpty {
+            let flush = clearedBatch
+            try await database.transaction { store in
+                for (id, version) in flush {
+                    try store.clearProjection("embeddings", id: id, ifVersion: version)
+                }
             }
         }
     }
 
-    private func syncThumbnails(_ layout: Layout, transport: any DriveTransport, scope: String) async throws {
-        let files = keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails))
+    private func syncThumbnails(
+        _ layout: Layout,
+        transport: any DriveTransport,
+        scope: String,
+        prefetchedRemoteFiles: [String: RemoteDriveFile]? = nil
+    ) async throws {
+        let files: [String: RemoteDriveFile]
+        if let prefetchedRemoteFiles {
+            files = prefetchedRemoteFiles
+        } else {
+            files = keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails))
+        }
         let dirty: [String: String] = try await database.state("projection.thumbnails") ?? [:]
+        let concurrency = transport is MountedVolumeTransport ? 2 : 8
+
+        // 1. Upload or delete dirty local thumbnails in bounded parallel (with live progress)
+        struct ThumbUploadJob: Sendable {
+            let id: String
+            let version: String
+            let name: String
+            let localURL: URL?
+            let existing: RemoteDriveFile?
+        }
+        var uploadJobs: [ThumbUploadJob] = []
+        uploadJobs.reserveCapacity(dirty.count)
         for (id, version) in dirty {
             guard let uuid = UUID(uuidString: id) else { continue }
             let name = id.lowercased() + ".jpg"
-            if let thumbnail = media.thumbnailURL(for: uuid, tier: .grid520), try await database.asset(id: uuid) != nil {
-                _ = try await write(Data(contentsOf: thumbnail), name: name, mime: "image/jpeg", parent: layout.thumbnails,
-                                    existing: files[name], transport: transport, allowOverwriteExisting: true)
-            } else if try await database.asset(id: uuid) == nil, let existing = files[name] {
-                try await trashIfPresent(existing.id, transport: transport)
-            }
-            try await database.clearProjection("thumbnails", id: id, ifVersion: version)
+            let assetExists = try await database.asset(id: uuid) != nil
+            let localURL = assetExists ? media.thumbnailURL(for: uuid, tier: .grid520) : nil
+            uploadJobs.append(ThumbUploadJob(
+                id: id,
+                version: version,
+                name: name,
+                localURL: localURL,
+                existing: files[name]
+            ))
         }
+        if !uploadJobs.isEmpty {
+            let totalUploads = uploadJobs.count
+            var completedUploads = 0
+            var clearedBatch: [(String, String)] = []
+            clearedBatch.reserveCapacity(32)
+            updateProgress(
+                phase: .uploading(completed: 0, total: totalUploads),
+                detail: "同步缩略图 (0/\(totalUploads))",
+                progress: 0.88,
+                forceBroadcast: true
+            )
+            try await withThrowingTaskGroup(of: (String, String).self) { group in
+                var nextIndex = 0
+                let enqueue: (inout ThrowingTaskGroup<(String, String), Error>) -> Void = { grp in
+                    guard nextIndex < totalUploads else { return }
+                    let job = uploadJobs[nextIndex]
+                    nextIndex += 1
+                    grp.addTask {
+                        if let localURL = job.localURL {
+                            let data = try Data(contentsOf: localURL)
+                            _ = try await Self.writeBlob(
+                                data,
+                                name: job.name,
+                                mime: "image/jpeg",
+                                parent: layout.thumbnails,
+                                existing: job.existing,
+                                transport: transport,
+                                allowOverwriteExisting: true
+                            )
+                        } else if let existing = job.existing {
+                            try await Self.trashIfPresentStatic(existing.id, transport: transport)
+                        }
+                        return (job.id, job.version)
+                    }
+                }
+                for _ in 0..<min(concurrency, totalUploads) { enqueue(&group) }
+                while let done = try await group.next() {
+                    enqueue(&group)
+                    clearedBatch.append(done)
+                    completedUploads += 1
+                    if clearedBatch.count >= 25 {
+                        let flush = clearedBatch
+                        clearedBatch.removeAll(keepingCapacity: true)
+                        try await database.transaction { store in
+                            for (id, version) in flush {
+                                try store.clearProjection("thumbnails", id: id, ifVersion: version)
+                            }
+                        }
+                    }
+                    let ratio = 0.88 + 0.03 * (Double(completedUploads) / Double(max(1, totalUploads)))
+                    updateProgress(
+                        phase: .uploading(completed: completedUploads, total: totalUploads),
+                        detail: "上传缩略图 (\(completedUploads)/\(totalUploads))",
+                        progress: ratio
+                    )
+                }
+            }
+            if !clearedBatch.isEmpty {
+                let flush = clearedBatch
+                try await database.transaction { store in
+                    for (id, version) in flush {
+                        try store.clearProjection("thumbnails", id: id, ifVersion: version)
+                    }
+                }
+            }
+        }
+
+        // 2. Download missing or updated remote thumbnails in bounded parallel
+        //    Check local MD5 first so switching transport scopes never re-downloads identical local thumbnails.
         var stamps: [String: String] = try await database.state(scope + ".thumbnails") ?? [:]
+        var stampsDirty = false
+        struct ThumbDownloadJob: Sendable {
+            let id: UUID
+            let key: String
+            let stamp: String
+            let remoteID: String
+            let destination: URL
+        }
+        var downloadJobs: [ThumbDownloadJob] = []
         for (name, file) in files where name.hasSuffix(".jpg") && !file.isFolder {
             guard let id = UUID(uuidString: String(name.dropLast(4))), dirty[id.uuidString] == nil,
                   try await database.asset(id: id) != nil else { continue }
             let key = id.uuidString
             let stamp = file.md5Checksum ?? (file.id + String(file.modifiedTime?.timeIntervalSince1970 ?? 0))
-            if stamps[key] == stamp, media.thumbnailURL(for: id, tier: .grid520) != nil { continue }
-            let data = try await transport.downloadData(fileID: file.id)
-            try data.write(to: media.thumbnailPath(id), options: .atomic)
-            stamps[key] = stamp
+            if let existingLocal = media.thumbnailURL(for: id, tier: .grid520) {
+                if stamps[key] == stamp { continue }
+                if let remoteMD5 = file.md5Checksum,
+                   let localData = try? Data(contentsOf: existingLocal),
+                   MediaPipeline.hex(Insecure.MD5.hash(data: localData)) == remoteMD5 {
+                    stamps[key] = stamp
+                    stampsDirty = true
+                    continue
+                }
+            }
+            downloadJobs.append(ThumbDownloadJob(
+                id: id,
+                key: key,
+                stamp: stamp,
+                remoteID: file.id,
+                destination: media.thumbnailPath(id)
+            ))
         }
-        try await database.setState(scope + ".thumbnails", stamps)
+        if !downloadJobs.isEmpty {
+            let totalDownloads = downloadJobs.count
+            var completedDownloads = 0
+            var unsavedCount = 0
+            updateProgress(
+                phase: .downloading(completed: 0, total: totalDownloads),
+                detail: "拉取缩略图 (0/\(totalDownloads))",
+                progress: 0.91,
+                forceBroadcast: true
+            )
+            try await withThrowingTaskGroup(of: (String, String).self) { group in
+                var nextIndex = 0
+                let enqueue: (inout ThrowingTaskGroup<(String, String), Error>) -> Void = { grp in
+                    guard nextIndex < totalDownloads else { return }
+                    let job = downloadJobs[nextIndex]
+                    nextIndex += 1
+                    grp.addTask {
+                        let data = try await transport.downloadData(fileID: job.remoteID)
+                        try data.write(to: job.destination, options: .atomic)
+                        return (job.key, job.stamp)
+                    }
+                }
+                for _ in 0..<min(concurrency, totalDownloads) { enqueue(&group) }
+                while let (key, stamp) = try await group.next() {
+                    enqueue(&group)
+                    stamps[key] = stamp
+                    stampsDirty = true
+                    completedDownloads += 1
+                    unsavedCount += 1
+                    if unsavedCount >= 25 {
+                        unsavedCount = 0
+                        try await database.setState(scope + ".thumbnails", stamps)
+                    }
+                    let ratio = 0.91 + 0.03 * (Double(completedDownloads) / Double(max(1, totalDownloads)))
+                    updateProgress(
+                        phase: .downloading(completed: completedDownloads, total: totalDownloads),
+                        detail: "拉取缩略图 (\(completedDownloads)/\(totalDownloads))",
+                        progress: ratio
+                    )
+                }
+            }
+        }
+        if stampsDirty {
+            try await database.setState(scope + ".thumbnails", stamps)
+        }
     }
 
     private func write(_ data: Data, name: String, mime: String, parent: String, existing: RemoteDriveFile?,
                        transport: any DriveTransport, allowOverwriteExisting: Bool = false) async throws -> RemoteDriveFile {
+        try await Self.writeBlob(
+            data,
+            name: name,
+            mime: mime,
+            parent: parent,
+            existing: existing,
+            transport: transport,
+            allowOverwriteExisting: allowOverwriteExisting
+        )
+    }
+
+    private nonisolated static func writeBlob(
+        _ data: Data,
+        name: String,
+        mime: String,
+        parent: String,
+        existing: RemoteDriveFile?,
+        transport: any DriveTransport,
+        allowOverwriteExisting: Bool = false
+    ) async throws -> RemoteDriveFile {
         if let existing {
             if let checksum = existing.md5Checksum {
                 if MediaPipeline.hex(Insecure.MD5.hash(data: data)) == checksum { return existing }
@@ -485,6 +959,42 @@ public final actor DriveSyncEngine {
             }
             throw error
         }
+    }
+
+    private nonisolated static func trashIfPresentStatic(_ id: String, transport: any DriveTransport) async throws {
+        do { try await transport.trashFile(fileID: id) }
+        catch DriveTransportError.fileNotFound { }
+        catch DriveTransportError.httpError(statusCode: 404, message: _) { }
+        catch DriveTransportError.httpError(statusCode: 403, message: _) { }
+    }
+
+    /// Executes `work` over `items` with a bounded sliding window of concurrent child tasks.
+    private nonisolated static func runBounded<Item: Sendable, Output: Sendable>(
+        items: [Item],
+        maxConcurrent: Int,
+        work: @escaping @Sendable (Item) async throws -> Output
+    ) async throws -> [Output] {
+        guard !items.isEmpty else { return [] }
+        let limit = max(1, min(maxConcurrent, items.count))
+        var results: [Output] = []
+        results.reserveCapacity(items.count)
+        try await withThrowingTaskGroup(of: Output.self) { group in
+            var nextIndex = 0
+            while nextIndex < limit {
+                let item = items[nextIndex]
+                nextIndex += 1
+                group.addTask { try await work(item) }
+            }
+            while let value = try await group.next() {
+                results.append(value)
+                if nextIndex < items.count {
+                    let item = items[nextIndex]
+                    nextIndex += 1
+                    group.addTask { try await work(item) }
+                }
+            }
+        }
+        return results
     }
 
     private func encoded<T: Encodable>(_ value: T) throws -> Data {
@@ -568,16 +1078,24 @@ extension DriveSyncEngine {
 
     private func collectChildren(of root: String, into files: inout [String: RemoteDriveFile], layout: Layout,
                                  transport: any DriveTransport) async throws {
-        var folders = [root]
+        let concurrency = transport is MountedVolumeTransport ? 2 : 6
+        var frontier = [root]
         var seen = Set<String>()
-        var index = 0
-        while index < folders.count {
-            let folder = folders[index]
-            index += 1
-            guard seen.insert(folder).inserted else { continue }
-            for file in try await transport.listFiles(inFolderID: folder) where isVisible(file, layout: layout) {
-                files[file.id] = file
-                if file.isFolder { folders.append(file.id) }
+        while !frontier.isEmpty {
+            let wave = frontier.filter { seen.insert($0).inserted }
+            frontier.removeAll(keepingCapacity: true)
+            guard !wave.isEmpty else { break }
+
+            let listedBatches = try await Self.runBounded(items: wave, maxConcurrent: concurrency) { folder in
+                try await transport.listFiles(inFolderID: folder)
+            }
+            for batch in listedBatches {
+                for file in batch where isVisible(file, layout: layout) {
+                    files[file.id] = file
+                    if file.isFolder {
+                        frontier.append(file.id)
+                    }
+                }
             }
         }
     }
@@ -678,36 +1196,81 @@ extension DriveSyncEngine {
         return false
     }
 
-    private func reconcile(_ update: InventoryUpdate, layout: Layout, transport: any DriveTransport,
-                           config: DriveSyncConfig, pending: [(Int64, SyncOperation)]) async throws -> (discovered: Int, discoveredIDs: [UUID], renames: Int, deferredFileIDs: Set<String>) {
-        // Clear stale mounted-path deletion markers once the deleted file is confirmed gone from disk,
-        // so dropping a brand-new file with the same name later is never silently blocked.
-        let activeFileIDs = Set(update.current.files.keys)
-        let deletedMarkers: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.drive." + MountedVolumeTransport.pathIDPrefix, as: Bool.self)) ?? []
-        if !deletedMarkers.isEmpty {
-            let markersToClear = deletedMarkers.compactMap { key, _ -> String? in
-                let remoteID = String(key.dropFirst("deleted.drive.".count))
-                return activeFileIDs.contains(remoteID) ? nil : key
+    private struct RemoteDownloadJob: Sendable {
+        let file: RemoteDriveFile
+        let folderID: UUID?
+        let existing: AssetRecord?
+    }
+
+    private struct PreparedRemoteAsset: Sendable {
+        let file: RemoteDriveFile
+        let existing: AssetRecord?
+        let matching: AssetRecord?
+        let folderURL: URL
+        let temporaryURL: URL
+        let rendered: AssetRecord
+        let analysis: LocalAnalysisResult
+    }
+
+    private enum RemoteDownloadOutcome: Sendable {
+        case prepared(PreparedRemoteAsset)
+        case skipped(fileName: String)
+        case deferred(fileID: String, fileName: String)
+        case deletedLocally(fileID: String, fileName: String)
+    }
+
+    private func reconcile(
+        _ update: InventoryUpdate,
+        layout: Layout,
+        transport: any DriveTransport,
+        config: DriveSyncConfig,
+        pending: [(Int64, SyncOperation)],
+        remoteThumbnails: [String: RemoteDriveFile]? = nil
+    ) async throws -> (discovered: Int, discoveredIDs: [UUID], renames: Int, deferredFileIDs: Set<String>, removedFileIDs: Set<String>) {
+        let isMountedTransport = transport is MountedVolumeTransport
+        var pendingMoves = Set<UUID>()
+        var pendingFolders = Set<UUID>()
+        var pendingDeletedDriveIDs = Set<String>()
+        for (_, op) in pending {
+            switch op.change {
+            case .asset(let delta) where delta.touchesLocation && op.projectLocation != false:
+                pendingMoves.insert(delta.id)
+            case .folder(let folder) where op.projectLocation != false:
+                pendingFolders.insert(folder.id)
+            case .deleteAsset(let id, let driveID):
+                if let driveID {
+                    pendingDeletedDriveIDs.insert(driveID)
+                }
+                if isMountedTransport,
+                   let local = try? await database.state("local.delete.asset." + id.uuidString, as: String.self) {
+                    pendingDeletedDriveIDs.insert(local)
+                }
+            default: break
             }
-            if !markersToClear.isEmpty {
-                try? await database.transaction { store in
-                    for key in markersToClear {
-                        try store.setState(key, Optional<Bool>.none)
+        }
+
+        // Only clear stale mounted-path deletion markers when actively syncing MountedVolumeTransport
+        // and the file is confirmed absent from the mounted filesystem (and not pending deletion).
+        if isMountedTransport {
+            let activeFileIDs = Set(update.current.files.keys)
+            let deletedMarkers: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.drive." + MountedVolumeTransport.pathIDPrefix, as: Bool.self)) ?? []
+            if !deletedMarkers.isEmpty {
+                let markersToClear = deletedMarkers.compactMap { key, _ -> String? in
+                    let remoteID = String(key.dropFirst("deleted.drive.".count))
+                    guard !activeFileIDs.contains(remoteID), !pendingDeletedDriveIDs.contains(remoteID) else { return nil }
+                    return key
+                }
+                if !markersToClear.isEmpty {
+                    try? await database.transaction { store in
+                        for key in markersToClear {
+                            try store.setState(key, Optional<Bool>.none)
+                        }
                     }
                 }
             }
         }
 
         var folderIDs: [String: UUID] = [:]
-        var pendingMoves = Set<UUID>()
-        var pendingFolders = Set<UUID>()
-        for (_, op) in pending {
-            switch op.change {
-            case .asset(let delta) where delta.touchesLocation && op.projectLocation != false: pendingMoves.insert(delta.id)
-            case .folder(let folder) where op.projectLocation != false: pendingFolders.insert(folder.id)
-            default: break
-            }
-        }
         var folders = try await database.fetchFolders()
         for file in update.orderedFolders where file.id != layout.inbox {
             let parent = file.parents.first.flatMap { folderIDs[$0] }
@@ -739,11 +1302,17 @@ extension DriveSyncEngine {
             folderIDs[file.id] = record.id
             if let found { folders[found] = record } else { folders.append(record) }
         }
-        let thumbnails = config.syncThumbnails ? keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails)) : [:]
+        let thumbnails: [String: RemoteDriveFile]
+        if let remoteThumbnails {
+            thumbnails = remoteThumbnails
+        } else {
+            thumbnails = config.syncThumbnails ? keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails)) : [:]
+        }
         var discovered = 0
         var discoveredIDs: [UUID] = []
         var renames = 0
         var deferredFileIDs = Set<String>()
+        var removedFileIDs = Set<String>()
         let bindings = try await database.assetDriveBindings()
         var linked = Dictionary(uniqueKeysWithValues: bindings)
         let visible = update.current.files.values.filter { file in
@@ -752,9 +1321,24 @@ extension DriveSyncEngine {
             guard let id = linked[file.id] else { return true }
             return media.thumbnailURL(for: id, tier: .grid520) == nil
         }.sorted { $0.id < $1.id }
+
+        // Phase 1: fast local metadata reconciliation & filter out assets that don't require remote bytes
+        var downloadJobs: [RemoteDownloadJob] = []
+        downloadJobs.reserveCapacity(visible.count)
         for file in visible {
             try Task.checkCancellation()
-            if try await database.state("deleted.drive." + file.id, as: Bool.self) == true { continue }
+            if pendingDeletedDriveIDs.contains(file.id) {
+                removedFileIDs.insert(file.id)
+                continue
+            }
+            if try await database.state("deleted.drive." + file.id, as: Bool.self) == true {
+                let compatibleWithTransport = isMountedTransport ? file.id.hasPrefix("mounted-") : !file.id.hasPrefix("mounted-")
+                if compatibleWithTransport {
+                    try await Self.trashIfPresentStatic(file.id, transport: transport)
+                }
+                removedFileIDs.insert(file.id)
+                continue
+            }
             if Self.isLikelyIncompleteZeroByteMedia(file) {
                 deferredFileIDs.insert(file.id)
                 continue
@@ -762,6 +1346,15 @@ extension DriveSyncEngine {
             let previous = update.previous[file.id]
             let folderID = file.parents.first.flatMap { folderIDs[$0] }
             let existing = try await linked[file.id].mapAsync { try await database.asset(id: $0) } ?? nil
+            if existing == nil,
+               let md5 = file.md5Checksum, !md5.isEmpty,
+               let deleted = try await database.state("deleted.md5." + md5, as: DeletedAssetFingerprint.self),
+               (try await database.assets(contentHash: deleted.sha256)).isEmpty {
+                try await Self.trashIfPresentStatic(file.id, transport: transport)
+                try? await database.setState("deleted.drive." + file.id, true)
+                removedFileIDs.insert(file.id)
+                continue
+            }
             let changedContent = Self.contentChanged(before: previous, after: file)
             if let existing, !changedContent || previous == nil {
                 if previous != file || existing.folderID == nil && folderID != nil {
@@ -774,25 +1367,112 @@ extension DriveSyncEngine {
                     || thumbnails[existing.id.uuidString.lowercased() + ".jpg"] != nil { continue }
                 if let cached = media.cachedOriginal(for: existing) {
                     let rendered = try await media.refreshed(existing, from: cached)
-                    _ = try await persistRemoteMedia(rendered, matching: existing, temporary: nil, config: config)
+                    let analysis: LocalAnalysisResult
+                    if rendered.mediaKind != .audio, let thumbnail = media.thumbnailURL(for: rendered.id, tier: .grid520) {
+                        analysis = await intelligence.analyze(thumbnailURL: thumbnail, includeColors: false)
+                    } else {
+                        analysis = LocalAnalysisResult()
+                    }
+                    _ = try await persistRemoteMedia(rendered, matching: existing, temporary: nil, analysis: analysis, config: config)
                     continue
                 }
             }
-            do {
-                let result = try await fetchRemoteAsset(file, folderID: folderID, existing: existing,
-                                                        current: update.current, config: config, transport: transport)
-                if let result {
-                    linked[file.id] = result.id
-                    if existing == nil && (result.id == DriveFiles.stableUUID("asset:" + file.id) || file.id.hasPrefix(MountedVolumeTransport.pathIDPrefix)) {
-                        discovered += 1
-                        discoveredIDs.append(result.id)
+            downloadJobs.append(RemoteDownloadJob(file: file, folderID: folderID, existing: existing))
+        }
+
+        // Phase 2: bounded parallel remote download + thumbnail rendering + Apple Vision analysis
+        if !downloadJobs.isEmpty {
+            let concurrency = transport is MountedVolumeTransport ? 2 : 6
+            let totalDownloads = downloadJobs.count
+            var completedDownloads = 0
+            let database = self.database
+            let media = self.media
+            let intelligence = self.intelligence
+            let currentInventory = update.current
+
+            updateProgress(
+                phase: .downloading(completed: 0, total: totalDownloads),
+                detail: "并行拉取 \(totalDownloads) 项素材…",
+                progress: 0.34,
+                forceBroadcast: true
+            )
+
+            try await withThrowingTaskGroup(of: RemoteDownloadOutcome.self) { group in
+                var nextIndex = 0
+                let launchNext: (inout ThrowingTaskGroup<RemoteDownloadOutcome, Error>) -> Void = { grp in
+                    guard nextIndex < totalDownloads else { return }
+                    let job = downloadJobs[nextIndex]
+                    nextIndex += 1
+                    grp.addTask {
+                        try await Self.downloadAndPrepareRemoteAsset(
+                            job: job,
+                            current: currentInventory,
+                            transport: transport,
+                            database: database,
+                            media: media,
+                            intelligence: intelligence
+                        )
                     }
-                    if let existing, existing.fileName != result.fileName || existing.folderID != result.folderID { renames += 1 }
                 }
-            } catch {
-                if Self.isFatalSyncError(error) { throw error }
-                // Isolate single-file corruption/export errors so other dropped files in Google Drive still ingest cleanly.
-                deferredFileIDs.insert(file.id)
+
+                for _ in 0..<min(concurrency, totalDownloads) {
+                    launchNext(&group)
+                }
+
+                while let outcome = try await group.next() {
+                    launchNext(&group)
+                    completedDownloads += 1
+                    let ratio = 0.34 + 0.26 * (Double(completedDownloads) / Double(max(1, totalDownloads)))
+                    switch outcome {
+                    case .prepared(let prepared):
+                        defer { try? FileManager.default.removeItem(at: prepared.folderURL) }
+                        let saved = try await persistRemoteMedia(
+                            prepared.rendered,
+                            matching: prepared.matching,
+                            temporary: prepared.temporaryURL,
+                            analysis: prepared.analysis,
+                            config: config,
+                            moveTemporary: true
+                        )
+                        if let saved {
+                            linked[prepared.file.id] = saved.id
+                            if prepared.existing == nil && (saved.id == DriveFiles.stableUUID("asset:" + prepared.file.id) || prepared.file.id.hasPrefix(MountedVolumeTransport.pathIDPrefix)) {
+                                discovered += 1
+                                discoveredIDs.append(saved.id)
+                            }
+                            if let existing = prepared.existing, existing.fileName != saved.fileName || existing.folderID != saved.folderID {
+                                renames += 1
+                            }
+                        }
+                        updateProgress(
+                            phase: .downloading(completed: completedDownloads, total: totalDownloads),
+                            detail: "拉取：\(prepared.file.name)",
+                            progress: ratio
+                        )
+                    case .skipped(let fileName):
+                        updateProgress(
+                            phase: .downloading(completed: completedDownloads, total: totalDownloads),
+                            detail: "跳过：\(fileName)",
+                            progress: ratio
+                        )
+                    case .deferred(let fileID, let fileName):
+                        deferredFileIDs.insert(fileID)
+                        updateProgress(
+                            phase: .downloading(completed: completedDownloads, total: totalDownloads),
+                            detail: "延后处理：\(fileName)",
+                            progress: ratio
+                        )
+                    case .deletedLocally(let fileID, let fileName):
+                        try await Self.trashIfPresentStatic(fileID, transport: transport)
+                        try? await database.setState("deleted.drive." + fileID, true)
+                        removedFileIDs.insert(fileID)
+                        updateProgress(
+                            phase: .downloading(completed: completedDownloads, total: totalDownloads),
+                            detail: "同步删除：\(fileName)",
+                            progress: ratio
+                        )
+                    }
+                }
             }
         }
 
@@ -805,7 +1485,7 @@ extension DriveSyncEngine {
                 _ = try store.saveAssetLocally(asset, projectLocation: false)
             }
         }
-        return (discovered, discoveredIDs, renames, deferredFileIDs)
+        return (discovered, discoveredIDs, renames, deferredFileIDs, removedFileIDs)
     }
 
     private static func contentChanged(before: RemoteDriveFile?, after: RemoteDriveFile) -> Bool {
@@ -846,65 +1526,110 @@ extension DriveSyncEngine {
         return file.name
     }
 
-    private func fetchRemoteAsset(_ file: RemoteDriveFile, folderID: UUID?, existing: AssetRecord?, current: SavedInventory,
-                                  config: DriveSyncConfig, transport: any DriveTransport) async throws -> AssetRecord? {
-        let folder = media.staging.appending(path: "remote-" + DriveFiles.stableUUID(file.id).uuidString, directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let isGoogleDocument = file.mimeType.hasPrefix("application/vnd.google-apps.")
-        let filename = Self.originalName(file)
-        let ext = (filename as NSString).pathExtension.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        let temporary = folder.appending(path: ext.isEmpty ? "content" : "content." + ext)
-        try await transport.downloadFile(fileID: file.id, to: temporary)
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let hash = try MediaPipeline.digests(temporary)
-        let matching: AssetRecord?
-        if let existing {
-            matching = existing
-        } else {
-            let matches = try await database.assets(contentHash: hash.sha256).filter {
-                ($0.driveFileID == nil && $0.fileName == filename && $0.folderID == folderID)
-                    || ($0.driveFileID.map { current.files[$0] == nil } == true && !$0.isTrashed)
-            }
-            if matches.count == 1 {
-                matching = matches.first
-            } else {
-                let exactLocation = matches.filter { $0.fileName == filename && $0.folderID == folderID }
-                matching = exactLocation.count == 1 ? exactLocation.first : nil
-            }
-        }
-        var id = matching?.id ?? DriveFiles.stableUUID("asset:" + file.id)
-        if try await database.isTombstoned("asset", id: id) {
-            // If an earlier mounted-path file was permanently deleted & already removed from disk,
-            // a brand-new file dropped later at the same filename gets a fresh UUID.
-            if matching == nil, file.id.hasPrefix(MountedVolumeTransport.pathIDPrefix) {
-                id = UUID()
-            } else {
-                return nil
-            }
-        }
+    /// Runs off-actor so multiple workers execute network download, digesting, thumbnail generation,
+    /// and Apple Vision analysis concurrently across network sockets, CPU cores, and Neural Engine.
+    private nonisolated static func downloadAndPrepareRemoteAsset(
+        job: RemoteDownloadJob,
+        current: SavedInventory,
+        transport: any DriveTransport,
+        database: LibraryDatabase,
+        media: MediaPipeline,
+        intelligence: IntelligenceEngine
+    ) async throws -> RemoteDownloadOutcome {
+        let file = job.file
+        let folder = media.staging.appending(
+            path: "remote-" + DriveFiles.stableUUID(file.id).uuidString + "-" + UUID().uuidString.prefix(8),
+            directoryHint: .isDirectory
+        )
+        do {
+            try Task.checkCancellation()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let isGoogleDocument = file.mimeType.hasPrefix("application/vnd.google-apps.")
+            let filename = Self.originalName(file)
+            let ext = (filename as NSString).pathExtension.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+            let temporary = folder.appending(path: ext.isEmpty ? "content" : "content." + ext)
 
-        let mime = isGoogleDocument ? "application/pdf" : file.mimeType
-        let naturalTitle = (filename as NSString).deletingPathExtension
-        var asset = matching ?? AssetRecord(id: id, title: naturalTitle, fileName: filename,
-                                            createdAt: file.modifiedTime ?? .now)
-        if asset.title == (asset.fileName as NSString).deletingPathExtension { asset.title = naturalTitle }
-        asset.fileName = filename
-        asset.foldRemote(fileID: file.id, folderID: folderID, kind: MediaKind.detect(fileExtension: ext, mimeType: mime),
-                         mime: mime, hash: hash.sha256, size: hash.bytes)
-        let rendered = try await media.refreshed(asset, from: temporary)
-        return try await persistRemoteMedia(rendered, matching: matching, temporary: temporary, config: config)
+            try await transport.downloadFile(file, to: temporary)
+            let hash = try MediaPipeline.digests(temporary)
+            let matching: AssetRecord?
+            if let existing = job.existing {
+                matching = existing
+            } else {
+                let matches = try await database.assets(contentHash: hash.sha256).filter {
+                    ($0.driveFileID == nil && $0.fileName == filename && $0.folderID == job.folderID)
+                        || ($0.driveFileID.map { current.files[$0] == nil } == true)
+                }
+                if matches.count == 1 {
+                    matching = matches.first
+                } else {
+                    let exactLocation = matches.filter { $0.fileName == filename && $0.folderID == job.folderID }
+                    matching = exactLocation.count == 1 ? exactLocation.first : nil
+                }
+            }
+            if matching == nil,
+               try await database.state("deleted.content." + hash.sha256, as: DeletedAssetFingerprint.self) != nil,
+               (try await database.assets(contentHash: hash.sha256)).isEmpty {
+                try? FileManager.default.removeItem(at: folder)
+                return .deletedLocally(fileID: file.id, fileName: file.name)
+            }
+            var id = matching?.id ?? DriveFiles.stableUUID("asset:" + file.id)
+            if try await database.isTombstoned("asset", id: id) {
+                if matching == nil, file.id.hasPrefix(MountedVolumeTransport.pathIDPrefix) {
+                    id = UUID()
+                } else {
+                    try? FileManager.default.removeItem(at: folder)
+                    return .skipped(fileName: file.name)
+                }
+            }
+
+            let mime = isGoogleDocument ? "application/pdf" : file.mimeType
+            let naturalTitle = (filename as NSString).deletingPathExtension
+            var asset = matching ?? AssetRecord(id: id, title: naturalTitle, fileName: filename,
+                                                createdAt: file.modifiedTime ?? .now)
+            if asset.title == (asset.fileName as NSString).deletingPathExtension { asset.title = naturalTitle }
+            asset.fileName = filename
+            asset.foldRemote(fileID: file.id, folderID: job.folderID, kind: MediaKind.detect(fileExtension: ext, mimeType: mime),
+                             mime: mime, hash: hash.sha256, size: hash.bytes)
+            let rendered = try await media.refreshed(asset, from: temporary)
+            let analysis: LocalAnalysisResult
+            if rendered.mediaKind != .audio, let thumbnail = media.thumbnailURL(for: rendered.id, tier: .grid520) {
+                analysis = await intelligence.analyze(thumbnailURL: thumbnail, includeColors: false)
+            } else {
+                analysis = LocalAnalysisResult()
+            }
+            return .prepared(PreparedRemoteAsset(
+                file: file,
+                existing: job.existing,
+                matching: matching,
+                folderURL: folder,
+                temporaryURL: temporary,
+                rendered: rendered,
+                analysis: analysis
+            ))
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            if Self.isFatalSyncError(error) { throw error }
+            return .deferred(fileID: file.id, fileName: file.name)
+        }
     }
 
-    private func persistRemoteMedia(_ rendered: AssetRecord, matching: AssetRecord?, temporary: URL?,
-                                    config: DriveSyncConfig) async throws -> AssetRecord? {
-        let analysis: LocalAnalysisResult
-        if rendered.mediaKind != .audio, let thumbnail = media.thumbnailURL(for: rendered.id, tier: .grid520) {
-            analysis = await intelligence.analyze(thumbnailURL: thumbnail, includeColors: false)
-        } else { analysis = LocalAnalysisResult() }
-        return try await database.transaction { [media] store in
+    private func persistRemoteMedia(
+        _ rendered: AssetRecord,
+        matching: AssetRecord?,
+        temporary: URL?,
+        analysis: LocalAnalysisResult,
+        config: DriveSyncConfig,
+        moveTemporary: Bool = false
+    ) async throws -> AssetRecord? {
+        try await database.transaction { [media] store in
             guard try !store.isTombstoned("asset", id: rendered.id) else { return nil }
             var result = rendered
             if let current = try store.asset(id: rendered.id), let matching {
+                // Guard against two parallel identical-content remote files claiming the same local record,
+                // while still allowing legitimate re-binding from nil or an obsolete/old-transport driveFileID.
+                if current.driveFileID != matching.driveFileID {
+                    return nil
+                }
                 result.notes = current.notes
                 result.tags = current.tags
                 result.suggestedTags = current.suggestedTags
@@ -918,7 +1643,7 @@ extension DriveSyncEngine {
             }
             result.ocrText = result.ocrText ?? analysis.ocrText
             if let temporary {
-                _ = try media.installOriginal(temporary, for: result)
+                _ = try media.installOriginal(temporary, for: result, moveSource: moveTemporary)
                 result.isLocalOriginalCached = true
             }
             let saved = try store.saveAssetLocally(result, projectLocation: false)
@@ -934,7 +1659,7 @@ extension DriveSyncEngine {
     }
 
     private func uploadPhysical(for operations: [SyncOperation], layout: Layout, transport: any DriveTransport,
-                                scope: String) async throws {
+                                scope: String) async throws -> Set<String> {
         var changedFolders = Set<UUID>()
         var movedAssets = Set<UUID>()
         var visitedAssets = Set<UUID>()
@@ -968,8 +1693,26 @@ extension DriveSyncEngine {
             }
         }
         let inventory: SavedInventory? = try await database.state(scope + ".inventory")
-        var listings: [String: [RemoteDriveFile]] = [:]
-        for id in visitedAssets.sorted(by: { $0.uuidString < $1.uuidString }) {
+        let orderedAssets = visitedAssets.sorted(by: { $0.uuidString < $1.uuidString })
+
+        struct MoveJob: Sendable {
+            let assetID: UUID
+            let remoteID: String
+            let oldParent: String?
+            let newParent: String
+            let newName: String?
+        }
+        struct PendingUploadAsset: Sendable {
+            let asset: AssetRecord
+            let parent: String
+            let localURL: URL
+        }
+
+        var moveJobs: [MoveJob] = []
+        var pendingUploads: [PendingUploadAsset] = []
+        var parentsToList = Set<String>()
+
+        for id in orderedAssets {
             guard let asset = try await database.asset(id: id) else { continue }
             let remote = asset.driveFileID.flatMap { inventory?.files[$0] }
             if remote != nil, !movedAssets.contains(id) { continue }
@@ -979,108 +1722,242 @@ extension DriveSyncEngine {
             if let remote {
                 let rename = Self.originalName(remote) == asset.fileName ? nil : asset.fileName
                 if remote.parents.first != parent || rename != nil {
-                    let moved = try await transport.moveFile(fileID: remote.id, fromParentID: remote.parents.first,
-                                                             toParentID: parent, newName: rename)
-                    if moved.id != remote.id {
-                        try await database.transaction { store in
-                            guard var current = try store.asset(id: id) else { return }
-                            current.driveFileID = moved.id
-                            _ = try store.saveAssetLocally(current, projectLocation: false)
-                        }
-                    }
+                    moveJobs.append(MoveJob(
+                        assetID: id,
+                        remoteID: remote.id,
+                        oldParent: remote.parents.first,
+                        newParent: parent,
+                        newName: rename
+                    ))
                 }
                 continue
             }
             guard asset.driveFileID == nil || asset.driveFileID?.hasPrefix("mounted-") == true,
                   let url = media.cachedOriginal(for: asset) else { continue }
-            var choices: [RemoteDriveFile]
-            if let known = listings[parent] { choices = known }
-            else { choices = try await transport.listFiles(inFolderID: parent) }
-            let hash = try MediaPipeline.digests(url)
-            let short = String(asset.id.uuidString.prefix(8)).lowercased()
-            let name = asset.fileName
-            let ext = (name as NSString).pathExtension
-            let suffix = ext.isEmpty ? "" : "." + ext
-            let alternative = (name as NSString).deletingPathExtension + "-" + short + suffix
-            var candidate = choices.first {
-                ($0.name.caseInsensitiveCompare(name) == .orderedSame
-                    || $0.name.caseInsensitiveCompare(alternative) == .orderedSame)
-                    && $0.md5Checksum == hash.md5
+            pendingUploads.append(PendingUploadAsset(asset: asset, parent: parent, localURL: url))
+            parentsToList.insert(parent)
+        }
+
+        let apiConcurrency = transport is MountedVolumeTransport ? 2 : 6
+
+        // 1. Execute remote renames/moves in bounded parallel
+        if !moveJobs.isEmpty {
+            let movedResults = try await Self.runBounded(items: moveJobs, maxConcurrent: apiConcurrency) { job -> (UUID, String)? in
+                let moved = try await transport.moveFile(
+                    fileID: job.remoteID,
+                    fromParentID: job.oldParent,
+                    toParentID: job.newParent,
+                    newName: job.newName
+                )
+                return moved.id != job.remoteID ? (job.assetID, moved.id) : nil
             }
-            var unbound = try await candidate.mapAsync { try await database.asset(driveID: $0.id) == nil } ?? false
-            if candidate == nil || !unbound {
-                for entry in choices where !entry.isFolder && entry.md5Checksum == nil && entry.size == hash.bytes && hash.bytes > 0 {
-                    guard entry.name.caseInsensitiveCompare(name) == .orderedSame
-                        || entry.name.caseInsensitiveCompare(alternative) == .orderedSame else { continue }
-                    guard try await database.asset(driveID: entry.id) == nil else { continue }
-                    if try await remoteFileMatchesHash(fileID: entry.id, expectedSHA256: hash.sha256, transport: transport) {
-                        candidate = entry
-                        unbound = true
-                        break
+            let updatedIDs = movedResults.compactMap { $0 }
+            if !updatedIDs.isEmpty {
+                try await database.transaction { store in
+                    for (assetID, newRemoteID) in updatedIDs {
+                        guard var current = try store.asset(id: assetID) else { continue }
+                        current.driveFileID = newRemoteID
+                        _ = try store.saveAssetLocally(current, projectLocation: false)
                     }
                 }
-            }
-            let uploaded: RemoteDriveFile
-            if let candidate, unbound {
-                uploaded = candidate
-            } else {
-                var takenNames = Set(choices.map { $0.name.lowercased() })
-                var uploadedFile: RemoteDriveFile?
-                for attempt in 0..<8 {
-                    let remoteName = Self.nextAvailableFileName(
-                        preferred: name,
-                        shortID: short,
-                        takenLowercasedNames: takenNames,
-                        startIndex: attempt
-                    )
-                    do {
-                        let file = try await transport.uploadFile(
-                            from: url,
-                            name: remoteName,
-                            mimeType: asset.mimeType,
-                            parentID: parent,
-                            existingFileID: nil
-                        )
-                        choices.append(file)
-                        uploadedFile = file
-                        break
-                    } catch DriveTransportError.fileAlreadyExists {
-                        takenNames.insert(remoteName.lowercased())
-                        choices = try await transport.listFiles(inFolderID: parent)
-                        for item in choices { takenNames.insert(item.name.lowercased()) }
-                    }
-                }
-                guard let resolvedUpload = uploadedFile else {
-                    throw DriveTransportError.fileAlreadyExists(name)
-                }
-                uploaded = resolvedUpload
-            }
-            listings[parent] = choices
-            try await database.transaction { store in
-                guard var current = try store.asset(id: id) else {
-                    // An in-flight deletion must be able to finish trashing the uploaded original.
-                    try store.record(.deleteAsset(id, driveID: uploaded.id))
-                    return
-                }
-                current.driveFileID = uploaded.id
-                let localName = current.fileName
-                if localName == asset.fileName { current.fileName = uploaded.name }
-                _ = try store.saveAssetLocally(current, projectLocation: false)
             }
         }
 
-        for id in removedFiles {
-            try await trashIfPresent(id, transport: transport)
-            if id.hasPrefix(MountedVolumeTransport.pathIDPrefix) {
-                try? await database.setState("deleted.drive." + id, Optional<Bool>.none)
+        // 2. Fetch distinct parent listings + hash local files in parallel, then upload concurrently
+        if !pendingUploads.isEmpty {
+            let listingPairs = try await Self.runBounded(items: Array(parentsToList), maxConcurrent: apiConcurrency) { parentID -> (String, [RemoteDriveFile]) in
+                (parentID, try await transport.listFiles(inFolderID: parentID))
+            }
+            var listings = Dictionary(uniqueKeysWithValues: listingPairs)
+            var takenNamesByParent: [String: Set<String>] = listings.mapValues { Set($0.map { $0.name.lowercased() }) }
+
+            struct UploadWork: Sendable {
+                let asset: AssetRecord
+                let parent: String
+                let localURL: URL
+                let shortID: String
+                let reservedName: String
+                let initialTaken: Set<String>
+            }
+
+            let hashedItems = try await Self.runBounded(items: pendingUploads, maxConcurrent: 6) { item -> (PendingUploadAsset, (sha256: String, md5: String, bytes: Int64)) in
+                (item, try MediaPipeline.digests(item.localURL))
+            }
+            let digestsByAssetID = Dictionary(uniqueKeysWithValues: hashedItems.map { ($0.0.asset.id, $0.1) })
+
+            var uploadQueue: [UploadWork] = []
+            uploadQueue.reserveCapacity(pendingUploads.count)
+            var alreadyBoundCount = 0
+            let totalWork = pendingUploads.count
+
+            for item in pendingUploads {
+                let asset = item.asset
+                let parent = item.parent
+                let choices = listings[parent] ?? []
+                guard let hash = digestsByAssetID[asset.id] else { continue }
+                let short = String(asset.id.uuidString.prefix(8)).lowercased()
+                let name = asset.fileName
+                let ext = (name as NSString).pathExtension
+                let suffix = ext.isEmpty ? "" : "." + ext
+                let alternative = (name as NSString).deletingPathExtension + "-" + short + suffix
+                var candidate = choices.first {
+                    ($0.name.caseInsensitiveCompare(name) == .orderedSame
+                        || $0.name.caseInsensitiveCompare(alternative) == .orderedSame)
+                        && $0.md5Checksum == hash.md5
+                }
+                var unbound = try await candidate.mapAsync { try await database.asset(driveID: $0.id) == nil } ?? false
+                if candidate == nil || !unbound {
+                    for entry in choices where !entry.isFolder && entry.md5Checksum == nil && entry.size == hash.bytes && hash.bytes > 0 {
+                        guard entry.name.caseInsensitiveCompare(name) == .orderedSame
+                            || entry.name.caseInsensitiveCompare(alternative) == .orderedSame else { continue }
+                        guard try await database.asset(driveID: entry.id) == nil else { continue }
+                        if try await remoteFileMatchesHash(fileID: entry.id, expectedSHA256: hash.sha256, transport: transport) {
+                            candidate = entry
+                            unbound = true
+                            break
+                        }
+                    }
+                }
+                if let candidate, unbound {
+                    try await bindUploadedAsset(asset: asset, uploaded: candidate)
+                    alreadyBoundCount += 1
+                    continue
+                }
+
+                // Pre-reserve unique filename per parent folder so parallel uploads never collide
+                var taken = takenNamesByParent[parent] ?? []
+                let reservedName = Self.nextAvailableFileName(
+                    preferred: name,
+                    shortID: short,
+                    takenLowercasedNames: taken,
+                    startIndex: 0
+                )
+                taken.insert(reservedName.lowercased())
+                takenNamesByParent[parent] = taken
+                uploadQueue.append(UploadWork(
+                    asset: asset,
+                    parent: parent,
+                    localURL: item.localURL,
+                    shortID: short,
+                    reservedName: reservedName,
+                    initialTaken: taken
+                ))
+            }
+
+            if !uploadQueue.isEmpty {
+                let uploadConcurrency = transport is MountedVolumeTransport ? 2 : 5
+                var completed = alreadyBoundCount
+                try await withThrowingTaskGroup(of: (AssetRecord, RemoteDriveFile).self) { group in
+                    var nextIndex = 0
+                    let enqueue: (inout ThrowingTaskGroup<(AssetRecord, RemoteDriveFile), Error>) -> Void = { grp in
+                        guard nextIndex < uploadQueue.count else { return }
+                        let work = uploadQueue[nextIndex]
+                        nextIndex += 1
+                        grp.addTask {
+                            let uploaded = try await Self.uploadWithConflictRetry(
+                                localURL: work.localURL,
+                                preferredName: work.asset.fileName,
+                                reservedName: work.reservedName,
+                                shortID: work.shortID,
+                                mimeType: work.asset.mimeType,
+                                parentID: work.parent,
+                                initialTaken: work.initialTaken,
+                                transport: transport
+                            )
+                            return (work.asset, uploaded)
+                        }
+                    }
+
+                    for _ in 0..<min(uploadConcurrency, uploadQueue.count) {
+                        enqueue(&group)
+                    }
+
+                    while let (asset, uploaded) = try await group.next() {
+                        enqueue(&group)
+                        try await bindUploadedAsset(asset: asset, uploaded: uploaded)
+                        listings[uploaded.parents.first ?? layout.inbox, default: []].append(uploaded)
+                        completed += 1
+                        let uploadRatio = 0.62 + 0.19 * (Double(completed) / Double(max(1, totalWork)))
+                        updateProgress(
+                            phase: .uploading(completed: completed, total: totalWork),
+                            detail: "上传：\(asset.fileName)",
+                            progress: uploadRatio
+                        )
+                    }
+                }
             }
         }
-        for id in removedFolders {
+
+        let isMountedTransport = transport is MountedVolumeTransport
+        let compatibleRemovedFiles = removedFiles.filter { id in
+            isMountedTransport ? id.hasPrefix("mounted-") : !id.hasPrefix("mounted-")
+        }
+        if !compatibleRemovedFiles.isEmpty {
+            _ = try await Self.runBounded(items: Array(compatibleRemovedFiles), maxConcurrent: apiConcurrency) { id -> String in
+                try await Self.trashIfPresentStatic(id, transport: transport)
+                return id
+            }
+        }
+        let compatibleRemovedFolders = removedFolders.filter { id in
+            isMountedTransport ? id.hasPrefix("mounted-") : !id.hasPrefix("mounted-")
+        }
+        for id in compatibleRemovedFolders {
             do {
                 if try await transport.listFiles(inFolderID: id).isEmpty { try await trashIfPresent(id, transport: transport) }
             } catch DriveTransportError.fileNotFound { }
             catch DriveTransportError.httpError(statusCode: 404, message: _) { }
         }
+        return compatibleRemovedFiles
+    }
+
+    private func bindUploadedAsset(asset: AssetRecord, uploaded: RemoteDriveFile) async throws {
+        try await database.transaction { store in
+            guard var current = try store.asset(id: asset.id) else {
+                // An in-flight deletion must be able to finish trashing the uploaded original.
+                try store.record(.deleteAsset(asset.id, driveID: uploaded.id))
+                return
+            }
+            current.driveFileID = uploaded.id
+            if current.fileName == asset.fileName { current.fileName = uploaded.name }
+            _ = try store.saveAssetLocally(current, projectLocation: false)
+        }
+    }
+
+    private nonisolated static func uploadWithConflictRetry(
+        localURL: URL,
+        preferredName: String,
+        reservedName: String,
+        shortID: String,
+        mimeType: String,
+        parentID: String,
+        initialTaken: Set<String>,
+        transport: any DriveTransport
+    ) async throws -> RemoteDriveFile {
+        var takenNames = initialTaken
+        for attempt in 0..<8 {
+            let remoteName = attempt == 0
+                ? reservedName
+                : Self.nextAvailableFileName(
+                    preferred: preferredName,
+                    shortID: shortID,
+                    takenLowercasedNames: takenNames,
+                    startIndex: attempt
+                )
+            do {
+                return try await transport.uploadFile(
+                    from: localURL,
+                    name: remoteName,
+                    mimeType: mimeType,
+                    parentID: parentID,
+                    existingFileID: nil
+                )
+            } catch DriveTransportError.fileAlreadyExists {
+                takenNames.insert(remoteName.lowercased())
+                let fresh = try await transport.listFiles(inFolderID: parentID)
+                for item in fresh { takenNames.insert(item.name.lowercased()) }
+            }
+        }
+        throw DriveTransportError.fileAlreadyExists(preferredName)
     }
 
     private func resolveFolder(_ id: UUID, layout: Layout, transport: any DriveTransport, path: Set<UUID>,

@@ -92,6 +92,11 @@ public nonisolated struct GoogleOAuthToken: Codable, Sendable {
 public actor GoogleOAuthClient {
     private let keychain: KeychainStore
     private let session: URLSession
+    private var cachedConfig: GoogleOAuthClientConfig?
+    private var hasLoadedConfig = false
+    private var cachedToken: GoogleOAuthToken?
+    private var hasLoadedToken = false
+    private var inFlightRefresh: Task<GoogleOAuthToken, Error>?
 
     public init(keychain: KeychainStore = KeychainStore(), session: URLSession = .shared) {
         self.keychain = keychain
@@ -118,12 +123,22 @@ public actor GoogleOAuthClient {
         )
         if try storedConfig()?.clientID != normalized.clientID {
             try keychain.delete("drive.oauth.token")
+            cachedToken = nil
+            hasLoadedToken = true
         }
         try keychain.save(JSONEncoder().encode(normalized), for: "drive.oauth.config")
+        cachedConfig = normalized
+        hasLoadedConfig = true
     }
 
     public func storedConfig() throws -> GoogleOAuthClientConfig? {
-        try keychain.read("drive.oauth.config").map { try JSONDecoder().decode(GoogleOAuthClientConfig.self, from: $0) }
+        if hasLoadedConfig { return cachedConfig }
+        let loaded = try keychain.read("drive.oauth.config").map {
+            try JSONDecoder().decode(GoogleOAuthClientConfig.self, from: $0)
+        }
+        cachedConfig = loaded
+        hasLoadedConfig = true
+        return loaded
     }
 
     /// Resolves OAuth client credentials in priority order:
@@ -136,18 +151,46 @@ public actor GoogleOAuthClient {
     }
 
     public func hasResolvedConfig() -> Bool {
-        (try? resolvedConfig()) != nil
+        if hasLoadedConfig, let cachedConfig, !cachedConfig.clientID.isEmpty {
+            return true
+        }
+        if keychain.exists("drive.oauth.config") {
+            return true
+        }
+        return GoogleOAuthClientConfig.bundledConfig() != nil
+    }
+
+    /// Lightweight metadata-only presence check that avoids unlocking secret payload data.
+    public func hasStoredToken() -> Bool {
+        if hasLoadedToken {
+            return cachedToken != nil
+        }
+        return keychain.exists("drive.oauth.token")
     }
 
     public func currentStoredToken() throws -> GoogleOAuthToken? {
-        try keychain.read("drive.oauth.token").map { try JSONDecoder().decode(GoogleOAuthToken.self, from: $0) }
+        if hasLoadedToken { return cachedToken }
+        let loaded = try keychain.read("drive.oauth.token").map {
+            try JSONDecoder().decode(GoogleOAuthToken.self, from: $0)
+        }
+        cachedToken = loaded
+        hasLoadedToken = true
+        return loaded
     }
 
     public func saveToken(_ token: GoogleOAuthToken) throws {
         try keychain.save(JSONEncoder().encode(token), for: "drive.oauth.token")
+        cachedToken = token
+        hasLoadedToken = true
     }
 
-    public func signOut() throws { try keychain.delete("drive.oauth.token") }
+    public func signOut() throws {
+        inFlightRefresh?.cancel()
+        inFlightRefresh = nil
+        try keychain.delete("drive.oauth.token")
+        cachedToken = nil
+        hasLoadedToken = true
+    }
 
     public func accessToken() async throws -> String {
         guard let config = try resolvedConfig() else {
@@ -156,7 +199,8 @@ public actor GoogleOAuthClient {
         return try await validAccessToken(config: config)
     }
 
-    /// Return a valid access token, automatically refreshing via `refresh_token` if needed.
+    /// Return a valid access token, automatically refreshing via `refresh_token` if needed
+    /// (with in-flight deduplication so parallel sync workers share a single refresh call).
     public func validAccessToken(config: GoogleOAuthClientConfig) async throws -> String {
         guard let token = try currentStoredToken() else {
             throw DriveTransportError.authenticationRequired("尚未完成 Google Drive OAuth 登录")
@@ -164,10 +208,18 @@ public actor GoogleOAuthClient {
         if !token.isExpiredOrExpiringSoon {
             return token.accessToken
         }
+        if let existing = inFlightRefresh {
+            return try await existing.value.accessToken
+        }
         guard let refreshToken = token.refreshToken, !refreshToken.isEmpty else {
             throw DriveTransportError.authenticationRequired("访问令牌已过期且无 Refresh Token，请重新登录")
         }
-        let refreshed = try await refreshAccessToken(refreshToken: refreshToken, config: config)
+        let refreshTask = Task {
+            try await self.refreshAccessToken(refreshToken: refreshToken, config: config)
+        }
+        inFlightRefresh = refreshTask
+        defer { inFlightRefresh = nil }
+        let refreshed = try await refreshTask.value
         try saveToken(refreshed)
         return refreshed.accessToken
     }

@@ -93,6 +93,24 @@ public nonisolated struct CharkleAgentTools: Sendable {
         self.media = media
     }
 
+    /// Loads a compact upright JPEG strictly compliant with TypeSafe's `280...1568` pixel bounds.
+    func preparedTypeSafeJPEG(for asset: AssetRecord, targetLongSide: Int = 448) -> Data? {
+        let originalURL = media.originalPath(for: asset)
+        let candidateURLs: [URL] = [
+            media.thumbnailURL(for: asset.id, tier: targetLongSide > 520 ? .preview1400 : .grid520),
+            media.thumbnailURL(for: asset.id, tier: .grid520),
+            FileManager.default.fileExists(atPath: originalURL.path) ? originalURL : nil
+        ].compactMap { $0 }
+
+        for url in candidateURLs {
+            if let cg = MediaPipeline.raster(url)?.poster,
+               let data = TypeSafeImagePreparer.prepareJPEG(from: cg, targetLongSide: targetLongSide) {
+                return data
+            }
+        }
+        return nil
+    }
+
     // MARK: - Tool 1: Library Overview
 
     public func libraryOverview() async throws -> AgentLibraryOverview {
@@ -558,29 +576,25 @@ public nonisolated struct CharkleAgentTools: Sendable {
         guard !insights.isEmpty else { return 0 }
         do {
             return try await database.transaction { store in
+                let existingLibraryTags = ((try? store.fetchTagCounts()) ?? []).map(\.name)
                 var updatedCount = 0
                 for insight in insights {
                     guard var asset = try store.asset(id: insight.assetID) else { continue }
                     let cleanDesc = insight.description.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let cleanTags = insight.tags
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
+                    let normalizedTags = CloudTagNormalizer.canonicalizeSuggestedTags(
+                        asset.suggestedTags + insight.tags,
+                        existingLibraryTags: existingLibraryTags,
+                        existingAssetTags: asset.tags,
+                        maxCount: 6
+                    )
                     var changed = false
                     if (asset.aiDescription == nil || asset.aiDescription?.isEmpty == true), !cleanDesc.isEmpty {
                         asset.aiDescription = String(cleanDesc.prefix(600))
                         changed = true
                     }
-                    if !cleanTags.isEmpty {
-                        let existingPublished = tagMap(asset.tags)
-                        var mergedSuggested = tagMap(asset.suggestedTags)
-                        for tag in cleanTags {
-                            let key = SearchText.normalize(tag)
-                            if !key.isEmpty && existingPublished[key] == nil && mergedSuggested[key] == nil {
-                                mergedSuggested[key] = tag
-                                changed = true
-                            }
-                        }
-                        asset.suggestedTags = Array(mergedSuggested.values.sorted().prefix(8))
+                    if !insight.tags.isEmpty, normalizedTags != asset.suggestedTags {
+                        asset.suggestedTags = normalizedTags
+                        changed = true
                     }
                     if changed {
                         _ = try store.saveAssetLocally(asset, projectLocation: false)

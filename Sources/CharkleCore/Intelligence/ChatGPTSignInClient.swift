@@ -432,7 +432,16 @@ public actor ChatGPTSignInClient {
                     throw ChatGPTAuthError(code: "response_too_large", message: "模型返回内容过大，请精简素材信息后重试。", retryable: false)
                 }
             }
-            return try Self.extractCompletedJSONText(jsonData)
+            let text = try Self.extractCompletedJSONText(jsonData)
+            let usage = Self.extractUsageTokens(from: jsonData)
+            CloudAIUsageStore.shared.record(
+                providerLabel: "ChatGPT 订阅",
+                model: model,
+                inputTokens: usage.input,
+                outputTokens: usage.output,
+                totalTokens: usage.total
+            )
+            return text
         }
 
         // Standard SSE stream (`text/event-stream` or omitted content-type per @siwc/local)
@@ -452,6 +461,13 @@ public actor ChatGPTSignInClient {
             if parser.isCompleted { break }
         }
         try parser.finish(statusCode: http.statusCode, requestID: requestID)
+        CloudAIUsageStore.shared.record(
+            providerLabel: "ChatGPT 订阅",
+            model: model,
+            inputTokens: parser.inputTokens,
+            outputTokens: parser.outputTokens,
+            totalTokens: parser.totalTokens
+        )
         return parser.accumulatedText
     }
 
@@ -1081,6 +1097,9 @@ public actor ChatGPTSignInClient {
     struct SSEStreamAccumulator {
         private(set) var accumulatedText: String = ""
         private(set) var isCompleted: Bool = false
+        private(set) var inputTokens: Int = 0
+        private(set) var outputTokens: Int = 0
+        private(set) var totalTokens: Int?
         private var dataLines: [String] = []
 
         mutating func consume(line: String, statusCode: Int, requestID: String?) throws {
@@ -1153,17 +1172,38 @@ public actor ChatGPTSignInClient {
                     requestID: requestID
                 )
             case "response.completed":
-                if accumulatedText.isEmpty,
-                   let responseObj = event["response"] as? [String: Any],
-                   let responseData = try? JSONSerialization.data(withJSONObject: responseObj),
-                   let fallback = try? ChatGPTSignInClient.extractCompletedJSONText(responseData) {
-                    accumulatedText = fallback
+                if let responseObj = event["response"] as? [String: Any] {
+                    if let usageObj = responseObj["usage"] as? [String: Any] {
+                        inputTokens = (usageObj["input_tokens"] as? Int) ?? (usageObj["prompt_tokens"] as? Int) ?? inputTokens
+                        outputTokens = (usageObj["output_tokens"] as? Int) ?? (usageObj["completion_tokens"] as? Int) ?? outputTokens
+                        if let tot = usageObj["total_tokens"] as? Int {
+                            totalTokens = tot
+                        }
+                    }
+                    if accumulatedText.isEmpty,
+                       let responseData = try? JSONSerialization.data(withJSONObject: responseObj),
+                       let fallback = try? ChatGPTSignInClient.extractCompletedJSONText(responseData) {
+                        accumulatedText = fallback
+                    }
                 }
                 isCompleted = true
             default:
                 break
             }
         }
+    }
+
+    private static func extractUsageTokens(from jsonData: Data) -> (input: Int, output: Int, total: Int?) {
+        guard let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            return (0, 0, nil)
+        }
+        let usage = (root["usage"] as? [String: Any])
+            ?? ((root["response"] as? [String: Any])?["usage"] as? [String: Any])
+        guard let usage else { return (0, 0, nil) }
+        let input = (usage["input_tokens"] as? Int) ?? (usage["prompt_tokens"] as? Int) ?? 0
+        let output = (usage["output_tokens"] as? Int) ?? (usage["completion_tokens"] as? Int) ?? 0
+        let total = usage["total_tokens"] as? Int
+        return (input, output, total)
     }
 }
 

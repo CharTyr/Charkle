@@ -6,6 +6,15 @@ public nonisolated struct KeychainStore: Sendable {
 
     public init(service: String = "com.charkle.app.secrets") { self.service = service }
 
+    public func exists(_ key: String) -> Bool {
+        var query = selector(key)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var output: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &output)
+        return status == errSecSuccess
+    }
+
     public func read(_ key: String) throws -> Data? {
         var query = selector(key)
         query[kSecReturnData as String] = true

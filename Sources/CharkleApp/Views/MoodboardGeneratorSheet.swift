@@ -26,6 +26,7 @@ public struct MoodboardGeneratorSheet: View {
     @State private var layoutStyle: EditorialStyle = .magazine
     @State private var useFreeformLayout: Bool = false
     @State private var includeCuratorNotes: Bool = true
+    @State private var autoFocusDetailCrop: Bool = false
 
     @State private var lockedAssetIDs: Set<UUID> = []
     @State private var excludedAssetIDs: Set<UUID> = []
@@ -62,17 +63,26 @@ public struct MoodboardGeneratorSheet: View {
         self.syncAndAI = syncAndAI
     }
 
+    private var isTypeSafeReady: Bool {
+        syncAndAI.typeSafeConfig.enabled && syncAndAI.hasStoredTypeSafeKey
+    }
+
     private var isCloudAIReady: Bool {
-        syncAndAI.aiConfig.provider != .disabled && syncAndAI.hasStoredAIKey
+        (syncAndAI.aiConfig.provider != .disabled && syncAndAI.hasStoredAIKey) || isTypeSafeReady
     }
 
     private var activeProviderBadge: String {
-        guard isCloudAIReady else { return "仅本机离线模式" }
+        let hasGenerative = syncAndAI.aiConfig.provider != .disabled && syncAndAI.hasStoredAIKey
+        if !hasGenerative && isTypeSafeReady {
+            return "TypeSafe Jev 视觉策展"
+        }
+        guard hasGenerative else { return "仅本机离线模式" }
+        let suffix = isTypeSafeReady ? " + Jev 精排" : ""
         switch syncAndAI.aiConfig.provider {
-        case .disabled: return "仅本机离线模式"
-        case .chatGPTSubscription: return "ChatGPT 订阅视觉策展"
-        case .gemini: return "Gemini 视觉策展"
-        case .openAICompatible: return "云端模型视觉策展"
+        case .disabled: return isTypeSafeReady ? "TypeSafe Jev 视觉策展" : "仅本机离线模式"
+        case .chatGPTSubscription: return "ChatGPT 订阅视觉策展\(suffix)"
+        case .gemini: return "Gemini 视觉策展\(suffix)"
+        case .openAICompatible: return "云端模型视觉策展\(suffix)"
         }
     }
 
@@ -384,7 +394,7 @@ public struct MoodboardGeneratorSheet: View {
                     }
 
                     HStack {
-                        Text("数量上限（宁缺毋滥）")
+                        Text("数量上限")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -395,7 +405,8 @@ public struct MoodboardGeneratorSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .frame(width: 164)
+                        .frame(width: 204)
+                        .help("宁缺毋滥：实际张数不超过上限，不会强行凑数")
                     }
 
                     Toggle(isOn: $includeCuratorNotes) {
@@ -403,6 +414,16 @@ public struct MoodboardGeneratorSheet: View {
                             .font(.system(size: 11.5))
                     }
                     .toggleStyle(.checkbox)
+
+                    Toggle(isOn: $autoFocusDetailCrop) {
+                        HStack(spacing: 4) {
+                            Text("细节特写模式（Jev Box 按灵感词自动局部裁切）")
+                                .font(.system(size: 11.5))
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(!isTypeSafeReady)
+                    .help(isTypeSafeReady ? "入选主图会自动按灵感词定位局部细节并写入非破坏性裁切框" : "需在「设置 → 智能与搜索」中开启 TypeSafe (Jev) 实验档")
                 }
 
                 // 6. Primary Curation Trigger
@@ -920,7 +941,8 @@ public struct MoodboardGeneratorSheet: View {
             excludedAssetIDs: Array(excludedAssetIDs),
             lockedAssetIDs: Array(lockedAssetIDs),
             existingBoard: refinement != nil ? moodboards.proposal?.draftDocument : nil,
-            refinementInstruction: refinement
+            refinementInstruction: refinement,
+            autoFocusDetailCrop: autoFocusDetailCrop && isTypeSafeReady
         )
         await moodboards.curateProposal(req)
         if let prop = moodboards.proposal {

@@ -6,6 +6,31 @@ import os
 private let visionLogger = Logger(subsystem: "com.charkle.core", category: "Vision")
 
 public nonisolated enum VisionAnalyzer {
+    /// Runs OCR and FeaturePrint in a single `VNImageRequestHandler` pass so the decoded pixel buffer
+    /// is uploaded to Vision/Metal once instead of twice.
+    public static func analyzeSync(in cgImage: CGImage) -> (ocrText: String, featurePrintData: Data?) {
+        let ocrRequest = VNRecognizeTextRequest()
+        ocrRequest.recognitionLevel = .accurate
+        ocrRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+        ocrRequest.usesLanguageCorrection = true
+
+        let featureRequest = VNGenerateImageFeaturePrintRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        do {
+            try handler.perform([ocrRequest, featureRequest])
+            let text = (ocrRequest.results ?? [])
+                .compactMap { $0.topCandidates(1).first?.string }
+                .joined(separator: "\n")
+            let featureData = featureRequest.results?.first.flatMap {
+                try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true)
+            }
+            return (text, featureData)
+        } catch {
+            visionLogger.debug("Combined Vision analysis fell back to split pass: \(error.localizedDescription, privacy: .private)")
+            return (recognizeTextSync(in: cgImage), generateFeaturePrint(for: cgImage))
+        }
+    }
+
     public static func recognizeTextSync(in cgImage: CGImage) -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -70,6 +95,42 @@ public nonisolated enum VisionAnalyzer {
         if distance <= strongFloor { return 1.0 }
         let normalized = Double(strictCutoff - distance) / Double(strictCutoff - strongFloor)
         return pow(normalized, 0.85)
+    }
+
+    /// Offline Apple Vision primary subject bounding box using Attention-Based Saliency
+    /// (falling back to Objectness Saliency). Converts Vision's bottom-left origin into
+    /// top-left normalized coordinates (`0...1`).
+    public static func detectPrimarySubjectBox(in cgImage: CGImage) -> NormalizedCropRect? {
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let attentionRequest = VNGenerateAttentionBasedSaliencyImageRequest()
+        let objectnessRequest = VNGenerateObjectnessBasedSaliencyImageRequest()
+
+        do {
+            try handler.perform([attentionRequest, objectnessRequest])
+        } catch {
+            visionLogger.debug("Saliency detection failed: \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
+
+        let boxes: [CGRect] = [
+            attentionRequest.results?.first?.salientObjects ?? [],
+            objectnessRequest.results?.first?.salientObjects ?? []
+        ]
+            .first(where: { !$0.isEmpty })?
+            .map(\.boundingBox) ?? []
+
+        guard !boxes.isEmpty else { return nil }
+
+        // Union salient regions (preferring the largest/most central salient box when multiple distant regions exist)
+        let unionRect = boxes.reduce(boxes[0]) { $0.union($1) }
+        guard unionRect.width > 0.04, unionRect.height > 0.04 else { return nil }
+
+        // Vision coordinates: origin at bottom-left -> flip Y to top-left
+        let top = max(0.0, min(1.0, 1.0 - Double(unionRect.maxY)))
+        let bottom = max(top, min(1.0, 1.0 - Double(unionRect.minY)))
+        let left = max(0.0, min(1.0, Double(unionRect.minX)))
+        let right = max(left, min(1.0, Double(unionRect.maxX)))
+        return NormalizedCropRect(boxTop: top, bottom: bottom, left: left, right: right).clamped()
     }
 
 }

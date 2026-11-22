@@ -7,20 +7,25 @@ public enum NotchTargetMode: Hashable, Sendable {
 }
 
 /// Observable animation & interaction state driving the fixed transparent Notch Shelf NSPanel.
+/// Supports both Compact Shelf (quick capture + drop well + Recent Assets horizontal strip, Img 5)
+/// and Expanded Full-Waterfall Shelf (infinite multi-column masonry + marquee multi-select + drag-out, Img 6).
 @Observable
 public final class NotchShelfState {
     public static let topEarRadius: CGFloat = 12
     public static let bottomCornerRadius: CGFloat = 24
 
     public var isExpanded: Bool = false
+    public var isFullGalleryExpanded: Bool = false
+    public var isPinnedOpen: Bool = false
     public var isDropTargeted: Bool = false
     public var dragItemCount: Int = 0
 
-    /// Measured physical MacBook camera housing notch geometry (from `NSScreen.safeAreaInsets` &
-    /// `auxiliaryTopLeftArea`/`auxiliaryTopRightArea`), with safe fallbacks for external/mirrored displays.
+    /// Measured physical MacBook camera housing notch & active display geometry.
     public var physicalNotchWidth: CGFloat = 204
     public var physicalNotchHeight: CGFloat = 0
     public var hasPhysicalNotch: Bool = false
+    public var activeScreenWidth: CGFloat = 1440
+    public var activeScreenHeight: CGFloat = 900
 
     public var targetMode: NotchTargetMode = .inbox
     public var selectedFolderID: UUID?
@@ -33,8 +38,6 @@ public final class NotchShelfState {
     public init() {}
 
     /// Height of the top wing row aligned beside the physical MacBook camera notch.
-    /// Always reserves at least 38pt (or the measured hardware notch height + 2pt) so full-width controls
-    /// rendered below this band are never occluded on any MacBook Pro/Air display or scaling mode.
     public var topNotchBandHeight: CGFloat {
         max(38, physicalNotchHeight + (hasPhysicalNotch ? 2 : 0))
     }
@@ -45,9 +48,11 @@ public final class NotchShelfState {
     }
 
     /// Inner capsule width between vertical side walls (excluding the two concave top ears).
-    /// Scales up automatically on large-text MacBook scalings so both wings keep comfortable room.
     public var expandedBodyWidth: CGFloat {
-        max(476, notchCenterClearanceWidth + 244)
+        if isFullGalleryExpanded {
+            return min(980, max(720, activeScreenWidth - 140))
+        }
+        return max(636, notchCenterClearanceWidth + 390)
     }
 
     /// Total width of `NotchShellShape` including both concave top bezel ears.
@@ -57,6 +62,9 @@ public final class NotchShelfState {
 
     /// Total height of the expanded pure-black notch capsule.
     public var expandedCardHeight: CGFloat {
-        topNotchBandHeight + 178
+        if isFullGalleryExpanded {
+            return min(580, max(440, activeScreenHeight - 160))
+        }
+        return topNotchBandHeight + 292
     }
 }

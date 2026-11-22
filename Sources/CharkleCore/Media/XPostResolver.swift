@@ -112,12 +112,49 @@ public nonisolated struct ResolvedXPost: Equatable, Sendable {
     public let reference: XPostReference
     public let authorName: String
     public let authorHandle: String
+    public let authorAvatarURL: String?
     public let text: String
     public let quotedAuthor: String?
     public let quotedText: String?
     public let articleTitle: String?
     public let createdAt: String?
     public let media: [XPostMedia]
+    public let replyCount: Int?
+    public let repostCount: Int?
+    public let likeCount: Int?
+    public let viewCount: Int?
+
+    public init(
+        reference: XPostReference,
+        authorName: String,
+        authorHandle: String,
+        authorAvatarURL: String? = nil,
+        text: String,
+        quotedAuthor: String? = nil,
+        quotedText: String? = nil,
+        articleTitle: String? = nil,
+        createdAt: String? = nil,
+        media: [XPostMedia] = [],
+        replyCount: Int? = nil,
+        repostCount: Int? = nil,
+        likeCount: Int? = nil,
+        viewCount: Int? = nil
+    ) {
+        self.reference = reference
+        self.authorName = authorName
+        self.authorHandle = authorHandle
+        self.authorAvatarURL = authorAvatarURL
+        self.text = text
+        self.quotedAuthor = quotedAuthor
+        self.quotedText = quotedText
+        self.articleTitle = articleTitle
+        self.createdAt = createdAt
+        self.media = media
+        self.replyCount = replyCount
+        self.repostCount = repostCount
+        self.likeCount = likeCount
+        self.viewCount = viewCount
+    }
 
     public var canonicalURL: URL {
         URL(string: "https://x.com/\(authorHandle)/status/\(reference.tweetID)") ?? reference.canonicalURL
@@ -257,6 +294,10 @@ public nonisolated enum XPostResolver {
             let media: FxMediaBlock?
             let quote: QuotedTweet?
             let article: Article?
+            let replies: Int?
+            let retweets: Int?
+            let likes: Int?
+            let views: Int?
         }
         struct QuotedTweet: Decodable {
             let text: String?
@@ -270,6 +311,7 @@ public nonisolated enum XPostResolver {
         struct Author: Decodable {
             let name: String?
             let screen_name: String?
+            let avatar_url: String?
         }
         struct Article: Decodable {
             let title: String?
@@ -315,12 +357,17 @@ public nonisolated enum XPostResolver {
             reference: ref,
             authorName: name,
             authorHandle: handle,
+            authorAvatarURL: tweet.author?.avatar_url?.nilIfEmpty,
             text: mainText,
             quotedAuthor: quotedAuthor,
             quotedText: quotedText,
             articleTitle: tweet.article?.title?.nilIfEmpty,
             createdAt: tweet.created_at?.nilIfEmpty,
-            media: mediaItems
+            media: mediaItems,
+            replyCount: tweet.replies,
+            repostCount: tweet.retweets,
+            likeCount: tweet.likes,
+            viewCount: tweet.views
         )
     }
 
@@ -360,9 +407,13 @@ public nonisolated enum XPostResolver {
             let text: String?
             let user_name: String?
             let user_screen_name: String?
+            let user_profile_image_url: String?
             let date: String?
             let media_extended: [MediaItem]?
             let mediaURLs: [String]?
+            let replies: Int?
+            let retweets: Int?
+            let likes: Int?
         }
         struct MediaItem: Decodable {
             let type: String?
@@ -405,12 +456,17 @@ public nonisolated enum XPostResolver {
             reference: ref,
             authorName: name,
             authorHandle: handle,
+            authorAvatarURL: decoded.user_profile_image_url?.nilIfEmpty,
             text: text,
             quotedAuthor: nil,
             quotedText: nil,
             articleTitle: nil,
             createdAt: decoded.date?.nilIfEmpty,
-            media: media
+            media: media,
+            replyCount: decoded.replies,
+            repostCount: decoded.retweets,
+            likeCount: decoded.likes,
+            viewCount: nil
         )
     }
 

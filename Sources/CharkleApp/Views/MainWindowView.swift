@@ -30,6 +30,8 @@ public struct MainWindowView: View {
     @State private var showCreateSubfolderPopover: Bool = false
     @State private var subfolderNameDraft: String = ""
     @State private var showFigmaPluginGuideSheet: Bool = false
+    @State private var showInboxBatchTriageSheet: Bool = false
+    @State private var selectedTriageIDs: Set<UUID> = []
     @FocusState private var isSubfolderFieldFocused: Bool
 
     private static let filterColorPresets: [String] = [
@@ -63,6 +65,7 @@ public struct MainWindowView: View {
             // Sidebar and Inspector keep deterministic fixed internal widths inside animated width slots
             // so rapid collapse/expand cycles never get stuck half-open or overflow past window bounds.
             HStack(spacing: 0) {
+                let sidebarTargetWidth: CGFloat = coordinator.isSidebarCollapsed ? 56 : 232
                 HStack(spacing: 0) {
                     SidebarView(
                         coordinator: coordinator,
@@ -101,7 +104,7 @@ public struct MainWindowView: View {
                             }
                         }
                     )
-                    .frame(width: 232)
+                    .frame(width: sidebarTargetWidth)
                     .background {
                         CharkleSidebarMaterialBackground()
                             .ignoresSafeArea(.container, edges: .top)
@@ -112,13 +115,13 @@ public struct MainWindowView: View {
                         .frame(width: 1)
                         .ignoresSafeArea(.container, edges: .top)
                 }
-                .frame(width: 233)
+                .frame(width: sidebarTargetWidth + 1)
                 .frame(maxHeight: .infinity)
                 .opacity(isSidebarVisible ? 1 : 0)
                 .allowsHitTesting(isSidebarVisible)
                 .disabled(!isSidebarVisible)
                 .accessibilityHidden(!isSidebarVisible)
-                .frame(width: isSidebarVisible ? 233 : 0, alignment: .trailing)
+                .frame(width: isSidebarVisible ? (sidebarTargetWidth + 1) : 0, alignment: .trailing)
                 .mask {
                     Rectangle()
                         .ignoresSafeArea(.container, edges: .top)
@@ -151,6 +154,12 @@ public struct MainWindowView: View {
                     },
                     onSaveBoardImage: { fmt in
                         saveCurrentBoardImage(format: fmt, options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                    },
+                    onExportFigmaBundle: {
+                        exportCurrentBoardToFigmaBundle(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                    },
+                    onOpenFigmaPluginGuide: {
+                        showFigmaPluginGuideSheet = true
                     }
                 )
                 .frame(width: 300)
@@ -167,6 +176,7 @@ public struct MainWindowView: View {
                 .layoutPriority(1)
             }
             .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: isSidebarVisible)
+            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
             .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.isInspectorVisible)
 
             // Full-Media Quick Look Hero Continuity Overlay (Kubai Tip 015)
@@ -257,6 +267,24 @@ public struct MainWindowView: View {
         .sheet(isPresented: $showFigmaPluginGuideSheet) {
             figmaPluginGuideSheet
         }
+        .sheet(isPresented: $showInboxBatchTriageSheet) {
+            inboxBatchTriageSheet
+        }
+        .sheet(isPresented: Binding(
+            get: { coordinator.isSmartFolderEditorPresented },
+            set: { coordinator.isSmartFolderEditorPresented = $0 }
+        )) {
+            SmartFolderEditorSheet(
+                library: library,
+                existing: coordinator.editingSmartFolder
+            ) { saved in
+                Task {
+                    await library.saveSmartFolder(saved)
+                    coordinator.showToast("已保存智能文件夹「\(saved.name)」", icon: "folder.badge.gearshape")
+                    navigate(to: .smartFolder(saved.id))
+                }
+            }
+        }
         .alert(
             pendingPermanentDeleteIDs.count == library.assets.count && coordinator.selectedDestination == .trash && pendingPermanentDeleteIDs.count > 1
                 ? "清空废纸篓（共 \(pendingPermanentDeleteIDs.count) 项）？"
@@ -290,7 +318,13 @@ public struct MainWindowView: View {
         }
         .onChange(of: searchDraft) { _, newValue in
             library.filter.searchQuery = newValue
-            Task { await library.refreshAssets() }
+            if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                library.semanticSearchReport = nil
+                Task { await library.refreshAssets() }
+            } else if !library.semanticSearchEnabled {
+                library.semanticSearchReport = nil
+                Task { await library.refreshAssets() }
+            }
         }
         .onChange(of: coordinator.selectedDestination) { _, newDest in
             if case .moodboard(let id) = newDest {
@@ -322,6 +356,7 @@ public struct MainWindowView: View {
         let activeFolderID: UUID? = if case .folder(let fid) = coordinator.selectedDestination { fid } else { nil }
         let topInset: CGFloat = {
             var base: CGFloat = 74
+            if library.semanticSearchReport != nil { base += 46 }
             if coordinator.isVisualFilterBarPresented { base += 92 }
             if isInbox && !library.assets.isEmpty { base += 54 }
             if isTrash && !library.assets.isEmpty { base += 54 }
@@ -334,9 +369,58 @@ public struct MainWindowView: View {
                 inboxZeroCelebrationView
             } else if library.assets.isEmpty && !library.isLoading {
                 emptyLibraryView
+            } else if coordinator.galleryLayoutMode == .galleryFilmstrip {
+                GalleryFilmstripView(
+                    assets: library.assets,
+                    loader: library.thumbnailLoader,
+                    selectedAssetIDs: Binding(
+                        get: { library.selectedAssetIDs },
+                        set: { library.selectedAssetIDs = $0 }
+                    ),
+                    topContentInset: topInset,
+                    resolveOriginalURL: { id in
+                        try? await library.engine.originalURL(for: id)
+                    },
+                    onOpenQuickLook: { asset in openQuickLook(asset) },
+                    onMarkOpened: { id in library.markAssetOpened(id) },
+                    onSetRating: { ids, rating in
+                        Task { await library.setRating(rating, for: ids) }
+                    },
+                    onExtractSocialMedia: { postAsset, attachment, idx in
+                        Task {
+                            if let extracted = await library.extractMediaFromSocialPost(
+                                postAsset: postAsset,
+                                attachment: attachment,
+                                index: idx
+                            ) {
+                                coordinator.showToast("已单独提取「\(extracted.title)」并保留推文来源", icon: "photo.badge.plus")
+                            } else if let err = library.lastError {
+                                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onExtractAllSocialMedia: { postAsset in
+                        Task {
+                            let extracted = await library.extractAllMediaFromSocialPost(postAsset: postAsset)
+                            if !extracted.isEmpty {
+                                coordinator.showToast("已提取 \(extracted.count) 项推文媒体为独立素材", icon: "square.and.arrow.down.on.square")
+                            } else if let err = library.lastError {
+                                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onRefreshRichAsset: { id in
+                        Task {
+                            if await library.refreshRichAsset(id) != nil {
+                                coordinator.showToast("已重新拉取最新内容", icon: "arrow.clockwise")
+                            }
+                        }
+                    }
+                )
             } else {
                 VirtualizedMasonryView(
                     assets: library.assets,
+                    assetsRevision: library.assetsRevision,
                     folders: library.folders,
                     loader: library.thumbnailLoader,
                     selectedAssetIDs: Binding(
@@ -344,6 +428,7 @@ public struct MainWindowView: View {
                         set: { library.selectedAssetIDs = $0 }
                     ),
                     cutAssetIDs: library.cutAssetIDs,
+                    layoutMode: coordinator.galleryLayoutMode,
                     targetColumnWidth: CGFloat(coordinator.targetColumnWidth),
                     topContentInset: topInset,
                     bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
@@ -424,6 +509,9 @@ public struct MainWindowView: View {
                                 }
                             }
                         },
+                        onRetagAssets: { ids in
+                            triggerAIRetagging(for: ids)
+                        },
                         onTrashAssets: { ids in
                             Task {
                                 await library.trashAssets(ids)
@@ -439,7 +527,16 @@ public struct MainWindowView: View {
                         onPermanentlyDeleteAssets: { ids in
                             pendingPermanentDeleteIDs = ids
                         },
-                        onResolveDragFileURL: { _ in nil }
+                        onResolveDragFileURL: { assetID in
+                            library.engine.cachedThumbnailURL(for: assetID, tier: .preview1400)
+                                ?? library.engine.cachedThumbnailURL(for: assetID, tier: .grid520)
+                        },
+                        onZoomColumnWidth: { newWidth in
+                            let clamped = Double(max(130, min(420, newWidth)))
+                            if abs(coordinator.targetColumnWidth - clamped) >= 0.5 {
+                                coordinator.targetColumnWidth = clamped
+                            }
+                        }
                     )
                 )
             }
@@ -447,6 +544,11 @@ public struct MainWindowView: View {
             // Floating Liquid Glass Top Control Stack
             VStack(spacing: 8) {
                 floatingTopBar
+
+                if let report = library.semanticSearchReport {
+                    semanticSearchStatusBar(report)
+                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
+                }
 
                 if coordinator.isVisualFilterBarPresented {
                     floatingVisualFilterBar
@@ -531,11 +633,21 @@ public struct MainWindowView: View {
             HStack(spacing: 8) {
                 // Search capsule
                 HStack(spacing: 7) {
-                    CharkleIcon("search", style: .duotone, size: 14, color: .secondary)
-                    TextField("搜索素材、标签、OCR 文字或拼音…", text: $searchDraft)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12.5))
-                        .frame(minWidth: 68, idealWidth: 160, maxWidth: 260)
+                    CharkleIcon("search", style: .duotone, size: 17, color: library.semanticSearchEnabled ? Color.accentColor : .secondary, isActive: library.semanticSearchEnabled)
+                    TextField(
+                        library.semanticSearchEnabled ? "自然语言语义搜图，回车检索…" : "搜索素材、标签、OCR 文字或拼音…",
+                        text: $searchDraft
+                    )
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .frame(minWidth: 68, idealWidth: 168, maxWidth: 260)
+                    .onSubmit {
+                        let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !q.isEmpty else { return }
+                        if library.semanticSearchEnabled {
+                            triggerSemanticSearch()
+                        }
+                    }
 
                     if !searchDraft.isEmpty {
                         Button {
@@ -547,6 +659,41 @@ public struct MainWindowView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    Button {
+                        let trimmed = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if library.semanticSearchEnabled && trimmed.isEmpty {
+                            library.semanticSearchEnabled = false
+                            Task { await library.clearSemanticSearch() }
+                        } else {
+                            library.semanticSearchEnabled = true
+                            if !trimmed.isEmpty {
+                                triggerSemanticSearch()
+                            } else {
+                                coordinator.showToast("已开启语义搜图模式：输入描述后按回车检索", icon: "sparkles")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            if library.isRunningSemanticSearch {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            Text("语义")
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
+                        .foregroundStyle(library.semanticSearchEnabled ? Color.white : Color.accentColor)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            library.semanticSearchEnabled ? Color.accentColor : Color.accentColor.opacity(0.12),
+                            in: Capsule(style: .continuous)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("混合视觉语义搜图（结合 TypeSafe Jev 视觉评分 + 语义向量 + 全文）")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
@@ -567,7 +714,7 @@ public struct MainWindowView: View {
                     }
                 } label: {
                     HStack(spacing: 5) {
-                        CharkleIcon("filter", style: .duotone, size: 14, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary)
+                        CharkleIcon("filter", style: .duotone, size: 17, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary, isActive: coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters)
                         Text("筛选")
                             .font(.system(size: 12, weight: .medium))
                             .lineLimit(1)
@@ -614,39 +761,51 @@ public struct MainWindowView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
 
-                // Column Density Slider Pill
-                HStack(spacing: 6) {
-                    Button {
-                        coordinator.targetColumnWidth = max(144, coordinator.targetColumnWidth - 36)
-                    } label: {
-                        Image(systemName: "square.grid.3x3")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("缩小卡片、显示更多列")
-
-                    Slider(value: Binding(
-                        get: { coordinator.targetColumnWidth },
-                        set: { coordinator.targetColumnWidth = $0 }
-                    ), in: 144...340)
-                    .frame(width: 64)
-
-                    Button {
-                        coordinator.targetColumnWidth = min(340, coordinator.targetColumnWidth + 36)
-                    } label: {
-                        Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("放大卡片、更清晰浏览细节")
+                // 3-Mode Gallery View Switcher (Vertical Masonry / Horizontal Justified / Finder Filmstrip Gallery)
+                HStack(spacing: 2) {
+                    layoutModeButton(mode: .verticalMasonry, icon: "masonry-vertical", helpText: "纵向瀑布流")
+                    layoutModeButton(mode: .horizontalJustified, icon: "masonry-horizontal", helpText: "横向等高瀑布流（竖图自动对齐）")
+                    layoutModeButton(mode: .galleryFilmstrip, icon: "quicklook", helpText: "画廊视图（底部胶片挑图）")
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 3.5)
                 .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                .help("拖动或点击两侧图标调整画廊卡片大小")
+
+                // Column / Row Density Slider Pill (synced with trackpad pinch & ⌘+scroll)
+                if coordinator.galleryLayoutMode != .galleryFilmstrip {
+                    HStack(spacing: 6) {
+                        Button {
+                            coordinator.targetColumnWidth = max(130, coordinator.targetColumnWidth - 36)
+                        } label: {
+                            Image(systemName: "square.grid.3x3")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("缩小卡片、显示更多列（也支持双指捏合或 ⌘+滚轮）")
+
+                        Slider(value: Binding(
+                            get: { coordinator.targetColumnWidth },
+                            set: { coordinator.targetColumnWidth = $0 }
+                        ), in: 130...420)
+                        .frame(width: 64)
+
+                        Button {
+                            coordinator.targetColumnWidth = min(420, coordinator.targetColumnWidth + 36)
+                        } label: {
+                            Image(systemName: "square.grid.2x2")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("放大卡片、更清晰浏览细节（也支持双指捏合或 ⌘+滚轮）")
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
+                    .help("支持触控板双指捏合缩放或按住 ⌘+滚轮缩放")
+                }
 
                 Spacer(minLength: 4)
 
@@ -657,7 +816,7 @@ public struct MainWindowView: View {
                     )
                 } label: {
                     HStack(spacing: 5) {
-                        CharkleIcon("sparkle-board", style: .duotone, size: 14, color: Color.accentColor)
+                        CharkleIcon("sparkle-board", style: .duotone, size: 17, color: Color.accentColor, isActive: true)
                         Text("快速生成情绪板")
                             .font(.system(size: 12, weight: .semibold))
                             .lineLimit(1)
@@ -669,40 +828,12 @@ public struct MainWindowView: View {
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
 
-                // Sync Status Pill
-                Button {
-                    Task {
-                        if let report = await syncAndAI.syncNow() {
-                            await library.refreshAll()
-                            await moodboards.refreshBoards()
-                            coordinator.showToast("同步完成 (+\(report.discoveredRemoteAssets) 新发现)", icon: "checkmark.icloud.fill")
-                        } else if let err = syncAndAI.errorMessage {
-                            coordinator.showToast(err, icon: "exclamationmark.icloud", tone: .warning)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        if syncAndAI.isBusy {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Circle()
-                                .fill(syncDotColor)
-                                .frame(width: 7, height: 7)
-                        }
-                        Text(syncPillLabel)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .lineLimit(1)
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
-                }
-                .buttonStyle(CharkleTactileButtonStyle())
-                .contextMenu {
-                    Button("打开 Google Drive 与 gdirect 设置…") { openSettings() }
-                }
-                .help("点击立即同步 Google Drive")
+                // Isolated Sync Status Pill so 20Hz live sync progress updates never re-render MainWindowView or VirtualizedMasonryView
+                FloatingSyncStatusPill(
+                    syncAndAI: syncAndAI,
+                    onOpenSettings: { openSettings() },
+                    onTriggerManualSync: triggerManualCloudSync
+                )
 
                 // Inspector Toggle
                 Button {
@@ -929,6 +1060,192 @@ public struct MainWindowView: View {
         .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
     }
 
+    // MARK: - Hybrid Semantic Search Status Pill & Inbox Batch Triage Sheet
+
+    private func triggerSemanticSearch() {
+        let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        Task {
+            if let report = await library.runSemanticSearch(query: q) {
+                coordinator.showToast(report.summary, icon: "sparkles")
+            } else if let err = library.lastError {
+                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+            }
+        }
+    }
+
+    private func triggerInboxBatchTriage() {
+        let targetIDs = library.selectedAssetIDs.isEmpty ? [] : Array(library.selectedAssetIDs)
+        Task {
+            if let recs = await library.runInboxBatchTriage(assetIDs: targetIDs, maxCount: 24) {
+                selectedTriageIDs = Set(
+                    recs.filter { $0.recommendedFolderID != nil && $0.confidence >= 0.65 }.map(\.assetID)
+                )
+                showInboxBatchTriageSheet = true
+            } else if let err = library.lastError {
+                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+            }
+        }
+    }
+
+    private func semanticSearchStatusBar(_ report: SemanticSearchReport) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+            Text(report.summary)
+                .font(.system(size: 11.5, weight: .medium))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button("返回普通检索") {
+                library.semanticSearchEnabled = false
+                Task { await library.clearSemanticSearch() }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Color.accentColor)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
+    }
+
+    private var inboxBatchTriageSheet: some View {
+        let recs = library.inboxTriageRecommendations
+        let actionable = recs.filter { $0.recommendedFolderID != nil }
+        let selectedRecs = actionable.filter { selectedTriageIDs.contains($0.assetID) }
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("收件箱智能分拣预览 (Choice + Companion Noul)")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("共分析 \(recs.count) 项待整理素材，其中 \(actionable.count) 项匹配到已有目录；高置信度项已默认勾选。")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if recs.isEmpty {
+                Text("收件箱暂无可分拣素材。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 32)
+            } else {
+                ScrollView(.vertical) {
+                    VStack(spacing: 8) {
+                        ForEach(recs) { rec in
+                            let hasTarget = rec.recommendedFolderID != nil
+                            let isChecked = selectedTriageIDs.contains(rec.assetID)
+                            HStack(spacing: 10) {
+                                Button {
+                                    guard hasTarget else { return }
+                                    if isChecked { selectedTriageIDs.remove(rec.assetID) }
+                                    else { selectedTriageIDs.insert(rec.assetID) }
+                                } label: {
+                                    Image(systemName: !hasTarget ? "minus.circle" : (isChecked ? "checkmark.circle.fill" : "circle"))
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(!hasTarget ? Color.secondary.opacity(0.45) : (isChecked ? Color.accentColor : Color.secondary))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!hasTarget)
+
+                                if let asset = library.allAssetsByID[rec.assetID] {
+                                    AssetThumbnailSurface(
+                                        asset: asset,
+                                        loader: library.thumbnailLoader,
+                                        tier: .grid520,
+                                        cornerRadius: 6
+                                    )
+                                    .frame(width: 44, height: 44)
+                                }
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(rec.assetTitle)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .lineLimit(1)
+                                    Text(rec.reason)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+
+                                Spacer(minLength: 8)
+
+                                if let folderName = rec.recommendedFolderName {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "folder.fill")
+                                            .font(.system(size: 10.5))
+                                        Text(folderName)
+                                            .font(.system(size: 11.5, weight: .semibold))
+                                        Text("\(Int((rec.confidence * 100).rounded()))%")
+                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .foregroundStyle(rec.confidence >= 0.65 ? Color.accentColor : Color.primary)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        (rec.confidence >= 0.65 ? Color.accentColor : Color.primary).opacity(0.10),
+                                        in: Capsule(style: .continuous)
+                                    )
+                                } else {
+                                    Text("留在收件箱")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+                                }
+                            }
+                            .padding(8)
+                            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                    }
+                }
+                .frame(maxHeight: 360)
+            }
+
+            HStack {
+                if !actionable.isEmpty {
+                    Button(selectedRecs.count == actionable.count ? "取消全选" : "全选推荐项") {
+                        if selectedRecs.count == actionable.count {
+                            selectedTriageIDs.removeAll()
+                        } else {
+                            selectedTriageIDs = Set(actionable.map(\.assetID))
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Spacer()
+
+                Button("取消") {
+                    showInboxBatchTriageSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("归档已勾选 (\(selectedRecs.count) 项)") {
+                    let batch = selectedRecs
+                    showInboxBatchTriageSheet = false
+                    Task {
+                        let moved = await library.applyInboxTriageRecommendations(batch)
+                        coordinator.showToast("智能分拣完成：已归档 \(moved) 项素材", icon: "checkmark.circle.fill")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(selectedRecs.isEmpty)
+            }
+        }
+        .padding(22)
+        .frame(width: 600)
+    }
+
     // MARK: - Inbox Triage Bar & Celebratory Empty State
 
     private var inboxTriageBar: some View {
@@ -971,6 +1288,31 @@ public struct MainWindowView: View {
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
                 .help(suggestion.reason)
+            }
+
+            // Phase 2: Batch Inbox Smart Triage (TypeSafe Choice + Companion Noul)
+            if !library.folders.isEmpty {
+                Button {
+                    triggerInboxBatchTriage()
+                } label: {
+                    HStack(spacing: 4) {
+                        if library.isRunningInboxTriage {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
+                        Text(library.isRunningInboxTriage ? "分拣中…" : "智能分拣")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.accentColor.opacity(0.10), in: Capsule(style: .continuous))
+                }
+                .buttonStyle(CharkleTactileButtonStyle())
+                .disabled(library.isRunningInboxTriage)
+                .help("使用 TypeSafe Jev (Choice + 伴随 Noul) 批量识别收件箱素材并推荐归档目录")
             }
 
             // Quick 1–9 Folder Archive Chips
@@ -1105,7 +1447,7 @@ public struct MainWindowView: View {
                     } label: {
                         HStack(spacing: 4) {
                             if index == 0 {
-                                CharkleIcon("folder", style: .duotone, size: 13, color: Color.accentColor)
+                                CharkleFolderIcon(colorHex: crumb.colorHex, customSymbol: crumb.customSymbol, size: 15, isActive: true)
                             }
                             Text(crumb.name)
                                 .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
@@ -1122,16 +1464,17 @@ public struct MainWindowView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(children) { child in
+                            let childCount = library.subtreeAssetCount(for: child.id)
                             Button {
                                 navigate(to: .folder(child.id))
                             } label: {
                                 HStack(spacing: 5) {
-                                    CharkleIcon("folder", style: .duotone, size: 12, color: .secondary)
+                                    CharkleFolderIcon(colorHex: child.colorHex, customSymbol: child.customSymbol, size: 14, isActive: false)
                                     Text(child.name)
                                         .font(.system(size: 11.5, weight: .medium))
                                         .lineLimit(1)
-                                    if child.assetCount > 0 {
-                                        Text("\(child.assetCount)")
+                                    if childCount > 0 {
+                                        Text("\(childCount)")
                                             .font(.system(size: 10, design: .rounded))
                                             .monospacedDigit()
                                             .foregroundStyle(.secondary)
@@ -1195,6 +1538,41 @@ public struct MainWindowView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func triggerAIRetagging(for ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        if ids.count > 1 {
+            coordinator.showToast("正在为 \(ids.count) 项素材重新生成标签…", icon: "sparkles")
+        }
+        Task {
+            let outcome = await library.retagAssetsWithCloudAI(ids: ids)
+            switch outcome {
+            case .aiDisabled:
+                coordinator.showToast("请先在「设置 → 智能与搜索」中开启云端增强智能", icon: "sparkles", tone: .warning)
+            case .cancelled(let completed, let total):
+                coordinator.showToast("已停止重新打标（已完成 \(completed)/\(total) 项）", icon: "stop.circle")
+            case .finished(let succeeded, let failed, let total, let firstError):
+                if succeeded > 0 && failed == 0 {
+                    coordinator.showToast(
+                        total == 1 ? "已按当前格式重新生成建议标签" : "已完成 \(succeeded) 项 AI 重新打标",
+                        icon: "sparkles"
+                    )
+                } else if succeeded > 0 && failed > 0 {
+                    coordinator.showToast(
+                        "已完成 \(succeeded)/\(total) 项重新打标（\(failed) 项失败）",
+                        icon: "exclamationmark.triangle",
+                        tone: .warning
+                    )
+                } else {
+                    coordinator.showToast(
+                        firstError ?? "重新打标失败，请检查云端增强智能配置",
+                        icon: "exclamationmark.triangle",
+                        tone: .warning
+                    )
+                }
+            }
+        }
     }
 
     private func commitNewSubfolder(parentID: UUID) {
@@ -1383,6 +1761,30 @@ public struct MainWindowView: View {
                         }
                         .padding(12)
                     }
+
+                    Button {
+                        if library.isEnrichingTags {
+                            library.cancelRetagging()
+                        } else {
+                            triggerAIRetagging(for: ids)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if library.isEnrichingTags {
+                                ProgressView().controlSize(.mini)
+                                Text("打标中 \(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount))")
+                                    .monospacedDigit()
+                            } else {
+                                Image(systemName: "sparkles")
+                                Text("AI 打标")
+                            }
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.plain)
+                    .help(library.isEnrichingTags ? "点击停止批量重新打标" : "按当前语言格式重新生成建议标签并优先合并已有标签")
 
                     Menu {
                         ForEach(1...5, id: \.self) { star in
@@ -1637,6 +2039,9 @@ public struct MainWindowView: View {
                     onCommitDocument: { nextDoc in
                         moodboards.commitMutation(nextDoc)
                     },
+                    onPersistViewport: { center, zoom in
+                        moodboards.persistViewportQuietly(center: center, zoom: zoom)
+                    },
                     onUndo: { moodboards.undo() },
                     onRedo: { moodboards.redo() },
                     onSelectSwapTarget: { nodeID in
@@ -1732,6 +2137,74 @@ public struct MainWindowView: View {
                     },
                     onOpenFigmaPluginGuide: {
                         showFigmaPluginGuideSheet = true
+                    },
+                    onSmartFocusNode: { nodeID, assetID, query in
+                        let label = query.map { "正在定位「\($0)」…" } ?? "正在识别画面主体…"
+                        coordinator.showToast(label, icon: "viewfinder")
+                        Task {
+                            switch await moodboards.smartFocusNode(nodeID: nodeID, assetID: assetID, query: query) {
+                            case .success(let res):
+                                coordinator.showToast(
+                                    res.summary,
+                                    icon: res.found ? "viewfinder" : "questionmark.circle",
+                                    tone: res.found ? .neutral : .warning
+                                )
+                            case .failure(let error):
+                                coordinator.showToast(error.localizedDescription, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onVisualMatchCropNode: { nodeID, targetAssetID, referenceAssetID in
+                        coordinator.showToast("正在按参考图定位匹配局部…", icon: "photo.on.rectangle.angled")
+                        Task {
+                            switch await moodboards.visualMatchCropNode(
+                                nodeID: nodeID,
+                                targetAssetID: targetAssetID,
+                                referenceAssetID: referenceAssetID
+                            ) {
+                            case .success(let res):
+                                coordinator.showToast(
+                                    res.summary,
+                                    icon: res.found ? "photo.on.rectangle.angled" : "questionmark.circle",
+                                    tone: res.found ? .neutral : .warning
+                                )
+                            case .failure(let error):
+                                coordinator.showToast(error.localizedDescription, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onCleanCropNode: { nodeID, assetID in
+                        coordinator.showToast("正在检测噪边与核心画面…", icon: "crop")
+                        Task {
+                            switch await moodboards.cleanCropNode(nodeID: nodeID, assetID: assetID) {
+                            case .success(let res):
+                                coordinator.showToast(res.summary, icon: res.hasNoise ? "crop" : "checkmark.circle")
+                            case .failure(let error):
+                                coordinator.showToast(error.localizedDescription, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onPinpointAnnotateNode: { nodeID, assetID, targetQuery, noteText in
+                        coordinator.showToast("正在定位「\(targetQuery)」并生成指物批注…", icon: "scope")
+                        Task {
+                            let res = await moodboards.pinpointAnnotateNode(
+                                nodeID: nodeID,
+                                assetID: assetID,
+                                targetQuery: targetQuery,
+                                noteText: noteText,
+                                assetsByID: library.allAssetsByID
+                            )
+                            switch res {
+                            case .success(let region):
+                                coordinator.showToast(
+                                    region.found ? "已添加指物批注 · \(region.summary)" : region.summary,
+                                    icon: region.found ? "scope" : "questionmark.circle",
+                                    tone: region.found ? .neutral : .warning
+                                )
+                            case .failure(let error):
+                                coordinator.showToast(error.localizedDescription, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
                     }
                 )
             )
@@ -1780,7 +2253,26 @@ public struct MainWindowView: View {
         }
     }
 
+    private func layoutModeButton(mode: GalleryLayoutMode, icon: String, helpText: String) -> some View {
+        let active = coordinator.galleryLayoutMode == mode
+        return Button {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                coordinator.galleryLayoutMode = mode
+            }
+        } label: {
+            CharkleIcon(icon, style: .duotone, size: 16, isActive: active)
+                .frame(width: 28, height: 24)
+                .background(
+                    active ? Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10) : Color.clear,
+                    in: Capsule(style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
     private func openQuickLook(_ asset: AssetRecord) {
+        library.markAssetOpened(asset.id)
         let playlist = library.assets.map(\.id)
         withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
             coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
@@ -1986,28 +2478,17 @@ public struct MainWindowView: View {
         }
     }
 
-    private var syncDotColor: Color {
-        switch syncAndAI.syncStatus.phase {
-        case .error: .red
-        case .scanning, .uploading, .downloading, .merging: .orange
-        case .idle:
-            syncAndAI.syncConfig.mode == .localOnly ? .secondary : .green
-        }
-    }
-
-    private var syncPillLabel: String {
-        switch syncAndAI.syncStatus.phase {
-        case .scanning: "扫描中…"
-        case .uploading(let done, let total): "上传 \(done)/\(total)"
-        case .downloading(let done, let total): "下载 \(done)/\(total)"
-        case .merging: "合并中…"
-        case .error: "同步异常"
-        case .idle:
-            switch syncAndAI.syncConfig.mode {
-            case .localOnly: "本地保存"
-            case .directAPIWithGDirect: "Google Drive"
-            case .webDAV: "WebDAV"
-            case .gdirectMount: "Drive 挂载"
+    private func triggerManualCloudSync() {
+        Task {
+            if let report = await syncAndAI.syncNow() {
+                await library.refreshAll()
+                await moodboards.refreshBoards()
+                coordinator.showToast(
+                    "同步完成 · 上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets)",
+                    icon: "checkmark.icloud.fill"
+                )
+            } else if let err = syncAndAI.errorMessage {
+                coordinator.showToast(err, icon: "exclamationmark.icloud", tone: .warning)
             }
         }
     }
@@ -2019,6 +2500,230 @@ public struct MainWindowView: View {
         case .warning: .orange
         case .error: .red
         }
+    }
+}
+
+/// Isolated top-bar sync pill & progress popover so frequent live sync progress broadcasts
+/// update only this compact control rather than triggering full Gallery / MainWindowView diffs.
+private struct FloatingSyncStatusPill: View {
+    let syncAndAI: SyncAndAIStore
+    let onOpenSettings: () -> Void
+    let onTriggerManualSync: () -> Void
+
+    @State private var showSyncPopover: Bool = false
+
+    var body: some View {
+        Button {
+            if syncAndAI.syncConfig.mode == .localOnly {
+                onOpenSettings()
+            } else {
+                showSyncPopover.toggle()
+                if showSyncPopover {
+                    Task { await syncAndAI.refreshSyncStatus() }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Circle()
+                        .fill(syncDotColor)
+                        .frame(width: 7, height: 7)
+                }
+                Text(syncPillLabel)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
+        }
+        .buttonStyle(CharkleTactileButtonStyle())
+        .popover(isPresented: $showSyncPopover, arrowEdge: .bottom) {
+            cloudSyncProgressPopover
+        }
+        .contextMenu {
+            if syncAndAI.syncConfig.mode != .localOnly {
+                Button("立即同步") {
+                    onTriggerManualSync()
+                }
+                Divider()
+            }
+            Button("打开存储与同步设置…") { onOpenSettings() }
+        }
+        .help(syncAndAI.syncConfig.mode == .localOnly ? "当前为本地保存，点击打开存储设置" : "点击查看云端同步进度与状态")
+    }
+
+    private var syncDotColor: Color {
+        switch syncAndAI.syncStatus.phase {
+        case .error: return .red
+        case .scanning, .uploading, .downloading, .merging: return .orange
+        case .idle:
+            if syncAndAI.syncConfig.mode == .localOnly { return .secondary }
+            return syncAndAI.syncStatus.pendingOpCount > 0 ? .orange : .green
+        }
+    }
+
+    private var syncPillLabel: String {
+        let status = syncAndAI.syncStatus
+        let pctSuffix = status.progressFraction.map { " \(Int(($0 * 100).rounded()))%" } ?? ""
+        switch status.phase {
+        case .scanning:
+            return "扫描中\(pctSuffix)"
+        case .uploading(let done, let total):
+            return total > 0 ? "上传 \(done)/\(total)" : "上传中\(pctSuffix)"
+        case .downloading(let done, let total):
+            return total > 0 ? "拉取 \(done)/\(total)" : "拉取中\(pctSuffix)"
+        case .merging:
+            return "整理中\(pctSuffix)"
+        case .error:
+            return "同步异常"
+        case .idle:
+            if syncAndAI.isBusy { return "同步中…" }
+            let pendingSuffix = status.pendingOpCount > 0 ? " · 待传 \(status.pendingOpCount)" : ""
+            switch syncAndAI.syncConfig.mode {
+            case .localOnly: return "本地保存"
+            case .directAPIWithGDirect: return "Google Drive\(pendingSuffix)"
+            case .webDAV: return "WebDAV\(pendingSuffix)"
+            case .gdirectMount: return "Drive 挂载\(pendingSuffix)"
+            }
+        }
+    }
+
+    private var cloudSyncProgressPopover: some View {
+        let status = syncAndAI.syncStatus
+        let isSyncing = status.isSyncing || syncAndAI.isBusy
+        let percentText = status.progressFraction.map { "\(Int(($0 * 100).rounded()))%" }
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                if isSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Circle()
+                        .fill(syncDotColor)
+                        .frame(width: 8, height: 8)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(isSyncing ? status.localizedPhaseTitle : (status.pendingOpCount > 0 ? "有 \(status.pendingOpCount) 项待同步" : "云端存储已连接"))
+                            .font(.system(size: 13, weight: .semibold))
+                        if isSyncing, let percentText {
+                            Text(percentText)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    Text(syncAndAI.syncConfig.activeStorageLocationSummary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+
+            if isSyncing {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let fraction = status.progressFraction {
+                        ProgressView(value: min(1.0, max(0.0, fraction)))
+                            .progressViewStyle(.linear)
+                            .tint(Color.accentColor)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                            .tint(Color.accentColor)
+                    }
+                    if let detail = status.currentDetail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            } else if let err = status.lastError, !err.isEmpty {
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("上次同步")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(status.lastSyncedAt.map { formatRelativeSyncTime($0) } ?? "尚未同步")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                }
+                HStack {
+                    Text("本地待传队列")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(status.pendingOpCount > 0 ? "\(status.pendingOpCount) 项" : "已清空")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(status.pendingOpCount > 0 ? .orange : .secondary)
+                }
+                if let report = syncAndAI.lastSyncReport {
+                    HStack {
+                        Text("最近同步结果")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .monospacedDigit()
+                    }
+                }
+            }
+            .padding(9)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            HStack(spacing: 8) {
+                Button {
+                    onTriggerManualSync()
+                } label: {
+                    Text(isSyncing ? "同步中…" : "立即同步")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isSyncing)
+
+                Button("存储设置…") {
+                    showSyncPopover = false
+                    onOpenSettings()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(14)
+        .frame(width: 296)
+    }
+
+    private func formatRelativeSyncTime(_ date: Date) -> String {
+        let elapsed = max(0, Date().timeIntervalSince(date))
+        if elapsed < 15 { return "刚刚" }
+        if elapsed < 60 { return "\(Int(elapsed)) 秒前" }
+        if elapsed < 3600 { return "\(Int(elapsed / 60)) 分钟前" }
+        if elapsed < 86400 { return "\(Int(elapsed / 3600)) 小时前" }
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MM-dd HH:mm"
+        return fmt.string(from: date)
     }
 }
 

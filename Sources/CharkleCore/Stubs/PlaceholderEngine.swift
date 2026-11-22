@@ -14,11 +14,28 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
     public init() {}
 
     public func fetchAssets(matching criteria: FilterCriteria) async throws -> [AssetRecord] {
+        var allowedFolderIDs: Set<UUID>?
+        if let rootFolderID = criteria.folderID {
+            if criteria.includeSubfolders {
+                var set: Set<UUID> = [rootFolderID]
+                var queue: [UUID] = [rootFolderID]
+                while let current = queue.popLast() {
+                    for f in folders.values where f.parentID == current && set.insert(f.id).inserted {
+                        queue.append(f.id)
+                    }
+                }
+                allowedFolderIDs = set
+            } else {
+                allowedFolderIDs = [rootFolderID]
+            }
+        }
         var result = Array(assets.values).filter { asset in
             if criteria.onlyTrashed { return asset.isTrashed }
             if !criteria.includeTrashed && asset.isTrashed { return false }
             if criteria.onlyInbox && asset.folderID != nil { return false }
-            if let folderID = criteria.folderID, asset.folderID != folderID { return false }
+            if let allowedFolderIDs {
+                guard let fid = asset.folderID, allowedFolderIDs.contains(fid) else { return false }
+            }
             if criteria.onlyUntagged && !asset.tags.isEmpty { return false }
             if !criteria.kinds.isEmpty && !criteria.kinds.contains(asset.mediaKind) { return false }
             if let shape = criteria.shape, asset.aspectShape != shape { return false }
@@ -345,12 +362,76 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
         [ChatGPTModelInfo(slug: "gpt-5.4-mini", displayName: "GPT-5.4 mini")]
     }
 
+    public func typeSafeConfig() async -> TypeSafeExperimentalConfig { TypeSafeExperimentalConfig() }
+    public func saveTypeSafeConfig(_ config: TypeSafeExperimentalConfig, apiKey: String?) async throws {}
+    public func hasStoredTypeSafeKey() async -> Bool { false }
+    public func testTypeSafeConnection(config: TypeSafeExperimentalConfig, apiKey: String?) async throws -> [TypeSafeModelInfo] {
+        [TypeSafeModelInfo(name: "jev-latest", description: "Demo Jev model", releaseDate: "2026-01-01")]
+    }
+    public func locateVisualRegion(assetID: UUID, query: String?) async throws -> VisualRegionResult {
+        VisualRegionResult(
+            crop: NormalizedCropRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7),
+            rawBox: NormalizedCropRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7),
+            presenceProbability: 0.95,
+            confidence: 0.88,
+            didApplyPadding: false,
+            found: true,
+            source: .appleVisionSaliency,
+            model: "Demo",
+            summary: "演示模式已聚焦主体"
+        )
+    }
+    public func detectCleanContentBounds(assetID: UUID) async throws -> CleanBoundsResult {
+        CleanBoundsResult(
+            hasNoise: true,
+            noiseProbability: 0.82,
+            recommendedCrop: NormalizedCropRect(x: 0.08, y: 0.1, width: 0.84, height: 0.8),
+            confidence: 0.85,
+            didApplyPadding: false,
+            source: .appleVisionSaliency,
+            model: "Demo",
+            summary: "演示模式已识别核心画面"
+        )
+    }
+    public func locateVisualMatch(referenceAssetID: UUID, in targetAssetID: UUID) async throws -> VisualRegionResult {
+        try await locateVisualRegion(assetID: targetAssetID, query: nil)
+    }
+    public func extractSubjectPalette(assetID: UUID, query: String?) async throws -> SubjectPaletteResult {
+        let asset = assets[assetID] ?? AssetRecord(title: "Demo", fileName: "demo.jpg")
+        let region = try await locateVisualRegion(assetID: assetID, query: query)
+        return SubjectPaletteResult(colors: asset.dominantColors, subjectRegion: region, updatedAsset: asset)
+    }
+    public func semanticSearch(query: String, criteria: FilterCriteria, limit: Int) async throws -> SemanticSearchReport {
+        let matched = Array(assets.values.filter { !$0.isTrashed }.prefix(limit))
+        return SemanticSearchReport(
+            query: query,
+            hits: matched.map { SemanticSearchHit(asset: $0, score: 0.85, reason: "演示语义匹配", sourceLabel: "演示") },
+            summary: "演示模式语义命中 \(matched.count) 项"
+        )
+    }
+    public func batchTriageInbox(assetIDs: [UUID], maxCount: Int) async throws -> [InboxTriageRecommendation] {
+        let firstFolder = folders.values.first
+        return assets.values.filter(\.isInInbox).prefix(maxCount).map {
+            InboxTriageRecommendation(
+                assetID: $0.id,
+                assetTitle: $0.title,
+                recommendedFolderID: firstFolder?.id,
+                recommendedFolderName: firstFolder?.name,
+                confidence: 0.82,
+                fitProbability: 0.86,
+                reason: "演示推荐",
+                source: .typeSafeJev
+            )
+        }
+    }
+
     public func syncConfig() async -> DriveSyncConfig { currentSyncConfig }
     public func saveSyncConfig(_ config: DriveSyncConfig) async throws { currentSyncConfig = config }
     public func syncStatus() async -> SyncStatus { currentSyncStatus }
     public func probeGDirectEnvironment() async -> GDirectEnvironmentSnapshot { GDirectEnvironmentSnapshot() }
     public func runGDirectScan() async throws -> GDirectEnvironmentSnapshot { GDirectEnvironmentSnapshot() }
     public func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot { GDirectEnvironmentSnapshot() }
+    public func runGDirectUnmount() async throws -> GDirectEnvironmentSnapshot { GDirectEnvironmentSnapshot() }
     public func importGoogleOAuthSecret(from url: URL) async throws {}
     public func importGoogleOAuthFromGDirect() async throws {}
     public func hasGoogleOAuthClientConfig() async -> Bool { true }

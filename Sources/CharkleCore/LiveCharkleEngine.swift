@@ -8,9 +8,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     let curator: MoodboardCurator
     let driveSync: DriveSyncEngine
     let oauth: GoogleOAuthClient
+    let driveSession: URLSession
     let injectedTransport: (any DriveTransport)?
     private var syncTask: Task<SyncReport, Error>?
     private var autoSyncTask: Task<Void, Never>?
+    private var backgroundEnrichmentTasks: [UUID: Task<Void, Never>] = [:]
+    private var cachedGDirectEndpoints: (endpoints: [GDirectEndpoint], fetchedAt: ContinuousClock.Instant)?
     private var seeding = false
 
     public init(database: LibraryDatabase, media: MediaPipeline, intelligence: IntelligenceEngine = IntelligenceEngine(),
@@ -20,13 +23,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         self.intelligence = intelligence
         self.curator = MoodboardCurator(database: database)
         self.driveSync = DriveSyncEngine(database: database, media: media, intelligence: intelligence)
-        self.oauth = GoogleOAuthClient(keychain: intelligence.keychain)
+        self.driveSession = DirectAPITransport.makePooledSession()
+        self.oauth = GoogleOAuthClient(keychain: intelligence.keychain, session: driveSession)
         self.injectedTransport = transport
     }
 
     deinit {
         autoSyncTask?.cancel()
         syncTask?.cancel()
+        for task in backgroundEnrichmentTasks.values {
+            task.cancel()
+        }
     }
 
     public func fetchAssets(matching criteria: FilterCriteria) async throws -> [AssetRecord] {
@@ -120,6 +127,196 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
     }
 
+    public func moveFolder(id: UUID, newParentID: UUID?, insertAtIndex: Int?) async throws -> [FolderRecord] {
+        try await database.transaction { store in
+            let allFolders = try store.fetchFolders()
+            let byID = Dictionary(uniqueKeysWithValues: allFolders.map { ($0.id, $0) })
+            guard var moving = byID[id] else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
+            if let newParentID {
+                guard byID[newParentID] != nil else {
+                    throw DriveTransportError.fileNotFound(newParentID.uuidString)
+                }
+                // Cycle guard: reject dropping a folder into itself or any descendant.
+                var cursor: UUID? = newParentID
+                var visited = Set<UUID>()
+                while let cid = cursor, visited.insert(cid).inserted {
+                    if cid == id {
+                        throw LibraryDatabaseError("不能将文件夹移动到自身或其子目录中。")
+                    }
+                    cursor = byID[cid]?.parentID
+                }
+            }
+
+            let parentChanged = moving.parentID != newParentID
+            let targetSiblings = allFolders
+                .filter { $0.parentID == newParentID && $0.id != id }
+                .sorted { ($0.sortOrder, $0.name, $0.id.uuidString) < ($1.sortOrder, $1.name, $1.id.uuidString) }
+
+            if parentChanged {
+                let originalName = moving.name
+                var candidate = originalName
+                var suffix = 2
+                while (newParentID == nil && candidate.caseInsensitiveCompare("Inbox") == .orderedSame)
+                    || targetSiblings.contains(where: { $0.name.caseInsensitiveCompare(candidate) == .orderedSame }) {
+                    candidate = "\(originalName) \(suffix)"
+                    suffix += 1
+                }
+                moving.name = candidate
+                moving.parentID = newParentID
+            }
+
+            var ordered = targetSiblings
+            let clampIndex = insertAtIndex.map { max(0, min($0, ordered.count)) } ?? ordered.count
+            ordered.insert(moving, at: clampIndex)
+
+            let now = Date()
+            for (index, var folder) in ordered.enumerated() {
+                if folder.sortOrder != index || folder.id == id {
+                    folder.sortOrder = index
+                    folder.updatedAt = now
+                    try store.record(.folder(folder))
+                }
+            }
+            return try store.fetchFolders()
+        }
+    }
+
+    public func updateFolderAppearance(id: UUID, colorHex: String?, customSymbol: String?) async throws -> FolderRecord {
+        try await database.transaction { store in
+            guard var folder = try store.folder(id: id) else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
+            folder.colorHex = colorHex?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? colorHex : nil
+            folder.customSymbol = customSymbol?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? customSymbol : nil
+            folder.updatedAt = Date()
+            try store.record(.folder(folder))
+            return folder
+        }
+    }
+
+    private static let smartFoldersStateKey = "smart_folders.v1"
+
+    public func fetchSmartFolders() async throws -> [SmartFolderRecord] {
+        let list = try await database.state(Self.smartFoldersStateKey, as: [SmartFolderRecord].self) ?? []
+        return list.sorted { ($0.sortOrder, $0.name, $0.id.uuidString) < ($1.sortOrder, $1.name, $1.id.uuidString) }
+    }
+
+    public func saveSmartFolder(_ folder: SmartFolderRecord) async throws -> [SmartFolderRecord] {
+        try await database.transaction { store in
+            var list = try store.state(Self.smartFoldersStateKey, as: [SmartFolderRecord].self) ?? []
+            var item = folder
+            item.name = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if item.name.isEmpty { item.name = "未命名智能文件夹" }
+            item.updatedAt = Date()
+            if let idx = list.firstIndex(where: { $0.id == item.id }) {
+                list[idx] = item
+            } else {
+                item.sortOrder = (list.map(\.sortOrder).max() ?? -1) + 1
+                list.append(item)
+            }
+            try store.setState(Self.smartFoldersStateKey, list)
+            return list.sorted { ($0.sortOrder, $0.name, $0.id.uuidString) < ($1.sortOrder, $1.name, $1.id.uuidString) }
+        }
+    }
+
+    public func deleteSmartFolder(id: UUID) async throws -> [SmartFolderRecord] {
+        try await database.transaction { store in
+            var list = try store.state(Self.smartFoldersStateKey, as: [SmartFolderRecord].self) ?? []
+            list.removeAll { $0.id == id }
+            try store.setState(Self.smartFoldersStateKey, list)
+            return list.sorted { ($0.sortOrder, $0.name, $0.id.uuidString) < ($1.sortOrder, $1.name, $1.id.uuidString) }
+        }
+    }
+
+    public func markAssetOpened(id: UUID) async {
+        try? await database.transaction { store in
+            guard var asset = try store.asset(id: id) else { return }
+            asset.lastOpenedAt = Date()
+            // Local activity timestamp only; avoids emitting unnecessary remote sync operations.
+            try store.put(asset)
+        }
+    }
+
+    public func refreshRichAsset(id: UUID) async throws -> AssetRecord {
+        guard var current = try await database.asset(id: id) else {
+            throw DriveTransportError.fileNotFound(id.uuidString)
+        }
+        guard let urlStr = current.sourceURL, let url = URL(string: urlStr) else {
+            return current
+        }
+
+        if let repoRef = GitHubRepoURLParser.parse(url) {
+            let repo = await GitHubRepoResolver.resolve(repoRef)
+            var rich = current.richMetadata ?? AssetRichMetadata()
+            rich.githubRepo = repo
+            current.richMetadata = rich
+            current.title = repo.fullName
+            if let desc = repo.description, !desc.isEmpty {
+                current.notes = desc
+            }
+            if let card = MediaArtwork.githubRepoCard(repo) {
+                try? media.writeCustomPoster(card, for: &current)
+            }
+            let updated = current
+            return try await database.transaction { store in
+                try store.saveAssetLocally(updated)
+            }
+        }
+
+        if let socialRef = SocialPostURLParser.parse(url),
+           let resolved = await SocialPostResolver.resolve(socialRef) {
+            let stagingDir = media.staging.appending(path: "social-refresh-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+            var embeddedPoster: CGImage?
+            var mediaFailed = false
+            var downloadedFile: URL?
+            if let mediaURL = resolved.primaryMediaDownloadURL, let kind = resolved.primaryMediaKind {
+                let item = XPostMedia(kind: kind, url: mediaURL, thumbnailURL: resolved.primaryThumbnailURL)
+                if let file = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: "Social-\(id.uuidString.prefix(8))") {
+                    downloadedFile = file
+                    embeddedPoster = MediaPipeline.raster(file)?.poster
+                } else {
+                    mediaFailed = true
+                }
+            }
+            if embeddedPoster == nil, let thumbURL = resolved.primaryThumbnailURL {
+                let thumbItem = XPostMedia(kind: .photo, url: thumbURL)
+                if let thumbFile = await XPostResolver.downloadMedia(thumbItem, to: stagingDir, baseName: "SocialThumb-\(id.uuidString.prefix(8))") {
+                    embeddedPoster = MediaPipeline.raster(thumbFile)?.poster
+                }
+            }
+
+            var meta = resolved.metadata
+            meta.mediaFetchFailed = mediaFailed
+            var rich = current.richMetadata ?? AssetRichMetadata()
+            rich.socialPost = meta
+            current.richMetadata = rich
+            current.title = resolved.shortTitle
+            if let file = downloadedFile {
+                let ext = file.pathExtension.lowercased()
+                if ["mp4", "mov", "m4v", "webm"].contains(ext) {
+                    current.fileName = file.lastPathComponent
+                    _ = try? media.installOriginal(file, for: current)
+                }
+            }
+            current.mediaKind = .webBookmark
+            current.ocrText = meta.bodyText.isEmpty ? current.ocrText : meta.bodyText
+            if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster) {
+                try? media.writeCustomPoster(card, for: &current)
+            }
+            let updated = current
+            return try await database.transaction { store in
+                try store.saveAssetLocally(updated)
+            }
+        }
+
+        return current
+    }
+
     public func ingest(_ inputs: [CaptureInput], targetFolderID: UUID?, targetBoardID: UUID?) async throws -> [AssetRecord] {
         if let targetFolderID, try await database.folder(id: targetFolderID) == nil {
             throw DriveTransportError.fileNotFound(targetFolderID.uuidString)
@@ -128,17 +325,42 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             throw DriveTransportError.fileNotFound(targetBoardID.uuidString)
         }
         guard !inputs.isEmpty else { return [] }
+
+        // 1. Expand any Finder directories recursively, creating mirrored FolderRecords on the fly.
+        let expandedItems = try await expandInputsWithDirectories(inputs, defaultFolderID: targetFolderID)
+        guard !expandedItems.isEmpty else { return [] }
+
+        // 2. Prepare items with bounded concurrency (up to 4 workers) without blocking on Vision OCR or Cloud AI.
         var prepared: [PreparedAsset] = []
         do {
-            for input in inputs {
-                try Task.checkCancellation()
-                if case .webURL(let url, _, _) = input, let ref = XPostURLParser.parse(url) {
-                    let xPrepared = try await prepareXPost(ref, fallbackInput: input, folderID: targetFolderID)
-                    prepared.append(contentsOf: xPrepared)
-                } else {
-                    prepared.append(try await prepare(input, folderID: targetFolderID))
+            let maxConcurrent = 4
+            var orderedResults = [PreparedAsset?](repeating: nil, count: expandedItems.count)
+            try await withThrowingTaskGroup(of: (Int, PreparedAsset).self) { group in
+                var nextIndex = 0
+                let initialBatch = min(maxConcurrent, expandedItems.count)
+                for _ in 0..<initialBatch {
+                    let index = nextIndex
+                    nextIndex += 1
+                    let work = expandedItems[index]
+                    group.addTask {
+                        try Task.checkCancellation()
+                        return (index, try await self.prepareExpanded(work.input, folderID: work.folderID))
+                    }
+                }
+                while let (index, item) = try await group.next() {
+                    orderedResults[index] = item
+                    if nextIndex < expandedItems.count {
+                        let launchIndex = nextIndex
+                        nextIndex += 1
+                        let work = expandedItems[launchIndex]
+                        group.addTask {
+                            try Task.checkCancellation()
+                            return (launchIndex, try await self.prepareExpanded(work.input, folderID: work.folderID))
+                        }
+                    }
                 }
             }
+            prepared = orderedResults.compactMap { $0 }
         } catch {
             for item in prepared { media.removeFiles(for: item.asset) }
             throw error
@@ -178,12 +400,167 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             throw error
         }
         _ = try await evict(keeping: Set(committed.map(\.id)))
-        let ai = await aiConfig()
-        if ai.autoAnalyzeOnImport, ai.provider != .disabled,
-           let enriched = try? await enrichAssetsWithCloudAI(ids: committed.map(\.id)) {
-            return enriched
+
+        // 3. Fire heavier Vision OCR + optional Cloud AI auto-tagging in a tracked background task
+        // (cancelled cleanly on deinit) so dropped files appear in Inbox immediately while still having
+        // fast FeaturePrint vectors ready synchronously for similarity search and sync shards.
+        let committedIDs = committed.map(\.id)
+        if !committedIDs.isEmpty {
+            let jobID = UUID()
+            let task = Task(priority: .utility) { [weak self] in
+                guard let self else { return }
+                defer {
+                    Task { [weak self] in
+                        await self?.finishBackgroundEnrichmentTask(jobID)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                var didChange = false
+                if await self.runBackgroundOCRIfNeeded(ids: committedIDs) {
+                    didChange = true
+                }
+                guard !Task.isCancelled else { return }
+                let ai = await self.aiConfig()
+                if ai.autoAnalyzeOnImport, ai.provider != .disabled, !Task.isCancelled,
+                   let enriched = try? await self.enrichAssetsWithCloudAI(ids: committedIDs), !enriched.isEmpty {
+                    didChange = true
+                }
+                if didChange && !Task.isCancelled {
+                    NotificationCenter.default.post(name: CharkleCoreNotifications.libraryDidEnrichInBackground, object: nil)
+                }
+            }
+            backgroundEnrichmentTasks[jobID] = task
         }
         return committed
+    }
+
+    private func finishBackgroundEnrichmentTask(_ jobID: UUID) {
+        backgroundEnrichmentTasks.removeValue(forKey: jobID)
+    }
+
+    private func runBackgroundOCRIfNeeded(ids: [UUID]) async -> Bool {
+        var didChange = false
+        for id in ids {
+            guard !Task.isCancelled else { break }
+            guard let before = try? await database.asset(id: id) else { continue }
+            guard before.mediaKind != .audio, before.mediaKind != .model3D else { continue }
+            if let existing = before.ocrText, !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continue
+            }
+            guard let thumbnail = media.thumbnailURL(for: id, tier: .grid520) else { continue }
+            let analysis = await intelligence.analyze(
+                thumbnailURL: thumbnail,
+                includeColors: false,
+                includeOCR: true,
+                includeFeaturePrint: false
+            )
+            guard !Task.isCancelled, let text = analysis.ocrText, !text.isEmpty else { continue }
+            let saved = try? await database.transaction { store -> AssetRecord? in
+                guard var current = try store.asset(id: id), current.contentHash == before.contentHash else { return nil }
+                if current.ocrText == nil || current.mediaKind == .image || current.mediaKind == .animatedImage {
+                    current.ocrText = text
+                    return try store.saveAssetLocally(current)
+                }
+                return nil
+            }
+            if saved != nil { didChange = true }
+        }
+        return didChange
+    }
+
+    private struct ExpandedCaptureWork: Sendable {
+        let input: CaptureInput
+        let folderID: UUID?
+    }
+
+    private func expandInputsWithDirectories(
+        _ inputs: [CaptureInput],
+        defaultFolderID: UUID?
+    ) async throws -> [ExpandedCaptureWork] {
+        var queue: [ExpandedCaptureWork] = []
+        for input in inputs {
+            try Task.checkCancellation()
+            guard case .fileURL(let url) = input else {
+                queue.append(ExpandedCaptureWork(input: input, folderID: defaultFolderID))
+                continue
+            }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            let resolved = url.resolvingSymlinksInPath()
+            let values = try? resolved.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+            if values?.isDirectory == true && values?.isPackage != true {
+                let collected = try await collectDirectoryFiles(
+                    directoryURL: resolved,
+                    parentFolderID: defaultFolderID,
+                    depth: 0
+                )
+                queue.append(contentsOf: collected)
+            } else {
+                queue.append(ExpandedCaptureWork(input: input, folderID: defaultFolderID))
+            }
+        }
+        return queue
+    }
+
+    private static let skippedDirectoryNames: Set<String> = [
+        ".git", ".svn", ".hg", "node_modules", "__MACOSX", ".Trash", ".build", "DerivedData"
+    ]
+
+    private func collectDirectoryFiles(
+        directoryURL: URL,
+        parentFolderID: UUID?,
+        depth: Int
+    ) async throws -> [ExpandedCaptureWork] {
+        guard depth < 16 else { return [] }
+        let folderName = directoryURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !folderName.isEmpty, !folderName.hasPrefix("."), !Self.skippedDirectoryNames.contains(folderName) else {
+            return []
+        }
+
+        let targetFolder = try await findOrCreateFolderForImport(named: folderName, parentID: parentFolderID)
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isPackageKey, .isHiddenKey, .isSymbolicLinkKey]
+        let children = (try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        let sortedChildren = children.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+
+        var result: [ExpandedCaptureWork] = []
+        for child in sortedChildren {
+            try Task.checkCancellation()
+            let childName = child.lastPathComponent
+            if childName.hasPrefix(".") || childName.hasPrefix("._") || Self.skippedDirectoryNames.contains(childName) {
+                continue
+            }
+            let vals = try? child.resourceValues(forKeys: Set(keys))
+            if vals?.isSymbolicLink == true { continue }
+            if vals?.isDirectory == true && vals?.isPackage != true {
+                let nested = try await collectDirectoryFiles(
+                    directoryURL: child,
+                    parentFolderID: targetFolder.id,
+                    depth: depth + 1
+                )
+                result.append(contentsOf: nested)
+            } else if vals?.isRegularFile == true {
+                result.append(ExpandedCaptureWork(input: .fileURL(child), folderID: targetFolder.id))
+            }
+        }
+        return result
+    }
+
+    private func findOrCreateFolderForImport(named rawName: String, parentID: UUID?) async throws -> FolderRecord {
+        let safeName = (parentID == nil && rawName.caseInsensitiveCompare("Inbox") == .orderedSame) ? "Inbox 导入" : rawName
+        let folders = try await database.fetchFolders()
+        if let existing = folders.first(where: {
+            $0.parentID == parentID && $0.name.caseInsensitiveCompare(safeName) == .orderedSame
+        }) {
+            return existing
+        }
+        return try await createFolder(name: safeName, parentID: parentID)
     }
 
     private struct PreparedAsset: Sendable {
@@ -191,89 +568,147 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let feature: Data?
     }
 
+    private func prepareExpanded(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
+        if case .webURL(let url, _, _) = input {
+            if let repoRef = GitHubRepoURLParser.parse(url) {
+                return try await prepareGitHubRepo(repoRef, folderID: folderID)
+            }
+            if let socialRef = SocialPostURLParser.parse(url) {
+                return try await prepareSocialPost(socialRef, fallbackInput: input, folderID: folderID)
+            }
+        }
+        return try await prepare(input, folderID: folderID)
+    }
+
     private func prepare(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
         let id = UUID()
         do {
             let source = try await media.ingest(input, folderID: folderID, id: id)
-            var asset = source.asset
             var feature: Data?
-            if asset.mediaKind != .audio, let thumbnail = media.thumbnailURL(for: id, tier: .grid520) {
-                let analysis = await intelligence.analyze(thumbnailURL: thumbnail, includeColors: false)
-                asset.ocrText = asset.ocrText ?? analysis.ocrText
+            if source.asset.mediaKind != .audio,
+               let thumbnail = media.thumbnailURL(for: id, tier: .grid520) {
+                let analysis = await intelligence.analyze(
+                    thumbnailURL: thumbnail,
+                    includeColors: false,
+                    includeOCR: false,
+                    includeFeaturePrint: true
+                )
                 feature = analysis.featurePrintData
             }
-            return PreparedAsset(asset: asset, feature: feature)
+            return PreparedAsset(asset: source.asset, feature: feature)
         } catch {
             media.removeFiles(for: AssetRecord(id: id, title: "", fileName: ""))
             throw error
         }
     }
 
-    private func prepareXPost(_ ref: XPostReference, fallbackInput: CaptureInput, folderID: UUID?) async throws -> [PreparedAsset] {
-        guard let post = await XPostResolver.resolve(ref) else {
-            return [try await prepare(fallbackInput, folderID: folderID)]
+    private func prepareGitHubRepo(_ ref: GitHubRepoReference, folderID: UUID?) async throws -> PreparedAsset {
+        let repo = await GitHubRepoResolver.resolve(ref)
+        let summaryText = [
+            repo.description ?? "",
+            repo.language.map { "Language: \($0)" } ?? "",
+            "Stars: \(repo.stars) · Forks: \(repo.forks)",
+            repo.topics.isEmpty ? "" : "Topics: \(repo.topics.joined(separator: ", "))"
+        ].filter { !$0.isEmpty }.joined(separator: "\n")
+
+        var item = try await prepare(
+            .webURL(ref.canonicalURL, title: repo.fullName, notes: summaryText),
+            folderID: folderID
+        )
+        item.asset.title = repo.fullName
+        item.asset.notes = repo.description ?? ""
+        item.asset.sourceURL = ref.canonicalURL.absoluteString
+        item.asset.sourceDomain = "github.com"
+        item.asset.richMetadata = AssetRichMetadata(githubRepo: repo)
+        var tags = Set(item.asset.tags)
+        tags.insert("GitHub")
+        if let lang = repo.language, !lang.isEmpty { tags.insert(lang) }
+        item.asset.tags = tags.sorted()
+        if let card = MediaArtwork.githubRepoCard(repo) {
+            try? media.writeCustomPoster(card, for: &item.asset)
+        }
+        return item
+    }
+
+    private func prepareSocialPost(_ ref: SocialPostReference, fallbackInput: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
+        guard let resolved = await SocialPostResolver.resolve(ref) else {
+            return try await prepare(fallbackInput, folderID: folderID)
         }
 
-        let stagingDir = media.staging.appending(path: "xpost-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let stagingDir = media.staging.appending(path: "social-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: stagingDir) }
 
-        var downloadedFiles: [URL] = []
-        for (idx, item) in post.media.enumerated() {
-            try Task.checkCancellation()
-            let baseName = "X-\(post.authorHandle)-\(ref.tweetID)-\(idx + 1)"
-            if let localFile = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: baseName) {
-                downloadedFiles.append(localFile)
-            }
-        }
+        var downloadedVideoFile: URL?
+        var embeddedPoster: CGImage?
+        var mediaFailed = false
 
-        var results: [PreparedAsset] = []
-        let canonicalStr = post.canonicalURL.absoluteString
-        let searchableTweetBody = [post.authorName, "@\(post.authorHandle)", post.articleTitle ?? "", post.text, post.quotedText ?? ""]
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: "\n")
-
-        if !downloadedFiles.isEmpty {
-            let total = downloadedFiles.count
-            for (idx, fileURL) in downloadedFiles.enumerated() {
-                try Task.checkCancellation()
-                var item = try await prepare(.fileURL(fileURL), folderID: folderID)
-                let suffix = total > 1 ? " (\(idx + 1)/\(total))" : ""
-                item.asset.title = post.shortTitle + suffix
-                item.asset.notes = post.formattedNotes
-                item.asset.sourceURL = canonicalStr
-                item.asset.sourceDomain = "x.com"
-                if !item.asset.tags.contains("X") {
-                    item.asset.tags.append("X")
-                }
-                if let existingOCR = item.asset.ocrText, !existingOCR.isEmpty {
-                    item.asset.ocrText = searchableTweetBody + "\n" + existingOCR
+        if let mediaURL = resolved.primaryMediaDownloadURL, let kind = resolved.primaryMediaKind {
+            let item = XPostMedia(kind: kind, url: mediaURL, thumbnailURL: resolved.primaryThumbnailURL)
+            if let file = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: "Social-\(resolved.metadata.authorHandle)") {
+                if kind == .video || kind == .gif {
+                    downloadedVideoFile = file
                 } else {
-                    item.asset.ocrText = searchableTweetBody
+                    embeddedPoster = MediaPipeline.raster(file)?.poster
                 }
-                results.append(item)
+            } else {
+                mediaFailed = true
             }
-            return results
+        }
+        if embeddedPoster == nil, let thumbURL = resolved.primaryThumbnailURL {
+            let thumbItem = XPostMedia(kind: .photo, url: thumbURL)
+            if let thumbFile = await XPostResolver.downloadMedia(thumbItem, to: stagingDir, baseName: "SocialThumb-\(resolved.metadata.authorHandle)") {
+                embeddedPoster = MediaPipeline.raster(thumbFile)?.poster
+            }
         }
 
-        // Text-only tweet (or protected/unavailable media): archive full tweet text as searchable Markdown card
-        var snippet = try await prepare(
-            .textSnippet(title: post.shortTitle, text: post.markdownDocument, sourceURL: canonicalStr),
-            folderID: folderID
-        )
-        snippet.asset.title = post.shortTitle
-        snippet.asset.notes = post.formattedNotes
-        snippet.asset.sourceURL = canonicalStr
-        snippet.asset.sourceDomain = "x.com"
-        if !snippet.asset.tags.contains("X") {
-            snippet.asset.tags.append("X")
+        var meta = resolved.metadata
+        meta.mediaFetchFailed = mediaFailed
+
+        // Always store a social post as ONE cohesive structured social-post asset (`.webBookmark`) combining
+        // author + full text + media attachments — NEVER flatten it into an `.image` asset.
+        // When a video/GIF is present, keep the downloaded `.mp4` as cached original for instant inline playback
+        // while preserving `.webBookmark` + `richMetadata.socialPost`; otherwise store the structured Markdown archive.
+        var prepared: PreparedAsset
+        if let downloadedVideoFile {
+            prepared = try await prepare(.fileURL(downloadedVideoFile), folderID: folderID)
+        } else {
+            prepared = try await prepare(
+                .textSnippet(title: resolved.shortTitle, text: resolved.markdownDocument, sourceURL: meta.originalURL),
+                folderID: folderID
+            )
         }
-        return [snippet]
+
+        prepared.asset.mediaKind = .webBookmark
+        prepared.asset.title = resolved.shortTitle
+        prepared.asset.notes = meta.bodyText
+        prepared.asset.ocrText = meta.bodyText.isEmpty ? prepared.asset.ocrText : meta.bodyText
+        prepared.asset.sourceURL = meta.originalURL
+        prepared.asset.sourceDomain = ref.canonicalURL.host() ?? (meta.platform == .x ? "x.com" : meta.platform == .bluesky ? "bsky.app" : "threads.net")
+        prepared.asset.richMetadata = AssetRichMetadata(socialPost: meta)
+
+        let platformTag = meta.platform.displayName
+        if !prepared.asset.tags.contains(platformTag) {
+            prepared.asset.tags.append(platformTag)
+        }
+
+        if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster) {
+            try? media.writeCustomPoster(card, for: &prepared.asset)
+        }
+        return prepared
     }
 
     private static func commit(_ prepared: PreparedAsset, in store: isolated LibraryDatabase,
                                syncConfig: DriveSyncConfig) throws -> AssetRecord {
         let asset = try store.saveAssetLocally(prepared.asset)
+        if !asset.contentHash.isEmpty {
+            // Re-importing the same content intentionally clears prior deletion suppression fingerprints.
+            if let oldFP = try store.state("deleted.content." + asset.contentHash, as: DeletedAssetFingerprint.self),
+               let md5 = oldFP.md5, !md5.isEmpty {
+                try store.setState("deleted.md5." + md5, Optional<DeletedAssetFingerprint>.none)
+            }
+            try store.setState("deleted.content." + asset.contentHash, Optional<DeletedAssetFingerprint>.none)
+        }
         try store.touchOriginal(asset.id)
         if let feature = prepared.feature {
             let vector = AssetVector(featurePrint: feature)
@@ -332,6 +767,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
         let rootPrefix = (rootSegments.isEmpty ? ["Charkle"] : rootSegments).joined(separator: "/")
 
+        let uniqueIDs = Array(Set(ids))
+        var precomputedMD5: [UUID: String] = [:]
+        for id in uniqueIDs {
+            if let asset = try? await database.asset(id: id),
+               let cached = media.cachedOriginal(for: asset),
+               let digest = try? MediaPipeline.digests(cached) {
+                precomputedMD5[id] = digest.md5
+            }
+        }
+        let md5Lookup = precomputedMD5
+
         try await database.transaction { store in
             let folders = try store.fetchFolders()
             let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
@@ -347,7 +793,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 return parts.isEmpty ? "Inbox" : parts.reversed().joined(separator: "/")
             }
 
-            for id in Set(ids) {
+            for id in uniqueIDs {
                 guard let asset = try store.asset(id: id) else { continue }
                 let mounted = asset.driveFileID?.hasPrefix("mounted-") == true
                 if mounted, let remote = asset.driveFileID {
@@ -365,6 +811,22 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     if resolvedRemote != remote {
                         try store.setState("deleted.drive." + remote, true)
                     }
+                } else if let remote = asset.driveFileID, !remote.isEmpty {
+                    try store.setState("deleted.drive." + remote, true)
+                }
+                if !asset.contentHash.isEmpty {
+                    let md5 = md5Lookup[id]
+                    let fp = DeletedAssetFingerprint(
+                        assetID: id,
+                        sha256: asset.contentHash,
+                        md5: md5,
+                        fileName: asset.fileName,
+                        deletedAt: Date()
+                    )
+                    try store.setState("deleted.content." + asset.contentHash, fp)
+                    if let md5, !md5.isEmpty {
+                        try store.setState("deleted.md5." + md5, fp)
+                    }
                 }
                 try store.record(.deleteAsset(id, driveID: mounted ? nil : asset.driveFileID))
             }
@@ -378,10 +840,48 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     public func similarAssets(to assetID: UUID, limit: Int) async throws -> [ScoredAsset] {
         try await curator.similarAssets(to: assetID, limit: limit)
     }
-    public func suggestFolder(for assetID: UUID) async throws -> FolderSuggestion? { try await curator.suggestFolder(for: assetID) }
+    public func suggestFolder(for assetID: UUID) async throws -> FolderSuggestion? {
+        let tsConfig = await typeSafeConfig()
+        if tsConfig.enabled, tsConfig.enableInboxSmartTriage,
+           let apiKey = intelligence.storedTypeSafeAPIKey(),
+           let asset = try await database.asset(id: assetID) {
+            let folders = try await database.fetchFolders().filter { $0.id != asset.folderID }
+            if !folders.isEmpty {
+                let options = try await buildFolderOptions(folders: folders)
+                let imgData = try? await loadVisualGroundingPayload(for: assetID, targetLongSide: 448).data
+                if let res = try? await intelligence.grounding.classifyIntoFolders(
+                    assetTitle: asset.title,
+                    assetTags: asset.tags + asset.suggestedTags,
+                    assetNotes: [asset.notes, asset.aiDescription ?? ""].joined(separator: " "),
+                    imageData: imgData,
+                    imageFormat: "jpg",
+                    folders: options,
+                    config: tsConfig,
+                    apiKey: apiKey
+                ) {
+                    if let folderID = res.folderID,
+                       let matched = folders.first(where: { $0.id == folderID }) {
+                        return FolderSuggestion(
+                            folderID: matched.id,
+                            folderName: matched.name,
+                            confidence: res.confidence,
+                            reason: res.reason
+                        )
+                    }
+                    // Jev explicitly evaluated fit and found none suitable — respect it instead of guessing!
+                    return nil
+                }
+            }
+        }
+        return try await curator.suggestFolder(for: assetID)
+    }
+
+    public nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL? {
+        media.thumbnailURL(for: assetID, tier: tier) ?? media.thumbnailURL(for: assetID, tier: .grid520)
+    }
 
     public func thumbnailURL(for assetID: UUID, tier: ThumbnailTier) async -> URL? {
-        media.thumbnailURL(for: assetID, tier: tier) ?? media.thumbnailURL(for: assetID, tier: .grid520)
+        cachedThumbnailURL(for: assetID, tier: tier)
     }
 
     public func originalURL(for assetID: UUID) async throws -> URL {
@@ -443,8 +943,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     ) async throws -> MoodboardProposal {
         let config = await aiConfig()
         let provider = try? intelligence.provider(for: config)
+        let tsConfig = await typeSafeConfig()
+        let tsKey = intelligence.storedTypeSafeAPIKey()
         let harness = MoodboardAgentHarness(database: database, media: media)
-        return try await harness.curate(request: request, provider: provider, onStep: onStep)
+        return try await harness.curate(
+            request: request,
+            provider: provider,
+            typeSafeConfig: tsConfig,
+            typeSafeAPIKey: tsKey,
+            grounding: intelligence.grounding,
+            onStep: onStep
+        )
     }
 
     public func saveBoard(_ document: MoodboardDocument) async throws -> MoodboardDocument {
@@ -510,17 +1019,28 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let config = await aiConfig()
         guard let provider = try intelligence.provider(for: config) else { return [] }
         let sync = await syncConfig()
+        let existingLibraryTags = ((try? await database.fetchTagCounts()) ?? []).map(\.name)
         var visited = Set<UUID>()
         var result: [AssetRecord] = []
         for id in ids where visited.insert(id).inserted {
             guard let before = try await database.asset(id: id) else { continue }
             let thumbnail = config.sendThumbnailsToCloud ? media.thumbnailURL(for: id, tier: .grid520) : nil
-            let enrichment = try await intelligence.enrich(before, thumbnailURL: thumbnail, provider: provider)
+            let enrichment = try await intelligence.enrich(
+                before,
+                thumbnailURL: thumbnail,
+                provider: provider,
+                existingLibraryTags: existingLibraryTags
+            )
             let persisted = try await database.transaction { store -> AssetRecord? in
                 guard var asset = try store.asset(id: id), asset.contentHash == before.contentHash else { return nil }
                 asset.aiDescription = enrichment.description
-                let published = tagMap(asset.tags)
-                asset.suggestedTags = tagMap(enrichment.suggestedTags).filter { published[$0.key] == nil }.values.sorted()
+                let latestLibraryTags = ((try? store.fetchTagCounts()) ?? []).map(\.name)
+                asset.suggestedTags = CloudTagNormalizer.canonicalizeSuggestedTags(
+                    enrichment.suggestedTags,
+                    existingLibraryTags: latestLibraryTags.isEmpty ? existingLibraryTags : latestLibraryTags,
+                    existingAssetTags: asset.tags,
+                    maxCount: 6
+                )
                 if let embedding = enrichment.embedding {
                     let vector = AssetVector(embedding: embedding, embeddingModel: provider.embeddingIdentity)
                     if sync.syncEmbeddings { try store.record(.vector(id, vector)) }
@@ -554,7 +1074,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         case .chatGPTSubscription:
             return await intelligence.chatGPT.hasUsableSession()
         case .gemini, .openAICompatible:
-            return (try? intelligence.keychain.read(IntelligenceEngine.key(provider)))?.isEmpty == false
+            return intelligence.keychain.exists(IntelligenceEngine.key(provider))
         }
     }
 
@@ -593,6 +1113,494 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func listChatGPTModels() async throws -> [ChatGPTModelInfo] {
         try await intelligence.chatGPT.listModels()
+    }
+
+    // MARK: - Experimental TypeSafe System One (Jev) Visual Grounding
+
+    public func typeSafeConfig() async -> TypeSafeExperimentalConfig {
+        (try? await database.state("typeSafeConfig", as: TypeSafeExperimentalConfig.self)) ?? TypeSafeExperimentalConfig()
+    }
+
+    public func saveTypeSafeConfig(_ config: TypeSafeExperimentalConfig, apiKey: String?) async throws {
+        var sanitized = config
+        sanitized.baseURL = config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if sanitized.baseURL.isEmpty { sanitized.baseURL = "https://api.typesafe.ai" }
+        sanitized.model = config.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if sanitized.model.isEmpty { sanitized.model = "jev-latest" }
+        sanitized.minConfidence = max(0.05, min(0.95, config.minConfidence))
+        sanitized.lowConfidencePadding = max(0.0, min(0.25, config.lowConfidencePadding))
+        sanitized.minPresenceProbability = max(0.05, min(0.95, config.minPresenceProbability))
+
+        if let apiKey {
+            let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                try intelligence.keychain.delete(IntelligenceEngine.typeSafeKey)
+            } else {
+                try intelligence.keychain.save(Data(trimmed.utf8), for: IntelligenceEngine.typeSafeKey)
+            }
+        }
+        try await database.setState("typeSafeConfig", sanitized)
+    }
+
+    public func hasStoredTypeSafeKey() async -> Bool {
+        intelligence.keychain.exists(IntelligenceEngine.typeSafeKey)
+    }
+
+    public func testTypeSafeConnection(
+        config: TypeSafeExperimentalConfig,
+        apiKey: String?
+    ) async throws -> [TypeSafeModelInfo] {
+        let resolvedKey: String? = {
+            if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
+                return provided
+            }
+            return intelligence.storedTypeSafeAPIKey()
+        }()
+        guard let resolvedKey else {
+            throw LibraryDatabaseError("请先填写 TypeSafe API 密钥后再测试连接。")
+        }
+        let client = try TypeSafeSystemOneClient(baseURL: config.baseURL, apiKey: resolvedKey)
+        return try await client.listModels()
+    }
+
+    public func locateVisualRegion(assetID: UUID, query: String?) async throws -> VisualRegionResult {
+        let payload = try await loadVisualGroundingPayload(for: assetID, targetLongSide: 768)
+        let config = await typeSafeConfig()
+        let apiKey = intelligence.storedTypeSafeAPIKey()
+        return try await intelligence.grounding.locateRegion(
+            query: query,
+            imageData: payload.data,
+            imageFormat: payload.format,
+            cgImage: payload.cgImage,
+            config: config,
+            apiKey: apiKey
+        )
+    }
+
+    public func locateVisualMatch(referenceAssetID: UUID, in targetAssetID: UUID) async throws -> VisualRegionResult {
+        let refPayload = try await loadVisualGroundingPayload(for: referenceAssetID, targetLongSide: 512)
+        let targetPayload = try await loadVisualGroundingPayload(for: targetAssetID, targetLongSide: 768)
+        let config = await typeSafeConfig()
+        let apiKey = intelligence.storedTypeSafeAPIKey()
+        return try await intelligence.grounding.locateVisualMatch(
+            referenceImageData: refPayload.data,
+            referenceFormat: refPayload.format,
+            in: targetPayload.data,
+            targetFormat: targetPayload.format,
+            config: config,
+            apiKey: apiKey
+        )
+    }
+
+    public func detectCleanContentBounds(assetID: UUID) async throws -> CleanBoundsResult {
+        let payload = try await loadVisualGroundingPayload(for: assetID, targetLongSide: 768)
+        let config = await typeSafeConfig()
+        let apiKey = intelligence.storedTypeSafeAPIKey()
+        return try await intelligence.grounding.detectCleanContentBounds(
+            imageData: payload.data,
+            imageFormat: payload.format,
+            cgImage: payload.cgImage,
+            config: config,
+            apiKey: apiKey
+        )
+    }
+
+    public func extractSubjectPalette(assetID: UUID, query: String?) async throws -> SubjectPaletteResult {
+        guard let before = try await database.asset(id: assetID) else {
+            throw DriveTransportError.fileNotFound(assetID.uuidString)
+        }
+        let payload = try await loadVisualGroundingPayload(for: assetID, targetLongSide: 768)
+        guard let cgImage = payload.cgImage else {
+            throw LibraryDatabaseError("该素材暂无可供提色的像素图像。")
+        }
+        let config = await typeSafeConfig()
+        let apiKey = intelligence.storedTypeSafeAPIKey()
+        let (colors, region) = try await intelligence.grounding.extractSubjectPalette(
+            query: query,
+            imageData: payload.data,
+            imageFormat: payload.format,
+            cgImage: cgImage,
+            colorCount: 6,
+            config: config,
+            apiKey: apiKey
+        )
+
+        let updated = try await database.transaction { store -> AssetRecord in
+            guard var current = try store.asset(id: assetID) else {
+                return before
+            }
+            if !colors.isEmpty {
+                current.dominantColors = colors
+            }
+            return try store.saveAssetLocally(current)
+        }
+        return SubjectPaletteResult(colors: colors, subjectRegion: region, updatedAsset: updated)
+    }
+
+    public func semanticSearch(
+        query: String,
+        criteria: FilterCriteria,
+        limit: Int = 48
+    ) async throws -> SemanticSearchReport {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return SemanticSearchReport(query: "", hits: [], summary: "请输入检索描述")
+        }
+
+        // 1. Respect current folder / visual / color / trash filters without text lock-out
+        var scope = criteria
+        scope.searchQuery = ""
+        let scopedAssets = try await database.fetchAssets(matching: scope)
+        guard !scopedAssets.isEmpty else {
+            return SemanticSearchReport(query: trimmed, hits: [], summary: "当前筛选范围内没有可检索素材")
+        }
+
+        // 2. Signal A: Local FTS5 + Pinyin text ranks
+        var textRanks = try await database.searchRanks(trimmed)
+        let tokens = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        if tokens.count > 1 {
+            for token in tokens.prefix(8) {
+                for (id, rank) in try await database.searchRanks(token) {
+                    textRanks[id] = min(1.0, (textRanks[id] ?? 0) + rank / Double(tokens.count))
+                }
+            }
+        }
+
+        // 3. Signal B: Cloud AI Embedding cosine similarity (if active & indexed)
+        var embeddingScores: [UUID: Double] = [:]
+        var usedEmbedding = false
+        let cloudCfg = await aiConfig()
+        if let provider = try? intelligence.provider(for: cloudCfg) {
+            let vectors = try await database.vectors()
+            let hasCompatibleVectors = vectors.values.contains {
+                $0.embeddingModel == provider.embeddingIdentity && $0.embedding != nil
+            }
+            if hasCompatibleVectors, let queryVec = try? await provider.embed(trimmed) {
+                usedEmbedding = true
+                for asset in scopedAssets {
+                    if let vec = vectors[asset.id],
+                       vec.embeddingModel == provider.embeddingIdentity,
+                       let emb = vec.embedding,
+                       let cos = Self.cosineSimilarity(queryVec, emb),
+                       cos > 0.22 {
+                        // Map cosine ~0.22...0.85 into 0...1
+                        embeddingScores[asset.id] = max(0, min(1, (cos - 0.22) / 0.63))
+                    }
+                }
+            }
+        }
+
+        // 4. Signal C: TypeSafe (Jev Score) direct visual semantic scoring on candidate images
+        var jevScores: [UUID: VisualScoreResult] = [:]
+        var usedJev = false
+        var evaluatedVisualCount = 0
+        let tsConfig = await typeSafeConfig()
+        if tsConfig.enabled, tsConfig.enableSemanticSearch,
+           let tsKey = intelligence.storedTypeSafeAPIKey() {
+            // Prioritize FTS/embedding shortlist + untagged/recent visual assets so zero-tag photos are discovered!
+            let maxVisualCandidates = 24
+            let prioritized = scopedAssets.sorted { lhs, rhs in
+                let ls = (textRanks[lhs.id] ?? 0) * 0.5 + (embeddingScores[lhs.id] ?? 0) * 0.5
+                let rs = (textRanks[rhs.id] ?? 0) * 0.5 + (embeddingScores[rhs.id] ?? 0) * 0.5
+                if abs(ls - rs) > 0.01 { return ls > rs }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            var shortlist: [AssetRecord] = Array(prioritized.prefix(16))
+            var seen = Set(shortlist.map(\.id))
+            // Also include newest untagged/uncaptioned visual items in case FTS/embeddings missed them
+            for asset in scopedAssets where shortlist.count < maxVisualCandidates && seen.insert(asset.id).inserted {
+                if asset.tags.isEmpty || asset.aiDescription == nil {
+                    shortlist.append(asset)
+                }
+            }
+            for asset in prioritized where shortlist.count < maxVisualCandidates && seen.insert(asset.id).inserted {
+                shortlist.append(asset)
+            }
+
+            var visualInputs: [VisualCandidateInput] = []
+            visualInputs.reserveCapacity(shortlist.count)
+            for asset in shortlist {
+                let jpeg = try? await loadVisualGroundingPayload(for: asset.id, targetLongSide: 384).data
+                visualInputs.append(VisualCandidateInput(
+                    assetID: asset.id,
+                    title: asset.title,
+                    tags: asset.tags,
+                    description: asset.aiDescription,
+                    imageData: jpeg,
+                    imageFormat: "jpg"
+                ))
+            }
+
+            evaluatedVisualCount = visualInputs.count
+            let scored = try await intelligence.grounding.scoreCandidatesForQuery(
+                query: trimmed,
+                candidates: visualInputs,
+                config: tsConfig,
+                apiKey: tsKey,
+                batchSize: 4,
+                maxConcurrency: 3
+            )
+            usedJev = !scored.isEmpty
+            for item in scored {
+                jevScores[item.assetID] = item
+            }
+        }
+
+        // 5. Fuse signals into calibrated ranked hits
+        var hits: [SemanticSearchHit] = []
+        for asset in scopedAssets {
+            let tScore = textRanks[asset.id] ?? 0
+            let eScore = embeddingScores[asset.id] ?? 0
+            let jResult = jevScores[asset.id]
+            let jScore = jResult?.score ?? 0
+
+            let combined: Double
+            var reasons: [String] = []
+            var sourceLabel = "全文匹配"
+
+            if jResult != nil {
+                // Jev actually inspected the visual asset
+                if jScore >= 0.30 {
+                    reasons.append("Jev 视觉语义 \(Int((jScore * 100).rounded()))%")
+                }
+                if eScore >= 0.30 {
+                    reasons.append("向量相似度 \(Int((eScore * 100).rounded()))%")
+                }
+                if tScore > 0.05 {
+                    reasons.append("标题/标签/OCR 命中")
+                }
+                let nonVisual = max(tScore, eScore)
+                combined = max(jScore, jScore * 0.72 + nonVisual * 0.28)
+                sourceLabel = eScore >= 0.30 ? "Jev 视觉 + 向量" : "Jev 视觉语义"
+            } else if eScore >= 0.28 {
+                reasons.append("语义向量 \(Int((eScore * 100).rounded()))%")
+                if tScore > 0.05 { reasons.append("关键词命中") }
+                combined = max(eScore, eScore * 0.75 + tScore * 0.25)
+                sourceLabel = "语义向量"
+            } else if tScore > 0.05 {
+                reasons.append("全文/标签/拼音匹配")
+                combined = tScore * 0.85
+                sourceLabel = "本机全文"
+            } else {
+                continue
+            }
+
+            // Strict threshold so irrelevant items don't pollute semantic results
+            let cutoff: Double = (usedJev || usedEmbedding) ? 0.32 : 0.05
+            guard combined >= cutoff else { continue }
+
+            hits.append(SemanticSearchHit(
+                asset: asset,
+                score: min(1.0, combined),
+                confidence: jResult?.confidence,
+                reason: reasons.joined(separator: " · "),
+                sourceLabel: sourceLabel
+            ))
+        }
+
+        hits.sort {
+            if abs($0.score - $1.score) > 0.002 { return $0.score > $1.score }
+            return $0.asset.rating > $1.asset.rating
+        }
+        let limited = Array(hits.prefix(max(1, limit)))
+
+        var engines: [String] = []
+        if usedJev { engines.append("Jev 视觉语义(\(evaluatedVisualCount)图)") }
+        if usedEmbedding { engines.append("语义向量") }
+        if engines.isEmpty { engines.append("本机全文/拼音") }
+
+        let summary = limited.isEmpty
+            ? "语义检索「\(trimmed)」未命中高度相关素材（\(engines.joined(separator: " + "))）"
+            : "语义检索「\(trimmed)」命中 \(limited.count) 项（\(engines.joined(separator: " + "))）"
+
+        return SemanticSearchReport(
+            query: trimmed,
+            hits: limited,
+            usedTypeSafeJev: usedJev,
+            usedCloudEmbedding: usedEmbedding,
+            evaluatedVisualCount: evaluatedVisualCount,
+            summary: summary
+        )
+    }
+
+    public func batchTriageInbox(assetIDs: [UUID], maxCount: Int = 24) async throws -> [InboxTriageRecommendation] {
+        let folders = try await database.fetchFolders()
+        guard !folders.isEmpty else {
+            throw LibraryDatabaseError("请先在左侧栏创建至少一个目标文件夹，再使用智能分拣。")
+        }
+
+        let targets: [AssetRecord]
+        if assetIDs.isEmpty {
+            targets = Array(try await database.fetchAssets(matching: FilterCriteria(onlyInbox: true)).prefix(max(1, maxCount)))
+        } else {
+            var loaded: [AssetRecord] = []
+            for id in assetIDs.prefix(max(1, maxCount)) {
+                if let asset = try await database.asset(id: id), !asset.isTrashed {
+                    loaded.append(asset)
+                }
+            }
+            targets = loaded
+        }
+        guard !targets.isEmpty else { return [] }
+
+        let tsConfig = await typeSafeConfig()
+        let tsKey = intelligence.storedTypeSafeAPIKey()
+        let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+
+        if tsConfig.enabled, tsConfig.enableInboxSmartTriage, let tsKey, !tsKey.isEmpty {
+            let options = try await buildFolderOptions(folders: folders)
+            let grounding = intelligence.grounding
+            var prepared: [(asset: AssetRecord, jpeg: Data?)] = []
+            for asset in targets {
+                let jpeg = try? await loadVisualGroundingPayload(for: asset.id, targetLongSide: 384).data
+                prepared.append((asset, jpeg))
+            }
+
+            var recommendations: [InboxTriageRecommendation] = []
+            let workerCount = min(4, prepared.count)
+            var nextIdx = 0
+
+            try await withThrowingTaskGroup(of: InboxTriageRecommendation.self) { group in
+                func enqueue(_ item: (asset: AssetRecord, jpeg: Data?)) {
+                    group.addTask {
+                        let res = try await grounding.classifyIntoFolders(
+                            assetTitle: item.asset.title,
+                            assetTags: item.asset.tags + item.asset.suggestedTags,
+                            assetNotes: [item.asset.notes, item.asset.aiDescription ?? ""].joined(separator: " "),
+                            imageData: item.jpeg,
+                            imageFormat: "jpg",
+                            folders: options,
+                            config: tsConfig,
+                            apiKey: tsKey
+                        )
+                        let folderName = res.folderID.flatMap { folderByID[$0]?.name }
+                        return InboxTriageRecommendation(
+                            assetID: item.asset.id,
+                            assetTitle: item.asset.title,
+                            recommendedFolderID: res.folderID,
+                            recommendedFolderName: folderName,
+                            confidence: res.confidence,
+                            fitProbability: res.fitProbability,
+                            reason: res.reason,
+                            source: .typeSafeJev
+                        )
+                    }
+                }
+
+                for _ in 0..<workerCount {
+                    enqueue(prepared[nextIdx])
+                    nextIdx += 1
+                }
+                while let rec = try await group.next() {
+                    recommendations.append(rec)
+                    if nextIdx < prepared.count {
+                        enqueue(prepared[nextIdx])
+                        nextIdx += 1
+                    }
+                }
+            }
+
+            return recommendations.sorted {
+                let lHas = $0.recommendedFolderID != nil
+                let rHas = $1.recommendedFolderID != nil
+                if lHas != rHas { return lHas }
+                if abs($0.confidence - $1.confidence) > 0.005 { return $0.confidence > $1.confidence }
+                return $0.fitProbability > $1.fitProbability
+            }
+        }
+
+        // Offline heuristic fallback when TypeSafe is disabled
+        var offlineRecs: [InboxTriageRecommendation] = []
+        for asset in targets {
+            if let suggestion = try await curator.suggestFolder(for: asset.id) {
+                offlineRecs.append(InboxTriageRecommendation(
+                    assetID: asset.id,
+                    assetTitle: asset.title,
+                    recommendedFolderID: suggestion.folderID,
+                    recommendedFolderName: suggestion.folderName,
+                    confidence: suggestion.confidence,
+                    fitProbability: suggestion.confidence,
+                    reason: suggestion.reason,
+                    source: .appleVisionSaliency
+                ))
+            } else {
+                offlineRecs.append(InboxTriageRecommendation(
+                    assetID: asset.id,
+                    assetTitle: asset.title,
+                    recommendedFolderID: nil,
+                    recommendedFolderName: nil,
+                    confidence: 0,
+                    fitProbability: 0,
+                    reason: "离线未匹配到明确目录，建议暂留收件箱",
+                    source: .appleVisionSaliency
+                ))
+            }
+        }
+        return offlineRecs.sorted { $0.confidence > $1.confidence }
+    }
+
+    private func buildFolderOptions(folders: [FolderRecord]) async throws -> [FolderOptionInput] {
+        let allAssets = try await database.fetchAssets(matching: FilterCriteria(includeTrashed: false))
+        var tagsByFolder: [UUID: [String: Int]] = [:]
+        for asset in allAssets {
+            guard let fid = asset.folderID else { continue }
+            for tag in asset.tags {
+                tagsByFolder[fid, default: [:]][tag, default: 0] += 1
+            }
+        }
+        return folders.map { folder in
+            let topTags = (tagsByFolder[folder.id] ?? [:])
+                .sorted { $0.value > $1.value }
+                .prefix(6)
+                .map(\.key)
+            return FolderOptionInput(id: folder.id, name: folder.name, sampleTags: topTags)
+        }
+    }
+
+    private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Double? {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return nil }
+        var dot: Double = 0
+        var normA: Double = 0
+        var normB: Double = 0
+        for i in lhs.indices {
+            let a = Double(lhs[i])
+            let b = Double(rhs[i])
+            dot += a * b
+            normA += a * a
+            normB += b * b
+        }
+        let denom = (normA * normB).squareRoot()
+        guard denom > 1e-9 else { return nil }
+        return dot / denom
+    }
+
+    private func loadVisualGroundingPayload(
+        for assetID: UUID,
+        targetLongSide: Int = 768
+    ) async throws -> (data: Data, format: String, cgImage: CGImage?) {
+        guard let asset = try await database.asset(id: assetID) else {
+            throw DriveTransportError.fileNotFound(assetID.uuidString)
+        }
+        let originalURL = media.originalPath(for: asset)
+        let candidateURLs: [URL] = [
+            media.thumbnailURL(for: assetID, tier: targetLongSide > 520 ? .preview1400 : .grid520),
+            media.thumbnailURL(for: assetID, tier: .grid520),
+            FileManager.default.fileExists(atPath: originalURL.path) ? originalURL : nil
+        ].compactMap { $0 }
+
+        for url in candidateURLs {
+            if let cgImage = MediaPipeline.raster(url)?.poster,
+               let normalizedJPEG = TypeSafeImagePreparer.prepareJPEG(from: cgImage, targetLongSide: targetLongSide) {
+                return (normalizedJPEG, "jpg", cgImage)
+            }
+            let ext = url.pathExtension.lowercased()
+            if (ext == "jpg" || ext == "jpeg" || ext == "png"),
+               let rawData = try? Data(contentsOf: url), !rawData.isEmpty {
+                let format = ext == "png" ? "png" : "jpg"
+                return (rawData, format, nil)
+            }
+        }
+        throw LibraryDatabaseError("该素材缺少本地预览图，请先下载或生成缩略图后重试。")
     }
 
     private static let webDAVPasswordKey = "sync.webdav.password"
@@ -635,14 +1643,37 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let config = await syncConfig()
         if case .idle = status.phase { status.activeMode = config.mode }
 
-        // Automatically surface an already-signed-in local `gdirect` account when no separate Charkle OAuth login exists
-        if (config.mode == .directAPIWithGDirect || config.mode == .gdirectMount),
-           status.account == nil,
-           (try? await oauth.currentStoredToken()) == nil {
+        switch config.mode {
+        case .directAPIWithGDirect:
+            let hasDirectToken = await oauth.hasStoredToken()
+            if hasDirectToken {
+                let isCurrentDirect = status.account != nil
+                    && status.account?.source != "gdirect"
+                    && status.account?.source != "gdirect mount"
+                    && status.account?.source != "WebDAV"
+                    && status.account?.source != "本地文件夹"
+                if !isCurrentDirect,
+                   let storedDirect = try? await database.state("googleDirectAccount", as: DriveAccountInfo.self) {
+                    status.account = storedDirect
+                }
+            } else {
+                // Coexistence fallback: surface an existing local `gdirect` account when direct OAuth is not signed in yet
+                let gd = await GDirectIntegration.signedInAccounts()
+                if let email = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
+                    status.account = DriveAccountInfo(email: email, displayName: nil, source: "gdirect")
+                } else if status.account?.source == "gdirect" || status.account?.source == "gdirect mount" {
+                    status.account = nil
+                }
+            }
+        case .gdirectMount:
             let gd = await GDirectIntegration.signedInAccounts()
             if let email = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
-                status.account = DriveAccountInfo(email: email, displayName: nil, source: "gdirect")
+                status.account = DriveAccountInfo(email: email, displayName: nil, source: "gdirect mount")
+            } else if status.account?.source != "gdirect mount" {
+                status.account = nil
             }
+        case .webDAV, .localOnly:
+            break
         }
         return status
     }
@@ -652,7 +1683,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func runGDirectScan() async throws -> GDirectEnvironmentSnapshot {
-        try await GDirectIntegration.scan(mountPath: syncConfig().mountPath)
+        let snapshot = try await GDirectIntegration.scan(mountPath: syncConfig().mountPath)
+        cachedGDirectEndpoints = (snapshot.endpoints, .now)
+        return snapshot
     }
 
     public func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot {
@@ -666,6 +1699,13 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             await refreshAutoSync(config: config)
         }
         return await GDirectIntegration.inspect(mountPath: mount)
+    }
+
+    public func runGDirectUnmount() async throws -> GDirectEnvironmentSnapshot {
+        let config = await syncConfig()
+        try? await GDirectIntegration.unmount(account: config.selectedGDirectAccount)
+        await refreshAutoSync(config: config)
+        return await GDirectIntegration.inspect(mountPath: config.mountPath)
     }
 
     public func importGoogleOAuthSecret(from url: URL) async throws { try await oauth.importClientSecret(from: url) }
@@ -694,14 +1734,13 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             NSApp.activate(ignoringOtherApps: true)
         }
         var currentConfig = await syncConfig()
-        if currentConfig.mode == .localOnly {
+        if currentConfig.mode == .localOnly || currentConfig.mode == .gdirectMount {
             currentConfig.mode = .directAPIWithGDirect
             try await saveSyncConfig(currentConfig)
         }
-        let endpoints = currentConfig.useGDirectIPAcceleration
-            ? await GDirectIntegration.inspect(mountPath: currentConfig.mountPath).endpoints
-            : []
-        let account = try await DirectAPITransport(oauth: oauth, endpoints: endpoints).accountInfo()
+        let endpoints = await resolvedGDirectEndpoints(for: currentConfig)
+        let account = try await DirectAPITransport(oauth: oauth, endpoints: endpoints, session: driveSession).accountInfo()
+        try? await database.setState("googleDirectAccount", account)
         await driveSync.updateSignedInAccount(account, activeMode: currentConfig.mode)
         await refreshAutoSync(config: currentConfig)
         return account
@@ -709,6 +1748,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func signOutGoogleDrive() async throws {
         try await oauth.signOut()
+        try? await database.setState("googleDirectAccount", Optional<DriveAccountInfo>.none)
         autoSyncTask?.cancel()
         autoSyncTask = nil
         let currentConfig = await syncConfig()
@@ -716,7 +1756,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func hasWebDAVPassword() async -> Bool {
-        (try? intelligence.keychain.read(Self.webDAVPasswordKey))?.isEmpty == false
+        intelligence.keychain.exists(Self.webDAVPasswordKey)
     }
 
     public func saveWebDAVPassword(_ password: String) async throws {
@@ -816,6 +1856,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         )
     }
 
+    private func resolvedGDirectEndpoints(for config: DriveSyncConfig) async -> [GDirectEndpoint] {
+        guard config.useGDirectIPAcceleration else { return [] }
+        let now = ContinuousClock.now
+        if let cached = cachedGDirectEndpoints, cached.fetchedAt.duration(to: now) < .seconds(300) {
+            return cached.endpoints
+        }
+        let endpoints = await GDirectIntegration.scannedEndpoints()
+        cachedGDirectEndpoints = (endpoints, now)
+        return endpoints
+    }
+
     public func listGoogleDriveSharedFolders() async throws -> [RemoteDriveFile] {
         if let injectedTransport {
             return try await injectedTransport.listSharedFolders()
@@ -824,9 +1875,15 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         guard (try? await oauth.currentStoredToken()) != nil else {
             throw DriveTransportError.authenticationRequired("读取「与我共享」目录列表需要先在 Charkle 中独立登录 Google 账号。")
         }
-        let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
+        let endpoints = await resolvedGDirectEndpoints(for: config)
         let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
-        let direct = DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
+        let direct = DirectAPITransport(
+            oauth: oauth,
+            endpoints: endpoints,
+            session: driveSession,
+            transferDirectory: transferDirectory,
+            multipartThresholdBytes: 5 * 1_048_576
+        )
         return try await direct.listSharedFolders()
     }
 
@@ -841,6 +1898,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let task = Task {
             let transport = try await self.transport(for: config, allowLocalFolder: true)
             let report = try await driveSync.sync(using: transport, config: config, allowLocalFolderSync: config.mode == .localOnly)
+            if transport is DirectAPITransport, let account = await driveSync.status().account {
+                try? await database.setState("googleDirectAccount", account)
+            }
             if config.mode != .localOnly {
                 _ = try await self.evict(keeping: [])
             }
@@ -917,8 +1977,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             let gd = await GDirectIntegration.signedInAccounts()
             let account = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first
             var activePath = config.mountPath
-            if !GDirectIntegration.isMountActive(at: activePath), account != nil {
-                activePath = try await GDirectIntegration.mount(path: activePath, account: account)
+            if !GDirectIntegration.isMountActive(at: activePath) {
+                if let liveMount = GDirectIntegration.activeLoopbackNFSMountPath() {
+                    activePath = liveMount
+                } else if account != nil {
+                    activePath = try await GDirectIntegration.mount(path: activePath, account: account)
+                }
             }
             return MountedVolumeTransport(
                 mountPath: activePath,
@@ -929,9 +1993,15 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         case .directAPIWithGDirect:
             // 1. Prefer Charkle's own OAuth token if the user signed in directly inside Charkle
             if (try? await oauth.currentStoredToken()) != nil {
-                let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
+                let endpoints = await resolvedGDirectEndpoints(for: config)
                 let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
-                return DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
+                return DirectAPITransport(
+                    oauth: oauth,
+                    endpoints: endpoints,
+                    session: driveSession,
+                    transferDirectory: transferDirectory,
+                    multipartThresholdBytes: 5 * 1_048_576
+                )
             }
             // 2. If user specified a Google Drive shared folder URL/ID directly, Direct API OAuth is required
             if config.resolvedSharedFolderID != nil {
@@ -939,21 +2009,37 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     "通过 Google Drive 共享目录链接/ID 协作需要先在设置中「改用 Charkle 独立登录 Google 账号」；若继续使用本机 gdirect 挂载，可在 Google Drive 网页端将共享目录「添加到云端硬盘快捷方式」后，直接把该快捷方式名填在「云端保存路径」。"
                 )
             }
-            // 3. Otherwise seamlessly reuse the user's ALREADY-SIGNED-IN local `gdirect` account with zero re-login!
+            // 3. Otherwise, if a local `gdirect` mount is already active, gracefully fall back to it
+            //    without silently mounting NFS behind the user's back.
             let gd = await GDirectIntegration.signedInAccounts()
             if let gdirectAccount = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
-                let activePath = try await GDirectIntegration.mount(path: config.mountPath, account: gdirectAccount)
-                return MountedVolumeTransport(
-                    mountPath: activePath,
-                    rootFolderName: config.rootFolderName,
-                    accountEmail: gdirectAccount,
-                    requireDedicatedMount: true
-                )
+                if GDirectIntegration.isMountActive(at: config.mountPath) {
+                    return MountedVolumeTransport(
+                        mountPath: config.mountPath,
+                        rootFolderName: config.rootFolderName,
+                        accountEmail: gdirectAccount,
+                        requireDedicatedMount: true
+                    )
+                }
+                if let liveMount = GDirectIntegration.activeLoopbackNFSMountPath() {
+                    return MountedVolumeTransport(
+                        mountPath: liveMount,
+                        rootFolderName: config.rootFolderName,
+                        accountEmail: gdirectAccount,
+                        requireDedicatedMount: true
+                    )
+                }
             }
-            // 4. No local gdirect account and no Charkle OAuth token -> DirectAPI prompts clean sign-in
-            let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
+            // 4. Direct API OAuth not signed in and no active gdirect fallback mount -> prompt clean Google sign-in
+            let endpoints = await resolvedGDirectEndpoints(for: config)
             let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
-            return DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
+            return DirectAPITransport(
+                oauth: oauth,
+                endpoints: endpoints,
+                session: driveSession,
+                transferDirectory: transferDirectory,
+                multipartThresholdBytes: 5 * 1_048_576
+            )
         }
     }
 
@@ -966,9 +2052,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             switch config.mode {
             case .localOnly: return
             case .directAPIWithGDirect:
-                let hasCharkleToken = (try? await oauth.currentStoredToken()) != nil
-                let hasLocalGDirectAccount = !(await GDirectIntegration.signedInAccounts().accounts.isEmpty)
-                guard hasCharkleToken || hasLocalGDirectAccount else { return }
+                let hasCharkleToken = await oauth.hasStoredToken()
+                let hasActiveGDirectMount = GDirectIntegration.isMountActive(at: config.mountPath)
+                    || GDirectIntegration.activeLoopbackNFSMountPath() != nil
+                guard hasCharkleToken || hasActiveGDirectMount else { return }
             case .webDAV:
                 guard !config.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             case .gdirectMount:

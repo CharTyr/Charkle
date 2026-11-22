@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 
 public nonisolated enum GDirectIntegration {
     private static let searchPath = [
@@ -10,11 +11,36 @@ public nonisolated enum GDirectIntegration {
         searchPath.lazy.map { $0 + "/" + name }.first(where: FileManager.default.isExecutableFile(atPath:))
     }
 
+    /// Checks active mountpoints directly from the macOS kernel mount table (`getfsstat(..., MNT_NOWAIT)`).
+    /// Unlike calling `stat()`/`lstat()` on an NFS path, `MNT_NOWAIT` reads kernel memory directly
+    /// and never issues a blocking NFS RPC that could trigger macOS's "服务器连接已中断" alert.
     public static func isMountActive(at path: String) -> Bool {
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
-        guard let mounted = statInfo(url, followLinks: false), let parent = statInfo(url.deletingLastPathComponent()),
-              mounted.st_mode & S_IFMT == S_IFDIR else { return false }
-        return mounted.st_dev != parent.st_dev
+        let expanded = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
+        let stripped = expanded.hasSuffix("/") && expanded.count > 1 ? String(expanded.dropLast()) : expanded
+        let candidates: Set<String> = if stripped.hasPrefix("/private/") {
+            [stripped, String(stripped.dropFirst("/private".count))]
+        } else {
+            [stripped, "/private" + stripped]
+        }
+
+        let count = getfsstat(nil, 0, MNT_NOWAIT)
+        guard count > 0 else { return false }
+        var entries = Array(repeating: statfs(), count: Int(count))
+        let bufferSize = Int32(entries.count * MemoryLayout<statfs>.stride)
+        let actual = entries.withUnsafeMutableBufferPointer { ptr in
+            getfsstat(ptr.baseAddress, bufferSize, MNT_NOWAIT)
+        }
+        guard actual > 0 else { return false }
+        for idx in 0..<Int(actual) {
+            var entry = entries[idx]
+            let target = withUnsafeBytes(of: &entry.f_mntonname) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            if candidates.contains(target) {
+                return true
+            }
+        }
+        return false
     }
 
     static func statInfo(_ url: URL, followLinks: Bool = true) -> stat? {
@@ -75,6 +101,15 @@ public nonisolated enum GDirectIntegration {
             return ([], nil)
         }
         return parseAccounts(output.stdout)
+    }
+
+    /// Lightweight scanned endpoint lookup (`gdirect scan --list` only) without running version/account probes.
+    public static func scannedEndpoints() async -> [GDirectEndpoint] {
+        guard let binary = detectBinary(),
+              let output = try? await run(binary, ["scan", "--list"], timeout: 5) else {
+            return []
+        }
+        return parseScanList(output.stdout)
     }
 
     public static func inspect(mountPath: String) async -> GDirectEnvironmentSnapshot {
@@ -217,20 +252,52 @@ public nonisolated enum GDirectIntegration {
         process.environment = env
         let inputPipe = input.map { _ in Pipe() }
         if let inputPipe { process.standardInput = inputPipe }
-        try process.run()
-        if let input, let inputPipe {
-            try inputPipe.fileHandleForWriting.write(contentsOf: input)
-            try inputPipe.fileHandleForWriting.close()
-        }
-        let deadline = ContinuousClock.now + .seconds(timeout)
-        do {
-            while process.isRunning {
-                guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
-                try await Task.sleep(for: .milliseconds(25))
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let finished = Mutex(false)
+                let resumeOnce: @Sendable (Result<Void, Error>) -> Void = { result in
+                    let shouldResume = finished.withLock { flag -> Bool in
+                        guard !flag else { return false }
+                        flag = true
+                        return true
+                    }
+                    guard shouldResume else { return }
+                    continuation.resume(with: result)
+                }
+
+                let timeoutTask = Task {
+                    do {
+                        try await Task.sleep(for: .seconds(timeout))
+                        if process.isRunning { process.terminate() }
+                        resumeOnce(.failure(URLError(.timedOut)))
+                    } catch {
+                        // Cancelled normally on process exit
+                    }
+                }
+
+                process.terminationHandler = { _ in
+                    timeoutTask.cancel()
+                    resumeOnce(.success(()))
+                }
+
+                do {
+                    try process.run()
+                    if let input, let inputPipe {
+                        try inputPipe.fileHandleForWriting.write(contentsOf: input)
+                        try inputPipe.fileHandleForWriting.close()
+                    }
+                    if !process.isRunning {
+                        timeoutTask.cancel()
+                        resumeOnce(.success(()))
+                    }
+                } catch {
+                    timeoutTask.cancel()
+                    resumeOnce(.failure(error))
+                }
             }
-        } catch {
+        } onCancel: {
             if process.isRunning { process.terminate() }
-            throw error
         }
         let error = String(decoding: try Data(contentsOf: err), as: UTF8.self)
         guard process.terminationStatus == 0 else {
