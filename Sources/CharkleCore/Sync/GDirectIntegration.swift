@@ -111,6 +111,12 @@ public nonisolated enum GDirectIntegration {
         _ = try await command(["unmount"], account: account)
     }
 
+    /// Exports the user's already-configured Desktop OAuth client JSON directly from the local `gdirect` CLI.
+    public static func exportOAuthClient() async throws -> GoogleOAuthClientConfig {
+        let output = try await command(["login", "--export-client", "-"], timeout: 10)
+        return try GoogleOAuthClientConfig.parseClientSecretJSON(output.output)
+    }
+
     public static func list(folderID: String = "root", account: String? = nil) async throws -> Data {
         try await command(["ls", "--json", "--", folderID], account: account).output
     }

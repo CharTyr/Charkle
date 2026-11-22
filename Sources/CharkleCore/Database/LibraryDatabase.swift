@@ -391,6 +391,18 @@ public final actor LibraryDatabase {
         Int(try connection.query("SELECT COUNT(*) FROM sync_ops") { $0.integer(0) }.first ?? 0)
     }
 
+    func clearMigrationSyncState() throws {
+        try connection.execute("DELETE FROM sync_ops")
+        try connection.execute("""
+            DELETE FROM sync_state
+            WHERE key LIKE 'remote.%'
+               OR key LIKE 'local.delete.%'
+               OR key LIKE 'deleted.drive.%'
+               OR key LIKE 'clock.%'
+               OR key LIKE 'projection.%'
+            """)
+    }
+
     func touchOriginal(_ id: UUID, now: Date = Date()) throws {
         try connection.execute("INSERT OR REPLACE INTO original_cache VALUES (?,?)", [
             .text(id.uuidString), .real(now.timeIntervalSince1970)

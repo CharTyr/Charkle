@@ -2,16 +2,28 @@ import Darwin
 import Foundation
 
 public final actor MountedVolumeTransport: DriveTransport {
-    public nonisolated let displayName = "gdirect mount"
+    public nonisolated let displayName: String
     private let mount: URL
-    private let rootName: String
+    private let rootSegments: [String]
     private let accountEmail: String?
+    private let requireDedicatedMount: Bool
     private var locations: [String: URL] = [:]
 
-    public init(mountPath: String, rootFolderName: String = "Charkle", accountEmail: String? = nil) {
+    public init(
+        mountPath: String,
+        rootFolderName: String = "Charkle",
+        accountEmail: String? = nil,
+        requireDedicatedMount: Bool = true
+    ) {
         mount = URL(fileURLWithPath: (mountPath as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
-        rootName = rootFolderName
+        let segments = rootFolderName
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+        rootSegments = segments.isEmpty ? ["Charkle"] : segments
         self.accountEmail = accountEmail
+        self.requireDedicatedMount = requireDedicatedMount
+        self.displayName = requireDedicatedMount ? "gdirect mount" : "本地文件夹"
     }
 
     public func accountInfo() throws -> DriveAccountInfo {
@@ -20,7 +32,8 @@ public final actor MountedVolumeTransport: DriveTransport {
         let used: Int64? = if let total = values?.volumeTotalCapacity, let free = values?.volumeAvailableCapacity {
             Int64(max(0, total - free))
         } else { nil }
-        return DriveAccountInfo(email: accountEmail ?? "Mounted Drive", storageUsedBytes: used,
+        let label = accountEmail ?? (requireDedicatedMount ? "Mounted Drive" : mount.appending(path: rootSegments.joined(separator: "/")).path)
+        return DriveAccountInfo(email: label, storageUsedBytes: used,
                                 storageLimitBytes: values?.volumeTotalCapacity.map(Int64.init), source: displayName)
     }
 
@@ -93,8 +106,11 @@ public final actor MountedVolumeTransport: DriveTransport {
 
     public func trashFile(fileID: String) throws {
         let url = try locate(fileID)
-        let root = try findOrCreateFolder(named: rootName, parentID: DriveFiles.rootID)
-        let metadata = try findOrCreateFolder(named: ".charkle", parentID: root.id)
+        var parentID = DriveFiles.rootID
+        for segment in rootSegments {
+            parentID = try findOrCreateFolder(named: segment, parentID: parentID).id
+        }
+        let metadata = try findOrCreateFolder(named: ".charkle", parentID: parentID)
         let trash = try findOrCreateFolder(named: "trash", parentID: metadata.id)
         _ = try moveFile(fileID: fileID, fromParentID: nil, toParentID: trash.id,
                          newName: UUID().uuidString + "-" + url.lastPathComponent)
@@ -116,9 +132,18 @@ public final actor MountedVolumeTransport: DriveTransport {
     }
 
     private func verifyMount() throws {
-        guard GDirectIntegration.isMountActive(at: mount.path),
-              let info = GDirectIntegration.statInfo(mount, followLinks: false), info.st_mode & S_IFMT == S_IFDIR else {
-            throw DriveTransportError.mountPathUnavailable(mount.path)
+        if requireDedicatedMount {
+            guard GDirectIntegration.isMountActive(at: mount.path),
+                  let info = GDirectIntegration.statInfo(mount, followLinks: false), info.st_mode & S_IFMT == S_IFDIR else {
+                throw DriveTransportError.mountPathUnavailable(mount.path)
+            }
+        } else {
+            if GDirectIntegration.statInfo(mount, followLinks: false) == nil {
+                try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+            }
+            guard let info = GDirectIntegration.statInfo(mount, followLinks: false), info.st_mode & S_IFMT == S_IFDIR else {
+                throw DriveTransportError.mountPathUnavailable(mount.path)
+            }
         }
     }
 
@@ -137,8 +162,11 @@ public final actor MountedVolumeTransport: DriveTransport {
 
     private func snapshot() throws -> [String: RemoteDriveFile] {
         try verifyMount()
-        try DriveFiles.validateName(rootName)
-        let url = mount.appending(path: rootName, directoryHint: .isDirectory)
+        var url = mount
+        for segment in rootSegments {
+            try DriveFiles.validateName(segment)
+            url = url.appending(path: segment, directoryHint: .isDirectory)
+        }
         var result: [String: RemoteDriveFile] = [:]
         locations.removeAll()
         guard GDirectIntegration.statInfo(url, followLinks: false) != nil else { return result }

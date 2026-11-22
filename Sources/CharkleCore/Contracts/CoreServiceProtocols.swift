@@ -58,7 +58,7 @@ public protocol CharkleEngineProtocol: Sendable {
     func saveAIConfig(_ config: AIProviderConfig, apiKey: String?) async throws
     func hasStoredAIKey(for provider: CloudAIProviderKind) async -> Bool
 
-    // MARK: - Google Drive & gdirect Sync
+    // MARK: - Cloud & Local Storage Sync (Google Drive / WebDAV / Local Folder + Migration)
     func syncConfig() async -> DriveSyncConfig
     func saveSyncConfig(_ config: DriveSyncConfig) async throws
     func syncStatus() async -> SyncStatus
@@ -66,10 +66,15 @@ public protocol CharkleEngineProtocol: Sendable {
     func runGDirectScan() async throws -> GDirectEnvironmentSnapshot
     func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot
     func importGoogleOAuthSecret(from url: URL) async throws
+    func importGoogleOAuthFromGDirect() async throws
     func hasGoogleOAuthClientConfig() async -> Bool
     func saveGoogleOAuthClientConfig(clientID: String, clientSecret: String) async throws
     func signInGoogleDrive() async throws -> DriveAccountInfo
     func signOutGoogleDrive() async throws
+    func hasWebDAVPassword() async -> Bool
+    func saveWebDAVPassword(_ password: String) async throws
+    func testWebDAVConnection(config: DriveSyncConfig, password: String?) async throws -> DriveAccountInfo
+    func migrateLibraryStorage(to targetConfig: DriveSyncConfig, webDAVPassword: String?) async throws -> StorageMigrationReport
     func syncNow() async throws -> SyncReport
 
     // MARK: - First-Launch Curated Demo

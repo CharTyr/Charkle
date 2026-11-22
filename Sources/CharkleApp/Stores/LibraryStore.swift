@@ -1,3 +1,4 @@
+import AppKit
 import CharkleCanvas
 import CharkleCore
 import Foundation
@@ -20,6 +21,8 @@ public final class LibraryStore {
 
     public var filter: FilterCriteria = FilterCriteria()
     public var selectedAssetIDs: Set<UUID> = []
+    public var cutAssetIDs: Set<UUID> = []
+    public var copiedAssetIDs: [UUID] = []
 
     public var similarAssets: [ScoredAsset] = []
     public var suggestedFolder: FolderSuggestion?
@@ -163,13 +166,148 @@ public final class LibraryStore {
         }
     }
 
-    public func deleteFolder(id: UUID) async {
+    @discardableResult
+    public func deleteFolder(id: UUID, trashContents: Bool = false) async -> Int {
         do {
-            try await engine.deleteFolder(id: id)
+            if !trashContents {
+                try await engine.deleteFolder(id: id)
+                await refreshAll()
+                return 0
+            }
+
+            // Collect this folder and all descendant subfolders (children before parents)
+            let subtreeIDs = descendantFolderIDsPostOrder(rootID: id)
+            let subtreeSet = Set(subtreeIDs)
+            let assetIDsToTrash = allAssetsByID.values
+                .filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }
+                .map(\.id)
+
+            if !assetIDsToTrash.isEmpty {
+                _ = try await engine.updateAssets(AssetBatchPatch(
+                    assetIDs: assetIDsToTrash,
+                    folderAssignment: .inbox,
+                    isTrashed: true
+                ))
+                selectedAssetIDs.subtract(assetIDsToTrash)
+            }
+            for folderID in subtreeIDs {
+                try await engine.deleteFolder(id: folderID)
+            }
             await refreshAll()
+            return assetIDsToTrash.count
         } catch {
             lastError = error.localizedDescription
+            return 0
         }
+    }
+
+    public func subtreeAssetCount(for folderID: UUID) -> Int {
+        let subtreeSet = Set(descendantFolderIDsPostOrder(rootID: folderID))
+        return allAssetsByID.values.filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }.count
+    }
+
+    private func descendantFolderIDsPostOrder(rootID: UUID) -> [UUID] {
+        let byParent = Dictionary(grouping: folders) { $0.parentID }
+        var result: [UUID] = []
+        var visited = Set<UUID>()
+        func visit(_ id: UUID) {
+            guard visited.insert(id).inserted else { return }
+            for child in byParent[id] ?? [] {
+                visit(child.id)
+            }
+            result.append(id)
+        }
+        visit(rootID)
+        return result
+    }
+
+    // MARK: - Finder Reveal, Copy, Cut & Paste Move
+
+    /// Resolves the best local file URL to reveal in Finder: prefers the human-readable file in the user's
+    /// configured local library folder if present, falling back to the cached original file.
+    public func resolveFinderFileURL(for assetID: UUID) async -> URL? {
+        if let asset = allAssetsByID[assetID] {
+            let syncCfg = await engine.syncConfig()
+            if syncCfg.mode == .localOnly {
+                let rawRoot = syncCfg.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rawRoot.isEmpty {
+                    var candidate = URL(fileURLWithPath: (rawRoot as NSString).expandingTildeInPath, isDirectory: true)
+                    if let folderID = asset.folderID {
+                        for crumb in folderBreadcrumbs(for: folderID) {
+                            candidate = candidate.appending(path: crumb.name, directoryHint: .isDirectory)
+                        }
+                    } else {
+                        candidate = candidate.appending(path: "Inbox", directoryHint: .isDirectory)
+                    }
+                    candidate = candidate.appending(path: asset.fileName)
+                    if FileManager.default.fileExists(atPath: candidate.path) {
+                        return candidate
+                    }
+                }
+            }
+        }
+        return await resolveOriginalURL(for: assetID)
+    }
+
+    @discardableResult
+    public func revealInFinder(assetID: UUID) async -> Bool {
+        guard let url = await resolveFinderFileURL(for: assetID) else { return false }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        return true
+    }
+
+    @discardableResult
+    public func copyAssetsToPasteboard(_ ids: [UUID]) async -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let urls = await resolveURLs(for: ids)
+        writeFilesToGeneralPasteboard(urls)
+        copiedAssetIDs = ids
+        cutAssetIDs.removeAll()
+        return max(urls.count, ids.count)
+    }
+
+    @discardableResult
+    public func cutAssets(_ ids: [UUID]) async -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let urls = await resolveURLs(for: ids)
+        writeFilesToGeneralPasteboard(urls)
+        cutAssetIDs = Set(ids)
+        copiedAssetIDs.removeAll()
+        return ids.count
+    }
+
+    @discardableResult
+    public func pasteCutAssets(toFolderID folderID: UUID?) async -> Int {
+        let ids = Array(cutAssetIDs)
+        guard !ids.isEmpty else { return 0 }
+        cutAssetIDs.removeAll()
+        await moveAssets(ids, toFolderID: folderID)
+        return ids.count
+    }
+
+    public func clearCutSelection() {
+        cutAssetIDs.removeAll()
+    }
+
+    private func resolveURLs(for ids: [UUID]) async -> [URL] {
+        var urls: [URL] = []
+        for id in ids {
+            if let url = await resolveFinderFileURL(for: id) {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    private func writeFilesToGeneralPasteboard(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        var objects: [any NSPasteboardWriting] = urls.map { $0 as NSURL }
+        if urls.count == 1, let single = urls.first, let image = NSImage(contentsOf: single) {
+            objects.append(image)
+        }
+        pb.writeObjects(objects)
     }
 
     public func childFolders(of parentID: UUID?) -> [FolderRecord] {

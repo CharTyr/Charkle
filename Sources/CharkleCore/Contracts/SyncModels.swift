@@ -2,14 +2,16 @@ import Foundation
 
 public enum DriveTransportMode: String, Codable, CaseIterable, Hashable, Sendable {
     case directAPIWithGDirect
+    case webDAV
     case gdirectMount
     case localOnly
 
     public var localizedLabel: String {
         switch self {
-        case .directAPIWithGDirect: "直连 API + gdirect 加速（推荐）"
-        case .gdirectMount: "gdirect 挂载目录模式"
-        case .localOnly: "仅本地离线"
+        case .directAPIWithGDirect: "Google Drive"
+        case .webDAV: "WebDAV 云盘"
+        case .gdirectMount: "gdirect 本地挂载"
+        case .localOnly: "纯本地文件夹"
         }
     }
 }
@@ -91,10 +93,18 @@ public struct GDirectEnvironmentSnapshot: Codable, Hashable, Sendable {
 
 public struct DriveSyncConfig: Codable, Hashable, Sendable {
     public var mode: DriveTransportMode
+    /// Cloud root folder path for Google Drive (supports single folder `"Charkle"` or nested `"Design/Charkle"`).
     public var rootFolderName: String
     public var mountPath: String
     public var selectedGDirectAccount: String?
     public var useGDirectIPAcceleration: Bool
+    /// WebDAV server endpoint (e.g. `https://dav.jianguoyun.com/dav/` or `https://nas.example.com:5006`).
+    public var webDAVServerURL: String
+    public var webDAVUsername: String
+    /// Remote library folder path inside WebDAV server (e.g. `/Charkle` or `/Design/Charkle`).
+    public var webDAVRemotePath: String
+    /// Human-readable local folder path when saving purely locally (e.g. `~/Pictures/Charkle`).
+    public var localLibraryPath: String
     public var autoSyncIntervalSeconds: Int
     public var syncThumbnails: Bool
     public var syncEmbeddings: Bool
@@ -105,6 +115,10 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         mountPath: String = NSHomeDirectory() + "/GoogleDrive",
         selectedGDirectAccount: String? = nil,
         useGDirectIPAcceleration: Bool = true,
+        webDAVServerURL: String = "",
+        webDAVUsername: String = "",
+        webDAVRemotePath: String = "/Charkle",
+        localLibraryPath: String = NSHomeDirectory() + "/Pictures/Charkle",
         autoSyncIntervalSeconds: Int = 120,
         syncThumbnails: Bool = true,
         syncEmbeddings: Bool = true
@@ -114,9 +128,84 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         self.mountPath = mountPath
         self.selectedGDirectAccount = selectedGDirectAccount
         self.useGDirectIPAcceleration = useGDirectIPAcceleration
+        self.webDAVServerURL = webDAVServerURL
+        self.webDAVUsername = webDAVUsername
+        self.webDAVRemotePath = webDAVRemotePath
+        self.localLibraryPath = localLibraryPath
         self.autoSyncIntervalSeconds = autoSyncIntervalSeconds
         self.syncThumbnails = syncThumbnails
         self.syncEmbeddings = syncEmbeddings
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mode, rootFolderName, mountPath, selectedGDirectAccount, useGDirectIPAcceleration
+        case webDAVServerURL, webDAVUsername, webDAVRemotePath, localLibraryPath
+        case autoSyncIntervalSeconds, syncThumbnails, syncEmbeddings
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decodeIfPresent(DriveTransportMode.self, forKey: .mode) ?? .directAPIWithGDirect
+        rootFolderName = try c.decodeIfPresent(String.self, forKey: .rootFolderName) ?? "Charkle"
+        mountPath = try c.decodeIfPresent(String.self, forKey: .mountPath) ?? (NSHomeDirectory() + "/GoogleDrive")
+        selectedGDirectAccount = try c.decodeIfPresent(String.self, forKey: .selectedGDirectAccount)
+        useGDirectIPAcceleration = try c.decodeIfPresent(Bool.self, forKey: .useGDirectIPAcceleration) ?? true
+        webDAVServerURL = try c.decodeIfPresent(String.self, forKey: .webDAVServerURL) ?? ""
+        webDAVUsername = try c.decodeIfPresent(String.self, forKey: .webDAVUsername) ?? ""
+        webDAVRemotePath = try c.decodeIfPresent(String.self, forKey: .webDAVRemotePath) ?? "/Charkle"
+        localLibraryPath = try c.decodeIfPresent(String.self, forKey: .localLibraryPath) ?? (NSHomeDirectory() + "/Pictures/Charkle")
+        autoSyncIntervalSeconds = try c.decodeIfPresent(Int.self, forKey: .autoSyncIntervalSeconds) ?? 120
+        syncThumbnails = try c.decodeIfPresent(Bool.self, forKey: .syncThumbnails) ?? true
+        syncEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .syncEmbeddings) ?? true
+    }
+
+    /// Clean human-readable target path summary for the currently active storage backend.
+    public var activeStorageLocationSummary: String {
+        switch mode {
+        case .directAPIWithGDirect:
+            let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "Google Drive / \(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .webDAV:
+            let host = URL(string: webDAVServerURL)?.host() ?? webDAVServerURL
+            let cleaned = webDAVRemotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "WebDAV (\(host.isEmpty ? "未配置" : host)) / \(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .gdirectMount:
+            let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "\(mountPath)/\(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .localOnly:
+            return localLibraryPath
+        }
+    }
+}
+
+public struct StorageMigrationReport: Codable, Hashable, Sendable {
+    public var sourceMode: DriveTransportMode
+    public var targetMode: DriveTransportMode
+    public var targetLocation: String
+    public var downloadedOriginals: Int
+    public var migratedAssets: Int
+    public var migratedFolders: Int
+    public var migratedBoards: Int
+    public var durationSeconds: Double
+
+    public init(
+        sourceMode: DriveTransportMode,
+        targetMode: DriveTransportMode,
+        targetLocation: String,
+        downloadedOriginals: Int = 0,
+        migratedAssets: Int = 0,
+        migratedFolders: Int = 0,
+        migratedBoards: Int = 0,
+        durationSeconds: Double = 0
+    ) {
+        self.sourceMode = sourceMode
+        self.targetMode = targetMode
+        self.targetLocation = targetLocation
+        self.downloadedOriginals = downloadedOriginals
+        self.migratedAssets = migratedAssets
+        self.migratedFolders = migratedFolders
+        self.migratedBoards = migratedBoards
+        self.durationSeconds = durationSeconds
     }
 }
 
@@ -253,12 +342,12 @@ public enum DriveTransportError: Error, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .notConfigured(let msg): "Google Drive 尚未配置：\(msg)"
-        case .authenticationRequired(let msg): "需要 Google Drive 登录授权：\(msg)"
-        case .mountPathUnavailable(let msg): "挂载目录不可用：\(msg)"
+        case .notConfigured(let msg): "存储或同步尚未配置：\(msg)"
+        case .authenticationRequired(let msg): "需要登录授权：\(msg)"
+        case .mountPathUnavailable(let msg): "目标目录不可用：\(msg)"
         case .gdirectNotFound: "未找到本机 gdirect 可执行文件。"
         case .commandFailed(let cmd, let stderr, let code): "命令 `\(cmd)` 失败 (exit \(code))：\(stderr)"
-        case .httpError(let code, let msg): "Google Drive API 错误 (HTTP \(code))：\(msg)"
+        case .httpError(let code, let msg): "云端请求失败 (HTTP \(code))：\(msg)"
         case .fileNotFound(let id): "远端文件不存在：\(id)"
         case .invalidResponse(let detail): "响应解析失败：\(detail)"
         }

@@ -486,12 +486,26 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         provider != .disabled && (try? intelligence.keychain.read(IntelligenceEngine.key(provider)))?.isEmpty == false
     }
 
+    private static let webDAVPasswordKey = "sync.webdav.password"
+
+    private static func validatePathSegments(_ raw: String) throws {
+        let segments = raw.split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for seg in segments {
+            try DriveFiles.validateName(seg)
+        }
+    }
+
     public func syncConfig() async -> DriveSyncConfig {
         (try? await database.state("driveConfig", as: DriveSyncConfig.self)) ?? DriveSyncConfig()
     }
 
     public func saveSyncConfig(_ config: DriveSyncConfig) async throws {
-        try DriveFiles.validateName(config.rootFolderName)
+        try Self.validatePathSegments(config.rootFolderName)
+        if !config.webDAVRemotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try Self.validatePathSegments(config.webDAVRemotePath)
+        }
         var value = config
         value.autoSyncIntervalSeconds = max(0, config.autoSyncIntervalSeconds)
         try await database.setState("driveConfig", value)
@@ -533,6 +547,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func importGoogleOAuthSecret(from url: URL) async throws { try await oauth.importClientSecret(from: url) }
 
+    public func importGoogleOAuthFromGDirect() async throws {
+        let exported = try await GDirectIntegration.exportOAuthClient()
+        try await oauth.saveClientConfig(exported)
+    }
+
     public func hasGoogleOAuthClientConfig() async -> Bool {
         await oauth.hasResolvedConfig()
     }
@@ -543,7 +562,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func signInGoogleDrive() async throws -> DriveAccountInfo {
         guard let config = try await oauth.resolvedConfig() else {
-            throw DriveTransportError.notConfigured("当前开发版本尚未内置 Google 登录凭据，请先在设置中填写或导入凭据。")
+            throw DriveTransportError.notConfigured("请先按照 gdirect 教程配置 Google 登录凭据，或从本机 gdirect 一键导入。")
         }
         _ = try await oauth.authorizeInteractive(config: config) { url in
             await MainActor.run { _ = NSWorkspace.shared.open(url) }
@@ -573,16 +592,121 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         await driveSync.updateSignedInAccount(nil, activeMode: currentConfig.mode)
     }
 
+    public func hasWebDAVPassword() async -> Bool {
+        (try? intelligence.keychain.read(Self.webDAVPasswordKey))?.isEmpty == false
+    }
+
+    public func saveWebDAVPassword(_ password: String) async throws {
+        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try intelligence.keychain.delete(Self.webDAVPasswordKey)
+        } else {
+            try intelligence.keychain.save(Data(trimmed.utf8), for: Self.webDAVPasswordKey)
+        }
+    }
+
+    public func testWebDAVConnection(config: DriveSyncConfig, password: String?) async throws -> DriveAccountInfo {
+        let effectivePassword: String
+        if let password, !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            effectivePassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            effectivePassword = (try? intelligence.keychain.read(Self.webDAVPasswordKey))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        }
+        let transport = try WebDAVTransport(
+            serverURL: config.webDAVServerURL,
+            username: config.webDAVUsername,
+            password: effectivePassword,
+            remotePath: config.webDAVRemotePath
+        )
+        let info = try await transport.accountInfo()
+        if config.mode == .webDAV {
+            await driveSync.updateSignedInAccount(info, activeMode: .webDAV)
+        }
+        return info
+    }
+
+    /// Losslessly migrates the entire library (folders, original files, tags, ratings, moodboards)
+    /// between Pure Local Folder, Google Drive, and WebDAV, or to a new path.
+    public func migrateLibraryStorage(
+        to targetConfig: DriveSyncConfig,
+        webDAVPassword: String?
+    ) async throws -> StorageMigrationReport {
+        guard syncTask == nil else {
+            throw DriveTransportError.notConfigured("当前正在同步中，请等待同步完成后再执行迁移。")
+        }
+        let start = ContinuousClock.now
+        let sourceConfig = await syncConfig()
+
+        // 1. Persist incoming WebDAV password if provided and validate destination FIRST before mutating local DB
+        if let webDAVPassword, !webDAVPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try await saveWebDAVPassword(webDAVPassword)
+        }
+        try Self.validatePathSegments(targetConfig.rootFolderName)
+        if !targetConfig.webDAVRemotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try Self.validatePathSegments(targetConfig.webDAVRemotePath)
+        }
+        let targetTransport = try await transport(for: targetConfig, allowLocalFolder: true)
+        _ = try await targetTransport.accountInfo()
+
+        // 2. Ensure ALL non-trashed originals are locally downloaded before detaching from an old cloud backend
+        var downloadedOriginals = 0
+        if sourceConfig.mode != .localOnly {
+            let activeAssets = try await database.fetchAssets(matching: FilterCriteria(includeTrashed: false))
+            let uncached = activeAssets.filter { $0.driveFileID != nil && media.cachedOriginal(for: $0) == nil }
+            if !uncached.isEmpty {
+                let sourceTransport = try await transport(for: sourceConfig, allowLocalFolder: false)
+                for asset in uncached {
+                    try Task.checkCancellation()
+                    _ = try await driveSync.downloadOriginal(for: asset.id, using: sourceTransport)
+                    downloadedOriginals += 1
+                }
+            }
+        }
+
+        // 3. Re-queue the entire authoritative local library cleanly for the new backend & path
+        let counts = try await database.transaction { store in
+            try store.requeueLibraryForBackendMigration(
+                syncThumbnails: targetConfig.syncThumbnails,
+                syncEmbeddings: targetConfig.syncEmbeddings
+            )
+        }
+
+        // 4. Switch active config and immediately sync all folders, originals & moodboards to the new destination
+        try await saveSyncConfig(targetConfig)
+        _ = try await driveSync.sync(using: targetTransport, config: targetConfig, allowLocalFolderSync: true)
+        if targetConfig.mode != .localOnly {
+            _ = try await evict(keeping: [])
+        }
+
+        let duration = start.duration(to: .now).components
+        let seconds = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
+        return StorageMigrationReport(
+            sourceMode: sourceConfig.mode,
+            targetMode: targetConfig.mode,
+            targetLocation: targetConfig.activeStorageLocationSummary,
+            downloadedOriginals: downloadedOriginals,
+            migratedAssets: counts.assets,
+            migratedFolders: counts.folders,
+            migratedBoards: counts.boards,
+            durationSeconds: seconds
+        )
+    }
+
     public func syncNow() async throws -> SyncReport {
         if let syncTask { return try await syncTask.value }
         let config = await syncConfig()
-        guard config.mode != .localOnly else { return SyncReport() }
+        if config.mode == .localOnly && config.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return SyncReport()
+        }
         // Another caller may have started while we waited for the configuration read.
         if let syncTask { return try await syncTask.value }
         let task = Task {
-            let transport = try await self.transport(for: config)
-            let report = try await driveSync.sync(using: transport, config: config)
-            _ = try await self.evict(keeping: [])
+            let transport = try await self.transport(for: config, allowLocalFolder: true)
+            let report = try await driveSync.sync(using: transport, config: config, allowLocalFolderSync: config.mode == .localOnly)
+            if config.mode != .localOnly {
+                _ = try await self.evict(keeping: [])
+            }
             return report
         }
         syncTask = task
@@ -590,14 +714,43 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return try await task.value
     }
 
-    private func transport(for config: DriveSyncConfig) async throws -> any DriveTransport {
-        guard config.mode != .localOnly else { throw DriveTransportError.notConfigured("Drive sync is disabled.") }
+    private func transport(for config: DriveSyncConfig, allowLocalFolder: Bool = false) async throws -> any DriveTransport {
         if let injectedTransport { return injectedTransport }
         switch config.mode {
-        case .localOnly: throw DriveTransportError.notConfigured("Drive sync is disabled.")
+        case .localOnly:
+            guard allowLocalFolder else {
+                throw DriveTransportError.notConfigured("当前为纯本地保存模式。")
+            }
+            let rawPath = config.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rawPath.isEmpty else {
+                throw DriveTransportError.notConfigured("请先选择一个本地文件夹作为素材库保存路径。")
+            }
+            let expanded = URL(fileURLWithPath: (rawPath as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+            let parentDir = expanded.deletingLastPathComponent().path
+            let leafName = expanded.lastPathComponent.isEmpty ? "Charkle" : expanded.lastPathComponent
+            return MountedVolumeTransport(
+                mountPath: parentDir,
+                rootFolderName: leafName,
+                accountEmail: expanded.path,
+                requireDedicatedMount: false
+            )
+        case .webDAV:
+            let password = (try? intelligence.keychain.read(Self.webDAVPasswordKey))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            return try WebDAVTransport(
+                serverURL: config.webDAVServerURL,
+                username: config.webDAVUsername,
+                password: password,
+                remotePath: config.webDAVRemotePath
+            )
         case .gdirectMount:
             let account = config.selectedGDirectAccount
-            return MountedVolumeTransport(mountPath: config.mountPath, rootFolderName: config.rootFolderName, accountEmail: account)
+            return MountedVolumeTransport(
+                mountPath: config.mountPath,
+                rootFolderName: config.rootFolderName,
+                accountEmail: account,
+                requireDedicatedMount: true
+            )
         case .directAPIWithGDirect:
             let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
             let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
@@ -615,6 +768,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             case .localOnly: return
             case .directAPIWithGDirect:
                 guard (try? await oauth.currentStoredToken()) != nil else { return }
+            case .webDAV:
+                guard !config.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             case .gdirectMount:
                 guard GDirectIntegration.isMountActive(at: config.mountPath) else { return }
             }

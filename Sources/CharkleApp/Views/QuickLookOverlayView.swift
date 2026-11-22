@@ -463,9 +463,20 @@ public struct QuickLookOverlayView: View {
                     .help("加入情绪板")
                 }
 
-                if let url = originalURL {
+                if originalURL != nil {
+                    hudIconButton("folder", help: "在访达中显示") {
+                        Task { _ = await library.revealInFinder(assetID: asset.id) }
+                    }
+                    if !asset.isTrashed {
+                        hudIconButton("doc.on.doc", help: "拷贝文件") {
+                            Task {
+                                _ = await library.copyAssetsToPasteboard([asset.id])
+                                coordinator.showToast("已拷贝到剪贴板", icon: "doc.on.doc")
+                            }
+                        }
+                    }
                     hudIconButton("arrow.up.forward.app", help: "使用默认应用打开") {
-                        NSWorkspace.shared.open(url)
+                        if let url = originalURL { NSWorkspace.shared.open(url) }
                     }
                 } else if let urlStr = asset.sourceURL, let webURL = URL(string: urlStr) {
                     hudIconButton("safari", help: "打开来源网页") {

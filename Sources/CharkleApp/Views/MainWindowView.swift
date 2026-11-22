@@ -312,6 +312,7 @@ public struct MainWindowView: View {
                         get: { library.selectedAssetIDs },
                         set: { library.selectedAssetIDs = $0 }
                     ),
+                    cutAssetIDs: library.cutAssetIDs,
                     targetColumnWidth: CGFloat(coordinator.targetColumnWidth),
                     topContentInset: topInset,
                     bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
@@ -355,6 +356,43 @@ public struct MainWindowView: View {
                             }
                         },
                         onCopyColorHex: { copyColorHex($0) },
+                        onRevealInFinder: { assetID in
+                            Task {
+                                let ok = await library.revealInFinder(assetID: assetID)
+                                if !ok {
+                                    coordinator.showToast("无法定位该素材的本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                                }
+                            }
+                        },
+                        onCopyAssets: { ids in
+                            Task {
+                                let count = await library.copyAssetsToPasteboard(ids)
+                                coordinator.showToast("已拷贝 \(count) 项素材到剪贴板", icon: "doc.on.doc")
+                            }
+                        },
+                        onCutAssets: { ids in
+                            Task {
+                                let count = await library.cutAssets(ids)
+                                coordinator.showToast("已剪切 \(count) 项素材，前往目标文件夹按 ⌘V 移动", icon: "scissors")
+                            }
+                        },
+                        onPasteIntoCurrentFolder: {
+                            let targetFolderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
+                            if !library.cutAssetIDs.isEmpty {
+                                Task {
+                                    let moved = await library.pasteCutAssets(toFolderID: targetFolderID)
+                                    let destName = targetFolderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
+                                    coordinator.showToast("已移动 \(moved) 项素材至「\(destName)」", icon: "folder")
+                                }
+                            } else {
+                                let inputs = ClipboardCollector.extractInputs(from: .general)
+                                guard !inputs.isEmpty else { return }
+                                Task {
+                                    let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
+                                    coordinator.showToast("已粘贴导入 \(max(created.count, inputs.count)) 项素材", icon: "doc.on.clipboard")
+                                }
+                            }
+                        },
                         onTrashAssets: { ids in
                             Task {
                                 await library.trashAssets(ids)
@@ -706,7 +744,7 @@ public struct MainWindowView: View {
                         .help("按主色调筛选 \(hex)")
                     }
 
-                    // Custom color picker (supports macOS eyedropper & arbitrary color selection)
+                    // Custom color picker (natural NSColorWell size via fixedSize so it never overlaps adjacent swatches)
                     ColorPicker(
                         "",
                         selection: Binding(
@@ -723,7 +761,8 @@ public struct MainWindowView: View {
                         supportsOpacity: false
                     )
                     .labelsHidden()
-                    .frame(width: 22, height: 20)
+                    .fixedSize()
+                    .padding(.leading, 4)
                     .help("自定义颜色或吸管取色")
 
                     if library.filter.selectedColorHex != nil {
@@ -1736,8 +1775,9 @@ public struct MainWindowView: View {
         case .error: "同步异常"
         case .idle:
             switch syncAndAI.syncConfig.mode {
-            case .localOnly: "本地模式"
-            case .directAPIWithGDirect: "Drive 直连"
+            case .localOnly: "本地保存"
+            case .directAPIWithGDirect: "Google Drive"
+            case .webDAV: "WebDAV"
             case .gdirectMount: "Drive 挂载"
             }
         }

@@ -279,6 +279,53 @@ public struct InspectorView: View {
                         }
                         .menuStyle(.borderlessButton)
                     }
+
+                    // Finder Reveal + Copy + Cut quick row
+                    HStack(spacing: 6) {
+                        Button {
+                            Task {
+                                let ok = await library.revealInFinder(assetID: asset.id)
+                                if !ok {
+                                    coordinator.showToast("无法定位本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                                }
+                            }
+                        } label: {
+                            Label("在访达中显示", systemImage: "folder")
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 5.5)
+                                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            Task {
+                                _ = await library.copyAssetsToPasteboard([asset.id])
+                                coordinator.showToast("已拷贝到剪贴板", icon: "doc.on.doc")
+                            }
+                        } label: {
+                            Label("拷贝", systemImage: "doc.on.doc")
+                                .font(.system(size: 11, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5.5)
+                                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            Task {
+                                _ = await library.cutAssets([asset.id])
+                                coordinator.showToast("已剪切，前往目标文件夹按 ⌘V 移动", icon: "scissors")
+                            }
+                        } label: {
+                            Label("剪切", systemImage: "scissors")
+                                .font(.system(size: 11, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5.5)
+                                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
 
                 // Dominant CIELAB Color Swatches

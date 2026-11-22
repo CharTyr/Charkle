@@ -102,6 +102,10 @@ public struct MasonryCallbacks {
     public var onMoveToFolder: ([UUID], UUID?) -> Void
     public var onTogglePinOffline: ([UUID], Bool) -> Void
     public var onCopyColorHex: (String) -> Void
+    public var onRevealInFinder: (UUID) -> Void
+    public var onCopyAssets: ([UUID]) -> Void
+    public var onCutAssets: ([UUID]) -> Void
+    public var onPasteIntoCurrentFolder: () -> Void
     public var onTrashAssets: ([UUID]) -> Void
     public var onRestoreAssets: ([UUID]) -> Void
     public var onPermanentlyDeleteAssets: ([UUID]) -> Void
@@ -114,6 +118,10 @@ public struct MasonryCallbacks {
         onMoveToFolder: @escaping ([UUID], UUID?) -> Void = { _, _ in },
         onTogglePinOffline: @escaping ([UUID], Bool) -> Void = { _, _ in },
         onCopyColorHex: @escaping (String) -> Void = { _ in },
+        onRevealInFinder: @escaping (UUID) -> Void = { _ in },
+        onCopyAssets: @escaping ([UUID]) -> Void = { _ in },
+        onCutAssets: @escaping ([UUID]) -> Void = { _ in },
+        onPasteIntoCurrentFolder: @escaping () -> Void = {},
         onTrashAssets: @escaping ([UUID]) -> Void = { _ in },
         onRestoreAssets: @escaping ([UUID]) -> Void = { _ in },
         onPermanentlyDeleteAssets: @escaping ([UUID]) -> Void = { _ in },
@@ -125,6 +133,10 @@ public struct MasonryCallbacks {
         self.onMoveToFolder = onMoveToFolder
         self.onTogglePinOffline = onTogglePinOffline
         self.onCopyColorHex = onCopyColorHex
+        self.onRevealInFinder = onRevealInFinder
+        self.onCopyAssets = onCopyAssets
+        self.onCutAssets = onCutAssets
+        self.onPasteIntoCurrentFolder = onPasteIntoCurrentFolder
         self.onTrashAssets = onTrashAssets
         self.onRestoreAssets = onRestoreAssets
         self.onPermanentlyDeleteAssets = onPermanentlyDeleteAssets
@@ -142,6 +154,7 @@ public struct VirtualizedMasonryView: View {
     public let folders: [FolderRecord]
     public let loader: ThumbnailImageLoader
     @Binding public var selectedAssetIDs: Set<UUID>
+    public let cutAssetIDs: Set<UUID>
     public let targetColumnWidth: CGFloat
     public let topContentInset: CGFloat
     public let bottomContentInset: CGFloat
@@ -168,6 +181,7 @@ public struct VirtualizedMasonryView: View {
         folders: [FolderRecord],
         loader: ThumbnailImageLoader,
         selectedAssetIDs: Binding<Set<UUID>>,
+        cutAssetIDs: Set<UUID> = [],
         targetColumnWidth: CGFloat = 228,
         topContentInset: CGFloat = 76,
         bottomContentInset: CGFloat = 96,
@@ -179,6 +193,7 @@ public struct VirtualizedMasonryView: View {
         self.folders = folders
         self.loader = loader
         self._selectedAssetIDs = selectedAssetIDs
+        self.cutAssetIDs = cutAssetIDs
         self.targetColumnWidth = targetColumnWidth
         self.topContentInset = topContentInset
         self.bottomContentInset = bottomContentInset
@@ -235,6 +250,7 @@ public struct VirtualizedMasonryView: View {
                             loader: loader,
                             folders: folders,
                             isSelected: isSelected,
+                            isCut: cutAssetIDs.contains(asset.id),
                             heroNamespace: heroNamespace,
                             isHiddenForHero: activeQuickLookID == asset.id,
                             onSelect: { handleCardClick(asset: asset) },
@@ -249,6 +265,9 @@ public struct VirtualizedMasonryView: View {
                                 callbacks.onTogglePinOffline(effectiveSelection(including: asset.id), !asset.pinnedOffline)
                             },
                             onCopyColorHex: { hex in callbacks.onCopyColorHex(hex) },
+                            onRevealInFinder: { callbacks.onRevealInFinder(asset.id) },
+                            onCopy: { callbacks.onCopyAssets(effectiveSelection(including: asset.id)) },
+                            onCut: { callbacks.onCutAssets(effectiveSelection(including: asset.id)) },
                             onTrash: { callbacks.onTrashAssets(effectiveSelection(including: asset.id)) },
                             onRestore: { callbacks.onRestoreAssets(effectiveSelection(including: asset.id)) },
                             onPermanentlyDelete: { callbacks.onPermanentlyDeleteAssets(effectiveSelection(including: asset.id)) }
@@ -337,6 +356,27 @@ public struct VirtualizedMasonryView: View {
         .onKeyPress(characters: CharacterSet(charactersIn: "aA")) { press in
             if press.modifiers.contains(.command) {
                 selectedAssetIDs = Set(assets.map(\.id))
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "cC")) { press in
+            if press.modifiers.contains(.command), !selectedAssetIDs.isEmpty {
+                callbacks.onCopyAssets(Array(selectedAssetIDs))
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "xX")) { press in
+            if press.modifiers.contains(.command), !selectedAssetIDs.isEmpty {
+                callbacks.onCutAssets(Array(selectedAssetIDs))
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "vV")) { press in
+            if press.modifiers.contains(.command) {
+                callbacks.onPasteIntoCurrentFolder()
                 return .handled
             }
             return .ignored
@@ -530,6 +570,7 @@ private struct MasonryAssetCard: View {
     let loader: ThumbnailImageLoader
     let folders: [FolderRecord]
     let isSelected: Bool
+    let isCut: Bool
     let heroNamespace: Namespace.ID
     let isHiddenForHero: Bool
     let onSelect: () -> Void
@@ -540,6 +581,9 @@ private struct MasonryAssetCard: View {
     let onMoveToFolder: (UUID?) -> Void
     let onTogglePinOffline: () -> Void
     let onCopyColorHex: (String) -> Void
+    let onRevealInFinder: () -> Void
+    let onCopy: () -> Void
+    let onCut: () -> Void
     let onTrash: () -> Void
     let onRestore: () -> Void
     let onPermanentlyDelete: () -> Void
@@ -562,7 +606,13 @@ private struct MasonryAssetCard: View {
                 isHovered: isHovered
             )
             .matchedGeometryEffect(id: asset.id, in: heroNamespace, isSource: !isHiddenForHero)
-            .opacity(isHiddenForHero ? 0.0 : 1.0)
+            .opacity(isHiddenForHero ? 0.0 : (isCut ? 0.52 : 1.0))
+
+            if isCut {
+                shape
+                    .strokeBorder(Color.secondary.opacity(0.65), style: StrokeStyle(lineWidth: 1.25, dash: [5, 4]))
+                    .allowsHitTesting(false)
+            }
 
             // Subtle hover luminance kiss (never animating layout on hover)
             if isHovered && !isSelected {
@@ -705,6 +755,11 @@ private struct MasonryAssetCard: View {
             Button("快速预览 (Space)") {
                 onDoubleClick()
             }
+            Button {
+                onRevealInFinder()
+            } label: {
+                Label("在访达中显示", systemImage: "folder")
+            }
             if asset.isTrashed {
                 Divider()
                 Button {
@@ -718,10 +773,21 @@ private struct MasonryAssetCard: View {
                     Label("彻底删除", systemImage: "trash.slash")
                 }
             } else {
+                Divider()
+                Button {
+                    onCopy()
+                } label: {
+                    Label("拷贝", systemImage: "doc.on.doc")
+                }
+                Button {
+                    onCut()
+                } label: {
+                    Label("剪切", systemImage: "scissors")
+                }
+                Divider()
                 Button("加入情绪板…") {
                     onAddToMoodboard()
                 }
-                Divider()
                 Menu("移动到文件夹") {
                     Button("收件箱") { onMoveToFolder(nil) }
                     if !folders.isEmpty {

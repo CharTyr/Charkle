@@ -52,8 +52,48 @@ public enum CloudAIProviderKind: String, Codable, CaseIterable, Hashable, Sendab
     }
 }
 
+public enum CustomAIEndpointFormat: String, Codable, CaseIterable, Hashable, Sendable {
+    case openAIChatCompletions
+    case anthropicMessages
+    case openAIResponses
+
+    public var localizedLabel: String {
+        switch self {
+        case .openAIChatCompletions: "OpenAI 兼容 (Chat Completions)"
+        case .anthropicMessages: "Anthropic Messages"
+        case .openAIResponses: "OpenAI Responses"
+        }
+    }
+
+    public var defaultBaseURL: String {
+        switch self {
+        case .openAIChatCompletions, .openAIResponses: "https://api.openai.com"
+        case .anthropicMessages: "https://api.anthropic.com"
+        }
+    }
+
+    public var defaultChatModel: String {
+        switch self {
+        case .openAIChatCompletions, .openAIResponses: "gpt-4.1-mini"
+        case .anthropicMessages: "claude-sonnet-4-5"
+        }
+    }
+
+    public var defaultEmbeddingModel: String {
+        switch self {
+        case .openAIChatCompletions, .openAIResponses: "text-embedding-3-small"
+        case .anthropicMessages: ""
+        }
+    }
+
+    public var supportsEmbeddings: Bool {
+        self != .anthropicMessages
+    }
+}
+
 public struct AIProviderConfig: Codable, Hashable, Sendable {
     public var provider: CloudAIProviderKind
+    public var customEndpointFormat: CustomAIEndpointFormat
     public var baseURL: String
     public var chatModel: String
     public var embeddingModel: String
@@ -62,6 +102,7 @@ public struct AIProviderConfig: Codable, Hashable, Sendable {
 
     public init(
         provider: CloudAIProviderKind = .disabled,
+        customEndpointFormat: CustomAIEndpointFormat = .openAIChatCompletions,
         baseURL: String = "https://generativelanguage.googleapis.com",
         chatModel: String = "gemini-2.5-flash",
         embeddingModel: String = "gemini-embedding-001",
@@ -69,11 +110,27 @@ public struct AIProviderConfig: Codable, Hashable, Sendable {
         sendThumbnailsToCloud: Bool = true
     ) {
         self.provider = provider
+        self.customEndpointFormat = customEndpointFormat
         self.baseURL = baseURL
         self.chatModel = chatModel
         self.embeddingModel = embeddingModel
         self.autoAnalyzeOnImport = autoAnalyzeOnImport
         self.sendThumbnailsToCloud = sendThumbnailsToCloud
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case provider, customEndpointFormat, baseURL, chatModel, embeddingModel, autoAnalyzeOnImport, sendThumbnailsToCloud
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decodeIfPresent(CloudAIProviderKind.self, forKey: .provider) ?? .disabled
+        customEndpointFormat = try c.decodeIfPresent(CustomAIEndpointFormat.self, forKey: .customEndpointFormat) ?? .openAIChatCompletions
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? "https://generativelanguage.googleapis.com"
+        chatModel = try c.decodeIfPresent(String.self, forKey: .chatModel) ?? "gemini-2.5-flash"
+        embeddingModel = try c.decodeIfPresent(String.self, forKey: .embeddingModel) ?? "gemini-embedding-001"
+        autoAnalyzeOnImport = try c.decodeIfPresent(Bool.self, forKey: .autoAnalyzeOnImport) ?? false
+        sendThumbnailsToCloud = try c.decodeIfPresent(Bool.self, forKey: .sendThumbnailsToCloud) ?? true
     }
 }
 

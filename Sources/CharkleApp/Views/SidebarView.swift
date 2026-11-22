@@ -55,6 +55,7 @@ public struct SidebarView: View {
     @State private var expandedFolderIDs: Set<UUID> = []
     @State private var didSeedInitialExpansion: Bool = false
     @State private var hoveredFolderID: UUID?
+    @State private var pendingDeleteWithContentsFolder: FolderRecord?
 
     @State private var dropTargetedFolderID: UUID?
     @State private var dropTargetedInbox: Bool = false
@@ -166,6 +167,18 @@ public struct SidebarView: View {
                     )
                     .onDrop(of: [.plainText, .fileURL, .url, .image], isTargeted: $dropTargetedInbox) { providers in
                         handleDrop(providers: providers, folderID: nil, boardID: nil)
+                    }
+                    .contextMenu {
+                        if !library.cutAssetIDs.isEmpty {
+                            Button {
+                                Task {
+                                    let count = await library.pasteCutAssets(toFolderID: nil)
+                                    coordinator.showToast("已将 \(count) 项素材移至收件箱", icon: "tray.and.arrow.down")
+                                }
+                            } label: {
+                                Label("粘贴移动至此（\(library.cutAssetIDs.count) 项）", systemImage: "doc.on.clipboard")
+                            }
+                        }
                     }
                     sidebarRow(
                         destination: .untagged,
@@ -348,6 +361,39 @@ public struct SidebarView: View {
                 expandAncestors(of: folderID)
             }
         }
+        .alert(
+            "删除「\(pendingDeleteWithContentsFolder?.name ?? "")」及其中素材？",
+            isPresented: Binding(
+                get: { pendingDeleteWithContentsFolder != nil },
+                set: { if !$0 { pendingDeleteWithContentsFolder = nil } }
+            )
+        ) {
+            Button("取消", role: .cancel) {
+                pendingDeleteWithContentsFolder = nil
+            }
+            Button("连同素材一起删除", role: .destructive) {
+                guard let folder = pendingDeleteWithContentsFolder else { return }
+                pendingDeleteWithContentsFolder = nil
+                Task {
+                    let trashedCount = await library.deleteFolder(id: folder.id, trashContents: true)
+                    if case .folder(let currentID) = coordinator.selectedDestination,
+                       !library.folders.contains(where: { $0.id == currentID }) {
+                        onSelectDestination(.allItems)
+                    }
+                    let msg = trashedCount > 0
+                        ? "已删除「\(folder.name)」，\(trashedCount) 项素材已移至废纸篓"
+                        : "已删除文件夹「\(folder.name)」"
+                    coordinator.showToast(msg, icon: "trash")
+                }
+            }
+        } message: {
+            if let folder = pendingDeleteWithContentsFolder {
+                let count = library.subtreeAssetCount(for: folder.id)
+                Text(count > 0
+                    ? "将删除该文件夹及其子文件夹，并将里面的 \(count) 项素材一并移至废纸篓（可在废纸篓中恢复或彻底删除）。"
+                    : "将删除该文件夹及其子文件夹。")
+            }
+        }
     }
 
     // MARK: - Folder Tree Row & Inline Creator / Renamer (with Click-Outside Dismiss)
@@ -406,20 +452,20 @@ public struct SidebarView: View {
             }
             .buttonStyle(.plain)
 
-            if isHovered {
-                Button {
-                    toggleFolderCreation(target: .subfolder(folder.id))
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 9.5, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18, height: 18)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .help("在「\(folder.name)」内新建子文件夹")
-                .transition(.opacity)
+            // Always keep fixed layout space for hover "+" button so hovering NEVER shifts row height or below items!
+            Button {
+                toggleFolderCreation(target: .subfolder(folder.id))
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
+            .buttonStyle(.plain)
+            .opacity(isHovered ? 1 : 0)
+            .allowsHitTesting(isHovered)
+            .help("在「\(folder.name)」内新建子文件夹")
 
             if folder.assetCount > 0 {
                 Text("\(folder.assetCount)")
@@ -432,7 +478,7 @@ public struct SidebarView: View {
         }
         .padding(.leading, 6 + indent)
         .padding(.trailing, 10)
-        .padding(.vertical, 6)
+        .frame(height: 28)
         .background {
             if isSelected {
                 rowShape
@@ -465,6 +511,17 @@ public struct SidebarView: View {
             handleDrop(providers: providers, folderID: folder.id, boardID: nil)
         }
         .contextMenu {
+            if !library.cutAssetIDs.isEmpty {
+                Button {
+                    Task {
+                        let count = await library.pasteCutAssets(toFolderID: folder.id)
+                        coordinator.showToast("已将 \(count) 项素材移至「\(folder.name)」", icon: "folder")
+                    }
+                } label: {
+                    Label("粘贴移动至此文件夹（\(library.cutAssetIDs.count) 项）", systemImage: "doc.on.clipboard")
+                }
+                Divider()
+            }
             Button {
                 toggleFolderCreation(target: .subfolder(folder.id))
             } label: {
@@ -478,13 +535,21 @@ public struct SidebarView: View {
                 }
             }
             Divider()
-            Button("删除文件夹（素材退回收件箱）", role: .destructive) {
+            Button {
                 Task {
-                    await library.deleteFolder(id: folder.id)
+                    await library.deleteFolder(id: folder.id, trashContents: false)
                     if coordinator.selectedDestination == .folder(folder.id) {
                         onSelectDestination(.allItems)
                     }
+                    coordinator.showToast("已删除「\(folder.name)」，素材已退回收件箱", icon: "tray.and.arrow.down")
                 }
+            } label: {
+                Label("删除文件夹（素材退回收件箱）", systemImage: "folder.badge.minus")
+            }
+            Button(role: .destructive) {
+                pendingDeleteWithContentsFolder = folder
+            } label: {
+                Label("删除文件夹及其中素材…", systemImage: "trash")
             }
         }
     }
@@ -745,7 +810,7 @@ extension SidebarView {
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .frame(height: 28)
             .background {
                 if isSelected {
                     rowShape

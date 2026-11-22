@@ -19,10 +19,18 @@ public nonisolated struct IntelligenceEngine: Sendable {
         switch config.provider {
         case .disabled: return nil
         case .gemini:
-            guard let key, !key.isEmpty else { throw LibraryDatabaseError("Enter a Gemini API key in Settings.") }
+            guard let key, !key.isEmpty else { throw LibraryDatabaseError("请先在设置中填写 Gemini API 密钥。") }
             return try GeminiProvider(config: config, apiKey: key)
         case .openAICompatible:
-            return try OpenAICompatibleProvider(config: config, apiKey: key)
+            switch config.customEndpointFormat {
+            case .openAIChatCompletions:
+                return try OpenAICompatibleProvider(config: config, apiKey: key)
+            case .openAIResponses:
+                return try OpenAIResponsesProvider(config: config, apiKey: key)
+            case .anthropicMessages:
+                guard let key, !key.isEmpty else { throw LibraryDatabaseError("请先在设置中填写 Anthropic API 密钥。") }
+                return try AnthropicMessagesProvider(config: config, apiKey: key)
+            }
         }
     }
 

@@ -189,6 +189,66 @@ extension LibraryDatabase {
         return try self.board(id: board.id) ?? board
     }
 
+    /// Rebuilds the sync operation queue cleanly from the authoritative local library state when
+    /// migrating between storage backends (e.g. Local Folder <-> Google Drive <-> WebDAV) or changing root path.
+    func requeueLibraryForBackendMigration(
+        syncThumbnails: Bool,
+        syncEmbeddings: Bool
+    ) throws -> (assets: Int, folders: Int, boards: Int) {
+        // Clear old backend sync state and stale remote bindings
+        try clearMigrationSyncState()
+
+        // Re-queue folders in parent-before-child topological order
+        let existingFolders = try fetchFolders()
+        let folderByID = Dictionary(uniqueKeysWithValues: existingFolders.map { ($0.id, $0) })
+        var orderedFolders: [FolderRecord] = []
+        var visited = Set<UUID>()
+        func visitFolder(_ f: FolderRecord) {
+            guard visited.insert(f.id).inserted else { return }
+            if let parentID = f.parentID, let parent = folderByID[parentID] {
+                visitFolder(parent)
+            }
+            orderedFolders.append(f)
+        }
+        for f in existingFolders { visitFolder(f) }
+
+        for var folder in orderedFolders {
+            folder.driveFolderID = nil
+            try put(folder)
+            try record(.folder(folder))
+        }
+
+        // Re-queue all non-trashed assets with clean unbound remote IDs
+        let allAssets = try fetchAssets(matching: FilterCriteria(includeTrashed: false))
+        let allVectors = try vectors()
+        for var asset in allAssets {
+            asset.driveFileID = nil
+            try put(asset)
+            let delta = try AssetChanges(asset, diff: nil)
+            if !delta.isEmpty {
+                try record(.asset(delta))
+            }
+            if syncThumbnails {
+                try markProjection("thumbnails", id: asset.id)
+            }
+            if syncEmbeddings, let vector = allVectors[asset.id] {
+                try record(.vector(asset.id, vector))
+            }
+        }
+
+        // Re-queue all moodboards
+        let allBoards = try fetchBoards()
+        for board in allBoards {
+            let delta = try BoardChanges(board, diff: nil)
+            if !delta.isEmpty {
+                try record(.board(delta))
+            }
+            try markProjection("boards", id: board.id)
+        }
+
+        return (allAssets.count, orderedFolders.count, allBoards.count)
+    }
+
     func apply(_ op: SyncOperation) throws {
         let stamp = op.stamp
         guard stamp.time > 0, stamp.time < Int64.max - 1 else {

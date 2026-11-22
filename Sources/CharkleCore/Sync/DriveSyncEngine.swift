@@ -41,9 +41,9 @@ public final actor DriveSyncEngine {
         try? await database.setState("lastSyncStatus", currentStatus)
     }
 
-    public func sync(using transport: any DriveTransport, config: DriveSyncConfig) async throws -> SyncReport {
-        guard config.mode != .localOnly else { return SyncReport() }
-        guard !running else { throw DriveTransportError.notConfigured("A sync is already running.") }
+    public func sync(using transport: any DriveTransport, config: DriveSyncConfig, allowLocalFolderSync: Bool = false) async throws -> SyncReport {
+        if config.mode == .localOnly && !allowLocalFolderSync { return SyncReport() }
+        guard !running else { throw DriveTransportError.notConfigured("当前已有同步任务正在运行，请稍候。") }
         running = true
         defer { running = false }
         currentStatus.phase = .scanning
@@ -52,7 +52,8 @@ public final actor DriveSyncEngine {
         do {
             let account = try await transport.accountInfo()
             currentStatus.account = account
-            let layout = try await makeLayout(using: transport, rootName: config.rootFolderName)
+            let rootPath = Self.resolvedRootPath(for: config)
+            let layout = try await makeLayout(using: transport, rootPath: rootPath)
             let scope = "remote." + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
             try await updateManifest(layout, transport: transport)
 
@@ -170,9 +171,35 @@ public final actor DriveSyncEngine {
         let directories: [String: String]?
     }
 
-    private func makeLayout(using transport: any DriveTransport, rootName: String) async throws -> Layout {
-        try DriveFiles.validateName(rootName)
-        let root = try await transport.findOrCreateFolder(named: rootName, parentID: DriveFiles.rootID)
+    private static func resolvedRootPath(for config: DriveSyncConfig) -> String {
+        switch config.mode {
+        case .webDAV:
+            return config.webDAVRemotePath
+        case .localOnly:
+            let url = URL(fileURLWithPath: (config.localLibraryPath as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+            return url.lastPathComponent.isEmpty ? "Charkle" : url.lastPathComponent
+        case .directAPIWithGDirect, .gdirectMount:
+            return config.rootFolderName
+        }
+    }
+
+    private func makeLayout(using transport: any DriveTransport, rootPath: String) async throws -> Layout {
+        let segments = rootPath
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+        let finalSegments = segments.isEmpty ? ["Charkle"] : segments
+        var currentParentID = DriveFiles.rootID
+        var rootFile: RemoteDriveFile?
+        for segment in finalSegments {
+            try DriveFiles.validateName(segment)
+            let created = try await transport.findOrCreateFolder(named: segment, parentID: currentParentID)
+            currentParentID = created.id
+            rootFile = created
+        }
+        guard let root = rootFile else {
+            throw DriveTransportError.notConfigured("请指定有效的素材库保存路径。")
+        }
         async let inbox = transport.findOrCreateFolder(named: "Inbox", parentID: root.id)
         let metadata = try await transport.findOrCreateFolder(named: ".charkle", parentID: root.id)
         async let ops = transport.findOrCreateFolder(named: "ops", parentID: metadata.id)

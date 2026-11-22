@@ -5,8 +5,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Product-grade macOS Settings window designed around user intent:
-/// plain human language, instant auto-save on toggles/pickers, calm visual hierarchy,
-/// and technical diagnostics cleanly tucked inside collapsible disclosure sections.
+/// Multi-backend storage & sync (Google Drive via gdirect OAuth, WebDAV, Pure Local Folder)
+/// with configurable library paths and lossless two-way storage migration,
+/// multi-format Custom AI endpoints (OpenAI Chat Completions, Anthropic Messages, OpenAI Responses),
+/// storage telemetry, and capture shortcuts.
 public struct SettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -14,6 +16,10 @@ public struct SettingsView: View {
     public let syncAndAI: SyncAndAIStore
     public let onToggleNotchPreview: () -> Void
     public let onSyncHotkeysEnabled: (Bool) -> Void
+
+    private static let gdirectTutorialURL = URL(
+        string: "https://github.com/mizorewww/gdirect/blob/main/docs/configuration/google-cloud.md"
+    )!
 
     public enum SettingsTab: String, CaseIterable, Identifiable {
         case cloudSync
@@ -25,9 +31,9 @@ public struct SettingsView: View {
 
         public var label: String {
             switch self {
-            case .cloudSync: "云同步"
+            case .cloudSync: "存储与同步"
             case .intelligence: "智能与搜索"
-            case .storage: "存储空间"
+            case .storage: "缓存空间"
             case .captureShortcuts: "采集与快捷键"
             }
         }
@@ -46,6 +52,7 @@ public struct SettingsView: View {
     @State private var draftSyncConfig: DriveSyncConfig = DriveSyncConfig()
     @State private var draftAIConfig: AIProviderConfig = AIProviderConfig()
     @State private var apiKeyInput: String = ""
+    @State private var webDAVPasswordInput: String = ""
     @State private var cacheBudgetGB: Double = 10.0
     @State private var didLoadInitial: Bool = false
 
@@ -54,6 +61,11 @@ public struct SettingsView: View {
     @State private var showOAuthSetupSheet: Bool = false
     @State private var oauthClientIDInput: String = ""
     @State private var oauthClientSecretInput: String = ""
+
+    // Lossless Storage Migration Sheet state
+    @State private var showMigrationSheet: Bool = false
+    @State private var migrationDraftConfig: DriveSyncConfig = DriveSyncConfig()
+    @State private var migrationWebDAVPassword: String = ""
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -113,7 +125,7 @@ public struct SettingsView: View {
 
             // Right Content Pane
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 18) {
                     if let status = syncAndAI.statusMessage {
                         feedbackBanner(status, isError: false)
                     }
@@ -137,7 +149,7 @@ public struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(CharkleTheme.galleryGround(for: colorScheme))
         }
-        .frame(width: 740, height: 600)
+        .frame(width: 760, height: 630)
         .task {
             await syncAndAI.loadAll()
             draftSyncConfig = syncAndAI.syncConfig
@@ -148,166 +160,61 @@ public struct SettingsView: View {
         .sheet(isPresented: $showOAuthSetupSheet) {
             googleOAuthSetupSheet
         }
+        .sheet(isPresented: $showMigrationSheet) {
+            storageMigrationSheet
+        }
     }
 
-    // MARK: - Tab 1: 云同步
+    // MARK: - Tab 1: 存储与同步 (Google Drive / WebDAV / 纯本地文件夹 + 无损迁移)
 
     private var cloudSyncPane: some View {
         let snap = syncAndAI.gdirectSnapshot
-        let signedInAccount = syncAndAI.syncStatus.account
-        let isSignedIn = signedInAccount != nil
-        let isSyncEnabled = draftSyncConfig.mode != .localOnly
         let healthyNodeCount = snap.endpoints.filter(\.healthy).count
+        let activeBackendBinding = Binding<DriveTransportMode>(
+            get: { draftSyncConfig.mode == .gdirectMount ? .directAPIWithGDirect : draftSyncConfig.mode },
+            set: { newMode in
+                draftSyncConfig.mode = newMode
+                persistSyncConfigIfReady()
+            }
+        )
 
         return VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
-                title: "云同步",
-                subtitle: "直接登录你的 Google 账号即可自动备份素材库与情绪板到 Google Drive，无需安装第三方工具。"
+                title: "存储与同步",
+                subtitle: "自由选择 Google Drive、WebDAV 云盘或纯本地文件夹保存素材库，可自定义保存路径并随时无损转移。"
             )
 
-            // Account & Primary Sync Status Card
+            // 3-Way Primary Storage Mode Selector
             settingsGroupCard {
-                HStack(spacing: 14) {
-                    ZStack {
-                        Circle()
-                            .fill(isSignedIn ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
-                            .frame(width: 44, height: 44)
-                        Image(systemName: isSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(isSignedIn ? Color.accentColor : .secondary)
+                settingsRow(
+                    title: "素材库存储方式",
+                    subtitle: storageModeDescription(draftSyncConfig.mode)
+                ) {
+                    Picker("", selection: activeBackendBinding) {
+                        Text("Google Drive").tag(DriveTransportMode.directAPIWithGDirect)
+                        Text("WebDAV 云盘").tag(DriveTransportMode.webDAV)
+                        Text("纯本地文件夹").tag(DriveTransportMode.localOnly)
                     }
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(signedInAccount?.displayName ?? signedInAccount?.email ?? "Google Drive")
-                                .font(.system(size: 13.5, weight: .semibold))
-                            if isSignedIn {
-                                Circle()
-                                    .fill(Color.green)
-                                    .frame(width: 7, height: 7)
-                            }
-                        }
-
-                        if let account = signedInAccount, let name = account.displayName, !name.isEmpty {
-                            Text(account.email)
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Text(syncHeroSubtitle(account: signedInAccount, isSyncEnabled: isSyncEnabled))
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    if isSignedIn {
-                        HStack(spacing: 8) {
-                            if isSyncEnabled {
-                                Button {
-                                    Task { _ = await syncAndAI.syncNow() }
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        if syncAndAI.isBusy {
-                                            ProgressView().controlSize(.mini)
-                                        }
-                                        Text("立即同步")
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(syncAndAI.isBusy)
-                            }
-
-                            Menu {
-                                Button("切换 Google 账号…") {
-                                    triggerGoogleSignIn()
-                                }
-                                Divider()
-                                Button("退出登录", role: .destructive) {
-                                    Task { await syncAndAI.signOutGoogleDrive() }
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                                    .font(.system(size: 16))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .menuStyle(.borderlessButton)
-                            .fixedSize()
-                            .help("账号操作")
-                        }
-                    } else {
-                        Button {
-                            triggerGoogleSignIn()
-                        } label: {
-                            HStack(spacing: 6) {
-                                if syncAndAI.isBusy {
-                                    ProgressView().controlSize(.mini)
-                                }
-                                Text("使用 Google 账号登录")
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(syncAndAI.isBusy)
-                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 286)
                 }
-                .padding(.vertical, 2)
 
-                if let used = signedInAccount?.storageUsedBytes,
-                   let limit = signedInAccount?.storageLimitBytes, limit > 0 {
-                    Divider()
-                    let ratio = min(1.0, max(0.0, Double(used) / Double(limit)))
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Text("Google Drive 云端空间")
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(ByteCountFormatter.string(fromByteCount: used, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))")
-                                .font(.system(size: 11, weight: .medium))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                        ProgressView(value: ratio)
-                            .progressViewStyle(.linear)
-                    }
+                Divider()
+
+                switch draftSyncConfig.mode {
+                case .directAPIWithGDirect, .gdirectMount:
+                    googleDriveSection
+                case .webDAV:
+                    webDAVSection
+                case .localOnly:
+                    localLibrarySection
                 }
             }
 
-            // Everyday Sync Preferences (instant auto-save)
-            settingsGroupCard {
-                settingsRow(
-                    title: "开启 Google Drive 自动同步",
-                    subtitle: isSyncEnabled
-                        ? "新增素材、文件夹与情绪板会自动备份到你的 Google Drive"
-                        : "当前仅保存在这台 Mac 本地，不联网同步"
-                ) {
-                    Toggle("", isOn: Binding(
-                        get: { draftSyncConfig.mode != .localOnly },
-                        set: { enabled in
-                            draftSyncConfig.mode = enabled ? .directAPIWithGDirect : .localOnly
-                            persistSyncConfigIfReady()
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                }
-
-                if isSyncEnabled {
-                    Divider()
-
-                    settingsRow(
-                        title: "云端主文件夹",
-                        subtitle: "在 Google Drive 网页版中也能直接浏览这些原文件"
-                    ) {
-                        TextField("Charkle", text: $draftSyncConfig.rootFolderName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 156)
-                            .onSubmit { persistSyncConfigIfReady() }
-                    }
-
-                    Divider()
-
+            // Sync Preferences (when using Cloud)
+            if draftSyncConfig.mode != .localOnly {
+                settingsGroupCard {
                     settingsRow(
                         title: "同步轻量化预览图",
                         subtitle: "切换其他 Mac 时立即看到完整画廊，无需等待下载原文件"
@@ -334,33 +241,82 @@ public struct SettingsView: View {
                 }
             }
 
-            // Collapsible Advanced Options (cleanly tucked away for developers & power users)
+            // Lossless Migration Card (Local <-> Cloud, or Change Path)
+            settingsGroupCard {
+                settingsRow(
+                    title: "转移素材库存储位置",
+                    subtitle: "将现有素材、文件夹和情绪板从纯本地无损迁移到云盘，或从云盘完整迁回本地文件夹。"
+                ) {
+                    Button {
+                        migrationDraftConfig = draftSyncConfig
+                        migrationWebDAVPassword = ""
+                        showMigrationSheet = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("开始转移…")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .fixedSize()
+                    .disabled(syncAndAI.isBusy)
+                }
+
+                HStack(spacing: 6) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                    Text("当前保存位置：\(draftSyncConfig.activeStorageLocationSummary)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+
+            // Collapsible Advanced Options
             settingsGroupCard {
                 DisclosureGroup(isExpanded: $showSyncAdvanced) {
                     VStack(alignment: .leading, spacing: 12) {
                         Divider().padding(.top, 4)
 
                         settingsRow(
-                            title: "Google 登录应用凭据",
+                            title: "Google 登录凭据（gdirect 桌面端凭据）",
                             subtitle: syncAndAI.hasGoogleOAuthClient
                                 ? "已配置，可直接点击上方「使用 Google 账号登录」"
-                                : "当前开发版未内置凭据，点击右侧粘贴或导入一次即可使用"
+                                : "可从本机 gdirect 导入，或按 gdirect 教程配置一次"
                         ) {
-                            Button(syncAndAI.hasGoogleOAuthClient ? "更换凭据…" : "配置凭据…") {
-                                showOAuthSetupSheet = true
+                            HStack(spacing: 6) {
+                                if snap.cliPath != nil && !syncAndAI.hasGoogleOAuthClient {
+                                    Button("从本机 gdirect 导入") {
+                                        Task { _ = await syncAndAI.importGoogleOAuthFromGDirect() }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .fixedSize()
+                                }
+                                Button(syncAndAI.hasGoogleOAuthClient ? "更换凭据…" : "配置凭据…") {
+                                    showOAuthSetupSheet = true
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .fixedSize()
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
 
                         if snap.cliPath != nil {
                             Divider()
 
                             settingsRow(
-                                title: "本机网络直连加速（可选）",
+                                title: "启用 gdirect 直连加速",
                                 subtitle: healthyNodeCount > 0
-                                    ? "检测到本机加速工具，当前有 \(healthyNodeCount) 条可用直连线路"
-                                    : "无需手动配置，检测到本机直连线路时自动择优提速"
+                                    ? "检测到本机 gdirect，当前有 \(healthyNodeCount) 条低延迟直连线路"
+                                    : "通过本机 gdirect 优选直连线路提升 Google Drive 读写速度"
                             ) {
                                 Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
                                     .labelsHidden()
@@ -402,23 +358,359 @@ public struct SettingsView: View {
         }
     }
 
+    // MARK: - Google Drive Sub-Section
+
+    @ViewBuilder
+    private var googleDriveSection: some View {
+        let signedInAccount = syncAndAI.syncStatus.account?.source == "WebDAV" || syncAndAI.syncStatus.account?.source == "本地文件夹"
+            ? nil
+            : syncAndAI.syncStatus.account
+        let isSignedIn = signedInAccount != nil
+
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(isSignedIn ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
+                    .frame(width: 42, height: 42)
+                Image(systemName: isSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(isSignedIn ? Color.accentColor : .secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(signedInAccount?.displayName ?? signedInAccount?.email ?? "未登录 Google 账号")
+                        .font(.system(size: 13.5, weight: .semibold))
+                    if isSignedIn {
+                        Circle().fill(Color.green).frame(width: 7, height: 7)
+                    }
+                }
+                if let account = signedInAccount, let name = account.displayName, !name.isEmpty {
+                    Text(account.email)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Text(googleHeroSubtitle(account: signedInAccount))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if isSignedIn {
+                HStack(spacing: 8) {
+                    Button {
+                        Task { _ = await syncAndAI.syncNow() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                            Text("立即同步")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .fixedSize()
+                    .disabled(syncAndAI.isBusy)
+
+                    Menu {
+                        Button("切换 Google 账号…") { triggerGoogleSignIn() }
+                        Divider()
+                        Button("退出登录", role: .destructive) {
+                            Task { await syncAndAI.signOutGoogleDrive() }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            } else {
+                Button {
+                    triggerGoogleSignIn()
+                } label: {
+                    HStack(spacing: 6) {
+                        if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                        Text("使用 Google 账号登录")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .fixedSize()
+                .disabled(syncAndAI.isBusy)
+            }
+        }
+
+        if let used = signedInAccount?.storageUsedBytes,
+           let limit = signedInAccount?.storageLimitBytes, limit > 0 {
+            let ratio = min(1.0, max(0.0, Double(used) / Double(limit)))
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("Google Drive 云端空间")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(ByteCountFormatter.string(fromByteCount: used, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: ratio)
+                    .progressViewStyle(.linear)
+            }
+        }
+
+        Divider()
+
+        settingsRow(
+            title: "云端保存路径",
+            subtitle: "支持单级目录（Charkle）或多级路径（如 Design/Charkle），回车生效"
+        ) {
+            TextField("Charkle", text: $draftSyncConfig.rootFolderName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 190)
+                .onSubmit { persistSyncConfigIfReady() }
+        }
+    }
+
+    // MARK: - WebDAV Sub-Section
+
+    @ViewBuilder
+    private var webDAVSection: some View {
+        let isWebDAVConnected = syncAndAI.syncStatus.account?.source == "WebDAV"
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(isWebDAVConnected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "externaldrive.connected.to.line.below.fill")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(isWebDAVConnected ? Color.accentColor : .secondary)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("WebDAV 云盘同步")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                HStack(spacing: 6) {
+                    Button("测试连接") {
+                        let pwd = webDAVPasswordInput
+                        let cfg = draftSyncConfig
+                        Task {
+                            let ok = await syncAndAI.testWebDAVConnection(config: cfg, password: pwd.isEmpty ? nil : pwd)
+                            if ok { webDAVPasswordInput = "" }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(draftSyncConfig.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncAndAI.isBusy)
+
+                    Button {
+                        let pwd = webDAVPasswordInput
+                        let cfg = draftSyncConfig
+                        Task {
+                            if !pwd.isEmpty {
+                                _ = await syncAndAI.saveWebDAVPassword(pwd)
+                                webDAVPasswordInput = ""
+                            }
+                            await syncAndAI.saveSyncConfig(cfg, quiet: true)
+                            _ = await syncAndAI.syncNow()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                            Text("立即同步")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(draftSyncConfig.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncAndAI.isBusy)
+                }
+            }
+
+            settingsRow(title: "服务器地址", subtitle: "例如 https://dav.jianguoyun.com/dav/") {
+                TextField("https://dav.jianguoyun.com/dav/", text: $draftSyncConfig.webDAVServerURL)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 248)
+                    .onSubmit { persistSyncConfigIfReady() }
+            }
+
+            settingsRow(title: "账号 / 用户名", subtitle: nil) {
+                TextField("邮箱或用户名", text: $draftSyncConfig.webDAVUsername)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 248)
+                    .onSubmit { persistSyncConfigIfReady() }
+            }
+
+            settingsRow(
+                title: "应用密码",
+                subtitle: syncAndAI.hasWebDAVPassword ? "已安全保存在 macOS 钥匙串" : "仅保存在本机钥匙串，绝不明文落盘"
+            ) {
+                HStack(spacing: 6) {
+                    SecureField(syncAndAI.hasWebDAVPassword ? "••••••••（留空不变）" : "输入密码或应用授权码", text: $webDAVPasswordInput)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 184)
+                    Button("保存") {
+                        let pwd = webDAVPasswordInput
+                        let cfg = draftSyncConfig
+                        Task {
+                            await syncAndAI.saveSyncConfig(cfg, quiet: true)
+                            if await syncAndAI.saveWebDAVPassword(pwd) {
+                                webDAVPasswordInput = ""
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(webDAVPasswordInput.isEmpty)
+                }
+            }
+
+            settingsRow(title: "云端保存路径", subtitle: "素材库将按可读目录保存在此路径下") {
+                TextField("/Charkle", text: $draftSyncConfig.webDAVRemotePath)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 248)
+                    .onSubmit { persistSyncConfigIfReady() }
+            }
+        }
+    }
+
+    // MARK: - Pure Local Folder Sub-Section
+
+    @ViewBuilder
+    private var localLibrarySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            settingsRow(
+                title: "本机素材库目录",
+                subtitle: "所有原始文件与文件夹结构以人类可读方式保存在此本机目录中"
+            ) {
+                HStack(spacing: 6) {
+                    Button("选择文件夹…") {
+                        if let picked = pickLocalDirectory(initialPath: draftSyncConfig.localLibraryPath) {
+                            draftSyncConfig.localLibraryPath = picked
+                            persistSyncConfigIfReady()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .fixedSize()
+
+                    Button("在访达中打开") {
+                        let url = URL(fileURLWithPath: (draftSyncConfig.localLibraryPath as NSString).expandingTildeInPath, isDirectory: true)
+                        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(url)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("~/Pictures/Charkle", text: $draftSyncConfig.localLibraryPath)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .onSubmit { persistSyncConfigIfReady() }
+
+                Button {
+                    let cfg = draftSyncConfig
+                    Task {
+                        await syncAndAI.saveSyncConfig(cfg, quiet: true)
+                        _ = await syncAndAI.syncNow()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        if syncAndAI.isBusy { ProgressView().controlSize(.mini) }
+                        Text("同步到该目录")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(syncAndAI.isBusy)
+            }
+        }
+    }
+
+    // MARK: - Google OAuth Setup Sheet (gdirect Import + Tutorial Link)
+
     private var googleOAuthSetupSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        let hasGDirect = syncAndAI.gdirectSnapshot.cliPath != nil
+
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
                 Image(systemName: "person.badge.key.fill")
                     .font(.system(size: 18))
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("配置 Google 登录凭据")
+                    Text("配置 Google Drive 登录凭据")
                         .font(.system(size: 15, weight: .semibold))
-                    Text("配置一次后即可在 Charkle 内一键登录任意 Google 账号，无需安装 gdirect。")
+                    Text("Charkle 基于 gdirect 生态直连 Google Drive，配置一次桌面端凭据即可完成账号登录。")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
+            // Guided Tutorial & One-Click Local gdirect Import Card
             VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Link(destination: Self.gdirectTutorialURL) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "book.pages")
+                            Text("查看 gdirect 官方 Google Cloud 配置教程")
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                    }
+                    Spacer()
+                }
+
+                HStack(spacing: 8) {
+                    if hasGDirect {
+                        Button {
+                            Task {
+                                let ok = await syncAndAI.importGoogleOAuthFromGDirect()
+                                if ok {
+                                    showOAuthSetupSheet = false
+                                    _ = await syncAndAI.signInGoogleDrive()
+                                }
+                            }
+                        } label: {
+                            Label("从本机已配置的 gdirect 一键导入", systemImage: "arrow.down.doc.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(syncAndAI.isBusy)
+                    }
+
+                    Button {
+                        presentOAuthSecretImporter(autoSignInAfterImport: true)
+                    } label: {
+                        Label("导入 client_secret.json 文件…", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer()
+                }
+            }
+            .padding(12)
+            .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("或手动粘贴教程中创建的桌面端凭据")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Client ID")
                         .font(.system(size: 11.5, weight: .medium))
@@ -435,24 +727,6 @@ public struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                 }
             }
-
-            HStack(spacing: 8) {
-                Button {
-                    presentOAuthSecretImporter(autoSignInAfterImport: true)
-                } label: {
-                    Label("从 client_secret.json 文件导入…", systemImage: "doc.badge.plus")
-                }
-                .buttonStyle(.bordered)
-
-                Spacer()
-            }
-
-            Text("提示：正式发布打包时，将凭据文件放到项目目录 Resources/GoogleOAuthClient.json，终端用户打开 App 即可零配置一键登录 Google。")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(10)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             HStack {
                 Button("取消") {
@@ -481,7 +755,165 @@ public struct SettingsView: View {
             }
         }
         .padding(22)
-        .frame(width: 480)
+        .frame(width: 520)
+    }
+
+    // MARK: - Lossless Storage Migration Sheet (Local <-> Google Drive <-> WebDAV)
+
+    private var storageMigrationSheet: some View {
+        let targetModeBinding = Binding<DriveTransportMode>(
+            get: { migrationDraftConfig.mode == .gdirectMount ? .directAPIWithGDirect : migrationDraftConfig.mode },
+            set: { migrationDraftConfig.mode = $0 }
+        )
+
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.left.arrow.right.circle.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("转移素材库存储位置")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("当前位置：\(draftSyncConfig.activeStorageLocationSummary)")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("目标存储方式")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Picker("", selection: targetModeBinding) {
+                    Text("Google Drive").tag(DriveTransportMode.directAPIWithGDirect)
+                    Text("WebDAV 云盘").tag(DriveTransportMode.webDAV)
+                    Text("纯本地文件夹").tag(DriveTransportMode.localOnly)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                switch migrationDraftConfig.mode {
+                case .directAPIWithGDirect, .gdirectMount:
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("目标 Google Drive 路径")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        TextField("Charkle 或 Design/Charkle", text: $migrationDraftConfig.rootFolderName)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    if syncAndAI.syncStatus.account == nil || syncAndAI.syncStatus.account?.source == "WebDAV" {
+                        HStack(spacing: 6) {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(.orange)
+                            Text("迁移到 Google Drive 前请先登录 Google 账号。")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("先去登录") {
+                                showMigrationSheet = false
+                                triggerGoogleSignIn()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .fixedSize()
+                        }
+                    }
+
+                case .webDAV:
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("WebDAV 服务器地址（如 https://dav.jianguoyun.com/dav/）", text: $migrationDraftConfig.webDAVServerURL)
+                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 8) {
+                            TextField("用户名", text: $migrationDraftConfig.webDAVUsername)
+                                .textFieldStyle(.roundedBorder)
+                            SecureField(syncAndAI.hasWebDAVPassword ? "密码（留空沿用已存密码）" : "应用密码", text: $migrationWebDAVPassword)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        TextField("远端保存路径（如 /Charkle）", text: $migrationDraftConfig.webDAVRemotePath)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                case .localOnly:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("目标本机文件夹路径")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            TextField("~/Pictures/Charkle", text: $migrationDraftConfig.localLibraryPath)
+                                .textFieldStyle(.roundedBorder)
+                            Button("选择文件夹…") {
+                                if let picked = pickLocalDirectory(initialPath: migrationDraftConfig.localLibraryPath) {
+                                    migrationDraftConfig.localLibraryPath = picked
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .fixedSize()
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("迁移流程说明")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text("1. 先验证目标位置连通与可写性，避免中断损坏原库；\n2. 自动补全拉取尚未缓存在本机的云端原件；\n3. 将全部文件夹、素材原件与情绪板完整写入新位置并切换为默认存储。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            HStack {
+                Button("取消") {
+                    showMigrationSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(syncAndAI.isMigrating)
+
+                Spacer()
+
+                Button {
+                    let target = migrationDraftConfig
+                    let pwd = migrationWebDAVPassword
+                    Task {
+                        if await syncAndAI.migrateLibraryStorage(to: target, webDAVPassword: pwd.isEmpty ? nil : pwd) != nil {
+                            draftSyncConfig = syncAndAI.syncConfig
+                            showMigrationSheet = false
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if syncAndAI.isMigrating {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Text(syncAndAI.isMigrating ? "正在迁移素材库…" : "开始无损转移")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(syncAndAI.isBusy || !canStartMigration)
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+    }
+
+    private var canStartMigration: Bool {
+        switch migrationDraftConfig.mode {
+        case .localOnly:
+            return !migrationDraftConfig.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .webDAV:
+            return !migrationDraftConfig.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .directAPIWithGDirect, .gdirectMount:
+            return !migrationDraftConfig.rootFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
 
     private func triggerGoogleSignIn() {
@@ -503,7 +935,7 @@ public struct SettingsView: View {
                 subtitle: "日常配色筛选、文字识别与相似推荐完全在你的 Mac 本机离线运行，零隐私外传；需要更深语义理解时可按需开启云端增强。"
             )
 
-            // Built-in Offline Capabilities (human benefits, no algorithm names)
+            // Built-in Offline Capabilities
             settingsGroupCard {
                 Text("本机内置智能（始终免费 · 离线可用）")
                     .font(.system(size: 12, weight: .semibold))
@@ -529,21 +961,40 @@ public struct SettingsView: View {
                         Text("自定义兼容服务").tag(CloudAIProviderKind.openAICompatible)
                     }
                     .labelsHidden()
-                    .frame(width: 176)
+                    .frame(width: 186)
                     .onChange(of: draftAIConfig.provider) { _, newProvider in
-                        if newProvider == .gemini && draftAIConfig.baseURL.isEmpty {
-                            draftAIConfig.baseURL = "https://generativelanguage.googleapis.com"
-                        }
+                        applySmartAIDefaults(for: newProvider, format: draftAIConfig.customEndpointFormat)
                         Task {
                             await syncAndAI.refreshAIKeyPresence(for: newProvider)
-                            if didLoadInitial && newProvider == .disabled {
-                                await syncAndAI.saveAIConfig(draftAIConfig, apiKey: nil)
+                            if didLoadInitial {
+                                await syncAndAI.saveAIConfig(draftAIConfig, apiKey: nil, quiet: true)
                             }
                         }
                     }
                 }
 
                 if draftAIConfig.provider != .disabled {
+                    if draftAIConfig.provider == .openAICompatible {
+                        Divider()
+
+                        settingsRow(
+                            title: "端点格式",
+                            subtitle: endpointFormatSubtitle(draftAIConfig.customEndpointFormat)
+                        ) {
+                            Picker("", selection: $draftAIConfig.customEndpointFormat) {
+                                ForEach(CustomAIEndpointFormat.allCases, id: \.self) { fmt in
+                                    Text(fmt.localizedLabel).tag(fmt)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 236)
+                            .onChange(of: draftAIConfig.customEndpointFormat) { _, newFormat in
+                                applySmartAIDefaults(for: .openAICompatible, format: newFormat)
+                                persistAIConfigIfReady()
+                            }
+                        }
+                    }
+
                     Divider()
 
                     settingsRow(
@@ -552,10 +1003,10 @@ public struct SettingsView: View {
                             ? "已安全保存在 macOS 钥匙串中"
                             : "密钥仅存于本机钥匙串，绝不上传"
                     ) {
-                        HStack(spacing: 6) {
+                        HStack(spacing: 8) {
                             SecureField(syncAndAI.hasStoredAIKey ? "••••••••（留空不变）" : "粘贴密钥…", text: $apiKeyInput)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 180)
+                                .frame(width: 176)
                             Button("保存") {
                                 let keyToSave = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
                                 Task {
@@ -565,6 +1016,38 @@ public struct SettingsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
+                            .fixedSize()
+                        }
+                    }
+
+                    if draftAIConfig.provider == .openAICompatible {
+                        Divider()
+
+                        settingsRow(title: "服务地址", subtitle: "自动补全 /v1 路径，也可直接填写完整前缀") {
+                            TextField(draftAIConfig.customEndpointFormat.defaultBaseURL, text: $draftAIConfig.baseURL)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 240)
+                                .onSubmit { persistAIConfigIfReady() }
+                        }
+
+                        Divider()
+
+                        settingsRow(title: "理解模型", subtitle: nil) {
+                            TextField(draftAIConfig.customEndpointFormat.defaultChatModel, text: $draftAIConfig.chatModel)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 240)
+                                .onSubmit { persistAIConfigIfReady() }
+                        }
+
+                        if draftAIConfig.customEndpointFormat.supportsEmbeddings {
+                            Divider()
+
+                            settingsRow(title: "搜索向量模型（可选）", subtitle: "留空时仅使用本机视觉特征搜索") {
+                                TextField("text-embedding-3-small", text: $draftAIConfig.embeddingModel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 240)
+                                    .onSubmit { persistAIConfigIfReady() }
+                            }
                         }
                     }
 
@@ -594,41 +1077,43 @@ public struct SettingsView: View {
                             .onChange(of: draftAIConfig.sendThumbnailsToCloud) { _, _ in persistAIConfigIfReady() }
                     }
 
-                    Divider()
+                    if draftAIConfig.provider == .gemini {
+                        Divider()
 
-                    DisclosureGroup(isExpanded: $showAIAdvanced) {
-                        VStack(spacing: 10) {
-                            settingsRow(title: "服务地址", subtitle: nil) {
-                                TextField("https://generativelanguage.googleapis.com", text: $draftAIConfig.baseURL)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 240)
-                                    .onSubmit { persistAIConfigIfReady() }
+                        DisclosureGroup(isExpanded: $showAIAdvanced) {
+                            VStack(spacing: 10) {
+                                settingsRow(title: "服务地址", subtitle: nil) {
+                                    TextField("https://generativelanguage.googleapis.com", text: $draftAIConfig.baseURL)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 240)
+                                        .onSubmit { persistAIConfigIfReady() }
+                                }
+                                settingsRow(title: "理解模型", subtitle: nil) {
+                                    TextField("gemini-2.5-flash", text: $draftAIConfig.chatModel)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 240)
+                                        .onSubmit { persistAIConfigIfReady() }
+                                }
+                                settingsRow(title: "搜索向量模型", subtitle: nil) {
+                                    TextField("gemini-embedding-001", text: $draftAIConfig.embeddingModel)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 240)
+                                        .onSubmit { persistAIConfigIfReady() }
+                                }
                             }
-                            settingsRow(title: "理解模型", subtitle: nil) {
-                                TextField("gemini-2.5-flash", text: $draftAIConfig.chatModel)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 240)
-                                    .onSubmit { persistAIConfigIfReady() }
-                            }
-                            settingsRow(title: "搜索向量模型", subtitle: nil) {
-                                TextField("gemini-embedding-001", text: $draftAIConfig.embeddingModel)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 240)
-                                    .onSubmit { persistAIConfigIfReady() }
-                            }
+                            .padding(.top, 8)
+                        } label: {
+                            Text("高级模型参数")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
                         }
-                        .padding(.top, 8)
-                    } label: {
-                        Text("高级模型参数")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
                     }
                 }
             }
         }
     }
 
-    // MARK: - Tab 3: 存储空间
+    // MARK: - Tab 3: 缓存空间
 
     private var storagePane: some View {
         let stats = syncAndAI.cacheStats
@@ -637,13 +1122,13 @@ public struct SettingsView: View {
 
         return VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
-                title: "存储空间",
+                title: "缓存空间",
                 subtitle: "预览图常驻本机让画廊随时秒开，原始大文件按需缓存；设为「始终保留在本地」的情绪板和素材不会被自动清理。"
             )
 
             settingsGroupCard {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("本机已使用空间")
+                    Text("本机已使用缓存")
                         .font(.system(size: 12.5, weight: .semibold))
                     Spacer()
                     Text("\(ByteCountFormatter.string(fromByteCount: totalUsed, countStyle: .file)) / \(Int(cacheBudgetGB.rounded())) GB 上限")
@@ -652,7 +1137,6 @@ public struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // Clean macOS-style segmented storage bar
                 GeometryReader { geo in
                     let w = max(10, geo.size.width)
                     let thumbW = stats.thumbnailBytes > 0 ? max(8, w * CGFloat(Double(stats.thumbnailBytes) / Double(barScale))) : 0
@@ -715,6 +1199,7 @@ public struct SettingsView: View {
                         Task { await syncAndAI.evictCacheNow() }
                     }
                     .buttonStyle(.bordered)
+                    .fixedSize()
                     .disabled(syncAndAI.isBusy)
                 }
             }
@@ -790,6 +1275,7 @@ public struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .fixedSize()
                 }
             }
 
@@ -800,10 +1286,11 @@ public struct SettingsView: View {
 
                 VStack(spacing: 8) {
                     shortcutRow("⌥ ⇧ A", "区域截图并收入目标")
-                    shortcutRow("⌥ ⇧ V", "一键收藏当前剪贴板")
+                    shortcutRow("⌥ ⇧ V", "一键收藏当前剪贴板（含 X 推文与媒体）")
                     shortcutRow("⌥ ⇧ S", "展开 / 收起顶部灵感浮窗")
                     Divider()
-                    shortcutRow("Space", "快速预览素材（画布中按住拖拽可平移）")
+                    shortcutRow("Space", "快速预览素材 / 再按一次退出预览")
+                    shortcutRow("⌘ C / ⌘ X / ⌘ V", "拷贝、剪切与粘贴移动素材")
                     shortcutRow("⌘ J", "快速跳转情绪板、文件夹或素材")
                     shortcutRow("⌘ N", "快速生成新情绪板")
                     shortcutRow("⇧ ⌘ S", "展开 / 收起视觉与配色筛选条")
@@ -818,7 +1305,76 @@ public struct SettingsView: View {
         }
     }
 
-    // MARK: - Auto-Save Helpers
+    // MARK: - Smart Defaults & Helpers
+
+    private func applySmartAIDefaults(for provider: CloudAIProviderKind, format: CustomAIEndpointFormat) {
+        let knownDefaultURLs: Set<String> = [
+            "",
+            "https://generativelanguage.googleapis.com",
+            "https://api.openai.com",
+            "https://api.anthropic.com"
+        ]
+        let knownDefaultChats: Set<String> = [
+            "", "gemini-2.5-flash", "gpt-4.1-mini", "claude-sonnet-4-5"
+        ]
+        let knownDefaultEmbeddings: Set<String> = [
+            "", "gemini-embedding-001", "text-embedding-3-small"
+        ]
+
+        switch provider {
+        case .disabled:
+            break
+        case .gemini:
+            if knownDefaultURLs.contains(draftAIConfig.baseURL) {
+                draftAIConfig.baseURL = "https://generativelanguage.googleapis.com"
+            }
+            if knownDefaultChats.contains(draftAIConfig.chatModel) {
+                draftAIConfig.chatModel = "gemini-2.5-flash"
+            }
+            if knownDefaultEmbeddings.contains(draftAIConfig.embeddingModel) {
+                draftAIConfig.embeddingModel = "gemini-embedding-001"
+            }
+        case .openAICompatible:
+            if knownDefaultURLs.contains(draftAIConfig.baseURL) {
+                draftAIConfig.baseURL = format.defaultBaseURL
+            }
+            if knownDefaultChats.contains(draftAIConfig.chatModel) {
+                draftAIConfig.chatModel = format.defaultChatModel
+            }
+            if knownDefaultEmbeddings.contains(draftAIConfig.embeddingModel) {
+                draftAIConfig.embeddingModel = format.defaultEmbeddingModel
+            }
+        }
+    }
+
+    private func endpointFormatSubtitle(_ format: CustomAIEndpointFormat) -> String {
+        switch format {
+        case .openAIChatCompletions: "标准 /v1/chat/completions（适配 OpenAI、DeepSeek、OpenRouter、Ollama 等）"
+        case .anthropicMessages: "标准 /v1/messages（适配 Anthropic Claude 及兼容代理）"
+        case .openAIResponses: "新版 /v1/responses（适配 OpenAI Responses 多模态接口）"
+        }
+    }
+
+    private func storageModeDescription(_ mode: DriveTransportMode) -> String {
+        switch mode {
+        case .directAPIWithGDirect, .gdirectMount:
+            "通过 Google Drive 在多台 Mac 之间自动同步原始文件与情绪板"
+        case .webDAV:
+            "连接坚果云、Nextcloud、群晖 NAS 或任意自建 WebDAV 云盘"
+        case .localOnly:
+            "完全保存在本机指定文件夹，零联网、随时可在访达直接浏览"
+        }
+    }
+
+    private func googleHeroSubtitle(account: DriveAccountInfo?) -> String {
+        guard account != nil else {
+            return "登录 Google 账号后，素材与情绪板将自动同步到你的云盘目录"
+        }
+        if let synced = syncAndAI.syncStatus.lastSyncedAt {
+            return "已连接 · 上次同步 \(synced.formatted(date: .omitted, time: .shortened))"
+        }
+        return "已连接 · 就绪，可随时同步"
+    }
 
     private func persistSyncConfigIfReady() {
         guard didLoadInitial else { return }
@@ -830,19 +1386,6 @@ public struct SettingsView: View {
         guard didLoadInitial else { return }
         let snapshot = draftAIConfig
         Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil, quiet: true) }
-    }
-
-    private func syncHeroSubtitle(account: DriveAccountInfo?, isSyncEnabled: Bool) -> String {
-        guard account != nil else {
-            return "登录 Google 账号后，素材与情绪板将自动安全备份到你的云盘"
-        }
-        if !isSyncEnabled {
-            return "已登录 · 当前已暂停自动同步，仅保存在本机"
-        }
-        if let synced = syncAndAI.syncStatus.lastSyncedAt {
-            return "已连接 · 上次同步 \(synced.formatted(date: .omitted, time: .shortened))"
-        }
-        return "已连接 · 就绪，可随时同步"
     }
 
     // MARK: - Clean Reusable Product Settings Chrome
@@ -962,6 +1505,20 @@ public struct SettingsView: View {
         }
         .padding(10)
         .background((isError ? Color.red : Color.green).opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func pickLocalDirectory(initialPath: String) -> String? {
+        let panel = NSOpenPanel()
+        panel.title = "选择素材库保存文件夹"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        let expanded = (initialPath as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: expanded) {
+            panel.directoryURL = URL(fileURLWithPath: expanded, isDirectory: true)
+        }
+        return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
     private func presentOAuthSecretImporter(autoSignInAfterImport: Bool = false) {

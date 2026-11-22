@@ -335,10 +335,21 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
     public func runGDirectScan() async throws -> GDirectEnvironmentSnapshot { GDirectEnvironmentSnapshot() }
     public func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot { GDirectEnvironmentSnapshot() }
     public func importGoogleOAuthSecret(from url: URL) async throws {}
+    public func importGoogleOAuthFromGDirect() async throws {}
     public func hasGoogleOAuthClientConfig() async -> Bool { true }
     public func saveGoogleOAuthClientConfig(clientID: String, clientSecret: String) async throws {}
     public func signInGoogleDrive() async throws -> DriveAccountInfo { DriveAccountInfo(email: "demo@example.com") }
     public func signOutGoogleDrive() async throws { currentSyncStatus.account = nil }
+    public func hasWebDAVPassword() async -> Bool { false }
+    public func saveWebDAVPassword(_ password: String) async throws {}
+    public func testWebDAVConnection(config: DriveSyncConfig, password: String?) async throws -> DriveAccountInfo {
+        DriveAccountInfo(email: config.webDAVUsername, source: "WebDAV")
+    }
+    public func migrateLibraryStorage(to targetConfig: DriveSyncConfig, webDAVPassword: String?) async throws -> StorageMigrationReport {
+        let oldMode = currentSyncConfig.mode
+        currentSyncConfig = targetConfig
+        return StorageMigrationReport(sourceMode: oldMode, targetMode: targetConfig.mode, targetLocation: targetConfig.activeStorageLocationSummary)
+    }
     public func syncNow() async throws -> SyncReport { SyncReport() }
 
     public func seedSampleLibraryIfEmpty() async throws -> Bool { false }

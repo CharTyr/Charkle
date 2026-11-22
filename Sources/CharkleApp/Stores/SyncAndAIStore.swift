@@ -13,12 +13,15 @@ public final class SyncAndAIStore {
     public var aiConfig: AIProviderConfig = AIProviderConfig()
     public var hasStoredAIKey: Bool = false
     public var hasGoogleOAuthClient: Bool = false
+    public var hasWebDAVPassword: Bool = false
     public var cacheStats: CacheStats = CacheStats()
 
     public var lastSyncReport: SyncReport?
+    public var lastMigrationReport: StorageMigrationReport?
     public var statusMessage: String?
     public var errorMessage: String?
     public var isBusy: Bool = false
+    public var isMigrating: Bool = false
 
     public init(engine: any CharkleEngineProtocol) {
         self.engine = engine
@@ -31,14 +34,18 @@ public final class SyncAndAIStore {
         async let ai = engine.aiConfig()
         async let stats = engine.cacheStats()
         async let oauthConfigured = engine.hasGoogleOAuthClientConfig()
+        async let webdavPwd = engine.hasWebDAVPassword()
 
-        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth) = await (cfg, status, gd, ai, stats, oauthConfigured)
+        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV) = await (
+            cfg, status, gd, ai, stats, oauthConfigured, webdavPwd
+        )
         syncConfig = sCfg
         syncStatus = sStatus
         gdirectSnapshot = gdSnap
         aiConfig = aiCfg
         cacheStats = cStats
         hasGoogleOAuthClient = hasOAuth
+        hasWebDAVPassword = hasWebDAV
         hasStoredAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
     }
 
@@ -103,6 +110,82 @@ public final class SyncAndAIStore {
         } catch {
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    @discardableResult
+    public func importGoogleOAuthFromGDirect() async -> Bool {
+        isBusy = true
+        defer { isBusy = false }
+        errorMessage = nil
+        do {
+            try await engine.importGoogleOAuthFromGDirect()
+            hasGoogleOAuthClient = await engine.hasGoogleOAuthClientConfig()
+            statusMessage = "已从本机 gdirect 自动导入 Google 登录凭据"
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func saveWebDAVPassword(_ password: String) async -> Bool {
+        errorMessage = nil
+        do {
+            try await engine.saveWebDAVPassword(password)
+            hasWebDAVPassword = await engine.hasWebDAVPassword()
+            statusMessage = "已保存 WebDAV 密码到 macOS 钥匙串"
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func testWebDAVConnection(config: DriveSyncConfig, password: String?) async -> Bool {
+        isBusy = true
+        defer { isBusy = false }
+        errorMessage = nil
+        do {
+            if let password, !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try await engine.saveWebDAVPassword(password)
+                hasWebDAVPassword = await engine.hasWebDAVPassword()
+            }
+            try await engine.saveSyncConfig(config)
+            syncConfig = config
+            let info = try await engine.testWebDAVConnection(config: config, password: password)
+            syncStatus = await engine.syncStatus()
+            statusMessage = "WebDAV 连接成功：\(info.email)"
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func migrateLibraryStorage(to targetConfig: DriveSyncConfig, webDAVPassword: String?) async -> StorageMigrationReport? {
+        isBusy = true
+        isMigrating = true
+        defer {
+            isBusy = false
+            isMigrating = false
+        }
+        errorMessage = nil
+        do {
+            let report = try await engine.migrateLibraryStorage(to: targetConfig, webDAVPassword: webDAVPassword)
+            lastMigrationReport = report
+            syncConfig = await engine.syncConfig()
+            syncStatus = await engine.syncStatus()
+            cacheStats = await engine.cacheStats()
+            hasWebDAVPassword = await engine.hasWebDAVPassword()
+            statusMessage = "素材库已迁移至「\(report.targetLocation)」· 共 \(report.migratedAssets) 项素材、\(report.migratedFolders) 个文件夹、\(report.migratedBoards) 块情绪板"
+            return report
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
         }
     }
 
