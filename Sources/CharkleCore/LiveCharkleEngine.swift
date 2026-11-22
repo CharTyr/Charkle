@@ -756,11 +756,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         case .gdirectMount:
             let gd = await GDirectIntegration.signedInAccounts()
             let account = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first
-            if !GDirectIntegration.isMountActive(at: config.mountPath), account != nil {
-                try await GDirectIntegration.mount(path: config.mountPath, account: account)
+            var activePath = config.mountPath
+            if !GDirectIntegration.isMountActive(at: activePath), account != nil {
+                activePath = try await GDirectIntegration.mount(path: activePath, account: account)
             }
             return MountedVolumeTransport(
-                mountPath: config.mountPath,
+                mountPath: activePath,
                 rootFolderName: config.rootFolderName,
                 accountEmail: account,
                 requireDedicatedMount: true
@@ -775,11 +776,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             // 2. Otherwise seamlessly reuse the user's ALREADY-SIGNED-IN local `gdirect` account with zero re-login!
             let gd = await GDirectIntegration.signedInAccounts()
             if let gdirectAccount = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
-                if !GDirectIntegration.isMountActive(at: config.mountPath) {
-                    try await GDirectIntegration.mount(path: config.mountPath, account: gdirectAccount)
-                }
+                let activePath = try await GDirectIntegration.mount(path: config.mountPath, account: gdirectAccount)
                 return MountedVolumeTransport(
-                    mountPath: config.mountPath,
+                    mountPath: activePath,
                     rootFolderName: config.rootFolderName,
                     accountEmail: gdirectAccount,
                     requireDedicatedMount: true

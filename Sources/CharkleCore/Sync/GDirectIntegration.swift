@@ -105,12 +105,57 @@ public nonisolated enum GDirectIntegration {
         return await inspect(mountPath: mountPath)
     }
 
-    public static func mount(path: String, account: String? = nil) async throws {
+    /// Detects any currently active loopback NFS mount (`localhost:/` or `127.0.0.1:/`) created by `gdirect` / `rclone`.
+    public static func activeLoopbackNFSMountPath() -> String? {
+        let count = getfsstat(nil, 0, MNT_NOWAIT)
+        guard count > 0 else { return nil }
+        var entries = Array(repeating: statfs(), count: Int(count))
+        let bufferSize = Int32(entries.count * MemoryLayout<statfs>.stride)
+        let actual = entries.withUnsafeMutableBufferPointer { ptr in
+            getfsstat(ptr.baseAddress, bufferSize, MNT_NOWAIT)
+        }
+        guard actual > 0 else { return nil }
+        for idx in 0..<Int(actual) {
+            var entry = entries[idx]
+            let fsType = withUnsafeBytes(of: &entry.f_fstypename) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            guard fsType == "nfs" else { continue }
+            let source = withUnsafeBytes(of: &entry.f_mntfromname) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            guard source.hasPrefix("localhost:") || source.hasPrefix("127.0.0.1:") else { continue }
+            let target = withUnsafeBytes(of: &entry.f_mntonname) { raw in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            if !target.isEmpty && isMountActive(at: target) {
+                return target
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    public static func mount(path: String, account: String? = nil) async throws -> String {
         let expanded = (path as NSString).expandingTildeInPath
-        guard !isMountActive(at: expanded) else { return }
-        _ = try await command(["mount", expanded], account: account, timeout: 55)
-        for _ in 0..<24 {
-            if isMountActive(at: expanded) { return }
+        if isMountActive(at: expanded) { return expanded }
+        try? FileManager.default.createDirectory(atPath: expanded, withIntermediateDirectories: true)
+
+        do {
+            _ = try await command(["mount", expanded], account: account, timeout: 55)
+        } catch let DriveTransportError.commandFailed(_, stderr, _) where stderr.lowercased().contains("already mounted") {
+            // If gdirect is already actively mounted at another path on this Mac, reuse it directly
+            if let liveMount = activeLoopbackNFSMountPath() {
+                return liveMount
+            }
+            // Otherwise clear stale mount state from an earlier crashed/rebooted session and mount cleanly
+            try? await unmount(account: account)
+            try? await Task.sleep(for: .milliseconds(250))
+            _ = try await command(["mount", expanded], account: account, timeout: 55)
+        }
+
+        for _ in 0..<32 {
+            if isMountActive(at: expanded) { return expanded }
             try await Task.sleep(for: .milliseconds(250))
         }
         throw DriveTransportError.mountPathUnavailable(expanded)

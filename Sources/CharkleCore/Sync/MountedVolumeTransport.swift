@@ -78,7 +78,15 @@ public final actor MountedVolumeTransport: DriveTransport {
     public func uploadData(_ data: Data, name: String, mimeType: String, parentID: String,
                            existingFileID: String?) throws -> RemoteDriveFile {
         let destination = try uploadPath(name: name, parentID: parentID, existingFileID: existingFileID)
-        try data.write(to: destination, options: existingFileID == nil ? .withoutOverwriting : .atomic)
+        if existingFileID == nil {
+            try data.write(to: destination, options: .withoutOverwriting)
+        } else {
+            do {
+                try data.write(to: destination, options: .atomic)
+            } catch {
+                try data.write(to: destination, options: [])
+            }
+        }
         return try metadata(destination, parentID: parentID)
     }
 

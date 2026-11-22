@@ -26,7 +26,13 @@ nonisolated enum DriveFiles {
         try fm.copyItem(at: source, to: temporary)
         defer { try? fm.removeItem(at: temporary) }
         if fm.fileExists(atPath: destination.path) {
-            _ = try fm.replaceItemAt(destination, withItemAt: temporary, options: .usingNewMetadataOnly)
+            do {
+                _ = try fm.replaceItemAt(destination, withItemAt: temporary, options: .usingNewMetadataOnly)
+            } catch {
+                // rclone NFS mounts may not support atomic RENAME_SWAP; fall back to unlink + rename
+                try? fm.removeItem(at: destination)
+                try fm.moveItem(at: temporary, to: destination)
+            }
         } else {
             try fm.moveItem(at: temporary, to: destination)
         }
