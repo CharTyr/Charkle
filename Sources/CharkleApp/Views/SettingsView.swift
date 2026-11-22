@@ -4,11 +4,9 @@ import CharkleCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Spacious tabbed macOS Settings (`780 × 640`, zero clipped text):
-/// 1. Google Drive & `gdirect`
-/// 2. AI 智能
-/// 3. 存储与缓存
-/// 4. 快捷键与刘海浮窗
+/// Product-grade macOS Settings window designed around user intent:
+/// plain human language, instant auto-save on toggles/pickers, calm visual hierarchy,
+/// and technical diagnostics cleanly tucked inside collapsible disclosure sections.
 public struct SettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -18,37 +16,41 @@ public struct SettingsView: View {
     public let onSyncHotkeysEnabled: (Bool) -> Void
 
     public enum SettingsTab: String, CaseIterable, Identifiable {
-        case driveSync
+        case cloudSync
         case intelligence
-        case storageCache
-        case hotkeysNotch
+        case storage
+        case captureShortcuts
 
         public var id: String { rawValue }
 
         public var label: String {
             switch self {
-            case .driveSync: "Google Drive & gdirect"
-            case .intelligence: "AI 智能"
-            case .storageCache: "存储与缓存"
-            case .hotkeysNotch: "快捷键与刘海浮窗"
+            case .cloudSync: "云同步"
+            case .intelligence: "智能与搜索"
+            case .storage: "存储空间"
+            case .captureShortcuts: "采集与快捷键"
             }
         }
 
         public var icon: String {
             switch self {
-            case .driveSync: "drive-sync"
+            case .cloudSync: "drive-sync"
             case .intelligence: "sparkle-board"
-            case .storageCache: "library"
-            case .hotkeysNotch: "notch"
+            case .storage: "library"
+            case .captureShortcuts: "notch"
             }
         }
     }
 
-    @State private var selectedTab: SettingsTab = .driveSync
+    @State private var selectedTab: SettingsTab = .cloudSync
     @State private var draftSyncConfig: DriveSyncConfig = DriveSyncConfig()
     @State private var draftAIConfig: AIProviderConfig = AIProviderConfig()
     @State private var apiKeyInput: String = ""
     @State private var cacheBudgetGB: Double = 10.0
+    @State private var didLoadInitial: Bool = false
+
+    @State private var showSyncAdvanced: Bool = false
+    @State private var showAIAdvanced: Bool = false
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -64,11 +66,11 @@ public struct SettingsView: View {
 
     public var body: some View {
         HStack(spacing: 0) {
-            // Left Settings Rail
+            // Left Navigation Rail
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    CharkleIcon("settings", style: .layered, size: 22)
-                    Text("Charkle 设置")
+                    CharkleIcon("moodboard", style: .layered, size: 22)
+                    Text("设置")
                         .font(.system(size: 14, weight: .semibold))
                 }
                 .padding(.horizontal, 12)
@@ -93,6 +95,7 @@ public struct SettingsView: View {
                             active ? Color.accentColor.opacity(0.13) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
+                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal, 8)
@@ -100,14 +103,14 @@ public struct SettingsView: View {
 
                 Spacer()
             }
-            .frame(width: 204)
+            .frame(width: 192)
             .background(CharkleTheme.inspectorBackground(for: colorScheme))
 
             Divider()
 
-            // Right Detail Pane
+            // Right Content Pane
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 20) {
                     if let status = syncAndAI.statusMessage {
                         feedbackBanner(status, isError: false)
                     }
@@ -116,14 +119,14 @@ public struct SettingsView: View {
                     }
 
                     switch selectedTab {
-                    case .driveSync:
-                        driveAndGDirectPane
+                    case .cloudSync:
+                        cloudSyncPane
                     case .intelligence:
                         intelligencePane
-                    case .storageCache:
-                        storageAndCachePane
-                    case .hotkeysNotch:
-                        hotkeysAndNotchPane
+                    case .storage:
+                        storagePane
+                    case .captureShortcuts:
+                        captureAndShortcutsPane
                     }
                 }
                 .padding(24)
@@ -131,421 +134,668 @@ public struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(CharkleTheme.galleryGround(for: colorScheme))
         }
-        .frame(width: 780, height: 640)
+        .frame(width: 740, height: 600)
         .task {
             await syncAndAI.loadAll()
             draftSyncConfig = syncAndAI.syncConfig
             draftAIConfig = syncAndAI.aiConfig
             cacheBudgetGB = max(2, min(100, Double(syncAndAI.cacheStats.budgetBytes) / (1024 * 1024 * 1024)))
+            didLoadInitial = true
         }
     }
 
-    // MARK: - Tab 1: Google Drive & gdirect
+    // MARK: - Tab 1: 云同步
 
-    private var driveAndGDirectPane: some View {
+    private var cloudSyncPane: some View {
         let snap = syncAndAI.gdirectSnapshot
-        return VStack(alignment: .leading, spacing: 16) {
+        let activeAccountEmail = syncAndAI.syncStatus.account?.email
+            ?? draftSyncConfig.selectedGDirectAccount
+            ?? snap.defaultAccount
+            ?? snap.accounts.first
+        let isConnected = syncAndAI.syncStatus.account != nil || (draftSyncConfig.mode == .gdirectMount && snap.isMountActive)
+        let healthyNodeCount = snap.endpoints.filter(\.healthy).count
+
+        return VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
-                title: "Google Drive 与 gdirect 双通道同步",
-                subtitle: "以人类可读目录 /Charkle/ 存储原始文件，元数据与情绪板按设备分片增量同步零冲突"
+                title: "云同步",
+                subtitle: "将你的素材库和情绪板安全备份到 Google Drive，在多台 Mac 之间自动保持同步。"
             )
 
-            // Transport Mode Picker
-            settingsCard("传输通道模式") {
-                VStack(alignment: .leading, spacing: 12) {
-                    Picker("同步模式", selection: $draftSyncConfig.mode) {
-                        ForEach(DriveTransportMode.allCases, id: \.self) { mode in
-                            Text(mode.localizedLabel).tag(mode)
-                        }
+            // Account & Primary Sync Status Card
+            settingsGroupCard {
+                HStack(spacing: 14) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.14))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: isConnected ? "icloud.fill" : "person.crop.circle")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
                     }
-                    .pickerStyle(.radioGroup)
 
-                    HStack(spacing: 12) {
-                        Text("Drive 根目录名")
-                            .font(.system(size: 12))
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(activeAccountEmail ?? "未连接 Google Drive")
+                                .font(.system(size: 13.5, weight: .semibold))
+                            if isConnected {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 7, height: 7)
+                            }
+                        }
+
+                        Text(syncHeroSubtitle(isConnected: isConnected, healthyNodes: healthyNodeCount, snap: snap))
+                            .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if draftSyncConfig.mode == .localOnly {
+                        Text("仅本机模式")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+                    } else if isConnected {
+                        Button {
+                            Task { _ = await syncAndAI.syncNow() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                if syncAndAI.isBusy {
+                                    ProgressView().controlSize(.mini)
+                                }
+                                Text("立即同步")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(syncAndAI.isBusy)
+                    } else {
+                        Button("连接账号") {
+                            Task { await syncAndAI.signInGoogleDrive() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(syncAndAI.isBusy)
+                    }
+                }
+                .padding(.vertical, 2)
+
+                if snap.hasVersionMismatch {
+                    Divider()
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("检测到本机直连加速组件版本不一致，建议更新以保证最佳同步速度。")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(8)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+
+            // Everyday Sync Preferences (instant auto-save, no "Save Config" developer button)
+            settingsGroupCard {
+                settingsRow(
+                    title: "同步方式",
+                    subtitle: syncModeDescription(draftSyncConfig.mode)
+                ) {
+                    Picker("", selection: $draftSyncConfig.mode) {
+                        Text("自动直连（推荐）").tag(DriveTransportMode.directAPIWithGDirect)
+                        Text("本地云盘目录").tag(DriveTransportMode.gdirectMount)
+                        Text("仅保存在本机").tag(DriveTransportMode.localOnly)
+                    }
+                    .labelsHidden()
+                    .frame(width: 176)
+                    .onChange(of: draftSyncConfig.mode) { _, _ in persistSyncConfigIfReady() }
+                }
+
+                if draftSyncConfig.mode != .localOnly {
+                    Divider()
+
+                    settingsRow(
+                        title: "云端主文件夹",
+                        subtitle: "在 Google Drive 网页版中也能直接浏览这些原文件"
+                    ) {
                         TextField("Charkle", text: $draftSyncConfig.rootFolderName)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 180)
-
-                        Toggle("启用 gdirect 直连 IP 加速", isOn: $draftSyncConfig.useGDirectIPAcceleration)
-                            .font(.system(size: 12))
+                            .frame(width: 156)
+                            .onSubmit { persistSyncConfigIfReady() }
                     }
 
                     if draftSyncConfig.mode == .gdirectMount {
-                        HStack(spacing: 10) {
-                            Text("挂载目录")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                            TextField("~/GoogleDrive", text: $draftSyncConfig.mountPath)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                    }
-
-                    HStack(spacing: 16) {
-                        Toggle("同步共享缩略图（跨设备秒开）", isOn: $draftSyncConfig.syncThumbnails)
-                            .font(.system(size: 12))
-                        Toggle("同步向量分片", isOn: $draftSyncConfig.syncEmbeddings)
-                            .font(.system(size: 12))
-                    }
-
-                    HStack {
-                        Spacer()
-                        Button("保存通道配置") {
-                            Task { await syncAndAI.saveSyncConfig(draftSyncConfig) }
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-            }
-
-            // Live gdirect Environment Card
-            settingsCard("本机 gdirect 环境与直连节点") {
-                VStack(alignment: .leading, spacing: 12) {
-                    if snap.hasVersionMismatch {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text("检测到 gdirect CLI (\(snap.cliVersion ?? "未知")) 与 gdirect.app (\(snap.appVersion ?? "未知")) 版本不一致，建议升级 CLI 以获得最新直连加速与挂载稳定性。")
-                                .font(.system(size: 11.5))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .padding(10)
-                        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-
-                    // Status Chips Row (clean wrapping flow layout)
-                    CharkleFlowLayout(spacing: 8, lineSpacing: 8) {
-                        statusChip(label: "CLI", value: snap.cliVersion ?? "未检测到", ok: snap.cliPath != nil)
-                        statusChip(label: "App", value: snap.appVersion ?? "未安装", ok: snap.appVersion != nil)
-                        statusChip(label: "rclone", value: snap.rclonePath != nil ? "就绪" : "未检测", ok: snap.rclonePath != nil)
-                        statusChip(label: "挂载状态", value: snap.isMountActive ? "已挂载 (st_dev)" : "未挂载", ok: snap.isMountActive)
-                    }
-
-                    // Accounts Wrapping Chips
-                    if !snap.accounts.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("已识别 gdirect 账号")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
-                                ForEach(snap.accounts, id: \.self) { acc in
-                                    let isSelected = draftSyncConfig.selectedGDirectAccount == acc || (draftSyncConfig.selectedGDirectAccount == nil && snap.defaultAccount == acc)
-                                    Button {
-                                        draftSyncConfig.selectedGDirectAccount = acc
-                                    } label: {
-                                        HStack(spacing: 5) {
-                                            Image(systemName: "person.crop.circle")
-                                                .font(.system(size: 11))
-                                            Text(acc)
-                                                .font(.system(size: 11.5, weight: .medium))
-                                        }
-                                        .padding(.horizontal, 9)
-                                        .padding(.vertical, 5)
-                                        .background(
-                                            isSelected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06),
-                                            in: Capsule(style: .continuous)
-                                        )
-                                        .overlay(
-                                            Capsule(style: .continuous)
-                                                .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-                    }
-
-                    // Low-Latency Endpoint Wrapping Chips
-                    if !snap.endpoints.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("低延迟直连 Google IP 节点 (\(snap.endpoints.count))")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
-                                ForEach(snap.endpoints) { ep in
-                                    HStack(spacing: 5) {
-                                        Circle()
-                                            .fill(ep.healthy ? Color.green : Color.orange)
-                                            .frame(width: 6, height: 6)
-                                        Text("\(ep.ip) · \(ep.latencyMs)ms")
-                                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                            .monospacedDigit()
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                }
-                            }
-                        }
-                    }
-
-                    // Action Buttons Row
-                    CharkleFlowLayout(spacing: 8, lineSpacing: 8) {
-                        Button("探测环境") { Task { await syncAndAI.probeGDirect() } }
-                            .buttonStyle(.bordered)
-                        Button("扫描直连 IP") { Task { await syncAndAI.runGDirectScan() } }
-                            .buttonStyle(.bordered)
-                        Button("执行 gdirect mount") { Task { await syncAndAI.runGDirectMount(path: draftSyncConfig.mountPath) } }
-                            .buttonStyle(.bordered)
-                        Button("导入 OAuth 凭据…") { presentOAuthSecretImporter() }
-                            .buttonStyle(.bordered)
-                        Button("登录 Google Drive") { Task { await syncAndAI.signInGoogleDrive() } }
-                            .buttonStyle(.bordered)
-                        Button("立即同步") { Task { _ = await syncAndAI.syncNow() } }
-                            .buttonStyle(.borderedProminent)
-                    }
-                    .disabled(syncAndAI.isBusy)
-
-                    if let account = syncAndAI.syncStatus.account {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .foregroundStyle(.green)
-                            Text("已授权账号：\(account.email)")
-                                .font(.system(size: 11.5, weight: .medium))
-                            if let synced = syncAndAI.syncStatus.lastSyncedAt {
-                                Text("· 上次同步 \(synced.formatted(date: .abbreviated, time: .shortened))")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - Tab 2: AI Intelligence
-
-    private var intelligencePane: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            settingsHeader(
-                title: "混合智能引擎（端侧常驻 + 云端可选）",
-                subtitle: "端侧离线分析默认始终开启且零隐私外传；需要更深语义搜索与双语标签时可按需接入云端模型"
-            )
-
-            settingsCard("端侧离线常驻引擎（零配置 · 永久免费）") {
-                CharkleFlowLayout(spacing: 8, lineSpacing: 8) {
-                    statusChip(label: "色彩", value: "CIELAB 感知色板 & ΔE", ok: true)
-                    statusChip(label: "视觉", value: "Apple Vision VNFeaturePrint", ok: true)
-                    statusChip(label: "OCR", value: "中英文离线文字识别", ok: true)
-                    statusChip(label: "检索", value: "FTS5 中文拼音分词", ok: true)
-                }
-            }
-
-            settingsCard("可选云端语义增强（密钥仅存于 macOS 钥匙串）") {
-                VStack(alignment: .leading, spacing: 12) {
-                    Picker("云端服务", selection: $draftAIConfig.provider) {
-                        ForEach(CloudAIProviderKind.allCases, id: \.self) { kind in
-                            Text(kind.localizedLabel).tag(kind)
-                        }
-                    }
-                    .onChange(of: draftAIConfig.provider) { _, newProvider in
-                        Task { await syncAndAI.refreshAIKeyPresence(for: newProvider) }
-                    }
-
-                    if draftAIConfig.provider != .disabled {
-                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                            GridRow {
-                                Text("API Endpoint")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                TextField("https://generativelanguage.googleapis.com", text: $draftAIConfig.baseURL)
+                        Divider()
+                        settingsRow(
+                            title: "本机云盘位置",
+                            subtitle: snap.isMountActive ? "目录已连接，可直接在访达查看" : "尚未连接，点击右侧一键挂载"
+                        ) {
+                            HStack(spacing: 6) {
+                                TextField("~/GoogleDrive", text: $draftSyncConfig.mountPath)
                                     .textFieldStyle(.roundedBorder)
-                            }
-                            GridRow {
-                                Text("多模态模型")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                TextField("gemini-2.5-flash", text: $draftAIConfig.chatModel)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            GridRow {
-                                Text("向量模型")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                TextField("gemini-embedding-001", text: $draftAIConfig.embeddingModel)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            GridRow {
-                                Text("API Key")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                HStack {
-                                    SecureField(syncAndAI.hasStoredAIKey ? "钥匙串已保存密钥（留空保持不变）" : "粘贴 API Key…", text: $apiKeyInput)
-                                        .textFieldStyle(.roundedBorder)
-                                    if syncAndAI.hasStoredAIKey {
-                                        Text("已存入钥匙串")
-                                            .font(.system(size: 10.5, weight: .semibold))
-                                            .foregroundStyle(.green)
-                                    }
+                                    .frame(width: 164)
+                                    .onSubmit { persistSyncConfigIfReady() }
+                                Button(snap.isMountActive ? "已连接" : "连接目录") {
+                                    Task { await syncAndAI.runGDirectMount(path: draftSyncConfig.mountPath) }
                                 }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(syncAndAI.isBusy)
                             }
                         }
-
-                        Toggle("导入新素材时自动触发云端标签与描述增强", isOn: $draftAIConfig.autoAnalyzeOnImport)
-                            .font(.system(size: 12))
-                        Toggle("仅发送 520px 低分辨率缩略图（保护原图与流量）", isOn: $draftAIConfig.sendThumbnailsToCloud)
-                            .font(.system(size: 12))
-                    }
-
-                    HStack {
-                        Spacer()
-                        Button("保存 AI 配置") {
-                            let keyToSave = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                            Task {
-                                await syncAndAI.saveAIConfig(draftAIConfig, apiKey: keyToSave.isEmpty ? nil : keyToSave)
-                                apiKeyInput = ""
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - Tab 3: Storage & Two-Tier LRU Cache
-
-    private var storageAndCachePane: some View {
-        let stats = syncAndAI.cacheStats
-        let totalUsed = max(1, stats.thumbnailBytes + stats.originalCacheBytes + stats.pinnedOfflineBytes)
-        let budget = max(totalUsed, stats.budgetBytes)
-
-        return VStack(alignment: .leading, spacing: 16) {
-            settingsHeader(
-                title: "两级本地缓存与离线保护",
-                subtitle: "520px 缩略图常驻本机实现断网秒览；原文件按 LRU 预算自动回收，钉选离线资产永不淘汰"
-            )
-
-            settingsCard("本机磁盘占用分布") {
-                VStack(alignment: .leading, spacing: 14) {
-                    // Stacked visual breakdown bar
-                    GeometryReader { geo in
-                        let w = max(10, geo.size.width)
-                        let thumbW = max(6, w * CGFloat(Double(stats.thumbnailBytes) / Double(budget)))
-                        let origW = max(6, w * CGFloat(Double(stats.originalCacheBytes) / Double(budget)))
-                        let pinW = max(6, w * CGFloat(Double(stats.pinnedOfflineBytes) / Double(budget)))
-                        HStack(spacing: 2) {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color(charkleHex: "#4E7D96"))
-                                .frame(width: min(w * 0.45, thumbW))
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color(charkleHex: "#D4A373"))
-                                .frame(width: min(w * 0.45, origW))
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color(charkleHex: "#6B8E76"))
-                                .frame(width: min(w * 0.45, pinW))
-                            Spacer(minLength: 0)
-                        }
-                        .padding(3)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    }
-                    .frame(height: 18)
-
-                    HStack(spacing: 18) {
-                        legendDot(color: Color(charkleHex: "#4E7D96"), title: "缩略图常驻", bytes: stats.thumbnailBytes)
-                        legendDot(color: Color(charkleHex: "#D4A373"), title: "原文件 LRU (\(stats.cachedOriginalCount))", bytes: stats.originalCacheBytes)
-                        legendDot(color: Color(charkleHex: "#6B8E76"), title: "钉选离线 (\(stats.pinnedAssetCount))", bytes: stats.pinnedOfflineBytes)
                     }
 
                     Divider()
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("原文件 LRU 缓存上限")
-                                .font(.system(size: 12.5, weight: .medium))
-                            Spacer()
-                            Text("\(Int(cacheBudgetGB.rounded())) GB")
-                                .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                                .monospacedDigit()
+                    settingsRow(
+                        title: "启用直连加速",
+                        subtitle: healthyNodeCount > 0
+                            ? "已通过本机加速服务自动择优，当前可用 \(healthyNodeCount) 条线路"
+                            : "提升大图片与视频的上传和预览加载速度"
+                    ) {
+                        Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, _ in persistSyncConfigIfReady() }
+                    }
+
+                    Divider()
+
+                    settingsRow(
+                        title: "同步轻量化预览图",
+                        subtitle: "切换其他 Mac 时立即看到完整画廊，无需等待下载原文件"
+                    ) {
+                        Toggle("", isOn: $draftSyncConfig.syncThumbnails)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .onChange(of: draftSyncConfig.syncThumbnails) { _, _ in persistSyncConfigIfReady() }
+                    }
+
+                    Divider()
+
+                    settingsRow(
+                        title: "同步智能搜索索引",
+                        subtitle: "在多台设备间共享搜索索引，保持一致的搜图与情绪板推荐体验"
+                    ) {
+                        Toggle("", isOn: $draftSyncConfig.syncEmbeddings)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .onChange(of: draftSyncConfig.syncEmbeddings) { _, _ in persistSyncConfigIfReady() }
+                    }
+                }
+            }
+
+            // Collapsible Advanced & Diagnostics (cleanly hidden by default for regular users)
+            settingsGroupCard {
+                DisclosureGroup(isExpanded: $showSyncAdvanced) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Divider().padding(.top, 4)
+
+                        if snap.accounts.count > 1 {
+                            settingsRow(title: "切换本机账号", subtitle: nil) {
+                                Picker("", selection: Binding(
+                                    get: { draftSyncConfig.selectedGDirectAccount ?? snap.defaultAccount ?? snap.accounts.first ?? "" },
+                                    set: {
+                                        draftSyncConfig.selectedGDirectAccount = $0
+                                        persistSyncConfigIfReady()
+                                    }
+                                )) {
+                                    ForEach(snap.accounts, id: \.self) { acc in
+                                        Text(acc).tag(acc)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(width: 210)
+                            }
+                            Divider()
                         }
-                        Slider(value: $cacheBudgetGB, in: 2...100, step: 1) { editing in
-                            if !editing {
-                                Task { await syncAndAI.setCacheBudgetGB(cacheBudgetGB) }
+
+                        HStack(spacing: 14) {
+                            diagnosticPill("加速组件", snap.cliVersion ?? "未安装", ok: snap.cliPath != nil)
+                            diagnosticPill("桌面端", snap.appVersion ?? "未安装", ok: snap.appVersion != nil)
+                            diagnosticPill("云盘目录", snap.isMountActive ? "已连接" : "未连接", ok: snap.isMountActive)
+                            diagnosticPill("可用线路", "\(healthyNodeCount) 条", ok: healthyNodeCount > 0)
+                        }
+
+                        HStack(spacing: 8) {
+                            Button("重新测速优选") {
+                                Task { await syncAndAI.runGDirectScan() }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Button("刷新状态") {
+                                Task { await syncAndAI.probeGDirect() }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Button("导入自定义登录凭据…") {
+                                presentOAuthSecretImporter()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Spacer()
+                        }
+                        .disabled(syncAndAI.isBusy)
+
+                        if !snap.endpoints.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("最快直连线路（前 6 条）")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
+                                    ForEach(snap.endpoints.prefix(6)) { ep in
+                                        HStack(spacing: 4) {
+                                            Circle()
+                                                .fill(ep.healthy ? Color.green : Color.orange)
+                                                .frame(width: 5, height: 5)
+                                            Text("\(ep.ip) · \(ep.latencyMs)ms")
+                                                .font(.system(size: 10.5, design: .monospaced))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    }
+                                }
                             }
                         }
                     }
-
-                    HStack {
-                        Text("清理仅释放未钉选的本地原文件缓存，Google Drive 云端原件与情绪板完全不受影响。")
-                            .font(.system(size: 11))
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
+                        Text("高级选项与连接诊断")
+                            .font(.system(size: 12.5, weight: .medium))
                         Spacer()
-                        Button("立即清理 LRU 缓存") {
-                            Task { await syncAndAI.evictCacheNow() }
+                    }
+                    .contentShape(Rectangle())
+                }
+            }
+        }
+    }
+
+    // MARK: - Tab 2: 智能与搜索
+
+    private var intelligencePane: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            settingsHeader(
+                title: "智能与搜索",
+                subtitle: "日常配色筛选、文字识别与相似推荐完全在你的 Mac 本机离线运行，零隐私外传；需要更深语义理解时可按需开启云端增强。"
+            )
+
+            // Built-in Offline Capabilities (human benefits, no algorithm names)
+            settingsGroupCard {
+                Text("本机内置智能（始终免费 · 离线可用）")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 10) {
+                    capabilityTile(icon: "paintpalette", title: "自动配色提取", detail: "按画面主色调筛选与生成和谐色卡")
+                    capabilityTile(icon: "sparkles.rectangle.stack", title: "视觉相似推荐", detail: "离线发现构图与风格接近的参考素材")
+                    capabilityTile(icon: "text.viewfinder", title: "图内文字识别", detail: "自动识别中英文海报、截图中的文字")
+                    capabilityTile(icon: "magnifyingglass", title: "中文与拼音快搜", detail: "按关键词或拼音首字母秒搜任意灵感")
+                }
+            }
+
+            // Optional Cloud AI Enhancement
+            settingsGroupCard {
+                settingsRow(
+                    title: "云端语义增强",
+                    subtitle: "自动生成画面描述与建议标签，让灵感词生板更懂你的想法"
+                ) {
+                    Picker("", selection: $draftAIConfig.provider) {
+                        Text("关闭（仅本机）").tag(CloudAIProviderKind.disabled)
+                        Text("Google Gemini").tag(CloudAIProviderKind.gemini)
+                        Text("自定义兼容服务").tag(CloudAIProviderKind.openAICompatible)
+                    }
+                    .labelsHidden()
+                    .frame(width: 176)
+                    .onChange(of: draftAIConfig.provider) { _, newProvider in
+                        if newProvider == .gemini && draftAIConfig.baseURL.isEmpty {
+                            draftAIConfig.baseURL = "https://generativelanguage.googleapis.com"
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(syncAndAI.isBusy)
+                        Task {
+                            await syncAndAI.refreshAIKeyPresence(for: newProvider)
+                            if didLoadInitial && newProvider == .disabled {
+                                await syncAndAI.saveAIConfig(draftAIConfig, apiKey: nil)
+                            }
+                        }
+                    }
+                }
+
+                if draftAIConfig.provider != .disabled {
+                    Divider()
+
+                    settingsRow(
+                        title: "API 密钥",
+                        subtitle: syncAndAI.hasStoredAIKey
+                            ? "已安全保存在 macOS 钥匙串中"
+                            : "密钥仅存于本机钥匙串，绝不上传"
+                    ) {
+                        HStack(spacing: 6) {
+                            SecureField(syncAndAI.hasStoredAIKey ? "••••••••（留空不变）" : "粘贴密钥…", text: $apiKeyInput)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                            Button("保存") {
+                                let keyToSave = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                                Task {
+                                    await syncAndAI.saveAIConfig(draftAIConfig, apiKey: keyToSave.isEmpty ? nil : keyToSave)
+                                    apiKeyInput = ""
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+
+                    Divider()
+
+                    settingsRow(
+                        title: "导入时自动分析",
+                        subtitle: "收藏新素材后自动补充描述与标签建议"
+                    ) {
+                        Toggle("", isOn: $draftAIConfig.autoAnalyzeOnImport)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .onChange(of: draftAIConfig.autoAnalyzeOnImport) { _, _ in persistAIConfigIfReady() }
+                    }
+
+                    Divider()
+
+                    settingsRow(
+                        title: "仅上传轻量化预览图",
+                        subtitle: "节省网络流量，避免发送原始大图"
+                    ) {
+                        Toggle("", isOn: $draftAIConfig.sendThumbnailsToCloud)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .onChange(of: draftAIConfig.sendThumbnailsToCloud) { _, _ in persistAIConfigIfReady() }
+                    }
+
+                    Divider()
+
+                    DisclosureGroup(isExpanded: $showAIAdvanced) {
+                        VStack(spacing: 10) {
+                            settingsRow(title: "服务地址", subtitle: nil) {
+                                TextField("https://generativelanguage.googleapis.com", text: $draftAIConfig.baseURL)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 240)
+                                    .onSubmit { persistAIConfigIfReady() }
+                            }
+                            settingsRow(title: "理解模型", subtitle: nil) {
+                                TextField("gemini-2.5-flash", text: $draftAIConfig.chatModel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 240)
+                                    .onSubmit { persistAIConfigIfReady() }
+                            }
+                            settingsRow(title: "搜索向量模型", subtitle: nil) {
+                                TextField("gemini-embedding-001", text: $draftAIConfig.embeddingModel)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 240)
+                                    .onSubmit { persistAIConfigIfReady() }
+                            }
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        Text("高级模型参数")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
         }
     }
 
-    // MARK: - Tab 4: Global Hotkeys & MacBook Notch Shelf
+    // MARK: - Tab 3: 存储空间
 
-    private var hotkeysAndNotchPane: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private var storagePane: some View {
+        let stats = syncAndAI.cacheStats
+        let totalUsed = stats.thumbnailBytes + stats.originalCacheBytes + stats.pinnedOfflineBytes
+        let barScale = max(Int64(1), max(totalUsed, stats.budgetBytes))
+
+        return VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
-                title: "全局快捷键与 MacBook 刘海浮窗",
-                subtitle: "后台零干扰采集：支持跨 App 直接拖入刘海，提前展开规避 Mission Control 切屏"
+                title: "存储空间",
+                subtitle: "预览图常驻本机让画廊随时秒开，原始大文件按需缓存；你钉选离线的情绪板和素材会永久保留在本机。"
             )
 
-            settingsCard("刘海浮窗采集行为") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Toggle("启用 MacBook 刘海浮窗（跨 App 拖放自动展开）", isOn: Binding(
+            settingsGroupCard {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("本机已使用空间")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Spacer()
+                    Text("\(ByteCountFormatter.string(fromByteCount: totalUsed, countStyle: .file)) / \(Int(cacheBudgetGB.rounded())) GB 上限")
+                        .font(.system(size: 12, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+
+                // Clean macOS-style segmented storage bar
+                GeometryReader { geo in
+                    let w = max(10, geo.size.width)
+                    let thumbW = stats.thumbnailBytes > 0 ? max(8, w * CGFloat(Double(stats.thumbnailBytes) / Double(barScale))) : 0
+                    let origW = stats.originalCacheBytes > 0 ? max(8, w * CGFloat(Double(stats.originalCacheBytes) / Double(barScale))) : 0
+                    let pinW = stats.pinnedOfflineBytes > 0 ? max(8, w * CGFloat(Double(stats.pinnedOfflineBytes) / Double(barScale))) : 0
+                    HStack(spacing: 2) {
+                        if thumbW > 0 {
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color(charkleHex: "#4E7D96"))
+                                .frame(width: min(w * 0.45, thumbW))
+                        }
+                        if origW > 0 {
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color(charkleHex: "#D4A373"))
+                                .frame(width: min(w * 0.45, origW))
+                        }
+                        if pinW > 0 {
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(Color(charkleHex: "#6B8E76"))
+                                .frame(width: min(w * 0.45, pinW))
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(3)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .frame(height: 18)
+
+                HStack(spacing: 22) {
+                    legendDot(color: Color(charkleHex: "#4E7D96"), title: "画廊预览图", bytes: stats.thumbnailBytes)
+                    legendDot(color: Color(charkleHex: "#D4A373"), title: "临时原件缓存（\(stats.cachedOriginalCount) 项）", bytes: stats.originalCacheBytes)
+                    legendDot(color: Color(charkleHex: "#6B8E76"), title: "钉选离线（\(stats.pinnedAssetCount) 项）", bytes: stats.pinnedOfflineBytes)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("临时缓存空间上限")
+                            .font(.system(size: 12.5, weight: .medium))
+                        Spacer()
+                        Text("\(Int(cacheBudgetGB.rounded())) GB")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .monospacedDigit()
+                    }
+                    Slider(value: $cacheBudgetGB, in: 2...100, step: 1) { editing in
+                        if !editing {
+                            Task { await syncAndAI.setCacheBudgetGB(cacheBudgetGB) }
+                        }
+                    }
+                }
+
+                Divider()
+
+                settingsRow(
+                    title: "清理临时原件缓存",
+                    subtitle: "仅释放未钉选的本地缓存，云端原件和情绪板完全不受影响"
+                ) {
+                    Button("立即清理") {
+                        Task { await syncAndAI.evictCacheNow() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(syncAndAI.isBusy)
+                }
+            }
+        }
+    }
+
+    // MARK: - Tab 4: 采集与快捷键
+
+    private var captureAndShortcutsPane: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            settingsHeader(
+                title: "采集与快捷键",
+                subtitle: "无论正在浏览网页还是做设计，都能一秒把灵感收入收件箱或当前活跃情绪板。"
+            )
+
+            settingsGroupCard {
+                settingsRow(
+                    title: "屏幕顶部灵感浮窗",
+                    subtitle: "在其他应用中拖起图片或文件时，顶部自动滑出收纳区"
+                ) {
+                    Toggle("", isOn: Binding(
                         get: { coordinator.notchShelfEnabled },
                         set: { coordinator.notchShelfEnabled = $0 }
                     ))
-                    Toggle("鼠标悬停屏幕顶部刘海区域时自动展开", isOn: Binding(
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+
+                Divider()
+
+                settingsRow(
+                    title: "悬停顶部中央自动展开",
+                    subtitle: "鼠标移至屏幕顶部刘海区域时唤出浮窗"
+                ) {
+                    Toggle("", isOn: Binding(
                         get: { coordinator.notchHoverTriggerEnabled },
                         set: { coordinator.notchHoverTriggerEnabled = $0 }
                     ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
                     .disabled(!coordinator.notchShelfEnabled)
+                }
 
-                    Toggle("注册系统全局快捷键（⌥⇧A / ⌥⇧S / ⌥⇧V）", isOn: Binding(
+                Divider()
+
+                settingsRow(
+                    title: "启用系统全局快捷键",
+                    subtitle: "在任意应用中通过快捷键截图或收藏剪贴板"
+                ) {
+                    Toggle("", isOn: Binding(
                         get: { coordinator.globalHotkeysEnabled },
                         set: { newVal in
                             coordinator.globalHotkeysEnabled = newVal
                             onSyncHotkeysEnabled(newVal)
                         }
                     ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
 
-                    HStack {
-                        Spacer()
-                        Button("测试展开 / 收起刘海浮窗") {
-                            onToggleNotchPreview()
-                        }
-                        .buttonStyle(.bordered)
+                Divider()
+
+                HStack {
+                    Text("想看看顶部浮窗的效果？")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("预览顶部浮窗") {
+                        onToggleNotchPreview()
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
 
-            settingsCard("快捷键一览") {
+            settingsGroupCard {
+                Text("常用快捷键")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
                 VStack(spacing: 8) {
-                    shortcutRow("⌥ ⇧ A", "交互式区域截图并按刘海目标入库")
-                    shortcutRow("⌥ ⇧ S", "随时展开 / 收起刘海浮窗")
-                    shortcutRow("⌥ ⇧ V", "一键收藏当前剪贴板（图片 / 链接 / 色值 / 文本）")
+                    shortcutRow("⌥ ⇧ A", "区域截图并收入目标")
+                    shortcutRow("⌥ ⇧ V", "一键收藏当前剪贴板")
+                    shortcutRow("⌥ ⇧ S", "展开 / 收起顶部灵感浮窗")
                     Divider()
-                    shortcutRow("Space", "打开 / 关闭全媒体 Quick Look 预览")
-                    shortcutRow("⌘ J", "快速跳转任意情绪板、文件夹、标签或素材")
-                    shortcutRow("⇧ ⌘ S", "展开 / 收起顶部视觉与 CIELAB 色彩筛选条")
-                    shortcutRow("1 – 9", "收件箱清理台：一键归档至前 9 个文件夹")
-                    shortcutRow("⌘ Z / ⇧ ⌘ Z", "情绪板画布完整撤销 / 重做")
-                    shortcutRow("V / H / C / P / E", "自由画布切换 选择 / 抓手 / 连线 / 手绘 / 橡皮")
+                    shortcutRow("Space", "快速预览素材（画布中按住拖拽可平移）")
+                    shortcutRow("⌘ J", "快速跳转情绪板、文件夹或素材")
+                    shortcutRow("⌘ N", "快速生成新情绪板")
+                    shortcutRow("⇧ ⌘ S", "展开 / 收起视觉与配色筛选条")
+                    shortcutRow("1 – 9", "收件箱中快速归档到对应文件夹")
+                    Divider()
+                    shortcutRow("R / ⇧ R", "情绪板图片顺时针 / 逆时针旋转 90°")
+                    shortcutRow("⇧ H / ⇧ V", "情绪板图片水平 / 上下翻转")
+                    shortcutRow("鼠标中键拖拽", "情绪板画布自由移动查看")
+                    shortcutRow("⌘ Z / ⇧ ⌘ Z", "情绪板撤销 / 重做")
                 }
             }
         }
     }
 
-    // MARK: - Reusable Settings Chrome
+    // MARK: - Auto-Save Helpers
+
+    private func persistSyncConfigIfReady() {
+        guard didLoadInitial else { return }
+        let snapshot = draftSyncConfig
+        Task { await syncAndAI.saveSyncConfig(snapshot) }
+    }
+
+    private func persistAIConfigIfReady() {
+        guard didLoadInitial else { return }
+        let snapshot = draftAIConfig
+        Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil) }
+    }
+
+    private func syncHeroSubtitle(isConnected: Bool, healthyNodes: Int, snap: GDirectEnvironmentSnapshot) -> String {
+        if draftSyncConfig.mode == .localOnly {
+            return "当前仅保存在这台 Mac 本地，不会上传至云端"
+        }
+        var parts: [String] = []
+        if isConnected {
+            if let synced = syncAndAI.syncStatus.lastSyncedAt {
+                parts.append("上次同步 \(synced.formatted(date: .omitted, time: .shortened))")
+            } else {
+                parts.append("已就绪，可随时同步")
+            }
+        } else if snap.accounts.first != nil {
+            parts.append("已发现本机账号，点击右侧连接即可开始同步")
+        } else {
+            parts.append("连接 Google Drive 后即可自动多端备份")
+        }
+        if draftSyncConfig.useGDirectIPAcceleration && healthyNodes > 0 {
+            parts.append("直连加速已开启")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func syncModeDescription(_ mode: DriveTransportMode) -> String {
+        switch mode {
+        case .directAPIWithGDirect: "直接与 Google Drive 安全同步，无需常驻挂载虚拟磁盘"
+        case .gdirectMount: "通过本机已挂载的云盘文件夹读写，访达里同步可见"
+        case .localOnly: "完全离线保存在本机，不联网也不上传任何文件"
+        }
+    }
+
+    // MARK: - Clean Reusable Product Settings Chrome
 
     private func settingsHeader(title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
             Text(subtitle)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -553,13 +803,11 @@ public struct SettingsView: View {
         }
     }
 
-    private func settingsCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func settingsGroupCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 12.5, weight: .semibold))
             content()
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             CharkleTheme.surfaceElevated(for: colorScheme),
@@ -571,20 +819,62 @@ public struct SettingsView: View {
         )
     }
 
-    private func statusChip(label: String, value: String, ok: Bool) -> some View {
-        HStack(spacing: 6) {
+    private func settingsRow<Control: View>(
+        title: String,
+        subtitle: String?,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .medium))
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 8)
+            control()
+        }
+    }
+
+    private func capabilityTile(icon: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13.5, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 24, height: 24)
+                .background(Color.accentColor.opacity(0.11), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func diagnosticPill(_ label: String, _ value: String, ok: Bool) -> some View {
+        HStack(spacing: 5) {
             Circle()
-                .fill(ok ? Color.green : Color.secondary.opacity(0.45))
+                .fill(ok ? Color.green : Color.secondary.opacity(0.4))
                 .frame(width: 6, height: 6)
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.system(size: 11, weight: .semibold))
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
     private func legendDot(color: Color, title: String, bytes: Int64) -> some View {
@@ -616,7 +906,7 @@ public struct SettingsView: View {
 
     private func feedbackBanner(_ text: String, isError: Bool) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: isError ? "exclamationmark.octagon.fill" : "checkmark.circle.fill")
+            Image(systemName: isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(isError ? .red : .green)
             Text(text)
                 .font(.system(size: 12, weight: .medium))
@@ -624,12 +914,12 @@ public struct SettingsView: View {
             Spacer()
         }
         .padding(10)
-        .background((isError ? Color.red : Color.green).opacity(0.11), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background((isError ? Color.red : Color.green).opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func presentOAuthSecretImporter() {
         let panel = NSOpenPanel()
-        panel.title = "选择 Google OAuth client_secret.json"
+        panel.title = "选择 Google 登录凭据文件 (.json)"
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
