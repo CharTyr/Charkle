@@ -142,4 +142,60 @@ struct MultiBackendAndAITests {
         let responses = try OpenAIResponsesProvider(config: responsesCfg, apiKey: "sk-test")
         #expect(responses.embeddingIdentity.contains("openai-responses:"))
     }
+
+    @Test("Mounted volume upload resolves multi-level filename collisions and skips AppleDouble files")
+    func mountedVolumeCollisionAndStreaming() async throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mountRoot = dir.appending(path: "Mount", directoryHint: .isDirectory)
+        let inboxDir = mountRoot.appending(path: "Charkle/Inbox", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: inboxDir, withIntermediateDirectories: true)
+
+        // Create a real local asset in the engine
+        let engine = try LiveCharkleEngine.make(appSupportDirectory: dir.appending(path: "AppSupport", directoryHint: .isDirectory))
+        let png = try BackendFixture.artwork("#1478DC")
+        let imported = try await engine.ingest([.imageData(png, suggestedName: "Poster.png", sourceURL: nil)], targetFolderID: nil, targetBoardID: nil)
+        let asset = try #require(imported.first)
+        let short = String(asset.id.uuidString.prefix(8)).lowercased()
+
+        // Pre-populate BOTH `Poster.png` AND `Poster-<short>.png` with different contents (plus an AppleDouble file)
+        try Data("different-1".utf8).write(to: inboxDir.appending(path: "Poster.png"))
+        try Data("different-2".utf8).write(to: inboxDir.appending(path: "Poster-\(short).png"))
+        try Data("appledouble".utf8).write(to: inboxDir.appending(path: "._Poster.png"))
+
+        let transport = MountedVolumeTransport(mountPath: mountRoot.path, rootFolderName: "Charkle", requireDedicatedMount: false)
+        let listed = try await transport.listFiles(inFolderID: try await transport.findOrCreateFolder(named: "Inbox", parentID: try await transport.findOrCreateFolder(named: "Charkle", parentID: DriveFiles.rootID).id).id)
+        #expect(!listed.contains(where: { $0.name.hasPrefix("._") }))
+
+        let config = DriveSyncConfig(
+            mode: .localOnly,
+            localLibraryPath: mountRoot.appending(path: "Charkle").path
+        )
+        try await engine.saveSyncConfig(config)
+        _ = try await engine.syncNow()
+
+        let expectedFallback = inboxDir.appending(path: "Poster-\(short)-2.png")
+        #expect(FileManager.default.fileExists(atPath: expectedFallback.path))
+        let uploadedData = try Data(contentsOf: expectedFallback)
+        #expect(uploadedData == png)
+    }
+
+    @Test("POSIX stream writer writes exact bytes and never leaves partial files")
+    func posixStreamWriter() throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let payload = Data((0..<700_000).map { UInt8($0 & 0xFF) })
+        let src = dir.appending(path: "source.bin")
+        let dst = dir.appending(path: "dest.bin")
+        try payload.write(to: src)
+
+        try DriveFiles.writeStream(from: src, to: dst, removeOnFailure: true)
+        #expect(try Data(contentsOf: dst) == payload)
+
+        let rawDst = dir.appending(path: "raw.bin")
+        try DriveFiles.writeRawBytes(payload, to: rawDst, removeOnFailure: true)
+        #expect(try Data(contentsOf: rawDst) == payload)
+    }
 }

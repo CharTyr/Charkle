@@ -325,8 +325,19 @@ public final actor DriveSyncEngine {
                     let remote = try await transport.downloadData(fileID: file.id)
                     guard remote == bytes else { throw DriveTransportError.invalidResponse("Conflicting operation shard \(name).") }
                 } else {
-                    _ = try await transport.uploadData(bytes, name: name, mimeType: "application/x-ndjson",
-                                                       parentID: layout.ops, existingFileID: nil)
+                    do {
+                        _ = try await transport.uploadData(bytes, name: name, mimeType: "application/x-ndjson",
+                                                           parentID: layout.ops, existingFileID: nil)
+                    } catch DriveTransportError.fileAlreadyExists {
+                        if let existing = try await transport.listFiles(inFolderID: layout.ops).first(where: { $0.name == name }) {
+                            let remote = try await transport.downloadData(fileID: existing.id)
+                            guard remote == bytes else {
+                                throw DriveTransportError.invalidResponse("Conflicting operation shard \(name).")
+                            }
+                        } else {
+                            throw DriveTransportError.fileAlreadyExists(name)
+                        }
+                    }
                 }
                 uploaded += bytes.split(separator: 0x0A).count
             }
@@ -346,7 +357,7 @@ public final actor DriveSyncEngine {
             let name = id.lowercased() + ".json"
             let data = try encoded(document)
             _ = try await write(data, name: name, mime: "application/json", parent: layout.boards, existing: files[name],
-                                transport: transport)
+                                transport: transport, allowOverwriteExisting: true)
             if let mark = dirty[id] { try await database.clearProjection("boards", id: id, ifVersion: mark) }
         }
         let active = Set(documents.map { $0.id.uuidString })
@@ -389,7 +400,8 @@ public final actor DriveSyncEngine {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
             _ = try await write(encoder.encode(shard), name: name, mime: "application/octet-stream",
-                                parent: layout.embeddings, existing: existing, transport: transport)
+                                parent: layout.embeddings, existing: existing, transport: transport,
+                                allowOverwriteExisting: true)
             for id in touched {
                 if let version = dirty[id] { try await database.clearProjection("embeddings", id: id, ifVersion: version) }
             }
@@ -404,7 +416,7 @@ public final actor DriveSyncEngine {
             let name = id.lowercased() + ".jpg"
             if let thumbnail = media.thumbnailURL(for: uuid, tier: .grid520), try await database.asset(id: uuid) != nil {
                 _ = try await write(Data(contentsOf: thumbnail), name: name, mime: "image/jpeg", parent: layout.thumbnails,
-                                    existing: files[name], transport: transport)
+                                    existing: files[name], transport: transport, allowOverwriteExisting: true)
             } else if try await database.asset(id: uuid) == nil, let existing = files[name] {
                 try await trashIfPresent(existing.id, transport: transport)
             }
@@ -425,7 +437,7 @@ public final actor DriveSyncEngine {
     }
 
     private func write(_ data: Data, name: String, mime: String, parent: String, existing: RemoteDriveFile?,
-                       transport: any DriveTransport) async throws -> RemoteDriveFile {
+                       transport: any DriveTransport, allowOverwriteExisting: Bool = false) async throws -> RemoteDriveFile {
         if let existing {
             if let checksum = existing.md5Checksum {
                 if MediaPipeline.hex(Insecure.MD5.hash(data: data)) == checksum { return existing }
@@ -436,11 +448,23 @@ public final actor DriveSyncEngine {
         do {
             return try await transport.uploadData(data, name: name, mimeType: mime, parentID: parent, existingFileID: existing?.id)
         } catch {
-            // Mounted volumes enforce unique names. A simultaneous create is safe to adopt only
-            // when it wrote the same bytes.
-            if existing == nil, let concurrent = try? await transport.listFiles(inFolderID: parent).first(where: { $0.name == name }),
-               let current = try? await transport.downloadData(fileID: concurrent.id), current == data {
-                return concurrent
+            // Mounted volumes enforce unique names and may have a stale directory listing cache.
+            if existing == nil,
+               let concurrent = try? await transport.listFiles(inFolderID: parent).first(where: {
+                   $0.name == name || $0.name.caseInsensitiveCompare(name) == .orderedSame
+               }) {
+                if let current = try? await transport.downloadData(fileID: concurrent.id), current == data {
+                    return concurrent
+                }
+                if allowOverwriteExisting {
+                    return try await transport.uploadData(
+                        data,
+                        name: concurrent.name,
+                        mimeType: mime,
+                        parentID: parent,
+                        existingFileID: concurrent.id
+                    )
+                }
             }
             throw error
         }
@@ -845,15 +869,58 @@ extension DriveSyncEngine {
             let ext = (name as NSString).pathExtension
             let suffix = ext.isEmpty ? "" : "." + ext
             let alternative = (name as NSString).deletingPathExtension + "-" + short + suffix
-            let candidate = choices.first { ($0.name == name || $0.name == alternative) && $0.md5Checksum == hash.md5 }
-            let unbound = try await candidate.mapAsync { try await database.asset(driveID: $0.id) == nil } ?? false
+            var candidate = choices.first {
+                ($0.name.caseInsensitiveCompare(name) == .orderedSame
+                    || $0.name.caseInsensitiveCompare(alternative) == .orderedSame)
+                    && $0.md5Checksum == hash.md5
+            }
+            var unbound = try await candidate.mapAsync { try await database.asset(driveID: $0.id) == nil } ?? false
+            if candidate == nil || !unbound {
+                for entry in choices where !entry.isFolder && entry.md5Checksum == nil && entry.size == hash.bytes && hash.bytes > 0 {
+                    guard entry.name.caseInsensitiveCompare(name) == .orderedSame
+                        || entry.name.caseInsensitiveCompare(alternative) == .orderedSame else { continue }
+                    guard try await database.asset(driveID: entry.id) == nil else { continue }
+                    if try await remoteFileMatchesHash(fileID: entry.id, expectedSHA256: hash.sha256, transport: transport) {
+                        candidate = entry
+                        unbound = true
+                        break
+                    }
+                }
+            }
             let uploaded: RemoteDriveFile
-            if let candidate, unbound { uploaded = candidate }
-            else {
-                let remoteName = choices.contains { $0.name == name } ? alternative : name
-                uploaded = try await transport.uploadFile(from: url, name: remoteName, mimeType: asset.mimeType,
-                                                          parentID: parent, existingFileID: nil)
-                choices.append(uploaded)
+            if let candidate, unbound {
+                uploaded = candidate
+            } else {
+                var takenNames = Set(choices.map { $0.name.lowercased() })
+                var uploadedFile: RemoteDriveFile?
+                for attempt in 0..<8 {
+                    let remoteName = Self.nextAvailableFileName(
+                        preferred: name,
+                        shortID: short,
+                        takenLowercasedNames: takenNames,
+                        startIndex: attempt
+                    )
+                    do {
+                        let file = try await transport.uploadFile(
+                            from: url,
+                            name: remoteName,
+                            mimeType: asset.mimeType,
+                            parentID: parent,
+                            existingFileID: nil
+                        )
+                        choices.append(file)
+                        uploadedFile = file
+                        break
+                    } catch DriveTransportError.fileAlreadyExists {
+                        takenNames.insert(remoteName.lowercased())
+                        choices = try await transport.listFiles(inFolderID: parent)
+                        for item in choices { takenNames.insert(item.name.lowercased()) }
+                    }
+                }
+                guard let resolvedUpload = uploadedFile else {
+                    throw DriveTransportError.fileAlreadyExists(name)
+                }
+                uploaded = resolvedUpload
             }
             listings[parent] = choices
             try await database.transaction { store in
@@ -907,6 +974,44 @@ extension DriveSyncEngine {
         }
         resolved[id] = result.id
         return result.id
+    }
+
+    private func remoteFileMatchesHash(
+        fileID: String,
+        expectedSHA256: String,
+        transport: any DriveTransport
+    ) async throws -> Bool {
+        let probe = media.staging.appending(path: "verify-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: probe) }
+        try await transport.downloadFile(fileID: fileID, to: probe)
+        return try MediaPipeline.digests(probe).sha256 == expectedSHA256
+    }
+
+    private static func nextAvailableFileName(
+        preferred: String,
+        shortID: String,
+        takenLowercasedNames: Set<String>,
+        startIndex: Int
+    ) -> String {
+        let stem = (preferred as NSString).deletingPathExtension
+        let ext = (preferred as NSString).pathExtension
+        let suffix = ext.isEmpty ? "" : "." + ext
+        if startIndex == 0 && !takenLowercasedNames.contains(preferred.lowercased()) {
+            return preferred
+        }
+        let firstAlt = "\(stem)-\(shortID)\(suffix)"
+        if startIndex <= 1 && !takenLowercasedNames.contains(firstAlt.lowercased()) {
+            return firstAlt
+        }
+        var counter = max(2, startIndex)
+        while counter < 10_000 {
+            let candidate = "\(stem)-\(shortID)-\(counter)\(suffix)"
+            if !takenLowercasedNames.contains(candidate.lowercased()) {
+                return candidate
+            }
+            counter += 1
+        }
+        return "\(stem)-\(UUID().uuidString.prefix(8).lowercased())\(suffix)"
     }
 }
 

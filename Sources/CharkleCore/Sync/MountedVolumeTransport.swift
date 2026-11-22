@@ -78,13 +78,13 @@ public final actor MountedVolumeTransport: DriveTransport {
     public func uploadData(_ data: Data, name: String, mimeType: String, parentID: String,
                            existingFileID: String?) throws -> RemoteDriveFile {
         let destination = try uploadPath(name: name, parentID: parentID, existingFileID: existingFileID)
-        if existingFileID == nil {
-            try data.write(to: destination, options: .withoutOverwriting)
+        if existingFileID == nil || requireDedicatedMount {
+            try DriveFiles.writeRawBytes(data, to: destination, removeOnFailure: existingFileID == nil)
         } else {
             do {
                 try data.write(to: destination, options: .atomic)
             } catch {
-                try data.write(to: destination, options: [])
+                try DriveFiles.writeRawBytes(data, to: destination, removeOnFailure: false)
             }
         }
         return try metadata(destination, parentID: parentID)
@@ -93,11 +93,7 @@ public final actor MountedVolumeTransport: DriveTransport {
     public func uploadFile(from localURL: URL, name: String, mimeType: String, parentID: String,
                            existingFileID: String?) throws -> RemoteDriveFile {
         let destination = try uploadPath(name: name, parentID: parentID, existingFileID: existingFileID)
-        if existingFileID == nil {
-            try FileManager.default.copyItem(at: localURL, to: destination)
-        } else {
-            try DriveFiles.writeFile(localURL, to: destination)
-        }
+        try DriveFiles.writeStream(from: localURL, to: destination, removeOnFailure: existingFileID == nil)
         return try metadata(destination, parentID: parentID)
     }
 
@@ -132,9 +128,11 @@ public final actor MountedVolumeTransport: DriveTransport {
         try verifyMount()
         if let existingFileID {
             let existing = try locate(existingFileID)
-            guard existing.path == target.path else { throw DriveTransportError.invalidResponse("Mounted upload target changed.") }
+            guard existing.standardizedFileURL.path == target.standardizedFileURL.path else {
+                throw DriveTransportError.invalidResponse("Mounted upload target changed.")
+            }
         } else if GDirectIntegration.statInfo(target, followLinks: false) != nil {
-            throw DriveTransportError.invalidResponse("Mounted upload target already exists.")
+            throw DriveTransportError.fileAlreadyExists(name)
         }
         return target
     }
@@ -159,7 +157,9 @@ public final actor MountedVolumeTransport: DriveTransport {
         try verifyMount()
         if id == DriveFiles.rootID { return mount }
         if let cached = locations[id], (try? metadata(cached, parentID: "").id) == id { return cached }
-        _ = try snapshot()
+        _ = try snapshot(includeMetadata: false)
+        if let url = locations[id] { return url }
+        _ = try snapshot(includeMetadata: true)
         if let url = locations[id] { return url }
         throw DriveTransportError.fileNotFound(id)
     }
@@ -168,11 +168,12 @@ public final actor MountedVolumeTransport: DriveTransport {
         try JSONEncoder().encode(snapshot).base64EncodedString()
     }
 
-    private func snapshot() throws -> [String: RemoteDriveFile] {
+    private func snapshot(includeMetadata: Bool = false) throws -> [String: RemoteDriveFile] {
         try verifyMount()
         var url = mount
         var parentID = DriveFiles.rootID
         var result: [String: RemoteDriveFile] = [:]
+        var rootEntry: RemoteDriveFile?
         locations.removeAll()
         for segment in rootSegments {
             try DriveFiles.validateName(segment)
@@ -180,8 +181,9 @@ public final actor MountedVolumeTransport: DriveTransport {
             guard GDirectIntegration.statInfo(url, followLinks: false) != nil else { return result }
             let entry = try metadata(url, parentID: parentID)
             parentID = entry.id
+            rootEntry = entry
         }
-        guard let root = try? metadata(url, parentID: parentID == DriveFiles.rootID ? DriveFiles.rootID : parentID) else {
+        guard let root = rootEntry else {
             return result
         }
         var queue = [root]
@@ -191,7 +193,12 @@ public final actor MountedVolumeTransport: DriveTransport {
             index += 1
             guard result[file.id] == nil else { continue }
             result[file.id] = file
-            if file.isFolder, let folder = locations[file.id] { queue += try children(of: folder, parent: file.id) }
+            if file.isFolder, let folder = locations[file.id] {
+                if !includeMetadata && file.id != root.id && file.name.hasPrefix(".") {
+                    continue
+                }
+                queue += try children(of: folder, parent: file.id)
+            }
         }
         return result
     }
@@ -199,7 +206,10 @@ public final actor MountedVolumeTransport: DriveTransport {
     private func children(of directory: URL, parent: String) throws -> [RemoteDriveFile] {
         try verifyMount()
         return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent != ".DS_Store" && !$0.lastPathComponent.hasPrefix(".charkle-write-") }
+            .filter { url in
+                let name = url.lastPathComponent
+                return name != ".DS_Store" && !name.hasPrefix("._") && !name.hasPrefix(".charkle-write-")
+            }
             .compactMap { url in
                 guard let info = GDirectIntegration.statInfo(url, followLinks: false),
                       [S_IFDIR, S_IFREG].contains(info.st_mode & S_IFMT) else { return nil }

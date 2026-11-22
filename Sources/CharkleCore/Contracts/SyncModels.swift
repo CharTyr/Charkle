@@ -338,6 +338,7 @@ public enum DriveTransportError: Error, LocalizedError, Sendable {
     case commandFailed(command: String, stderr: String, exitCode: Int32)
     case httpError(statusCode: Int, message: String)
     case fileNotFound(String)
+    case fileAlreadyExists(String)
     case invalidResponse(String)
 
     public var errorDescription: String? {
@@ -349,6 +350,7 @@ public enum DriveTransportError: Error, LocalizedError, Sendable {
         case .commandFailed(let cmd, let stderr, let code): "命令 `\(cmd)` 失败 (exit \(code))：\(stderr)"
         case .httpError(let code, let msg): "云端请求失败 (HTTP \(code))：\(msg)"
         case .fileNotFound(let id): "远端文件不存在：\(id)"
+        case .fileAlreadyExists(let name): "远端已存在同名文件：\(name)"
         case .invalidResponse(let detail): "响应解析失败：\(detail)"
         }
     }
