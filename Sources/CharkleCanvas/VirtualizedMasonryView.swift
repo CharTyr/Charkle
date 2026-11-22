@@ -230,9 +230,12 @@ public struct VirtualizedMasonryView: View {
 
         ScrollView(.vertical) {
             ZStack(alignment: .topLeading) {
-                // Background canvas hit area for clearing selection & rubber-band marquee
-                CanvasSurface.ground(for: colorScheme)
-                    .frame(width: max(containerWidth, 240), height: max(layout.totalHeight, visibleHeight))
+                // Hit area for clearing selection & rubber-band marquee across the laid-out content.
+                // Never feed `containerWidth` or `visibleHeight` back into ScrollView content size,
+                // otherwise scrollbar show/hide toggles can oscillate with `onGeometryChange`.
+                Color.clear
+                    .frame(maxWidth: .infinity)
+                    .frame(height: max(layout.totalHeight, 1))
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if !selectedAssetIDs.isEmpty {
@@ -290,27 +293,34 @@ public struct VirtualizedMasonryView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: max(layout.totalHeight, visibleHeight), alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: max(layout.totalHeight, 1), alignment: .topLeading)
         }
         .canvasScrollEdgeSoft(for: .top)
-        .background(CanvasSurface.ground(for: colorScheme))
-        .onScrollGeometryChange(for: CGRect.self) { geo in
-            geo.visibleRect
-        } action: { _, newRect in
-            visibleMinY = max(0, newRect.minY)
-            if newRect.height > 10 {
-                visibleHeight = newRect.height
-            }
+        .background {
+            CanvasSurface.ground(for: colorScheme)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !selectedAssetIDs.isEmpty {
+                        selectedAssetIDs.removeAll()
+                    }
+                }
+                .onGeometryChange(for: CGSize.self) { proxy in
+                    CGSize(width: floor(proxy.size.width), height: floor(proxy.size.height))
+                } action: { _, newSize in
+                    if newSize.width > 120, abs(newSize.width - containerWidth) >= 2 {
+                        containerWidth = newSize.width
+                        recomputeLayout()
+                    }
+                    if newSize.height > 100, abs(newSize.height - visibleHeight) >= 2 {
+                        visibleHeight = newSize.height
+                    }
+                }
         }
-        .onGeometryChange(for: CGSize.self) { proxy in
-            proxy.size
-        } action: { _, newSize in
-            if abs(newSize.width - containerWidth) > 0.5, newSize.width > 120 {
-                containerWidth = newSize.width
-                recomputeLayout()
-            }
-            if newSize.height > 100 {
-                visibleHeight = newSize.height
+        .onScrollGeometryChange(for: CGFloat.self) { geo in
+            floor(max(0, geo.visibleRect.minY))
+        } action: { _, newMinY in
+            if abs(newMinY - visibleMinY) >= 4 {
+                visibleMinY = newMinY
             }
         }
         .onChange(of: assets.map(\.id)) { _, _ in

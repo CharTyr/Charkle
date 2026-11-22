@@ -249,9 +249,10 @@ public struct MoodboardCanvasView: View {
             }
         }
         .onGeometryChange(for: CGSize.self) { proxy in
-            proxy.size
+            CGSize(width: floor(proxy.size.width), height: floor(proxy.size.height))
         } action: { _, newSize in
-            if newSize.width > 120, newSize.height > 120 {
+            if newSize.width > 120, newSize.height > 120,
+               (abs(newSize.width - viewportSize.width) >= 1 || abs(newSize.height - viewportSize.height) >= 1) {
                 viewportSize = newSize
             }
         }
