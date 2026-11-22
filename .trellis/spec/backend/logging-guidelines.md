@@ -1,51 +1,48 @@
-# Logging Guidelines
+# Backend Logging & Privacy Guidelines
 
-> How logging is done in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's logging conventions here.
-
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
-
-(To be filled by the team)
+> Structured `os.Logger` usage and strict secret/PII redaction rules across `CharkleCore`, `CharkleApp`, and `CharkleCLI`.
 
 ---
 
-## Log Levels
+## Logger Convention
 
-<!-- When to use each level: debug, info, warn, error -->
+Use Apple's unified `os.Logger` with a file-scoped `private let` logger per subsystem and category:
 
-(To be filled by the team)
+```swift
+import os
 
----
+private let visionLogger = Logger(subsystem: "com.charkle.core", category: "Vision")
+private let libraryStoreLogger = Logger(subsystem: "com.charkle.app", category: "LibraryStore")
+private let notchLogger = Logger(subsystem: "com.charkle.app", category: "NotchShelf")
+```
 
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
+| Subsystem | Module |
+|-----------|--------|
+| `com.charkle.core` | `Sources/CharkleCore` |
+| `com.charkle.canvas` | `Sources/CharkleCanvas` |
+| `com.charkle.app` | `Sources/CharkleApp` |
+| `com.charkle.cli` | `Sources/CharkleCLI` |
 
 ---
 
-## What NOT to Log
+## Log Level Rules
 
-<!-- Sensitive data, PII, secrets -->
+- `.debug`: Expected fallbacks, Vision split-pass retries, cache misses, high-frequency diagnostics.
+- `.info`: Significant lifecycle transitions (sync completed, migration completed, MCP server initialized).
+- `.warning` / `.error`: Recoverable operational errors (network fetch failures, corrupt media fallback, failed store refresh).
+- **Never** use `print()` inside `CharkleCore`, `CharkleCanvas`, or `CharkleApp` (note: `CharkleCLI` reserves `stdout` strictly for JSON-RPC / structured CLI output; diagnostic messages in `CharkleCLI` must go to `stderr`).
 
-(To be filled by the team)
+---
+
+## Privacy & Secret Redaction (STRICT — ZERO EXCEPTIONS)
+
+1. Mark user-derived strings, file paths, and error descriptions with `privacy: .private` whenever they could contain filenames, URLs, or personal metadata:
+   ```swift
+   visionLogger.debug("Combined Vision analysis fell back: \(error.localizedDescription, privacy: .private)")
+   ```
+2. **NEVER** log, print, embed in test fixtures, or commit:
+   - `Resources/GoogleOAuthClient.json` (gitignored, bundled only at local build time by `scripts/build-app.sh`)
+   - Keychain values (`KeychainStore.read`), OAuth access/refresh tokens, ID tokens, PKCE verifiers
+   - User API keys (Gemini, OpenAI, Anthropic, TypeSafe Jev, WebDAV passwords)
+   - Code-signing certificate Common Names (CN) or developer emails (when verifying signatures, run `codesign -v --deep dist/Charkle.app`, never `codesign -dvvv` into shared logs)
+3. **Keychain Isolation in Tests**: Tests that instantiate `IntelligenceEngine` or `LiveCharkleEngine` MUST inject an isolated `KeychainStore` (via `BackendFixture.makeEngine(...)`) so tests never read or mutate the developer's live macOS login Keychain.

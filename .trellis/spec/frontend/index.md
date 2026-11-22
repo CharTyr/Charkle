@@ -1,12 +1,15 @@
-# Frontend Development Guidelines
+# Frontend Development Guidelines (`CharkleApp` & `CharkleCanvas`)
 
-> Best practices for frontend development in this project.
+> Executable contracts and macOS SwiftUI + AppKit UI conventions for Charkle's desktop app, high-FPS virtualized masonry canvas, dual-mode moodboard studio, rich media viewers, and hardware Notch Shelf.
 
 ---
 
-## Overview
+## Architecture Summary
 
-This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
+- **Targets**:
+  - `Sources/CharkleCanvas/` (`@MainActor` default isolation): High-FPS AppKit-backed `VirtualizedMasonryView`, dual-mode `MoodboardCanvasView` (Auto Editorial ↔ Freeform), `EditorialLayoutSolver`, `FigmaBridgeExporter`, `ThumbnailImageLoader`, `CanvasSupport`.
+  - `Sources/CharkleApp/` (`@MainActor` default isolation): SwiftUI desktop shell, collapsible sidebar, Gallery Filmstrip view, Inspector, Quick Look rich viewers, hardware MacBook Notch Shelf, `@Observable` domain stores, Kubai Duotone icon system & motion tokens.
+- **Platform**: macOS 15+ (Swift 6.2, Apple Silicon). Restrained Apple Liquid Glass (`charkleLiquidGlass`), gallery-first visual hierarchy, 120 FPS interaction discipline.
 
 ---
 
@@ -14,26 +17,32 @@ This directory contains guidelines for frontend development. Fill in each file w
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
-| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
-| [State Management](./state-management.md) | Local state, global state, server state | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+| [Directory Structure](./directory-structure.md) | `CharkleCanvas` and `CharkleApp` layout, resource bundling, component placement | Active |
+| [Component Guidelines](./component-guidelines.md) | SwiftUI composition, Kubai Duotone icons, macOS menu color swatches, Notch morphing clip contract, rich viewers | Active |
+| [AppKit Bridge Guidelines](./appkit-bridge-guidelines.md) | SwiftUI↔AppKit drag/drop rules, `nonisolated isFlipped`, multi-item drag, pasteboard caching, GPU zoom animations | Active |
+| [State Management](./state-management.md) | `@Observable` domain stores, derived caches, `@ObservationIgnored` + `isolated deinit`, isolated canvas camera state | Active |
+| [Type Safety](./type-safety.md) | Swift 6 `@MainActor` isolation, typed drag envelopes (`CharkleDragIdentifiers`), exhaustive enums | Active |
+| [Quality Guidelines](./quality-guidelines.md) | Motion discipline, Reduce Motion, Light/Dark parity, idle CPU `< 1%`, verification gates | Active |
 
 ---
 
-## How to Fill These Guidelines
+## Pre-Development Checklist
 
-For each guideline file:
+Before editing `Sources/CharkleApp/` or `Sources/CharkleCanvas/`:
 
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
+- [ ] Never attach `.onDrag` onto a macOS SwiftUI `Button` (use `.onTapGesture` + `.onDrag { ... } preview: { ... }`).
+- [ ] Mark `override nonisolated var isFlipped: Bool { true }` on any flipped AppKit `NSView` that calls `beginDraggingSession`.
+- [ ] In internal multi-item drops (`SidebarView.handleDrop`, `MoodboardCanvasView.handleCanvasDrop`), short-circuit `.fileURL` providers once internal IDs are decoded so files are never re-imported as duplicates.
+- [ ] Never sort `allAssetsByID.values` inside a SwiftUI `View.body` — read precomputed store caches (`library.cachedRecentActivityAssets`).
+- [ ] For macOS `.contextMenu` color icons, render `NSImage` with `isTemplate = false` (`CharkleIconCache.shared.menuFolderIcon`).
+- [ ] Keep Notch Shelf content at its fixed final target width inside `.clipShape(shape)` with `animatableData` on both shell and rim paths.
 
 ---
 
-**Language**: All documentation should be written in **English**.
+## Quality Check (Run Before Finish)
+
+```bash
+swift build --build-tests -Xswiftc -warnings-as-errors
+swift test --skip-build
+./scripts/build-app.sh release && codesign -v --deep dist/Charkle.app
+```

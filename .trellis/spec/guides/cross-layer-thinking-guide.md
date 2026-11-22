@@ -325,3 +325,26 @@ state correctly, but several commands still re-parsed event payload fields with
 local casts. The fix was to make the core event layer own `ThreadChannelEvent`
 and `isThreadEvent`, make `reduceChannelMetadata` the only channel metadata
 projection, and make `reduceThreads` the only thread replay reducer.
+
+---
+
+## Charkle Cross-Layer Checklists
+
+### 1. Adding a New Media Family or Rich Metadata Field
+- [ ] Model & Codable fallback in `Sources/CharkleCore/Contracts/CoreModels.swift` (`MediaKind` / `AssetRichMetadata` / `displayTypeLabel`) → see `backend/database-guidelines.md`
+- [ ] FTS5 indexing in `LibraryDatabase.searchFields(for:)` → see `backend/database-guidelines.md`
+- [ ] Media ingest / poster / resolver in `Sources/CharkleCore/Media/` and `LiveCharkleEngine.swift` → see `backend/quality-guidelines.md`
+- [ ] Exhaustive switches in `VirtualizedMasonryView.swift`, `ThumbnailImageLoader.swift`, `ContactSheetRenderer.swift`
+- [ ] Interactive reader parity in **both** `QuickLookOverlayView` and `GalleryFilmstripView` (`QuickLookRichViewers.swift`), plus `InspectorView` actions → see `frontend/component-guidelines.md`
+
+### 2. Adding or Changing Drag-and-Drop Payloads
+- [ ] Encode/decode exclusively through `CharkleDragIdentifiers` (`Sources/CharkleCanvas/CanvasSupport.swift`) → see `frontend/type-safety.md`
+- [ ] Never wrap macOS `.onDrag` triggers in a SwiftUI `Button` → see `frontend/appkit-bridge-guidelines.md`
+- [ ] Keep `override nonisolated var isFlipped: Bool { true }` on flipped AppKit drag source views
+- [ ] Short-circuit external `.fileURL` handling in `SidebarView.handleDrop` & `MoodboardCanvasView.handleCanvasDrop` when internal IDs are decoded
+- [ ] Cache drag pasteboard reads by `NSPasteboard.changeCount` in `NotchShelfController.swift`
+
+### 3. Changing Folder Tree / Filtering Contracts
+- [ ] Remember `folders` table stores `parentID` inside JSON `payload`, not as a SQL column → use `folderSubtreeIDs(rootID:)` (`backend/database-guidelines.md`)
+- [ ] Keep `PlaceholderEngine.swift` behavior aligned with `LibraryDatabase.swift`
+- [ ] Sync counts across `SidebarView` (`subtreeAssetCount`), `MainWindowView` subfolder pills, and `LibraryStore.applyDestination`
