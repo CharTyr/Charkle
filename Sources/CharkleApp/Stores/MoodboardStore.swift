@@ -80,7 +80,7 @@ public final class MoodboardStore {
         let doc = MoodboardDocument(
             title: title,
             subtitle: "",
-            mode: .autoEditorial(AutoLayoutConfig(columns: 4, spacing: 16, style: .balanced, showPaletteStrip: true))
+            mode: .freeform
         )
         do {
             let saved = try await engine.saveBoard(doc)
@@ -107,6 +107,13 @@ public final class MoodboardStore {
             )
             var doc = prop.draftDocument
             doc.title = title
+            if doc.mode.isAutoEditorial {
+                doc = EditorialLayoutSolver.freezeIntoFreeform(
+                    document: doc,
+                    containerWidth: 1080,
+                    assetsByID: [:]
+                )
+            }
             let saved = try await engine.saveBoard(doc)
             activeBoard = saved
             candidatePool = prop.candidatePool
@@ -454,14 +461,11 @@ public final class MoodboardStore {
         defer { isRefiningActiveBoard = false }
 
         let currentStyle: EditorialStyle
-        let isFreeform: Bool
         switch currentBoard.mode {
         case .autoEditorial(let cfg):
             currentStyle = cfg.style
-            isFreeform = false
         case .freeform:
             currentStyle = .magazine
-            isFreeform = true
         }
 
         let lockedIDs = currentBoard.nodes.compactMap { node -> UUID? in
@@ -475,7 +479,7 @@ public final class MoodboardStore {
             preferredCount: max(8, min(20, max(12, currentBoard.referencedAssetIDs.count + 4))),
             candidateCount: 28,
             layoutStyle: currentStyle,
-            useFreeformLayout: isFreeform,
+            useFreeformLayout: true,
             includeCuratorNotes: true,
             lockedAssetIDs: lockedIDs,
             existingBoard: currentBoard,

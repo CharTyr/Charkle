@@ -47,24 +47,59 @@ public final class NotchShelfState {
         max(216, physicalNotchWidth + 24)
     }
 
-    /// Inner capsule width between vertical side walls (excluding the two concave top ears).
-    public var expandedBodyWidth: CGFloat {
-        if isFullGalleryExpanded {
-            return min(980, max(720, activeScreenWidth - 140))
-        }
-        return max(636, notchCenterClearanceWidth + 390)
+    /// Inner capsule width in Compact mode (excluding the two concave top ears).
+    public var compactBodyWidth: CGFloat {
+        max(636, notchCenterClearanceWidth + 390)
     }
 
-    /// Total width of `NotchShellShape` including both concave top bezel ears.
+    /// Total width of `NotchShellShape` in Compact mode including both concave top bezel ears.
+    public var compactShapeWidth: CGFloat {
+        compactBodyWidth + Self.topEarRadius * 2
+    }
+
+    /// Total height of the pure-black notch capsule in Compact mode.
+    public var compactCardHeight: CGFloat {
+        topNotchBandHeight + 292
+    }
+
+    /// Inner capsule width in Full-Waterfall Gallery mode.
+    public var fullGalleryBodyWidth: CGFloat {
+        min(980, max(720, activeScreenWidth - 140))
+    }
+
+    /// Total width of `NotchShellShape` in Full-Waterfall Gallery mode.
+    public var fullGalleryShapeWidth: CGFloat {
+        fullGalleryBodyWidth + Self.topEarRadius * 2
+    }
+
+    /// Total height of the pure-black notch capsule in Full-Waterfall Gallery mode.
+    public var fullGalleryCardHeight: CGFloat {
+        min(580, max(440, activeScreenHeight - 160))
+    }
+
+    /// Fixed maximum shape width for the backing transparent `NSPanel` so expanding/collapsing
+    /// between compact & full gallery NEVER calls `NSWindow.setFrame` mid-spring.
+    public var maxPanelShapeWidth: CGFloat {
+        max(compactShapeWidth, fullGalleryShapeWidth)
+    }
+
+    /// Fixed maximum card height for the backing transparent `NSPanel`.
+    public var maxPanelCardHeight: CGFloat {
+        max(compactCardHeight, fullGalleryCardHeight)
+    }
+
+    /// Active inner capsule width between vertical side walls (excluding the two concave top ears).
+    public var expandedBodyWidth: CGFloat {
+        isFullGalleryExpanded ? fullGalleryBodyWidth : compactBodyWidth
+    }
+
+    /// Active total width of `NotchShellShape` including both concave top bezel ears.
     public var expandedShapeWidth: CGFloat {
         expandedBodyWidth + Self.topEarRadius * 2
     }
 
-    /// Total height of the expanded pure-black notch capsule.
+    /// Active total height of the expanded pure-black notch capsule.
     public var expandedCardHeight: CGFloat {
-        if isFullGalleryExpanded {
-            return min(580, max(440, activeScreenHeight - 160))
-        }
-        return topNotchBandHeight + 292
+        isFullGalleryExpanded ? fullGalleryCardHeight : compactCardHeight
     }
 }

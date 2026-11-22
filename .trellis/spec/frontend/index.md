@@ -1,13 +1,13 @@
 # Frontend Development Guidelines (`CharkleApp` & `CharkleCanvas`)
 
-> Executable contracts and macOS SwiftUI + AppKit UI conventions for Charkle's desktop app, high-FPS virtualized masonry canvas, dual-mode moodboard studio, rich media viewers, and hardware Notch Shelf.
+> Executable contracts and macOS SwiftUI + AppKit UI conventions for Charkle's desktop app, high-FPS virtualized masonry canvas, freeform moodboard studio, gallery/Quick Look preview parity, hover muted playback, and hardware Notch Shelf.
 
 ---
 
 ## Architecture Summary
 
 - **Targets**:
-  - `Sources/CharkleCanvas/` (`@MainActor` default isolation): High-FPS AppKit-backed `VirtualizedMasonryView`, dual-mode `MoodboardCanvasView` (Auto Editorial ↔ Freeform), `EditorialLayoutSolver`, `FigmaBridgeExporter`, `ThumbnailImageLoader`, `CanvasSupport`.
+  - `Sources/CharkleCanvas/` (`@MainActor` default isolation): High-FPS AppKit-backed `VirtualizedMasonryView`, freeform `MoodboardCanvasView`, `EditorialLayoutSolver`, `FigmaBridgeExporter`, `ThumbnailImageLoader`, `HoverMediaPreview`, `CanvasSupport` (`HorizontalWheelScrollRedirector`, `StageInteractiveBridge`).
   - `Sources/CharkleApp/` (`@MainActor` default isolation): SwiftUI desktop shell, collapsible sidebar, Gallery Filmstrip view, Inspector, Quick Look rich viewers, hardware MacBook Notch Shelf, `@Observable` domain stores, Kubai Duotone icon system & motion tokens.
 - **Platform**: macOS 15+ (Swift 6.2, Apple Silicon). Restrained Apple Liquid Glass (`charkleLiquidGlass`), gallery-first visual hierarchy, 120 FPS interaction discipline.
 

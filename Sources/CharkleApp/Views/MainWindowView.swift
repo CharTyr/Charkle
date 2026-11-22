@@ -175,9 +175,9 @@ public struct MainWindowView: View {
                 }
                 .layoutPriority(1)
             }
-            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: isSidebarVisible)
-            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
-            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.isInspectorVisible)
+            .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidebarVisible)
+            .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
+            .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
 
             // Full-Media Quick Look Hero Continuity Overlay (Kubai Tip 015)
             if let qlID = coordinator.quickLookAssetID,
@@ -372,6 +372,10 @@ public struct MainWindowView: View {
             } else if coordinator.galleryLayoutMode == .galleryFilmstrip {
                 GalleryFilmstripView(
                     assets: library.assets,
+                    folders: library.folders,
+                    boards: moodboards.boards,
+                    activeMoodboardID: coordinator.activeMoodboardID,
+                    isQuickLookPresented: coordinator.quickLookAssetID != nil,
                     loader: library.thumbnailLoader,
                     selectedAssetIDs: Binding(
                         get: { library.selectedAssetIDs },
@@ -385,6 +389,77 @@ public struct MainWindowView: View {
                     onMarkOpened: { id in library.markAssetOpened(id) },
                     onSetRating: { ids, rating in
                         Task { await library.setRating(rating, for: ids) }
+                    },
+                    onCopyAssets: { ids in
+                        Task {
+                            let count = await library.copyAssetsToPasteboard(ids)
+                            coordinator.showToast("已拷贝 \(count) 项素材到剪贴板", icon: "doc.on.doc")
+                        }
+                    },
+                    onCutAssets: { ids in
+                        Task {
+                            let count = await library.cutAssets(ids)
+                            coordinator.showToast("已剪切 \(count) 项素材，前往目标文件夹或情绪板按 ⌘V 移动", icon: "scissors")
+                        }
+                    },
+                    onRevealInFinder: { id in
+                        Task {
+                            let ok = await library.revealInFinder(assetID: id)
+                            if !ok {
+                                coordinator.showToast("无法定位该素材的本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onAddToMoodboard: { ids, boardID in
+                        let items = ids.compactMap { library.allAssetsByID[$0] }
+                        guard !items.isEmpty else { return }
+                        if let targetBoardID = boardID ?? coordinator.activeMoodboardID ?? moodboards.boards.first?.id {
+                            let boardTitle = moodboards.boards.first(where: { $0.id == targetBoardID })?.title ?? "活跃情绪板"
+                            Task {
+                                await moodboards.addAssetsToSpecificBoard(boardID: targetBoardID, assets: items)
+                                coordinator.showToast("已加入情绪板「\(boardTitle)」(\(items.count) 项)", icon: "rectangle.3.group")
+                            }
+                        } else {
+                            library.selectedAssetIDs = Set(ids)
+                            coordinator.presentMoodboardGenerator(entry: .selection)
+                        }
+                    },
+                    onMoveToFolder: { ids, folderID in
+                        Task {
+                            await library.moveAssets(ids, toFolderID: folderID)
+                            let targetName = folderID.flatMap { fid in library.folders.first(where: { $0.id == fid })?.name } ?? "收件箱"
+                            coordinator.showToast("已移动 \(ids.count) 项至「\(targetName)」", icon: "folder")
+                        }
+                    },
+                    onTogglePinOffline: { ids, pinned in
+                        Task {
+                            await library.togglePinOffline(ids: ids, pinned: pinned)
+                            coordinator.showToast(
+                                pinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
+                                icon: pinned ? "arrow.down.circle.fill" : "icloud"
+                            )
+                        }
+                    },
+                    onRetagAssets: { ids in
+                        triggerAIRetagging(for: ids)
+                    },
+                    onTrashAssets: { ids in
+                        Task {
+                            await library.trashAssets(ids)
+                            coordinator.showToast("已移至废纸篓 (\(ids.count) 项)", icon: "trash")
+                        }
+                    },
+                    onRestoreAssets: { ids in
+                        Task {
+                            await library.restoreAssets(ids)
+                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward")
+                        }
+                    },
+                    onPermanentlyDeleteAssets: { ids in
+                        Task {
+                            await library.permanentlyDeleteAssets(ids)
+                            coordinator.showToast("已彻底删除 \(ids.count) 项素材", icon: "trash.slash")
+                        }
                     },
                     onExtractSocialMedia: { postAsset, attachment, idx in
                         Task {
@@ -1862,7 +1937,7 @@ public struct MainWindowView: View {
                         Text("情绪板创作台")
                             .font(.system(size: 22, weight: .semibold))
                             .tracking(-0.3)
-                        Text("单源引用素材库 · 随时无缝切换自动排版与自由白板")
+                        Text("单源引用素材库 · 无限自由画布与智能灵感策展")
                             .font(.system(size: 12.5))
                             .foregroundStyle(.secondary)
                     }
@@ -2005,7 +2080,7 @@ public struct MainWindowView: View {
                         .foregroundStyle(.secondary)
                     Text("·")
                         .foregroundStyle(.tertiary)
-                    Text(board.mode.isAutoEditorial ? "自动排版" : "自由画布")
+                    Text("自由画布")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                     Spacer()

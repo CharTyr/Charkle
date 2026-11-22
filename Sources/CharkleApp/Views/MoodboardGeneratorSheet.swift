@@ -24,7 +24,6 @@ public struct MoodboardGeneratorSheet: View {
     @State private var colorTolerance: Double = 26.0
     @State private var preferredCount: Int = 10
     @State private var layoutStyle: EditorialStyle = .magazine
-    @State private var useFreeformLayout: Bool = false
     @State private var includeCuratorNotes: Bool = true
     @State private var autoFocusDetailCrop: Bool = false
 
@@ -365,7 +364,7 @@ public struct MoodboardGeneratorSheet: View {
                         .font(.system(size: 12, weight: .semibold))
 
                     HStack {
-                        Text("排版节奏")
+                        Text("初始构图节奏")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -373,20 +372,6 @@ public struct MoodboardGeneratorSheet: View {
                             ForEach(EditorialStyle.allCases, id: \.self) { style in
                                 Text(style.localizedLabel).tag(style)
                             }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .frame(width: 204)
-                    }
-
-                    HStack {
-                        Text("画布模式")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Picker("", selection: $useFreeformLayout) {
-                            Text("自动排版").tag(false)
-                            Text("自由拼贴").tag(true)
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
@@ -936,7 +921,7 @@ public struct MoodboardGeneratorSheet: View {
             preferredCount: preferredCount,
             candidateCount: 24,
             layoutStyle: layoutStyle,
-            useFreeformLayout: useFreeformLayout,
+            useFreeformLayout: true,
             includeCuratorNotes: includeCuratorNotes,
             excludedAssetIDs: Array(excludedAssetIDs),
             lockedAssetIDs: Array(lockedAssetIDs),

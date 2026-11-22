@@ -70,6 +70,53 @@ struct PerformanceAndNotchTests {
             notchWidth: 204,
             notchHeight: 37
         ))
+
+        // Fixed max-size NSPanel accommodates both compact and full-gallery states without window resize,
+        // while strictCardRect tracks the live visible capsule bounds inside the oversized panel.
+        let maxPanelBounds = NSRect(x: 0, y: 0, width: 980 + 24 + 96, height: 580 + 56)
+        let compactHit = NotchDropGeometry.strictCardRect(panelBounds: maxPanelBounds, bodyWidth: 636, cardHeight: 330)
+        let fullHit = NotchDropGeometry.strictCardRect(panelBounds: maxPanelBounds, bodyWidth: 980, cardHeight: 580)
+        #expect(compactHit.maxY == maxPanelBounds.maxY)
+        #expect(fullHit.maxY == maxPanelBounds.maxY)
+        #expect(!compactHit.contains(NSPoint(x: maxPanelBounds.midX, y: maxPanelBounds.maxY - 400)))
+        #expect(fullHit.contains(NSPoint(x: maxPanelBounds.midX, y: maxPanelBounds.maxY - 400)))
+    }
+
+    @Test("Hover muted preview eligibility & local-only cachedOriginalURL never trigger cloud downloads")
+    @MainActor
+    func hoverMediaPreviewEligibilityAndLocalLookup() async throws {
+        let videoAsset = AssetRecord(title: "Clip", fileName: "clip.mp4", mediaKind: .video)
+        let gifAsset = AssetRecord(title: "Loop", fileName: "loop.gif", mediaKind: .animatedImage)
+        let imageAsset = AssetRecord(title: "Photo", fileName: "photo.jpg", mediaKind: .image)
+        let socialVideoPost = AssetRecord(
+            title: "Tweet",
+            fileName: "tweet.png",
+            mediaKind: .video,
+            richMetadata: AssetRichMetadata(socialPost: SocialPostMetadata(
+                platform: .x,
+                authorName: "Author",
+                authorHandle: "author",
+                bodyText: "hello",
+                originalURL: "https://x.com/author/status/123"
+            ))
+        )
+
+        #expect(HoverMediaPreviewLayerController.supportsHoverPlayback(videoAsset))
+        #expect(HoverMediaPreviewLayerController.supportsHoverPlayback(gifAsset))
+        #expect(!HoverMediaPreviewLayerController.supportsHoverPlayback(imageAsset))
+        #expect(!HoverMediaPreviewLayerController.supportsHoverPlayback(socialVideoPost))
+
+        let directory = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = try BackendFixture.makeEngine(directory)
+        let created = try await engine.ingest(
+            [.imageData(try BackendFixture.artwork("#3D5A80"), suggestedName: "local.png", sourceURL: nil)],
+            targetFolderID: nil,
+            targetBoardID: nil
+        )
+        let local = try #require(created.first)
+        #expect(engine.cachedOriginalURL(for: local) != nil)
+        #expect(engine.cachedOriginalURL(for: videoAsset) == nil)
     }
 
     // MARK: - 2. Virtualized Masonry O(log N) Visibility & Scale Performance

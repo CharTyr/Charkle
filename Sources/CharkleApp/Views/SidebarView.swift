@@ -1021,7 +1021,7 @@ public struct SidebarView: View {
             isTargeted: Binding(
                 get: { dropTargetedSlot == slotKey },
                 set: { targeted in
-                    withAnimation(.easeOut(duration: 0.12)) {
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
                         if targeted {
                             dropTargetedSlot = slotKey
                         } else if dropTargetedSlot == slotKey {

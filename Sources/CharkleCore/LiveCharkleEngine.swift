@@ -880,6 +880,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         media.thumbnailURL(for: assetID, tier: tier) ?? media.thumbnailURL(for: assetID, tier: .grid520)
     }
 
+    public nonisolated func cachedOriginalURL(for asset: AssetRecord) -> URL? {
+        media.cachedOriginal(for: asset)
+    }
+
     public func thumbnailURL(for assetID: UUID, tier: ThumbnailTier) async -> URL? {
         cachedThumbnailURL(for: assetID, tier: tier)
     }

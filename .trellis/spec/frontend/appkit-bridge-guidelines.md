@@ -88,3 +88,15 @@ ThumbnailCard(item)
   - Always pass `animate: !reduceMotion` in `handleInteractiveZoom` (never gate on `abs(scaleFactor - 1.0) > 0.04`, which suppresses `⌘ + scroll` animations!).
   - Chain interruptible GPU `CABasicAnimation`s (`MasonryTileLayer.animateFrameTransition`) starting from `layer.presentation()?.frame ?? oldRect` with Kubai Tip 011 ease-out `CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)`.
   - Guard `updateNSView` round-trips with `isRecentPinch = (CFAbsoluteTimeGetCurrent() - lastInteractiveZoomAt) < 0.26` so syncing `callbacks.onZoomColumnWidth` back to SwiftUI never cancels the active GPU animation.
+
+---
+
+## Scenario 6: Fixed Max-Size Notch `NSPanel`, Event Bridges & Hover Muted Preview
+
+- **Never call `panel.setFrame` during Notch expand / collapse / compact↔full-gallery morph (`NotchShelfController.swift`, `NotchShelfState.swift`)**:
+  - Size the fixed transparent `NSPanel` ONCE per screen to `maxPanelShapeWidth × maxPanelCardHeight` (plus shadow margins) and keep `activeHitRectProvider` tracking live `expandedBodyWidth × expandedCardHeight`. Pin compact and full-gallery sub-views to their own settled inner dimensions inside `.clipShape(NotchShellShape)` and put the drop shadow strictly on the pure-black background shape layer rather than the full clipped subtree.
+- **Always-fresh SwiftUI → AppKit event bridges (`StageInteractiveBridge`, `HorizontalWheelScrollRedirector` in `CanvasSupport.swift`)**:
+  - Never install an `NSEvent.addLocalMonitorForEvents` closure once in SwiftUI `.onAppear` that captures `struct View` `let` properties (`assets`, `isQuickLookPresented`, `asset`) — they go stale on view updates. Inject fresh closures on every `updateNSView` and tear down in both `dismantleNSView` and `isolated deinit`.
+  - Attach `HorizontalWheelScrollRedirector()` to horizontal thumbnail strips (`NotchShelfView`, `GalleryFilmstripView`) so standard vertical wheel scrolls horizontally without requiring `Shift` while preserving native trackpad horizontal gestures.
+- **Hover-to-play muted video & GIF preview (`HoverMediaPreview.swift`)**:
+  - Enforce a `140ms` dwell debounce, single active preview, strict local-cache-only lookup (`ThumbnailImageLoader.resolveLocalCachedOriginalURL` -> `engine.cachedOriginalURL`, never triggering cloud downloads), `AVQueuePlayer.isMuted = true`, off-main-thread `CGImageSource` GIF frame decoding, and immediate teardown on live scroll, pointer down, Quick Look open, or exit.

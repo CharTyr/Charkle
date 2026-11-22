@@ -192,6 +192,7 @@ public struct NotchShelfView: View {
 
     public var body: some View {
         let expanded = shelfState.isExpanded
+        let isFullGallery = shelfState.isFullGalleryExpanded
         let topEar = NotchShelfState.topEarRadius
         let bottomRadius: CGFloat = expanded ? NotchShelfState.bottomCornerRadius : 14
         let collapsedWidth = shelfState.physicalNotchWidth + topEar * 2
@@ -203,8 +204,6 @@ public struct NotchShelfView: View {
         VStack(spacing: 0) {
             ZStack(alignment: .top) {
                 if expanded {
-                    // Always lay out interior at its exact final target dimensions and clip strictly to the
-                    // morphing NotchShellShape so nothing ever reflows, jumps, or spills outside the black bezel.
                     expandedContent
                         .padding(.horizontal, topEar + 16)
                         .padding(.bottom, 14)
@@ -217,8 +216,14 @@ public struct NotchShelfView: View {
                 height: expanded ? targetHeight : collapsedHeight,
                 alignment: .top
             )
-            .background(Color.black)
             .clipShape(shape)
+            .background {
+                // Shadow strictly on the pure-black vector capsule rather than the full clipped
+                // subtree so CoreAnimation never re-rasterizes shadows over 50+ thumbnails per frame.
+                shape
+                    .fill(Color.black)
+                    .shadow(color: Color.black.opacity(0.42), radius: 18, y: 8)
+            }
             .overlay(
                 NotchShellRimPath(topEarRadius: topEar, bottomCornerRadius: bottomRadius)
                     .stroke(
@@ -235,18 +240,17 @@ public struct NotchShelfView: View {
                     )
                     .allowsHitTesting(false)
             )
-            .shadow(color: Color.black.opacity(0.42), radius: 18, y: 8)
             .opacity(expanded ? 1.0 : 0.0)
             .animation(
                 CharkleMotion.accessible(
-                    expanded ? CharkleMotion.gestureSpring : CharkleMotion.uiSpring,
+                    expanded ? CharkleMotion.notchMorphSpring : CharkleMotion.uiSpring,
                     reduced: reduceMotion
                 ),
                 value: expanded
             )
             .animation(
-                CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion),
-                value: shelfState.isFullGalleryExpanded
+                CharkleMotion.accessible(CharkleMotion.notchMorphSpring, reduced: reduceMotion),
+                value: isFullGallery
             )
             .animation(
                 CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion),
@@ -312,15 +316,27 @@ public struct NotchShelfView: View {
             }
             .frame(height: shelfState.topNotchBandHeight)
 
-            if shelfState.isFullGalleryExpanded {
-                fullWaterfallGalleryBody
-                    .padding(.top, 8)
-                    .transition(.opacity)
-            } else {
-                compactShelfBody
-                    .padding(.top, 8)
-                    .transition(.opacity)
+            // Pin each sub-mode to its own exact settled interior width/height so neither compact controls
+            // nor the full masonry waterfall ever reflow mid-morph while the black capsule springs smoothly.
+            let bodyTransition = CharkleMotion.originTransition(anchor: .top, scale: 0.985, reduced: reduceMotion)
+            let compactInnerW = max(300, shelfState.compactBodyWidth - 32)
+            let compactInnerH = max(160, shelfState.compactCardHeight - shelfState.topNotchBandHeight - 22)
+            let fullInnerW = max(400, shelfState.fullGalleryBodyWidth - 32)
+            let fullInnerH = max(240, shelfState.fullGalleryCardHeight - shelfState.topNotchBandHeight - 22)
+
+            ZStack(alignment: .top) {
+                if shelfState.isFullGalleryExpanded {
+                    fullWaterfallGalleryBody
+                        .frame(width: fullInnerW, height: fullInnerH, alignment: .top)
+                        .transition(bodyTransition)
+                } else {
+                    compactShelfBody
+                        .frame(width: compactInnerW, height: compactInnerH, alignment: .top)
+                        .transition(bodyTransition)
+                }
             }
+            .padding(.top, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
 
@@ -407,6 +423,7 @@ public struct NotchShelfView: View {
                         }
                         .padding(.vertical, 2)
                     }
+                    .background(HorizontalWheelScrollRedirector())
                     .frame(height: 110)
                     .clipped()
                 }
@@ -467,7 +484,7 @@ public struct NotchShelfView: View {
                 onToggleFullGallery(true)
             }
             .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.14)) {
+                withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
                     hoveredRecentID = hovering ? asset.id : (hoveredRecentID == asset.id ? nil : hoveredRecentID)
                 }
             }

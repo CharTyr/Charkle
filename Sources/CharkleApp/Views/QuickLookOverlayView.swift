@@ -31,7 +31,6 @@ public struct QuickLookOverlayView: View {
     @State private var flipVertical: Bool = false
     @State private var stageViewportSize: CGSize = CGSize(width: 960, height: 640)
     @State private var showSecondaryControls: Bool = false
-    @State private var keyMonitor: Any?
     @State private var confirmPermanentDelete: Bool = false
     @State private var isSidePanelOpen: Bool = false
     @State private var sidePanelTab: SidePanelTab = .similar
@@ -128,7 +127,7 @@ public struct QuickLookOverlayView: View {
                     Spacer()
 
                     Button {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
                             isSidePanelOpen.toggle()
                         }
                     } label: {
@@ -172,6 +171,23 @@ public struct QuickLookOverlayView: View {
                                         stageViewportSize = newSize
                                     }
                                 }
+                        }
+                        .overlay {
+                            StageInteractiveBridge(
+                                isWheelZoomEnabled: supportsVisualTransform && !confirmPermanentDelete,
+                                onWheelZoom: { factor in
+                                    let next = max(0.5, min(5.0, zoomScale * factor))
+                                    zoomScale = next
+                                    if next <= 1.01 {
+                                        panOffset = .zero
+                                        panStartOffset = .zero
+                                    }
+                                },
+                                onKeyDown: { event in
+                                    handleQuickLookKeyDown(event)
+                                }
+                            )
+                            .allowsHitTesting(false)
                         }
 
                     if isSidePanelOpen {
@@ -227,14 +243,10 @@ public struct QuickLookOverlayView: View {
             if reduceMotion {
                 showSecondaryControls = true
             } else {
-                withAnimation(CharkleMotion.settleStrong.delay(0.11)) {
+                withAnimation(CharkleMotion.enterSm.delay(0.04)) {
                     showSecondaryControls = true
                 }
             }
-            installKeyMonitor()
-        }
-        .onDisappear {
-            removeKeyMonitor()
         }
         .alert("彻底删除此素材？", isPresented: $confirmPermanentDelete) {
             Button("取消", role: .cancel) {}
@@ -833,62 +845,69 @@ public struct QuickLookOverlayView: View {
         }
     }
 
-    private func installKeyMonitor() {
-        guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if confirmPermanentDelete { return event }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let isUnmodified = flags.isEmpty || flags == .numericPad || flags == .function
-            let isShiftOnly = flags == .shift
+    private func handleQuickLookKeyDown(_ event: NSEvent) -> NSEvent? {
+        if confirmPermanentDelete { return event }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isUnmodified = flags.isEmpty || flags == .numericPad || flags == .function
+        let isShiftOnly = flags == .shift
 
-            if isUnmodified {
-                switch event.keyCode {
-                case 49, 53: // Space or Escape -> close Quick Look immediately
-                    if event.isARepeat { return nil }
-                    onClose()
-                    return nil
-                case 123: // Left Arrow
-                    onStep(-1)
-                    return nil
-                case 124: // Right Arrow
-                    onStep(1)
-                    return nil
-                default:
-                    break
-                }
+        if isUnmodified {
+            switch event.keyCode {
+            case 49, 53: // Space or Escape -> close Quick Look immediately
+                if event.isARepeat { return nil }
+                onClose()
+                return nil
+            case 123: // Left Arrow
+                onStep(-1)
+                return nil
+            case 124: // Right Arrow
+                onStep(1)
+                return nil
+            default:
+                break
             }
+        }
 
-            if supportsVisualTransform, let chars = event.charactersIgnoringModifiers?.lowercased() {
-                if isUnmodified && chars == "r" {
-                    rotatePreview(by: 90)
-                    return nil
-                }
-                if isShiftOnly && chars == "r" {
-                    rotatePreview(by: -90)
-                    return nil
-                }
-                if isShiftOnly && chars == "h" {
-                    toggleFlip(horizontal: true)
-                    return nil
-                }
-                if isShiftOnly && chars == "v" {
-                    toggleFlip(horizontal: false)
-                    return nil
-                }
-                if isUnmodified && chars == "0" {
-                    resetViewTransform()
-                    return nil
-                }
+        if supportsVisualTransform, let chars = event.charactersIgnoringModifiers?.lowercased() {
+            if isUnmodified && chars == "r" {
+                rotatePreview(by: 90)
+                return nil
             }
-            return event
+            if isShiftOnly && chars == "r" {
+                rotatePreview(by: -90)
+                return nil
+            }
+            if isShiftOnly && chars == "h" {
+                toggleFlip(horizontal: true)
+                return nil
+            }
+            if isShiftOnly && chars == "v" {
+                toggleFlip(horizontal: false)
+                return nil
+            }
+            if isUnmodified && chars == "0" {
+                resetViewTransform()
+                return nil
+            }
+            if (isUnmodified || isShiftOnly) && (chars == "+" || chars == "=") {
+                withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
+                    zoomScale = min(5.0, zoomScale * 1.25)
+                }
+                return nil
+            }
+            if isUnmodified && chars == "-" {
+                withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
+                    let next = max(0.5, zoomScale * 0.8)
+                    zoomScale = next
+                    if next <= 1.01 {
+                        panOffset = .zero
+                        panStartOffset = .zero
+                    }
+                }
+                return nil
+            }
         }
-    }
-
-    private func removeKeyMonitor() {
-        if let keyMonitor {
-            NSEvent.removeMonitor(keyMonitor)
-            self.keyMonitor = nil
-        }
+        return event
     }
 
     private func hudIconButton(_ systemName: String, help: String, isActive: Bool = false, action: @escaping () -> Void) -> some View {
@@ -928,44 +947,77 @@ public struct QuickLookOverlayView: View {
 
 // MARK: - Native AppKit / AVKit / PDFKit Quick Look Media Bridges
 
-private struct AnimatedGIFPlayerView: NSViewRepresentable {
+struct AnimatedGIFPlayerView: NSViewRepresentable {
     let url: URL
+
+    final class Coordinator {
+        var currentURL: URL?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSView(context: Context) -> NSImageView {
         let view = NSImageView()
         view.animates = true
         view.imageScaling = .scaleProportionallyDown
         view.image = NSImage(contentsOf: url)
+        context.coordinator.currentURL = url
         return view
     }
 
     func updateNSView(_ nsView: NSImageView, context: Context) {
+        guard context.coordinator.currentURL != url else { return }
+        context.coordinator.currentURL = url
         nsView.image = NSImage(contentsOf: url)
         nsView.animates = true
     }
 }
 
-private struct QuickLookVideoPlayerView: NSViewRepresentable {
+struct QuickLookVideoPlayerView: NSViewRepresentable {
     let url: URL
+    var autoPlay: Bool = true
+
+    final class Coordinator {
+        var currentURL: URL?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .floating
         let player = AVPlayer(url: url)
         view.player = player
-        player.play()
+        context.coordinator.currentURL = url
+        if autoPlay {
+            player.play()
+        }
         return view
     }
 
-    func updateNSView(_ nsView: AVPlayerView, context: Context) {}
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        guard context.coordinator.currentURL != url else { return }
+        context.coordinator.currentURL = url
+        nsView.player?.pause()
+        let player = AVPlayer(url: url)
+        nsView.player = player
+        if autoPlay {
+            player.play()
+        }
+    }
 
-    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
         nsView.player?.pause()
         nsView.player = nil
+        coordinator.currentURL = nil
     }
 }
 
-private struct QuickLookPDFView: NSViewRepresentable {
+struct QuickLookPDFView: NSViewRepresentable {
     let url: URL
 
     func makeNSView(context: Context) -> PDFView {
@@ -983,7 +1035,7 @@ private struct QuickLookPDFView: NSViewRepresentable {
     }
 }
 
-private struct QuickLookAudioStudioCard: View {
+struct QuickLookAudioStudioCard: View {
     @Environment(\.colorScheme) private var colorScheme
 
     let asset: AssetRecord

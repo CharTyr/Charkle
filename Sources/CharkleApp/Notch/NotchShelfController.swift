@@ -272,6 +272,8 @@ public final class NotchShelfController {
     private var cachedDragPBIsInternal: Bool = false
     private var cachedDragPBHasDroppable: Bool = false
     private var lastAnchoredScreenFrame: NSRect = .zero
+    private var lastSensorScreenFrame: NSRect = .zero
+    private var lastObservedNotchEnabled: Bool = true
     private var screenObserver: (any NSObjectProtocol)?
     private var keyMonitor: Any?
 
@@ -366,8 +368,8 @@ public final class NotchShelfController {
         shelfState.isExpanded = false
         shelfState.isFullGalleryExpanded = false
         shelfState.isPinnedOpen = false
-        anchorFixedPanelIfScreenChanged()
-        // Immediately let pointer events pass through to underlying apps even during spring settle
+        // Immediately let pointer events pass through to underlying apps even during spring settle.
+        // Never resize the backing NSPanel here so the closing spring never clips or hitches.
         panel?.ignoresMouseEvents = true
     }
 
@@ -376,7 +378,6 @@ public final class NotchShelfController {
         if expanded {
             shelfState.isPinnedOpen = true
         }
-        anchorFixedPanelIfScreenChanged()
     }
 
     /// Shows an active in-progress spinner in the Notch Shelf (e.g. while downloading X post media).
@@ -451,8 +452,8 @@ public final class NotchShelfController {
             }
         )
 
-        let initialPanelWidth = shelfState.expandedShapeWidth + Self.shadowHorizontalMargin * 2
-        let initialPanelHeight = shelfState.expandedCardHeight + Self.shadowBottomMargin
+        let initialPanelWidth = shelfState.maxPanelShapeWidth + Self.shadowHorizontalMargin * 2
+        let initialPanelHeight = shelfState.maxPanelCardHeight + Self.shadowBottomMargin
 
         let hosting = NotchDropHostingView(rootView: rootView)
         hosting.frame = NSRect(x: 0, y: 0, width: initialPanelWidth, height: initialPanelHeight)
@@ -555,8 +556,8 @@ public final class NotchShelfController {
             shelfState.activeScreenHeight = screen.frame.height
         }
 
-        let panelWidth = shelfState.expandedShapeWidth + Self.shadowHorizontalMargin * 2
-        let panelHeight = shelfState.expandedCardHeight + Self.shadowBottomMargin
+        let panelWidth = shelfState.maxPanelShapeWidth + Self.shadowHorizontalMargin * 2
+        let panelHeight = shelfState.maxPanelCardHeight + Self.shadowBottomMargin
         let targetFrame = NSRect(
             x: screen.frame.midX - panelWidth / 2.0,
             y: screen.frame.maxY - panelHeight,
@@ -616,13 +617,22 @@ public final class NotchShelfController {
         sensor.orderFrontRegardless()
     }
 
-    private func repositionSensorWindow() {
+    private func repositionSensorWindow(for precomputedScreen: NSScreen? = nil) {
         guard let sensorWindow else { return }
-        guard coordinator.notchShelfEnabled else {
-            sensorWindow.orderOut(nil)
+        let enabled = coordinator.notchShelfEnabled
+        guard enabled else {
+            if lastObservedNotchEnabled || sensorWindow.isVisible {
+                lastObservedNotchEnabled = false
+                sensorWindow.orderOut(nil)
+            }
             return
         }
-        let screen = screenUnderCursor()
+        let screen = precomputedScreen ?? screenUnderCursor()
+        if lastObservedNotchEnabled, lastSensorScreenFrame == screen.frame, sensorWindow.isVisible {
+            return
+        }
+        lastObservedNotchEnabled = true
+        lastSensorScreenFrame = screen.frame
         let metrics = notchMetrics(for: screen)
         let sensorWidth: CGFloat = metrics.hasPhysicalNotch ? (metrics.notchWidth + 12) : 210
         let sensorHeight: CGFloat = metrics.hasPhysicalNotch ? max(metrics.notchHeight, 34) : 6
@@ -643,11 +653,13 @@ public final class NotchShelfController {
     // MARK: - System Drag Pasteboard Watcher (Mission Control Avoidance)
 
     private func startCursorAndDragWatcher() {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollCursorAndDragState()
             }
         }
+        timer.tolerance = 0.04
+        pollTimer = timer
     }
 
     private func syncDropTargetedState() {
@@ -685,15 +697,26 @@ public final class NotchShelfController {
     }
 
     private func pollCursorAndDragState() {
-        repositionSensorWindow()
-        guard coordinator.notchShelfEnabled else {
-            if shelfState.isExpanded { collapse() }
+        let enabled = coordinator.notchShelfEnabled
+        let isMouseButtonDown = NSEvent.pressedMouseButtons != 0
+
+        // Fast idle exit when collapsed, no button pressed, and hover-open disabled:
+        // avoids iterating NSScreen.screens or computing notch metrics 10x/sec while idle.
+        if !shelfState.isExpanded,
+           enabled == lastObservedNotchEnabled,
+           !isMouseButtonDown,
+           !coordinator.notchHoverTriggerEnabled {
             return
         }
 
         let loc = NSEvent.mouseLocation
-        let screen = screenUnderCursor()
-        let isMouseButtonDown = NSEvent.pressedMouseButtons != 0
+        let screen = screenUnderCursor(at: loc)
+        repositionSensorWindow(for: screen)
+        guard enabled else {
+            if shelfState.isExpanded { collapse() }
+            return
+        }
+
         let metrics = notchMetrics(for: screen)
 
         let inDragTrigger = NotchDropGeometry.isPointInDragTriggerZone(
@@ -727,8 +750,10 @@ public final class NotchShelfController {
             return
         }
 
-        // Keep panel frame synced if the user toggled between compact & full waterfall mode
-        anchorFixedPanelIfScreenChanged()
+        // Re-anchor only if the user moved across displays (never resizes on compact <-> full toggle).
+        if lastAnchoredScreenFrame.midX != screen.frame.midX || lastAnchoredScreenFrame.maxY != screen.frame.maxY {
+            anchorFixedPanelIfScreenChanged()
+        }
 
         guard let panelFrame = panel?.frame else { return }
         let strictCardRect = NotchDropGeometry.strictScreenCardRect(
@@ -765,8 +790,8 @@ public final class NotchShelfController {
         }
     }
 
-    private func screenUnderCursor() -> NSScreen {
-        let loc = NSEvent.mouseLocation
+    private func screenUnderCursor(at location: NSPoint? = nil) -> NSScreen {
+        let loc = location ?? NSEvent.mouseLocation
         return NSScreen.screens.first(where: { $0.frame.contains(loc) })
             ?? NSScreen.main
             ?? NSScreen.screens[0]

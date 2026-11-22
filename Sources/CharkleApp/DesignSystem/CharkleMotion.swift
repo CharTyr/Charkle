@@ -6,44 +6,50 @@ import SwiftUI
 /// Every transition in Charkle uses one of these role-mapped curves rather than default `.easeInOut`
 /// or `.linear` for spatial movement.
 public enum CharkleMotion {
-    // MARK: - Role-Mapped Timing Curves (Kubai Tip 011)
+    // MARK: - Role-Mapped Timing Curves (Kubai Tip 011 + Emil Kowalski Motion Craft)
 
-    /// `--ease-out` (0, 0, 0.58, 1) — Small UI entering (toasts, tooltips, menus, popovers).
-    public static let enterSm = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.18)
+    /// Strong `ease-out` (0.23, 1, 0.32, 1) — Small UI entering (toasts, tooltips, menus, popovers).
+    public static let enterSm = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.18)
 
-    /// `--ease-out` (0, 0, 0.58, 1) — Medium UI entering (inspector panels, dialogs, command palette).
-    public static let enterMd = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.26)
+    /// Strong `ease-out` (0.23, 1, 0.32, 1) — Medium UI entering (inspector panels, dialogs).
+    public static let enterMd = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.24)
 
-    /// `--ease-out` (0, 0, 0.58, 1) — Large surfaces entering (sheets, moodboard studio transitions).
-    public static let enterLg = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.36)
+    /// Strong `ease-out` (0.23, 1, 0.32, 1) — Large surfaces entering (sheets, studio transitions; strictly ≤300ms).
+    public static let enterLg = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.28)
 
-    /// `--ease-out-strong` (0.22, 1, 0.36, 1) — Crisp active pills, toggles, selected filter chips, stepped reveals.
-    public static let settleStrong = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)
+    /// Crisp `ease-out-strong` (0.22, 1, 0.36, 1) — Active pills, toggles, selected filter chips, stepped reveals.
+    public static let settleStrong = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.22)
 
-    /// `--ease-in` (0.42, 0, 1, 1) — Small UI leaving (shorter than enter!).
-    public static let exitSm = Animation.timingCurve(0.42, 0, 1, 1, duration: 0.14)
+    /// Crisp `ease-out` (0.23, 1, 0.32, 1) — Small UI leaving (instant start, shorter than enter — never ease-in).
+    public static let exitSm = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.13)
 
-    /// `--ease-in` (0.42, 0, 1, 1) — Medium UI leaving (always shorter than enter!).
-    public static let exitMd = Animation.timingCurve(0.42, 0, 1, 1, duration: 0.19)
+    /// Crisp `ease-out` (0.23, 1, 0.32, 1) — Medium UI leaving (instant start, always shorter than enter).
+    public static let exitMd = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.17)
 
-    /// `--ease-in-out` (0.42, 0, 0.58, 1) — Elements already on screen moving/resizing (segmented indicator, reflow).
-    public static let moveOnScreen = Animation.timingCurve(0.42, 0, 0.58, 1, duration: 0.26)
+    /// Confident `ease-in-out` (0.77, 0, 0.175, 1) — Elements already on screen moving/resizing (segmented indicator, reflow).
+    public static let moveOnScreen = Animation.timingCurve(0.77, 0, 0.175, 1, duration: 0.24)
+
+    /// Drawer & side-panel slide curve (0.32, 0.72, 0, 1) — Apple/Vaul sheet & inspector curve.
+    public static let drawerEase = Animation.timingCurve(0.32, 0.72, 0, 1, duration: 0.30)
 
     /// `--ease-overshoot` (0.34, 1.56, 0.64, 1) — Tiny ≤64px confirmations ONLY (checkbox tick, rating star, badge pop).
-    public static let microOvershoot = Animation.timingCurve(0.34, 1.56, 0.64, 1, duration: 0.28)
+    public static let microOvershoot = Animation.timingCurve(0.34, 1.56, 0.64, 1, duration: 0.26)
 
-    /// Momentum spring for drag release, Notch Shelf morphing, Quick Look zoom-to-card, Auto↔Freeform reflow.
-    public static let gestureSpring = Animation.spring(response: 0.34, dampingFraction: 0.86)
+    /// Fluid interruptible hardware morph spring for MacBook Notch Shelf expand / collapse / full-gallery reveal.
+    public static let notchMorphSpring = Animation.spring(duration: 0.42, bounce: 0.08)
+
+    /// Momentum spring for drag release, Quick Look zoom-to-card, and physical gesture hand-off.
+    public static let gestureSpring = Animation.spring(duration: 0.36, bounce: 0.10)
 
     /// Critically damped UI spring for responsive state morphs without bounce.
-    public static let uiSpring = Animation.spring(response: 0.32, dampingFraction: 1.0)
+    public static let uiSpring = Animation.spring(duration: 0.28, bounce: 0.0)
 
     /// Fast micro-tactile hover & pointer-down feedback (never animate layout on hover!).
-    public static let hoverPress = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.12)
+    public static let hoverPress = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
 
-    /// Popover origin enter (`0.16s`) and exit (`0.11s`) per Kubai Popover Origin note.
-    public static let popoverEnter = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.16)
-    public static let popoverExit = Animation.timingCurve(0.42, 0, 1, 1, duration: 0.11)
+    /// Popover origin enter (`0.16s`) and exit (`0.11s`) — both ease-out so exits respond immediately.
+    public static let popoverEnter = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.16)
+    public static let popoverExit = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.11)
 
     /// Reduced-motion clean cross-fade (`0.15s`).
     public static let reducedMotionFade = Animation.easeOut(duration: 0.15)

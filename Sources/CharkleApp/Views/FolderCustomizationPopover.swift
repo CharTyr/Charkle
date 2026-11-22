@@ -6,6 +6,7 @@ import SwiftUI
 /// categorized SF Symbol gallery, and Emoji badge switcher.
 public struct FolderCustomizationPopover: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public let folder: FolderRecord
     public let onUpdate: (_ colorHex: String?, _ customSymbol: String?) -> Void
@@ -104,8 +105,8 @@ public struct FolderCustomizationPopover: View {
                     size: 58,
                     isActive: false
                 )
-                .animation(.easeOut(duration: 0.16), value: selectedColorHex)
-                .animation(.easeOut(duration: 0.16), value: selectedSymbol)
+                .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: selectedColorHex)
+                .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: selectedSymbol)
 
                 Text(folder.name)
                     .font(.system(size: 12.5, weight: .semibold))

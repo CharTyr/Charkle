@@ -121,8 +121,6 @@ public struct MoodboardCanvasView: View {
     public let heroNamespace: Namespace.ID
     public let callbacks: MoodboardCanvasCallbacks
 
-    @Namespace private var dockModeNamespace
-
     // Canvas viewport & tool state
     @State private var viewportSize: CGSize = CGSize(width: 1080, height: 760)
     @State private var activeTool: MoodboardTool = .select
@@ -178,11 +176,6 @@ public struct MoodboardCanvasView: View {
     @State private var rotationStartDegrees: Double = 0
     @State private var rotationDragStartAngle: Double = 0
     @State private var liveRotationDegrees: Double?
-
-    // Auto Editorial Kubai Tip 005 drag-to-reorder ripple state
-    @State private var editorialDraggingID: UUID?
-    @State private var editorialDragTranslation: CGSize = .zero
-    @State private var editorialTargetOrderIndex: Int?
 
     // Connector creation & label editing
     @State private var pendingConnectorSource: (nodeID: UUID, anchor: ConnectorAnchor, startWorld: CGPoint)?
@@ -240,14 +233,10 @@ public struct MoodboardCanvasView: View {
         self.callbacks = callbacks
     }
 
-    private var isAutoEditorial: Bool {
-        document.mode.isAutoEditorial
-    }
-
-    private var autoConfig: AutoLayoutConfig {
+    private var showTopPaletteStrip: Bool {
         switch document.mode {
-        case .autoEditorial(let cfg): cfg
-        case .freeform: AutoLayoutConfig()
+        case .autoEditorial(let cfg): cfg.showPaletteStrip
+        case .freeform: true
         }
     }
 
@@ -260,15 +249,11 @@ public struct MoodboardCanvasView: View {
                     clearCanvasSelection()
                 }
 
-            if isAutoEditorial {
-                autoEditorialStage
-            } else {
-                freeformInfiniteStage
-            }
+            freeformInfiniteStage
 
             // Top floating Board Palette Strip (cleanly positioned below main floating search/header)
             VStack {
-                if autoConfig.showPaletteStrip && !document.extractedPalette.isEmpty {
+                if showTopPaletteStrip && !document.extractedPalette.isEmpty {
                     BoardPaletteHeaderStrip(
                         colors: document.extractedPalette,
                         onCopyHex: callbacks.onCopyColorHex,
@@ -281,32 +266,30 @@ public struct MoodboardCanvasView: View {
             }
 
             // Bottom-Right Freeform Zoom Controls (isolated leaf view — only observes camera.zoom)
-            if !isAutoEditorial {
-                VStack {
+            VStack {
+                Spacer()
+                HStack {
                     Spacer()
-                    HStack {
-                        Spacer()
-                        FreeformZoomControlsPill(
-                            camera: camera,
-                            reduceMotion: reduceMotion,
-                            onZoomStep: { factor in
-                                applyZoom(factor: factor, anchorScreenPoint: CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5))
-                                persistCameraViewport()
-                            },
-                            onResetZoom: {
-                                withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
-                                    camera.setZoom(1.0)
-                                }
-                                persistCameraViewport()
-                            },
-                            onFitBoard: {
-                                fitBoardToScreen()
+                    FreeformZoomControlsPill(
+                        camera: camera,
+                        reduceMotion: reduceMotion,
+                        onZoomStep: { factor in
+                            applyZoom(factor: factor, anchorScreenPoint: CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5))
+                            persistCameraViewport()
+                        },
+                        onResetZoom: {
+                            withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
+                                camera.setZoom(1.0)
                             }
-                        )
-                    }
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 20)
+                            persistCameraViewport()
+                        },
+                        onFitBoard: {
+                            fitBoardToScreen()
+                        }
+                    )
                 }
+                .padding(.trailing, 20)
+                .padding(.bottom, 20)
             }
 
             // Bottom-Center Floating Liquid Glass Transform Pill (when nodes selected) + Tool Dock
@@ -344,12 +327,14 @@ public struct MoodboardCanvasView: View {
         }
         .onAppear {
             syncCameraFromDocument()
+            ensureFreeformModeIfLegacy()
         }
         .onChange(of: document.id) { _, _ in
             selectedNodeIDs.removeAll()
             selectedConnectorID = nil
             activeTool = .select
             syncCameraFromDocument()
+            ensureFreeformModeIfLegacy()
         }
         .onDrop(of: [.fileURL, .url, .image, .plainText], isTargeted: $isDropTargeted) { providers, location in
             handleCanvasDrop(providers: providers, screenLocation: location)
@@ -359,12 +344,6 @@ public struct MoodboardCanvasView: View {
         .onKeyPress(.escape) {
             if pendingConnectorSource != nil {
                 pendingConnectorSource = nil
-                return .handled
-            }
-            if editorialDraggingID != nil {
-                editorialDraggingID = nil
-                editorialDragTranslation = .zero
-                editorialTargetOrderIndex = nil
                 return .handled
             }
             if activeTool != .select {
@@ -425,7 +404,7 @@ public struct MoodboardCanvasView: View {
                     return .handled
                 }
             }
-            guard !isAutoEditorial, press.modifiers.isEmpty else { return .ignored }
+            guard press.modifiers.isEmpty else { return .ignored }
             switch lower {
             case "v": activeTool = .select; return .handled
             case "h": activeTool = .pan; return .handled
@@ -461,215 +440,7 @@ public struct MoodboardCanvasView: View {
         }
     }
 
-    // MARK: - 1. Auto Editorial Mode (With Kubai Tip 005 Drag-to-Reorder Ripple)
-
-    private var autoEditorialStage: some View {
-        let topPad: Double = (autoConfig.showPaletteStrip && !document.extractedPalette.isEmpty) ? 68 : 24
-        let solved = EditorialLayoutSolver.solve(
-            nodes: document.nodes,
-            config: autoConfig,
-            containerWidth: Double(max(420, viewportSize.width)),
-            assetsByID: assetsByID,
-            padding: 28
-        )
-        let orderedIDs = solved.orderedNodeIDs
-        let draggingIdx = editorialDraggingID.flatMap { orderedIDs.firstIndex(of: $0) }
-
-        return ScrollView(.vertical) {
-            ZStack(alignment: .topLeading) {
-                // Never feed `viewportSize` back into ScrollView content width/height,
-                // otherwise macOS ScrollView layout/scrollbar toggles oscillate with `onGeometryChange`.
-                Color.clear
-                    .frame(maxWidth: .infinity)
-                    .frame(height: max(solved.contentSize.height + topPad, 1))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        clearCanvasSelection()
-                    }
-                    .contextMenu {
-                        Button {
-                            callbacks.onPasteIntoBoard(nil)
-                        } label: {
-                            Label("粘贴到情绪板", systemImage: "doc.on.clipboard")
-                        }
-                    }
-
-                if document.nodes.isEmpty {
-                    emptyBoardPlaceholder
-                        .frame(maxWidth: .infinity, minHeight: 420)
-                } else {
-                    // Insertion drop line (Kubai 005: faint 15%-ink line growing from center)
-                    if let targetIdx = editorialTargetOrderIndex,
-                       let dragIdx = draggingIdx,
-                       targetIdx != dragIdx,
-                       targetIdx < orderedIDs.count,
-                       let targetRect = solved.frames[orderedIDs[targetIdx]] {
-                        Capsule(style: .continuous)
-                            .fill(Color.primary.opacity(0.18))
-                            .frame(width: 3, height: max(48, CGFloat(targetRect.height) - 16))
-                            .position(
-                                x: CGFloat(targetRect.minX) - 7,
-                                y: CGFloat(targetRect.midY + topPad)
-                            )
-                            .transition(.scale(scale: 0.2, anchor: .center).combined(with: .opacity))
-                            .allowsHitTesting(false)
-                    }
-
-                    ForEach(Array(orderedIDs.enumerated()), id: \.element) { orderIdx, nodeID in
-                        if let node = document.nodes.first(where: { $0.id == nodeID }),
-                           let rect = solved.frames[nodeID] {
-                            let isDragging = editorialDraggingID == nodeID
-                            let rippleX = computeEditorialRippleX(
-                                itemIndex: orderIdx,
-                                draggingIndex: draggingIdx,
-                                targetIndex: editorialTargetOrderIndex
-                            )
-                            let rippleDelay = computeEditorialRippleDelay(
-                                itemIndex: orderIdx,
-                                targetIndex: editorialTargetOrderIndex
-                            )
-
-                            renderNodeBody(node: node, isAutoMode: true)
-                                .frame(width: CGFloat(rect.width), height: CGFloat(rect.height))
-                                .rotationEffect(.degrees(effectiveRotation(for: node)))
-                                .contentShape(Rectangle())
-                                .simultaneousGesture(
-                                    TapGesture(count: 1).onEnded {
-                                        let mods = NSEvent.modifierFlags
-                                        if mods.contains(.command) || mods.contains(.shift) {
-                                            if selectedNodeIDs.contains(node.id) {
-                                                selectedNodeIDs.remove(node.id)
-                                            } else {
-                                                selectedNodeIDs.insert(node.id)
-                                            }
-                                        } else {
-                                            selectedNodeIDs = [node.id]
-                                        }
-                                        selectedConnectorID = nil
-                                    }
-                                )
-                                .gesture(
-                                    editorialReorderGesture(
-                                        nodeID: nodeID,
-                                        solved: solved,
-                                        topPad: topPad
-                                    )
-                                )
-                                .scaleEffect(isDragging ? 0.94 : 1.0)
-                                .offset(
-                                    x: isDragging ? editorialDragTranslation.width : rippleX,
-                                    y: isDragging ? editorialDragTranslation.height : 0
-                                )
-                                .zIndex(isDragging ? 500 : Double(node.zIndex))
-                                .position(
-                                    x: CGFloat(rect.midX),
-                                    y: CGFloat(rect.midY + topPad)
-                                )
-                                .animation(
-                                    isDragging
-                                        ? nil
-                                        : CanvasMotion.accessible(
-                                            CanvasMotion.gestureSpring.delay(rippleDelay),
-                                            reduced: reduceMotion
-                                        ),
-                                    value: rippleX
-                                )
-                                .animation(
-                                    CanvasMotion.accessible(CanvasMotion.moveOnScreen, reduced: reduceMotion),
-                                    value: rect
-                                )
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, minHeight: max(solved.contentSize.height + topPad, 1), alignment: .topLeading)
-        }
-        .canvasScrollEdgeSoft(for: .top)
-        .overlay {
-            EditorialPanBridge(
-                onSpaceQuickTap: {
-                    _ = openQuickLookForSelectedNode()
-                }
-            )
-            .allowsHitTesting(false)
-        }
-    }
-
-    private func computeEditorialRippleX(itemIndex: Int, draggingIndex: Int?, targetIndex: Int?) -> CGFloat {
-        guard !reduceMotion,
-              let draggingIndex,
-              let targetIndex,
-              draggingIndex != targetIndex,
-              itemIndex != draggingIndex else { return 0 }
-        let dist = abs(itemIndex - targetIndex)
-        guard dist <= 5 else { return 0 }
-        let magnitude = CanvasMotion.rippleOffset(distance: dist, amplitude: 8)
-        return itemIndex < targetIndex ? -magnitude : magnitude
-    }
-
-    private func computeEditorialRippleDelay(itemIndex: Int, targetIndex: Int?) -> Double {
-        guard !reduceMotion, let targetIndex else { return 0 }
-        return CanvasMotion.rippleDelay(distance: abs(itemIndex - targetIndex))
-    }
-
-    private func editorialReorderGesture(
-        nodeID: UUID,
-        solved: EditorialLayoutResult,
-        topPad: Double
-    ) -> some Gesture {
-        DragGesture(minimumDistance: 8)
-            .onChanged { value in
-                if editorialDraggingID == nil {
-                    editorialDraggingID = nodeID
-                }
-                editorialDragTranslation = value.translation
-                guard let originRect = solved.frames[nodeID] else { return }
-                let probe = CGPoint(
-                    x: CGFloat(originRect.midX) + value.translation.width,
-                    y: CGFloat(originRect.midY + topPad) + value.translation.height
-                )
-                // Find closest editorial slot
-                var closestIdx: Int?
-                var bestDist = CGFloat.greatestFiniteMagnitude
-                for (idx, candidateID) in solved.orderedNodeIDs.enumerated() {
-                    guard let r = solved.frames[candidateID] else { continue }
-                    let d = hypot(probe.x - CGFloat(r.midX), probe.y - CGFloat(r.midY + topPad))
-                    if d < bestDist {
-                        bestDist = d
-                        closestIdx = idx
-                    }
-                }
-                editorialTargetOrderIndex = closestIdx
-            }
-            .onEnded { _ in
-                defer {
-                    withAnimation(CanvasMotion.accessible(CanvasMotion.gestureSpring, reduced: reduceMotion)) {
-                        editorialDraggingID = nil
-                        editorialDragTranslation = .zero
-                        editorialTargetOrderIndex = nil
-                    }
-                }
-                guard let fromIdx = solved.orderedNodeIDs.firstIndex(of: nodeID),
-                      let toIdx = editorialTargetOrderIndex,
-                      fromIdx != toIdx else { return }
-
-                var reordered = solved.orderedNodeIDs
-                let moved = reordered.remove(at: fromIdx)
-                reordered.insert(moved, at: min(toIdx, reordered.count))
-
-                var nextDoc = document
-                for (order, id) in reordered.enumerated() {
-                    if let idx = nextDoc.nodes.firstIndex(where: { $0.id == id }) {
-                        nextDoc.nodes[idx].editorialOrder = order
-                    }
-                }
-                withAnimation(CanvasMotion.accessible(CanvasMotion.gestureSpring, reduced: reduceMotion)) {
-                    callbacks.onCommitDocument(nextDoc)
-                }
-            }
-    }
-
-    // MARK: - 2. Freeform Infinite Canvas Mode (GPU-Transformed 120fps Stage)
+    // MARK: - Freeform Infinite Canvas Mode (GPU-Transformed 120fps Stage)
 
     private var freeformInfiniteStage: some View {
         let sortedNodes = document.nodes.sorted { lhs, rhs in
@@ -1135,7 +906,7 @@ public struct MoodboardCanvasView: View {
     }
 
     private func defaultPasteLocation() -> BoardPoint? {
-        isAutoEditorial ? nil : BoardPoint(camera.center)
+        BoardPoint(camera.center)
     }
 
     private func effectiveNodeIDs(including anchorNodeID: UUID) -> Set<UUID> {
@@ -1735,111 +1506,68 @@ public struct MoodboardCanvasView: View {
     private var floatingToolDock: some View {
         CanvasGlassContainer(spacing: 10) {
             HStack(spacing: 8) {
-                // Mode Segmented Pill (Auto Editorial <-> Freeform) with travelling indicator
-                HStack(spacing: 2) {
-                    dockModeButton(
-                        title: "自动排版",
-                        systemIcon: "rectangle.3.group",
-                        isActive: isAutoEditorial
-                    ) {
-                        switchToAutoEditorial()
+                // Freeform Tool Buttons
+                ForEach(MoodboardTool.allCases, id: \.self) { tool in
+                    let active = activeTool == tool
+                    Button {
+                        withAnimation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion)) {
+                            activeTool = tool
+                        }
+                    } label: {
+                        Image(systemName: toolIcon(tool))
+                            .font(.system(size: 13, weight: active ? .semibold : .regular))
+                            .foregroundStyle(active ? Color.accentColor : .primary.opacity(0.84))
+                            .frame(width: 30, height: 30)
+                            .background(
+                                active ? Color.accentColor.opacity(0.14) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            )
                     }
-                    dockModeButton(
-                        title: "自由画布",
-                        systemIcon: "scribble.variable",
-                        isActive: !isAutoEditorial
-                    ) {
-                        switchToFreeform()
-                    }
+                    .buttonStyle(.plain)
+                    .help("\(tool.label) (\(tool.shortcutHint))")
                 }
-                .padding(3)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-                dockDivider
-
-                if isAutoEditorial {
-                    // Editorial Style Picker
-                    ForEach(EditorialStyle.allCases, id: \.self) { style in
-                        let active = autoConfig.style == style
-                        Button {
-                            updateAutoConfig { $0.style = style }
-                        } label: {
-                            Text(style.localizedLabel)
-                                .font(.system(size: 11.5, weight: active ? .semibold : .medium))
-                                .foregroundStyle(active ? .primary : .secondary)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 6)
-                                .background(
-                                    active ? Color.primary.opacity(0.10) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } else {
-                    // Freeform Tool Buttons
-                    ForEach(MoodboardTool.allCases, id: \.self) { tool in
-                        let active = activeTool == tool
-                        Button {
-                            withAnimation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion)) {
-                                activeTool = tool
-                            }
-                        } label: {
-                            Image(systemName: toolIcon(tool))
-                                .font(.system(size: 13, weight: active ? .semibold : .regular))
-                                .foregroundStyle(active ? Color.accentColor : .primary.opacity(0.84))
-                                .frame(width: 30, height: 30)
-                                .background(
-                                    active ? Color.accentColor.opacity(0.14) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .help("\(tool.label) (\(tool.shortcutHint))")
-                    }
-
-                    // Contextual Ink Pen swatch & width controls
-                    if activeTool == .pen {
-                        dockDivider
-                        HStack(spacing: 4) {
-                            ForEach(Self.calmInkSwatches, id: \.hex) { swatch in
-                                Button {
-                                    inkColorHex = swatch.hex
-                                } label: {
-                                    Circle()
-                                        .fill(Color(charkleHex: swatch.hex))
-                                        .frame(width: 14, height: 14)
-                                        .overlay(
-                                            Circle().strokeBorder(
-                                                inkColorHex == swatch.hex ? Color.accentColor : Color.white.opacity(0.45),
-                                                lineWidth: inkColorHex == swatch.hex ? 2 : 0.75
-                                            )
+                // Contextual Ink Pen swatch & width controls
+                if activeTool == .pen {
+                    dockDivider
+                    HStack(spacing: 4) {
+                        ForEach(Self.calmInkSwatches, id: \.hex) { swatch in
+                            Button {
+                                inkColorHex = swatch.hex
+                            } label: {
+                                Circle()
+                                    .fill(Color(charkleHex: swatch.hex))
+                                    .frame(width: 14, height: 14)
+                                    .overlay(
+                                        Circle().strokeBorder(
+                                            inkColorHex == swatch.hex ? Color.accentColor : Color.white.opacity(0.45),
+                                            lineWidth: inkColorHex == swatch.hex ? 2 : 0.75
                                         )
-                                }
-                                .buttonStyle(.plain)
-                                .help(swatch.name)
+                                    )
                             }
-                            Picker("", selection: $inkWidth) {
-                                Text("细").tag(2.0)
-                                Text("中").tag(3.5)
-                                Text("粗").tag(6.5)
-                            }
-                            .pickerStyle(.segmented)
-                            .frame(width: 84)
+                            .buttonStyle(.plain)
+                            .help(swatch.name)
                         }
-                    }
-
-                    // Contextual Connector style toggle
-                    if activeTool == .connector {
-                        dockDivider
-                        Picker("", selection: $connectorStyle) {
-                            Text("曲线").tag(ConnectorStyle.curved)
-                            Text("折线").tag(ConnectorStyle.elbow)
-                            Text("直线").tag(ConnectorStyle.straight)
+                        Picker("", selection: $inkWidth) {
+                            Text("细").tag(2.0)
+                            Text("中").tag(3.5)
+                            Text("粗").tag(6.5)
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 120)
+                        .frame(width: 84)
                     }
+                }
+
+                // Contextual Connector style toggle
+                if activeTool == .connector {
+                    dockDivider
+                    Picker("", selection: $connectorStyle) {
+                        Text("曲线").tag(ConnectorStyle.curved)
+                        Text("折线").tag(ConnectorStyle.elbow)
+                        Text("直线").tag(ConnectorStyle.straight)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 120)
                 }
 
                 dockDivider
@@ -1855,10 +1583,8 @@ public struct MoodboardCanvasView: View {
                     addPaletteStripNode()
                 }
 
-                if !isAutoEditorial {
-                    dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版") {
-                        tidyFreeformNodes()
-                    }
+                dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版") {
+                    tidyFreeformNodes()
                 }
 
                 dockDivider
@@ -1916,29 +1642,6 @@ public struct MoodboardCanvasView: View {
             .padding(8)
             .canvasLiquidGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-    }
-
-    private func dockModeButton(title: String, systemIcon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemIcon)
-                    .font(.system(size: 11.5, weight: .medium))
-                Text(title)
-                    .font(.system(size: 11.5, weight: isActive ? .semibold : .medium))
-            }
-            .foregroundStyle(isActive ? .primary : .secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background {
-                if isActive {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(CanvasSurface.elevated(for: colorScheme))
-                        .shadow(color: Color.black.opacity(0.08), radius: 3, y: 1)
-                        .matchedGeometryEffect(id: "board-mode-pill", in: dockModeNamespace)
-                }
-            }
-        }
-        .buttonStyle(.plain)
     }
 
     private func dockIconButton(
@@ -2165,37 +1868,17 @@ public struct MoodboardCanvasView: View {
 
     // MARK: - Document Mutations
 
-    private func switchToFreeform() {
-        guard isAutoEditorial else { return }
+    /// Silently upgrades any legacy `.autoEditorial` board into `.freeform` on open so all boards
+    /// live natively on the unified freeform canvas without losing existing placement.
+    private func ensureFreeformModeIfLegacy() {
+        guard document.mode.isAutoEditorial else { return }
         let frozen = EditorialLayoutSolver.freezeIntoFreeform(
             document: document,
-            containerWidth: Double(max(420, viewportSize.width)),
+            containerWidth: Double(max(640, viewportSize.width)),
             assetsByID: assetsByID
         )
-        withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
-            camera.set(center: frozen.viewportCenter.cgPoint, zoom: CGFloat(frozen.viewportZoom))
-            callbacks.onCommitDocument(frozen)
-        }
-    }
-
-    private func switchToAutoEditorial() {
-        guard !isAutoEditorial else { return }
-        var nextDoc = document
-        nextDoc.mode = .autoEditorial(AutoLayoutConfig())
-        activeTool = .select
-        withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
-            callbacks.onCommitDocument(nextDoc)
-        }
-    }
-
-    private func updateAutoConfig(_ mutate: (inout AutoLayoutConfig) -> Void) {
-        var cfg = autoConfig
-        mutate(&cfg)
-        var nextDoc = document
-        nextDoc.mode = .autoEditorial(cfg)
-        withAnimation(CanvasMotion.accessible(CanvasMotion.moveOnScreen, reduced: reduceMotion)) {
-            callbacks.onCommitDocument(nextDoc)
-        }
+        camera.set(center: frozen.viewportCenter.cgPoint, zoom: CGFloat(frozen.viewportZoom))
+        callbacks.onCommitDocument(frozen)
     }
 
     private func tidyFreeformNodes() {
@@ -2425,7 +2108,7 @@ public struct MoodboardCanvasView: View {
 
     private func addNoteNode() {
         var nextDoc = document
-        let spawn = isAutoEditorial ? CGPoint(x: 80, y: 80) : camera.center
+        let spawn = camera.center
         let node = BoardNode(
             kind: .note(title: "灵感便签", text: "记录构图、材质、光影或排版思路…", style: .warm, fontSize: 14),
             frame: BoardRect(x: Double(spawn.x - 130), y: Double(spawn.y - 90), width: 260, height: 180),
@@ -2439,14 +2122,6 @@ public struct MoodboardCanvasView: View {
 
     private func addGroupFrameNode() {
         var nextDoc = document
-        if isAutoEditorial {
-            nextDoc = EditorialLayoutSolver.freezeIntoFreeform(
-                document: nextDoc,
-                containerWidth: Double(max(420, viewportSize.width)),
-                assetsByID: assetsByID
-            )
-            camera.set(center: nextDoc.viewportCenter.cgPoint, zoom: CGFloat(nextDoc.viewportZoom))
-        }
         let spawn = camera.center
         let node = BoardNode(
             kind: .groupFrame(title: "构图参考区", tint: .sand),
@@ -2461,7 +2136,7 @@ public struct MoodboardCanvasView: View {
 
     private func addPaletteStripNode() {
         var nextDoc = document
-        let spawn = isAutoEditorial ? CGPoint(x: 80, y: 80) : camera.center
+        let spawn = camera.center
         let colors = nextDoc.extractedPalette.isEmpty
             ? [LabColor.fromHex("#C8B8A6"), LabColor.fromHex("#5C6B73"), LabColor.fromHex("#253237"), LabColor.fromHex("#E0D6CC")]
             : nextDoc.extractedPalette
@@ -2554,7 +2229,7 @@ public struct MoodboardCanvasView: View {
 
     private func handleCanvasDrop(providers: [NSItemProvider], screenLocation: CGPoint) -> Bool {
         guard !providers.isEmpty else { return false }
-        let dropPoint: BoardPoint? = isAutoEditorial ? nil : BoardPoint(screenToWorld(screenLocation))
+        let dropPoint: BoardPoint? = BoardPoint(screenToWorld(screenLocation))
 
         Task {
             var internalIDs: [UUID] = []
@@ -2848,165 +2523,6 @@ private final class CanvasInputCatcherView: NSView {
 
     isolated deinit {
         teardownMonitors()
-    }
-}
-
-/// Supports middle-mouse drag & hold-Space drag scrolling in Auto Editorial mode as well,
-/// scrolling the nearest underlying `NSScrollView` 1:1 with hand cursor feedback.
-private struct EditorialPanBridge: NSViewRepresentable {
-    let onSpaceQuickTap: () -> Void
-
-    func makeNSView(context: Context) -> EditorialPanCatcherView {
-        let view = EditorialPanCatcherView()
-        view.onSpaceQuickTap = onSpaceQuickTap
-        return view
-    }
-
-    func updateNSView(_ nsView: EditorialPanCatcherView, context: Context) {
-        nsView.onSpaceQuickTap = onSpaceQuickTap
-    }
-}
-
-private final class EditorialPanCatcherView: NSView {
-    var onSpaceQuickTap: (() -> Void)?
-    private var monitor: Any?
-    private var resignObserver: NSObjectProtocol?
-    private var isMiddleDragging = false
-    private var isSpaceHeld = false
-    private var isSpaceDragging = false
-    private var didDragDuringSpace = false
-    private var lastPoint: NSPoint = .zero
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        teardown()
-        guard let hostWindow = window else { return }
-
-        resignObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResignKeyNotification,
-            object: hostWindow,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.resetState()
-            }
-        }
-
-        let mask: NSEvent.EventTypeMask = [
-            .otherMouseDown, .otherMouseDragged, .otherMouseUp,
-            .keyDown, .keyUp,
-            .leftMouseDown, .leftMouseDragged, .leftMouseUp
-        ]
-        monitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-            guard let self, let win = self.window, event.window === win else { return event }
-            return self.handleEvent(event, in: win)
-        }
-    }
-
-    private func isInside(_ windowPoint: NSPoint) -> Bool {
-        bounds.contains(convert(windowPoint, from: nil))
-    }
-
-    private func findScrollView(in view: NSView?) -> NSScrollView? {
-        guard let view else { return nil }
-        if let sv = view as? NSScrollView { return sv }
-        for sub in view.subviews {
-            if let hit = findScrollView(in: sub) { return hit }
-        }
-        return nil
-    }
-
-    private func scrollUnderlying(byDY dy: CGFloat) {
-        guard let sv = enclosingScrollView ?? findScrollView(in: superview) else { return }
-        let clip = sv.contentView
-        guard let doc = sv.documentView else { return }
-        var origin = clip.bounds.origin
-        let maxY = max(0, doc.bounds.height - clip.bounds.height)
-        origin.y = max(0, min(maxY, origin.y - dy))
-        clip.scroll(to: origin)
-        sv.reflectScrolledClipView(clip)
-    }
-
-    private func handleEvent(_ event: NSEvent, in window: NSWindow) -> NSEvent? {
-        switch event.type {
-        case .otherMouseDown:
-            guard event.buttonNumber == 2, isInside(event.locationInWindow) else { return event }
-            isMiddleDragging = true
-            lastPoint = event.locationInWindow
-            NSCursor.closedHand.set()
-            return nil
-        case .otherMouseDragged:
-            guard isMiddleDragging else { return event }
-            let cur = event.locationInWindow
-            let dy = -(cur.y - lastPoint.y)
-            lastPoint = cur
-            scrollUnderlying(byDY: dy)
-            return nil
-        case .otherMouseUp:
-            guard isMiddleDragging else { return event }
-            isMiddleDragging = false
-            (isSpaceHeld ? NSCursor.openHand : NSCursor.arrow).set()
-            return nil
-        case .keyDown:
-            guard event.keyCode == 49, window.attachedSheet == nil,
-                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-                  !(window.firstResponder is NSTextView),
-                  !(window.firstResponder is NSTextField) else { return event }
-            if !isSpaceHeld {
-                isSpaceHeld = true
-                didDragDuringSpace = false
-                NSCursor.openHand.set()
-            }
-            return nil
-        case .keyUp:
-            guard event.keyCode == 49, isSpaceHeld else { return event }
-            let quickTap = !didDragDuringSpace
-            isSpaceHeld = false
-            isSpaceDragging = false
-            didDragDuringSpace = false
-            NSCursor.arrow.set()
-            if quickTap { onSpaceQuickTap?() }
-            return nil
-        case .leftMouseDown:
-            guard isSpaceHeld, isInside(event.locationInWindow) else { return event }
-            isSpaceDragging = true
-            didDragDuringSpace = true
-            lastPoint = event.locationInWindow
-            NSCursor.closedHand.set()
-            return nil
-        case .leftMouseDragged:
-            guard isSpaceDragging else { return event }
-            let cur = event.locationInWindow
-            let dy = -(cur.y - lastPoint.y)
-            lastPoint = cur
-            scrollUnderlying(byDY: dy)
-            return nil
-        case .leftMouseUp:
-            guard isSpaceDragging else { return event }
-            isSpaceDragging = false
-            (isSpaceHeld ? NSCursor.openHand : NSCursor.arrow).set()
-            return nil
-        default:
-            return event
-        }
-    }
-
-    private func resetState() {
-        isMiddleDragging = false
-        isSpaceHeld = false
-        isSpaceDragging = false
-        didDragDuringSpace = false
-        NSCursor.arrow.set()
-    }
-
-    private func teardown() {
-        if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
-        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver); self.resignObserver = nil }
-        resetState()
-    }
-
-    isolated deinit {
-        teardown()
     }
 }
 

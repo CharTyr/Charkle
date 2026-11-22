@@ -44,7 +44,6 @@ public struct JumpAnywhereView: View {
     @State private var query: String = ""
     @State private var matches: [QuickJumpMatch] = []
     @State private var selectedIndex: Int = 0
-    @State private var isPresentedVisual: Bool = false
     @FocusState private var isSearchFocused: Bool
 
     public init(
@@ -73,7 +72,7 @@ public struct JumpAnywhereView: View {
         ZStack(alignment: .top) {
             Color.black.opacity(colorScheme == .dark ? 0.38 : 0.22)
                 .ignoresSafeArea()
-                .onTapGesture { dismissWithAnimation() }
+                .onTapGesture { onClose() }
 
             VStack(spacing: 0) {
                 // Search Input Header
@@ -179,11 +178,9 @@ public struct JumpAnywhereView: View {
             }
             .frame(width: 580)
             .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
-            .popoverOriginScale(isPresented: isPresentedVisual, anchor: .top, reducedMotion: reduceMotion)
             .padding(.top, 92)
         }
         .onAppear {
-            isPresentedVisual = true
             isSearchFocused = true
             runSearch()
         }
@@ -192,7 +189,7 @@ public struct JumpAnywhereView: View {
             runSearch()
         }
         .onKeyPress(.escape) {
-            dismissWithAnimation()
+            onClose()
             return .handled
         }
         .onKeyPress(.upArrow) {
@@ -249,14 +246,6 @@ public struct JumpAnywhereView: View {
         } else {
             guard selectedIndex < matches.count else { return }
             onSelectMatch(matches[selectedIndex])
-            onClose()
-        }
-    }
-
-    private func dismissWithAnimation() {
-        isPresentedVisual = false
-        Task {
-            try? await Task.sleep(for: .milliseconds(reduceMotion ? 10 : 100))
             onClose()
         }
     }

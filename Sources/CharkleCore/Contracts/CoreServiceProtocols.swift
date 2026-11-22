@@ -40,6 +40,7 @@ public protocol CharkleEngineProtocol: Sendable {
 
     // MARK: - Media & Cache
     nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL?
+    nonisolated func cachedOriginalURL(for asset: AssetRecord) -> URL?
     func thumbnailURL(for assetID: UUID, tier: ThumbnailTier) async -> URL?
     func originalURL(for assetID: UUID) async throws -> URL
     func cacheStats() async -> CacheStats
@@ -119,6 +120,10 @@ public protocol CharkleEngineProtocol: Sendable {
 
 public extension CharkleEngineProtocol {
     nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL? {
+        nil
+    }
+
+    nonisolated func cachedOriginalURL(for asset: AssetRecord) -> URL? {
         nil
     }
 

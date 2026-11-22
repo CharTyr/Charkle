@@ -117,6 +117,19 @@ public final class ThumbnailImageLoader {
         await loadBox(for: assetID, tier: tier)?.cgImage
     }
 
+    /// Resolves an already-cached local original file URL off the main thread without ever
+    /// triggering cloud downloads — safe for 120Hz hover playback previews.
+    public func resolveLocalCachedOriginalURL(for asset: AssetRecord) async -> URL? {
+        let engine = self.engine
+        return await Self.lookupCachedOriginal(engine: engine, asset: asset)
+    }
+
+    @concurrent
+    private static func lookupCachedOriginal(engine: any CharkleEngineProtocol, asset: AssetRecord) async -> URL? {
+        guard !Task.isCancelled else { return nil }
+        return engine.cachedOriginalURL(for: asset)
+    }
+
     /// Low-priority lookahead prefetching so upcoming cards during scrolling hit `cachedCGImage`
     /// synchronously with zero decode stall.
     public func prefetch(assetIDs: [UUID], tier: ThumbnailTier = .grid520) {
@@ -253,8 +266,10 @@ public struct AssetThumbnailSurface: View {
     public let isHovered: Bool
     public let crop: NormalizedCropRect?
     public let contentMode: ContentMode
+    public let enableHoverPlayback: Bool
 
     @State private var loadedImage: NSImage?
+    @State private var isPointerHovering: Bool = false
 
     public init(
         asset: AssetRecord,
@@ -263,7 +278,8 @@ public struct AssetThumbnailSurface: View {
         cornerRadius: CGFloat = 12,
         isHovered: Bool = false,
         crop: NormalizedCropRect? = nil,
-        contentMode: ContentMode = .fill
+        contentMode: ContentMode = .fill,
+        enableHoverPlayback: Bool = true
     ) {
         self.asset = asset
         self.loader = loader
@@ -272,22 +288,53 @@ public struct AssetThumbnailSurface: View {
         self.isHovered = isHovered
         self.crop = crop
         self.contentMode = contentMode
+        self.enableHoverPlayback = enableHoverPlayback
+    }
+
+    private var shouldPlayHoverPreview: Bool {
+        enableHoverPlayback
+            && crop == nil
+            && HoverMediaPreviewLayerController.supportsHoverPlayback(asset)
+            && (isHovered || isPointerHovering)
     }
 
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let displayImage = loadedImage ?? loader.cachedImage(for: asset.id, tier: tier)
+        let canHoverPlay = enableHoverPlayback && crop == nil && HoverMediaPreviewLayerController.supportsHoverPlayback(asset)
         Color.clear
             .overlay {
                 if let image = displayImage {
                     croppedImageView(image)
                 } else {
-                    ProceduralMediaFallbackCard(asset: asset, isHovered: isHovered)
+                    ProceduralMediaFallbackCard(asset: asset, isHovered: isHovered || isPointerHovering)
+                }
+            }
+            .overlay {
+                if shouldPlayHoverPreview {
+                    HoverMediaPreviewOverlay(
+                        asset: asset,
+                        loader: loader,
+                        cornerRadius: cornerRadius,
+                        fillMode: contentMode == .fill
+                    )
+                    .allowsHitTesting(false)
                 }
             }
             .clipped()
             .clipShape(shape)
             .contentShape(shape)
+            .onHover { hovering in
+                guard canHoverPlay else { return }
+                if isPointerHovering != hovering {
+                    isPointerHovering = hovering
+                }
+            }
+            .onDisappear {
+                if isPointerHovering {
+                    isPointerHovering = false
+                }
+            }
             .task(id: "\(asset.id.uuidString)-\(tier.rawValue)-\(loader.invalidationVersion)") {
                 if let cached = loader.cachedImage(for: asset.id, tier: tier) {
                     if loadedImage !== cached {

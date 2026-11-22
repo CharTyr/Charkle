@@ -6,12 +6,13 @@
 
 ## Motion & Performance Budgets
 
-1. **Kubai Motion Tokens (`CharkleMotion.swift` / `CanvasMotion` in `CanvasSupport.swift`)**:
+1. **Motion Craft Tokens (`CharkleMotion.swift` / `CanvasMotion` in `CanvasSupport.swift`)**:
    - Always wrap SwiftUI animations with `CharkleMotion.accessible(..., reduced: reduceMotion)` using `@Environment(\.accessibilityReduceMotion)`.
+   - Never use `ease-in` for UI exits (`exitSm`/`exitMd`/`popoverExit` use strong `ease-out (0.23, 1, 0.32, 1)` shorter than enter); use `drawerEase (0.32, 0.72, 0, 1)` for sidebar/inspector/QuickLook drawers, `notchMorphSpring (0.42s, bounce: 0.08)` for MacBook Notch morphs, and zero-delay snap for high-frequency `⌘J` command palette (`JumpAnywhereView`).
    - Never animate during live scroll (`VirtualizedMasonryView.isLiveScrolling == true`); use interruptible GPU `CABasicAnimation` (`cubic-bezier(0.22, 1, 0.36, 1)`) only for discrete layout changes, zoom, and mode switches.
 2. **Idle CPU Budget**:
    - Settled idle CPU of `dist/Charkle.app` MUST stay `< 1%`.
-   - Never attach continuous `TimelineView` / high-frequency `Timer` loops when the window or Notch Shelf is idle. The Notch cursor watcher (`0.10s`) must perform only O(1) coordinate & cached `changeCount` checks when collapsed.
+   - Never attach continuous `TimelineView` / high-frequency `Timer` loops when the window or Notch Shelf is idle. The Notch cursor watcher (`0.10s`, `tolerance = 0.04`) exits immediately when collapsed with no button pressed and hover-open disabled, and caches screen/pasteboard metrics by `changeCount` and screen frame.
 3. **Masonry O(log N) Parity**:
    - Both `.verticalMasonry` and `.horizontalJustified` snapshots MUST keep `visibleItems(minY:maxY:)` and `intersectingIDs(in:)` strictly consistent with brute-force bounds checks under `50 ms` across 10,000 items (`PerformanceAndNotchTests`, `UpgradeFeaturesTests`).
 

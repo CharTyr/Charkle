@@ -1409,6 +1409,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     private var activeTiles: [UUID: MasonryTileLayer] = [:]
     private var reusePool: [MasonryTileLayer] = []
     private let tilesContainerLayer = CALayer()
+    private let hoverMediaPreview = HoverMediaPreviewLayerController()
     private let hoverOverlayLayer = MasonryHoverOverlayLayer()
     private let marqueeLayer = CALayer()
 
@@ -1451,6 +1452,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         tilesContainerLayer.actions = MasonryStaticLayerAssets.noImplicitActions
         root.addSublayer(tilesContainerLayer)
+        root.addSublayer(hoverMediaPreview.containerLayer)
         root.addSublayer(hoverOverlayLayer.layer)
 
         marqueeLayer.actions = MasonryStaticLayerAssets.noImplicitActions
@@ -1480,7 +1482,11 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        handleViewportFrameChanged()
+        if window == nil {
+            hoverMediaPreview.stop()
+        } else {
+            handleViewportFrameChanged()
+        }
     }
 
     override func viewDidChangeBackingProperties() {
@@ -1539,6 +1545,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         self.topInset = topInset
         self.bottomInset = bottomInset
         self.activeQuickLookID = activeQuickLookID
+        if activeQuickLookID != nil {
+            hoverMediaPreview.stop()
+        }
         self.isDarkMode = isDarkMode
         self.reduceMotion = reduceMotion
         self.callbacks = callbacks
@@ -1623,6 +1632,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         if scrolling {
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
+            hoverMediaPreview.stop()
             for tile in activeTiles.values {
                 tile.stripLayoutAnimations()
             }
@@ -1752,7 +1762,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             }
         }
 
-        // Keep hover overlay aligned if still visible and not live-scrolling
+        // Keep hover overlay & muted hover media preview aligned if still visible and not live-scrolling
         if !isLiveScrolling, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
             hoverOverlayLayer.show(
                 for: asset,
@@ -1761,8 +1771,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                 isDark: isDarkMode,
                 scale: scale
             )
+            syncHoverMediaPreview(for: asset, in: tile.frame, scale: scale)
         } else if hoveredAssetID != nil {
             hoverOverlayLayer.hide()
+            hoverMediaPreview.stop()
         }
 
         CATransaction.commit()
@@ -1820,26 +1832,50 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         return nil
     }
 
+    private func syncHoverMediaPreview(for asset: AssetRecord?, in frame: CGRect?, scale: CGFloat) {
+        guard !isLiveScrolling,
+              activeQuickLookID == nil,
+              let asset,
+              let frame,
+              let loader,
+              HoverMediaPreviewLayerController.supportsHoverPlayback(asset) else {
+            hoverMediaPreview.stop()
+            return
+        }
+        hoverMediaPreview.schedulePreview(
+            for: asset,
+            in: frame,
+            cornerRadius: 12,
+            fillMode: true,
+            scale: scale,
+            loader: loader
+        )
+    }
+
     private func refreshHoverForCurrentMouseLocation() {
         guard !isLiveScrolling, let window else {
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
+            hoverMediaPreview.stop()
             return
         }
         let loc = convert(window.mouseLocationOutsideOfEventStream, from: nil)
         guard visibleRect.contains(loc), let hit = hitTestCard(at: loc) else {
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
+            hoverMediaPreview.stop()
             return
         }
         hoveredAssetID = hit.asset.id
+        let scale = currentScale
         hoverOverlayLayer.show(
             for: hit.asset,
             in: hit.frame,
             isSelected: selectedAssetIDs.contains(hit.asset.id),
             isDark: isDarkMode,
-            scale: currentScale
+            scale: scale
         )
+        syncHoverMediaPreview(for: hit.asset, in: hit.frame, scale: scale)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -1849,24 +1885,28 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             if hoveredAssetID != nil {
                 hoveredAssetID = nil
                 hoverOverlayLayer.hide()
+                hoverMediaPreview.stop()
             }
             return
         }
         if hoveredAssetID != hit.asset.id || hoverOverlayLayer.isHidden {
             hoveredAssetID = hit.asset.id
+            let scale = currentScale
             hoverOverlayLayer.show(
                 for: hit.asset,
                 in: hit.frame,
                 isSelected: selectedAssetIDs.contains(hit.asset.id),
                 isDark: isDarkMode,
-                scale: currentScale
+                scale: scale
             )
+            syncHoverMediaPreview(for: hit.asset, in: hit.frame, scale: scale)
         }
     }
 
     override func mouseExited(with event: NSEvent) {
         hoveredAssetID = nil
         hoverOverlayLayer.hide()
+        hoverMediaPreview.stop()
     }
 
     // MARK: - Selection, Double-Click, Marquee & Drag Out
@@ -1906,6 +1946,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseDown(with event: NSEvent) {
+        hoverMediaPreview.stop()
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
 

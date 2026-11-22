@@ -144,16 +144,18 @@ public nonisolated enum NotchDropGeometry {
 // MARK: - Kubai Tip 011 Motion Tokens (Canvas Layer)
 
 public enum CanvasMotion {
-    public static let enterSm = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.18)
-    public static let enterMd = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.26)
-    public static let settleStrong = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)
-    public static let exitSm = Animation.timingCurve(0.42, 0, 1, 1, duration: 0.14)
-    public static let moveOnScreen = Animation.timingCurve(0.42, 0, 0.58, 1, duration: 0.26)
-    public static let microOvershoot = Animation.timingCurve(0.34, 1.56, 0.64, 1, duration: 0.28)
-    public static let gestureSpring = Animation.spring(response: 0.34, dampingFraction: 0.86)
-    public static let uiSpring = Animation.spring(response: 0.32, dampingFraction: 1.0)
-    public static let densityResizeSpring = Animation.spring(response: 0.28, dampingFraction: 0.88)
-    public static let hoverPress = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.12)
+    public static let enterSm = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.18)
+    public static let enterMd = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.24)
+    public static let settleStrong = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.22)
+    public static let exitSm = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.13)
+    public static let moveOnScreen = Animation.timingCurve(0.77, 0, 0.175, 1, duration: 0.24)
+    public static let drawerEase = Animation.timingCurve(0.32, 0.72, 0, 1, duration: 0.30)
+    public static let microOvershoot = Animation.timingCurve(0.34, 1.56, 0.64, 1, duration: 0.26)
+    public static let notchMorphSpring = Animation.spring(duration: 0.42, bounce: 0.08)
+    public static let gestureSpring = Animation.spring(duration: 0.36, bounce: 0.10)
+    public static let uiSpring = Animation.spring(duration: 0.28, bounce: 0.0)
+    public static let densityResizeSpring = Animation.spring(duration: 0.28, bounce: 0.06)
+    public static let hoverPress = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.12)
     public static let reducedFade = Animation.easeOut(duration: 0.15)
 
     public static func accessible(_ animation: Animation, reduced: Bool) -> Animation {
@@ -368,6 +370,245 @@ public extension View {
             self.scrollEdgeEffectStyle(.soft, for: edges)
         } else {
             self
+        }
+    }
+}
+
+// MARK: - Horizontal Wheel Scroll Redirector (Normal Vertical Wheel Scrolls Horizontal Strips)
+
+/// Lightweight AppKit event monitor attached to horizontal `ScrollView`s (e.g. Notch recent strip,
+/// Gallery filmstrip) so standard vertical mouse wheel / trackpad vertical scroll effortlessly scrolls
+/// horizontally without requiring the user to hold `Shift`. Native horizontal trackpad swipes pass through untouched.
+public struct HorizontalWheelScrollRedirector: NSViewRepresentable {
+    public init() {}
+
+    public func makeNSView(context: Context) -> RedirectorNSView {
+        RedirectorNSView()
+    }
+
+    public func updateNSView(_ nsView: RedirectorNSView, context: Context) {}
+
+    public static func dismantleNSView(_ nsView: RedirectorNSView, coordinator: ()) {
+        nsView.teardown()
+    }
+
+    public final class RedirectorNSView: NSView {
+        private var scrollMonitor: Any?
+
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                installMonitorIfNeeded()
+            } else {
+                teardown()
+            }
+        }
+
+        private func installMonitorIfNeeded() {
+            guard scrollMonitor == nil else { return }
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self else { return event }
+                return self.handleScrollWheel(event)
+            }
+        }
+
+        func teardown() {
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                scrollMonitor = nil
+            }
+        }
+
+        isolated deinit {
+            teardown()
+        }
+
+        private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+            guard let hostWindow = self.window, event.window === hostWindow, !isHiddenOrHasHiddenAncestor else {
+                return event
+            }
+            // Respect Cmd-zoom shortcuts and native horizontal trackpad swipes / Shift-scroll
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if flags.contains(.command) || flags.contains(.control) {
+                return event
+            }
+            let dy = event.scrollingDeltaY
+            let dx = event.scrollingDeltaX
+            guard abs(dy) > abs(dx), abs(dy) > 0.01 else {
+                return event
+            }
+
+            let localPoint = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(localPoint) else {
+                return event
+            }
+
+            guard let scrollView = findAssociatedHorizontalScrollView(eventLocationInWindow: event.locationInWindow) else {
+                return event
+            }
+
+            let clipView = scrollView.contentView
+            let docWidth = scrollView.documentView?.frame.width ?? 0
+            let maxX = max(0, docWidth - clipView.bounds.width)
+            guard maxX > 0.5 else {
+                return nil
+            }
+
+            let step = event.hasPreciseScrollingDeltas ? dy : dy * 18.0
+            let currentOrigin = clipView.bounds.origin
+            let nextX = max(0, min(maxX, currentOrigin.x - step))
+            if abs(nextX - currentOrigin.x) > 0.01 {
+                clipView.scroll(to: NSPoint(x: nextX, y: currentOrigin.y))
+                scrollView.reflectScrolledClipView(clipView)
+            }
+            return nil
+        }
+
+        private func findAssociatedHorizontalScrollView(eventLocationInWindow: NSPoint) -> NSScrollView? {
+            if let enclosing = enclosingScrollView {
+                return enclosing
+            }
+            if let hitView = window?.contentView?.hitTest(eventLocationInWindow) {
+                var cursor: NSView? = hitView
+                while let view = cursor {
+                    if let sv = view as? NSScrollView {
+                        return sv
+                    }
+                    cursor = view.superview
+                }
+            }
+            // Fallback: inspect superview subtree (when mounted via `.background(...)` on SwiftUI ScrollView)
+            guard let parent = superview else { return nil }
+            var queue: [NSView] = parent.subviews
+            var idx = 0
+            while idx < queue.count {
+                let candidate = queue[idx]
+                idx += 1
+                if candidate === self { continue }
+                if let sv = candidate as? NSScrollView {
+                    return sv
+                }
+                queue.append(contentsOf: candidate.subviews)
+            }
+            return nil
+        }
+    }
+}
+
+// MARK: - Interactive Stage Bridge (Direct Scroll-Wheel Zoom + Always-Fresh Keyboard Monitor)
+
+/// Reusable AppKit event bridge for visual preview stages (`GalleryFilmstripView`, `QuickLookOverlayView`).
+/// Updates its closures in `updateNSView` so SwiftUI value-type state (`assets`, `isQuickLookPresented`,
+/// `supportsVisualTransform`) is NEVER captured stale, and cleans up deterministically in `dismantleNSView`/`deinit`.
+public struct StageInteractiveBridge: NSViewRepresentable {
+    public let isWheelZoomEnabled: Bool
+    public let onWheelZoom: (CGFloat) -> Void
+    public let onKeyDown: (NSEvent) -> NSEvent?
+
+    public init(
+        isWheelZoomEnabled: Bool,
+        onWheelZoom: @escaping (CGFloat) -> Void,
+        onKeyDown: @escaping (NSEvent) -> NSEvent?
+    ) {
+        self.isWheelZoomEnabled = isWheelZoomEnabled
+        self.onWheelZoom = onWheelZoom
+        self.onKeyDown = onKeyDown
+    }
+
+    public func makeNSView(context: Context) -> BridgeNSView {
+        let view = BridgeNSView()
+        view.isWheelZoomEnabled = isWheelZoomEnabled
+        view.onWheelZoom = onWheelZoom
+        view.onKeyDown = onKeyDown
+        return view
+    }
+
+    public func updateNSView(_ nsView: BridgeNSView, context: Context) {
+        nsView.isWheelZoomEnabled = isWheelZoomEnabled
+        nsView.onWheelZoom = onWheelZoom
+        nsView.onKeyDown = onKeyDown
+    }
+
+    public static func dismantleNSView(_ nsView: BridgeNSView, coordinator: ()) {
+        nsView.teardown()
+    }
+
+    public final class BridgeNSView: NSView {
+        var isWheelZoomEnabled: Bool = false
+        var onWheelZoom: ((CGFloat) -> Void)?
+        var onKeyDown: ((NSEvent) -> NSEvent?)?
+
+        private var scrollMonitor: Any?
+        private var keyMonitor: Any?
+
+        public override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                installMonitorsIfNeeded()
+            } else {
+                teardown()
+            }
+        }
+
+        private func installMonitorsIfNeeded() {
+            if scrollMonitor == nil {
+                scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                    guard let self else { return event }
+                    return self.handleScrollWheel(event)
+                }
+            }
+            if keyMonitor == nil {
+                keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self, let hostWindow = self.window, event.window === hostWindow else {
+                        return event
+                    }
+                    return self.onKeyDown?(event) ?? event
+                }
+            }
+        }
+
+        func teardown() {
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                scrollMonitor = nil
+            }
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
+        }
+
+        isolated deinit {
+            teardown()
+        }
+
+        private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+            guard isWheelZoomEnabled,
+                  let hostWindow = self.window,
+                  event.window === hostWindow,
+                  hostWindow.attachedSheet == nil,
+                  !isHiddenOrHasHiddenAncestor else {
+                return event
+            }
+            let localPoint = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(localPoint) else {
+                return event
+            }
+            let dy = event.scrollingDeltaY
+            guard abs(dy) > 0.01 else { return event }
+            // Ignore trailing trackpad momentum deceleration so zooming stops crisply where the user lifts fingers
+            if !event.momentumPhase.isEmpty {
+                return nil
+            }
+            let sensitivity: CGFloat = event.hasPreciseScrollingDeltas ? 0.0042 : 0.055
+            let clampedDelta = max(-60, min(60, dy))
+            let factor = exp(clampedDelta * sensitivity)
+            onWheelZoom?(factor)
+            return nil
         }
     }
 }
