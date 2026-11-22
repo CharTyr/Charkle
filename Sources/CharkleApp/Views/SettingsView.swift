@@ -532,7 +532,7 @@ public struct SettingsView: View {
                     shortcutRow("Space", "打开 / 关闭全媒体 Quick Look 预览")
                     shortcutRow("⌘ J", "快速跳转任意情绪板、文件夹、标签或素材")
                     shortcutRow("⇧ ⌘ S", "展开 / 收起顶部视觉与 CIELAB 色彩筛选条")
-                    shortcutRow("1 – 9", "收件箱清理台：一键归档至前 9 个 Drive 文件夹")
+                    shortcutRow("1 – 9", "收件箱清理台：一键归档至前 9 个文件夹")
                     shortcutRow("⌘ Z / ⇧ ⌘ Z", "情绪板画布完整撤销 / 重做")
                     shortcutRow("V / H / C / P / E", "自由画布切换 选择 / 抓手 / 连线 / 手绘 / 橡皮")
                 }

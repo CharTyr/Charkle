@@ -197,7 +197,7 @@ public struct SidebarView: View {
                 // Section 3: Google Drive Folders
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        sectionHeader("Google Drive 文件夹")
+                        sectionHeader("文件夹")
                         Spacer()
                         Button {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion)) {
@@ -212,7 +212,7 @@ public struct SidebarView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("新建 Drive 文件夹")
+                        .help("新建文件夹")
                     }
                     .padding(.trailing, 10)
 
