@@ -29,6 +29,7 @@ public struct MainWindowView: View {
     @State private var pendingPermanentDeleteIDs: [UUID] = []
     @State private var showCreateSubfolderPopover: Bool = false
     @State private var subfolderNameDraft: String = ""
+    @State private var showFigmaPluginGuideSheet: Bool = false
     @FocusState private var isSubfolderFieldFocused: Bool
 
     private static let filterColorPresets: [String] = [
@@ -252,6 +253,9 @@ public struct MainWindowView: View {
                 moodboards: moodboards,
                 syncAndAI: syncAndAI
             )
+        }
+        .sheet(isPresented: $showFigmaPluginGuideSheet) {
+            figmaPluginGuideSheet
         }
         .alert(
             pendingPermanentDeleteIDs.count == library.assets.count && coordinator.selectedDestination == .trash && pendingPermanentDeleteIDs.count > 1
@@ -1722,6 +1726,12 @@ public struct MainWindowView: View {
                     },
                     onSaveExportedImage: { format, options in
                         saveCurrentBoardImage(format: format, options: options)
+                    },
+                    onExportFigmaBundle: { options in
+                        exportCurrentBoardToFigmaBundle(options: options)
+                    },
+                    onOpenFigmaPluginGuide: {
+                        showFigmaPluginGuideSheet = true
                     }
                 )
             )
@@ -1818,6 +1828,132 @@ public struct MainWindowView: View {
                 coordinator.showToast("已导出 2× 图片至 \(url.lastPathComponent)", icon: "checkmark.circle.fill", tone: .success)
             } catch {
                 coordinator.showToast("导出失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
+            }
+        }
+    }
+
+    private func exportCurrentBoardToFigmaBundle(options: MoodboardExportOptions) {
+        guard let board = moodboards.activeBoard else { return }
+        let panel = NSSavePanel()
+        panel.title = "导出到 Figma / FigJam（可编辑独立图层）"
+        panel.message = "保存为 .charkleboard 文件后，在 Figma / FigJam 中运行「Charkle → Figma Bridge」插件导入，即可保留独立图片、原图像素、便签、分组、色卡与连线。"
+        let safeTitle = board.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Charkle情绪板" : board.title
+        panel.nameFieldStringValue = "\(safeTitle).charkleboard"
+        panel.allowedContentTypes = [UTType(filenameExtension: "charkleboard") ?? .zip]
+        panel.allowsOtherFileTypes = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let targetURL = url.pathExtension.isEmpty ? url.appendingPathExtension("charkleboard") : url
+        let assetsSnapshot = library.allAssetsByID
+        let engine = library.engine
+        coordinator.showToast("正在打包可编辑 Figma 情绪板…", icon: "square.stack.3d.up")
+
+        Task {
+            do {
+                let report = try await FigmaBridgeExporter.exportBundle(
+                    document: board,
+                    assetsByID: assetsSnapshot,
+                    options: options,
+                    resolveOriginalURL: { id in try? await engine.originalURL(for: id) },
+                    resolveThumbnailURL: { id, tier in await engine.thumbnailURL(for: id, tier: tier) },
+                    to: targetURL
+                )
+                NSWorkspace.shared.activateFileViewerSelecting([report.bundleURL])
+                coordinator.showToast(
+                    "已导出 \(report.objectCount) 个可编辑对象至 \(report.bundleURL.lastPathComponent)",
+                    icon: "checkmark.circle.fill",
+                    tone: .success
+                )
+            } catch {
+                coordinator.showToast("导出 Figma 包失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
+            }
+        }
+    }
+
+    private var figmaPluginGuideSheet: some View {
+        let pluginDir = FigmaBridgeExporter.bundledPluginDirectoryURL()
+        let manifestPath = pluginDir?.appending(path: "manifest.json").path
+
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.14))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "puzzlepiece.extension.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Color.accentColor)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Charkle → Figma / FigJam Bridge 插件")
+                        .font(.system(size: 15.5, weight: .semibold))
+                    Text("纯本地离线导入，无需 API 密钥；保留独立图层、原图像素、GIF、便签、分组、色卡与连线。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                figmaGuideStep(number: "1", title: "在 Figma 桌面端导入本地插件（仅首次需要）", detail: "打开 Figma 桌面端的 Design 或 FigJam 文件，菜单栏选择：Plugins → Development → Import plugin from manifest…")
+                figmaGuideStep(number: "2", title: "选择 Charkle 内置的 manifest.json", detail: manifestPath ?? "未找到内置插件目录，请使用正式打包的 Charkle.app。")
+                figmaGuideStep(number: "3", title: "导入 .charkleboard 文件", detail: "在情绪板底部「导出」菜单导出 .charkleboard 文件，然后在 Figma 运行「Charkle → Figma Bridge」拖入即可。")
+            }
+
+            if let pluginDir, let manifestPath {
+                HStack(spacing: 10) {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([pluginDir.appending(path: "manifest.json")])
+                    } label: {
+                        Label("在访达中定位 manifest.json", systemImage: "folder")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(manifestPath, forType: .string)
+                        coordinator.showToast("已复制插件 manifest.json 路径", icon: "doc.on.doc")
+                    } label: {
+                        Label("复制路径", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    Button("完成") {
+                        showFigmaPluginGuideSheet = false
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else {
+                HStack {
+                    Spacer()
+                    Button("关闭") { showFigmaPluginGuideSheet = false }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .padding(22)
+        .frame(width: 540)
+    }
+
+    private func figmaGuideStep(number: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(number)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(width: 20, height: 20)
+                .background(Color.accentColor, in: Circle())
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                Text(detail)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
         }
     }

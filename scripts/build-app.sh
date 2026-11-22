@@ -41,6 +41,28 @@ for bundle in "$BIN_DIR"/*.bundle; do
   fi
 done
 
+# Embed offline Charkle -> Figma / FigJam Bridge plugin
+if [[ -d "$ROOT_DIR/Resources/FigmaPlugin" ]]; then
+  python3 - "$ROOT_DIR/Resources/FigmaPlugin" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+tpl = p / 'ui-template.html'
+if tpl.exists():
+    s = tpl.read_text(encoding='utf-8')
+    for marker, file in [('/*__JSZIP__*/', 'jszip.min.js'), ('/*__SHA256__*/', 'sha256.min.js')]:
+        s = s.replace(marker, (p / file).read_text(encoding='utf-8'))
+    (p / 'ui.html').write_text(s, encoding='utf-8')
+PY
+  mkdir -p "$APP_BUNDLE/Contents/Resources/FigmaPlugin"
+  cp "$ROOT_DIR/Resources/FigmaPlugin/manifest.json" \
+     "$ROOT_DIR/Resources/FigmaPlugin/code.js" \
+     "$ROOT_DIR/Resources/FigmaPlugin/ui.html" \
+     "$ROOT_DIR/Resources/FigmaPlugin/JSZIP-LICENSE.md" \
+     "$ROOT_DIR/Resources/FigmaPlugin/SHA256-LICENSE.txt" \
+     "$APP_BUNDLE/Contents/Resources/FigmaPlugin/"
+fi
+
 # Embed app-level Google Desktop OAuth client for zero-setup end-user Google Sign-In if present
 if [[ -f "$ROOT_DIR/Resources/GoogleOAuthClient.json" ]]; then
   cp "$ROOT_DIR/Resources/GoogleOAuthClient.json" "$APP_BUNDLE/Contents/Resources/GoogleOAuthClient.json"

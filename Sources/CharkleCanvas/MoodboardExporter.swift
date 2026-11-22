@@ -15,7 +15,7 @@ public enum MoodboardExportFormat: String, CaseIterable, Sendable {
     }
 }
 
-public struct MoodboardExportOptions: Sendable {
+public nonisolated struct MoodboardExportOptions: Sendable {
     public var scale: CGFloat
     public var includeAnnotations: Bool
     public var includePaletteStrip: Bool

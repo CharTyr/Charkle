@@ -70,7 +70,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CharkleTests",
-            dependencies: ["CharkleCore"],
+            dependencies: ["CharkleCore", "CharkleCanvas"],
             path: "Tests/CharkleTests",
             swiftSettings: [
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault"),

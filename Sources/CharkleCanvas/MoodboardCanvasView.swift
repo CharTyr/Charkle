@@ -49,6 +49,8 @@ public struct MoodboardCanvasCallbacks {
     public var onSearchByColorHex: (String) -> Void
     public var onCopyExportedImage: (MoodboardExportOptions) -> Void
     public var onSaveExportedImage: (MoodboardExportFormat, MoodboardExportOptions) -> Void
+    public var onExportFigmaBundle: (MoodboardExportOptions) -> Void
+    public var onOpenFigmaPluginGuide: () -> Void
 
     public init(
         onCommitDocument: @escaping (MoodboardDocument) -> Void = { _ in },
@@ -65,7 +67,9 @@ public struct MoodboardCanvasCallbacks {
         onCopyColorHex: @escaping (String) -> Void = { _ in },
         onSearchByColorHex: @escaping (String) -> Void = { _ in },
         onCopyExportedImage: @escaping (MoodboardExportOptions) -> Void = { _ in },
-        onSaveExportedImage: @escaping (MoodboardExportFormat, MoodboardExportOptions) -> Void = { _, _ in }
+        onSaveExportedImage: @escaping (MoodboardExportFormat, MoodboardExportOptions) -> Void = { _, _ in },
+        onExportFigmaBundle: @escaping (MoodboardExportOptions) -> Void = { _ in },
+        onOpenFigmaPluginGuide: @escaping () -> Void = {}
     ) {
         self.onCommitDocument = onCommitDocument
         self.onUndo = onUndo
@@ -82,6 +86,8 @@ public struct MoodboardCanvasCallbacks {
         self.onSearchByColorHex = onSearchByColorHex
         self.onCopyExportedImage = onCopyExportedImage
         self.onSaveExportedImage = onSaveExportedImage
+        self.onExportFigmaBundle = onExportFigmaBundle
+        self.onOpenFigmaPluginGuide = onOpenFigmaPluginGuide
     }
 }
 
@@ -1932,12 +1938,22 @@ public struct MoodboardCanvasView: View {
 
                 dockDivider
 
-                // Export / Copy for Figma
+                // Export / Figma Bridge
                 Menu {
+                    Button {
+                        callbacks.onExportFigmaBundle(currentExportOptions)
+                    } label: {
+                        Label("导出到 Figma / FigJam（可编辑独立图层）…", systemImage: "square.stack.3d.up")
+                    }
+                    Button {
+                        callbacks.onOpenFigmaPluginGuide()
+                    } label: {
+                        Label("安装 / 获取 Figma Bridge 插件…", systemImage: "puzzlepiece.extension")
+                    }
+                    Divider()
                     Button("复制 2× 高清图（直接 ⌘V 到 Figma / Keynote）") {
                         callbacks.onCopyExportedImage(currentExportOptions)
                     }
-                    Divider()
                     Button("导出 2× Retina PNG…") {
                         callbacks.onSaveExportedImage(.png, currentExportOptions)
                     }
