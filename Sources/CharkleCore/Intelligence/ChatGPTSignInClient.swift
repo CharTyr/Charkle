@@ -330,19 +330,33 @@ public actor ChatGPTSignInClient {
         userText: String,
         thumbnailJPEG: Data?
     ) async throws -> String {
+        try await streamResponse(
+            model: model,
+            instructions: instructions,
+            userText: userText,
+            imagesJPEG: thumbnailJPEG.map { [$0] } ?? []
+        )
+    }
+
+    public func streamResponse(
+        model: String,
+        instructions: String?,
+        userText: String,
+        imagesJPEG: [Data]
+    ) async throws -> String {
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModel.isEmpty else {
             throw ChatGPTAuthError(code: "invalid_request", message: "请先在设置中选择一个 ChatGPT 模型。", retryable: false)
         }
         let token = try await validAccessToken()
 
-        // Try multimodal input first when a thumbnail is provided; if the user's ChatGPT sharing route
+        // Try multimodal input first when images are provided; if the user's ChatGPT sharing route
         // restricts image inputs, fall back gracefully to text-only prompt automatically.
-        if let thumbnailJPEG {
-            let contentParts: [[String: Any]] = [
-                ["type": "input_text", "text": userText],
-                ["type": "input_image", "image_url": "data:image/jpeg;base64," + thumbnailJPEG.base64EncodedString()]
-            ]
+        if !imagesJPEG.isEmpty {
+            var contentParts: [[String: Any]] = [["type": "input_text", "text": userText]]
+            for jpeg in imagesJPEG {
+                contentParts.append(["type": "input_image", "image_url": "data:image/jpeg;base64," + jpeg.base64EncodedString()])
+            }
             do {
                 return try await performResponsesStream(
                     token: token,

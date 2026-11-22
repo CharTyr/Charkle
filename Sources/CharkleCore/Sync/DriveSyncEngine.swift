@@ -752,7 +752,12 @@ extension DriveSyncEngine {
                 ($0.driveFileID == nil && $0.fileName == filename && $0.folderID == folderID)
                     || ($0.driveFileID.map { current.files[$0] == nil } == true && !$0.isTrashed)
             }
-            matching = matches.count == 1 ? matches.first : nil
+            if matches.count == 1 {
+                matching = matches.first
+            } else {
+                let exactLocation = matches.filter { $0.fileName == filename && $0.folderID == folderID }
+                matching = exactLocation.count == 1 ? exactLocation.first : nil
+            }
         }
         let id = matching?.id ?? DriveFiles.stableUUID("asset:" + file.id)
         if try await database.isTombstoned("asset", id: id) { return nil }
@@ -853,8 +858,15 @@ extension DriveSyncEngine {
             if let remote {
                 let rename = Self.originalName(remote) == asset.fileName ? nil : asset.fileName
                 if remote.parents.first != parent || rename != nil {
-                    _ = try await transport.moveFile(fileID: remote.id, fromParentID: remote.parents.first,
-                                                     toParentID: parent, newName: rename)
+                    let moved = try await transport.moveFile(fileID: remote.id, fromParentID: remote.parents.first,
+                                                             toParentID: parent, newName: rename)
+                    if moved.id != remote.id {
+                        try await database.transaction { store in
+                            guard var current = try store.asset(id: id) else { return }
+                            current.driveFileID = moved.id
+                            _ = try store.saveAssetLocally(current, projectLocation: false)
+                        }
+                    }
                 }
                 continue
             }

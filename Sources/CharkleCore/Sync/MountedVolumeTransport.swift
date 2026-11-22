@@ -116,8 +116,12 @@ public final actor MountedVolumeTransport: DriveTransport {
         }
         let metadata = try findOrCreateFolder(named: ".charkle", parentID: parentID)
         let trash = try findOrCreateFolder(named: "trash", parentID: metadata.id)
-        _ = try moveFile(fileID: fileID, fromParentID: nil, toParentID: trash.id,
-                         newName: UUID().uuidString + "-" + url.lastPathComponent)
+        do {
+            _ = try moveFile(fileID: fileID, fromParentID: nil, toParentID: trash.id,
+                             newName: UUID().uuidString + "-" + url.lastPathComponent)
+        } catch {
+            try FileManager.default.removeItem(at: url)
+        }
         locations.removeValue(forKey: fileID)
     }
 
@@ -153,9 +157,30 @@ public final actor MountedVolumeTransport: DriveTransport {
         }
     }
 
+    static let pathIDPrefix = "mounted-path:"
+
     private func locate(_ id: String) throws -> URL {
         try verifyMount()
         if id == DriveFiles.rootID { return mount }
+        if id.hasPrefix(Self.pathIDPrefix) {
+            let relPath = String(id.dropFirst(Self.pathIDPrefix.count))
+            let segments = relPath.split(separator: "/").map(String.init)
+            guard !segments.isEmpty else { throw DriveTransportError.fileNotFound(id) }
+            var candidate = mount
+            for seg in segments {
+                try DriveFiles.validateName(seg)
+                candidate = candidate.appending(path: seg)
+            }
+            guard let attrs = GDirectIntegration.statInfo(candidate, followLinks: false),
+                  let mounted = GDirectIntegration.statInfo(mount),
+                  attrs.st_dev == mounted.st_dev,
+                  [S_IFDIR, S_IFREG].contains(attrs.st_mode & S_IFMT),
+                  candidate.resolvingSymlinksInPath().path.hasPrefix(mount.resolvingSymlinksInPath().path + "/") else {
+                throw DriveTransportError.fileNotFound(id)
+            }
+            locations[id] = candidate
+            return candidate
+        }
         if let cached = locations[id], (try? metadata(cached, parentID: "").id) == id { return cached }
         _ = try snapshot(includeMetadata: false)
         if let url = locations[id] { return url }
@@ -218,14 +243,20 @@ public final actor MountedVolumeTransport: DriveTransport {
     }
 
     private func metadata(_ url: URL, parentID: String) throws -> RemoteDriveFile {
+        let resolvedMount = mount.resolvingSymlinksInPath().path
+        let resolvedURL = url.resolvingSymlinksInPath().path
+        let prefix = resolvedMount.hasSuffix("/") ? resolvedMount : resolvedMount + "/"
         guard let attrs = GDirectIntegration.statInfo(url, followLinks: false),
               let mounted = GDirectIntegration.statInfo(mount), attrs.st_dev == mounted.st_dev,
               [S_IFDIR, S_IFREG].contains(attrs.st_mode & S_IFMT),
-              url.resolvingSymlinksInPath().path.hasPrefix(mount.resolvingSymlinksInPath().path + "/") else {
+              resolvedURL.hasPrefix(prefix) else {
             throw DriveTransportError.fileNotFound(url.lastPathComponent)
         }
         let folder = attrs.st_mode & S_IFMT == S_IFDIR
-        let id = "mounted-\(attrs.st_ino)"
+        // Use normalized mount-relative path instead of ephemeral `st_ino` (which rclone nfsmount
+        // rotates whenever its 1-minute dir-cache expires or the drive remounts).
+        let relativePath = String(resolvedURL.dropFirst(prefix.count))
+        let id = Self.pathIDPrefix + relativePath
         locations[id] = url
         let modified = Date(timeIntervalSince1970: Double(attrs.st_mtimespec.tv_sec) + Double(attrs.st_mtimespec.tv_nsec) / 1e9)
         return RemoteDriveFile(id: id, name: url.lastPathComponent,

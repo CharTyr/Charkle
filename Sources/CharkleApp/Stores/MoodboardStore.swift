@@ -21,7 +21,11 @@ public final class MoodboardStore {
     public var redoStack: [MoodboardDocument] = []
 
     public var proposal: MoodboardProposal?
+    public var agentTrace: [MoodboardAgentStep] = []
     public var isGeneratingProposal: Bool = false
+    public var isRefiningActiveBoard: Bool = false
+    public var activeBoardAgentTrace: [MoodboardAgentStep] = []
+    public var activeBoardLastSummary: String?
     public var isSaving: Bool = false
     public var lastError: String?
 
@@ -50,6 +54,8 @@ public final class MoodboardStore {
                 undoStack.removeAll()
                 redoStack.removeAll()
                 swappingNodeID = nil
+                activeBoardAgentTrace = []
+                activeBoardLastSummary = nil
                 await refreshCandidates(for: nil)
             }
         } catch {
@@ -118,6 +124,8 @@ public final class MoodboardStore {
                 undoStack.removeAll()
                 redoStack.removeAll()
                 candidatePool.removeAll()
+                activeBoardAgentTrace = []
+                activeBoardLastSummary = nil
             }
             await refreshBoards()
         } catch {
@@ -333,7 +341,7 @@ public final class MoodboardStore {
         }
     }
 
-    // MARK: - Rapid 4-Entry Moodboard Generator
+    // MARK: - Moodboard Curator Agent Harness (Draft Workbench + In-Canvas Refinement)
 
     public func generateProposal(
         seed: MoodboardSeed,
@@ -353,18 +361,116 @@ public final class MoodboardStore {
         }
     }
 
+    public func curateProposal(_ request: MoodboardCurationRequest) async {
+        isGeneratingProposal = true
+        lastError = nil
+        agentTrace = []
+        defer { isGeneratingProposal = false }
+        do {
+            let result = try await engine.curateMoodboard(request) { [weak self] step in
+                await MainActor.run {
+                    guard let self else { return }
+                    if let idx = self.agentTrace.firstIndex(where: { $0.id == step.id }) {
+                        self.agentTrace[idx] = step
+                    } else if let idx = self.agentTrace.lastIndex(where: { $0.phase == step.phase && $0.status == .running }) {
+                        self.agentTrace[idx] = step
+                    } else {
+                        self.agentTrace.append(step)
+                    }
+                }
+            }
+            proposal = result
+            agentTrace = result.agentTrace
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Runs the Moodboard Curator Agent Harness on the currently open `activeBoard` with full ⌘Z Undo support.
+    @discardableResult
+    public func refineActiveBoard(
+        instruction: String,
+        scopeFolderIDs: [UUID] = []
+    ) async -> MoodboardProposal? {
+        guard let currentBoard = activeBoard else { return nil }
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        isRefiningActiveBoard = true
+        lastError = nil
+        activeBoardAgentTrace = []
+        defer { isRefiningActiveBoard = false }
+
+        let currentStyle: EditorialStyle
+        let isFreeform: Bool
+        switch currentBoard.mode {
+        case .autoEditorial(let cfg):
+            currentStyle = cfg.style
+            isFreeform = false
+        case .freeform:
+            currentStyle = .magazine
+            isFreeform = true
+        }
+
+        let lockedIDs = currentBoard.nodes.compactMap { node -> UUID? in
+            node.isLocked ? node.referencedAssetID : nil
+        }
+
+        let req = MoodboardCurationRequest(
+            prompt: currentBoard.subtitle.isEmpty ? currentBoard.title : "\(currentBoard.title)：\(currentBoard.subtitle)",
+            seedAssetIDs: [],
+            scopeFolderIDs: scopeFolderIDs,
+            preferredCount: max(8, min(20, max(12, currentBoard.referencedAssetIDs.count + 4))),
+            candidateCount: 28,
+            layoutStyle: currentStyle,
+            useFreeformLayout: isFreeform,
+            includeCuratorNotes: true,
+            lockedAssetIDs: lockedIDs,
+            existingBoard: currentBoard,
+            refinementInstruction: trimmed
+        )
+
+        do {
+            let result = try await engine.curateMoodboard(req) { [weak self] step in
+                await MainActor.run {
+                    guard let self else { return }
+                    if let idx = self.activeBoardAgentTrace.firstIndex(where: { $0.id == step.id }) {
+                        self.activeBoardAgentTrace[idx] = step
+                    } else if let idx = self.activeBoardAgentTrace.lastIndex(where: { $0.phase == step.phase && $0.status == .running }) {
+                        self.activeBoardAgentTrace[idx] = step
+                    } else {
+                        self.activeBoardAgentTrace.append(step)
+                    }
+                }
+            }
+            activeBoardAgentTrace = result.agentTrace
+            activeBoardLastSummary = result.curatedSummary
+            if !result.draftDocument.nodes.isEmpty {
+                commitMutation(result.draftDocument, recordUndo: true)
+            }
+            candidatePool = result.candidatePool
+            return result
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
     @discardableResult
     public func confirmProposal(title: String, subtitle: String = "") async -> MoodboardDocument? {
         guard let prop = proposal else { return nil }
         var doc = prop.draftDocument
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleaned.isEmpty { doc.title = cleaned }
-        doc.subtitle = subtitle
+        let cleanSubtitle = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanSubtitle.isEmpty { doc.subtitle = cleanSubtitle }
         do {
             let saved = try await engine.saveBoard(doc)
             activeBoard = saved
             candidatePool = prop.candidatePool
+            activeBoardLastSummary = prop.curatedSummary
             proposal = nil
+            agentTrace = []
             undoStack.removeAll()
             redoStack.removeAll()
             await refreshBoards()

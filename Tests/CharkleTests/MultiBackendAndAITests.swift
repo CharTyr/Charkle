@@ -198,4 +198,53 @@ struct MultiBackendAndAITests {
         try DriveFiles.writeRawBytes(payload, to: rawDst, removeOnFailure: true)
         #expect(try Data(contentsOf: rawDst) == payload)
     }
+
+    @Test("MountedVolumeTransport uses stable path IDs and permanently deleted Inbox files never respawn across syncs")
+    func mountedVolumePermanentDeleteNeverRespawnsInInbox() async throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let mountRoot = dir.appending(path: "Mount", directoryHint: .isDirectory)
+        let inboxDir = mountRoot.appending(path: "Charkle/Inbox", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: inboxDir, withIntermediateDirectories: true)
+
+        // Drop a brand-new image directly into Mounted Inbox (simulating remote cloud discovery)
+        let png = try BackendFixture.artwork("#E85D75")
+        let remoteFileURL = inboxDir.appending(path: "EphemeralTest.png")
+        try png.write(to: remoteFileURL)
+
+        let transport = MountedVolumeTransport(mountPath: mountRoot.path, rootFolderName: "Charkle", requireDedicatedMount: false)
+        let appSupport = dir.appending(path: "AppSupport", directoryHint: .isDirectory)
+        let media = try MediaPipeline(directory: appSupport)
+        let db = try LibraryDatabase(url: appSupport.appending(path: "Library.sqlite3"))
+        let engine = LiveCharkleEngine(database: db, media: media, transport: transport)
+        try await engine.saveSyncConfig(DriveSyncConfig(
+            mode: .localOnly,
+            rootFolderName: "Charkle",
+            localLibraryPath: mountRoot.appending(path: "Charkle").path
+        ))
+
+        // Sync #1: discovers remote Inbox file with stable mounted-path ID
+        let firstSync = try await engine.syncNow()
+        #expect(firstSync.discoveredRemoteAssets >= 1)
+        let inboxAssets = try await engine.fetchAssets(matching: FilterCriteria(onlyInbox: true))
+        let discovered = try #require(inboxAssets.first(where: { $0.fileName == "EphemeralTest.png" }))
+        let driveID = try #require(discovered.driveFileID)
+        #expect(driveID.hasPrefix(MountedVolumeTransport.pathIDPrefix))
+
+        // Simulate a legacy ephemeral `mounted-<inode>` record (as existed before the fix) to verify automatic migration on permanent delete!
+        var legacyAsset = discovered
+        legacyAsset.driveFileID = "mounted-99999999"
+        try await db.upsertAssets([legacyAsset])
+
+        // Permanently delete the asset locally, then run TWO consecutive syncs
+        try await engine.permanentlyDeleteAssets(ids: [discovered.id])
+        _ = try await engine.syncNow()
+        #expect(!FileManager.default.fileExists(atPath: remoteFileURL.path))
+
+        let thirdSync = try await engine.syncNow()
+        #expect(thirdSync.discoveredRemoteAssets == 0)
+        let remainingInbox = try await engine.fetchAssets(matching: FilterCriteria(onlyInbox: true))
+        #expect(!remainingInbox.contains(where: { $0.fileName == "EphemeralTest.png" }))
+    }
 }

@@ -249,7 +249,8 @@ public struct MainWindowView: View {
             MoodboardGeneratorSheet(
                 coordinator: coordinator,
                 library: library,
-                moodboards: moodboards
+                moodboards: moodboards,
+                syncAndAI: syncAndAI
             )
         }
         .alert(

@@ -67,10 +67,29 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func deleteFolder(id: UUID) async throws {
+        let config = await syncConfig()
+        let rootSegments = config.rootFolderName
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+        let rootPrefix = (rootSegments.isEmpty ? ["Charkle"] : rootSegments).joined(separator: "/")
+
         try await database.transaction { store in
-            guard let folder = try store.folder(id: id) else { return }
-            var children = try store.fetchFolders().filter { $0.parentID == id }
-            var siblings = try store.fetchFolders().filter { $0.parentID == folder.parentID && $0.id != id }
+            let allFolders = try store.fetchFolders()
+            let folderByID = Dictionary(uniqueKeysWithValues: allFolders.map { ($0.id, $0) })
+            guard let folder = folderByID[id] else { return }
+
+            var pathParts: [String] = []
+            var cursor: UUID? = id
+            var visited = Set<UUID>()
+            while let cid = cursor, visited.insert(cid).inserted, let f = folderByID[cid] {
+                pathParts.append(f.name)
+                cursor = f.parentID
+            }
+            let relFolderPath = pathParts.reversed().joined(separator: "/")
+
+            var children = allFolders.filter { $0.parentID == id }
+            var siblings = allFolders.filter { $0.parentID == folder.parentID && $0.id != id }
             for index in children.indices {
                 let originalName = children[index].name
                 var name = originalName
@@ -92,7 +111,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
             let mounted = folder.driveFolderID?.hasPrefix("mounted-") == true
             if mounted, let remote = folder.driveFolderID {
-                try store.setState("local.delete.folder." + id.uuidString, remote)
+                let resolvedRemote = remote.hasPrefix(MountedVolumeTransport.pathIDPrefix)
+                    ? remote
+                    : "\(MountedVolumeTransport.pathIDPrefix)\(rootPrefix)/\(relFolderPath)"
+                try store.setState("local.delete.folder." + id.uuidString, resolvedRemote)
             }
             try store.record(.deleteFolder(id, driveID: mounted ? nil : folder.driveFolderID))
         }
@@ -303,13 +325,46 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func permanentlyDeleteAssets(ids: [UUID]) async throws {
+        let config = await syncConfig()
+        let rootSegments = config.rootFolderName
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+        let rootPrefix = (rootSegments.isEmpty ? ["Charkle"] : rootSegments).joined(separator: "/")
+
         try await database.transaction { store in
+            let folders = try store.fetchFolders()
+            let folderByID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+            func mountedRelativeFolderPath(_ folderID: UUID?) -> String {
+                guard let folderID else { return "Inbox" }
+                var parts: [String] = []
+                var cursor: UUID? = folderID
+                var visited = Set<UUID>()
+                while let cid = cursor, visited.insert(cid).inserted, let folder = folderByID[cid] {
+                    parts.append(folder.name)
+                    cursor = folder.parentID
+                }
+                return parts.isEmpty ? "Inbox" : parts.reversed().joined(separator: "/")
+            }
+
             for id in Set(ids) {
                 guard let asset = try store.asset(id: id) else { continue }
                 let mounted = asset.driveFileID?.hasPrefix("mounted-") == true
                 if mounted, let remote = asset.driveFileID {
-                    try store.setState("local.delete.asset." + id.uuidString, remote)
-                    try store.setState("deleted.drive." + remote, true)
+                    // Upgrade legacy inode-based `mounted-<ino>` IDs into stable mount-relative path IDs
+                    // so deletion succeeds even after rclone rotates NFS inodes.
+                    let resolvedRemote: String
+                    if remote.hasPrefix(MountedVolumeTransport.pathIDPrefix) {
+                        resolvedRemote = remote
+                    } else {
+                        let relDir = mountedRelativeFolderPath(asset.folderID)
+                        resolvedRemote = "\(MountedVolumeTransport.pathIDPrefix)\(rootPrefix)/\(relDir)/\(asset.fileName)"
+                    }
+                    try store.setState("local.delete.asset." + id.uuidString, resolvedRemote)
+                    try store.setState("deleted.drive." + resolvedRemote, true)
+                    if resolvedRemote != remote {
+                        try store.setState("deleted.drive." + remote, true)
+                    }
                 }
                 try store.record(.deleteAsset(id, driveID: mounted ? nil : asset.driveFileID))
             }
@@ -380,6 +435,16 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let config = await aiConfig()
         let provider = try? intelligence.provider(for: config)
         return try await curator.proposeMoodboard(seed: seed, primaryCount: primaryCount, candidateCount: candidateCount, provider: provider)
+    }
+
+    public func curateMoodboard(
+        _ request: MoodboardCurationRequest,
+        onStep: (@Sendable (MoodboardAgentStep) async -> Void)?
+    ) async throws -> MoodboardProposal {
+        let config = await aiConfig()
+        let provider = try? intelligence.provider(for: config)
+        let harness = MoodboardAgentHarness(database: database, media: media)
+        return try await harness.curate(request: request, provider: provider, onStep: onStep)
     }
 
     public func saveBoard(_ document: MoodboardDocument) async throws -> MoodboardDocument {

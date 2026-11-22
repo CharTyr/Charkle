@@ -27,6 +27,8 @@ public struct InspectorView: View {
     @State private var titleDraft: String = ""
     @State private var boardTitleDraft: String = ""
     @State private var boardSubtitleDraft: String = ""
+    @State private var boardRefinementDraft: String = ""
+    @State private var showBoardAgentTrace: Bool = false
     @State private var pendingPermanentDeleteIDs: [UUID] = []
 
     public init(
@@ -811,6 +813,9 @@ public struct InspectorView: View {
                     }
                 }
 
+                // In-Canvas AI Curator Assistant (with instant ⌘Z Undo)
+                moodboardCuratorCard(board)
+
                 // Active Swap Mode Banner
                 if let swapNodeID = moodboards.swappingNodeID {
                     HStack(spacing: 8) {
@@ -1023,6 +1028,241 @@ public struct InspectorView: View {
         .onChange(of: board.id) { _, _ in
             boardTitleDraft = board.title
             boardSubtitleDraft = board.subtitle
+            boardRefinementDraft = ""
+            showBoardAgentTrace = false
+        }
+        .onChange(of: board.title) { _, newTitle in
+            if boardTitleDraft != newTitle {
+                boardTitleDraft = newTitle
+            }
+        }
+        .onChange(of: board.subtitle) { _, newSubtitle in
+            if boardSubtitleDraft != newSubtitle {
+                boardSubtitleDraft = newSubtitle
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func moodboardCuratorCard(_ board: MoodboardDocument) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("AI 策展助手")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Spacer()
+                if moodboards.canUndo && !moodboards.isRefiningActiveBoard {
+                    Button {
+                        moodboards.undo()
+                        coordinator.showToast("已撤销上一步画布调整", icon: "arrow.uturn.backward")
+                    } label: {
+                        Text("撤销")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("撤销上一步（⌘Z）")
+                }
+            }
+
+            HStack(spacing: 6) {
+                TextField("输入指令微调当前情绪板…", text: $boardRefinementDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    )
+                    .disabled(moodboards.isRefiningActiveBoard)
+                    .onSubmit {
+                        runBoardRefinement(boardRefinementDraft)
+                    }
+
+                Button {
+                    runBoardRefinement(boardRefinementDraft)
+                } label: {
+                    Group {
+                        if moodboards.isRefiningActiveBoard {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .frame(width: 14, height: 14)
+                        } else {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        (boardRefinementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || moodboards.isRefiningActiveBoard)
+                            ? Color.accentColor.opacity(0.45)
+                            : Color.accentColor,
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(boardRefinementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || moodboards.isRefiningActiveBoard)
+                .help("执行 AI 策展微调")
+            }
+
+            // One-click curation actions
+            HStack(spacing: 5) {
+                curatorQuickChip("重新分区编排") {
+                    runBoardRefinement("按视觉层次重新划分为清晰分区，突出主视觉并补充简短美术指导批注")
+                }
+                curatorQuickChip("补充同氛围图") {
+                    runBoardRefinement("保留当前核心素材，从素材库补充 4 到 6 张色调与气质一致的高质量参考图")
+                }
+                curatorQuickChip("精简不协调") {
+                    runBoardRefinement("严格审视当前画布，剔除风格、构图或色温不协调的素材，宁缺毋滥")
+                }
+            }
+            .disabled(moodboards.isRefiningActiveBoard)
+
+            if moodboards.isRefiningActiveBoard, let activeStep = moodboards.activeBoardAgentTrace.last {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(activeStep.title)
+                            .font(.system(size: 10.5, weight: .semibold))
+                        if !activeStep.detail.isEmpty {
+                            Text(activeStep.detail)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            } else if let summary = moodboards.activeBoardLastSummary, !summary.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(summary)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if !moodboards.activeBoardAgentTrace.isEmpty {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                showBoardAgentTrace.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text(showBoardAgentTrace ? "收起策展步骤" : "查看策展步骤（\(moodboards.activeBoardAgentTrace.count) 步）")
+                                    .font(.system(size: 10, weight: .medium))
+                                Image(systemName: showBoardAgentTrace ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                            }
+                            .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+
+                        if showBoardAgentTrace {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(moodboards.activeBoardAgentTrace) { step in
+                                    HStack(alignment: .top, spacing: 5) {
+                                        Image(systemName: stepIconName(step.status))
+                                            .font(.system(size: 9.5))
+                                            .foregroundStyle(stepColor(step.status))
+                                            .padding(.top, 1.5)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(step.title)
+                                                .font(.system(size: 10, weight: .medium))
+                                            if !step.detail.isEmpty {
+                                                Text(step.detail)
+                                                    .font(.system(size: 9.5))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
+
+            HStack(spacing: 4) {
+                Text("已锁定卡片会自动保留 · 支持 ⌘Z 撤销")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Text("\(board.referencedAssetIDs.count) 张素材")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(10)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme).opacity(0.75), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+        )
+    }
+
+    private func curatorQuickChip(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .foregroundStyle(.primary.opacity(0.85))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func runBoardRefinement(_ instruction: String) {
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !moodboards.isRefiningActiveBoard else { return }
+        boardRefinementDraft = ""
+        Task {
+            let result = await moodboards.refineActiveBoard(instruction: trimmed)
+            if let result {
+                if let updated = moodboards.activeBoard {
+                    boardTitleDraft = updated.title
+                    boardSubtitleDraft = updated.subtitle
+                }
+                if result.cachedVisualInsightsCount > 0 {
+                    await library.refreshAssets()
+                }
+                let count = result.primaryMatches.count
+                if count > 0 {
+                    coordinator.showToast("已完成策展微调（\(count) 张），可按 ⌘Z 撤销", icon: "sparkles")
+                } else {
+                    coordinator.showToast("未找到符合该条件的素材，已保持当前画布", icon: "info.circle")
+                }
+            } else if let err = moodboards.lastError {
+                coordinator.showToast("策展调整未完成：\(err)", icon: "exclamationmark.triangle")
+            }
+        }
+    }
+
+    private func stepIconName(_ status: MoodboardAgentStepStatus) -> String {
+        switch status {
+        case .running: return "circle.dotted"
+        case .done: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func stepColor(_ status: MoodboardAgentStepStatus) -> Color {
+        switch status {
+        case .running: return .accentColor
+        case .done: return .green
+        case .warning: return .orange
         }
     }
 

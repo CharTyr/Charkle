@@ -1,6 +1,8 @@
 import Foundation
 
 public nonisolated struct IntelligenceEngine: Sendable {
+    private static let visionQueue = DispatchQueue(label: "com.charkle.core.vision", qos: .userInitiated)
+
     let keychain: KeychainStore
     let chatGPT: ChatGPTSignInClient
 
@@ -9,12 +11,23 @@ public nonisolated struct IntelligenceEngine: Sendable {
         self.chatGPT = chatGPT ?? ChatGPTSignInClient(keychain: keychain)
     }
 
-    @concurrent
     public func analyze(thumbnailURL: URL, includeColors: Bool = true) async -> LocalAnalysisResult {
-        guard let image = MediaPipeline.raster(thumbnailURL)?.poster else { return LocalAnalysisResult() }
-        let text = VisionAnalyzer.recognizeTextSync(in: image)
-        return LocalAnalysisResult(dominantColors: includeColors ? ColorExtractor.extractDominantColors(from: image) : [],
-                                   ocrText: text.isEmpty ? nil : text, featurePrintData: VisionAnalyzer.generateFeaturePrint(for: image))
+        await withCheckedContinuation { continuation in
+            Self.visionQueue.async {
+                guard let image = MediaPipeline.raster(thumbnailURL)?.poster else {
+                    continuation.resume(returning: LocalAnalysisResult())
+                    return
+                }
+                let text = VisionAnalyzer.recognizeTextSync(in: image)
+                let colors = includeColors ? ColorExtractor.extractDominantColors(from: image) : []
+                let featurePrint = VisionAnalyzer.generateFeaturePrint(for: image)
+                continuation.resume(returning: LocalAnalysisResult(
+                    dominantColors: colors,
+                    ocrText: text.isEmpty ? nil : text,
+                    featurePrintData: featurePrint
+                ))
+            }
+        }
     }
 
     func provider(for config: AIProviderConfig) throws -> (any CloudAIProvider)? {

@@ -365,24 +365,160 @@ public enum MoodboardSeed: Codable, Hashable, Sendable {
     case combined(prompt: String?, seedAssetIDs: [UUID], palette: [LabColor])
 }
 
+public enum MoodboardAgentPhase: String, Codable, Hashable, Sendable {
+    case planning
+    case retrieving
+    case inspectingVisuals
+    case composing
+    case verifying
+    case repairing
+    case completed
+    case fallbackOffline
+}
+
+public enum MoodboardAgentStepStatus: String, Codable, Hashable, Sendable {
+    case running
+    case done
+    case warning
+}
+
+public struct MoodboardAgentStep: Codable, Hashable, Identifiable, Sendable {
+    public let id: UUID
+    public var phase: MoodboardAgentPhase
+    public var title: String
+    public var detail: String
+    public var status: MoodboardAgentStepStatus
+    public var timestamp: Date
+
+    public init(
+        id: UUID = UUID(),
+        phase: MoodboardAgentPhase,
+        title: String,
+        detail: String = "",
+        status: MoodboardAgentStepStatus = .running,
+        timestamp: Date = Date()
+    ) {
+        self.id = id
+        self.phase = phase
+        self.title = title
+        self.detail = detail
+        self.status = status
+        self.timestamp = timestamp
+    }
+}
+
+public struct MoodboardSectionDraft: Codable, Hashable, Identifiable, Sendable {
+    public let id: UUID
+    public var title: String
+    public var tint: GroupTint
+    public var rationale: String
+    public var assetIDs: [UUID]
+    public var heroAssetIDs: [UUID]
+
+    public init(
+        id: UUID = UUID(),
+        title: String,
+        tint: GroupTint = .neutral,
+        rationale: String = "",
+        assetIDs: [UUID],
+        heroAssetIDs: [UUID] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.tint = tint
+        self.rationale = rationale
+        self.assetIDs = assetIDs
+        self.heroAssetIDs = heroAssetIDs
+    }
+}
+
+/// Composable multi-signal curation brief powering both the built-in Moodboard Agent Harness
+/// and external Agent tools (MCP / CLI).
+public struct MoodboardCurationRequest: Codable, Hashable, Sendable {
+    public var prompt: String
+    public var seedAssetIDs: [UUID]
+    public var scopeFolderIDs: [UUID]
+    public var requiredTags: [String]
+    public var targetPalette: [LabColor]
+    public var colorTolerance: Double
+    public var preferredCount: Int
+    public var candidateCount: Int
+    public var layoutStyle: EditorialStyle
+    public var useFreeformLayout: Bool
+    public var includeCuratorNotes: Bool
+    public var excludedAssetIDs: [UUID]
+    public var lockedAssetIDs: [UUID]
+    public var existingBoard: MoodboardDocument?
+    public var refinementInstruction: String?
+
+    public init(
+        prompt: String = "",
+        seedAssetIDs: [UUID] = [],
+        scopeFolderIDs: [UUID] = [],
+        requiredTags: [String] = [],
+        targetPalette: [LabColor] = [],
+        colorTolerance: Double = 28.0,
+        preferredCount: Int = 12,
+        candidateCount: Int = 24,
+        layoutStyle: EditorialStyle = .magazine,
+        useFreeformLayout: Bool = false,
+        includeCuratorNotes: Bool = true,
+        excludedAssetIDs: [UUID] = [],
+        lockedAssetIDs: [UUID] = [],
+        existingBoard: MoodboardDocument? = nil,
+        refinementInstruction: String? = nil
+    ) {
+        self.prompt = prompt
+        self.seedAssetIDs = seedAssetIDs
+        self.scopeFolderIDs = scopeFolderIDs
+        self.requiredTags = requiredTags
+        self.targetPalette = targetPalette
+        self.colorTolerance = colorTolerance
+        self.preferredCount = preferredCount
+        self.candidateCount = candidateCount
+        self.layoutStyle = layoutStyle
+        self.useFreeformLayout = useFreeformLayout
+        self.includeCuratorNotes = includeCuratorNotes
+        self.excludedAssetIDs = excludedAssetIDs
+        self.lockedAssetIDs = lockedAssetIDs
+        self.existingBoard = existingBoard
+        self.refinementInstruction = refinementInstruction
+    }
+}
+
 public struct MoodboardProposal: Codable, Hashable, Sendable {
     public var draftDocument: MoodboardDocument
     public var primaryMatches: [ScoredAsset]
     public var candidatePool: [ScoredAsset]
     public var extractedPalette: [LabColor]
     public var usedCloudAI: Bool
+    public var curatedSummary: String
+    public var agentTrace: [MoodboardAgentStep]
+    public var sections: [MoodboardSectionDraft]
+    public var rejectedSummary: String?
+    public var cachedVisualInsightsCount: Int
 
     public init(
         draftDocument: MoodboardDocument,
         primaryMatches: [ScoredAsset],
         candidatePool: [ScoredAsset],
         extractedPalette: [LabColor],
-        usedCloudAI: Bool
+        usedCloudAI: Bool,
+        curatedSummary: String = "",
+        agentTrace: [MoodboardAgentStep] = [],
+        sections: [MoodboardSectionDraft] = [],
+        rejectedSummary: String? = nil,
+        cachedVisualInsightsCount: Int = 0
     ) {
         self.draftDocument = draftDocument
         self.primaryMatches = primaryMatches
         self.candidatePool = candidatePool
         self.extractedPalette = extractedPalette
         self.usedCloudAI = usedCloudAI
+        self.curatedSummary = curatedSummary
+        self.agentTrace = agentTrace
+        self.sections = sections
+        self.rejectedSummary = rejectedSummary
+        self.cachedVisualInsightsCount = cachedVisualInsightsCount
     }
 }

@@ -2,33 +2,45 @@ import CharkleCanvas
 import CharkleCore
 import SwiftUI
 
-/// 4-Entry Rapid Moodboard Generator Sheet (`灵感词` / `种子图` / `配色定调` / `当前框选`):
-/// Lets designers generate a curated 12–20 item editorial moodboard draft + 20–40 candidate pool
-/// + extracted 5–7 color palette in under 10 seconds.
+/// Composable AI Moodboard Curator Workbench powered by `MoodboardAgentHarness`.
+/// Supports combining natural language brief + folder scope + seed images + optional color direction
+/// + layout options, live Agent Harness step timeline, sectioned visual preview with per-card
+/// lock/exclude controls, and multi-turn conversational refinement before opening the canvas.
 public struct MoodboardGeneratorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openSettings) private var openSettings
 
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
     public let moodboards: MoodboardStore
+    public let syncAndAI: SyncAndAIStore
 
-    @Namespace private var entryTabNamespace
-
-    @State private var activeEntry: MoodboardGeneratorEntry = .prompt
     @State private var promptText: String = ""
+    @State private var scopeFolderIDs: Set<UUID> = []
     @State private var selectedSeedIDs: Set<UUID> = []
-    @State private var selectedPaletteHexes: [String] = ["#3D5A80", "#D4A373"]
-    @State private var colorTolerance: Double = 28.0
-    @State private var customColor: Color = Color(charkleHex: "#5C6B73")
+    @State private var selectedPaletteHexes: [String] = []
+    @State private var colorTolerance: Double = 26.0
+    @State private var preferredCount: Int = 10
+    @State private var layoutStyle: EditorialStyle = .magazine
+    @State private var useFreeformLayout: Bool = false
+    @State private var includeCuratorNotes: Bool = true
+
+    @State private var lockedAssetIDs: Set<UUID> = []
+    @State private var excludedAssetIDs: Set<UUID> = []
+    @State private var refinementInput: String = ""
     @State private var boardTitle: String = ""
 
+    @State private var showSeedPicker: Bool = false
+    @State private var showColorPicker: Bool = false
+    @State private var showTraceExpanded: Bool = true
+    @State private var hoveredAssetID: UUID?
+
     private static let presetPrompts: [String] = [
-        "京都雨夜霓虹与湿润反光",
-        "低饱和奶油陶瓷与柔和自然光",
-        "粗野主义建筑几何与混凝土阴影",
-        "瑞士网格排版与编辑部留白"
+        "夏日清凉插画与通透蓝天阳光",
+        "极简暖调陶艺、纸张肌理与自然光影",
+        "瑞士网格排版与高级编辑部视觉",
+        "现代暗色数据界面与克制科技感"
     ]
 
     private static let curatedSwatches: [String] = [
@@ -40,444 +52,864 @@ public struct MoodboardGeneratorSheet: View {
     public init(
         coordinator: AppCoordinatorStore,
         library: LibraryStore,
-        moodboards: MoodboardStore
+        moodboards: MoodboardStore,
+        syncAndAI: SyncAndAIStore
     ) {
         self.coordinator = coordinator
         self.library = library
         self.moodboards = moodboards
+        self.syncAndAI = syncAndAI
+    }
+
+    private var isCloudAIReady: Bool {
+        syncAndAI.aiConfig.provider != .disabled && syncAndAI.hasStoredAIKey
+    }
+
+    private var activeProviderBadge: String {
+        guard isCloudAIReady else { return "仅本机离线模式" }
+        switch syncAndAI.aiConfig.provider {
+        case .disabled: return "仅本机离线模式"
+        case .chatGPTSubscription: return "ChatGPT 订阅视觉策展"
+        case .gemini: return "Gemini 视觉策展"
+        case .openAICompatible: return "云端模型视觉策展"
+        }
     }
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Header + Unified 4-Entry Segmented Pill
-            HStack {
-                HStack(spacing: 8) {
-                    CharkleIcon("sparkle-board", style: .layered, size: 24)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("10 秒快速生成情绪板")
-                            .font(.system(size: 15, weight: .semibold))
-                        Text("端侧 Vision / CIELAB 即时策展 · 自动生成主稿 + 候选替换池")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer()
-
-                HStack(spacing: 2) {
-                    ForEach(MoodboardGeneratorEntry.allCases, id: \.self) { entry in
-                        let isSelected = activeEntry == entry
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                activeEntry = entry
-                            }
-                            triggerPreviewGeneration()
-                        } label: {
-                            Text(entry.label)
-                                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                                .foregroundStyle(isSelected ? .primary : .secondary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background {
-                                    if isSelected {
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(CharkleTheme.surfaceElevated(for: colorScheme))
-                                            .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
-                                            .matchedGeometryEffect(id: "gen-entry-pill", in: entryTabNamespace)
-                                    }
-                                }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(3)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-
+            headerBar
             Divider()
 
-            // Split Workspace: Left Seed Input / Right Live Draft Preview
             HStack(spacing: 0) {
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        switch activeEntry {
-                        case .prompt:
-                            promptEntryPanel
-                        case .seedAssets:
-                            seedAssetsEntryPanel
-                        case .palette:
-                            paletteEntryPanel
-                        case .selection:
-                            selectionEntryPanel
-                        }
-
-                        Button {
-                            triggerPreviewGeneration()
-                        } label: {
-                            HStack(spacing: 6) {
-                                if moodboards.isGeneratingProposal {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "wand.and.stars")
-                                        .font(.system(size: 12, weight: .semibold))
-                                }
-                                Text(moodboards.isGeneratingProposal ? "正在策展排版…" : "刷新推荐初稿")
-                                    .font(.system(size: 12.5, weight: .semibold))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .buttonStyle(CharkleTactileButtonStyle())
-                        .disabled(moodboards.isGeneratingProposal)
-                    }
-                    .padding(20)
-                }
-                .frame(width: 340)
+                leftBriefStudio
+                    .frame(width: 348)
 
                 Divider()
 
-                // Right Live Preview Pane
-                liveProposalPreviewPane
+                rightAgentWorkbench
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             Divider()
-
-            // Footer Action Bar
-            HStack(spacing: 12) {
-                TextField("输入情绪板标题…", text: $boardTitle)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 260)
-
-                if let prop = moodboards.proposal {
-                    Text(prop.usedCloudAI ? "已启用云端增强智能" : "端侧离线即时策展")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.05), in: Capsule(style: .continuous))
-                }
-
-                Spacer()
-
-                Button("取消") {
-                    moodboards.proposal = nil
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-
-                Button("创建并打开情绪板") {
-                    Task {
-                        let title = boardTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            ? defaultBoardTitle
-                            : boardTitle
-                        if moodboards.proposal == nil {
-                            await runGenerationNow()
-                        }
-                        if let created = await moodboards.confirmProposal(title: title, subtitle: promptText) {
-                            coordinator.openMoodboard(created.id)
-                            coordinator.showToast("已创建情绪板「\(created.title)」", icon: "sparkles.rectangle.stack")
-                            dismiss()
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            footerBar
         }
-        .frame(width: 860, height: 590)
+        .frame(width: 960, height: 660)
         .background(CharkleTheme.galleryGround(for: colorScheme))
         .onAppear {
-            activeEntry = coordinator.generatorInitialEntry
             if !library.selectedAssetIDs.isEmpty {
-                selectedSeedIDs = Set(library.selectedAssetIDs.prefix(3))
+                selectedSeedIDs = Set(library.selectedAssetIDs.prefix(4))
+                showSeedPicker = true
             }
-            triggerPreviewGeneration()
-        }
-    }
-
-    // MARK: - 4 Entry Panels
-
-    private var promptEntryPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("描述你想探索的视觉氛围或主题")
-                .font(.system(size: 12.5, weight: .semibold))
-            TextField("例如：京都雨夜霓虹、奶油陶艺、复古印刷排版…", text: $promptText, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(3...5)
-                .onSubmit { triggerPreviewGeneration() }
-
-            Text("灵感方向示例")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-
-            CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
-                ForEach(Self.presetPrompts, id: \.self) { sample in
-                    Button {
-                        promptText = sample
-                        if boardTitle.isEmpty { boardTitle = sample }
-                        triggerPreviewGeneration()
-                    } label: {
-                        Text(sample)
-                            .font(.system(size: 11.5))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(CharkleTheme.surfaceElevated(for: colorScheme), in: Capsule(style: .continuous))
-                            .overlay(
-                                Capsule(style: .continuous)
-                                    .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
+            if case .folder(let folderID) = coordinator.selectedDestination {
+                scopeFolderIDs = [folderID]
+            }
+            if let existingProp = moodboards.proposal, boardTitle.isEmpty {
+                boardTitle = existingProp.draftDocument.title
             }
         }
     }
 
-    private var seedAssetsEntryPanel: some View {
-        let candidates = library.allAssetsByID.values.filter { !$0.isTrashed }.sorted { $0.createdAt > $1.createdAt }
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("选择 1–3 张定调种子图")
-                    .font(.system(size: 12.5, weight: .semibold))
-                Spacer()
-                Text("已选 \(selectedSeedIDs.count)/3")
-                    .font(.system(size: 11, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
+    // MARK: - Header
 
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                ForEach(candidates.prefix(18)) { asset in
-                    let isPicked = selectedSeedIDs.contains(asset.id)
-                    Button {
-                        if isPicked {
-                            selectedSeedIDs.remove(asset.id)
-                        } else {
-                            if selectedSeedIDs.count >= 3, let first = selectedSeedIDs.first {
-                                selectedSeedIDs.remove(first)
-                            }
-                            selectedSeedIDs.insert(asset.id)
-                        }
-                        triggerPreviewGeneration()
-                    } label: {
-                        AssetThumbnailSurface(
-                            asset: asset,
-                            loader: library.thumbnailLoader,
-                            tier: .grid520,
-                            cornerRadius: 8
-                        )
-                        .frame(height: 76)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(isPicked ? Color.accentColor : Color.clear, lineWidth: 2.5)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private var paletteEntryPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("点选 1–3 个核心定调色彩（CIELAB 感知匹配）")
-                .font(.system(size: 12.5, weight: .semibold))
-
-            CharkleFlowLayout(spacing: 8, lineSpacing: 8) {
-                ForEach(Self.curatedSwatches, id: \.self) { hex in
-                    let active = selectedPaletteHexes.contains(hex)
-                    Button {
-                        if active {
-                            if selectedPaletteHexes.count > 1 {
-                                selectedPaletteHexes.removeAll { $0 == hex }
-                            }
-                        } else {
-                            if selectedPaletteHexes.count >= 3 {
-                                selectedPaletteHexes.removeFirst()
-                            }
-                            selectedPaletteHexes.append(hex)
-                        }
-                        triggerPreviewGeneration()
-                    } label: {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(charkleHex: hex))
-                            .frame(width: 36, height: 36)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(active ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: active ? 2.5 : 0.75)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help(hex)
+    private var headerBar: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 9) {
+                CharkleIcon("sparkle-board", style: .layered, size: 26)
+                VStack(alignment: .leading, spacing: 1.5) {
+                    Text("AI 情绪板策展工作台")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("组合灵感词、目录与种子图，由 Agent 视觉审片、宁缺毋滥挑选并编排分区")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            HStack {
-                Text("色彩容差 ΔE")
+            Spacer()
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(isCloudAIReady ? Color.green : Color.orange)
+                    .frame(width: 7, height: 7)
+                Text(activeProviderBadge)
                     .font(.system(size: 11.5, weight: .medium))
-                Spacer()
-                Text("\(Int(colorTolerance))")
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .monospacedDigit()
-            }
-            Slider(value: $colorTolerance, in: 10...55, step: 2)
-                .onChange(of: colorTolerance) { _, _ in
-                    triggerPreviewGeneration()
+                    .foregroundStyle(.secondary)
+                if !isCloudAIReady {
+                    Button("去开启") {
+                        dismiss()
+                        openSettings()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .fixedSize()
                 }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.05), in: Capsule(style: .continuous))
         }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 
-    private var selectionEntryPanel: some View {
-        let selected = library.selectedAssets
-        return VStack(alignment: .leading, spacing: 10) {
-            Text("基于当前素材库框选内容 (\(selected.count) 项)")
-                .font(.system(size: 12.5, weight: .semibold))
-            if selected.isEmpty {
-                Text("当前未在素材库选中素材。将自动使用最近添加的素材构建情绪板，或返回画廊先框选一批作品。")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(selected.prefix(12)) { asset in
-                        AssetThumbnailSurface(
-                            asset: asset,
-                            loader: library.thumbnailLoader,
-                            tier: .grid520,
-                            cornerRadius: 8
-                        )
-                        .frame(height: 68)
+    // MARK: - Left Composable Brief Studio
+
+    private var leftBriefStudio: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 16) {
+                // 1. Prompt Brief
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("灵感方向与要求")
+                        .font(.system(size: 12.5, weight: .semibold))
+
+                    TextField("描述想要的氛围、题材、光影或排除项（如：只要清凉插画，不要暗色界面）…", text: $promptText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                        .lineLimit(3...5)
+
+                    CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
+                        ForEach(Self.presetPrompts, id: \.self) { sample in
+                            Button {
+                                promptText = sample
+                            } label: {
+                                Text(sample)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(CharkleTheme.surfaceElevated(for: colorScheme), in: Capsule(style: .continuous))
+                                    .overlay(
+                                        Capsule(style: .continuous)
+                                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
-            }
-        }
-    }
 
-    // MARK: - Live Draft Preview Pane
+                Divider()
 
-    private var liveProposalPreviewPane: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 14) {
-                if let prop = moodboards.proposal {
+                // 2. Folder Scope (Multi-Select Composable)
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("主画布初稿预览（\(prop.primaryMatches.count) 张）")
-                            .font(.system(size: 12.5, weight: .semibold))
+                        Text("限定文件夹范围")
+                            .font(.system(size: 12, weight: .semibold))
                         Spacer()
-                        Text("候选替换池 +\(prop.candidatePool.count) 张")
-                            .font(.system(size: 11, weight: .medium))
+                        Text(scopeFolderIDs.isEmpty ? "全库检索" : "已选 \(scopeFolderIDs.count) 个目录")
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
 
-                    // Extracted Harmonious Board Palette
-                    if !prop.extractedPalette.isEmpty {
-                        HStack(spacing: 4) {
-                            ForEach(prop.extractedPalette.prefix(7), id: \.hex) { swatch in
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(Color(charkleHex: swatch.hex))
-                                    .frame(height: 24)
+                    CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
+                        folderScopeChip(id: nil, label: "全部素材")
+                        ForEach(library.folders) { folder in
+                            folderScopeChip(id: folder.id, label: library.folderDisplayPath(for: folder.id))
+                        }
+                    }
+                }
+
+                Divider()
+
+                // 3. Optional Seed Images
+                DisclosureGroup(isExpanded: $showSeedPicker) {
+                    let candidates = library.allAssetsByID.values
+                        .filter { !$0.isTrashed }
+                        .sorted { $0.createdAt > $1.createdAt }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("点选 1–4 张定调种子图（必入主画布）")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if !selectedSeedIDs.isEmpty {
+                                Button("清空") { selectedSeedIDs.removeAll() }
+                                    .font(.system(size: 11))
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        LazyVGrid(
+                            columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
+                            spacing: 6
+                        ) {
+                            ForEach(candidates.prefix(18)) { asset in
+                                let isPicked = selectedSeedIDs.contains(asset.id)
+                                Button {
+                                    if isPicked {
+                                        selectedSeedIDs.remove(asset.id)
+                                    } else {
+                                        if selectedSeedIDs.count >= 4, let first = selectedSeedIDs.first {
+                                            selectedSeedIDs.remove(first)
+                                        }
+                                        selectedSeedIDs.insert(asset.id)
+                                    }
+                                } label: {
+                                    ZStack(alignment: .topTrailing) {
+                                        AssetThumbnailSurface(
+                                            asset: asset,
+                                            loader: library.thumbnailLoader,
+                                            tier: .grid520,
+                                            cornerRadius: 7
+                                        )
+                                        .frame(height: 64)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(isPicked ? Color.accentColor : Color.clear, lineWidth: 2)
+                                        )
+                                        if isPicked {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(Color.accentColor)
+                                                .background(Circle().fill(Color.white).padding(1))
+                                                .padding(4)
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                     }
+                    .padding(.top, 6)
+                } label: {
+                    HStack {
+                        Text("定调种子图")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        Text(selectedSeedIDs.isEmpty ? "可选" : "已选 \(selectedSeedIDs.count) 张")
+                            .font(.system(size: 11))
+                            .foregroundStyle(selectedSeedIDs.isEmpty ? Color.secondary : Color.accentColor)
+                    }
+                }
 
-                    if prop.primaryMatches.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "photo.on.rectangle.angled")
-                                .font(.system(size: 28, weight: .light))
-                                .foregroundStyle(.secondary)
-                            Text("暂未匹配到足够素材，请先拖入素材或放宽筛选条件")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 48)
-                    } else {
-                        LazyVGrid(
-                            columns: [
-                                GridItem(.flexible(), spacing: 10),
-                                GridItem(.flexible(), spacing: 10),
-                                GridItem(.flexible(), spacing: 10)
-                            ],
-                            spacing: 10
-                        ) {
-                            ForEach(prop.primaryMatches.prefix(15)) { match in
-                                ZStack(alignment: .bottomLeading) {
-                                    AssetThumbnailSurface(
-                                        asset: match.asset,
-                                        loader: library.thumbnailLoader,
-                                        tier: .grid520,
-                                        cornerRadius: 10
-                                    )
-                                    .frame(height: 112)
+                Divider()
 
-                                    if let reason = match.matchReasons.first {
-                                        Text(reason)
-                                            .font(.system(size: 9.5, weight: .semibold))
-                                            .foregroundStyle(.white)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.black.opacity(0.54), in: Capsule(style: .continuous))
-                                            .padding(6)
+                // 4. Optional Color Direction
+                DisclosureGroup(isExpanded: $showColorPicker) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        CharkleFlowLayout(spacing: 7, lineSpacing: 7) {
+                            ForEach(Self.curatedSwatches, id: \.self) { hex in
+                                let active = selectedPaletteHexes.contains(hex)
+                                Button {
+                                    if active {
+                                        selectedPaletteHexes.removeAll { $0 == hex }
+                                    } else {
+                                        if selectedPaletteHexes.count >= 3 { selectedPaletteHexes.removeFirst() }
+                                        selectedPaletteHexes.append(hex)
                                     }
+                                } label: {
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .fill(Color(charkleHex: hex))
+                                        .frame(width: 28, height: 28)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                .strokeBorder(active ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: active ? 2.2 : 0.75)
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .help(hex)
+                            }
+                        }
+
+                        if !selectedPaletteHexes.isEmpty {
+                            HStack(spacing: 8) {
+                                Text("精确")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                                Slider(value: $colorTolerance, in: 12...46, step: 2)
+                                Text("宽松")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.top, 6)
+                } label: {
+                    HStack {
+                        Text("色彩倾向")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        if selectedPaletteHexes.isEmpty {
+                            Text("可选")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            HStack(spacing: 3) {
+                                ForEach(selectedPaletteHexes, id: \.self) { hex in
+                                    Circle()
+                                        .fill(Color(charkleHex: hex))
+                                        .frame(width: 11, height: 11)
                                 }
                             }
                         }
                     }
-                } else {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                        Text("正在生成情绪板策展初稿…")
-                            .font(.system(size: 12))
+                }
+
+                Divider()
+
+                // 5. Composition & Layout Controls
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("版面与构成")
+                        .font(.system(size: 12, weight: .semibold))
+
+                    HStack {
+                        Text("排版节奏")
+                            .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker("", selection: $layoutStyle) {
+                            ForEach(EditorialStyle.allCases, id: \.self) { style in
+                                Text(style.localizedLabel).tag(style)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 204)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 260)
+
+                    HStack {
+                        Text("画布模式")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker("", selection: $useFreeformLayout) {
+                            Text("自动排版").tag(false)
+                            Text("自由拼贴").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 204)
+                    }
+
+                    HStack {
+                        Text("数量上限（宁缺毋滥）")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker("", selection: $preferredCount) {
+                            Text("6 张").tag(6)
+                            Text("10 张").tag(10)
+                            Text("16 张").tag(16)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 164)
+                    }
+
+                    Toggle(isOn: $includeCuratorNotes) {
+                        Text("附带视觉策展便签与分区标题")
+                            .font(.system(size: 11.5))
+                    }
+                    .toggleStyle(.checkbox)
+                }
+
+                // 6. Primary Curation Trigger
+                Button {
+                    excludedAssetIDs.removeAll()
+                    lockedAssetIDs = selectedSeedIDs
+                    Task { await runCuration(refinement: nil) }
+                } label: {
+                    HStack(spacing: 7) {
+                        if moodboards.isGeneratingProposal {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: isCloudAIReady ? "sparkles" : "wand.and.stars")
+                                .font(.system(size: 12.5, weight: .semibold))
+                        }
+                        Text(
+                            moodboards.isGeneratingProposal
+                                ? "Agent 正在审片策展…"
+                                : (isCloudAIReady ? "开始 AI 视觉策展" : "生成离线策展初稿")
+                        )
+                        .font(.system(size: 12.5, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(moodboards.isGeneratingProposal)
+            }
+            .padding(18)
+        }
+    }
+
+    private func folderScopeChip(id: UUID?, label: String) -> some View {
+        let isSelected = id == nil ? scopeFolderIDs.isEmpty : scopeFolderIDs.contains(id!)
+        return Button {
+            if let id {
+                if scopeFolderIDs.contains(id) {
+                    scopeFolderIDs.remove(id)
+                } else {
+                    scopeFolderIDs.insert(id)
+                }
+            } else {
+                scopeFolderIDs.removeAll()
+            }
+        } label: {
+            Text(label)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    isSelected ? Color.accentColor.opacity(0.12) : CharkleTheme.surfaceElevated(for: colorScheme),
+                    in: Capsule(style: .continuous)
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(isSelected ? Color.accentColor.opacity(0.45) : CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Right Agent Harness Workbench & Live Sectioned Preview
+
+    private var rightAgentWorkbench: some View {
+        VStack(spacing: 0) {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 14) {
+                    // Live / Completed Agent Harness Timeline
+                    if !moodboards.agentTrace.isEmpty || moodboards.isGeneratingProposal {
+                        agentTimelineCard
+                    }
+
+                    if let err = moodboards.lastError {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(err)
+                                .font(.system(size: 11.5))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+
+                    if let prop = moodboards.proposal {
+                        curatedProposalView(prop)
+                    } else if !moodboards.isGeneratingProposal {
+                        emptyWorkbenchPlaceholder
+                    }
+                }
+                .padding(18)
+            }
+
+            // Multi-Turn Refinement Steering Bar (visible once a draft exists)
+            if moodboards.proposal != nil {
+                Divider()
+                HStack(spacing: 8) {
+                    Image(systemName: "bubble.left.and.sparkles")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.accentColor)
+                    TextField("继续微调初稿… 如：去掉暗色界面、换更通透的色调、按光影与角色分组", text: $refinementInput)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                        .onSubmit { triggerRefinement() }
+                    Button("继续调整") {
+                        triggerRefinement()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(moodboards.isGeneratingProposal || refinementInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(CharkleTheme.surfaceElevated(for: colorScheme))
+            }
+        }
+    }
+
+    private var agentTimelineCard: some View {
+        DisclosureGroup(isExpanded: $showTraceExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(moodboards.agentTrace) { step in
+                    HStack(alignment: .top, spacing: 8) {
+                        Group {
+                            switch step.status {
+                            case .running:
+                                ProgressView().controlSize(.mini)
+                            case .done:
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            case .warning:
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        .font(.system(size: 12))
+                        .frame(width: 15, height: 15)
+                        .padding(.top, 1)
+
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text(step.title)
+                                .font(.system(size: 11.5, weight: .semibold))
+                            if !step.detail.isEmpty {
+                                Text(step.detail)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
                 }
             }
-            .padding(20)
+            .padding(.top, 6)
+        } label: {
+            HStack(spacing: 6) {
+                if moodboards.isGeneratingProposal {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                Text(moodboards.isGeneratingProposal ? "Agent 策展执行中…" : "策展执行轨迹（\(moodboards.agentTrace.count) 步）")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+            }
+        }
+        .padding(12)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+        )
+    }
+
+    @ViewBuilder
+    private func curatedProposalView(_ prop: MoodboardProposal) -> some View {
+        let scoredByID = Dictionary(uniqueKeysWithValues: prop.primaryMatches.map { ($0.id, $0) })
+
+        // Curator Art-Direction Summary + Palette + Rejections
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(prop.draftDocument.title)
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Text("入选 \(prop.primaryMatches.count) 张 · 候选池 +\(prop.candidatePool.count)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            if !prop.curatedSummary.isEmpty {
+                Text(prop.curatedSummary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !prop.extractedPalette.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(prop.extractedPalette.prefix(6), id: \.hex) { swatch in
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color(charkleHex: swatch.hex))
+                            .frame(height: 22)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+                            )
+                            .help(swatch.hex)
+                    }
+                }
+            }
+
+            if let rejected = prop.rejectedSummary, !rejected.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(rejected)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(14)
+        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+        )
+
+        if prop.primaryMatches.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("没有硬塞不符主题的素材")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("当前限定范围内暂无与描述相符的画面，可以放宽文件夹范围、修改描述，或先在设置开启云端增强智能让 AI 看图筛选。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 36)
+        } else {
+            let displaySections: [MoodboardSectionDraft] = prop.sections.isEmpty
+                ? [MoodboardSectionDraft(title: "精选画面", assetIDs: prop.primaryMatches.map(\.id))]
+                : prop.sections
+
+            ForEach(displaySections) { section in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(sectionTintColor(section.tint))
+                            .frame(width: 8, height: 8)
+                        Text(section.title)
+                            .font(.system(size: 12.5, weight: .semibold))
+                        if !section.rationale.isEmpty {
+                            Text("· \(section.rationale)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Text("\(section.assetIDs.count) 张")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    let heroSet = Set(section.heroAssetIDs)
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.flexible(), spacing: 10),
+                            GridItem(.flexible(), spacing: 10),
+                            GridItem(.flexible(), spacing: 10)
+                        ],
+                        spacing: 10
+                    ) {
+                        ForEach(section.assetIDs, id: \.self) { assetID in
+                            if let scored = scoredByID[assetID] {
+                                curatedPreviewTile(scored: scored, isHero: heroSet.contains(assetID))
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // MARK: - Seed Resolution
+    private func curatedPreviewTile(scored: ScoredAsset, isHero: Bool) -> some View {
+        let isLocked = lockedAssetIDs.contains(scored.id)
+        let isHovered = hoveredAssetID == scored.id
 
-    private var defaultBoardTitle: String {
-        switch activeEntry {
-        case .prompt:
-            let p = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
-            return p.isEmpty ? "灵感情绪板" : String(p.prefix(20))
-        case .seedAssets:
-            return "以图生板 · 视觉延伸"
-        case .palette:
-            return "色彩情绪板 \(selectedPaletteHexes.first ?? "")"
-        case .selection:
-            return "精选情绪板"
+        return ZStack {
+            AssetThumbnailSurface(
+                asset: scored.asset,
+                loader: library.thumbnailLoader,
+                tier: .grid520,
+                cornerRadius: 10
+            )
+            .frame(height: 118)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isLocked ? Color.accentColor : CharkleTheme.hairline(for: colorScheme),
+                        lineWidth: isLocked ? 2 : 0.75
+                    )
+            )
+
+            // Top-left Hero badge
+            VStack {
+                HStack {
+                    if isHero {
+                        Text("主视觉")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.92), in: Capsule())
+                    }
+                    Spacer()
+
+                    // Lock / Exclude controls on hover (or when locked)
+                    if isHovered || isLocked {
+                        HStack(spacing: 4) {
+                            Button {
+                                if isLocked { lockedAssetIDs.remove(scored.id) }
+                                else { lockedAssetIDs.insert(scored.id) }
+                            } label: {
+                                Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(isLocked ? Color.accentColor : Color.black.opacity(0.62), in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .help(isLocked ? "取消锁定" : "锁定保留（微调时不被换掉）")
+
+                            Button {
+                                lockedAssetIDs.remove(scored.id)
+                                selectedSeedIDs.remove(scored.id)
+                                excludedAssetIDs.insert(scored.id)
+                                Task { await runCuration(refinement: "已剔除刚才排除的素材，请保持整体和谐并按需补位") }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(Color.black.opacity(0.62), in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("排除此素材并重新调整")
+                        }
+                    }
+                }
+                .padding(6)
+
+                Spacer()
+
+                if let reason = scored.matchReasons.first, !reason.isEmpty {
+                    HStack {
+                        Text(reason)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.black.opacity(0.60), in: Capsule(style: .continuous))
+                        Spacer()
+                    }
+                    .padding(6)
+                }
+            }
+        }
+        .onHover { hovering in
+            hoveredAssetID = hovering ? scored.id : (hoveredAssetID == scored.id ? nil : hoveredAssetID)
         }
     }
 
-    private func currentSeed() -> MoodboardSeed {
-        switch activeEntry {
-        case .prompt:
-            return .prompt(promptText.trimmingCharacters(in: .whitespacesAndNewlines))
-        case .seedAssets:
-            let ids = Array(selectedSeedIDs)
-            return ids.isEmpty ? .prompt("") : .seedAssets(ids)
-        case .palette:
-            let labs = selectedPaletteHexes.map { LabColor.fromHex($0) }
-            return .palette(labs, tolerance: colorTolerance)
-        case .selection:
-            let ids = Array(library.selectedAssetIDs)
-            return ids.isEmpty ? .prompt("") : .manualSelection(ids)
+    private var emptyWorkbenchPlaceholder: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "sparkles.rectangle.stack")
+                .font(.system(size: 36, weight: .ultraLight))
+                .foregroundStyle(.secondary)
+            Text("输入灵感方向，点击左侧「\(isCloudAIReady ? "开始 AI 视觉策展" : "生成离线策展初稿")」")
+                .font(.system(size: 13.5, weight: .semibold))
+            Text("Agent 会把候选素材拼成编号视觉联系表直接“肉眼看图”，只挑选真正契合氛围的作品，自动划分逻辑分区、标注主视觉并提炼全板色卡；初稿生成后还可继续对话微调。")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 96)
+    }
+
+    // MARK: - Footer
+
+    private var footerBar: some View {
+        HStack(spacing: 12) {
+            TextField("情绪板名称…", text: $boardTitle)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 260)
+
+            if let prop = moodboards.proposal {
+                HStack(spacing: 5) {
+                    Image(systemName: prop.usedCloudAI ? "sparkles" : "desktopcomputer")
+                        .font(.system(size: 10.5))
+                    Text(prop.usedCloudAI ? "已启用云端增强智能" : "本机离线策展")
+                        .font(.system(size: 11, weight: .medium))
+                    if prop.cachedVisualInsightsCount > 0 {
+                        Text("· 沉淀 \(prop.cachedVisualInsightsCount) 条视觉理解")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.05), in: Capsule(style: .continuous))
+            }
+
+            Spacer()
+
+            Button("取消") {
+                moodboards.proposal = nil
+                moodboards.agentTrace = []
+                dismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+
+            Button("创建并打开情绪板") {
+                Task {
+                    if moodboards.proposal == nil {
+                        await runCuration(refinement: nil)
+                    }
+                    let finalTitle = boardTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? (moodboards.proposal?.draftDocument.title ?? "新情绪板")
+                        : boardTitle
+                    let subtitle = moodboards.proposal?.draftDocument.subtitle.isEmpty == false
+                        ? (moodboards.proposal?.draftDocument.subtitle ?? promptText)
+                        : promptText
+                    if let created = await moodboards.confirmProposal(title: finalTitle, subtitle: subtitle) {
+                        coordinator.openMoodboard(created.id)
+                        coordinator.showToast("已创建情绪板「\(created.title)」", icon: "sparkles.rectangle.stack")
+                        dismiss()
+                    }
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(moodboards.isGeneratingProposal || (moodboards.proposal != nil && moodboards.proposal?.primaryMatches.isEmpty == true))
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 13)
+    }
+
+    // MARK: - Actions
+
+    private func triggerRefinement() {
+        let instruction = refinementInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty, !moodboards.isGeneratingProposal else { return }
+        refinementInput = ""
+        Task { await runCuration(refinement: instruction) }
+    }
+
+    private func runCuration(refinement: String?) async {
+        showTraceExpanded = true
+        let req = MoodboardCurationRequest(
+            prompt: promptText.trimmingCharacters(in: .whitespacesAndNewlines),
+            seedAssetIDs: Array(selectedSeedIDs),
+            scopeFolderIDs: Array(scopeFolderIDs),
+            targetPalette: selectedPaletteHexes.map { LabColor.fromHex($0) },
+            colorTolerance: colorTolerance,
+            preferredCount: preferredCount,
+            candidateCount: 24,
+            layoutStyle: layoutStyle,
+            useFreeformLayout: useFreeformLayout,
+            includeCuratorNotes: includeCuratorNotes,
+            excludedAssetIDs: Array(excludedAssetIDs),
+            lockedAssetIDs: Array(lockedAssetIDs),
+            existingBoard: refinement != nil ? moodboards.proposal?.draftDocument : nil,
+            refinementInstruction: refinement
+        )
+        await moodboards.curateProposal(req)
+        if let prop = moodboards.proposal {
+            if boardTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || refinement == nil {
+                boardTitle = prop.draftDocument.title
+            }
+            if prop.cachedVisualInsightsCount > 0 {
+                await library.refreshAssets()
+            }
         }
     }
 
-    private func triggerPreviewGeneration() {
-        Task { await runGenerationNow() }
-    }
-
-    private func runGenerationNow() async {
-        await moodboards.generateProposal(seed: currentSeed(), primaryCount: 16, candidateCount: 28)
+    private func sectionTintColor(_ tint: GroupTint) -> Color {
+        switch tint {
+        case .neutral: .secondary
+        case .sand: Color(charkleHex: "#D4A373")
+        case .sage: Color(charkleHex: "#6B8E76")
+        case .slate: Color(charkleHex: "#5C6B73")
+        case .terracotta: Color(charkleHex: "#BA6B55")
+        case .ocean: Color(charkleHex: "#3D5A80")
+        }
     }
 }

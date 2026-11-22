@@ -40,6 +40,10 @@ public protocol CharkleEngineProtocol: Sendable {
         primaryCount: Int,
         candidateCount: Int
     ) async throws -> MoodboardProposal
+    func curateMoodboard(
+        _ request: MoodboardCurationRequest,
+        onStep: (@Sendable (MoodboardAgentStep) async -> Void)?
+    ) async throws -> MoodboardProposal
     func saveBoard(_ document: MoodboardDocument) async throws -> MoodboardDocument
     func deleteBoard(id: UUID) async throws
     func setBoardPinnedOffline(id: UUID, pinned: Bool) async throws

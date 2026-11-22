@@ -4,6 +4,7 @@ public nonisolated protocol CloudAIProvider: Sendable {
     var embeddingIdentity: String { get }
     func embed(_ text: String) async throws -> [Float]
     func enrich(text: String, thumbnailJPEG: Data?) async throws -> CloudEnrichmentResult
+    func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String
 }
 
 public nonisolated struct GeminiProvider: CloudAIProvider {
@@ -47,6 +48,30 @@ public nonisolated struct GeminiProvider: CloudAIProvider {
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: embedding)
     }
+
+    public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
+        struct Response: Decodable {
+            struct Candidate: Decodable {
+                struct Content: Decodable { struct Part: Decodable { let text: String? }; let parts: [Part] }
+                let content: Content?
+            }
+            let candidates: [Candidate]?
+        }
+        var parts: [[String: Any]] = [["text": prompt]]
+        for jpeg in imagesJPEG {
+            parts.append(["inline_data": ["mime_type": "image/jpeg", "data": jpeg.base64EncodedString()]])
+        }
+        let model = config.chatModel.replacingOccurrences(of: "models/", with: "", options: .anchored)
+        var body: [String: Any] = [
+            "contents": [["parts": parts]],
+            "generationConfig": ["responseMimeType": "application/json"]
+        ]
+        if !instructions.isEmpty {
+            body["systemInstruction"] = ["parts": [["text": instructions]]]
+        }
+        let response: Response = try await api.post("models/\(model):generateContent", body: body, timeout: 90)
+        return response.candidates?.first?.content?.parts.compactMap(\.text).joined() ?? ""
+    }
 }
 
 public nonisolated struct OpenAICompatibleProvider: CloudAIProvider {
@@ -87,6 +112,33 @@ public nonisolated struct OpenAICompatibleProvider: CloudAIProvider {
         let embedding = config.embeddingModel.isEmpty ? nil : try? await embed(extensionText)
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: embedding)
+    }
+
+    public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
+        struct Response: Decodable {
+            struct Choice: Decodable { struct Message: Decodable { let content: String? }; let message: Message }
+            let choices: [Choice]
+        }
+        let userContent: Any
+        if !imagesJPEG.isEmpty {
+            var parts: [[String: Any]] = [["type": "text", "text": prompt]]
+            for jpeg in imagesJPEG {
+                parts.append(["type": "image_url", "image_url": ["url": "data:image/jpeg;base64," + jpeg.base64EncodedString()]])
+            }
+            userContent = parts
+        } else {
+            userContent = prompt
+        }
+        var messages: [[String: Any]] = []
+        if !instructions.isEmpty {
+            messages.append(["role": "system", "content": instructions])
+        }
+        messages.append(["role": "user", "content": userContent])
+        let response: Response = try await api.post("chat/completions", body: [
+            "model": config.chatModel,
+            "messages": messages
+        ], timeout: 90)
+        return response.choices.first?.message.content ?? ""
     }
 }
 
@@ -145,6 +197,40 @@ public nonisolated struct OpenAIResponsesProvider: CloudAIProvider {
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: embedding)
     }
+
+    public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
+        struct Response: Decodable {
+            struct OutputItem: Decodable {
+                struct ContentPart: Decodable {
+                    let type: String?
+                    let text: String?
+                }
+                let type: String?
+                let content: [ContentPart]?
+            }
+            let output_text: String?
+            let output: [OutputItem]?
+        }
+        var contentParts: [[String: Any]] = [["type": "input_text", "text": prompt]]
+        for jpeg in imagesJPEG {
+            contentParts.append(["type": "input_image", "image_url": "data:image/jpeg;base64," + jpeg.base64EncodedString()])
+        }
+        var body: [String: Any] = [
+            "model": config.chatModel,
+            "input": [["role": "user", "content": contentParts]]
+        ]
+        if !instructions.isEmpty {
+            body["instructions"] = instructions
+        }
+        let response: Response = try await api.post("responses", body: body, timeout: 90)
+        if let direct = response.output_text, !direct.isEmpty {
+            return direct
+        }
+        return (response.output ?? [])
+            .flatMap { $0.content ?? [] }
+            .compactMap(\.text)
+            .joined(separator: "\n")
+    }
 }
 
 public nonisolated struct AnthropicMessagesProvider: CloudAIProvider {
@@ -200,6 +286,38 @@ public nonisolated struct AnthropicMessagesProvider: CloudAIProvider {
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: nil)
     }
+
+    public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
+        struct Response: Decodable {
+            struct Block: Decodable {
+                let type: String?
+                let text: String?
+            }
+            let content: [Block]
+        }
+        var blocks: [[String: Any]] = []
+        for jpeg in imagesJPEG {
+            blocks.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": jpeg.base64EncodedString()
+                ]
+            ])
+        }
+        blocks.append(["type": "text", "text": prompt])
+        var body: [String: Any] = [
+            "model": config.chatModel,
+            "max_tokens": 4096,
+            "messages": [["role": "user", "content": blocks]]
+        ]
+        if !instructions.isEmpty {
+            body["system"] = instructions
+        }
+        let response: Response = try await api.post("messages", body: body, timeout: 90)
+        return response.content.compactMap(\.text).joined(separator: "\n")
+    }
 }
 
 public nonisolated struct ChatGPTSubscriptionProvider: CloudAIProvider {
@@ -239,18 +357,33 @@ public nonisolated struct ChatGPTSubscriptionProvider: CloudAIProvider {
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: nil)
     }
+
+    public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
+        try await client.streamResponse(
+            model: model,
+            instructions: instructions,
+            userText: prompt,
+            imagesJPEG: imagesJPEG
+        )
+    }
 }
 
 public nonisolated struct FakeCloudAIProvider: CloudAIProvider {
     public let embeddingIdentity: String
     private let embeddings: [String: [Float]]
     private let result: CloudEnrichmentResult
+    private let jsonResponder: (@Sendable (_ instructions: String, _ prompt: String, _ imagesCount: Int) async throws -> String)?
 
-    public init(embeddingIdentity: String = "fake", embeddings: [String: [Float]] = [:],
-                result: CloudEnrichmentResult = CloudEnrichmentResult()) {
+    public init(
+        embeddingIdentity: String = "fake",
+        embeddings: [String: [Float]] = [:],
+        result: CloudEnrichmentResult = CloudEnrichmentResult(),
+        jsonResponder: (@Sendable (_ instructions: String, _ prompt: String, _ imagesCount: Int) async throws -> String)? = nil
+    ) {
         self.embeddingIdentity = embeddingIdentity
         self.embeddings = embeddings
         self.result = result
+        self.jsonResponder = jsonResponder
     }
 
     public func embed(_ text: String) async throws -> [Float] {
@@ -267,6 +400,13 @@ public nonisolated struct FakeCloudAIProvider: CloudAIProvider {
         var enrichment = result
         if enrichment.embedding == nil { enrichment.embedding = try await embed(text) }
         return enrichment
+    }
+
+    public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
+        if let jsonResponder {
+            return try await jsonResponder(instructions, prompt, imagesJPEG.count)
+        }
+        return "{}"
     }
 }
 
@@ -297,8 +437,8 @@ nonisolated struct AIHTTPClient: Sendable {
         self.session = session
     }
 
-    func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
-        var request = URLRequest(url: base.appending(path: path), timeoutInterval: 45)
+    func post<T: Decodable>(_ path: String, body: [String: Any], timeout: TimeInterval = 45) async throws -> T {
+        var request = URLRequest(url: base.appending(path: path), timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

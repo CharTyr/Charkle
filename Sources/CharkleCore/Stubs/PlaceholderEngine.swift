@@ -292,6 +292,15 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
         )
     }
 
+    public func curateMoodboard(
+        _ request: MoodboardCurationRequest,
+        onStep: (@Sendable (MoodboardAgentStep) async -> Void)?
+    ) async throws -> MoodboardProposal {
+        let step = MoodboardAgentStep(phase: .completed, title: "演示模式策展完成", detail: "", status: .done)
+        await onStep?(step)
+        return try await proposeMoodboard(seed: .prompt(request.prompt), primaryCount: request.preferredCount, candidateCount: request.candidateCount)
+    }
+
     public func saveBoard(_ document: MoodboardDocument) async throws -> MoodboardDocument {
         var copy = document
         copy.updatedAt = Date()
