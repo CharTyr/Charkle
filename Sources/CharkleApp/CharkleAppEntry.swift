@@ -20,6 +20,12 @@ public final class CharkleRuntime {
     private let hotkeyManager = GlobalHotkeyManager()
     @ObservationIgnored
     private nonisolated(unsafe) var externalRefreshObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var syncCompletedObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var appBecomeActiveObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private var lastForegroundSyncDate: Date = .distantPast
 
     public init() {
         let resolvedEngine: any CharkleEngineProtocol
@@ -38,11 +44,68 @@ public final class CharkleRuntime {
 
         setupNotchAndHotkeys()
         setupExternalAgentLiveRefresh()
+        setupRemoteSyncObservers()
     }
 
     deinit {
         if let observer = externalRefreshObserver {
             DistributedNotificationCenter.default().removeObserver(observer)
+        }
+        if let observer = syncCompletedObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = appBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func setupRemoteSyncObservers() {
+        syncCompletedObserver = NotificationCenter.default.addObserver(
+            forName: CharkleSyncNotifications.didCompleteSync,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let discovered = notification.userInfo?[CharkleSyncNotifications.discoveredCountKey] as? Int ?? 0
+            let downloaded = notification.userInfo?[CharkleSyncNotifications.downloadedOpsKey] as? Int ?? 0
+            let renames = notification.userInfo?[CharkleSyncNotifications.reconciledRenamesKey] as? Int ?? 0
+            let boards = notification.userInfo?[CharkleSyncNotifications.updatedBoardsKey] as? Int ?? 0
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.library.refreshAll()
+                await self.moodboards.refreshBoards()
+                if let activeBoardID = self.moodboards.activeBoard?.id {
+                    await self.moodboards.reloadActiveBoardIfNeeded(id: activeBoardID)
+                }
+                self.syncAndAI.syncStatus = await self.engine.syncStatus()
+                if discovered > 0 {
+                    self.coordinator.showToast("从云端目录发现并导入 \(discovered) 项新素材", icon: "icloud.and.arrow.down.fill", tone: .success)
+                } else if downloaded > 0 || boards > 0 || renames > 0 {
+                    self.coordinator.showToast("已同步云端最新变更", icon: "checkmark.icloud.fill")
+                }
+            }
+        }
+
+        appBecomeActiveObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let now = Date()
+                guard now.timeIntervalSince(self.lastForegroundSyncDate) >= 20 else { return }
+                self.lastForegroundSyncDate = now
+                _ = await self.syncAndAI.syncQuietlyIfReady()
+            }
+        }
+
+        // Trigger one quiet initial scan shortly after launch so files dropped in Google Drive while
+        // Charkle was closed are automatically ingested without blocking first-paint.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard let self else { return }
+            self.lastForegroundSyncDate = Date()
+            _ = await self.syncAndAI.syncQuietlyIfReady()
         }
     }
 
@@ -296,7 +359,11 @@ struct CharkleApp: App {
                 runtime.coordinator.presentMoodboardGenerator(entry: .prompt)
             }
             Button("立即同步 Google Drive") {
-                Task { _ = await runtime.syncAndAI.syncNow() }
+                Task {
+                    _ = await runtime.syncAndAI.syncNow()
+                    await runtime.library.refreshAll()
+                    await runtime.moodboards.refreshBoards()
+                }
             }
             Divider()
             Button("退出 Charkle") {

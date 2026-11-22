@@ -83,6 +83,7 @@ public protocol CharkleEngineProtocol: Sendable {
     func saveWebDAVPassword(_ password: String) async throws
     func testWebDAVConnection(config: DriveSyncConfig, password: String?) async throws -> DriveAccountInfo
     func migrateLibraryStorage(to targetConfig: DriveSyncConfig, webDAVPassword: String?) async throws -> StorageMigrationReport
+    func listGoogleDriveSharedFolders() async throws -> [RemoteDriveFile]
     func syncNow() async throws -> SyncReport
 
     // MARK: - First-Launch Curated Demo

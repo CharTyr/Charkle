@@ -26,9 +26,53 @@ public struct QuickLookOverlayView: View {
     @State private var gestureStartScale: CGFloat?
     @State private var panOffset: CGSize = .zero
     @State private var panStartOffset: CGSize = .zero
+    @State private var rotationDegrees: Double = 0
+    @State private var flipHorizontal: Bool = false
+    @State private var flipVertical: Bool = false
+    @State private var stageViewportSize: CGSize = CGSize(width: 960, height: 640)
     @State private var showSecondaryControls: Bool = false
     @State private var keyMonitor: Any?
     @State private var confirmPermanentDelete: Bool = false
+
+    private var supportsVisualTransform: Bool {
+        asset.mediaKind == .image || asset.mediaKind == .designFile || asset.mediaKind == .animatedImage
+    }
+
+    private var displayRotationDegrees: Int {
+        let raw = Int(rotationDegrees.rounded()) % 360
+        return raw < 0 ? raw + 360 : raw
+    }
+
+    private var hasActiveVisualTransform: Bool {
+        displayRotationDegrees != 0 || flipHorizontal || flipVertical
+    }
+
+    /// Ensures a landscape/portrait image rotated ±90° scales smoothly to stay within the stage bounds.
+    private var quarterTurnFitScale: CGFloat {
+        guard displayRotationDegrees == 90 || displayRotationDegrees == 270 else { return 1.0 }
+        let availW = max(120, stageViewportSize.width)
+        let availH = max(120, stageViewportSize.height)
+        let naturalRatio: CGFloat = {
+            if let img = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520),
+               img.size.height > 0 {
+                return img.size.width / img.size.height
+            }
+            return CGFloat(max(0.2, asset.aspectRatio))
+        }()
+        // Unrotated fitted size inside (availW, availH)
+        let fittedW: CGFloat
+        let fittedH: CGFloat
+        if availW / availH > naturalRatio {
+            fittedH = availH
+            fittedW = fittedH * naturalRatio
+        } else {
+            fittedW = availW
+            fittedH = fittedW / naturalRatio
+        }
+        // After 90° rotation, bounding box becomes (fittedH, fittedW)
+        let scale = min(availW / max(1, fittedH), availH / max(1, fittedW))
+        return max(0.25, min(1.0, scale))
+    }
 
     public init(
         asset: AssetRecord,
@@ -95,6 +139,17 @@ public struct QuickLookOverlayView: View {
                     .matchedGeometryEffect(id: asset.id, in: heroNamespace)
                     .padding(.horizontal, 48)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background {
+                        Color.clear
+                            .onGeometryChange(for: CGSize.self) { proxy in
+                                CGSize(width: floor(max(0, proxy.size.width - 96)), height: floor(proxy.size.height))
+                            } action: { _, newSize in
+                                if newSize.width > 80, newSize.height > 80,
+                                   (abs(newSize.width - stageViewportSize.width) >= 2 || abs(newSize.height - stageViewportSize.height) >= 2) {
+                                    stageViewportSize = newSize
+                                }
+                            }
+                    }
 
                 Spacer(minLength: 12)
 
@@ -120,6 +175,9 @@ public struct QuickLookOverlayView: View {
             zoomScale = 1.0
             panOffset = .zero
             panStartOffset = .zero
+            rotationDegrees = 0
+            flipHorizontal = false
+            flipVertical = false
             originalURL = nil
             highResImage = nil
             async let orig = library.resolveOriginalURL(for: asset.id)
@@ -187,6 +245,10 @@ public struct QuickLookOverlayView: View {
             if let url = originalURL {
                 AnimatedGIFPlayerView(url: url)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .rotationEffect(.degrees(rotationDegrees))
+                    .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
+                    .scaleEffect(zoomScale * quarterTurnFitScale)
+                    .offset(panOffset)
                     .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
             } else {
                 zoomableImageStage
@@ -238,7 +300,9 @@ public struct QuickLookOverlayView: View {
                     .clipShape(shape)
             }
         }
-        .scaleEffect(zoomScale)
+        .rotationEffect(.degrees(rotationDegrees))
+        .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
+        .scaleEffect(zoomScale * quarterTurnFitScale)
         .offset(panOffset)
         .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
         .gesture(
@@ -356,7 +420,7 @@ public struct QuickLookOverlayView: View {
     private var floatingBottomHUD: some View {
         CharkleGlassContainer(spacing: 10) {
             HStack(spacing: 10) {
-                if asset.mediaKind == .image || asset.mediaKind == .designFile {
+                if supportsVisualTransform {
                     HStack(spacing: 4) {
                         hudIconButton("minus.magnifyingglass", help: "缩小") {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
@@ -373,14 +437,59 @@ public struct QuickLookOverlayView: View {
                                 zoomScale = min(5.0, zoomScale * 1.25)
                             }
                         }
-                        hudIconButton("1.magnifyingglass", help: "重置 100%") {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                                zoomScale = 1.0
-                                panOffset = .zero
-                                panStartOffset = .zero
-                            }
+                        hudIconButton("1.magnifyingglass", help: "重置缩放与变换 (0)") {
+                            resetViewTransform()
                         }
                     }
+
+                    hudDivider
+
+                    HStack(spacing: 2) {
+                        hudIconButton("rotate.left", help: "逆时针旋转 90° (⇧R)") {
+                            rotatePreview(by: -90)
+                        }
+                        hudIconButton("rotate.right", help: "顺时针旋转 90° (R)") {
+                            rotatePreview(by: 90)
+                        }
+                        hudIconButton(
+                            "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                            help: "水平翻转 (⇧H)",
+                            isActive: flipHorizontal
+                        ) {
+                            toggleFlip(horizontal: true)
+                        }
+                        hudIconButton(
+                            "arrow.up.and.down.righttriangle.up.righttriangle.down",
+                            help: "上下翻转 (⇧V)",
+                            isActive: flipVertical
+                        ) {
+                            toggleFlip(horizontal: false)
+                        }
+
+                        if hasActiveVisualTransform {
+                            Button {
+                                resetViewTransform(resetZoom: false)
+                            } label: {
+                                HStack(spacing: 3) {
+                                    if displayRotationDegrees != 0 {
+                                        Text("\(displayRotationDegrees)°")
+                                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                            .monospacedDigit()
+                                    }
+                                    Image(systemName: "arrow.uturn.backward")
+                                        .font(.system(size: 9.5, weight: .semibold))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(Color.accentColor.opacity(0.72), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            }
+                            .buttonStyle(CharkleTactileButtonStyle())
+                            .help("还原旋转与翻转")
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        }
+                    }
+                    .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: hasActiveVisualTransform)
 
                     hudDivider
                 }
@@ -492,26 +601,87 @@ public struct QuickLookOverlayView: View {
         }
     }
 
+    private func rotatePreview(by screenDelta: Double) {
+        guard supportsVisualTransform else { return }
+        // Because screen-space flip wraps inner rotation: R(Δ) * S * R(θ) = S * R(θ + sx*sy*Δ)
+        let parity: Double = (flipHorizontal != flipVertical) ? -1.0 : 1.0
+        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+            rotationDegrees += screenDelta * parity
+        }
+    }
+
+    private func toggleFlip(horizontal: Bool) {
+        guard supportsVisualTransform else { return }
+        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+            if horizontal {
+                flipHorizontal.toggle()
+            } else {
+                flipVertical.toggle()
+            }
+        }
+    }
+
+    private func resetViewTransform(resetZoom: Bool = true) {
+        withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
+            if resetZoom {
+                zoomScale = 1.0
+                panOffset = .zero
+                panStartOffset = .zero
+            }
+            rotationDegrees = 0
+            flipHorizontal = false
+            flipVertical = false
+        }
+    }
+
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if confirmPermanentDelete { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard flags.isEmpty || flags == .numericPad || flags == .function else { return event }
-            switch event.keyCode {
-            case 49, 53: // Space or Escape -> close Quick Look immediately
-                if event.isARepeat { return nil }
-                onClose()
-                return nil
-            case 123: // Left Arrow
-                onStep(-1)
-                return nil
-            case 124: // Right Arrow
-                onStep(1)
-                return nil
-            default:
-                return event
+            let isUnmodified = flags.isEmpty || flags == .numericPad || flags == .function
+            let isShiftOnly = flags == .shift
+
+            if isUnmodified {
+                switch event.keyCode {
+                case 49, 53: // Space or Escape -> close Quick Look immediately
+                    if event.isARepeat { return nil }
+                    onClose()
+                    return nil
+                case 123: // Left Arrow
+                    onStep(-1)
+                    return nil
+                case 124: // Right Arrow
+                    onStep(1)
+                    return nil
+                default:
+                    break
+                }
             }
+
+            if supportsVisualTransform, let chars = event.charactersIgnoringModifiers?.lowercased() {
+                if isUnmodified && chars == "r" {
+                    rotatePreview(by: 90)
+                    return nil
+                }
+                if isShiftOnly && chars == "r" {
+                    rotatePreview(by: -90)
+                    return nil
+                }
+                if isShiftOnly && chars == "h" {
+                    toggleFlip(horizontal: true)
+                    return nil
+                }
+                if isShiftOnly && chars == "v" {
+                    toggleFlip(horizontal: false)
+                    return nil
+                }
+                if isUnmodified && chars == "0" {
+                    resetViewTransform()
+                    return nil
+                }
+            }
+            return event
         }
     }
 
@@ -522,12 +692,16 @@ public struct QuickLookOverlayView: View {
         }
     }
 
-    private func hudIconButton(_ systemName: String, help: String, action: @escaping () -> Void) -> some View {
+    private func hudIconButton(_ systemName: String, help: String, isActive: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(isActive ? Color.white : .white.opacity(0.9))
                 .frame(width: 28, height: 28)
+                .background(
+                    isActive ? Color.accentColor.opacity(0.78) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
         }
         .buttonStyle(CharkleTactileButtonStyle())
         .help(help)

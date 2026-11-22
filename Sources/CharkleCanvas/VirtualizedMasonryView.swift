@@ -164,7 +164,7 @@ public struct VirtualizedMasonryView: View {
 
     @State private var containerWidth: CGFloat = 960
     @State private var visibleMinY: CGFloat = 0
-    @State private var visibleHeight: CGFloat = 900
+    @State private var visibleHeight: CGFloat = 480
     @State private var layout: MasonryLayoutSnapshot = .empty
     @State private var lastClickedID: UUID?
     @State private var marqueeStart: CGPoint?
@@ -227,15 +227,17 @@ public struct VirtualizedMasonryView: View {
             maxY: visibleMinY + visibleHeight + overscan
         )
         let byID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+        // Keep the hit-testable marquee surface filling the visible viewport even for short lists
+        // (Inbox, Folders, Trash) while staying 4pt below `visibleHeight` so it never triggers
+        // spurious scrollbars or feeds back into the decoupled `.background` geometry observer.
+        let contentHeight = max(layout.totalHeight, max(1, visibleHeight - 4))
 
         ScrollView(.vertical) {
             ZStack(alignment: .topLeading) {
-                // Hit area for clearing selection & rubber-band marquee across the laid-out content.
-                // Never feed `containerWidth` or `visibleHeight` back into ScrollView content size,
-                // otherwise scrollbar show/hide toggles can oscillate with `onGeometryChange`.
+                // Full-viewport hit area for clearing selection, rubber-band marquee, and canvas paste
                 Color.clear
                     .frame(maxWidth: .infinity)
-                    .frame(height: max(layout.totalHeight, 1))
+                    .frame(height: contentHeight)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         if !selectedAssetIDs.isEmpty {
@@ -243,6 +245,13 @@ public struct VirtualizedMasonryView: View {
                         }
                     }
                     .gesture(marqueeDragGesture)
+                    .contextMenu {
+                        Button {
+                            callbacks.onPasteIntoCurrentFolder()
+                        } label: {
+                            Label("粘贴", systemImage: "doc.on.clipboard")
+                        }
+                    }
 
                 // Virtualized visible-only cards
                 ForEach(visibleSlice, id: \.id) { itemFrame in
@@ -293,7 +302,7 @@ public struct VirtualizedMasonryView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: max(layout.totalHeight, 1), alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: contentHeight, alignment: .topLeading)
         }
         .canvasScrollEdgeSoft(for: .top)
         .background {
@@ -327,7 +336,13 @@ public struct VirtualizedMasonryView: View {
             recomputeLayout()
         }
         .onChange(of: targetColumnWidth) { _, _ in
-            recomputeLayout()
+            if reduceMotion {
+                recomputeLayout()
+            } else {
+                withAnimation(CanvasMotion.densityResizeSpring) {
+                    recomputeLayout()
+                }
+            }
         }
         .onChange(of: topContentInset) { _, _ in
             recomputeLayout()

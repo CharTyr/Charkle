@@ -9,7 +9,8 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
     private static let api = URL(string: "https://www.googleapis.com/drive/v3")!
     private static let uploadAPI = URL(string: "https://www.googleapis.com/upload/drive/v3")!
-    private static let fileFields = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink"
+    private static let fileFields = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,shortcutDetails(targetId,targetMimeType)"
+    private static let shortcutMimeType = "application/vnd.google-apps.shortcut"
 
     public init(oauth: GoogleOAuthClient, endpoints: [GDirectEndpoint] = [], session: URLSession = .shared,
                 transferDirectory: URL? = nil) {
@@ -40,7 +41,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
     public func fetchStartPageToken() async throws -> String {
         struct Token: Decodable { let startPageToken: String }
-        let result: Token = try await get("changes/startPageToken")
+        let result: Token = try await get("changes/startPageToken", ["supportsAllDrives": "true"])
         return result.startPageToken
     }
 
@@ -53,6 +54,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         }
         let page: Page = try await get("changes", [
             "pageToken": pageToken, "includeRemoved": "true", "spaces": "drive", "pageSize": "1000",
+            "supportsAllDrives": "true", "includeItemsFromAllDrives": "true",
             "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(\(Self.fileFields)))"
         ])
         return DriveChangePage(changes: page.changes.compactMap {
@@ -61,10 +63,43 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         }, nextPageToken: page.nextPageToken, newStartPageToken: page.newStartPageToken)
     }
 
+    public func resolveFolder(id: String) async throws -> RemoteDriveFile {
+        let dto: FileDTO = try await get("files/\(try segment(id))", [
+            "supportsAllDrives": "true",
+            "fields": Self.fileFields
+        ])
+        if dto.trashed == true {
+            throw DriveTransportError.fileNotFound("共享目录已在回收站中：\(id)")
+        }
+        if dto.mimeType == Self.shortcutMimeType,
+           let target = dto.shortcutDetails,
+           target.targetMimeType == RemoteDriveFile.folderMimeType,
+           let targetID = target.targetId, !targetID.isEmpty {
+            return try await resolveFolder(id: targetID)
+        }
+        guard dto.mimeType == RemoteDriveFile.folderMimeType else {
+            throw DriveTransportError.invalidResponse("指定的 Google Drive 链接不是文件夹（类型为 \(dto.mimeType)）。")
+        }
+        return dto.record
+    }
+
+    public func listSharedFolders() async throws -> [RemoteDriveFile] {
+        let shared = try await list(
+            query: "sharedWithMe = true and mimeType = '\(RemoteDriveFile.folderMimeType)' and trashed = false"
+        )
+        return shared.sorted { ($0.modifiedTime ?? .distantPast) > ($1.modifiedTime ?? .distantPast) }
+    }
+
     public func findOrCreateFolder(named name: String, parentID: String) async throws -> RemoteDriveFile {
         try DriveFiles.validateName(name)
         let query = "'\(escape(parentID))' in parents and trashed=false and name='\(escape(name))' and mimeType='\(RemoteDriveFile.folderMimeType)'"
         if let folder = try await oldestFolder(query: query) { return folder }
+        // Also follow an existing Google Drive folder shortcut (e.g. a Shared Folder added as shortcut into My Drive)
+        let shortcutQuery = "'\(escape(parentID))' in parents and trashed=false and name='\(escape(name))' and mimeType='\(Self.shortcutMimeType)'"
+        if let shortcut = try await oldestFolderShortcut(query: shortcutQuery),
+           let targetID = shortcut.shortcutDetails?.targetId, !targetID.isEmpty {
+            return try await resolveFolder(id: targetID)
+        }
         let file: FileDTO = try await mutate("files", method: "POST", body: [
             "name": name, "mimeType": RemoteDriveFile.folderMimeType, "parents": [parentID]
         ])
@@ -75,9 +110,29 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     private func oldestFolder(query: String) async throws -> RemoteDriveFile? {
         struct Result: Decodable { let files: [FileDTO] }
         let result: Result = try await get("files", [
-            "q": query, "fields": "files(\(Self.fileFields),createdTime)", "pageSize": "100", "orderBy": "createdTime"
+            "q": query,
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+            "fields": "files(\(Self.fileFields),createdTime)",
+            "pageSize": "100",
+            "orderBy": "createdTime"
         ])
         return result.files.min { ($0.createdTime ?? "", $0.id) < ($1.createdTime ?? "", $1.id) }?.record
+    }
+
+    private func oldestFolderShortcut(query: String) async throws -> FileDTO? {
+        struct Result: Decodable { let files: [FileDTO] }
+        let result: Result = try await get("files", [
+            "q": query,
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+            "fields": "files(\(Self.fileFields),createdTime)",
+            "pageSize": "20",
+            "orderBy": "createdTime"
+        ])
+        return result.files
+            .filter { $0.shortcutDetails?.targetMimeType == RemoteDriveFile.folderMimeType }
+            .min { ($0.createdTime ?? "", $0.id) < ($1.createdTime ?? "", $1.id) }
     }
 
     public func listFiles(inFolderID folderID: String) async throws -> [RemoteDriveFile] {
@@ -89,7 +144,13 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         var token: String?
         var files: [RemoteDriveFile] = []
         repeat {
-            var params = ["q": query, "fields": "nextPageToken,files(\(Self.fileFields))", "pageSize": "1000"]
+            var params = [
+                "q": query,
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+                "fields": "nextPageToken,files(\(Self.fileFields))",
+                "pageSize": "1000"
+            ]
             params["pageToken"] = token
             let page: Page = try await get("files", params)
             token = page.nextPageToken
@@ -99,13 +160,13 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     }
 
     public func downloadData(fileID: String) async throws -> Data {
-        let request = try await request(Self.api, "files/\(try segment(fileID))", ["alt": "media"])
+        let request = try await request(Self.api, "files/\(try segment(fileID))", ["alt": "media", "supportsAllDrives": "true"])
         return try await perform(request, accelerate: true)
     }
 
     public func downloadFile(fileID: String, to destinationURL: URL) async throws {
         let path = "files/\(try segment(fileID))"
-        let file: FileDTO = try await get(path, ["fields": Self.fileFields])
+        let file: FileDTO = try await get(path, ["fields": Self.fileFields, "supportsAllDrives": "true"])
         let url = destinationURL
         let folder = url.deletingLastPathComponent()
         let fm = FileManager.default
@@ -132,7 +193,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         if !fm.fileExists(atPath: partial.path) { try Data().write(to: partial) }
         let chunkSize: Int64 = 16 * 1_024 * 1_024
         while expected == nil || offset < expected ?? 0 {
-            var req = try await request(Self.api, path, ["alt": "media"])
+            var req = try await request(Self.api, path, ["alt": "media", "supportsAllDrives": "true"])
             let end = min((expected ?? Int64.max) - 1, offset + chunkSize - 1)
             if expected != nil { req.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range") }
             let (temporary, response) = try await session.download(for: req)
@@ -198,7 +259,12 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
     private func uploadEmpty(path: String, method: String, metadata: Data, mimeType: String) async throws -> RemoteDriveFile {
         let boundary = "charkle-" + UUID().uuidString
-        var request = try await request(Self.uploadAPI, path, ["uploadType": "multipart", "fields": Self.fileFields], method: method)
+        var request = try await request(
+            Self.uploadAPI,
+            path,
+            ["uploadType": "multipart", "supportsAllDrives": "true", "fields": Self.fileFields],
+            method: method
+        )
         request.setValue("multipart/related; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         var body = Data("--\(boundary)\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".utf8)
         body.append(metadata)
@@ -221,7 +287,12 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         let upload: URL
         if let previous { upload = previous }
         else {
-            var initial = try await request(Self.uploadAPI, path, ["uploadType": "resumable", "fields": Self.fileFields], method: method)
+            var initial = try await request(
+                Self.uploadAPI,
+                path,
+                ["uploadType": "resumable", "supportsAllDrives": "true", "fields": Self.fileFields],
+                method: method
+            )
             initial.setValue(mimeType, forHTTPHeaderField: "X-Upload-Content-Type")
             initial.setValue(String(fileSize), forHTTPHeaderField: "X-Upload-Content-Length")
             initial.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -304,7 +375,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
     public func moveFile(fileID: String, fromParentID: String?, toParentID: String, newName: String?) async throws -> RemoteDriveFile {
         let path = "files/\(try segment(fileID))"
-        let current: FileDTO = try await get(path, ["fields": Self.fileFields])
+        let current: FileDTO = try await get(path, ["fields": Self.fileFields, "supportsAllDrives": "true"])
         let old = fromParentID ?? current.parents?.first
         var params: [String: String] = [:]
         if old != toParentID { params["addParents"] = toParentID; params["removeParents"] = old }
@@ -328,6 +399,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
                                        body: [String: Any]) async throws -> T {
         var fields = params
         fields["fields"] = Self.fileFields
+        fields["supportsAllDrives"] = "true"
         var req = try await request(Self.api, path, fields, method: method)
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -396,6 +468,11 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     }
 
     private nonisolated struct FileDTO: Decodable {
+        struct ShortcutDetails: Decodable {
+            let targetId: String?
+            let targetMimeType: String?
+        }
+
         let id: String
         let name: String
         let mimeType: String
@@ -406,6 +483,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         let parents: [String]?
         let trashed: Bool?
         let webViewLink: String?
+        let shortcutDetails: ShortcutDetails?
 
         var record: RemoteDriveFile {
             let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)

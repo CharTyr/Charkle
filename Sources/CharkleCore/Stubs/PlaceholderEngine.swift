@@ -367,6 +367,7 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
         currentSyncConfig = targetConfig
         return StorageMigrationReport(sourceMode: oldMode, targetMode: targetConfig.mode, targetLocation: targetConfig.activeStorageLocationSummary)
     }
+    public func listGoogleDriveSharedFolders() async throws -> [RemoteDriveFile] { [] }
     public func syncNow() async throws -> SyncReport { SyncReport() }
 
     public func seedSampleLibraryIfEmpty() async throws -> Bool { false }

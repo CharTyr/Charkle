@@ -66,12 +66,22 @@ public nonisolated struct MoodboardCurator: Sendable {
         let neighbors = assets.filter { context.contains($0.id) }
         let evidence = Evidence(seeds: [anchor], colors: Self.palette(neighbors.flatMap(\.dominantColors), count: 6),
                                 vectors: try await database.vectors())
-        let matches = assets.filter { !existing.contains($0.id) }.map { evidence.score($0) }
+        let matches = assets
+            .filter { !existing.contains($0.id) }
+            .map { evidence.score($0) }
+            .filter { !$0.matchReasons.isEmpty && $0.score >= 0.24 }
         return rerank(matches, evidence: evidence, against: [], limit: limit)
     }
 
     public func similarAssets(to assetID: UUID, limit: Int) async throws -> [ScoredAsset] {
-        try await replacementCandidates(for: assetID, excluding: [], boardContext: [], limit: limit)
+        guard limit > 0, let anchor = try await database.asset(id: assetID) else { return [] }
+        let assets = try await database.fetchAssets(matching: FilterCriteria())
+        let evidence = Evidence(seeds: [anchor], vectors: try await database.vectors())
+        let matches = assets
+            .filter { $0.id != assetID }
+            .map { evidence.score($0) }
+            .filter { !$0.matchReasons.isEmpty && $0.score >= 0.26 }
+        return rerank(matches, evidence: evidence, against: [], limit: limit)
     }
 
     public func suggestFolder(for assetID: UUID) async throws -> FolderSuggestion? {
@@ -203,9 +213,10 @@ private nonisolated struct Evidence {
     let vectors: [UUID: AssetVector]
 
     func score(_ asset: AssetRecord) -> ScoredAsset {
-        var signals: [(Double, Double, String)] = []
+        // Tuple: (signalValue, weight, minDisplayThreshold, label)
+        var signals: [(value: Double, weight: Double, threshold: Double, reason: String)] = []
         if !ranks.isEmpty {
-            signals.append((ranks[asset.id] ?? 0, 0.48, "关键词匹配"))
+            signals.append((ranks[asset.id] ?? 0, 0.48, 0.15, "关键词匹配"))
         }
         if let vector = vectors[asset.id], let embedding = vector.embedding {
             var cloud: [Double] = []
@@ -217,37 +228,67 @@ private nonisolated struct Evidence {
                     cloud.append(Self.cosine(embedding, values))
                 }
             }
-            if let best = cloud.max() { signals.append((best, 0.40, Self.cloudReason)) }
+            if let best = cloud.max() {
+                signals.append((best, 0.40, 0.45, Self.cloudReason))
+            }
         }
-        if let print = vectors[asset.id]?.featurePrint {
+        if let print = vectors[asset.id]?.featurePrint, !seeds.isEmpty {
             let similarities = seeds.compactMap { vectors[$0.id]?.featurePrint }
                 .compactMap { VisionAnalyzer.visualDistance(between: print, and: $0) }
-                .map { exp(-Double($0) * 1.4) }
-            if let best = similarities.max() { signals.append((best, 0.30, "图像特征接近")) }
+                .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
+            if let best = similarities.max() {
+                signals.append((best, 0.36, 0.22, "图像特征接近"))
+            }
         }
         let targetColors = colors.isEmpty ? seeds.flatMap { $0.dominantColors.prefix(3) } : colors
         if !targetColors.isEmpty {
-            let distance = Self.colorDistance(asset.dominantColors, targetColors)
-            let similarity = distance.map {
-                if colors.isEmpty { return exp(-$0 / 22) }
-                if $0 <= tolerance { return 1 - $0 / max(1, tolerance) * 0.35 }
-                return 0.28 * exp(-($0 - tolerance) / 22)
-            } ?? 0
-            signals.append((similarity, colors.isEmpty ? 0.22 : 0.44, "配色相近"))
+            let similarity: Double
+            if colors.isEmpty {
+                // Asset-to-asset palette harmony: weighted average CIEDE2000 across dominant swatches
+                // so tiny white/black margins don't falsely match unrelated images.
+                if let avgDelta = Self.weightedPaletteDistance(asset.dominantColors, targetColors) {
+                    if avgDelta <= 6.0 {
+                        similarity = 1.0
+                    } else if avgDelta < 22.0 {
+                        similarity = pow((22.0 - avgDelta) / 16.0, 1.1)
+                    } else {
+                        similarity = 0.0
+                    }
+                } else {
+                    similarity = 0.0
+                }
+            } else {
+                // Explicit target swatch query (palette seed / board palette): match significant swatches
+                let distance = Self.significantSwatchDistance(asset.dominantColors, targetColors)
+                similarity = distance.map { d in
+                    if d <= tolerance { return 1.0 - d / max(1.0, tolerance) * 0.35 }
+                    let cutoff = max(tolerance * 1.6, tolerance + 14.0)
+                    guard d < cutoff else { return 0.0 }
+                    return 0.30 * ((cutoff - d) / max(1.0, cutoff - tolerance))
+                } ?? 0.0
+            }
+            signals.append((similarity, colors.isEmpty ? 0.24 : 0.44, 0.35, "配色相近"))
         }
         if !seeds.isEmpty {
-            let tags = Set(asset.tags.map(SearchText.normalize))
+            let tags = Set((asset.tags + asset.suggestedTags).map(SearchText.normalize)).filter { !$0.isEmpty }
             let overlap = seeds.map { seed -> Double in
-                let peers = Set(seed.tags.map(SearchText.normalize))
+                let peers = Set((seed.tags + seed.suggestedTags).map(SearchText.normalize)).filter { !$0.isEmpty }
+                guard !peers.isEmpty, !tags.isEmpty else { return 0 }
                 return Double(peers.intersection(tags).count) / Double(max(1, peers.union(tags).count))
             }.max() ?? 0
-            signals.append((overlap, 0.18, "相同标签"))
+            signals.append((overlap, 0.18, 0.20, "相同标签"))
         }
-        let sum = signals.reduce(0) { $0 + $1.0 * $1.1 }
-        let signalCapacity = max(0.35, signals.reduce(0) { $0 + $1.1 })
+        let sum = signals.reduce(0) { $0 + $1.value * $1.weight }
+        let signalCapacity = max(0.35, signals.reduce(0) { $0 + $1.weight })
         let rating = Double(min(5, max(0, asset.rating))) / 5
-        return ScoredAsset(asset: asset, score: min(1, 0.08 * rating + 0.92 * sum / signalCapacity),
-                           matchReasons: signals.filter { $0.0 > 0.18 }.map { $0.2 })
+        let qualifiedReasons = signals
+            .filter { $0.value >= $0.threshold }
+            .sorted { $0.value * $0.weight > $1.value * $1.weight }
+            .map(\.reason)
+        // Only add rating nudge when at least one real similarity signal matched!
+        let baseScore = sum / signalCapacity
+        let finalScore = qualifiedReasons.isEmpty ? baseScore : min(1, 0.06 * rating + 0.94 * baseScore)
+        return ScoredAsset(asset: asset, score: finalScore, matchReasons: qualifiedReasons)
     }
 
     func redundancy(_ lhs: AssetRecord, _ rhs: AssetRecord) -> Double {
@@ -260,16 +301,45 @@ private nonisolated struct Evidence {
         }
         if let a = l?.featurePrint, let b = r?.featurePrint,
            let distance = VisionAnalyzer.visualDistance(between: a, and: b) {
-            result = max(result, exp(-Double(distance) * 1.6))
+            result = max(result, VisionAnalyzer.visualSimilarity(forDistance: distance))
         }
-        if let distance = Self.colorDistance(Array(lhs.dominantColors.prefix(2)), Array(rhs.dominantColors.prefix(2))) {
+        if let distance = Self.weightedPaletteDistance(Array(lhs.dominantColors.prefix(2)), Array(rhs.dominantColors.prefix(2))) {
             result = max(result, 0.55 * exp(-distance / 17))
         }
         return result
     }
 
-    private static func colorDistance(_ a: [LabColor], _ b: [LabColor]) -> Double? {
-        a.prefix(8).flatMap { lhs in b.map { lhs.deltaE2000(to: $0) } }.filter(\.isFinite).min()
+    private static func significantSwatches(_ colors: [LabColor], maxCount: Int) -> [LabColor] {
+        let valid = colors.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }
+        let hasProportions = valid.contains { $0.proportion > 0.001 }
+        if hasProportions {
+            let major = valid.filter { $0.proportion >= 0.08 }
+            if !major.isEmpty { return Array(major.prefix(maxCount)) }
+        }
+        return Array(valid.prefix(maxCount))
+    }
+
+    /// Proportion-weighted average minimum CIEDE2000 from candidate's top dominant swatches to target palette.
+    private static func weightedPaletteDistance(_ candidate: [LabColor], _ target: [LabColor]) -> Double? {
+        let a = significantSwatches(candidate, maxCount: 3)
+        let b = significantSwatches(target, maxCount: 4)
+        guard !a.isEmpty, !b.isEmpty else { return nil }
+        var weightedSum = 0.0
+        var totalWeight = 0.0
+        for swatch in a {
+            guard let nearest = b.map({ swatch.deltaE2000(to: $0) }).filter(\.isFinite).min() else { continue }
+            let w = swatch.proportion > 0.001 ? swatch.proportion : 1.0
+            weightedSum += nearest * w
+            totalWeight += w
+        }
+        guard totalWeight > 0 else { return nil }
+        return weightedSum / totalWeight
+    }
+
+    private static func significantSwatchDistance(_ candidate: [LabColor], _ target: [LabColor]) -> Double? {
+        let a = significantSwatches(candidate, maxCount: 5)
+        let b = target.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }
+        return a.flatMap { lhs in b.map { lhs.deltaE2000(to: $0) } }.filter(\.isFinite).min()
     }
 
     private static func cosine(_ a: [Float], _ b: [Float]) -> Double {

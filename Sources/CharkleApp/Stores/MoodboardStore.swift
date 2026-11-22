@@ -212,6 +212,24 @@ public final class MoodboardStore {
             return
         }
         let boardAssetIDs = board.referencedAssetIDs
+        let boardAssetSet = Set(boardAssetIDs)
+
+        // When browsing the board generally (not actively swapping a specific card) and the AI curator
+        // saved a curated candidate pool on the document, preserve those curated candidates first
+        // instead of overwriting them with loose fallback matches.
+        if nodeID == nil, !board.candidateAssetIDs.isEmpty {
+            var curated: [ScoredAsset] = []
+            for cid in board.candidateAssetIDs where !boardAssetSet.contains(cid) {
+                if let asset = try? await engine.fetchAsset(id: cid), !asset.isTrashed {
+                    curated.append(ScoredAsset(asset: asset, score: 0.78, matchReasons: ["策展备选"]))
+                }
+            }
+            if !curated.isEmpty {
+                candidatePool = curated
+                return
+            }
+        }
+
         let targetAssetID: UUID? = {
             if let nodeID, let node = board.nodes.first(where: { $0.id == nodeID }) {
                 return node.referencedAssetID
@@ -232,7 +250,7 @@ public final class MoodboardStore {
         do {
             candidatePool = try await engine.replacementCandidates(
                 for: anchorID,
-                excluding: Set(boardAssetIDs),
+                excluding: boardAssetSet,
                 boardContext: boardAssetIDs,
                 limit: 32
             )

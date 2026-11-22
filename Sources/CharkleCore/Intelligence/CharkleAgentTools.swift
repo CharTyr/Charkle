@@ -837,19 +837,35 @@ public nonisolated struct CharkleAgentTools: Sendable {
         if let print = vectors[asset.id]?.featurePrint, !seeds.isEmpty {
             let sims = seeds.compactMap { vectors[$0.id]?.featurePrint }
                 .compactMap { VisionAnalyzer.visualDistance(between: print, and: $0) }
-                .map { exp(-Double($0) * 1.45) }
+                .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
             if let best = sims.max() {
                 signals.append((best, 0.36, "画面风格接近"))
             }
         }
         let effectiveColors = targetColors.isEmpty ? seeds.flatMap { $0.dominantColors.prefix(3) } : targetColors
         if !effectiveColors.isEmpty {
-            let dist = minColorDistance(asset.dominantColors, effectiveColors)
-            let sim = dist.map { d -> Double in
-                if targetColors.isEmpty { return exp(-d / 22.0) }
-                if d <= colorTolerance { return 1.0 - (d / max(1.0, colorTolerance)) * 0.35 }
-                return 0.25 * exp(-(d - colorTolerance) / 20.0)
-            } ?? 0
+            let sim: Double
+            if targetColors.isEmpty {
+                if let avgDelta = weightedPaletteDistance(asset.dominantColors, effectiveColors) {
+                    if avgDelta <= 6.0 {
+                        sim = 1.0
+                    } else if avgDelta < 22.0 {
+                        sim = pow((22.0 - avgDelta) / 16.0, 1.1)
+                    } else {
+                        sim = 0.0
+                    }
+                } else {
+                    sim = 0.0
+                }
+            } else {
+                let dist = minColorDistance(asset.dominantColors, effectiveColors)
+                sim = dist.map { d -> Double in
+                    if d <= colorTolerance { return 1.0 - (d / max(1.0, colorTolerance)) * 0.35 }
+                    let cutoff = max(colorTolerance * 1.6, colorTolerance + 14.0)
+                    guard d < cutoff else { return 0.0 }
+                    return 0.25 * ((cutoff - d) / max(1.0, cutoff - colorTolerance))
+                } ?? 0
+            }
             signals.append((sim, targetColors.isEmpty ? 0.20 : 0.42, "色彩吻合"))
         }
         if !seeds.isEmpty {
@@ -872,7 +888,30 @@ public nonisolated struct CharkleAgentTools: Sendable {
     }
 
     private static func minColorDistance(_ a: [LabColor], _ b: [LabColor]) -> Double? {
-        a.prefix(8).flatMap { lhs in b.map { lhs.deltaE2000(to: $0) } }.filter(\.isFinite).min()
+        let validA = a.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }
+        let hasProps = validA.contains { $0.proportion > 0.001 }
+        let majorA = hasProps ? validA.filter { $0.proportion >= 0.08 } : validA
+        let srcA = majorA.isEmpty ? Array(validA.prefix(5)) : Array(majorA.prefix(5))
+        return srcA.flatMap { lhs in b.map { lhs.deltaE2000(to: $0) } }.filter(\.isFinite).min()
+    }
+
+    private static func weightedPaletteDistance(_ candidate: [LabColor], _ target: [LabColor]) -> Double? {
+        let validC = candidate.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }
+        let hasPropsC = validC.contains { $0.proportion > 0.001 }
+        let a = hasPropsC ? Array(validC.filter { $0.proportion >= 0.08 }.prefix(3)) : Array(validC.prefix(3))
+        let srcA = a.isEmpty ? Array(validC.prefix(3)) : a
+        let srcB = Array(target.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }.prefix(4))
+        guard !srcA.isEmpty, !srcB.isEmpty else { return nil }
+        var sum = 0.0
+        var totalW = 0.0
+        for swatch in srcA {
+            guard let nearest = srcB.map({ swatch.deltaE2000(to: $0) }).filter(\.isFinite).min() else { continue }
+            let w = swatch.proportion > 0.001 ? swatch.proportion : 1.0
+            sum += nearest * w
+            totalW += w
+        }
+        guard totalW > 0 else { return nil }
+        return sum / totalW
     }
 
     private static func cosine(_ a: [Float], _ b: [Float]) -> Double {

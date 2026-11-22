@@ -23,6 +23,7 @@ public final class LibraryStore {
     public var selectedAssetIDs: Set<UUID> = []
     public var cutAssetIDs: Set<UUID> = []
     public var copiedAssetIDs: [UUID] = []
+    private var lastInternalPasteboardChangeCount: Int?
 
     public var similarAssets: [ScoredAsset] = []
     public var suggestedFolder: FolderSuggestion?
@@ -244,6 +245,36 @@ public final class LibraryStore {
                         return candidate
                     }
                 }
+            } else if syncCfg.mode == .gdirectMount || syncCfg.mode == .directAPIWithGDirect {
+                let mountRoot = (syncCfg.mountPath as NSString).expandingTildeInPath
+                if GDirectIntegration.isMountActive(at: mountRoot) {
+                    if let driveID = asset.driveFileID, driveID.hasPrefix("mounted-path:") {
+                        let rel = String(driveID.dropFirst("mounted-path:".count))
+                        let mountedCandidate = URL(fileURLWithPath: mountRoot, isDirectory: true).appending(path: rel)
+                        if FileManager.default.fileExists(atPath: mountedCandidate.path) {
+                            return mountedCandidate
+                        }
+                    }
+                    let rootSegments = syncCfg.rootFolderName
+                        .split(separator: "/")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+                    var candidate = URL(fileURLWithPath: mountRoot, isDirectory: true)
+                    for seg in (rootSegments.isEmpty ? ["Charkle"] : rootSegments) {
+                        candidate = candidate.appending(path: seg, directoryHint: .isDirectory)
+                    }
+                    if let folderID = asset.folderID {
+                        for crumb in folderBreadcrumbs(for: folderID) {
+                            candidate = candidate.appending(path: crumb.name, directoryHint: .isDirectory)
+                        }
+                    } else {
+                        candidate = candidate.appending(path: "Inbox", directoryHint: .isDirectory)
+                    }
+                    candidate = candidate.appending(path: asset.fileName)
+                    if FileManager.default.fileExists(atPath: candidate.path) {
+                        return candidate
+                    }
+                }
             }
         }
         return await resolveOriginalURL(for: assetID)
@@ -263,6 +294,7 @@ public final class LibraryStore {
         writeFilesToGeneralPasteboard(urls)
         copiedAssetIDs = ids
         cutAssetIDs.removeAll()
+        lastInternalPasteboardChangeCount = NSPasteboard.general.changeCount
         return max(urls.count, ids.count)
     }
 
@@ -273,7 +305,24 @@ public final class LibraryStore {
         writeFilesToGeneralPasteboard(urls)
         cutAssetIDs = Set(ids)
         copiedAssetIDs.removeAll()
+        lastInternalPasteboardChangeCount = NSPasteboard.general.changeCount
         return ids.count
+    }
+
+    /// Returns internally copied/cut Charkle asset IDs if the system pasteboard has not been overwritten
+    /// externally since the last copy/cut inside Charkle.
+    public func internalPasteboardAssets() -> (ids: [UUID], isCut: Bool)? {
+        guard let expectedCount = lastInternalPasteboardChangeCount,
+              NSPasteboard.general.changeCount == expectedCount else {
+            return nil
+        }
+        if !cutAssetIDs.isEmpty {
+            return (Array(cutAssetIDs), true)
+        }
+        if !copiedAssetIDs.isEmpty {
+            return (copiedAssetIDs, false)
+        }
+        return nil
     }
 
     @discardableResult
@@ -281,12 +330,18 @@ public final class LibraryStore {
         let ids = Array(cutAssetIDs)
         guard !ids.isEmpty else { return 0 }
         cutAssetIDs.removeAll()
+        if copiedAssetIDs.isEmpty {
+            lastInternalPasteboardChangeCount = nil
+        }
         await moveAssets(ids, toFolderID: folderID)
         return ids.count
     }
 
     public func clearCutSelection() {
         cutAssetIDs.removeAll()
+        if copiedAssetIDs.isEmpty {
+            lastInternalPasteboardChangeCount = nil
+        }
     }
 
     private func resolveURLs(for ids: [UUID]) async -> [URL] {

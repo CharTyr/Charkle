@@ -112,6 +112,19 @@ public final actor InMemoryDriveTransport: DriveTransport {
         _ = save(entry, id: fileID)
     }
 
+    public func resolveFolder(id: String) throws -> RemoteDriveFile {
+        guard let entry = entries[id], entry.data == nil, !entry.trashed else {
+            throw DriveTransportError.fileNotFound(id)
+        }
+        return entry.metadata(id: id)
+    }
+
+    public func listSharedFolders() -> [RemoteDriveFile] {
+        entries.compactMap { id, entry in
+            entry.data == nil && !entry.trashed ? entry.metadata(id: id) : nil
+        }.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+    }
+
     private var now: Date { Date(timeIntervalSince1970: 1_700_000_000 + Double(history.count) / 10) }
 
     private func requireParent(_ id: String) throws {

@@ -23,6 +23,8 @@ public final class SyncAndAIStore {
 
     public var lastSyncReport: SyncReport?
     public var lastMigrationReport: StorageMigrationReport?
+    public var sharedFolders: [RemoteDriveFile] = []
+    public var isLoadingSharedFolders: Bool = false
     public var statusMessage: String?
     public var errorMessage: String?
     public var isBusy: Bool = false
@@ -261,6 +263,38 @@ public final class SyncAndAIStore {
             errorMessage = error.localizedDescription
             syncStatus = await engine.syncStatus()
             return nil
+        }
+    }
+
+    /// Background sync on app launch / foreground return that discovers newly dropped files in Google Drive
+    /// without flashing noisy error banners when offline or not signed in yet.
+    @discardableResult
+    public func syncQuietlyIfReady() async -> SyncReport? {
+        guard !isBusy, !isMigrating else { return nil }
+        let cfg = await engine.syncConfig()
+        guard cfg.mode != .localOnly else { return nil }
+        do {
+            let report = try await engine.syncNow()
+            lastSyncReport = report
+            syncStatus = await engine.syncStatus()
+            cacheStats = await engine.cacheStats()
+            return report
+        } catch {
+            return nil
+        }
+    }
+
+    public func loadSharedFolders() async {
+        isLoadingSharedFolders = true
+        defer { isLoadingSharedFolders = false }
+        errorMessage = nil
+        do {
+            sharedFolders = try await engine.listGoogleDriveSharedFolders()
+            if sharedFolders.isEmpty {
+                statusMessage = "暂未在「与我共享」中发现共享文件夹，可直接粘贴 Google Drive 共享目录链接或 ID"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 

@@ -69,8 +69,32 @@ struct MoodboardCuratorTests {
         #expect(proposal.primaryMatches.contains { $0.id == alternative.id })
         let replacements = try await curator.replacementCandidates(for: clones[0].id, excluding: [clones[1].id],
                                                                    boardContext: [clones[2].id], limit: 4)
-        #expect(Set(replacements.map(\.id)) == [clones[3].id, alternative.id])
+        // Strict anti-padding: red clone #3 matches by dominant color, while unrelated blue asset is NOT padded in.
+        #expect(Set(replacements.map(\.id)) == [clones[3].id])
         #expect(try await curator.similarAssets(to: clones[0].id, limit: 1).count == 1)
+    }
+
+    @Test("Vision FeaturePrint calibration and similarity search refuse to pad unrelated assets")
+    func calibratedVisualSimilarityAndNoPadding() async throws {
+        // Vision Revision 2 L2 distances: genuine matches (< 0.95) score above reason threshold; unrelated (>= 0.95) are 0.
+        #expect(VisionAnalyzer.visualSimilarity(forDistance: 0.35) == 1.0)
+        #expect(VisionAnalyzer.visualSimilarity(forDistance: 0.69) > 0.45)
+        #expect(VisionAnalyzer.visualSimilarity(forDistance: 0.84) > 0.22)
+        #expect(VisionAnalyzer.visualSimilarity(forDistance: 0.95) == 0.0)
+        #expect(VisionAnalyzer.visualSimilarity(forDistance: 1.12) == 0.0)
+
+        let db = try LibraryDatabase()
+        let warm = AssetRecord(title: "Warm Terracotta", fileName: "warm.png", contentHash: "h-warm",
+                               tags: ["ceramic"], dominantColors: [LabColor.fromHex("#C85A3A")], rating: 5)
+        let unrelated = AssetRecord(title: "Neon Cyan Grid", fileName: "cyan.png", contentHash: "h-cyan",
+                                    tags: ["cyber"], dominantColors: [LabColor.fromHex("#00E5FF")], rating: 5)
+        try await db.upsertAssets([warm, unrelated])
+        let curator = MoodboardCurator(database: db)
+
+        let similar = try await curator.similarAssets(to: warm.id, limit: 6)
+        #expect(similar.isEmpty)
+        let replacements = try await curator.replacementCandidates(for: warm.id, excluding: [], boardContext: [], limit: 6)
+        #expect(replacements.isEmpty)
     }
 
     @Test("Compatible semantic embeddings affect prompt ranking and folder recommendations")

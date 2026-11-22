@@ -157,6 +157,111 @@ struct DriveSyncTests {
         #expect(blob.starts(with: Data("bplist00".utf8)))
     }
 
+    @Test("Direct drops into Google Drive root, Inbox, and subfolders ingest cleanly while ignoring temp/junk and deferring 0-byte uploads")
+    func directDropFilteringAndResilience() async throws {
+        let pair = try await Pair.make()
+        defer { pair.cleanup() }
+        let dirs = try await pair.folders()
+        let lookbook = try await pair.transport.findOrCreateFolder(named: "Lookbook", parentID: dirs.root.id)
+
+        let pngA = try BackendFixture.artwork("#CD7854")
+        let pngB = try BackendFixture.artwork("#3E709E")
+        let pngC = try BackendFixture.artwork("#5F986C")
+
+        _ = try await pair.transport.uploadData(pngA, name: "root-drop.png", mimeType: "image/png", parentID: dirs.root.id, existingFileID: nil)
+        _ = try await pair.transport.uploadData(pngB, name: "inbox-drop.png", mimeType: "image/png", parentID: dirs.inbox.id, existingFileID: nil)
+        _ = try await pair.transport.uploadData(pngC, name: "shoot.png", mimeType: "image/png", parentID: lookbook.id, existingFileID: nil)
+        // Noise files that should be ignored or deferred without aborting sync
+        _ = try await pair.transport.uploadData(Data("junk".utf8), name: "Thumbs.db", mimeType: "application/octet-stream", parentID: dirs.inbox.id, existingFileID: nil)
+        _ = try await pair.transport.uploadData(Data("partial".utf8), name: "uploading.png.crdownload", mimeType: "application/octet-stream", parentID: dirs.inbox.id, existingFileID: nil)
+        _ = try await pair.transport.uploadData(Data(), name: "Survey", mimeType: "application/vnd.google-apps.form", parentID: dirs.root.id, existingFileID: nil)
+        let emptyUpload = try await pair.transport.uploadData(Data(), name: "late-finish.png", mimeType: "image/png", parentID: dirs.inbox.id, existingFileID: nil)
+
+        let report1 = try await pair.a.syncNow()
+        #expect(report1.discoveredRemoteAssets == 3)
+        #expect(report1.discoveredAssetIDs.count == 3)
+
+        let allAssets = try await pair.a.fetchAssets(matching: FilterCriteria())
+        let names = Set(allAssets.map(\.fileName))
+        #expect(names == ["root-drop.png", "inbox-drop.png", "shoot.png"])
+        let folders = try await pair.a.fetchFolders()
+        let lookbookFolder = try #require(folders.first { $0.name == "Lookbook" })
+        #expect(allAssets.first { $0.fileName == "shoot.png" }?.folderID == lookbookFolder.id)
+        #expect(allAssets.first { $0.fileName == "root-drop.png" }?.folderID == nil)
+        for asset in allAssets {
+            #expect(await pair.a.thumbnailURL(for: asset.id, tier: .grid520) != nil)
+        }
+
+        // Once the 0-byte upload finishes receiving bytes, the next sync automatically picks it up
+        let pngD = try BackendFixture.artwork("#E6C470")
+        _ = try await pair.transport.uploadData(pngD, name: "late-finish.png", mimeType: "image/png", parentID: dirs.inbox.id, existingFileID: emptyUpload.id)
+        let report2 = try await pair.a.syncNow()
+        #expect(report2.discoveredRemoteAssets == 1)
+        let updatedNames = Set(try await pair.a.fetchAssets(matching: FilterCriteria()).map(\.fileName))
+        #expect(updatedNames.contains("late-finish.png"))
+    }
+
+    @Test("Shared Google Drive folder URL/ID enables multi-user collaborative read/write sync")
+    func sharedCollaborativeFolderCoEditing() async throws {
+        #expect(DriveSyncConfig.extractGoogleDriveFolderID(from: "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWx?usp=sharing") == "1AbCdEfGhIjKlMnOpQrStUvWx")
+        #expect(DriveSyncConfig.extractGoogleDriveFolderID(from: "https://drive.google.com/drive/u/0/folders/1AbCdEfGhIjKlMnOpQrStUvWx") == "1AbCdEfGhIjKlMnOpQrStUvWx")
+        #expect(DriveSyncConfig.extractGoogleDriveFolderID(from: "https://drive.google.com/open?id=1AbCdEfGhIjKlMnOpQrStUvWx") == "1AbCdEfGhIjKlMnOpQrStUvWx")
+        #expect(DriveSyncConfig.extractGoogleDriveFolderID(from: "1AbCdEfGhIjKlMnOpQrStUvWx") == "1AbCdEfGhIjKlMnOpQrStUvWx")
+        #expect(DriveSyncConfig.extractGoogleDriveFolderID(from: "not a valid folder") == nil)
+
+        let directory = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = InMemoryDriveTransport()
+        let sharedFolder = try await transport.findOrCreateFolder(named: "TeamStudioShared", parentID: "root")
+
+        let sharedURL = "https://drive.google.com/drive/folders/\(sharedFolder.id)?usp=sharing"
+        var config = BackendFixture.syncConfig()
+        config.sharedFolderURLOrID = sharedURL
+
+        let userA = try BackendFixture.makeEngine(directory.appending(path: "UserA"), transport: transport)
+        let userB = try BackendFixture.makeEngine(directory.appending(path: "UserB"), transport: transport)
+        try await userA.saveSyncConfig(config)
+        try await userB.saveSyncConfig(config)
+
+        // User A creates a folder + ingests an asset + tags it, then syncs to the shared folder
+        let paletteFolder = try await userA.createFolder(name: "Lighting", parentID: nil)
+        let importedA = try await userA.ingest(
+            [.imageData(try BackendFixture.artwork("#E09E5C"), suggestedName: "sunbeam.png", sourceURL: nil)],
+            targetFolderID: paletteFolder.id,
+            targetBoardID: nil
+        )
+        _ = try await userA.updateAssets(AssetBatchPatch(assetIDs: [importedA[0].id], addTags: ["warm", "studio"]))
+        _ = try await userA.syncNow()
+
+        // Someone also drops a reference directly into the shared folder on Google Drive
+        _ = try await transport.uploadData(
+            try BackendFixture.artwork("#2C4C70"),
+            name: "external-collab.png",
+            mimeType: "image/png",
+            parentID: sharedFolder.id,
+            existingFileID: nil
+        )
+
+        // User B syncs from the same shared folder and sees BOTH User A's asset+folder+tags AND the direct Drive drop
+        let reportB = try await userB.syncNow()
+        #expect(reportB.discoveredRemoteAssets >= 1)
+        let assetsB = try await userB.fetchAssets(matching: FilterCriteria())
+        #expect(Set(assetsB.map(\.fileName)) == ["sunbeam.png", "external-collab.png"])
+        let syncedSunbeam = try #require(assetsB.first { $0.fileName == "sunbeam.png" })
+        #expect(syncedSunbeam.tags.contains("warm"))
+        #expect(syncedSunbeam.folderID == paletteFolder.id)
+
+        // User B rates the externally dropped file and syncs back; User A converges on both files & rating
+        let extAsset = try #require(assetsB.first { $0.fileName == "external-collab.png" })
+        _ = try await userB.updateAssets(AssetBatchPatch(assetIDs: [extAsset.id], rating: 5))
+        _ = try await userB.syncNow()
+        _ = try await userA.syncNow()
+
+        let assetsA = try await userA.fetchAssets(matching: FilterCriteria())
+        #expect(Set(assetsA.map(\.fileName)) == ["sunbeam.png", "external-collab.png"])
+        #expect(assetsA.first { $0.fileName == "external-collab.png" }?.rating == 5)
+    }
+
     private struct Pair {
         let directory: URL
         let a: LiveCharkleEngine

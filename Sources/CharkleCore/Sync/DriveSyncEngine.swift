@@ -52,8 +52,9 @@ public final actor DriveSyncEngine {
         do {
             let account = try await transport.accountInfo()
             currentStatus.account = account
+            let sharedRootID = config.mode == .directAPIWithGDirect ? config.resolvedSharedFolderID : nil
             let rootPath = Self.resolvedRootPath(for: config)
-            let layout = try await makeLayout(using: transport, rootPath: rootPath)
+            let layout = try await makeLayout(using: transport, rootPath: rootPath, sharedRootID: sharedRootID)
             let scope = "remote." + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
             try await updateManifest(layout, transport: transport)
 
@@ -63,12 +64,22 @@ public final actor DriveSyncEngine {
             var changedBoards = pulled.boards
 
             let pending = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
-            let inventory = try await fetchInventory(layout, transport: transport, scope: scope)
+            let inventory = try await fetchInventory(
+                layout,
+                transport: transport,
+                scope: scope,
+                forceFullCrawl: sharedRootID != nil
+            )
             currentStatus.phase = .merging
             let reconciled = try await reconcile(inventory, layout: layout, transport: transport, config: config, pending: pending)
             report.discoveredRemoteAssets = reconciled.discovered
+            report.discoveredAssetIDs = reconciled.discoveredIDs
             report.reconciledRenames = reconciled.renames
-            let state = inventory.current
+            var savedFiles = inventory.current.files
+            for deferredID in reconciled.deferredFileIDs {
+                savedFiles.removeValue(forKey: deferredID)
+            }
+            let state = SavedInventory(files: savedFiles, startPageToken: inventory.current.startPageToken)
             try await database.setState(scope + ".inventory", state)
 
             if !pending.isEmpty {
@@ -183,22 +194,28 @@ public final actor DriveSyncEngine {
         }
     }
 
-    private func makeLayout(using transport: any DriveTransport, rootPath: String) async throws -> Layout {
-        let segments = rootPath
-            .split(separator: "/")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
-        let finalSegments = segments.isEmpty ? ["Charkle"] : segments
-        var currentParentID = DriveFiles.rootID
-        var rootFile: RemoteDriveFile?
-        for segment in finalSegments {
-            try DriveFiles.validateName(segment)
-            let created = try await transport.findOrCreateFolder(named: segment, parentID: currentParentID)
-            currentParentID = created.id
-            rootFile = created
-        }
-        guard let root = rootFile else {
-            throw DriveTransportError.notConfigured("请指定有效的素材库保存路径。")
+    private func makeLayout(using transport: any DriveTransport, rootPath: String, sharedRootID: String? = nil) async throws -> Layout {
+        let root: RemoteDriveFile
+        if let sharedRootID, !sharedRootID.isEmpty {
+            root = try await transport.resolveFolder(id: sharedRootID)
+        } else {
+            let segments = rootPath
+                .split(separator: "/")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+            let finalSegments = segments.isEmpty ? ["Charkle"] : segments
+            var currentParentID = DriveFiles.rootID
+            var rootFile: RemoteDriveFile?
+            for segment in finalSegments {
+                try DriveFiles.validateName(segment)
+                let created = try await transport.findOrCreateFolder(named: segment, parentID: currentParentID)
+                currentParentID = created.id
+                rootFile = created
+            }
+            guard let resolvedRoot = rootFile else {
+                throw DriveTransportError.notConfigured("请指定有效的素材库保存路径。")
+            }
+            root = resolvedRoot
         }
         async let inbox = transport.findOrCreateFolder(named: "Inbox", parentID: root.id)
         let metadata = try await transport.findOrCreateFolder(named: ".charkle", parentID: root.id)
@@ -486,6 +503,7 @@ public final actor DriveSyncEngine {
         do { try await transport.trashFile(fileID: id) }
         catch DriveTransportError.fileNotFound { }
         catch DriveTransportError.httpError(statusCode: 404, message: _) { }
+        catch DriveTransportError.httpError(statusCode: 403, message: _) { }
     }
 }
 
@@ -506,10 +524,19 @@ extension DriveSyncEngine {
         let startPageToken: String
     }
 
-    private func fetchInventory(_ layout: Layout, transport: any DriveTransport, scope: String) async throws -> InventoryUpdate {
+    private func fetchInventory(
+        _ layout: Layout,
+        transport: any DriveTransport,
+        scope: String,
+        forceFullCrawl: Bool = false
+    ) async throws -> InventoryUpdate {
         let previous: SavedInventory? = try await database.state(scope + ".inventory")
         var inventory: Inventory
-        if let previous {
+        if forceFullCrawl {
+            // Shared folders & Team Drives can receive writes from other collaborators that My-Drive-scoped
+            // `changes.list` omits; walking the shared root directly guarantees 100% collaborator visibility.
+            inventory = try await crawl(layout: layout, transport: transport)
+        } else if let previous {
             do {
                 inventory = try await readChanges(previous, transport: transport)
             } catch DriveTransportError.httpError(statusCode: 410, message: _) {
@@ -521,7 +548,7 @@ extension DriveSyncEngine {
         let known = previous?.files ?? [:]
         var visible = reachable(inventory.files, layout: layout)
         let newFolders = visible.folders.filter { known[$0.id] == nil }
-        if previous != nil {
+        if !forceFullCrawl && previous != nil {
             // Drive changes can report only the ancestor when a whole folder is moved into Charkle.
             for folder in newFolders where folder.id != layout.inbox {
                 try await collectChildren(of: folder.id, into: &inventory.files, layout: layout, transport: transport)
@@ -593,13 +620,84 @@ extension DriveSyncEngine {
         return (reachable, folders)
     }
 
+    private static let nonExportableGoogleMimeTypes: Set<String> = [
+        "application/vnd.google-apps.shortcut",
+        "application/vnd.google-apps.form",
+        "application/vnd.google-apps.site",
+        "application/vnd.google-apps.map",
+        "application/vnd.google-apps.script",
+        "application/vnd.google-apps.jam",
+        "application/vnd.google-apps.fusiontable",
+        "application/vnd.google-apps.drive-sdk"
+    ]
+
+    private static let ignoredJunkFileNames: Set<String> = [
+        "thumbs.db", "desktop.ini", "icon\r"
+    ]
+
+    private static let ignoredTempExtensions: Set<String> = [
+        "crdownload", "part", "download", "tmp", "partial"
+    ]
+
+    private static let binaryMediaExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "avif", "tif", "tiff", "bmp",
+        "mp4", "mov", "m4v", "webm", "mkv", "avi",
+        "mp3", "m4a", "wav", "flac", "aac", "ogg",
+        "pdf", "psd", "psb", "ai", "eps", "fig", "sketch", "xd", "blend", "zip"
+    ]
+
     private func isVisible(_ file: RemoteDriveFile, layout: Layout) -> Bool {
-        !file.trashed && file.id != layout.metadata && !file.name.hasPrefix(".")
-            && file.mimeType != "application/vnd.google-apps.shortcut"
+        guard !file.trashed, file.id != layout.metadata, !file.name.hasPrefix(".") else { return false }
+        if Self.nonExportableGoogleMimeTypes.contains(file.mimeType) { return false }
+        let lowerName = file.name.lowercased()
+        if Self.ignoredJunkFileNames.contains(lowerName) { return false }
+        if !file.isFolder {
+            let ext = (lowerName as NSString).pathExtension
+            if Self.ignoredTempExtensions.contains(ext) { return false }
+        }
+        return true
+    }
+
+    private static func isLikelyIncompleteZeroByteMedia(_ file: RemoteDriveFile) -> Bool {
+        guard !file.isFolder, let size = file.size, size == 0 else { return false }
+        let ext = (file.name.lowercased() as NSString).pathExtension
+        return binaryMediaExtensions.contains(ext)
+    }
+
+    private static func isFatalSyncError(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if error is URLError { return true }
+        if let transportError = error as? DriveTransportError {
+            switch transportError {
+            case .authenticationRequired, .mountPathUnavailable, .gdirectNotFound, .notConfigured:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
     }
 
     private func reconcile(_ update: InventoryUpdate, layout: Layout, transport: any DriveTransport,
-                           config: DriveSyncConfig, pending: [(Int64, SyncOperation)]) async throws -> (discovered: Int, renames: Int) {
+                           config: DriveSyncConfig, pending: [(Int64, SyncOperation)]) async throws -> (discovered: Int, discoveredIDs: [UUID], renames: Int, deferredFileIDs: Set<String>) {
+        // Clear stale mounted-path deletion markers once the deleted file is confirmed gone from disk,
+        // so dropping a brand-new file with the same name later is never silently blocked.
+        let activeFileIDs = Set(update.current.files.keys)
+        let deletedMarkers: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.drive." + MountedVolumeTransport.pathIDPrefix, as: Bool.self)) ?? []
+        if !deletedMarkers.isEmpty {
+            let markersToClear = deletedMarkers.compactMap { key, _ -> String? in
+                let remoteID = String(key.dropFirst("deleted.drive.".count))
+                return activeFileIDs.contains(remoteID) ? nil : key
+            }
+            if !markersToClear.isEmpty {
+                try? await database.transaction { store in
+                    for key in markersToClear {
+                        try store.setState(key, Optional<Bool>.none)
+                    }
+                }
+            }
+        }
+
         var folderIDs: [String: UUID] = [:]
         var pendingMoves = Set<UUID>()
         var pendingFolders = Set<UUID>()
@@ -643,7 +741,9 @@ extension DriveSyncEngine {
         }
         let thumbnails = config.syncThumbnails ? keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails)) : [:]
         var discovered = 0
+        var discoveredIDs: [UUID] = []
         var renames = 0
+        var deferredFileIDs = Set<String>()
         let bindings = try await database.assetDriveBindings()
         var linked = Dictionary(uniqueKeysWithValues: bindings)
         let visible = update.current.files.values.filter { file in
@@ -655,6 +755,10 @@ extension DriveSyncEngine {
         for file in visible {
             try Task.checkCancellation()
             if try await database.state("deleted.drive." + file.id, as: Bool.self) == true { continue }
+            if Self.isLikelyIncompleteZeroByteMedia(file) {
+                deferredFileIDs.insert(file.id)
+                continue
+            }
             let previous = update.previous[file.id]
             let folderID = file.parents.first.flatMap { folderIDs[$0] }
             let existing = try await linked[file.id].mapAsync { try await database.asset(id: $0) } ?? nil
@@ -674,12 +778,21 @@ extension DriveSyncEngine {
                     continue
                 }
             }
-            let result = try await fetchRemoteAsset(file, folderID: folderID, existing: existing,
-                                                    current: update.current, config: config, transport: transport)
-            if let result {
-                linked[file.id] = result.id
-                if existing == nil && result.id == DriveFiles.stableUUID("asset:" + file.id) { discovered += 1 }
-                if let existing, existing.fileName != result.fileName || existing.folderID != result.folderID { renames += 1 }
+            do {
+                let result = try await fetchRemoteAsset(file, folderID: folderID, existing: existing,
+                                                        current: update.current, config: config, transport: transport)
+                if let result {
+                    linked[file.id] = result.id
+                    if existing == nil && (result.id == DriveFiles.stableUUID("asset:" + file.id) || file.id.hasPrefix(MountedVolumeTransport.pathIDPrefix)) {
+                        discovered += 1
+                        discoveredIDs.append(result.id)
+                    }
+                    if let existing, existing.fileName != result.fileName || existing.folderID != result.folderID { renames += 1 }
+                }
+            } catch {
+                if Self.isFatalSyncError(error) { throw error }
+                // Isolate single-file corruption/export errors so other dropped files in Google Drive still ingest cleanly.
+                deferredFileIDs.insert(file.id)
             }
         }
 
@@ -692,7 +805,7 @@ extension DriveSyncEngine {
                 _ = try store.saveAssetLocally(asset, projectLocation: false)
             }
         }
-        return (discovered, renames)
+        return (discovered, discoveredIDs, renames, deferredFileIDs)
     }
 
     private static func contentChanged(before: RemoteDriveFile?, after: RemoteDriveFile) -> Bool {
@@ -759,8 +872,16 @@ extension DriveSyncEngine {
                 matching = exactLocation.count == 1 ? exactLocation.first : nil
             }
         }
-        let id = matching?.id ?? DriveFiles.stableUUID("asset:" + file.id)
-        if try await database.isTombstoned("asset", id: id) { return nil }
+        var id = matching?.id ?? DriveFiles.stableUUID("asset:" + file.id)
+        if try await database.isTombstoned("asset", id: id) {
+            // If an earlier mounted-path file was permanently deleted & already removed from disk,
+            // a brand-new file dropped later at the same filename gets a fresh UUID.
+            if matching == nil, file.id.hasPrefix(MountedVolumeTransport.pathIDPrefix) {
+                id = UUID()
+            } else {
+                return nil
+            }
+        }
 
         let mime = isGoogleDocument ? "application/pdf" : file.mimeType
         let naturalTitle = (filename as NSString).deletingPathExtension
@@ -948,7 +1069,12 @@ extension DriveSyncEngine {
             }
         }
 
-        for id in removedFiles { try await trashIfPresent(id, transport: transport) }
+        for id in removedFiles {
+            try await trashIfPresent(id, transport: transport)
+            if id.hasPrefix(MountedVolumeTransport.pathIDPrefix) {
+                try? await database.setState("deleted.drive." + id, Optional<Bool>.none)
+            }
+        }
         for id in removedFolders {
             do {
                 if try await transport.listFiles(inFolderID: id).isEmpty { try await trashIfPresent(id, transport: transport) }

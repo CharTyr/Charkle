@@ -405,7 +405,7 @@ public struct MainWindowView: View {
                         },
                         onPasteIntoCurrentFolder: {
                             let targetFolderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
-                            if !library.cutAssetIDs.isEmpty {
+                            if library.internalPasteboardAssets()?.isCut == true {
                                 Task {
                                     let moved = await library.pasteCutAssets(toFolderID: targetFolderID)
                                     let destName = targetFolderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
@@ -612,23 +612,37 @@ public struct MainWindowView: View {
 
                 // Column Density Slider Pill
                 HStack(spacing: 6) {
-                    Image(systemName: "square.grid.3x3")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                    Button {
+                        coordinator.targetColumnWidth = max(144, coordinator.targetColumnWidth - 36)
+                    } label: {
+                        Image(systemName: "square.grid.3x3")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("缩小卡片、显示更多列")
+
                     Slider(value: Binding(
                         get: { coordinator.targetColumnWidth },
                         set: { coordinator.targetColumnWidth = $0 }
-                    ), in: 168...316)
-                    .frame(width: 58)
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
+                    ), in: 144...340)
+                    .frame(width: 64)
+
+                    Button {
+                        coordinator.targetColumnWidth = min(340, coordinator.targetColumnWidth + 36)
+                    } label: {
+                        Image(systemName: "square.grid.2x2")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("放大卡片、更清晰浏览细节")
                 }
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                .help("调整画廊瀑布流列宽密度")
+                .help("拖动或点击两侧图标调整画廊卡片大小")
 
                 Spacer(minLength: 4)
 
@@ -1635,6 +1649,48 @@ public struct MainWindowView: View {
                         } else {
                             let playlist = board.referencedAssetIDs
                             coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                        }
+                    },
+                    onRevealInFinder: { assetID in
+                        Task {
+                            let ok = await library.revealInFinder(assetID: assetID)
+                            if !ok {
+                                coordinator.showToast("无法定位该素材的本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onCopyAssets: { ids in
+                        Task {
+                            let count = await library.copyAssetsToPasteboard(ids)
+                            coordinator.showToast("已拷贝 \(count) 项素材到剪贴板", icon: "doc.on.doc")
+                        }
+                    },
+                    onCutAssets: { ids in
+                        Task {
+                            let count = await library.cutAssets(ids)
+                            coordinator.showToast("已剪切 \(count) 项素材，可按 ⌘V 粘贴到其他情绪板或文件夹", icon: "scissors")
+                        }
+                    },
+                    onPasteIntoBoard: { dropPoint in
+                        Task {
+                            if let internalPaste = library.internalPasteboardAssets() {
+                                let resolved = internalPaste.ids.compactMap { library.allAssetsByID[$0] }
+                                guard !resolved.isEmpty else { return }
+                                await moodboards.appendAssets(resolved, at: dropPoint)
+                                if internalPaste.isCut {
+                                    library.clearCutSelection()
+                                }
+                                coordinator.showToast("已粘贴 \(resolved.count) 项素材到情绪板", icon: "doc.on.clipboard")
+                            } else {
+                                let inputs = ClipboardCollector.extractInputs(from: .general)
+                                guard !inputs.isEmpty else {
+                                    coordinator.showToast("剪贴板中没有可粘贴的图片或文件", icon: "doc.on.clipboard", tone: .warning)
+                                    return
+                                }
+                                let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: nil)
+                                await moodboards.appendAssets(created, at: dropPoint)
+                                coordinator.showToast("已粘贴导入并加入情绪板 (\(created.count) 项)", icon: "doc.on.clipboard")
+                            }
                         }
                     },
                     onDropExternalInputs: { inputs, dropPoint in

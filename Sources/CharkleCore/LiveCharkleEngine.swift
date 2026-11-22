@@ -616,6 +616,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             try Self.validatePathSegments(config.webDAVRemotePath)
         }
         var value = config
+        value.sharedFolderURLOrID = config.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.sharedFolderURLOrID.isEmpty, value.resolvedSharedFolderID == nil {
+            throw DriveTransportError.invalidResponse("共享目录格式无效，请粘贴完整的 Google Drive 文件夹链接（含 /folders/…）或目录 ID。")
+        }
         value.autoSyncIntervalSeconds = max(0, config.autoSyncIntervalSeconds)
         try await database.setState("driveConfig", value)
         await refreshAutoSync(config: value)
@@ -812,6 +816,20 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         )
     }
 
+    public func listGoogleDriveSharedFolders() async throws -> [RemoteDriveFile] {
+        if let injectedTransport {
+            return try await injectedTransport.listSharedFolders()
+        }
+        let config = await syncConfig()
+        guard (try? await oauth.currentStoredToken()) != nil else {
+            throw DriveTransportError.authenticationRequired("读取「与我共享」目录列表需要先在 Charkle 中独立登录 Google 账号。")
+        }
+        let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
+        let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
+        let direct = DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
+        return try await direct.listSharedFolders()
+    }
+
     public func syncNow() async throws -> SyncReport {
         if let syncTask { return try await syncTask.value }
         let config = await syncConfig()
@@ -825,6 +843,39 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             let report = try await driveSync.sync(using: transport, config: config, allowLocalFolderSync: config.mode == .localOnly)
             if config.mode != .localOnly {
                 _ = try await self.evict(keeping: [])
+            }
+            if !report.discoveredAssetIDs.isEmpty {
+                let ai = await self.aiConfig()
+                if ai.autoAnalyzeOnImport, ai.provider != .disabled {
+                    let discoveredIDs = report.discoveredAssetIDs
+                    Task { [weak engine = self] in
+                        guard let engine else { return }
+                        if let enriched = try? await engine.enrichAssetsWithCloudAI(ids: discoveredIDs), !enriched.isEmpty {
+                            NotificationCenter.default.post(
+                                name: CharkleSyncNotifications.didCompleteSync,
+                                object: nil,
+                                userInfo: [
+                                    CharkleSyncNotifications.discoveredCountKey: 0,
+                                    CharkleSyncNotifications.downloadedOpsKey: 0,
+                                    CharkleSyncNotifications.reconciledRenamesKey: enriched.count,
+                                    CharkleSyncNotifications.updatedBoardsKey: 0
+                                ]
+                            )
+                        }
+                    }
+                }
+            }
+            if report.hasVisibleLibraryChanges {
+                NotificationCenter.default.post(
+                    name: CharkleSyncNotifications.didCompleteSync,
+                    object: nil,
+                    userInfo: [
+                        CharkleSyncNotifications.discoveredCountKey: report.discoveredRemoteAssets,
+                        CharkleSyncNotifications.downloadedOpsKey: report.downloadedOps,
+                        CharkleSyncNotifications.reconciledRenamesKey: report.reconciledRenames,
+                        CharkleSyncNotifications.updatedBoardsKey: report.updatedBoards
+                    ]
+                )
             }
             return report
         }
@@ -882,7 +933,13 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
                 return DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
             }
-            // 2. Otherwise seamlessly reuse the user's ALREADY-SIGNED-IN local `gdirect` account with zero re-login!
+            // 2. If user specified a Google Drive shared folder URL/ID directly, Direct API OAuth is required
+            if config.resolvedSharedFolderID != nil {
+                throw DriveTransportError.authenticationRequired(
+                    "通过 Google Drive 共享目录链接/ID 协作需要先在设置中「改用 Charkle 独立登录 Google 账号」；若继续使用本机 gdirect 挂载，可在 Google Drive 网页端将共享目录「添加到云端硬盘快捷方式」后，直接把该快捷方式名填在「云端保存路径」。"
+                )
+            }
+            // 3. Otherwise seamlessly reuse the user's ALREADY-SIGNED-IN local `gdirect` account with zero re-login!
             let gd = await GDirectIntegration.signedInAccounts()
             if let gdirectAccount = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
                 let activePath = try await GDirectIntegration.mount(path: config.mountPath, account: gdirectAccount)
@@ -893,7 +950,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     requireDedicatedMount: true
                 )
             }
-            // 3. No local gdirect account and no Charkle OAuth token -> DirectAPI prompts clean sign-in
+            // 4. No local gdirect account and no Charkle OAuth token -> DirectAPI prompts clean sign-in
             let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
             let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
             return DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)

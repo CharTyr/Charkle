@@ -156,6 +156,10 @@ struct BoardAssetNodeView: View {
     let onToggleHero: () -> Void
     let onTriggerSwap: () -> Void
     let onOpenQuickLook: () -> Void
+    let onRevealInFinder: () -> Void
+    let onCopy: () -> Void
+    let onCut: () -> Void
+    let onPaste: () -> Void
     let onRotateBy: (Double) -> Void
     let onResetRotation: () -> Void
     let onFlipHorizontal: () -> Void
@@ -304,7 +308,32 @@ struct BoardAssetNodeView: View {
         }
         .contextMenu {
             Button("快速预览 (Space)") { onOpenQuickLook() }
+            if asset != nil {
+                Button {
+                    onRevealInFinder()
+                } label: {
+                    Label("在访达中显示", systemImage: "folder")
+                }
+            }
             Button("从候选池换一张…") { onTriggerSwap() }
+            Divider()
+            if asset != nil {
+                Button {
+                    onCopy()
+                } label: {
+                    Label("拷贝", systemImage: "doc.on.doc")
+                }
+                Button {
+                    onCut()
+                } label: {
+                    Label("剪切", systemImage: "scissors")
+                }
+            }
+            Button {
+                onPaste()
+            } label: {
+                Label("粘贴到情绪板", systemImage: "doc.on.clipboard")
+            }
             Divider()
             Button("顺时针旋转 90° (R)") { onRotateBy(90) }
             Button("逆时针旋转 90° (⇧R)") { onRotateBy(-90) }
@@ -350,6 +379,8 @@ struct BoardNoteNodeView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: max(13, fontSize), weight: .semibold))
                     .foregroundStyle(palette.foreground)
+                    .frame(minWidth: 64)
+                    .layoutPriority(1)
                     .onChange(of: draftTitle) { _, newValue in
                         if newValue != (title ?? "") {
                             onUpdate(newValue.isEmpty ? nil : newValue, draftText, style, fontSize)
@@ -357,7 +388,7 @@ struct BoardNoteNodeView: View {
                     }
 
                 if isHovered || isSelected {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3) {
                         ForEach(NoteStyle.allCases, id: \.self) { candidate in
                             let c = NoteStylePalette.colors(for: candidate)
                             Button {
@@ -365,7 +396,7 @@ struct BoardNoteNodeView: View {
                             } label: {
                                 Circle()
                                     .fill(c.background)
-                                    .frame(width: 11, height: 11)
+                                    .frame(width: 10, height: 10)
                                     .overlay(
                                         Circle()
                                             .strokeBorder(
@@ -378,6 +409,7 @@ struct BoardNoteNodeView: View {
                             .help(NoteStylePalette.label(for: candidate))
                         }
                     }
+                    .fixedSize()
                     .transition(.opacity)
                 }
             }
@@ -389,7 +421,9 @@ struct BoardNoteNodeView: View {
                 .font(.system(size: max(11, fontSize - 1)))
                 .foregroundStyle(palette.foreground.opacity(0.90))
                 .scrollContentBackground(.hidden)
+                .scrollIndicators(.hidden)
                 .background(Color.clear)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: draftText) { _, newValue in
                     if newValue != text {
                         onUpdate(draftTitle.isEmpty ? nil : draftTitle, newValue, style, fontSize)
@@ -397,6 +431,7 @@ struct BoardNoteNodeView: View {
                 }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(palette.background, in: shape)
         .overlay(
             shape.strokeBorder(isSelected ? Color.accentColor : palette.border, lineWidth: isSelected ? 2 : 1)

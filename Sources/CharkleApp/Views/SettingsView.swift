@@ -514,12 +514,103 @@ public struct SettingsView: View {
 
         settingsRow(
             title: "云端保存路径",
-            subtitle: "支持单级目录（Charkle）或多级路径（如 Design/Charkle），回车生效"
+            subtitle: draftSyncConfig.resolvedSharedFolderID != nil
+                ? "当前已绑定下方共享协作目录；清除共享目录后将恢复使用此路径"
+                : "支持单级目录（Charkle）、多级路径（Design/Charkle），或已添加到「我的云端硬盘」的共享目录快捷方式名"
         ) {
             TextField("Charkle", text: $draftSyncConfig.rootFolderName)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 190)
+                .frame(width: 210)
+                .disabled(draftSyncConfig.resolvedSharedFolderID != nil)
                 .onSubmit { persistSyncConfigIfReady() }
+        }
+
+        Divider()
+
+        VStack(alignment: .leading, spacing: 8) {
+            settingsRow(
+                title: "共享协作目录（可选）",
+                subtitle: "粘贴 Google Drive「与我共享」目录链接或 ID，多人指向同一共享目录即可共同写入、整理与浏览"
+            ) {
+                HStack(spacing: 6) {
+                    TextField("https://drive.google.com/drive/folders/… 或目录 ID", text: $draftSyncConfig.sharedFolderURLOrID)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 230)
+                        .onSubmit { persistSyncConfigIfReady() }
+
+                    if !draftSyncConfig.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button("清除") {
+                            draftSyncConfig.sharedFolderURLOrID = ""
+                            persistSyncConfigIfReady()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                if let sharedID = draftSyncConfig.resolvedSharedFolderID {
+                    Label("协作模式已启用（ID: \(String(sharedID.prefix(12)))…）", systemImage: "person.2.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                } else if !draftSyncConfig.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Label("链接或 ID 格式无效，请检查是否包含 /folders/…", systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                } else {
+                    Text(
+                        isUsingLocalGDirect
+                            ? "提示：在 gdirect 挂载模式下，将共享目录在 Google Drive 网页端「添加到云端硬盘快捷方式」后，也可直接在上方填写快捷方式名协作。"
+                            : "提示：在 Google Drive 目录中直接拖入新素材文件，Charkle 也会自动扫描并生成缩略图与视觉索引。"
+                    )
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 6)
+
+                if !isUsingLocalGDirect && isSignedIn {
+                    Menu {
+                        if syncAndAI.sharedFolders.isEmpty {
+                            Button("加载「与我共享」目录列表…") {
+                                Task { await syncAndAI.loadSharedFolders() }
+                            }
+                        } else {
+                            ForEach(syncAndAI.sharedFolders, id: \.id) { folder in
+                                Button {
+                                    draftSyncConfig.sharedFolderURLOrID = folder.webViewLink ?? folder.id
+                                    persistSyncConfigIfReady()
+                                } label: {
+                                    Label(folder.name, systemImage: "folder.badge.person.crop")
+                                }
+                            }
+                            Divider()
+                            Button("刷新列表") {
+                                Task { await syncAndAI.loadSharedFolders() }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if syncAndAI.isLoadingSharedFolders {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "person.2.badge.gearshape")
+                                    .font(.system(size: 11))
+                            }
+                            Text("选择与我共享")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .onTapGesture {
+                        if syncAndAI.sharedFolders.isEmpty && !syncAndAI.isLoadingSharedFolders {
+                            Task { await syncAndAI.loadSharedFolders() }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -95,6 +95,9 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
     public var mode: DriveTransportMode
     /// Cloud root folder path for Google Drive (supports single folder `"Charkle"` or nested `"Design/Charkle"`).
     public var rootFolderName: String
+    /// Optional Google Drive shared folder URL or folder ID (e.g. `https://drive.google.com/drive/folders/<id>` or raw `<id>`)
+    /// so multiple collaborators can share and co-edit the same library folder.
+    public var sharedFolderURLOrID: String
     public var mountPath: String
     public var selectedGDirectAccount: String?
     public var useGDirectIPAcceleration: Bool
@@ -112,6 +115,7 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
     public init(
         mode: DriveTransportMode = .directAPIWithGDirect,
         rootFolderName: String = "Charkle",
+        sharedFolderURLOrID: String = "",
         mountPath: String = NSHomeDirectory() + "/GoogleDrive",
         selectedGDirectAccount: String? = nil,
         useGDirectIPAcceleration: Bool = true,
@@ -125,6 +129,7 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
     ) {
         self.mode = mode
         self.rootFolderName = rootFolderName
+        self.sharedFolderURLOrID = sharedFolderURLOrID
         self.mountPath = mountPath
         self.selectedGDirectAccount = selectedGDirectAccount
         self.useGDirectIPAcceleration = useGDirectIPAcceleration
@@ -138,7 +143,7 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case mode, rootFolderName, mountPath, selectedGDirectAccount, useGDirectIPAcceleration
+        case mode, rootFolderName, sharedFolderURLOrID, mountPath, selectedGDirectAccount, useGDirectIPAcceleration
         case webDAVServerURL, webDAVUsername, webDAVRemotePath, localLibraryPath
         case autoSyncIntervalSeconds, syncThumbnails, syncEmbeddings
     }
@@ -147,6 +152,7 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         mode = try c.decodeIfPresent(DriveTransportMode.self, forKey: .mode) ?? .directAPIWithGDirect
         rootFolderName = try c.decodeIfPresent(String.self, forKey: .rootFolderName) ?? "Charkle"
+        sharedFolderURLOrID = try c.decodeIfPresent(String.self, forKey: .sharedFolderURLOrID) ?? ""
         mountPath = try c.decodeIfPresent(String.self, forKey: .mountPath) ?? (NSHomeDirectory() + "/GoogleDrive")
         selectedGDirectAccount = try c.decodeIfPresent(String.self, forKey: .selectedGDirectAccount)
         useGDirectIPAcceleration = try c.decodeIfPresent(Bool.self, forKey: .useGDirectIPAcceleration) ?? true
@@ -159,10 +165,49 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         syncEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .syncEmbeddings) ?? true
     }
 
+    /// Parses a Google Drive folder URL (`.../folders/<id>`, `...open?id=<id>`) or raw folder ID.
+    public nonisolated static func extractGoogleDriveFolderID(from raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        func isValidDriveID(_ candidate: String) -> Bool {
+            candidate.count >= 4 && candidate.count <= 128 && candidate.utf8.allSatisfy {
+                (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+            }
+        }
+
+        if let url = URL(string: trimmed), let host = url.host()?.lowercased(), host.contains("google.com") {
+            let parts = url.pathComponents
+            if let idx = parts.firstIndex(of: "folders"), parts.indices.contains(idx + 1) {
+                let candidate = parts[idx + 1]
+                if isValidDriveID(candidate) { return candidate }
+            }
+            if let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+               let idVal = items.first(where: { $0.name == "id" })?.value,
+               isValidDriveID(idVal) {
+                return idVal
+            }
+            return nil
+        }
+
+        if !trimmed.contains("/"), !trimmed.contains(" "), isValidDriveID(trimmed) {
+            return trimmed
+        }
+        return nil
+    }
+
+    public nonisolated var resolvedSharedFolderID: String? {
+        Self.extractGoogleDriveFolderID(from: sharedFolderURLOrID)
+    }
+
     /// Clean human-readable target path summary for the currently active storage backend.
     public var activeStorageLocationSummary: String {
         switch mode {
         case .directAPIWithGDirect:
+            if let sharedID = resolvedSharedFolderID {
+                let shortID = String(sharedID.prefix(10))
+                return "Google Drive 共享目录 (\(shortID)…)"
+            }
             let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
             return "Google Drive / \(cleaned.isEmpty ? "Charkle" : cleaned)"
         case .webDAV:
@@ -247,14 +292,20 @@ public struct SyncReport: Codable, Hashable, Sendable {
     public var uploadedOps: Int
     public var downloadedOps: Int
     public var discoveredRemoteAssets: Int
+    public var discoveredAssetIDs: [UUID]
     public var updatedBoards: Int
     public var reconciledRenames: Int
     public var durationSeconds: Double
+
+    public var hasVisibleLibraryChanges: Bool {
+        discoveredRemoteAssets > 0 || downloadedOps > 0 || reconciledRenames > 0 || updatedBoards > 0
+    }
 
     public init(
         uploadedOps: Int = 0,
         downloadedOps: Int = 0,
         discoveredRemoteAssets: Int = 0,
+        discoveredAssetIDs: [UUID] = [],
         updatedBoards: Int = 0,
         reconciledRenames: Int = 0,
         durationSeconds: Double = 0
@@ -262,10 +313,35 @@ public struct SyncReport: Codable, Hashable, Sendable {
         self.uploadedOps = uploadedOps
         self.downloadedOps = downloadedOps
         self.discoveredRemoteAssets = discoveredRemoteAssets
+        self.discoveredAssetIDs = discoveredAssetIDs
         self.updatedBoards = updatedBoards
         self.reconciledRenames = reconciledRenames
         self.durationSeconds = durationSeconds
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case uploadedOps, downloadedOps, discoveredRemoteAssets, discoveredAssetIDs
+        case updatedBoards, reconciledRenames, durationSeconds
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        uploadedOps = try c.decodeIfPresent(Int.self, forKey: .uploadedOps) ?? 0
+        downloadedOps = try c.decodeIfPresent(Int.self, forKey: .downloadedOps) ?? 0
+        discoveredRemoteAssets = try c.decodeIfPresent(Int.self, forKey: .discoveredRemoteAssets) ?? 0
+        discoveredAssetIDs = try c.decodeIfPresent([UUID].self, forKey: .discoveredAssetIDs) ?? []
+        updatedBoards = try c.decodeIfPresent(Int.self, forKey: .updatedBoards) ?? 0
+        reconciledRenames = try c.decodeIfPresent(Int.self, forKey: .reconciledRenames) ?? 0
+        durationSeconds = try c.decodeIfPresent(Double.self, forKey: .durationSeconds) ?? 0
+    }
+}
+
+public nonisolated enum CharkleSyncNotifications {
+    public static let didCompleteSync = Notification.Name("com.charkle.sync.didCompleteSync")
+    public static let discoveredCountKey = "discoveredCount"
+    public static let downloadedOpsKey = "downloadedOps"
+    public static let reconciledRenamesKey = "reconciledRenames"
+    public static let updatedBoardsKey = "updatedBoards"
 }
 
 public struct RemoteDriveFile: Codable, Hashable, Sendable {
@@ -388,4 +464,18 @@ public protocol DriveTransport: Sendable {
         newName: String?
     ) async throws -> RemoteDriveFile
     func trashFile(fileID: String) async throws
+    func resolveFolder(id: String) async throws -> RemoteDriveFile
+    func listSharedFolders() async throws -> [RemoteDriveFile]
+}
+
+public extension DriveTransport {
+    func resolveFolder(id: String) async throws -> RemoteDriveFile {
+        throw DriveTransportError.notConfigured(
+            "\(displayName) 暂不支持通过共享目录链接/ID 直连，请先在设置中「独立登录 Google 账号」，或在 Google Drive 中将该共享目录「添加到云端硬盘快捷方式」后再填写快捷方式路径。"
+        )
+    }
+
+    func listSharedFolders() async throws -> [RemoteDriveFile] {
+        []
+    }
 }

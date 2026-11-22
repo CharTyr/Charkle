@@ -39,6 +39,10 @@ public struct MoodboardCanvasCallbacks {
     public var onRedo: () -> Void
     public var onSelectSwapTarget: (UUID?) -> Void
     public var onOpenQuickLook: (AssetRecord) -> Void
+    public var onRevealInFinder: (UUID) -> Void
+    public var onCopyAssets: ([UUID]) -> Void
+    public var onCutAssets: ([UUID]) -> Void
+    public var onPasteIntoBoard: (BoardPoint?) -> Void
     public var onDropExternalInputs: ([CaptureInput], BoardPoint?) -> Void
     public var onDropLibraryAssetIDs: ([UUID], BoardPoint?) -> Void
     public var onCopyColorHex: (String) -> Void
@@ -52,6 +56,10 @@ public struct MoodboardCanvasCallbacks {
         onRedo: @escaping () -> Void = {},
         onSelectSwapTarget: @escaping (UUID?) -> Void = { _ in },
         onOpenQuickLook: @escaping (AssetRecord) -> Void = { _ in },
+        onRevealInFinder: @escaping (UUID) -> Void = { _ in },
+        onCopyAssets: @escaping ([UUID]) -> Void = { _ in },
+        onCutAssets: @escaping ([UUID]) -> Void = { _ in },
+        onPasteIntoBoard: @escaping (BoardPoint?) -> Void = { _ in },
         onDropExternalInputs: @escaping ([CaptureInput], BoardPoint?) -> Void = { _, _ in },
         onDropLibraryAssetIDs: @escaping ([UUID], BoardPoint?) -> Void = { _, _ in },
         onCopyColorHex: @escaping (String) -> Void = { _ in },
@@ -64,6 +72,10 @@ public struct MoodboardCanvasCallbacks {
         self.onRedo = onRedo
         self.onSelectSwapTarget = onSelectSwapTarget
         self.onOpenQuickLook = onOpenQuickLook
+        self.onRevealInFinder = onRevealInFinder
+        self.onCopyAssets = onCopyAssets
+        self.onCutAssets = onCutAssets
+        self.onPasteIntoBoard = onPasteIntoBoard
         self.onDropExternalInputs = onDropExternalInputs
         self.onDropLibraryAssetIDs = onDropLibraryAssetIDs
         self.onCopyColorHex = onCopyColorHex
@@ -112,7 +124,29 @@ public struct MoodboardCanvasView: View {
     @State private var snapGuidesX: [CGFloat] = []
     @State private var snapGuidesY: [CGFloat] = []
 
+    private enum ResizeCorner: CaseIterable {
+        case topLeading
+        case topTrailing
+        case bottomLeading
+        case bottomTrailing
+
+        var signX: Double {
+            switch self {
+            case .topLeading, .bottomLeading: -1
+            case .topTrailing, .bottomTrailing: 1
+            }
+        }
+
+        var signY: Double {
+            switch self {
+            case .topLeading, .topTrailing: -1
+            case .bottomLeading, .bottomTrailing: 1
+            }
+        }
+    }
+
     @State private var resizingNodeID: UUID?
+    @State private var resizingCorner: ResizeCorner?
     @State private var resizeStartFrame: BoardRect?
     @State private var liveResizeFrame: BoardRect?
 
@@ -295,11 +329,35 @@ public struct MoodboardCanvasView: View {
             return .handled
         }
         .onKeyPress(.delete) {
+            guard !isEditingTextInWindow else { return .ignored }
             deleteCurrentSelection()
             return .handled
         }
-        .onKeyPress(characters: CharacterSet(charactersIn: "vhcperVHCPER")) { press in
+        .onKeyPress(characters: CharacterSet(charactersIn: "acxvhperACXVHPER")) { press in
+            guard !isEditingTextInWindow else { return .ignored }
             let lower = press.characters.lowercased()
+            if press.modifiers == [.command] {
+                switch lower {
+                case "a":
+                    selectedNodeIDs = Set(document.nodes.map(\.id))
+                    selectedConnectorID = nil
+                    return .handled
+                case "c":
+                    let ids = selectedAssetIDs()
+                    guard !ids.isEmpty else { return .ignored }
+                    callbacks.onCopyAssets(ids)
+                    return .handled
+                case "x":
+                    guard !selectedNodeIDs.isEmpty else { return .ignored }
+                    cutBoardNodes(selectedNodeIDs)
+                    return .handled
+                case "v":
+                    callbacks.onPasteIntoBoard(defaultPasteLocation())
+                    return .handled
+                default:
+                    return .ignored
+                }
+            }
             // Transform shortcuts work whenever unlocked nodes are selected (both modes)
             if !selectedUnlockedNodes.isEmpty {
                 if lower == "r" && press.modifiers.isEmpty {
@@ -361,6 +419,13 @@ public struct MoodboardCanvasView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         clearCanvasSelection()
+                    }
+                    .contextMenu {
+                        Button {
+                            callbacks.onPasteIntoBoard(nil)
+                        } label: {
+                            Label("粘贴到情绪板", systemImage: "doc.on.clipboard")
+                        }
                     }
 
                 if document.nodes.isEmpty {
@@ -591,34 +656,72 @@ public struct MoodboardCanvasView: View {
             Color.clear
                 .contentShape(Rectangle())
                 .gesture(canvasBackgroundGesture)
+                .contextMenu {
+                    Button {
+                        callbacks.onPasteIntoBoard(BoardPoint(cameraCenter))
+                    } label: {
+                        Label("粘贴到情绪板", systemImage: "doc.on.clipboard")
+                    }
+                    Divider()
+                    Button {
+                        addNoteNode()
+                    } label: {
+                        Label("添加灵感便签", systemImage: "note.text.badge.plus")
+                    }
+                    Button {
+                        addGroupFrameNode()
+                    } label: {
+                        Label("添加区域分组框", systemImage: "rectangle.dashed")
+                    }
+                }
 
             // Culled visible nodes positioned in screen coordinates
             ForEach(culledNodes) { node in
                 let worldRect = effectiveFrame(for: node)
                 let screenCenter = worldToScreen(CGPoint(x: worldRect.midX, y: worldRect.midY))
-                let screenW = CGFloat(worldRect.width) * cameraZoom
-                let screenH = CGFloat(worldRect.height) * cameraZoom
+                let screenW = max(24, CGFloat(worldRect.width) * cameraZoom)
+                let screenH = max(24, CGFloat(worldRect.height) * cameraZoom)
                 let isSelected = selectedNodeIDs.contains(node.id)
                 let isHovered = hoveredNodeID == node.id
                 let currentRotation = effectiveRotation(for: node)
 
                 ZStack {
                     renderNodeBody(node: node, isAutoMode: false)
-                        .frame(width: max(24, screenW), height: max(24, screenH))
+                        .frame(width: screenW, height: screenH)
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(
+                            TapGesture(count: 1).onEnded {
+                                if activeTool == .select && !isSpaceKeyPanning {
+                                    let mods = NSEvent.modifierFlags
+                                    if mods.contains(.command) || mods.contains(.shift) {
+                                        if selectedNodeIDs.contains(node.id) {
+                                            selectedNodeIDs.remove(node.id)
+                                        } else {
+                                            selectedNodeIDs.insert(node.id)
+                                        }
+                                    } else {
+                                        selectedNodeIDs = [node.id]
+                                    }
+                                    selectedConnectorID = nil
+                                }
+                            }
+                        )
+                        .gesture(activeTool == .select && !isSpaceKeyPanning ? nodeDragGesture(for: node) : nil)
 
                     // Magnetic edge ports for connectors
                     if (activeTool == .connector || isHovered || isSelected) && activeTool != .pen && activeTool != .eraser && !isSpaceKeyPanning {
                         connectorPortsOverlay(node: node, worldRect: worldRect, width: screenW, height: screenH)
                     }
 
-                    // Bottom-right corner resize handle + Top-center rotation handle on selected unlocked nodes
+                    // 4-corner resize handles + Top-center rotation handle on selected unlocked nodes
                     if isSelected && !node.isLocked && activeTool == .select && !isSpaceKeyPanning {
-                        resizeHandleOverlay(node: node, width: screenW, height: screenH)
+                        resizeHandlesOverlay(node: node, width: screenW, height: screenH, currentRotation: currentRotation)
                         rotationHandleOverlay(node: node, screenCenter: screenCenter, height: screenH, currentRotation: currentRotation)
                     }
                 }
-                .frame(width: max(24, screenW), height: max(24, screenH))
-                .contentShape(Rectangle())
+                // Symmetric expanded frame keeps all corner/rotation handles strictly inside bounds for hit-testing
+                // without `.contentShape(Rectangle())`, so transparent margins pass clicks through to canvas/neighbors.
+                .frame(width: screenW + 40, height: screenH + 84)
                 .onHover { hovering in
                     if hovering {
                         hoveredNodeID = node.id
@@ -626,24 +729,6 @@ public struct MoodboardCanvasView: View {
                         hoveredNodeID = nil
                     }
                 }
-                .simultaneousGesture(
-                    TapGesture(count: 1).onEnded {
-                        if activeTool == .select && !isSpaceKeyPanning {
-                            let mods = NSEvent.modifierFlags
-                            if mods.contains(.command) || mods.contains(.shift) {
-                                if selectedNodeIDs.contains(node.id) {
-                                    selectedNodeIDs.remove(node.id)
-                                } else {
-                                    selectedNodeIDs.insert(node.id)
-                                }
-                            } else {
-                                selectedNodeIDs = [node.id]
-                            }
-                            selectedConnectorID = nil
-                        }
-                    }
-                )
-                .gesture(activeTool == .select && !isSpaceKeyPanning ? nodeDragGesture(for: node) : nil)
                 .allowsHitTesting(activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning)
                 .rotationEffect(.degrees(currentRotation))
                 .position(screenCenter)
@@ -1181,6 +1266,65 @@ public struct MoodboardCanvasView: View {
 
     // MARK: - Selection & Quick Look Helpers
 
+    private var isEditingTextInWindow: Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+        return responder is NSTextView || responder is NSTextField
+    }
+
+    private func defaultPasteLocation() -> BoardPoint? {
+        isAutoEditorial ? nil : BoardPoint(cameraCenter)
+    }
+
+    private func effectiveNodeIDs(including anchorNodeID: UUID) -> Set<UUID> {
+        if selectedNodeIDs.contains(anchorNodeID) {
+            return selectedNodeIDs
+        }
+        return [anchorNodeID]
+    }
+
+    private func selectedAssetIDs() -> [UUID] {
+        var seen = Set<UUID>()
+        var result: [UUID] = []
+        for node in document.nodes where selectedNodeIDs.contains(node.id) {
+            if let assetID = node.referencedAssetID, seen.insert(assetID).inserted {
+                result.append(assetID)
+            }
+        }
+        return result
+    }
+
+    private func effectiveAssetIDs(including anchorNodeID: UUID, fallbackAssetID: UUID) -> [UUID] {
+        if selectedNodeIDs.contains(anchorNodeID) {
+            let ids = selectedAssetIDs()
+            if !ids.isEmpty { return ids }
+        }
+        return [fallbackAssetID]
+    }
+
+    private func cutBoardNodes(_ nodeIDs: Set<UUID>) {
+        guard !nodeIDs.isEmpty else { return }
+        var seen = Set<UUID>()
+        var assetIDs: [UUID] = []
+        for node in document.nodes where nodeIDs.contains(node.id) {
+            if let assetID = node.referencedAssetID, seen.insert(assetID).inserted {
+                assetIDs.append(assetID)
+            }
+        }
+        guard !assetIDs.isEmpty else { return }
+        callbacks.onCutAssets(assetIDs)
+
+        let removableNodeIDs = Set(document.nodes.filter { nodeIDs.contains($0.id) && !$0.isLocked }.map(\.id))
+        guard !removableNodeIDs.isEmpty else { return }
+        var nextDoc = document
+        nextDoc.nodes.removeAll { removableNodeIDs.contains($0.id) }
+        nextDoc.connectors.removeAll { removableNodeIDs.contains($0.fromNodeID) || removableNodeIDs.contains($0.toNodeID) }
+        selectedNodeIDs.subtract(removableNodeIDs)
+        if let swapID = swappingNodeID, removableNodeIDs.contains(swapID) {
+            callbacks.onSelectSwapTarget(nil)
+        }
+        callbacks.onCommitDocument(nextDoc)
+    }
+
     private func clearCanvasSelection() {
         selectedNodeIDs.removeAll()
         selectedConnectorID = nil
@@ -1291,7 +1435,7 @@ public struct MoodboardCanvasView: View {
     private func nodeDragGesture(for node: BoardNode) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .named("charkle-freeform-stage"))
             .onChanged { value in
-                guard !node.isLocked else { return }
+                guard !node.isLocked, resizingNodeID == nil, rotatingNodeID == nil else { return }
                 if activeNodeDragID == nil {
                     activeNodeDragID = node.id
                     if !selectedNodeIDs.contains(node.id) {
@@ -1364,48 +1508,132 @@ public struct MoodboardCanvasView: View {
             }
     }
 
-    private func resizeHandleOverlay(node: BoardNode, width: CGFloat, height: CGFloat) -> some View {
-        Circle()
-            .fill(Color.white)
-            .frame(width: 11, height: 11)
-            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 2))
-            .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
-            .offset(x: width * 0.5, y: height * 0.5)
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        if resizingNodeID == nil {
-                            resizingNodeID = node.id
-                            resizeStartFrame = node.frame
-                        }
-                        guard let start = resizeStartFrame else { return }
-                        let dw = Double(value.translation.width / cameraZoom)
-                        let dh = Double(value.translation.height / cameraZoom)
-                        let newW = max(96, start.width + dw)
-                        var newH = max(64, start.height + dh)
+    private func resizeHandlesOverlay(
+        node: BoardNode,
+        width: CGFloat,
+        height: CGFloat,
+        currentRotation: Double
+    ) -> some View {
+        let minSize: (width: Double, height: Double) = switch node.kind {
+        case .note: (140, 96)
+        case .groupFrame: (180, 120)
+        case .paletteStrip: (160, 48)
+        case .assetRef: (84, 60)
+        }
+        let isResizingThis = resizingNodeID == node.id
 
-                        // Maintain aspect ratio for asset nodes unless Shift is held
-                        if case .assetRef = node.kind, !NSEvent.modifierFlags.contains(.shift) {
-                            let aspect = start.width / max(1, start.height)
-                            newH = max(64, newW / aspect)
-                        }
-                        liveResizeFrame = BoardRect(x: start.x, y: start.y, width: newW, height: newH)
+        return ZStack {
+            ForEach(ResizeCorner.allCases, id: \.self) { corner in
+                let isActiveCorner = isResizingThis && resizingCorner == corner
+                ZStack {
+                    Circle()
+                        .fill(isActiveCorner ? Color.accentColor : Color.white)
+                        .frame(width: isActiveCorner ? 12 : 10, height: isActiveCorner ? 12 : 10)
+                        .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 2))
+                        .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+                }
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+                .overlay(alignment: .bottom) {
+                    if isActiveCorner, let live = liveResizeFrame {
+                        Text("\(Int(live.width.rounded())) × \(Int(live.height.rounded()))")
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(0.76), in: Capsule(style: .continuous))
+                            .rotationEffect(.degrees(-currentRotation))
+                            .offset(y: 26)
+                            .allowsHitTesting(false)
                     }
-                    .onEnded { _ in
-                        defer {
-                            resizingNodeID = nil
-                            resizeStartFrame = nil
-                            liveResizeFrame = nil
+                }
+                .offset(
+                    x: CGFloat(corner.signX) * width * 0.5,
+                    y: CGFloat(corner.signY) * height * 0.5
+                )
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 1, coordinateSpace: .named("charkle-freeform-stage"))
+                        .onChanged { value in
+                            if resizingNodeID == nil {
+                                resizingNodeID = node.id
+                                resizingCorner = corner
+                                resizeStartFrame = node.frame
+                            }
+                            guard let start = resizeStartFrame else { return }
+                            let stageDX = Double(value.translation.width / cameraZoom)
+                            let stageDY = Double(value.translation.height / cameraZoom)
+
+                            // Project world translation onto node's local rotated axes
+                            let rad = node.rotationDegrees * .pi / 180.0
+                            let cosR = cos(rad)
+                            let sinR = sin(rad)
+                            let localDX = stageDX * cosR + stageDY * sinR
+                            let localDY = -stageDX * sinR + stageDY * cosR
+
+                            let rawW = max(minSize.width, start.width + corner.signX * localDX)
+                            let rawH = max(minSize.height, start.height + corner.signY * localDY)
+
+                            let preserveAspect: Bool = switch node.kind {
+                            case .assetRef: !NSEvent.modifierFlags.contains(.shift)
+                            case .note, .groupFrame, .paletteStrip: NSEvent.modifierFlags.contains(.shift)
+                            }
+
+                            var newW = rawW
+                            var newH = rawH
+                            if preserveAspect {
+                                let aspect = start.width / max(1, start.height)
+                                let scaleW = rawW / max(1, start.width)
+                                let scaleH = rawH / max(1, start.height)
+                                let chosenScale = abs(scaleW - 1) >= abs(scaleH - 1) ? scaleW : scaleH
+                                newW = max(minSize.width, start.width * chosenScale)
+                                newH = max(minSize.height, newW / aspect)
+                                if newH < minSize.height {
+                                    newH = minSize.height
+                                    newW = max(minSize.width, newH * aspect)
+                                }
+                            }
+
+                            // Keep the opposite corner pinned in world space (works for both 0° and rotated nodes)
+                            let deltaW = newW - start.width
+                            let deltaH = newH - start.height
+                            let localCenterShiftX = corner.signX * deltaW * 0.5
+                            let localCenterShiftY = corner.signY * deltaH * 0.5
+                            let worldCenterShiftX = localCenterShiftX * cosR - localCenterShiftY * sinR
+                            let worldCenterShiftY = localCenterShiftX * sinR + localCenterShiftY * cosR
+
+                            let newCenterX = start.midX + worldCenterShiftX
+                            let newCenterY = start.midY + worldCenterShiftY
+                            liveResizeFrame = BoardRect(
+                                x: newCenterX - newW * 0.5,
+                                y: newCenterY - newH * 0.5,
+                                width: newW,
+                                height: newH
+                            )
                         }
-                        guard let finalRect = liveResizeFrame else { return }
-                        var nextDoc = document
-                        if let idx = nextDoc.nodes.firstIndex(where: { $0.id == node.id }) {
-                            nextDoc.nodes[idx].frame = finalRect
-                            nextDoc.nodes[idx].updatedAt = Date()
-                            callbacks.onCommitDocument(nextDoc)
+                        .onEnded { _ in
+                            defer {
+                                resizingNodeID = nil
+                                resizingCorner = nil
+                                resizeStartFrame = nil
+                                liveResizeFrame = nil
+                            }
+                            guard let finalRect = liveResizeFrame else { return }
+                            var nextDoc = document
+                            if let idx = nextDoc.nodes.firstIndex(where: { $0.id == node.id }) {
+                                nextDoc.nodes[idx].frame = finalRect
+                                nextDoc.nodes[idx].updatedAt = Date()
+                                callbacks.onCommitDocument(nextDoc)
+                            }
                         }
-                    }
-            )
+                )
+                .help(
+                    node.referencedAssetID != nil
+                        ? "拖拽调整尺寸（按住 ⇧ 自由拉伸）"
+                        : "拖拽自由调整尺寸（按住 ⇧ 锁定比例）"
+                )
+            }
+        }
     }
 
     private func connectorPortsOverlay(node: BoardNode, worldRect: BoardRect, width: CGFloat, height: CGFloat) -> some View {
@@ -1417,44 +1645,45 @@ public struct MoodboardCanvasView: View {
         ]
         return ZStack {
             ForEach(anchors, id: \.0) { anchor, offset, startWorld in
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 9, height: 9)
-                    .overlay(Circle().strokeBorder(Color.white, lineWidth: 1.5))
-                    .offset(offset)
-                    .gesture(
-                        DragGesture(minimumDistance: 2)
-                            .onChanged { value in
-                                if pendingConnectorSource == nil {
-                                    pendingConnectorSource = (node.id, anchor, startWorld)
-                                }
-                                pendingConnectorCursorWorld = CGPoint(
-                                    x: startWorld.x + value.translation.width / cameraZoom,
-                                    y: startWorld.y + value.translation.height / cameraZoom
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 9, height: 9)
+                        .overlay(Circle().strokeBorder(Color.white, lineWidth: 1.5))
+                }
+                .frame(width: 18, height: 18)
+                .contentShape(Circle())
+                .offset(offset)
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 2, coordinateSpace: .named("charkle-freeform-stage"))
+                        .onChanged { value in
+                            if pendingConnectorSource == nil {
+                                pendingConnectorSource = (node.id, anchor, startWorld)
+                            }
+                            pendingConnectorCursorWorld = screenToWorld(value.location)
+                        }
+                        .onEnded { _ in
+                            defer { pendingConnectorSource = nil }
+                            guard let pending = pendingConnectorSource else { return }
+                            let dropWorld = BoardPoint(pendingConnectorCursorWorld)
+                            if let targetNode = document.nodes.first(where: { other in
+                                other.id != pending.nodeID && other.frame.contains(dropWorld)
+                            }) {
+                                var nextDoc = document
+                                let conn = BoardConnector(
+                                    fromNodeID: pending.nodeID,
+                                    fromAnchor: pending.anchor,
+                                    toNodeID: targetNode.id,
+                                    toAnchor: .auto,
+                                    style: connectorStyle,
+                                    dashed: connectorDashed
                                 )
+                                nextDoc.connectors.append(conn)
+                                selectedConnectorID = conn.id
+                                callbacks.onCommitDocument(nextDoc)
                             }
-                            .onEnded { _ in
-                                defer { pendingConnectorSource = nil }
-                                guard let pending = pendingConnectorSource else { return }
-                                let dropWorld = BoardPoint(pendingConnectorCursorWorld)
-                                if let targetNode = document.nodes.first(where: { other in
-                                    other.id != pending.nodeID && other.frame.contains(dropWorld)
-                                }) {
-                                    var nextDoc = document
-                                    let conn = BoardConnector(
-                                        fromNodeID: pending.nodeID,
-                                        fromAnchor: pending.anchor,
-                                        toNodeID: targetNode.id,
-                                        toAnchor: .auto,
-                                        style: connectorStyle,
-                                        dashed: connectorDashed
-                                    )
-                                    nextDoc.connectors.append(conn)
-                                    selectedConnectorID = conn.id
-                                    callbacks.onCommitDocument(nextDoc)
-                                }
-                            }
-                    )
+                        }
+                )
             }
         }
     }
@@ -1504,6 +1733,18 @@ public struct MoodboardCanvasView: View {
                     if let asset = assetsByID[assetID] {
                         callbacks.onOpenQuickLook(asset)
                     }
+                },
+                onRevealInFinder: {
+                    callbacks.onRevealInFinder(assetID)
+                },
+                onCopy: {
+                    callbacks.onCopyAssets(effectiveAssetIDs(including: node.id, fallbackAssetID: assetID))
+                },
+                onCut: {
+                    cutBoardNodes(effectiveNodeIDs(including: node.id))
+                },
+                onPaste: {
+                    callbacks.onPasteIntoBoard(defaultPasteLocation())
                 },
                 onRotateBy: { delta in rotateNodes([node.id], by: delta) },
                 onResetRotation: { resetRotation(for: [node.id]) },
@@ -2045,7 +2286,7 @@ public struct MoodboardCanvasView: View {
         let spawn = isAutoEditorial ? CGPoint(x: 80, y: 80) : cameraCenter
         let node = BoardNode(
             kind: .note(title: "灵感便签", text: "记录构图、材质、光影或排版思路…", style: .warm, fontSize: 14),
-            frame: BoardRect(x: Double(spawn.x - 120), y: Double(spawn.y - 80), width: 240, height: 170),
+            frame: BoardRect(x: Double(spawn.x - 130), y: Double(spawn.y - 90), width: 260, height: 180),
             zIndex: (nextDoc.nodes.map(\.zIndex).max() ?? 0) + 1,
             editorialOrder: nextDoc.nodes.count
         )

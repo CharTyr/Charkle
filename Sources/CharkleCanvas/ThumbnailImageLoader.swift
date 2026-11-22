@@ -163,22 +163,15 @@ public struct AssetThumbnailSurface: View {
             }
             .clipped()
         } else if contentMode == .fit {
-            GeometryReader { geo in
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: geo.size.width, height: geo.size.height)
-            }
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
         } else {
-            GeometryReader { geo in
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .clipped()
-            }
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fill)
         }
     }
 }

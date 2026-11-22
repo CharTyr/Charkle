@@ -46,6 +46,7 @@ public enum CanvasMotion {
     public static let microOvershoot = Animation.timingCurve(0.34, 1.56, 0.64, 1, duration: 0.28)
     public static let gestureSpring = Animation.spring(response: 0.34, dampingFraction: 0.86)
     public static let uiSpring = Animation.spring(response: 0.32, dampingFraction: 1.0)
+    public static let densityResizeSpring = Animation.spring(response: 0.28, dampingFraction: 0.88)
     public static let hoverPress = Animation.timingCurve(0, 0, 0.58, 1, duration: 0.12)
     public static let reducedFade = Animation.easeOut(duration: 0.15)
 
