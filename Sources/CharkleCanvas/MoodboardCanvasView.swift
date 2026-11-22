@@ -279,16 +279,6 @@ public struct MoodboardCanvasView: View {
             deleteCurrentSelection()
             return .handled
         }
-        .onKeyPress(.space) {
-            if let firstID = selectedNodeIDs.first,
-               let node = document.nodes.first(where: { $0.id == firstID }),
-               let assetID = node.referencedAssetID,
-               let asset = assetsByID[assetID] {
-                callbacks.onOpenQuickLook(asset)
-                return .handled
-            }
-            return .ignored
-        }
         .onKeyPress(characters: CharacterSet(charactersIn: "vhcpeVHCPE")) { press in
             guard !isAutoEditorial, press.modifiers.isEmpty else { return .ignored }
             switch press.characters.lowercased() {
@@ -328,8 +318,7 @@ public struct MoodboardCanvasView: View {
                     .frame(width: max(viewportSize.width, 320), height: max(solved.contentSize.height + topPad, viewportSize.height))
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        selectedNodeIDs.removeAll()
-                        callbacks.onSelectSwapTarget(nil)
+                        clearCanvasSelection()
                     }
 
                 if document.nodes.isEmpty {
@@ -410,6 +399,14 @@ public struct MoodboardCanvasView: View {
             }
         }
         .canvasScrollEdgeSoft(for: .top)
+        .overlay {
+            EditorialPanBridge(
+                onSpaceQuickTap: {
+                    _ = openQuickLookForSelectedNode()
+                }
+            )
+            .allowsHitTesting(false)
+        }
     }
 
     private func computeEditorialRippleX(itemIndex: Int, draggingIndex: Int?, targetIndex: Int?) -> CGFloat {
@@ -514,26 +511,30 @@ public struct MoodboardCanvasView: View {
             }
             .allowsHitTesting(false)
 
-            // Native macOS trackpad scroll-pan & Option-scroll zoom bridge
-            FreeformTrackpadBridge(
-                onScrollDelta: { dx, dy in
+            // Native macOS trackpad scroll-pan, Option/Cmd zoom, Middle-mouse drag pan, and Hold-Space drag pan
+            FreeformInputBridge(
+                onPanDelta: { dx, dy in
                     cameraCenter.x -= dx / cameraZoom
                     cameraCenter.y -= dy / cameraZoom
                 },
+                onPanEnded: {
+                    persistCameraViewport()
+                },
                 onZoomDelta: { factor, cursorInView in
                     applyZoom(factor: factor, anchorScreenPoint: cursorInView)
+                },
+                onSpacePanStateChanged: { active in
+                    isSpaceKeyPanning = active
+                },
+                onSpaceQuickTap: {
+                    _ = openQuickLookForSelectedNode()
                 }
             )
             .allowsHitTesting(false)
 
-            // Interactive background canvas surface for pan, marquee, pen drawing, or erasing
+            // Interactive background canvas surface: click empty area to deselect, or drag for pan/marquee/pen/eraser
             Color.clear
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    selectedNodeIDs.removeAll()
-                    selectedConnectorID = nil
-                    callbacks.onSelectSwapTarget(nil)
-                }
                 .gesture(canvasBackgroundGesture)
 
             // Culled visible nodes positioned in screen coordinates
@@ -550,12 +551,12 @@ public struct MoodboardCanvasView: View {
                         .frame(width: max(24, screenW), height: max(24, screenH))
 
                     // Magnetic edge ports for connectors
-                    if (activeTool == .connector || isHovered || isSelected) && activeTool != .pen && activeTool != .eraser {
+                    if (activeTool == .connector || isHovered || isSelected) && activeTool != .pen && activeTool != .eraser && !isSpaceKeyPanning {
                         connectorPortsOverlay(node: node, worldRect: worldRect, width: screenW, height: screenH)
                     }
 
                     // Bottom-right corner resize handle on selected unlocked nodes
-                    if isSelected && !node.isLocked && activeTool == .select {
+                    if isSelected && !node.isLocked && activeTool == .select && !isSpaceKeyPanning {
                         resizeHandleOverlay(node: node, width: screenW, height: screenH)
                     }
                 }
@@ -571,7 +572,7 @@ public struct MoodboardCanvasView: View {
                 }
                 .simultaneousGesture(
                     TapGesture(count: 1).onEnded {
-                        if activeTool == .select {
+                        if activeTool == .select && !isSpaceKeyPanning {
                             let mods = NSEvent.modifierFlags
                             if mods.contains(.command) || mods.contains(.shift) {
                                 if selectedNodeIDs.contains(node.id) {
@@ -586,8 +587,8 @@ public struct MoodboardCanvasView: View {
                         }
                     }
                 )
-                .gesture(activeTool == .select ? nodeDragGesture(for: node) : nil)
-                .allowsHitTesting(activeTool != .pen && activeTool != .eraser && activeTool != .pan)
+                .gesture(activeTool == .select && !isSpaceKeyPanning ? nodeDragGesture(for: node) : nil)
+                .allowsHitTesting(activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning)
             }
 
             // Interactive connector midpoint labels (clickable to edit / delete)
@@ -856,13 +857,36 @@ public struct MoodboardCanvasView: View {
         }
     }
 
-    // MARK: - Freeform Interactive Gestures (Pan, Marquee, Pen, Eraser, Node Drag, Resize, Ports)
+    // MARK: - Selection & Quick Look Helpers
+
+    private func clearCanvasSelection() {
+        selectedNodeIDs.removeAll()
+        selectedConnectorID = nil
+        editingConnectorLabelID = nil
+        callbacks.onSelectSwapTarget(nil)
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
+    private func openQuickLookForSelectedNode() -> Bool {
+        guard let firstID = selectedNodeIDs.first,
+              let node = document.nodes.first(where: { $0.id == firstID }),
+              let assetID = node.referencedAssetID,
+              let asset = assetsByID[assetID] else {
+            return false
+        }
+        callbacks.onOpenQuickLook(asset)
+        return true
+    }
+
+    // MARK: - Freeform Interactive Gestures (Click-to-Deselect, Pan, Marquee, Pen, Eraser, Node Drag, Resize, Ports)
 
     private var canvasBackgroundGesture: some Gesture {
-        DragGesture(minimumDistance: 2)
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
+                let distance = hypot(value.translation.width, value.translation.height)
                 switch activeTool {
                 case .pan:
+                    guard distance >= 2 else { return }
                     if panStartCenter == nil { panStartCenter = cameraCenter }
                     if let start = panStartCenter {
                         cameraCenter = CGPoint(
@@ -872,6 +896,7 @@ public struct MoodboardCanvasView: View {
                     }
                 case .select:
                     if NSEvent.modifierFlags.contains(.option) || isSpaceKeyPanning {
+                        guard distance >= 2 else { return }
                         if panStartCenter == nil { panStartCenter = cameraCenter }
                         if let start = panStartCenter {
                             cameraCenter = CGPoint(
@@ -880,6 +905,7 @@ public struct MoodboardCanvasView: View {
                             )
                         }
                     } else {
+                        guard distance >= 4 else { return }
                         if freeformMarqueeStart == nil { freeformMarqueeStart = value.startLocation }
                         freeformMarqueeCurrent = value.location
                         if let s = freeformMarqueeStart {
@@ -895,6 +921,7 @@ public struct MoodboardCanvasView: View {
                         }
                     }
                 case .pen:
+                    guard distance >= 2 else { return }
                     let worldPt = screenToWorld(value.location)
                     if let last = activeInkPoints.last {
                         if hypot(worldPt.x - last.x, worldPt.y - last.y) >= 2.0 / cameraZoom {
@@ -909,7 +936,8 @@ public struct MoodboardCanvasView: View {
                     break
                 }
             }
-            .onEnded { _ in
+            .onEnded { value in
+                let distance = hypot(value.translation.width, value.translation.height)
                 if panStartCenter != nil {
                     panStartCenter = nil
                     persistCameraViewport()
@@ -930,6 +958,10 @@ public struct MoodboardCanvasView: View {
                     callbacks.onCommitDocument(nextDoc)
                 } else {
                     activeInkPoints = []
+                    // Clean click on empty canvas background deselects nodes, connectors, and text focus
+                    if distance < 4 && activeTool != .eraser {
+                        clearCanvasSelection()
+                    }
                 }
             }
     }
@@ -1889,59 +1921,379 @@ public struct MoodboardCanvasView: View {
     }
 }
 
-// MARK: - AppKit Trackpad Scroll-Pan & Option/Command-Scroll Zoom Bridge
+// MARK: - AppKit Trackpad Scroll, Option/Cmd Zoom, Middle-Mouse Drag Pan & Hold-Space Drag Pan Bridge
 
-private struct FreeformTrackpadBridge: NSViewRepresentable {
-    let onScrollDelta: (CGFloat, CGFloat) -> Void
+private struct FreeformInputBridge: NSViewRepresentable {
+    let onPanDelta: (CGFloat, CGFloat) -> Void
+    let onPanEnded: () -> Void
     let onZoomDelta: (CGFloat, CGPoint) -> Void
+    let onSpacePanStateChanged: (Bool) -> Void
+    let onSpaceQuickTap: () -> Void
 
-    func makeNSView(context: Context) -> TrackpadEventCatcherView {
-        let view = TrackpadEventCatcherView()
-        view.onScrollDelta = onScrollDelta
+    func makeNSView(context: Context) -> CanvasInputCatcherView {
+        let view = CanvasInputCatcherView()
+        view.onPanDelta = onPanDelta
+        view.onPanEnded = onPanEnded
         view.onZoomDelta = onZoomDelta
+        view.onSpacePanStateChanged = onSpacePanStateChanged
+        view.onSpaceQuickTap = onSpaceQuickTap
         return view
     }
 
-    func updateNSView(_ nsView: TrackpadEventCatcherView, context: Context) {
-        nsView.onScrollDelta = onScrollDelta
+    func updateNSView(_ nsView: CanvasInputCatcherView, context: Context) {
+        nsView.onPanDelta = onPanDelta
+        nsView.onPanEnded = onPanEnded
         nsView.onZoomDelta = onZoomDelta
+        nsView.onSpacePanStateChanged = onSpacePanStateChanged
+        nsView.onSpaceQuickTap = onSpaceQuickTap
     }
 }
 
-private final class TrackpadEventCatcherView: NSView {
-    var onScrollDelta: ((CGFloat, CGFloat) -> Void)?
+private final class CanvasInputCatcherView: NSView {
+    var onPanDelta: ((CGFloat, CGFloat) -> Void)?
+    var onPanEnded: (() -> Void)?
     var onZoomDelta: ((CGFloat, CGPoint) -> Void)?
-    private var monitor: Any?
+    var onSpacePanStateChanged: ((Bool) -> Void)?
+    var onSpaceQuickTap: (() -> Void)?
+
+    private var eventMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+
+    private var isMiddleDragging = false
+    private var isSpaceHeld = false
+    private var isSpaceLeftDragging = false
+    private var didDragDuringSpace = false
+    private var lastWindowPoint: NSPoint = .zero
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        teardownMonitor()
-        guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
-            guard let self, let win = self.window, event.window === win else { return event }
-            let locInView = self.convert(event.locationInWindow, from: nil)
-            guard self.bounds.contains(locInView) else { return event }
-            // Convert AppKit bottom-left Y to SwiftUI top-left Y
-            let swiftUIPoint = CGPoint(x: locInView.x, y: self.bounds.height - locInView.y)
-            if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command) {
-                let factor = max(0.85, min(1.18, 1.0 + event.scrollingDeltaY * 0.008))
-                self.onZoomDelta?(factor, swiftUIPoint)
-            } else {
-                let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
-                self.onScrollDelta?(event.scrollingDeltaX * scale, event.scrollingDeltaY * scale)
+        teardownMonitors()
+        guard let hostWindow = window else { return }
+
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: hostWindow,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.resetActivePanState()
             }
-            return nil
+        }
+
+        let mask: NSEvent.EventTypeMask = [
+            .scrollWheel,
+            .otherMouseDown,
+            .otherMouseDragged,
+            .otherMouseUp,
+            .keyDown,
+            .keyUp,
+            .leftMouseDown,
+            .leftMouseDragged,
+            .leftMouseUp
+        ]
+
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self, let win = self.window, event.window === win else { return event }
+            return self.handleLocalEvent(event, in: win)
         }
     }
 
-    private func teardownMonitor() {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-            self.monitor = nil
+    private func isEditingText(in window: NSWindow) -> Bool {
+        if window.firstResponder is NSTextView || window.firstResponder is NSTextField {
+            return true
         }
+        return false
+    }
+
+    private func isPointInsideCanvas(_ windowPoint: NSPoint) -> Bool {
+        let local = convert(windowPoint, from: nil)
+        return bounds.contains(local)
+    }
+
+    private func handleLocalEvent(_ event: NSEvent, in window: NSWindow) -> NSEvent? {
+        switch event.type {
+        case .scrollWheel:
+            let locInView = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(locInView) else { return event }
+            let swiftUIPoint = CGPoint(x: locInView.x, y: bounds.height - locInView.y)
+            if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command) {
+                let factor = max(0.85, min(1.18, 1.0 + event.scrollingDeltaY * 0.008))
+                onZoomDelta?(factor, swiftUIPoint)
+            } else {
+                let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
+                onPanDelta?(event.scrollingDeltaX * scale, event.scrollingDeltaY * scale)
+            }
+            return nil
+
+        case .otherMouseDown:
+            // Middle mouse button (buttonNumber == 2) pans from anywhere over the canvas
+            guard event.buttonNumber == 2, isPointInsideCanvas(event.locationInWindow) else { return event }
+            isMiddleDragging = true
+            lastWindowPoint = event.locationInWindow
+            NSCursor.closedHand.set()
+            return nil
+
+        case .otherMouseDragged:
+            guard isMiddleDragging else { return event }
+            let cur = event.locationInWindow
+            let dx = cur.x - lastWindowPoint.x
+            let dy = -(cur.y - lastWindowPoint.y)
+            lastWindowPoint = cur
+            onPanDelta?(dx, dy)
+            return nil
+
+        case .otherMouseUp:
+            guard isMiddleDragging else { return event }
+            isMiddleDragging = false
+            (isSpaceHeld ? NSCursor.openHand : NSCursor.arrow).set()
+            onPanEnded?()
+            return nil
+
+        case .keyDown:
+            guard event.keyCode == 49 else { return event } // Spacebar
+            guard window.attachedSheet == nil else { return event }
+            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+            guard !isEditingText(in: window) else { return event }
+            if !isSpaceHeld {
+                isSpaceHeld = true
+                didDragDuringSpace = false
+                onSpacePanStateChanged?(true)
+                NSCursor.openHand.set()
+            }
+            return nil
+
+        case .keyUp:
+            guard event.keyCode == 49, isSpaceHeld else { return event }
+            let shouldQuickTap = !didDragDuringSpace
+            let wasDragging = isSpaceLeftDragging
+            isSpaceHeld = false
+            isSpaceLeftDragging = false
+            didDragDuringSpace = false
+            onSpacePanStateChanged?(false)
+            NSCursor.arrow.set()
+            if wasDragging {
+                onPanEnded?()
+            } else if shouldQuickTap {
+                onSpaceQuickTap?()
+            }
+            return nil
+
+        case .leftMouseDown:
+            guard isSpaceHeld, isPointInsideCanvas(event.locationInWindow) else { return event }
+            isSpaceLeftDragging = true
+            didDragDuringSpace = true
+            lastWindowPoint = event.locationInWindow
+            NSCursor.closedHand.set()
+            return nil
+
+        case .leftMouseDragged:
+            guard isSpaceLeftDragging else { return event }
+            let cur = event.locationInWindow
+            let dx = cur.x - lastWindowPoint.x
+            let dy = -(cur.y - lastWindowPoint.y)
+            lastWindowPoint = cur
+            onPanDelta?(dx, dy)
+            return nil
+
+        case .leftMouseUp:
+            guard isSpaceLeftDragging else { return event }
+            isSpaceLeftDragging = false
+            (isSpaceHeld ? NSCursor.openHand : NSCursor.arrow).set()
+            onPanEnded?()
+            return nil
+
+        default:
+            return event
+        }
+    }
+
+    private func resetActivePanState() {
+        let hadPan = isMiddleDragging || isSpaceLeftDragging
+        isMiddleDragging = false
+        isSpaceLeftDragging = false
+        if isSpaceHeld {
+            isSpaceHeld = false
+            didDragDuringSpace = false
+            onSpacePanStateChanged?(false)
+        }
+        NSCursor.arrow.set()
+        if hadPan {
+            onPanEnded?()
+        }
+    }
+
+    private func teardownMonitors() {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
+        if let resignObserver {
+            NotificationCenter.default.removeObserver(resignObserver)
+            self.resignObserver = nil
+        }
+        resetActivePanState()
     }
 
     isolated deinit {
-        teardownMonitor()
+        teardownMonitors()
+    }
+}
+
+/// Supports middle-mouse drag & hold-Space drag scrolling in Auto Editorial mode as well,
+/// scrolling the nearest underlying `NSScrollView` 1:1 with hand cursor feedback.
+private struct EditorialPanBridge: NSViewRepresentable {
+    let onSpaceQuickTap: () -> Void
+
+    func makeNSView(context: Context) -> EditorialPanCatcherView {
+        let view = EditorialPanCatcherView()
+        view.onSpaceQuickTap = onSpaceQuickTap
+        return view
+    }
+
+    func updateNSView(_ nsView: EditorialPanCatcherView, context: Context) {
+        nsView.onSpaceQuickTap = onSpaceQuickTap
+    }
+}
+
+private final class EditorialPanCatcherView: NSView {
+    var onSpaceQuickTap: (() -> Void)?
+    private var monitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private var isMiddleDragging = false
+    private var isSpaceHeld = false
+    private var isSpaceDragging = false
+    private var didDragDuringSpace = false
+    private var lastPoint: NSPoint = .zero
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        teardown()
+        guard let hostWindow = window else { return }
+
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: hostWindow,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.resetState()
+            }
+        }
+
+        let mask: NSEvent.EventTypeMask = [
+            .otherMouseDown, .otherMouseDragged, .otherMouseUp,
+            .keyDown, .keyUp,
+            .leftMouseDown, .leftMouseDragged, .leftMouseUp
+        ]
+        monitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self, let win = self.window, event.window === win else { return event }
+            return self.handleEvent(event, in: win)
+        }
+    }
+
+    private func isInside(_ windowPoint: NSPoint) -> Bool {
+        bounds.contains(convert(windowPoint, from: nil))
+    }
+
+    private func findScrollView(in view: NSView?) -> NSScrollView? {
+        guard let view else { return nil }
+        if let sv = view as? NSScrollView { return sv }
+        for sub in view.subviews {
+            if let hit = findScrollView(in: sub) { return hit }
+        }
+        return nil
+    }
+
+    private func scrollUnderlying(byDY dy: CGFloat) {
+        guard let sv = enclosingScrollView ?? findScrollView(in: superview) else { return }
+        let clip = sv.contentView
+        guard let doc = sv.documentView else { return }
+        var origin = clip.bounds.origin
+        let maxY = max(0, doc.bounds.height - clip.bounds.height)
+        origin.y = max(0, min(maxY, origin.y - dy))
+        clip.scroll(to: origin)
+        sv.reflectScrolledClipView(clip)
+    }
+
+    private func handleEvent(_ event: NSEvent, in window: NSWindow) -> NSEvent? {
+        switch event.type {
+        case .otherMouseDown:
+            guard event.buttonNumber == 2, isInside(event.locationInWindow) else { return event }
+            isMiddleDragging = true
+            lastPoint = event.locationInWindow
+            NSCursor.closedHand.set()
+            return nil
+        case .otherMouseDragged:
+            guard isMiddleDragging else { return event }
+            let cur = event.locationInWindow
+            let dy = -(cur.y - lastPoint.y)
+            lastPoint = cur
+            scrollUnderlying(byDY: dy)
+            return nil
+        case .otherMouseUp:
+            guard isMiddleDragging else { return event }
+            isMiddleDragging = false
+            (isSpaceHeld ? NSCursor.openHand : NSCursor.arrow).set()
+            return nil
+        case .keyDown:
+            guard event.keyCode == 49, window.attachedSheet == nil,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                  !(window.firstResponder is NSTextView),
+                  !(window.firstResponder is NSTextField) else { return event }
+            if !isSpaceHeld {
+                isSpaceHeld = true
+                didDragDuringSpace = false
+                NSCursor.openHand.set()
+            }
+            return nil
+        case .keyUp:
+            guard event.keyCode == 49, isSpaceHeld else { return event }
+            let quickTap = !didDragDuringSpace
+            isSpaceHeld = false
+            isSpaceDragging = false
+            didDragDuringSpace = false
+            NSCursor.arrow.set()
+            if quickTap { onSpaceQuickTap?() }
+            return nil
+        case .leftMouseDown:
+            guard isSpaceHeld, isInside(event.locationInWindow) else { return event }
+            isSpaceDragging = true
+            didDragDuringSpace = true
+            lastPoint = event.locationInWindow
+            NSCursor.closedHand.set()
+            return nil
+        case .leftMouseDragged:
+            guard isSpaceDragging else { return event }
+            let cur = event.locationInWindow
+            let dy = -(cur.y - lastPoint.y)
+            lastPoint = cur
+            scrollUnderlying(byDY: dy)
+            return nil
+        case .leftMouseUp:
+            guard isSpaceDragging else { return event }
+            isSpaceDragging = false
+            (isSpaceHeld ? NSCursor.openHand : NSCursor.arrow).set()
+            return nil
+        default:
+            return event
+        }
+    }
+
+    private func resetState() {
+        isMiddleDragging = false
+        isSpaceHeld = false
+        isSpaceDragging = false
+        didDragDuringSpace = false
+        NSCursor.arrow.set()
+    }
+
+    private func teardown() {
+        if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver); self.resignObserver = nil }
+        resetState()
+    }
+
+    isolated deinit {
+        teardown()
     }
 }

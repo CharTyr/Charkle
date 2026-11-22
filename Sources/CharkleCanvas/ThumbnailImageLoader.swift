@@ -122,24 +122,27 @@ public struct AssetThumbnailSurface: View {
 
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        ZStack {
-            if let image = loadedImage ?? loader.cachedImage(for: asset.id, tier: tier) {
-                croppedImageView(image)
-            } else {
-                ProceduralMediaFallbackCard(asset: asset, isHovered: isHovered)
+        Color.clear
+            .overlay {
+                if let image = loadedImage ?? loader.cachedImage(for: asset.id, tier: tier) {
+                    croppedImageView(image)
+                } else {
+                    ProceduralMediaFallbackCard(asset: asset, isHovered: isHovered)
+                }
             }
-        }
-        .clipShape(shape)
-        .task(id: "\(asset.id.uuidString)-\(tier.rawValue)") {
-            if let cached = loader.cachedImage(for: asset.id, tier: tier) {
-                loadedImage = cached
-                return
+            .clipped()
+            .clipShape(shape)
+            .contentShape(shape)
+            .task(id: "\(asset.id.uuidString)-\(tier.rawValue)") {
+                if let cached = loader.cachedImage(for: asset.id, tier: tier) {
+                    loadedImage = cached
+                    return
+                }
+                let img = await loader.loadImage(for: asset.id, tier: tier)
+                if !Task.isCancelled {
+                    loadedImage = img
+                }
             }
-            let img = await loader.loadImage(for: asset.id, tier: tier)
-            if !Task.isCancelled {
-                loadedImage = img
-            }
-        }
     }
 
     @ViewBuilder
@@ -157,10 +160,14 @@ public struct AssetThumbnailSurface: View {
             }
             .clipped()
         } else {
-            Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fill)
+            GeometryReader { geo in
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+            }
         }
     }
 }

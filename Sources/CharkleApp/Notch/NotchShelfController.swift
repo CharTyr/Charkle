@@ -18,6 +18,7 @@ private final class NotchDropHostingView: NSHostingView<NotchShelfView> {
     var onDragEntered: ((Int) -> Void)?
     var onDragExited: (() -> Void)?
     var onPerformDrop: ((NSPasteboard, [NSFilePromiseReceiver]) -> Bool)?
+    var activeHitRectProvider: (() -> NSRect)?
 
     private static let supportedTypes: [NSPasteboard.PasteboardType] = {
         var types: [NSPasteboard.PasteboardType] = [
@@ -36,12 +37,21 @@ private final class NotchDropHostingView: NSHostingView<NotchShelfView> {
 
     required init(rootView: NotchShelfView) {
         super.init(rootView: rootView)
+        wantsLayer = true
+        layer?.masksToBounds = false
         registerForDraggedTypes(Self.supportedTypes)
     }
 
     @available(*, unavailable)
     @MainActor @preconcurrency dynamic required init?(coder aDecoder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let activeRect = activeHitRectProvider?(), !activeRect.contains(point) {
+            return nil
+        }
+        return super.hitTest(point)
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -179,8 +189,14 @@ public final class NotchShelfController {
     private static let shelfWindowLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 4)
     private static let sensorWindowLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
 
-    private static let fixedPanelWidth: CGFloat = 480
-    private static let fixedPanelBaseHeight: CGFloat = 290
+    // Generous transparent margin (≥ 3× shadow radius on left/right/bottom) so drop shadows
+    // feather cleanly to 0% alpha without ever clipping into a rectangular borderless panel edge.
+    private static let cardExpandedWidth: CGFloat = 436
+    private static let cardExpandedBaseHeight: CGFloat = 236
+    private static let shadowHorizontalMargin: CGFloat = 96
+    private static let shadowBottomMargin: CGFloat = 120
+    private static let fixedPanelWidth: CGFloat = cardExpandedWidth + shadowHorizontalMargin * 2 // 628
+    private static let fixedPanelBaseHeight: CGFloat = cardExpandedBaseHeight + shadowBottomMargin // 356
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -291,6 +307,17 @@ public final class NotchShelfController {
         hosting.onPerformDrop = { [weak self] pasteboard, receivers in
             guard let self else { return false }
             return self.handleAppKitDrop(pasteboard: pasteboard, promiseReceivers: receivers)
+        }
+        hosting.activeHitRectProvider = { [weak self, weak hosting] in
+            guard let self, let hosting, self.shelfState.isExpanded else { return .zero }
+            let bounds = hosting.bounds
+            let cardH = Self.cardExpandedBaseHeight + self.shelfState.notchTopInset + 12
+            return NSRect(
+                x: bounds.midX - (Self.cardExpandedWidth / 2.0) - 8,
+                y: bounds.maxY - cardH,
+                width: Self.cardExpandedWidth + 16,
+                height: cardH
+            )
         }
 
         let panel = NotchPanel(
@@ -491,7 +518,13 @@ public final class NotchShelfController {
                 hideWorkItem?.cancel()
                 return
             }
-            let activeCardRect = panelFrame.insetBy(dx: 12, dy: 12)
+            let cardHeight = Self.cardExpandedBaseHeight + shelfState.notchTopInset
+            let activeCardRect = NSRect(
+                x: panelFrame.midX - (Self.cardExpandedWidth / 2.0) - 12,
+                y: panelFrame.maxY - cardHeight - 12,
+                width: Self.cardExpandedWidth + 24,
+                height: cardHeight + 12
+            )
             if activeCardRect.contains(loc) || nearTopCenter {
                 hideWorkItem?.cancel()
             } else if hideWorkItem == nil {

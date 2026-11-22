@@ -23,7 +23,7 @@ public struct MainWindowView: View {
     @Namespace private var heroNamespace
 
     @State private var searchDraft: String = ""
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isSidebarVisible: Bool = true
     @State private var quickBatchTagDraft: String = ""
     @State private var showBatchTagPopover: Bool = false
 
@@ -53,79 +53,90 @@ public struct MainWindowView: View {
 
     public var body: some View {
         ZStack {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
-                SidebarView(
-                    coordinator: coordinator,
-                    library: library,
-                    moodboards: moodboards,
-                    onSelectDestination: { dest in
-                        navigate(to: dest)
-                    },
-                    onDropAssetsOntoFolder: { ids, folderID in
-                        Task {
-                            await library.moveAssets(ids, toFolderID: folderID)
-                            let targetName = folderID.flatMap { fid in library.folders.first(where: { $0.id == fid })?.name } ?? "收件箱"
-                            coordinator.showToast("已移动 \(ids.count) 项到「\(targetName)」", icon: "folder")
-                        }
-                    },
-                    onDropExternalOntoFolder: { inputs, folderID in
-                        Task {
-                            let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
-                            coordinator.showToast("已导入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
-                        }
-                    },
-                    onDropAssetsOntoBoard: { ids, boardID in
-                        let resolved = ids.compactMap { library.allAssetsByID[$0] }
-                        Task {
-                            await moodboards.addAssetsToSpecificBoard(boardID: boardID, assets: resolved)
-                            let title = moodboards.boards.first(where: { $0.id == boardID })?.title ?? "情绪板"
-                            coordinator.showToast("已加入情绪板「\(title)」(\(resolved.count) 项)", icon: "rectangle.3.group")
-                        }
-                    },
-                    onDropExternalOntoBoard: { inputs, boardID in
-                        Task {
-                            let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: boardID)
-                            await moodboards.reloadActiveBoardIfNeeded(id: boardID)
-                            await moodboards.refreshBoards()
-                            coordinator.showToast("已收入并上板 (\(max(created.count, inputs.count)) 项)", icon: "sparkles.rectangle.stack")
-                        }
-                    }
-                )
-                .navigationSplitViewColumnWidth(min: 208, ideal: 232, max: 280)
-            } detail: {
-                HStack(spacing: 0) {
-                    centerWorkspace
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    if coordinator.isInspectorVisible {
-                        InspectorView(
-                            coordinator: coordinator,
-                            library: library,
-                            moodboards: moodboards,
-                            onCopyHex: { copyColorHex($0) },
-                            onFilterByColor: { hex in
-                                Task {
-                                    coordinator.selectedDestination = .allItems
-                                    await library.applyDestination(.allItems)
-                                    await library.filterByColorHex(hex)
-                                    coordinator.isVisualFilterBarPresented = true
-                                }
-                            },
-                            onOpenQuickLook: { asset in
-                                openQuickLook(asset)
-                            },
-                            onCopyBoardImage: {
-                                copyCurrentBoardImage(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
-                            },
-                            onSaveBoardImage: { fmt in
-                                saveCurrentBoardImage(format: fmt, options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+            // Native 3-pane studio layout (avoids macOS 26/27 NavigationSplitView + hiddenTitleBar
+            // ScrollView safe-area hit-test vertical offset bug, ensuring 0px-accurate sidebar clicks).
+            HStack(spacing: 0) {
+                if isSidebarVisible {
+                    SidebarView(
+                        coordinator: coordinator,
+                        library: library,
+                        moodboards: moodboards,
+                        onSelectDestination: { dest in
+                            navigate(to: dest)
+                        },
+                        onDropAssetsOntoFolder: { ids, folderID in
+                            Task {
+                                await library.moveAssets(ids, toFolderID: folderID)
+                                let targetName = folderID.flatMap { fid in library.folders.first(where: { $0.id == fid })?.name } ?? "收件箱"
+                                coordinator.showToast("已移动 \(ids.count) 项到「\(targetName)」", icon: "folder")
                             }
-                        )
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        },
+                        onDropExternalOntoFolder: { inputs, folderID in
+                            Task {
+                                let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
+                                coordinator.showToast("已导入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
+                            }
+                        },
+                        onDropAssetsOntoBoard: { ids, boardID in
+                            let resolved = ids.compactMap { library.allAssetsByID[$0] }
+                            Task {
+                                await moodboards.addAssetsToSpecificBoard(boardID: boardID, assets: resolved)
+                                let title = moodboards.boards.first(where: { $0.id == boardID })?.title ?? "情绪板"
+                                coordinator.showToast("已加入情绪板「\(title)」(\(resolved.count) 项)", icon: "rectangle.3.group")
+                            }
+                        },
+                        onDropExternalOntoBoard: { inputs, boardID in
+                            Task {
+                                let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: boardID)
+                                await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                                await moodboards.refreshBoards()
+                                coordinator.showToast("已收入并上板 (\(max(created.count, inputs.count)) 项)", icon: "sparkles.rectangle.stack")
+                            }
+                        }
+                    )
+                    .frame(width: 232)
+                    .background {
+                        CharkleSidebarMaterialBackground()
+                            .ignoresSafeArea(.container, edges: .top)
                     }
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+
+                    Rectangle()
+                        .fill(CharkleTheme.hairline(for: colorScheme))
+                        .frame(width: 1)
+                        .ignoresSafeArea(.container, edges: .top)
+                }
+
+                centerWorkspace
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if coordinator.isInspectorVisible {
+                    InspectorView(
+                        coordinator: coordinator,
+                        library: library,
+                        moodboards: moodboards,
+                        onCopyHex: { copyColorHex($0) },
+                        onFilterByColor: { hex in
+                            Task {
+                                coordinator.selectedDestination = .allItems
+                                await library.applyDestination(.allItems)
+                                await library.filterByColorHex(hex)
+                                coordinator.isVisualFilterBarPresented = true
+                            }
+                        },
+                        onOpenQuickLook: { asset in
+                            openQuickLook(asset)
+                        },
+                        onCopyBoardImage: {
+                            copyCurrentBoardImage(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                        },
+                        onSaveBoardImage: { fmt in
+                            saveCurrentBoardImage(format: fmt, options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
+                        }
+                    )
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            .navigationSplitViewStyle(.balanced)
 
             // Full-Media Quick Look Hero Continuity Overlay (Kubai Tip 015)
             if let qlID = coordinator.quickLookAssetID,
@@ -1206,8 +1217,14 @@ public struct MainWindowView: View {
                         Task { await moodboards.selectSwapTarget(nodeID) }
                     },
                     onOpenQuickLook: { asset in
-                        let playlist = board.referencedAssetIDs
-                        coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                        if coordinator.quickLookAssetID != nil {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
+                                coordinator.closeQuickLook()
+                            }
+                        } else {
+                            let playlist = board.referencedAssetIDs
+                            coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                        }
                     },
                     onDropExternalInputs: { inputs, dropPoint in
                         // Single Source of Truth: new files go into /Charkle/Inbox/ (folderID = nil) and place at dropPoint

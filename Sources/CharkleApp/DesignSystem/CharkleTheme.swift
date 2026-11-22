@@ -138,38 +138,40 @@ public struct CharkleLiquidGlassModifier<S: InsettableShape>: ViewModifier {
                 .overlay(shape.strokeBorder(stroke, lineWidth: 1))
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.34 : 0.10), radius: 14, y: 6)
         } else if variant == .darkNotch {
-            // Notch Shelf dark glass expansion capsule (always dark-ink calibrated against physical MacBook bezel)
+            // Notch Shelf dark glass expansion capsule (calibrated against physical MacBook bezel;
+            // gentle dual-layer shadow fully contained inside the oversized transparent NSPanel so it never clips).
             if #available(macOS 26, *) {
-                let glass = Glass.regular.tint(Color(charkleHex: "#0B0C0F").opacity(0.76))
+                let glass = Glass.regular.tint(Color(charkleHex: "#0B0C0F").opacity(0.88))
                 content
-                    .background(Color(charkleHex: "#0D0E12").opacity(0.74), in: shape)
                     .glassEffect(interactive ? glass.interactive() : glass, in: shape)
                     .overlay(
                         shape.strokeBorder(
                             LinearGradient(
-                                colors: [Color.white.opacity(0.22), Color.white.opacity(0.06)],
+                                colors: [Color.white.opacity(0.0), Color.white.opacity(0.14), Color.white.opacity(0.08)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             ),
                             lineWidth: 0.75
                         )
                     )
-                    .shadow(color: Color.black.opacity(0.42), radius: 22, y: 10)
+                    .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
+                    .shadow(color: Color.black.opacity(0.24), radius: 22, y: 10)
             } else {
                 content
-                    .background(Color(charkleHex: "#0E1014").opacity(0.90), in: shape)
+                    .background(Color(charkleHex: "#0E1014").opacity(0.92), in: shape)
                     .background(.ultraThinMaterial, in: shape)
                     .overlay(
                         shape.strokeBorder(
                             LinearGradient(
-                                colors: [Color.white.opacity(0.20), Color.white.opacity(0.06)],
+                                colors: [Color.white.opacity(0.02), Color.white.opacity(0.14), Color.white.opacity(0.08)],
                                 startPoint: .top,
                                 endPoint: .bottom
                             ),
                             lineWidth: 0.75
                         )
                     )
-                    .shadow(color: Color.black.opacity(0.45), radius: 22, y: 10)
+                    .shadow(color: Color.black.opacity(0.22), radius: 6, y: 2)
+                    .shadow(color: Color.black.opacity(0.28), radius: 22, y: 10)
             }
         } else if #available(macOS 26, *) {
             let base: Glass = variant == .clear ? .clear : .regular

@@ -63,10 +63,10 @@ public struct NotchShelfView: View {
     public var body: some View {
         let expanded = shelfState.isExpanded
         let outerShape = UnevenRoundedRectangle(
-            topLeadingRadius: 8,
+            topLeadingRadius: 0,
             bottomLeadingRadius: expanded ? 24 : 14,
             bottomTrailingRadius: expanded ? 24 : 14,
-            topTrailingRadius: 8,
+            topTrailingRadius: 0,
             style: .continuous
         )
 
@@ -77,7 +77,7 @@ public struct NotchShelfView: View {
                         .padding(.top, max(12, shelfState.notchTopInset + 8))
                         .padding(.horizontal, 16)
                         .padding(.bottom, 16)
-                        .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .top)))
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                 } else {
                     // Sleek collapsed notch lip (invisible at rest unless subtly peeking)
                     Color.clear
@@ -107,8 +107,6 @@ public struct NotchShelfView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.horizontal, 22)
-        .padding(.bottom, 26)
         .preferredColorScheme(.dark)
     }
 

@@ -695,7 +695,6 @@ public struct InspectorView: View {
                                             tier: .grid520,
                                             cornerRadius: 8
                                         )
-                                        .frame(height: 86)
 
                                         if let reason = candidate.matchReasons.first {
                                             Text(reason)
@@ -703,10 +702,13 @@ public struct InspectorView: View {
                                                 .foregroundStyle(.white)
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
-                                                .background(Color.black.opacity(0.55), in: Capsule(style: .continuous))
+                                                .background(Color.black.opacity(0.58), in: Capsule(style: .continuous))
                                                 .padding(5)
                                         }
                                     }
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 86)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                                             .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
@@ -776,7 +778,12 @@ public struct InspectorView: View {
                                             tier: .grid520,
                                             cornerRadius: 6
                                         )
+                                        .frame(maxWidth: .infinity)
                                         .frame(height: 58)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.5)
+                                        )
                                     }
                                     .buttonStyle(CharkleTactileButtonStyle())
                                     .help("点击加入：\(asset.title)")
@@ -801,14 +808,35 @@ public struct InspectorView: View {
                         .buttonStyle(.plain)
 
                         HStack(spacing: 6) {
-                            Button("保存 PNG") { onSaveBoardImage(.png) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .frame(maxWidth: .infinity)
-                            Button("保存 JPG") { onSaveBoardImage(.jpeg) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .frame(maxWidth: .infinity)
+                            Button {
+                                onSaveBoardImage(.png)
+                            } label: {
+                                Text("保存 PNG")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                    )
+                            }
+                            .buttonStyle(CharkleTactileButtonStyle())
+
+                            Button {
+                                onSaveBoardImage(.jpeg)
+                            } label: {
+                                Text("保存 JPG")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                                    )
+                            }
+                            .buttonStyle(CharkleTactileButtonStyle())
                         }
                     }
                 }

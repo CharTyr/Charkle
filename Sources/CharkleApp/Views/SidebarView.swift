@@ -77,7 +77,7 @@ public struct SidebarView: View {
                     .help("快速跳转 (⌘J)")
                 }
                 .padding(.horizontal, 12)
-                .padding(.top, 8)
+                .padding(.top, 12)
 
                 // Section 1: Library
                 VStack(alignment: .leading, spacing: 2) {
@@ -316,6 +316,27 @@ public struct SidebarView: View {
         }
         .scrollIndicators(.hidden)
     }
+}
+
+/// Native macOS translucent sidebar surface (`NSVisualEffectView(.sidebar)`) without `NavigationSplitView`'s
+/// hidden-titlebar scroll pocket hit-testing offset.
+public struct CharkleSidebarMaterialBackground: NSViewRepresentable {
+    public init() {}
+
+    public func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = .sidebar
+    }
+}
+
+extension SidebarView {
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)
