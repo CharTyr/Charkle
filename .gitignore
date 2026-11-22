@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+.build-*/
+.swiftpm/
+dist/
+*.xcuserdata
+*.xcworkspace/
+design/icons/check-out/
+design/icons/node_modules/
