@@ -1,0 +1,25 @@
+{
+  "name": "charkle-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted full-stack TypeScript visual reference library & rapid moodboard studio",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/client"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "npm run build -w @charkle/shared && (trap 'kill 0' EXIT; npm run dev -w @charkle/server & npm run dev -w @charkle/client & wait)",
+    "dev:server": "npm run build -w @charkle/shared && npm run dev -w @charkle/server",
+    "dev:client": "npm run build -w @charkle/shared && npm run dev -w @charkle/client",
+    "build": "npm run build -w @charkle/shared && npm run build -w @charkle/server && npm run build -w @charkle/client",
+    "test": "npm run build -w @charkle/shared && npm run test --workspaces --if-present",
+    "typecheck": "npm run build -w @charkle/shared && npm run typecheck -w @charkle/shared && npm run typecheck -w @charkle/server && npm run typecheck -w @charkle/client",
+    "start": "npm run start -w @charkle/server",
+    "mcp": "npm run mcp -w @charkle/server"
+  }
+}
