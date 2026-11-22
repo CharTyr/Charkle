@@ -68,6 +68,15 @@ public nonisolated enum GDirectIntegration {
         }
     }
 
+    /// Fast, lightweight account lookup (`gdirect accounts` only) without triggering endpoint scan reads.
+    public static func signedInAccounts() async -> (accounts: [String], defaultAccount: String?) {
+        guard let binary = detectBinary(),
+              let output = try? await run(binary, ["accounts"], timeout: 5) else {
+            return ([], nil)
+        }
+        return parseAccounts(output.stdout)
+    }
+
     public static func inspect(mountPath: String) async -> GDirectEnvironmentSnapshot {
         let binary = detectBinary()
         let app = Bundle(path: "/Applications/gdirect.app")?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String

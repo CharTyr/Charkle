@@ -362,10 +362,17 @@ public struct SettingsView: View {
 
     @ViewBuilder
     private var googleDriveSection: some View {
-        let signedInAccount = syncAndAI.syncStatus.account?.source == "WebDAV" || syncAndAI.syncStatus.account?.source == "本地文件夹"
-            ? nil
-            : syncAndAI.syncStatus.account
-        let isSignedIn = signedInAccount != nil
+        let snap = syncAndAI.gdirectSnapshot
+        let gdirectEmail = draftSyncConfig.selectedGDirectAccount ?? snap.defaultAccount ?? snap.accounts.first
+        let directAccount: DriveAccountInfo? = {
+            guard let acc = syncAndAI.syncStatus.account,
+                  acc.source != "WebDAV", acc.source != "本地文件夹" else { return nil }
+            return acc
+        }()
+        let activeAccount: DriveAccountInfo? = directAccount
+            ?? gdirectEmail.map { DriveAccountInfo(email: $0, displayName: nil, source: "gdirect") }
+        let isUsingLocalGDirect = activeAccount?.source == "gdirect" || activeAccount?.source == "gdirect mount"
+        let isSignedIn = activeAccount != nil
 
         HStack(spacing: 14) {
             ZStack {
@@ -379,18 +386,26 @@ public struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(signedInAccount?.displayName ?? signedInAccount?.email ?? "未登录 Google 账号")
+                    Text(activeAccount?.displayName ?? activeAccount?.email ?? "未登录 Google 账号")
                         .font(.system(size: 13.5, weight: .semibold))
                     if isSignedIn {
                         Circle().fill(Color.green).frame(width: 7, height: 7)
                     }
+                    if isUsingLocalGDirect {
+                        Text("本机 gdirect")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                    }
                 }
-                if let account = signedInAccount, let name = account.displayName, !name.isEmpty {
+                if let account = activeAccount, let name = account.displayName, !name.isEmpty {
                     Text(account.email)
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
-                Text(googleHeroSubtitle(account: signedInAccount))
+                Text(googleHeroSubtitle(account: activeAccount, isUsingLocalGDirect: isUsingLocalGDirect))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
             }
@@ -412,10 +427,31 @@ public struct SettingsView: View {
                     .disabled(syncAndAI.isBusy)
 
                     Menu {
-                        Button("切换 Google 账号…") { triggerGoogleSignIn() }
-                        Divider()
-                        Button("退出登录", role: .destructive) {
-                            Task { await syncAndAI.signOutGoogleDrive() }
+                        if snap.accounts.count > 1 {
+                            Menu("切换本机 gdirect 账号") {
+                                ForEach(snap.accounts, id: \.self) { email in
+                                    Button {
+                                        draftSyncConfig.selectedGDirectAccount = email
+                                        persistSyncConfigIfReady()
+                                    } label: {
+                                        if email == gdirectEmail {
+                                            Label(email, systemImage: "checkmark")
+                                        } else {
+                                            Text(email)
+                                        }
+                                    }
+                                }
+                            }
+                            Divider()
+                        }
+                        Button(isUsingLocalGDirect ? "改用 Charkle 独立登录 Google 账号…" : "切换 Google 账号…") {
+                            triggerGoogleSignIn()
+                        }
+                        if !isUsingLocalGDirect {
+                            Divider()
+                            Button("退出登录", role: .destructive) {
+                                Task { await syncAndAI.signOutGoogleDrive() }
+                            }
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -440,8 +476,8 @@ public struct SettingsView: View {
             }
         }
 
-        if let used = signedInAccount?.storageUsedBytes,
-           let limit = signedInAccount?.storageLimitBytes, limit > 0 {
+        if let used = activeAccount?.storageUsedBytes,
+           let limit = activeAccount?.storageLimitBytes, limit > 0 {
             let ratio = min(1.0, max(0.0, Double(used) / Double(limit)))
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
@@ -807,7 +843,10 @@ public struct SettingsView: View {
                         TextField("Charkle 或 Design/Charkle", text: $migrationDraftConfig.rootFolderName)
                             .textFieldStyle(.roundedBorder)
                     }
-                    if syncAndAI.syncStatus.account == nil || syncAndAI.syncStatus.account?.source == "WebDAV" {
+                    let hasReadyGoogleAccount = (syncAndAI.syncStatus.account != nil && syncAndAI.syncStatus.account?.source != "WebDAV" && syncAndAI.syncStatus.account?.source != "本地文件夹")
+                        || syncAndAI.gdirectSnapshot.defaultAccount != nil
+                        || !syncAndAI.gdirectSnapshot.accounts.isEmpty
+                    if !hasReadyGoogleAccount {
                         HStack(spacing: 6) {
                             Image(systemName: "info.circle")
                                 .foregroundStyle(.orange)
@@ -1366,14 +1405,15 @@ public struct SettingsView: View {
         }
     }
 
-    private func googleHeroSubtitle(account: DriveAccountInfo?) -> String {
+    private func googleHeroSubtitle(account: DriveAccountInfo?, isUsingLocalGDirect: Bool) -> String {
         guard account != nil else {
             return "登录 Google 账号后，素材与情绪板将自动同步到你的云盘目录"
         }
+        let prefix = isUsingLocalGDirect ? "已直接复用本机 gdirect 登录态（免重复登录）" : "已连接"
         if let synced = syncAndAI.syncStatus.lastSyncedAt {
-            return "已连接 · 上次同步 \(synced.formatted(date: .omitted, time: .shortened))"
+            return "\(prefix) · 上次同步 \(synced.formatted(date: .omitted, time: .shortened))"
         }
-        return "已连接 · 就绪，可随时同步"
+        return "\(prefix) · 点击右侧即可立即同步"
     }
 
     private func persistSyncConfigIfReady() {

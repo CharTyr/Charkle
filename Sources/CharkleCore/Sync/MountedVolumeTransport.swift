@@ -163,14 +163,19 @@ public final actor MountedVolumeTransport: DriveTransport {
     private func snapshot() throws -> [String: RemoteDriveFile] {
         try verifyMount()
         var url = mount
+        var parentID = DriveFiles.rootID
+        var result: [String: RemoteDriveFile] = [:]
+        locations.removeAll()
         for segment in rootSegments {
             try DriveFiles.validateName(segment)
             url = url.appending(path: segment, directoryHint: .isDirectory)
+            guard GDirectIntegration.statInfo(url, followLinks: false) != nil else { return result }
+            let entry = try metadata(url, parentID: parentID)
+            parentID = entry.id
         }
-        var result: [String: RemoteDriveFile] = [:]
-        locations.removeAll()
-        guard GDirectIntegration.statInfo(url, followLinks: false) != nil else { return result }
-        let root = try metadata(url, parentID: DriveFiles.rootID)
+        guard let root = try? metadata(url, parentID: parentID == DriveFiles.rootID ? DriveFiles.rootID : parentID) else {
+            return result
+        }
         var queue = [root]
         var index = 0
         while index < queue.count {

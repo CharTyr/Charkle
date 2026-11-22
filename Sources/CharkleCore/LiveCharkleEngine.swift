@@ -513,15 +513,25 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func syncStatus() async -> SyncStatus {
-        let status = await driveSync.status()
+        var status = await driveSync.status()
         if status.lastSyncedAt == nil, case .idle = status.phase,
            let persisted = try? await database.state("lastSyncStatus", as: SyncStatus.self) {
             await driveSync.restoreStatus(persisted)
-            return await driveSync.status()
+            status = await driveSync.status()
         }
-        var updated = status
-        if case .idle = status.phase { updated.activeMode = await syncConfig().mode }
-        return updated
+        let config = await syncConfig()
+        if case .idle = status.phase { status.activeMode = config.mode }
+
+        // Automatically surface an already-signed-in local `gdirect` account when no separate Charkle OAuth login exists
+        if (config.mode == .directAPIWithGDirect || config.mode == .gdirectMount),
+           status.account == nil,
+           (try? await oauth.currentStoredToken()) == nil {
+            let gd = await GDirectIntegration.signedInAccounts()
+            if let email = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
+                status.account = DriveAccountInfo(email: email, displayName: nil, source: "gdirect")
+            }
+        }
+        return status
     }
 
     public func probeGDirectEnvironment() async -> GDirectEnvironmentSnapshot {
@@ -744,7 +754,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 remotePath: config.webDAVRemotePath
             )
         case .gdirectMount:
-            let account = config.selectedGDirectAccount
+            let gd = await GDirectIntegration.signedInAccounts()
+            let account = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first
+            if !GDirectIntegration.isMountActive(at: config.mountPath), account != nil {
+                try await GDirectIntegration.mount(path: config.mountPath, account: account)
+            }
             return MountedVolumeTransport(
                 mountPath: config.mountPath,
                 rootFolderName: config.rootFolderName,
@@ -752,6 +766,26 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 requireDedicatedMount: true
             )
         case .directAPIWithGDirect:
+            // 1. Prefer Charkle's own OAuth token if the user signed in directly inside Charkle
+            if (try? await oauth.currentStoredToken()) != nil {
+                let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
+                let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
+                return DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
+            }
+            // 2. Otherwise seamlessly reuse the user's ALREADY-SIGNED-IN local `gdirect` account with zero re-login!
+            let gd = await GDirectIntegration.signedInAccounts()
+            if let gdirectAccount = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
+                if !GDirectIntegration.isMountActive(at: config.mountPath) {
+                    try await GDirectIntegration.mount(path: config.mountPath, account: gdirectAccount)
+                }
+                return MountedVolumeTransport(
+                    mountPath: config.mountPath,
+                    rootFolderName: config.rootFolderName,
+                    accountEmail: gdirectAccount,
+                    requireDedicatedMount: true
+                )
+            }
+            // 3. No local gdirect account and no Charkle OAuth token -> DirectAPI prompts clean sign-in
             let endpoints = config.useGDirectIPAcceleration ? await GDirectIntegration.inspect(mountPath: config.mountPath).endpoints : []
             let transferDirectory = media.staging.appending(path: "DriveTransfers", directoryHint: .isDirectory)
             return DirectAPITransport(oauth: oauth, endpoints: endpoints, transferDirectory: transferDirectory)
@@ -767,7 +801,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             switch config.mode {
             case .localOnly: return
             case .directAPIWithGDirect:
-                guard (try? await oauth.currentStoredToken()) != nil else { return }
+                let hasCharkleToken = (try? await oauth.currentStoredToken()) != nil
+                let hasLocalGDirectAccount = !(await GDirectIntegration.signedInAccounts().accounts.isEmpty)
+                guard hasCharkleToken || hasLocalGDirectAccount else { return }
             case .webDAV:
                 guard !config.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             case .gdirectMount:
