@@ -90,19 +90,28 @@ public struct InspectorView: View {
     private func singleAssetInspector(_ asset: AssetRecord) -> some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 16) {
-                // Clean Preview Card
-                AssetThumbnailSurface(
-                    asset: asset,
-                    loader: library.thumbnailLoader,
-                    tier: .grid520,
-                    cornerRadius: CharkleTheme.Radius.cardOuter
-                )
-                .frame(height: 172)
+                // Clean Uncropped Proportional Preview Card
+                let naturalRatio = max(0.35, min(3.2, CGFloat(asset.aspectRatio)))
+                let previewContentWidth: CGFloat = 268
+                let fittedHeight = min(320, max(110, (previewContentWidth / naturalRatio).rounded()))
+                let fittedWidth = min(previewContentWidth, (fittedHeight * naturalRatio).rounded())
+
+                ZStack {
+                    AssetThumbnailSurface(
+                        asset: asset,
+                        loader: library.thumbnailLoader,
+                        tier: .preview1400,
+                        cornerRadius: CharkleTheme.Radius.cardOuter,
+                        contentMode: .fit
+                    )
+                    .frame(width: fittedWidth, height: fittedHeight)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
+                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    )
+                }
                 .frame(maxWidth: .infinity)
-                .overlay(
-                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.cardOuter, style: .continuous)
-                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                )
+                .contentShape(Rectangle())
                 .onTapGesture {
                     onOpenQuickLook(asset)
                 }

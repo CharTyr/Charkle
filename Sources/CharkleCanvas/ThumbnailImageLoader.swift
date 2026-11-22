@@ -101,6 +101,7 @@ public struct AssetThumbnailSurface: View {
     public let cornerRadius: CGFloat
     public let isHovered: Bool
     public let crop: NormalizedCropRect?
+    public let contentMode: ContentMode
 
     @State private var loadedImage: NSImage?
 
@@ -110,7 +111,8 @@ public struct AssetThumbnailSurface: View {
         tier: ThumbnailTier = .grid520,
         cornerRadius: CGFloat = 12,
         isHovered: Bool = false,
-        crop: NormalizedCropRect? = nil
+        crop: NormalizedCropRect? = nil,
+        contentMode: ContentMode = .fill
     ) {
         self.asset = asset
         self.loader = loader
@@ -118,6 +120,7 @@ public struct AssetThumbnailSurface: View {
         self.cornerRadius = cornerRadius
         self.isHovered = isHovered
         self.crop = crop
+        self.contentMode = contentMode
     }
 
     public var body: some View {
@@ -159,6 +162,14 @@ public struct AssetThumbnailSurface: View {
                     .offset(x: -geo.size.width * crop.x * scaleX, y: -geo.size.height * crop.y * scaleY)
             }
             .clipped()
+        } else if contentMode == .fit {
+            GeometryReader { geo in
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: geo.size.width, height: geo.size.height)
+            }
         } else {
             GeometryReader { geo in
                 Image(nsImage: image)
