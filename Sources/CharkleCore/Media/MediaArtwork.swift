@@ -75,7 +75,8 @@ nonisolated enum MediaArtwork {
     }
 
     static func draw(_ text: String, in ctx: CGContext, at position: CGPoint, size: Double, ink: UInt32, width: Double) {
-        let font = CTFontCreateWithName("Helvetica Neue" as CFString, size, nil)
+        let font = CTFontCreateUIFontForLanguage(.system, size, nil)
+            ?? CTFontCreateWithName("Helvetica Neue" as CFString, size, nil)
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color(ink)

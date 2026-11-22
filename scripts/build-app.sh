@@ -33,6 +33,11 @@ for bundle in "$BIN_DIR"/*.bundle; do
   fi
 done
 
+# Embed app-level Google Desktop OAuth client for zero-setup end-user Google Sign-In if present
+if [[ -f "$ROOT_DIR/Resources/GoogleOAuthClient.json" ]]; then
+  cp "$ROOT_DIR/Resources/GoogleOAuthClient.json" "$APP_BUNDLE/Contents/Resources/GoogleOAuthClient.json"
+fi
+
 # Use prebuilt Kubai AppIcon.icns if available; otherwise generate from Resources/AppIcon.svg or fallback
 if [[ -f "$ROOT_DIR/Resources/AppIcon.icns" ]]; then
   cp "$ROOT_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"

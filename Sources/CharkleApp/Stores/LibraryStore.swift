@@ -172,6 +172,34 @@ public final class LibraryStore {
         }
     }
 
+    public func childFolders(of parentID: UUID?) -> [FolderRecord] {
+        folders
+            .filter { $0.parentID == parentID }
+            .sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+                let cmp = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+                if cmp != .orderedSame { return cmp == .orderedAscending }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+    }
+
+    public func folderBreadcrumbs(for folderID: UUID) -> [FolderRecord] {
+        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
+        var chain: [FolderRecord] = []
+        var visited = Set<UUID>()
+        var cursor: UUID? = folderID
+        while let id = cursor, visited.insert(id).inserted, let folder = byID[id] {
+            chain.append(folder)
+            cursor = folder.parentID
+        }
+        return chain.reversed()
+    }
+
+    public func folderDisplayPath(for folderID: UUID) -> String {
+        let crumbs = folderBreadcrumbs(for: folderID)
+        return crumbs.isEmpty ? "文件夹" : crumbs.map(\.name).joined(separator: " / ")
+    }
+
     // MARK: - Ingestion (Single Source of Truth)
 
     @discardableResult

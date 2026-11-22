@@ -27,6 +27,8 @@ public struct QuickLookOverlayView: View {
     @State private var panOffset: CGSize = .zero
     @State private var panStartOffset: CGSize = .zero
     @State private var showSecondaryControls: Bool = false
+    @State private var keyMonitor: Any?
+    @State private var confirmPermanentDelete: Bool = false
 
     public init(
         asset: AssetRecord,
@@ -136,6 +138,23 @@ public struct QuickLookOverlayView: View {
                     showSecondaryControls = true
                 }
             }
+            installKeyMonitor()
+        }
+        .onDisappear {
+            removeKeyMonitor()
+        }
+        .alert("彻底删除此素材？", isPresented: $confirmPermanentDelete) {
+            Button("取消", role: .cancel) {}
+            Button("彻底删除", role: .destructive) {
+                let id = asset.id
+                onClose()
+                Task {
+                    await library.permanentlyDeleteAssets([id])
+                    coordinator.showToast("已彻底删除素材", icon: "trash.slash")
+                }
+            }
+        } message: {
+            Text("彻底删除后将无法恢复。")
         }
         .focusable()
         .focusEffectDisabled()
@@ -383,30 +402,66 @@ public struct QuickLookOverlayView: View {
 
                 hudDivider
 
-                hudIconButton(asset.pinnedOffline ? "pin.fill" : "pin", help: asset.pinnedOffline ? "取消离线钉选" : "钉选离线") {
-                    Task {
-                        await library.togglePinOffline(ids: [asset.id], pinned: !asset.pinnedOffline)
-                        coordinator.showToast(asset.pinnedOffline ? "已取消离线钉选" : "已钉选离线", icon: "pin.fill")
+                if asset.isTrashed {
+                    Button {
+                        let id = asset.id
+                        onClose()
+                        Task {
+                            await library.restoreAssets([id])
+                            coordinator.showToast("已放回原处", icon: "arrow.uturn.backward")
+                        }
+                    } label: {
+                        Label("放回原处", systemImage: "arrow.uturn.backward")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
                     }
-                }
+                    .buttonStyle(.plain)
 
-                Menu {
-                    ForEach(moodboards.boards) { board in
-                        Button(board.title) {
-                            Task {
-                                await moodboards.addAssetsToSpecificBoard(boardID: board.id, assets: [asset])
-                                coordinator.showToast("已加入情绪板「\(board.title)」", icon: "rectangle.3.group")
-                            }
+                    Button(role: .destructive) {
+                        confirmPermanentDelete = true
+                    } label: {
+                        Label("彻底删除", systemImage: "trash.slash")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color(charkleHex: "#FF6B6B"))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    hudIconButton(
+                        asset.pinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle",
+                        help: asset.pinnedOffline ? "取消始终保留在本地" : "始终保留在本地"
+                    ) {
+                        let nextPinned = !asset.pinnedOffline
+                        Task {
+                            await library.togglePinOffline(ids: [asset.id], pinned: nextPinned)
+                            coordinator.showToast(
+                                nextPinned ? "已设为始终保留在本地" : "已取消始终保留在本地",
+                                icon: nextPinned ? "arrow.down.circle.fill" : "icloud"
+                            )
                         }
                     }
-                } label: {
-                    Image(systemName: "rectangle.3.group.badge.plus")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 28, height: 28)
+
+                    Menu {
+                        ForEach(moodboards.boards) { board in
+                            Button(board.title) {
+                                Task {
+                                    await moodboards.addAssetsToSpecificBoard(boardID: board.id, assets: [asset])
+                                    coordinator.showToast("已加入情绪板「\(board.title)」", icon: "rectangle.3.group")
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "rectangle.3.group.badge.plus")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .frame(width: 28, height: 28)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("加入情绪板")
                 }
-                .menuStyle(.borderlessButton)
-                .help("加入情绪板")
 
                 if let url = originalURL {
                     hudIconButton("arrow.up.forward.app", help: "使用默认应用打开") {
@@ -421,6 +476,36 @@ public struct QuickLookOverlayView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .charkleLiquidGlass(.darkNotch, in: Capsule(style: .continuous))
+        }
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if confirmPermanentDelete { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags.isEmpty || flags == .numericPad || flags == .function else { return event }
+            switch event.keyCode {
+            case 49, 53: // Space or Escape -> close Quick Look immediately
+                if event.isARepeat { return nil }
+                onClose()
+                return nil
+            case 123: // Left Arrow
+                onStep(-1)
+                return nil
+            case 124: // Right Arrow
+                onStep(1)
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
         }
     }
 

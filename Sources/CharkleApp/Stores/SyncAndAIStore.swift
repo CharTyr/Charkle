@@ -12,6 +12,7 @@ public final class SyncAndAIStore {
     public var gdirectSnapshot: GDirectEnvironmentSnapshot = GDirectEnvironmentSnapshot()
     public var aiConfig: AIProviderConfig = AIProviderConfig()
     public var hasStoredAIKey: Bool = false
+    public var hasGoogleOAuthClient: Bool = false
     public var cacheStats: CacheStats = CacheStats()
 
     public var lastSyncReport: SyncReport?
@@ -29,13 +30,15 @@ public final class SyncAndAIStore {
         async let gd = engine.probeGDirectEnvironment()
         async let ai = engine.aiConfig()
         async let stats = engine.cacheStats()
+        async let oauthConfigured = engine.hasGoogleOAuthClientConfig()
 
-        let (sCfg, sStatus, gdSnap, aiCfg, cStats) = await (cfg, status, gd, ai, stats)
+        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth) = await (cfg, status, gd, ai, stats, oauthConfigured)
         syncConfig = sCfg
         syncStatus = sStatus
         gdirectSnapshot = gdSnap
         aiConfig = aiCfg
         cacheStats = cStats
+        hasGoogleOAuthClient = hasOAuth
         hasStoredAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
     }
 
@@ -73,38 +76,76 @@ public final class SyncAndAIStore {
         }
     }
 
-    public func saveSyncConfig(_ config: DriveSyncConfig) async {
+    public func saveSyncConfig(_ config: DriveSyncConfig, quiet: Bool = true) async {
         errorMessage = nil
         do {
             try await engine.saveSyncConfig(config)
             syncConfig = config
             syncStatus = await engine.syncStatus()
-            statusMessage = "已保存 Google Drive 同步配置"
+            if !quiet {
+                statusMessage = "已更新云同步设置"
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    public func importGoogleOAuthSecret(from url: URL) async {
+    @discardableResult
+    public func importGoogleOAuthSecret(from url: URL) async -> Bool {
         isBusy = true
         defer { isBusy = false }
         errorMessage = nil
         do {
             try await engine.importGoogleOAuthSecret(from: url)
-            statusMessage = "已导入 OAuth 凭据文件：\(url.lastPathComponent)"
+            hasGoogleOAuthClient = await engine.hasGoogleOAuthClientConfig()
+            statusMessage = "已保存 Google 登录配置"
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
-    public func signInGoogleDrive() async {
+    @discardableResult
+    public func saveGoogleOAuthClientConfig(clientID: String, clientSecret: String) async -> Bool {
+        isBusy = true
+        defer { isBusy = false }
+        errorMessage = nil
+        do {
+            try await engine.saveGoogleOAuthClientConfig(clientID: clientID, clientSecret: clientSecret)
+            hasGoogleOAuthClient = await engine.hasGoogleOAuthClientConfig()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func signInGoogleDrive() async -> Bool {
         isBusy = true
         defer { isBusy = false }
         errorMessage = nil
         do {
             let account = try await engine.signInGoogleDrive()
+            syncConfig = await engine.syncConfig()
             syncStatus = await engine.syncStatus()
-            statusMessage = "已连接 Google Drive 账号：\(account.email)"
+            statusMessage = "已登录 Google 账号：\(account.email)"
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    public func signOutGoogleDrive() async {
+        isBusy = true
+        defer { isBusy = false }
+        errorMessage = nil
+        do {
+            try await engine.signOutGoogleDrive()
+            syncStatus = await engine.syncStatus()
+            statusMessage = "已退出 Google 账号"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -129,13 +170,15 @@ public final class SyncAndAIStore {
         }
     }
 
-    public func saveAIConfig(_ config: AIProviderConfig, apiKey: String?) async {
+    public func saveAIConfig(_ config: AIProviderConfig, apiKey: String?, quiet: Bool = false) async {
         errorMessage = nil
         do {
             try await engine.saveAIConfig(config, apiKey: apiKey)
             aiConfig = config
             hasStoredAIKey = await engine.hasStoredAIKey(for: config.provider)
-            statusMessage = "已保存 AI 配置（密钥仅存于 macOS 钥匙串）"
+            if !quiet {
+                statusMessage = "已保存 AI 配置（密钥仅存于 macOS 钥匙串）"
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -157,7 +200,7 @@ public final class SyncAndAIStore {
         errorMessage = nil
         do {
             cacheStats = try await engine.evictCacheNow()
-            statusMessage = "已清理可淘汰原文件缓存（钉选离线内容已保留）"
+            statusMessage = "已释放临时本地缓存（已保留在本地的内容未受影响）"
         } catch {
             errorMessage = error.localizedDescription
         }

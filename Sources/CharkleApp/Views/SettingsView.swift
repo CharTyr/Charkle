@@ -51,6 +51,9 @@ public struct SettingsView: View {
 
     @State private var showSyncAdvanced: Bool = false
     @State private var showAIAdvanced: Bool = false
+    @State private var showOAuthSetupSheet: Bool = false
+    @State private var oauthClientIDInput: String = ""
+    @State private var oauthClientSecretInput: String = ""
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -142,23 +145,24 @@ public struct SettingsView: View {
             cacheBudgetGB = max(2, min(100, Double(syncAndAI.cacheStats.budgetBytes) / (1024 * 1024 * 1024)))
             didLoadInitial = true
         }
+        .sheet(isPresented: $showOAuthSetupSheet) {
+            googleOAuthSetupSheet
+        }
     }
 
     // MARK: - Tab 1: 云同步
 
     private var cloudSyncPane: some View {
         let snap = syncAndAI.gdirectSnapshot
-        let activeAccountEmail = syncAndAI.syncStatus.account?.email
-            ?? draftSyncConfig.selectedGDirectAccount
-            ?? snap.defaultAccount
-            ?? snap.accounts.first
-        let isConnected = syncAndAI.syncStatus.account != nil || (draftSyncConfig.mode == .gdirectMount && snap.isMountActive)
+        let signedInAccount = syncAndAI.syncStatus.account
+        let isSignedIn = signedInAccount != nil
+        let isSyncEnabled = draftSyncConfig.mode != .localOnly
         let healthyNodeCount = snap.endpoints.filter(\.healthy).count
 
         return VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
                 title: "云同步",
-                subtitle: "将你的素材库和情绪板安全备份到 Google Drive，在多台 Mac 之间自动保持同步。"
+                subtitle: "直接登录你的 Google 账号即可自动备份素材库与情绪板到 Google Drive，无需安装第三方工具。"
             )
 
             // Account & Primary Sync Status Card
@@ -166,54 +170,81 @@ public struct SettingsView: View {
                 HStack(spacing: 14) {
                     ZStack {
                         Circle()
-                            .fill(Color.accentColor.opacity(0.14))
-                            .frame(width: 42, height: 42)
-                        Image(systemName: isConnected ? "icloud.fill" : "person.crop.circle")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
+                            .fill(isSignedIn ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
+                            .frame(width: 44, height: 44)
+                        Image(systemName: isSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(isSignedIn ? Color.accentColor : .secondary)
                     }
 
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
-                            Text(activeAccountEmail ?? "未连接 Google Drive")
+                            Text(signedInAccount?.displayName ?? signedInAccount?.email ?? "Google Drive")
                                 .font(.system(size: 13.5, weight: .semibold))
-                            if isConnected {
+                            if isSignedIn {
                                 Circle()
                                     .fill(Color.green)
                                     .frame(width: 7, height: 7)
                             }
                         }
 
-                        Text(syncHeroSubtitle(isConnected: isConnected, healthyNodes: healthyNodeCount, snap: snap))
+                        if let account = signedInAccount, let name = account.displayName, !name.isEmpty {
+                            Text(account.email)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text(syncHeroSubtitle(account: signedInAccount, isSyncEnabled: isSyncEnabled))
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
 
-                    if draftSyncConfig.mode == .localOnly {
-                        Text("仅本机模式")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
-                    } else if isConnected {
+                    if isSignedIn {
+                        HStack(spacing: 8) {
+                            if isSyncEnabled {
+                                Button {
+                                    Task { _ = await syncAndAI.syncNow() }
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        if syncAndAI.isBusy {
+                                            ProgressView().controlSize(.mini)
+                                        }
+                                        Text("立即同步")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(syncAndAI.isBusy)
+                            }
+
+                            Menu {
+                                Button("切换 Google 账号…") {
+                                    triggerGoogleSignIn()
+                                }
+                                Divider()
+                                Button("退出登录", role: .destructive) {
+                                    Task { await syncAndAI.signOutGoogleDrive() }
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("账号操作")
+                        }
+                    } else {
                         Button {
-                            Task { _ = await syncAndAI.syncNow() }
+                            triggerGoogleSignIn()
                         } label: {
-                            HStack(spacing: 5) {
+                            HStack(spacing: 6) {
                                 if syncAndAI.isBusy {
                                     ProgressView().controlSize(.mini)
                                 }
-                                Text("立即同步")
+                                Text("使用 Google 账号登录")
                             }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(syncAndAI.isBusy)
-                    } else {
-                        Button("连接账号") {
-                            Task { await syncAndAI.signInGoogleDrive() }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(syncAndAI.isBusy)
@@ -221,38 +252,48 @@ public struct SettingsView: View {
                 }
                 .padding(.vertical, 2)
 
-                if snap.hasVersionMismatch {
+                if let used = signedInAccount?.storageUsedBytes,
+                   let limit = signedInAccount?.storageLimitBytes, limit > 0 {
                     Divider()
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        Text("检测到本机直连加速组件版本不一致，建议更新以保证最佳同步速度。")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                        Spacer()
+                    let ratio = min(1.0, max(0.0, Double(used) / Double(limit)))
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text("Google Drive 云端空间")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(ByteCountFormatter.string(fromByteCount: used, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))")
+                                .font(.system(size: 11, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        ProgressView(value: ratio)
+                            .progressViewStyle(.linear)
                     }
-                    .padding(8)
-                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
             }
 
-            // Everyday Sync Preferences (instant auto-save, no "Save Config" developer button)
+            // Everyday Sync Preferences (instant auto-save)
             settingsGroupCard {
                 settingsRow(
-                    title: "同步方式",
-                    subtitle: syncModeDescription(draftSyncConfig.mode)
+                    title: "开启 Google Drive 自动同步",
+                    subtitle: isSyncEnabled
+                        ? "新增素材、文件夹与情绪板会自动备份到你的 Google Drive"
+                        : "当前仅保存在这台 Mac 本地，不联网同步"
                 ) {
-                    Picker("", selection: $draftSyncConfig.mode) {
-                        Text("自动直连（推荐）").tag(DriveTransportMode.directAPIWithGDirect)
-                        Text("本地云盘目录").tag(DriveTransportMode.gdirectMount)
-                        Text("仅保存在本机").tag(DriveTransportMode.localOnly)
-                    }
+                    Toggle("", isOn: Binding(
+                        get: { draftSyncConfig.mode != .localOnly },
+                        set: { enabled in
+                            draftSyncConfig.mode = enabled ? .directAPIWithGDirect : .localOnly
+                            persistSyncConfigIfReady()
+                        }
+                    ))
                     .labelsHidden()
-                    .frame(width: 176)
-                    .onChange(of: draftSyncConfig.mode) { _, _ in persistSyncConfigIfReady() }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
                 }
 
-                if draftSyncConfig.mode != .localOnly {
+                if isSyncEnabled {
                     Divider()
 
                     settingsRow(
@@ -263,42 +304,6 @@ public struct SettingsView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 156)
                             .onSubmit { persistSyncConfigIfReady() }
-                    }
-
-                    if draftSyncConfig.mode == .gdirectMount {
-                        Divider()
-                        settingsRow(
-                            title: "本机云盘位置",
-                            subtitle: snap.isMountActive ? "目录已连接，可直接在访达查看" : "尚未连接，点击右侧一键挂载"
-                        ) {
-                            HStack(spacing: 6) {
-                                TextField("~/GoogleDrive", text: $draftSyncConfig.mountPath)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 164)
-                                    .onSubmit { persistSyncConfigIfReady() }
-                                Button(snap.isMountActive ? "已连接" : "连接目录") {
-                                    Task { await syncAndAI.runGDirectMount(path: draftSyncConfig.mountPath) }
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(syncAndAI.isBusy)
-                            }
-                        }
-                    }
-
-                    Divider()
-
-                    settingsRow(
-                        title: "启用直连加速",
-                        subtitle: healthyNodeCount > 0
-                            ? "已通过本机加速服务自动择优，当前可用 \(healthyNodeCount) 条线路"
-                            : "提升大图片与视频的上传和预览加载速度"
-                    ) {
-                        Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, _ in persistSyncConfigIfReady() }
                     }
 
                     Divider()
@@ -329,82 +334,57 @@ public struct SettingsView: View {
                 }
             }
 
-            // Collapsible Advanced & Diagnostics (cleanly hidden by default for regular users)
+            // Collapsible Advanced Options (cleanly tucked away for developers & power users)
             settingsGroupCard {
                 DisclosureGroup(isExpanded: $showSyncAdvanced) {
                     VStack(alignment: .leading, spacing: 12) {
                         Divider().padding(.top, 4)
 
-                        if snap.accounts.count > 1 {
-                            settingsRow(title: "切换本机账号", subtitle: nil) {
-                                Picker("", selection: Binding(
-                                    get: { draftSyncConfig.selectedGDirectAccount ?? snap.defaultAccount ?? snap.accounts.first ?? "" },
-                                    set: {
-                                        draftSyncConfig.selectedGDirectAccount = $0
-                                        persistSyncConfigIfReady()
-                                    }
-                                )) {
-                                    ForEach(snap.accounts, id: \.self) { acc in
-                                        Text(acc).tag(acc)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(width: 210)
+                        settingsRow(
+                            title: "Google 登录应用凭据",
+                            subtitle: syncAndAI.hasGoogleOAuthClient
+                                ? "已配置，可直接点击上方「使用 Google 账号登录」"
+                                : "当前开发版未内置凭据，点击右侧粘贴或导入一次即可使用"
+                        ) {
+                            Button(syncAndAI.hasGoogleOAuthClient ? "更换凭据…" : "配置凭据…") {
+                                showOAuthSetupSheet = true
                             }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+
+                        if snap.cliPath != nil {
                             Divider()
-                        }
 
-                        HStack(spacing: 14) {
-                            diagnosticPill("加速组件", snap.cliVersion ?? "未安装", ok: snap.cliPath != nil)
-                            diagnosticPill("桌面端", snap.appVersion ?? "未安装", ok: snap.appVersion != nil)
-                            diagnosticPill("云盘目录", snap.isMountActive ? "已连接" : "未连接", ok: snap.isMountActive)
-                            diagnosticPill("可用线路", "\(healthyNodeCount) 条", ok: healthyNodeCount > 0)
-                        }
-
-                        HStack(spacing: 8) {
-                            Button("重新测速优选") {
-                                Task { await syncAndAI.runGDirectScan() }
+                            settingsRow(
+                                title: "本机网络直连加速（可选）",
+                                subtitle: healthyNodeCount > 0
+                                    ? "检测到本机加速工具，当前有 \(healthyNodeCount) 条可用直连线路"
+                                    : "无需手动配置，检测到本机直连线路时自动择优提速"
+                            ) {
+                                Toggle("", isOn: $draftSyncConfig.useGDirectIPAcceleration)
+                                    .labelsHidden()
+                                    .toggleStyle(.switch)
+                                    .controlSize(.small)
+                                    .onChange(of: draftSyncConfig.useGDirectIPAcceleration) { _, _ in persistSyncConfigIfReady() }
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
 
-                            Button("刷新状态") {
-                                Task { await syncAndAI.probeGDirect() }
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-
-                            Button("导入自定义登录凭据…") {
-                                presentOAuthSecretImporter()
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-
-                            Spacer()
-                        }
-                        .disabled(syncAndAI.isBusy)
-
-                        if !snap.endpoints.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("最快直连线路（前 6 条）")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
-                                    ForEach(snap.endpoints.prefix(6)) { ep in
-                                        HStack(spacing: 4) {
-                                            Circle()
-                                                .fill(ep.healthy ? Color.green : Color.orange)
-                                                .frame(width: 5, height: 5)
-                                            Text("\(ep.ip) · \(ep.latencyMs)ms")
-                                                .font(.system(size: 10.5, design: .monospaced))
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 3)
-                                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                    }
+                            HStack(spacing: 8) {
+                                Button("重新测速优选") {
+                                    Task { await syncAndAI.runGDirectScan() }
                                 }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Button("刷新线路状态") {
+                                    Task { await syncAndAI.probeGDirect() }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Spacer()
                             }
+                            .disabled(syncAndAI.isBusy)
                         }
                     }
                 } label: {
@@ -412,12 +392,104 @@ public struct SettingsView: View {
                         Image(systemName: "slider.horizontal.3")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
-                        Text("高级选项与连接诊断")
+                        Text("高级选项")
                             .font(.system(size: 12.5, weight: .medium))
                         Spacer()
                     }
                     .contentShape(Rectangle())
                 }
+            }
+        }
+    }
+
+    private var googleOAuthSetupSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "person.badge.key.fill")
+                    .font(.system(size: 18))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("配置 Google 登录凭据")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("配置一次后即可在 Charkle 内一键登录任意 Google 账号，无需安装 gdirect。")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Client ID")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    TextField("例如：1234567890-xxxx.apps.googleusercontent.com", text: $oauthClientIDInput)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Client Secret")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    SecureField("例如：GOCSPX-xxxxxxxx", text: $oauthClientSecretInput)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    presentOAuthSecretImporter(autoSignInAfterImport: true)
+                } label: {
+                    Label("从 client_secret.json 文件导入…", systemImage: "doc.badge.plus")
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+            }
+
+            Text("提示：正式发布打包时，将凭据文件放到项目目录 Resources/GoogleOAuthClient.json，终端用户打开 App 即可零配置一键登录 Google。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(10)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            HStack {
+                Button("取消") {
+                    showOAuthSetupSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("保存并前往 Google 登录") {
+                    let cid = oauthClientIDInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let secret = oauthClientSecretInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Task {
+                        let saved = await syncAndAI.saveGoogleOAuthClientConfig(clientID: cid, clientSecret: secret)
+                        if saved {
+                            showOAuthSetupSheet = false
+                            oauthClientIDInput = ""
+                            oauthClientSecretInput = ""
+                            _ = await syncAndAI.signInGoogleDrive()
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(oauthClientIDInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncAndAI.isBusy)
+            }
+        }
+        .padding(22)
+        .frame(width: 480)
+    }
+
+    private func triggerGoogleSignIn() {
+        Task {
+            if syncAndAI.hasGoogleOAuthClient {
+                _ = await syncAndAI.signInGoogleDrive()
+            } else {
+                showOAuthSetupSheet = true
             }
         }
     }
@@ -566,7 +638,7 @@ public struct SettingsView: View {
         return VStack(alignment: .leading, spacing: 18) {
             settingsHeader(
                 title: "存储空间",
-                subtitle: "预览图常驻本机让画廊随时秒开，原始大文件按需缓存；你钉选离线的情绪板和素材会永久保留在本机。"
+                subtitle: "预览图常驻本机让画廊随时秒开，原始大文件按需缓存；设为「始终保留在本地」的情绪板和素材不会被自动清理。"
             )
 
             settingsGroupCard {
@@ -612,7 +684,7 @@ public struct SettingsView: View {
                 HStack(spacing: 22) {
                     legendDot(color: Color(charkleHex: "#4E7D96"), title: "画廊预览图", bytes: stats.thumbnailBytes)
                     legendDot(color: Color(charkleHex: "#D4A373"), title: "临时原件缓存（\(stats.cachedOriginalCount) 项）", bytes: stats.originalCacheBytes)
-                    legendDot(color: Color(charkleHex: "#6B8E76"), title: "钉选离线（\(stats.pinnedAssetCount) 项）", bytes: stats.pinnedOfflineBytes)
+                    legendDot(color: Color(charkleHex: "#6B8E76"), title: "始终保留在本地（\(stats.pinnedAssetCount) 项）", bytes: stats.pinnedOfflineBytes)
                 }
 
                 Divider()
@@ -637,7 +709,7 @@ public struct SettingsView: View {
 
                 settingsRow(
                     title: "清理临时原件缓存",
-                    subtitle: "仅释放未钉选的本地缓存，云端原件和情绪板完全不受影响"
+                    subtitle: "仅释放未设为常驻的本地缓存，云端原件和「始终保留在本地」的内容不受影响"
                 ) {
                     Button("立即清理") {
                         Task { await syncAndAI.evictCacheNow() }
@@ -751,43 +823,26 @@ public struct SettingsView: View {
     private func persistSyncConfigIfReady() {
         guard didLoadInitial else { return }
         let snapshot = draftSyncConfig
-        Task { await syncAndAI.saveSyncConfig(snapshot) }
+        Task { await syncAndAI.saveSyncConfig(snapshot, quiet: true) }
     }
 
     private func persistAIConfigIfReady() {
         guard didLoadInitial else { return }
         let snapshot = draftAIConfig
-        Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil) }
+        Task { await syncAndAI.saveAIConfig(snapshot, apiKey: nil, quiet: true) }
     }
 
-    private func syncHeroSubtitle(isConnected: Bool, healthyNodes: Int, snap: GDirectEnvironmentSnapshot) -> String {
-        if draftSyncConfig.mode == .localOnly {
-            return "当前仅保存在这台 Mac 本地，不会上传至云端"
+    private func syncHeroSubtitle(account: DriveAccountInfo?, isSyncEnabled: Bool) -> String {
+        guard account != nil else {
+            return "登录 Google 账号后，素材与情绪板将自动安全备份到你的云盘"
         }
-        var parts: [String] = []
-        if isConnected {
-            if let synced = syncAndAI.syncStatus.lastSyncedAt {
-                parts.append("上次同步 \(synced.formatted(date: .omitted, time: .shortened))")
-            } else {
-                parts.append("已就绪，可随时同步")
-            }
-        } else if snap.accounts.first != nil {
-            parts.append("已发现本机账号，点击右侧连接即可开始同步")
-        } else {
-            parts.append("连接 Google Drive 后即可自动多端备份")
+        if !isSyncEnabled {
+            return "已登录 · 当前已暂停自动同步，仅保存在本机"
         }
-        if draftSyncConfig.useGDirectIPAcceleration && healthyNodes > 0 {
-            parts.append("直连加速已开启")
+        if let synced = syncAndAI.syncStatus.lastSyncedAt {
+            return "已连接 · 上次同步 \(synced.formatted(date: .omitted, time: .shortened))"
         }
-        return parts.joined(separator: " · ")
-    }
-
-    private func syncModeDescription(_ mode: DriveTransportMode) -> String {
-        switch mode {
-        case .directAPIWithGDirect: "直接与 Google Drive 安全同步，无需常驻挂载虚拟磁盘"
-        case .gdirectMount: "通过本机已挂载的云盘文件夹读写，访达里同步可见"
-        case .localOnly: "完全离线保存在本机，不联网也不上传任何文件"
-        }
+        return "已连接 · 就绪，可随时同步"
     }
 
     // MARK: - Clean Reusable Product Settings Chrome
@@ -861,22 +916,6 @@ public struct SettingsView: View {
         .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 
-    private func diagnosticPill(_ label: String, _ value: String, ok: Bool) -> some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(ok ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 6, height: 6)
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 11, weight: .semibold))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-
     private func legendDot(color: Color, title: String, bytes: Int64) -> some View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 8, height: 8)
@@ -912,19 +951,33 @@ public struct SettingsView: View {
                 .font(.system(size: 12, weight: .medium))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
+            Button {
+                if isError { syncAndAI.errorMessage = nil } else { syncAndAI.statusMessage = nil }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
         }
         .padding(10)
         .background((isError ? Color.red : Color.green).opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    private func presentOAuthSecretImporter() {
+    private func presentOAuthSecretImporter(autoSignInAfterImport: Bool = false) {
         let panel = NSOpenPanel()
         panel.title = "选择 Google 登录凭据文件 (.json)"
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url {
-            Task { await syncAndAI.importGoogleOAuthSecret(from: url) }
+            Task {
+                let ok = await syncAndAI.importGoogleOAuthSecret(from: url)
+                if ok && autoSignInAfterImport {
+                    showOAuthSetupSheet = false
+                    _ = await syncAndAI.signInGoogleDrive()
+                }
+            }
         }
     }
 }

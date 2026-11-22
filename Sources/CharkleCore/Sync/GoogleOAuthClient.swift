@@ -49,6 +49,26 @@ public nonisolated struct GoogleOAuthClientConfig: Codable, Equatable, Sendable 
             tokenURI: tokenURI
         )
     }
+
+    /// Resolves an app-bundled Google Desktop OAuth client for zero-configuration end-user sign-in:
+    /// 1) `GoogleOAuthClient.json` in `Bundle.main` resources (embedded during release builds), or
+    /// 2) `CharkleGoogleOAuthClientID` (+ optional `CharkleGoogleOAuthClientSecret`) in `Info.plist`.
+    public static func bundledConfig() -> GoogleOAuthClientConfig? {
+        if let url = Bundle.main.url(forResource: "GoogleOAuthClient", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
+           let parsed = try? parseClientSecretJSON(data) {
+            return parsed
+        }
+        if let clientID = Bundle.main.object(forInfoDictionaryKey: "CharkleGoogleOAuthClientID") as? String {
+            let trimmedID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedID.isEmpty {
+                let secret = (Bundle.main.object(forInfoDictionaryKey: "CharkleGoogleOAuthClientSecret") as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return GoogleOAuthClientConfig(clientID: trimmedID, clientSecret: secret)
+            }
+        }
+        return nil
+    }
 }
 
 public nonisolated struct GoogleOAuthToken: Codable, Sendable {
@@ -82,12 +102,41 @@ public actor GoogleOAuthClient {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let config = try GoogleOAuthClientConfig.parseClientSecretJSON(Data(contentsOf: url))
-        if try storedConfig()?.clientID != config.clientID { try keychain.delete("drive.oauth.token") }
-        try keychain.save(JSONEncoder().encode(config), for: "drive.oauth.config")
+        try saveClientConfig(config)
+    }
+
+    public func saveClientConfig(_ config: GoogleOAuthClientConfig) throws {
+        let trimmedID = config.clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else {
+            throw DriveTransportError.notConfigured("请输入有效的 Google OAuth Client ID。")
+        }
+        let normalized = GoogleOAuthClientConfig(
+            clientID: trimmedID,
+            clientSecret: config.clientSecret.trimmingCharacters(in: .whitespacesAndNewlines),
+            authURI: config.authURI,
+            tokenURI: config.tokenURI
+        )
+        if try storedConfig()?.clientID != normalized.clientID {
+            try keychain.delete("drive.oauth.token")
+        }
+        try keychain.save(JSONEncoder().encode(normalized), for: "drive.oauth.config")
     }
 
     public func storedConfig() throws -> GoogleOAuthClientConfig? {
         try keychain.read("drive.oauth.config").map { try JSONDecoder().decode(GoogleOAuthClientConfig.self, from: $0) }
+    }
+
+    /// Resolves OAuth client credentials in priority order:
+    /// 1) Explicitly saved Keychain config, 2) App-bundled production OAuth client.
+    public func resolvedConfig() throws -> GoogleOAuthClientConfig? {
+        if let saved = try storedConfig(), !saved.clientID.isEmpty {
+            return saved
+        }
+        return GoogleOAuthClientConfig.bundledConfig()
+    }
+
+    public func hasResolvedConfig() -> Bool {
+        (try? resolvedConfig()) != nil
     }
 
     public func currentStoredToken() throws -> GoogleOAuthToken? {
@@ -101,7 +150,9 @@ public actor GoogleOAuthClient {
     public func signOut() throws { try keychain.delete("drive.oauth.token") }
 
     public func accessToken() async throws -> String {
-        guard let config = try storedConfig() else { throw DriveTransportError.notConfigured("Import Google OAuth credentials.") }
+        guard let config = try resolvedConfig() else {
+            throw DriveTransportError.notConfigured("请先在设置中完成 Google 登录配置。")
+        }
         return try await validAccessToken(config: config)
     }
 
@@ -343,7 +394,7 @@ private actor LoopbackOAuthServer {
         }
         let timeout = Task {
             do { try await Task.sleep(for: .seconds(timeoutSeconds)) } catch { return }
-            finish(with: .failure(DriveTransportError.authenticationRequired("Google OAuth callback timed out.")))
+            finish(with: .failure(DriveTransportError.authenticationRequired("Google 登录已超时，请重试。")))
         }
         defer { timeout.cancel() }
         return try await withTaskCancellationHandler {
@@ -387,17 +438,33 @@ private actor LoopbackOAuthServer {
                 if let code = url?.queryItems?.first(where: { $0.name == "code" })?.value, !code.isEmpty {
                     result = .success((code, state))
                 } else {
-                    result = .failure(DriveTransportError.authenticationRequired("Google authorization was declined."))
+                    result = .failure(DriveTransportError.authenticationRequired("已取消 Google 账号授权。"))
                 }
             } else {
                 result = nil
             }
             if let result { Task { await self?.finish(with: result) } }
             let success = (try? result?.get()) != nil
-            let message = success ? "Charkle received Google authorization. You can close this tab."
-                : "Charkle did not receive Google authorization."
+            let title = success ? "已完成 Google 账号登录" : "未完成授权"
+            let bodyText = success
+                ? "你可以关闭此标签页，Charkle 将自动开始同步你的素材与情绪板。"
+                : "授权未完成或已取消，请返回 Charkle 重试。"
+            let accent = success ? "#22C55E" : "#EF4444"
+            let icon = success ? "✓" : "!"
+            let html = """
+            <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>\(title) · Charkle</title>
+            <style>
+            :root{color-scheme:light dark}
+            body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;background:#F6F6F5;color:#1D1D1F}
+            @media(prefers-color-scheme:dark){body{background:#141517;color:#F5F5F7}.card{background:#1E2024;border-color:rgba(255,255,255,.1)}}
+            .card{max-width:380px;padding:32px 28px;border-radius:18px;background:#fff;border:1px solid rgba(0,0,0,.08);box-shadow:0 16px 40px rgba(0,0,0,.08);text-align:center}
+            .badge{width:46px;height:46px;margin:0 auto 16px;border-radius:50%;background:\(accent);color:#fff;font-size:22px;font-weight:700;display:flex;align-items:center;justify-content:center}
+            h1{margin:0 0 8px;font-size:18px;font-weight:600}
+            p{margin:0;font-size:13.5px;line-height:1.55;opacity:.72}
+            </style></head><body><div class="card"><div class="badge">\(icon)</div><h1>\(title)</h1><p>\(bodyText)</p></div></body></html>
+            """
             let status = success ? "200 OK" : "400 Bad Request"
-            let response = "HTTP/1.1 \(status)\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(message.utf8.count)\r\nConnection: close\r\n\r\n\(message)"
+            let response = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
             connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
         }
     }

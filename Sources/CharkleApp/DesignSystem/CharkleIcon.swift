@@ -67,7 +67,7 @@ public struct CharkleIcon: View {
         case "palette": "paintpalette"
         case "export": "square.and.arrow.up"
         case "swap": "arrow.triangle.2.circlepath"
-        case "pin-offline": "pin.fill"
+        case "pin-offline": "arrow.down.circle.fill"
         // Capture & Sync
         case "notch": "menubar.dock.rectangle"
         case "screenshot": "camera.viewfinder"

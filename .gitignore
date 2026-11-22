@@ -8,3 +8,4 @@ dist/
 design/icons/check-out/
 design/icons/*/check-out/
 design/icons/node_modules/
+Resources/GoogleOAuthClient.json

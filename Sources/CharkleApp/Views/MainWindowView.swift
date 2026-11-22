@@ -26,6 +26,10 @@ public struct MainWindowView: View {
     @State private var isSidebarVisible: Bool = true
     @State private var quickBatchTagDraft: String = ""
     @State private var showBatchTagPopover: Bool = false
+    @State private var pendingPermanentDeleteIDs: [UUID] = []
+    @State private var showCreateSubfolderPopover: Bool = false
+    @State private var subfolderNameDraft: String = ""
+    @FocusState private var isSubfolderFieldFocused: Bool
 
     private static let filterColorPresets: [String] = [
         "#1E2024", "#5C6B73", "#3D5A80", "#4E7D96",
@@ -222,6 +226,29 @@ public struct MainWindowView: View {
                 moodboards: moodboards
             )
         }
+        .alert(
+            pendingPermanentDeleteIDs.count == library.assets.count && coordinator.selectedDestination == .trash && pendingPermanentDeleteIDs.count > 1
+                ? "清空废纸篓（共 \(pendingPermanentDeleteIDs.count) 项）？"
+                : "彻底删除 \(pendingPermanentDeleteIDs.count) 项素材？",
+            isPresented: Binding(
+                get: { !pendingPermanentDeleteIDs.isEmpty },
+                set: { if !$0 { pendingPermanentDeleteIDs = [] } }
+            )
+        ) {
+            Button("取消", role: .cancel) {
+                pendingPermanentDeleteIDs = []
+            }
+            Button("彻底删除", role: .destructive) {
+                let ids = pendingPermanentDeleteIDs
+                pendingPermanentDeleteIDs = []
+                Task {
+                    await library.permanentlyDeleteAssets(ids)
+                    coordinator.showToast("已彻底删除 \(ids.count) 项素材", icon: "trash.slash")
+                }
+            }
+        } message: {
+            Text("彻底删除后将无法从废纸篓恢复。")
+        }
         .task {
             await library.bootstrap()
             await moodboards.refreshBoards()
@@ -260,10 +287,14 @@ public struct MainWindowView: View {
 
     private var libraryGalleryStage: some View {
         let isInbox = coordinator.selectedDestination == .inbox
+        let isTrash = coordinator.selectedDestination == .trash
+        let activeFolderID: UUID? = if case .folder(let fid) = coordinator.selectedDestination { fid } else { nil }
         let topInset: CGFloat = {
             var base: CGFloat = 74
             if coordinator.isVisualFilterBarPresented { base += 92 }
             if isInbox && !library.assets.isEmpty { base += 54 }
+            if isTrash && !library.assets.isEmpty { base += 54 }
+            if activeFolderID != nil { base += 54 }
             return base
         }()
 
@@ -317,7 +348,10 @@ public struct MainWindowView: View {
                         onTogglePinOffline: { ids, pinned in
                             Task {
                                 await library.togglePinOffline(ids: ids, pinned: pinned)
-                                coordinator.showToast(pinned ? "已钉选离线可用" : "已取消离线钉选", icon: "pin.fill")
+                                coordinator.showToast(
+                                    pinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
+                                    icon: pinned ? "arrow.down.circle.fill" : "icloud"
+                                )
                             }
                         },
                         onCopyColorHex: { copyColorHex($0) },
@@ -326,6 +360,15 @@ public struct MainWindowView: View {
                                 await library.trashAssets(ids)
                                 coordinator.showToast("已移至废纸篓", icon: "trash")
                             }
+                        },
+                        onRestoreAssets: { ids in
+                            Task {
+                                await library.restoreAssets(ids)
+                                coordinator.showToast("已将 \(ids.count) 项放回原处", icon: "arrow.uturn.backward")
+                            }
+                        },
+                        onPermanentlyDeleteAssets: { ids in
+                            pendingPermanentDeleteIDs = ids
                         },
                         onResolveDragFileURL: { _ in nil }
                     )
@@ -347,6 +390,16 @@ public struct MainWindowView: View {
 
                 if isInbox && !library.assets.isEmpty {
                     inboxTriageBar
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                }
+
+                if isTrash && !library.assets.isEmpty {
+                    trashActionBar
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                }
+
+                if let activeFolderID {
+                    folderSubfoldersBar(folderID: activeFolderID)
                         .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
                 }
             }
@@ -625,7 +678,7 @@ public struct MainWindowView: View {
                 }
             }
 
-            // Row 2: CIELAB Color Swatch Picker + ΔE Tolerance + Rating + Offline Pinned
+            // Row 2: Friendly Color Filter + Tolerance Range + Rating + Kept Locally
             HStack(spacing: 12) {
                 HStack(spacing: 5) {
                     Text("色彩")
@@ -650,14 +703,33 @@ public struct MainWindowView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .help("按 CIELAB 感知色彩筛选 \(hex)")
+                        .help("按主色调筛选 \(hex)")
                     }
 
+                    // Custom color picker (supports macOS eyedropper & arbitrary color selection)
+                    ColorPicker(
+                        "",
+                        selection: Binding(
+                            get: {
+                                Color(charkleHex: library.filter.selectedColorHex ?? "#3D5A80")
+                            },
+                            set: { newColor in
+                                if let hex = Self.hexString(from: newColor) {
+                                    library.filter.selectedColorHex = hex
+                                    Task { await library.refreshAssets() }
+                                }
+                            }
+                        ),
+                        supportsOpacity: false
+                    )
+                    .labelsHidden()
+                    .frame(width: 22, height: 20)
+                    .help("自定义颜色或吸管取色")
+
                     if library.filter.selectedColorHex != nil {
-                        HStack(spacing: 4) {
-                            Text("ΔE \(Int(library.filter.colorTolerance))")
-                                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                                .monospacedDigit()
+                        HStack(spacing: 5) {
+                            Text("精确")
+                                .font(.system(size: 10))
                                 .foregroundStyle(.secondary)
                             Slider(value: Binding(
                                 get: { library.filter.colorTolerance },
@@ -666,8 +738,29 @@ public struct MainWindowView: View {
                                     Task { await library.refreshAssets() }
                                 }
                             ), in: 10...55)
-                            .frame(width: 72)
+                            .frame(width: 74)
+                            .help("调节颜色匹配范围：越靠左越接近所选颜色，越靠右包含更多相近色调")
+                            Text("宽松")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                            Text(colorToleranceLabel(library.filter.colorTolerance))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                            Button {
+                                library.filter.selectedColorHex = nil
+                                Task { await library.refreshAssets() }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("清除颜色筛选")
                         }
+                        .padding(.leading, 4)
                     }
                 }
 
@@ -693,15 +786,15 @@ public struct MainWindowView: View {
 
                 Divider().frame(height: 16)
 
-                // Pinned Offline Toggle
+                // Kept Locally (iCloud-style) Filter Toggle
                 Button {
                     library.filter.onlyPinnedOffline.toggle()
                     Task { await library.refreshAssets() }
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: library.filter.onlyPinnedOffline ? "pin.fill" : "pin")
+                        Image(systemName: library.filter.onlyPinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle")
                             .font(.system(size: 10.5))
-                        Text("仅看离线钉选")
+                        Text("已保留在本地")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundStyle(library.filter.onlyPinnedOffline ? Color.accentColor : .secondary)
@@ -831,6 +924,191 @@ public struct MainWindowView: View {
         .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
+    // MARK: - Trash Recovery & Empty Bar
+
+    private var trashActionBar: some View {
+        let allIDs = library.assets.map(\.id)
+        return HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "trash")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("废纸篓 · 共 \(allIDs.count) 项素材")
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                Task {
+                    await library.restoreAssets(allIDs)
+                    coordinator.showToast("已将 \(allIDs.count) 项全部放回原处", icon: "arrow.uturn.backward")
+                }
+            } label: {
+                Label("全部放回原处", systemImage: "arrow.uturn.backward")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.07), in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button(role: .destructive) {
+                pendingPermanentDeleteIDs = allIDs
+            } label: {
+                Label("清空废纸篓…", systemImage: "trash.slash")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.red.opacity(0.10), in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    // MARK: - Folder Breadcrumb + Subfolders Strip + Click-Outside Popover Creator
+
+    private func folderSubfoldersBar(folderID: UUID) -> some View {
+        let crumbs = library.folderBreadcrumbs(for: folderID)
+        let children = library.childFolders(of: folderID)
+
+        return HStack(spacing: 10) {
+            // Breadcrumb path
+            HStack(spacing: 4) {
+                ForEach(Array(crumbs.enumerated()), id: \.element.id) { index, crumb in
+                    if index > 0 {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Button {
+                        navigate(to: .folder(crumb.id))
+                    } label: {
+                        HStack(spacing: 4) {
+                            if index == 0 {
+                                CharkleIcon("folder", style: .duotone, size: 13, color: Color.accentColor)
+                            }
+                            Text(crumb.name)
+                                .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
+                                .foregroundStyle(crumb.id == folderID ? Color.primary : Color.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if !children.isEmpty {
+                Divider().frame(height: 15)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(children) { child in
+                            Button {
+                                navigate(to: .folder(child.id))
+                            } label: {
+                                HStack(spacing: 5) {
+                                    CharkleIcon("folder", style: .duotone, size: 12, color: .secondary)
+                                    Text(child.name)
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .lineLimit(1)
+                                    if child.assetCount > 0 {
+                                        Text("\(child.assetCount)")
+                                            .font(.system(size: 10, design: .rounded))
+                                            .monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                subfolderNameDraft = ""
+                showCreateSubfolderPopover = true
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 11))
+                    Text("新建子文件夹")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showCreateSubfolderPopover, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("新建子文件夹")
+                        .font(.system(size: 12.5, weight: .semibold))
+                    HStack(spacing: 6) {
+                        TextField("子文件夹名称", text: $subfolderNameDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                            .frame(width: 190)
+                            .focused($isSubfolderFieldFocused)
+                            .onSubmit { commitNewSubfolder(parentID: folderID) }
+                        Button("创建") {
+                            commitNewSubfolder(parentID: folderID)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(subfolderNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                .padding(14)
+                .onAppear {
+                    DispatchQueue.main.async {
+                        isSubfolderFieldFocused = true
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func commitNewSubfolder(parentID: UUID) {
+        let name = subfolderNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        subfolderNameDraft = ""
+        showCreateSubfolderPopover = false
+        Task {
+            if let created = await library.createFolder(name: name, parentID: parentID) {
+                coordinator.showToast("已创建子文件夹「\(created.name)」", icon: "folder.badge.plus")
+            }
+        }
+    }
+
+    private func colorToleranceLabel(_ tolerance: Double) -> String {
+        if tolerance <= 18 { return "精确" }
+        if tolerance <= 34 { return "适中" }
+        return "宽松"
+    }
+
+    private static func hexString(from color: Color) -> String? {
+        guard let ns = NSColor(color).usingColorSpace(.sRGB) else { return nil }
+        let r = Int((ns.redComponent * 255).rounded())
+        let g = Int((ns.greenComponent * 255).rounded())
+        let b = Int((ns.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+    }
+
     private var inboxZeroCelebrationView: some View {
         VStack(spacing: 14) {
             CharkleIcon("inbox", style: .layered, size: 64, color: Color(charkleHex: "#6B8E76"))
@@ -855,26 +1133,41 @@ public struct MainWindowView: View {
     }
 
     private var emptyLibraryView: some View {
-        VStack(spacing: 14) {
-            CharkleIcon("library", style: .layered, size: 60, color: .secondary.opacity(0.6))
-            Text(library.filter.hasActiveVisualFilters || !library.filter.searchQuery.isEmpty ? "没有符合筛选条件的素材" : "这里还没有素材")
-                .font(.system(size: 17, weight: .semibold))
-            Text("直接拖入图片、GIF、视频、PDF、音频、设计文件或网页链接，或按 ⌥⇧V 粘贴剪贴板内容。")
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-            HStack(spacing: 10) {
-                if library.filter.hasActiveVisualFilters || !library.filter.searchQuery.isEmpty {
-                    Button("清除筛选条件") {
-                        searchDraft = ""
-                        library.filter.clearVisualFilters()
-                        Task { await library.refreshAssets() }
+        let isTrash = coordinator.selectedDestination == .trash
+        let isFiltered = library.filter.hasActiveVisualFilters || !library.filter.searchQuery.isEmpty
+        return VStack(spacing: 14) {
+            if isTrash && !isFiltered {
+                Image(systemName: "trash")
+                    .font(.system(size: 42, weight: .light))
+                    .foregroundStyle(.secondary.opacity(0.6))
+                Text("废纸篓是空的")
+                    .font(.system(size: 17, weight: .semibold))
+                Text("移至废纸篓的素材会暂存在这里，你可以随时放回原处或彻底删除。")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+            } else {
+                CharkleIcon("library", style: .layered, size: 60, color: .secondary.opacity(0.6))
+                Text(isFiltered ? "没有符合筛选条件的素材" : "这里还没有素材")
+                    .font(.system(size: 17, weight: .semibold))
+                Text("直接拖入图片、GIF、视频、PDF、音频、设计文件或 X / 网页链接，或按 ⌥⇧V 粘贴剪贴板内容。")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 400)
+                HStack(spacing: 10) {
+                    if isFiltered {
+                        Button("清除筛选条件") {
+                            searchDraft = ""
+                            library.filter.clearVisualFilters()
+                            Task { await library.refreshAssets() }
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
+                    Button("采集剪贴板 (⌥⇧V)") { onCollectClipboard() }
+                        .buttonStyle(.borderedProminent)
                 }
-                Button("采集剪贴板 (⌥⇧V)") { onCollectClipboard() }
-                    .buttonStyle(.borderedProminent)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -885,6 +1178,11 @@ public struct MainWindowView: View {
 
     private var multiSelectFloatingActionPill: some View {
         let ids = Array(library.selectedAssetIDs)
+        let selectedAssets = library.selectedAssets
+        let isTrashSelection = coordinator.selectedDestination == .trash
+            || (!selectedAssets.isEmpty && selectedAssets.allSatisfy(\.isTrashed))
+        let allKeptLocally = !selectedAssets.isEmpty && selectedAssets.allSatisfy(\.pinnedOffline)
+
         return CharkleGlassContainer(spacing: 8) {
             HStack(spacing: 8) {
                 Text("已选 \(ids.count) 项")
@@ -894,114 +1192,148 @@ public struct MainWindowView: View {
 
                 Rectangle().fill(CharkleTheme.hairline(for: colorScheme)).frame(width: 1, height: 16)
 
-                Button {
-                    Task {
-                        if let board = await moodboards.createBoardFromSelection(assetIDs: ids, title: "精选情绪板 (\(ids.count))") {
-                            coordinator.openMoodboard(board.id)
-                            coordinator.showToast("已用 \(ids.count) 项生成情绪板", icon: "sparkles.rectangle.stack")
+                if isTrashSelection {
+                    Button {
+                        Task {
+                            await library.restoreAssets(ids)
+                            coordinator.showToast("已将 \(ids.count) 项放回原处", icon: "arrow.uturn.backward")
                         }
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        CharkleIcon("sparkle-board", style: .duotone, size: 13.5, color: .white)
-                        Text("生成情绪板")
+                    } label: {
+                        Label("放回原处", systemImage: "arrow.uturn.backward")
                             .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 6)
+                            .background(Color.accentColor, in: Capsule(style: .continuous))
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6)
-                    .background(Color.accentColor, in: Capsule(style: .continuous))
-                }
-                .buttonStyle(CharkleTactileButtonStyle())
+                    .buttonStyle(CharkleTactileButtonStyle())
 
-                Menu {
-                    Button("收件箱") { Task { await library.moveAssets(ids, toFolderID: nil) } }
-                    Divider()
-                    ForEach(library.folders) { folder in
-                        Button(folder.name) {
-                            Task {
-                                await library.moveAssets(ids, toFolderID: folder.id)
-                                coordinator.showToast("已移动到「\(folder.name)」", icon: "folder")
+                    Button(role: .destructive) {
+                        pendingPermanentDeleteIDs = ids
+                    } label: {
+                        Label("彻底删除", systemImage: "trash.slash")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.red.opacity(0.10), in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button {
+                        Task {
+                            if let board = await moodboards.createBoardFromSelection(assetIDs: ids, title: "精选情绪板 (\(ids.count))") {
+                                coordinator.openMoodboard(board.id)
+                                coordinator.showToast("已用 \(ids.count) 项生成情绪板", icon: "sparkles.rectangle.stack")
                             }
                         }
-                    }
-                } label: {
-                    Label("移动", systemImage: "folder")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-
-                Button {
-                    showBatchTagPopover.toggle()
-                } label: {
-                    Label("加标签", systemImage: "tag")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showBatchTagPopover) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("为 \(ids.count) 项素材添加标签")
-                            .font(.system(size: 12, weight: .semibold))
-                        TextField("输入标签回车…", text: $quickBatchTagDraft)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 200)
-                            .onSubmit {
-                                let val = quickBatchTagDraft
-                                quickBatchTagDraft = ""
-                                showBatchTagPopover = false
-                                Task { await library.addTags([val], to: ids) }
-                            }
-                    }
-                    .padding(12)
-                }
-
-                Menu {
-                    ForEach(1...5, id: \.self) { star in
-                        Button(String(repeating: "★", count: star)) {
-                            Task { await library.setRating(star, for: ids) }
+                    } label: {
+                        HStack(spacing: 5) {
+                            CharkleIcon("sparkle-board", style: .duotone, size: 13.5, color: .white)
+                            Text("生成情绪板")
+                                .font(.system(size: 12, weight: .semibold))
                         }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Color.accentColor, in: Capsule(style: .continuous))
                     }
-                    Button("清除评分") { Task { await library.setRating(0, for: ids) } }
-                } label: {
-                    Label("评分", systemImage: "star")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                    .buttonStyle(CharkleTactileButtonStyle())
 
-                Button {
-                    Task {
-                        await library.togglePinOffline(ids: ids, pinned: true)
-                        coordinator.showToast("已钉选 \(ids.count) 项离线可用", icon: "pin.fill")
+                    Menu {
+                        Button("收件箱") { Task { await library.moveAssets(ids, toFolderID: nil) } }
+                        Divider()
+                        ForEach(library.folders) { folder in
+                            Button(library.folderDisplayPath(for: folder.id)) {
+                                Task {
+                                    await library.moveAssets(ids, toFolderID: folder.id)
+                                    coordinator.showToast("已移动到「\(folder.name)」", icon: "folder")
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("移动", systemImage: "folder")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
                     }
-                } label: {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 12))
-                        .frame(width: 26, height: 26)
-                }
-                .buttonStyle(.plain)
-                .help("全部钉选离线")
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
 
-                Button(role: .destructive) {
-                    Task {
-                        await library.trashAssets(ids)
-                        coordinator.showToast("已移至废纸篓", icon: "trash")
+                    Button {
+                        showBatchTagPopover.toggle()
+                    } label: {
+                        Label("加标签", systemImage: "tag")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
                     }
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.red)
-                        .frame(width: 26, height: 26)
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showBatchTagPopover) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("为 \(ids.count) 项素材添加标签")
+                                .font(.system(size: 12, weight: .semibold))
+                            TextField("输入标签回车…", text: $quickBatchTagDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 200)
+                                .onSubmit {
+                                    let val = quickBatchTagDraft
+                                    quickBatchTagDraft = ""
+                                    showBatchTagPopover = false
+                                    Task { await library.addTags([val], to: ids) }
+                                }
+                        }
+                        .padding(12)
+                    }
+
+                    Menu {
+                        ForEach(1...5, id: \.self) { star in
+                            Button(String(repeating: "★", count: star)) {
+                                Task { await library.setRating(star, for: ids) }
+                            }
+                        }
+                        Button("清除评分") { Task { await library.setRating(0, for: ids) } }
+                    } label: {
+                        Label("评分", systemImage: "star")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+
+                    Button {
+                        let nextPinned = !allKeptLocally
+                        Task {
+                            await library.togglePinOffline(ids: ids, pinned: nextPinned)
+                            coordinator.showToast(
+                                nextPinned ? "已将 \(ids.count) 项设为始终保留在本地" : "已取消 \(ids.count) 项的始终保留",
+                                icon: nextPinned ? "arrow.down.circle.fill" : "icloud"
+                            )
+                        }
+                    } label: {
+                        Image(systemName: allKeptLocally ? "arrow.down.circle.fill" : "arrow.down.circle")
+                            .font(.system(size: 13))
+                            .foregroundStyle(allKeptLocally ? Color.accentColor : Color.primary)
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help(allKeptLocally ? "取消全部保留在本地" : "全部始终保留在本地")
+
+                    Button(role: .destructive) {
+                        Task {
+                            await library.trashAssets(ids)
+                            coordinator.showToast("已移至废纸篓", icon: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.red)
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help("移至废纸篓")
                 }
-                .buttonStyle(.plain)
-                .help("移至废纸篓")
 
                 Button {
                     library.selectedAssetIDs.removeAll()
@@ -1159,9 +1491,10 @@ public struct MainWindowView: View {
                             .background(Color.green.opacity(0.12), in: Capsule(style: .continuous))
                     }
                     if board.pinnedOffline {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 10))
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 11))
                             .foregroundStyle(Color.accentColor)
+                            .help("已始终保留在本地")
                     }
                 }
 

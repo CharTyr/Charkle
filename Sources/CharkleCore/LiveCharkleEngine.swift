@@ -110,7 +110,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         do {
             for input in inputs {
                 try Task.checkCancellation()
-                prepared.append(try await prepare(input, folderID: targetFolderID))
+                if case .webURL(let url, _, _) = input, let ref = XPostURLParser.parse(url) {
+                    let xPrepared = try await prepareXPost(ref, fallbackInput: input, folderID: targetFolderID)
+                    prepared.append(contentsOf: xPrepared)
+                } else {
+                    prepared.append(try await prepare(input, folderID: targetFolderID))
+                }
             }
         } catch {
             for item in prepared { media.removeFiles(for: item.asset) }
@@ -180,6 +185,68 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             media.removeFiles(for: AssetRecord(id: id, title: "", fileName: ""))
             throw error
         }
+    }
+
+    private func prepareXPost(_ ref: XPostReference, fallbackInput: CaptureInput, folderID: UUID?) async throws -> [PreparedAsset] {
+        guard let post = await XPostResolver.resolve(ref) else {
+            return [try await prepare(fallbackInput, folderID: folderID)]
+        }
+
+        let stagingDir = media.staging.appending(path: "xpost-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        var downloadedFiles: [URL] = []
+        for (idx, item) in post.media.enumerated() {
+            try Task.checkCancellation()
+            let baseName = "X-\(post.authorHandle)-\(ref.tweetID)-\(idx + 1)"
+            if let localFile = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: baseName) {
+                downloadedFiles.append(localFile)
+            }
+        }
+
+        var results: [PreparedAsset] = []
+        let canonicalStr = post.canonicalURL.absoluteString
+        let searchableTweetBody = [post.authorName, "@\(post.authorHandle)", post.articleTitle ?? "", post.text, post.quotedText ?? ""]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
+
+        if !downloadedFiles.isEmpty {
+            let total = downloadedFiles.count
+            for (idx, fileURL) in downloadedFiles.enumerated() {
+                try Task.checkCancellation()
+                var item = try await prepare(.fileURL(fileURL), folderID: folderID)
+                let suffix = total > 1 ? " (\(idx + 1)/\(total))" : ""
+                item.asset.title = post.shortTitle + suffix
+                item.asset.notes = post.formattedNotes
+                item.asset.sourceURL = canonicalStr
+                item.asset.sourceDomain = "x.com"
+                if !item.asset.tags.contains("X") {
+                    item.asset.tags.append("X")
+                }
+                if let existingOCR = item.asset.ocrText, !existingOCR.isEmpty {
+                    item.asset.ocrText = searchableTweetBody + "\n" + existingOCR
+                } else {
+                    item.asset.ocrText = searchableTweetBody
+                }
+                results.append(item)
+            }
+            return results
+        }
+
+        // Text-only tweet (or protected/unavailable media): archive full tweet text as searchable Markdown card
+        var snippet = try await prepare(
+            .textSnippet(title: post.shortTitle, text: post.markdownDocument, sourceURL: canonicalStr),
+            folderID: folderID
+        )
+        snippet.asset.title = post.shortTitle
+        snippet.asset.notes = post.formattedNotes
+        snippet.asset.sourceURL = canonicalStr
+        snippet.asset.sourceDomain = "x.com"
+        if !snippet.asset.tags.contains("X") {
+            snippet.asset.tags.append("X")
+        }
+        return [snippet]
     }
 
     private static func commit(_ prepared: PreparedAsset, in store: isolated LibraryDatabase,
@@ -466,16 +533,44 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func importGoogleOAuthSecret(from url: URL) async throws { try await oauth.importClientSecret(from: url) }
 
+    public func hasGoogleOAuthClientConfig() async -> Bool {
+        await oauth.hasResolvedConfig()
+    }
+
+    public func saveGoogleOAuthClientConfig(clientID: String, clientSecret: String) async throws {
+        try await oauth.saveClientConfig(GoogleOAuthClientConfig(clientID: clientID, clientSecret: clientSecret))
+    }
+
     public func signInGoogleDrive() async throws -> DriveAccountInfo {
-        guard let config = try await oauth.storedConfig() else {
-            throw DriveTransportError.notConfigured("Import the Google Desktop OAuth client JSON first.")
+        guard let config = try await oauth.resolvedConfig() else {
+            throw DriveTransportError.notConfigured("当前开发版本尚未内置 Google 登录凭据，请先在设置中填写或导入凭据。")
         }
         _ = try await oauth.authorizeInteractive(config: config) { url in
             await MainActor.run { _ = NSWorkspace.shared.open(url) }
         }
-        let account = try await DirectAPITransport(oauth: oauth).accountInfo()
-        await refreshAutoSync(config: syncConfig())
+        await MainActor.run {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        var currentConfig = await syncConfig()
+        if currentConfig.mode == .localOnly {
+            currentConfig.mode = .directAPIWithGDirect
+            try await saveSyncConfig(currentConfig)
+        }
+        let endpoints = currentConfig.useGDirectIPAcceleration
+            ? await GDirectIntegration.inspect(mountPath: currentConfig.mountPath).endpoints
+            : []
+        let account = try await DirectAPITransport(oauth: oauth, endpoints: endpoints).accountInfo()
+        await driveSync.updateSignedInAccount(account, activeMode: currentConfig.mode)
+        await refreshAutoSync(config: currentConfig)
         return account
+    }
+
+    public func signOutGoogleDrive() async throws {
+        try await oauth.signOut()
+        autoSyncTask?.cancel()
+        autoSyncTask = nil
+        let currentConfig = await syncConfig()
+        await driveSync.updateSignedInAccount(nil, activeMode: currentConfig.mode)
     }
 
     public func syncNow() async throws -> SyncReport {

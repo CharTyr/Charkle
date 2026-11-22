@@ -183,20 +183,25 @@ public final class NotchShelfController {
     private var isSensorDragging = false
     private var isPanelDragging = false
     private var lastObservedDragChangeCount: Int = NSPasteboard(name: .drag).changeCount
+    private var lastObservedGeneralPasteboardChangeCount: Int = -1
     private var autoOpenedBySystemDrag: Bool = false
     private var lastAnchoredScreenFrame: NSRect = .zero
+    private var screenObserver: (any NSObjectProtocol)?
+    private var keyMonitor: Any?
 
     private static let shelfWindowLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 4)
     private static let sensorWindowLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 3)
 
     // Generous transparent margin (≥ 3× shadow radius on left/right/bottom) so drop shadows
     // feather cleanly to 0% alpha without ever clipping into a rectangular borderless panel edge.
-    private static let cardExpandedWidth: CGFloat = 436
-    private static let cardExpandedBaseHeight: CGFloat = 236
     private static let shadowHorizontalMargin: CGFloat = 96
     private static let shadowBottomMargin: CGFloat = 120
-    private static let fixedPanelWidth: CGFloat = cardExpandedWidth + shadowHorizontalMargin * 2 // 628
-    private static let fixedPanelBaseHeight: CGFloat = cardExpandedBaseHeight + shadowBottomMargin // 356
+
+    private struct ScreenNotchMetrics {
+        let hasPhysicalNotch: Bool
+        let notchWidth: CGFloat
+        let notchHeight: CGFloat
+    }
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -217,6 +222,33 @@ public final class NotchShelfController {
         createFixedPanel()
         setupSensorWindow()
         startCursorAndDragWatcher()
+
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.anchorFixedPanelIfScreenChanged()
+                self?.repositionSensorWindow()
+            }
+        }
+
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.shelfState.isExpanded, self.panel?.isKeyWindow == true else {
+                return event
+            }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "v" {
+                self.onCollectClipboard()
+                return nil
+            }
+            if event.keyCode == 53 { // Escape
+                self.collapse()
+                return nil
+            }
+            return event
+        }
     }
 
     public func toggle() {
@@ -231,6 +263,7 @@ public final class NotchShelfController {
         guard coordinator.notchShelfEnabled else { return }
         hideWorkItem?.cancel()
         anchorFixedPanelIfScreenChanged()
+        refreshClipboardHint(force: true)
         guard let panel else { return }
 
         panel.ignoresMouseEvents = false
@@ -242,26 +275,43 @@ public final class NotchShelfController {
 
     public func collapse() {
         guard shelfState.isExpanded else { return }
-        if shelfState.isDropTargeted { return }
+        if shelfState.isDropTargeted || shelfState.processingMessage != nil { return }
         hideWorkItem?.cancel()
         shelfState.isExpanded = false
         // Immediately let pointer events pass through to underlying apps even during spring settle
         panel?.ignoresMouseEvents = true
     }
 
-    /// Shows a brief confirmation in the Notch Shelf (e.g. after screenshot or clipboard collect).
+    /// Shows an active in-progress spinner in the Notch Shelf (e.g. while downloading X post media).
+    public func showProcessing(_ message: String) {
+        expand(forDrag: false)
+        bannerResetTask?.cancel()
+        hideWorkItem?.cancel()
+        shelfState.statusBanner = nil
+        shelfState.processingMessage = message
+    }
+
+    /// Shows a brief confirmation in the Notch Shelf (e.g. after screenshot, clipboard, or X post collect).
     public func flashConfirmation(_ message: String) {
         expand(forDrag: false)
         bannerResetTask?.cancel()
+        shelfState.processingMessage = nil
         shelfState.statusBanner = message
         shelfState.lastDropTimestamp = Date()
         hideWorkItem?.cancel()
         bannerResetTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.6))
+            try? await Task.sleep(for: .seconds(1.8))
             guard !Task.isCancelled, let self else { return }
             self.shelfState.statusBanner = nil
             self.scheduleAutoCollapse(delay: 0.45)
         }
+    }
+
+    private func refreshClipboardHint(force: Bool = false) {
+        let count = NSPasteboard.general.changeCount
+        guard force || count != lastObservedGeneralPasteboardChangeCount else { return }
+        lastObservedGeneralPasteboardChangeCount = count
+        shelfState.clipboardXPostURL = ClipboardCollector.detectedXPostURL(from: .general)
     }
 
     // MARK: - Fixed Oversized Transparent NSPanel Setup
@@ -288,8 +338,11 @@ public final class NotchShelfController {
             }
         )
 
+        let initialPanelWidth = shelfState.expandedShapeWidth + Self.shadowHorizontalMargin * 2
+        let initialPanelHeight = shelfState.expandedCardHeight + Self.shadowBottomMargin
+
         let hosting = NotchDropHostingView(rootView: rootView)
-        hosting.frame = NSRect(x: 0, y: 0, width: Self.fixedPanelWidth, height: Self.fixedPanelBaseHeight)
+        hosting.frame = NSRect(x: 0, y: 0, width: initialPanelWidth, height: initialPanelHeight)
         hosting.autoresizingMask = [.width, .height]
 
         hosting.onDragEntered = { [weak self] count in
@@ -311,22 +364,24 @@ public final class NotchShelfController {
         hosting.activeHitRectProvider = { [weak self, weak hosting] in
             guard let self, let hosting, self.shelfState.isExpanded else { return .zero }
             let bounds = hosting.bounds
-            let cardH = Self.cardExpandedBaseHeight + self.shelfState.notchTopInset + 12
+            let cardW = self.shelfState.expandedShapeWidth
+            let cardH = self.shelfState.expandedCardHeight + 12
             return NSRect(
-                x: bounds.midX - (Self.cardExpandedWidth / 2.0) - 8,
+                x: bounds.midX - (cardW / 2.0) - 8,
                 y: bounds.maxY - cardH,
-                width: Self.cardExpandedWidth + 16,
+                width: cardW + 16,
                 height: cardH
             )
         }
 
         let panel = NotchPanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.fixedPanelWidth, height: Self.fixedPanelBaseHeight),
+            contentRect: NSRect(x: 0, y: 0, width: initialPanelWidth, height: initialPanelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         panel.contentView = hosting
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -342,18 +397,52 @@ public final class NotchShelfController {
         panel.orderFrontRegardless()
     }
 
+    private func notchMetrics(for screen: NSScreen) -> ScreenNotchMetrics {
+        let safeTop = screen.safeAreaInsets.top
+        let auxLeft = screen.auxiliaryTopLeftArea
+        let auxRight = screen.auxiliaryTopRightArea
+        let auxHeight = max(auxLeft?.height ?? 0, auxRight?.height ?? 0)
+        let hasNotch = safeTop > 0
+
+        let measuredWidth: CGFloat
+        if let left = auxLeft, let right = auxRight {
+            measuredWidth = max(0, screen.frame.width - left.width - right.width)
+        } else {
+            measuredWidth = 0
+        }
+
+        // Always keep generous notch dimensions so UI never collides with any MacBook Pro/Air camera housing
+        let notchWidth: CGFloat = hasNotch ? max(measuredWidth, 192) : 204
+        let notchHeight: CGFloat = hasNotch ? max(safeTop, auxHeight, 36) : 0
+        return ScreenNotchMetrics(
+            hasPhysicalNotch: hasNotch,
+            notchWidth: notchWidth,
+            notchHeight: notchHeight
+        )
+    }
+
     private func anchorFixedPanelIfScreenChanged() {
         guard let panel else { return }
         let screen = screenUnderCursor()
-        let topNotchClearance = max(0, screen.safeAreaInsets.top - 4)
-        shelfState.notchTopInset = topNotchClearance
-        shelfState.hasPhysicalNotch = screen.safeAreaInsets.top > 0
+        let metrics = notchMetrics(for: screen)
 
+        if shelfState.hasPhysicalNotch != metrics.hasPhysicalNotch {
+            shelfState.hasPhysicalNotch = metrics.hasPhysicalNotch
+        }
+        if abs(shelfState.physicalNotchWidth - metrics.notchWidth) > 0.5 {
+            shelfState.physicalNotchWidth = metrics.notchWidth
+        }
+        if abs(shelfState.physicalNotchHeight - metrics.notchHeight) > 0.5 {
+            shelfState.physicalNotchHeight = metrics.notchHeight
+        }
+
+        let panelWidth = shelfState.expandedShapeWidth + Self.shadowHorizontalMargin * 2
+        let panelHeight = shelfState.expandedCardHeight + Self.shadowBottomMargin
         let targetFrame = NSRect(
-            x: screen.frame.midX - Self.fixedPanelWidth / 2.0,
-            y: screen.frame.maxY - (Self.fixedPanelBaseHeight + topNotchClearance),
-            width: Self.fixedPanelWidth,
-            height: Self.fixedPanelBaseHeight + topNotchClearance
+            x: screen.frame.midX - panelWidth / 2.0,
+            y: screen.frame.maxY - panelHeight,
+            width: panelWidth,
+            height: panelHeight
         )
         if lastAnchoredScreenFrame != targetFrame {
             lastAnchoredScreenFrame = targetFrame
@@ -415,9 +504,9 @@ public final class NotchShelfController {
             return
         }
         let screen = screenUnderCursor()
-        let hasPhysicalNotch = screen.safeAreaInsets.top > 0
-        let sensorWidth: CGFloat = hasPhysicalNotch ? 220 : 240
-        let sensorHeight: CGFloat = hasPhysicalNotch ? max(screen.safeAreaInsets.top, 32) : 8
+        let metrics = notchMetrics(for: screen)
+        let sensorWidth: CGFloat = metrics.hasPhysicalNotch ? (metrics.notchWidth + 24) : 230
+        let sensorHeight: CGFloat = metrics.hasPhysicalNotch ? max(metrics.notchHeight, 34) : 8
         let rect = NSRect(
             x: screen.frame.midX - sensorWidth / 2.0,
             y: screen.frame.maxY - sensorHeight,
@@ -504,25 +593,31 @@ public final class NotchShelfController {
             }
         }
 
-        let topBandHeight: CGFloat = isMouseButtonDown ? 68 : max(screen.safeAreaInsets.top, 10)
-        let horizontalHalfSpan: CGFloat = isMouseButtonDown ? 190 : 120
+        let metrics = notchMetrics(for: screen)
+        let topBandHeight: CGFloat = isMouseButtonDown ? 68 : max(metrics.notchHeight, 10)
+        let horizontalHalfSpan: CGFloat = isMouseButtonDown ? 190 : max(metrics.notchWidth / 2.0 + 16, 120)
         let nearTopCenter = loc.y >= screen.frame.maxY - topBandHeight
             && abs(loc.x - screen.frame.midX) <= horizontalHalfSpan
+
+        if shelfState.isExpanded {
+            refreshClipboardHint()
+        }
 
         if nearTopCenter && !shelfState.isExpanded {
             if isMouseButtonDown || coordinator.notchHoverTriggerEnabled {
                 expand(forDrag: isMouseButtonDown)
             }
         } else if shelfState.isExpanded, let panelFrame = panel?.frame {
-            if shelfState.isDropTargeted || shelfState.statusBanner != nil {
+            if shelfState.isDropTargeted || shelfState.statusBanner != nil || shelfState.processingMessage != nil {
                 hideWorkItem?.cancel()
                 return
             }
-            let cardHeight = Self.cardExpandedBaseHeight + shelfState.notchTopInset
+            let cardWidth = shelfState.expandedShapeWidth
+            let cardHeight = shelfState.expandedCardHeight
             let activeCardRect = NSRect(
-                x: panelFrame.midX - (Self.cardExpandedWidth / 2.0) - 12,
+                x: panelFrame.midX - (cardWidth / 2.0) - 12,
                 y: panelFrame.maxY - cardHeight - 12,
-                width: Self.cardExpandedWidth + 24,
+                width: cardWidth + 24,
                 height: cardHeight + 12
             )
             if activeCardRect.contains(loc) || nearTopCenter {
@@ -571,10 +666,17 @@ public final class NotchShelfController {
     private func handleAppKitDrop(pasteboard: NSPasteboard, promiseReceivers: [NSFilePromiseReceiver]) -> Bool {
         let (targetFolderID, targetBoardID, destLabel) = resolvedDropTargets()
 
-        // 1. Standard synchronous pasteboard payloads (files, images, URLs, hex colors, text)
+        // 1. Standard synchronous pasteboard payloads (files, images, URLs, X posts, hex colors, text)
         let directInputs = ClipboardCollector.extractInputs(from: pasteboard)
         if !directInputs.isEmpty {
+            let hasXPost = directInputs.contains { input in
+                if case .webURL(let url, _, _) = input { return XPostURLParser.parse(url) != nil }
+                return false
+            }
             notchLogger.info("NotchShelf received \(directInputs.count) payload(s) -> \(destLabel, privacy: .public)")
+            if hasXPost {
+                showProcessing("正在保存 X 推文及媒体…")
+            }
             Task { @MainActor in
                 let created = await library.ingest(
                     directInputs,
@@ -585,7 +687,11 @@ public final class NotchShelfController {
                     await moodboards.reloadActiveBoardIfNeeded(id: boardID)
                     await moodboards.refreshBoards()
                 }
-                flashConfirmation("已收入「\(destLabel)」(\(max(created.count, directInputs.count)) 项)")
+                let count = max(created.count, directInputs.count)
+                let message = hasXPost
+                    ? "已保存 X 推文及媒体至「\(destLabel)」(\(count) 项)"
+                    : "已收入「\(destLabel)」(\(count) 项)"
+                flashConfirmation(message)
             }
             return true
         }
@@ -620,6 +726,12 @@ public final class NotchShelfController {
     }
 
     isolated deinit {
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+        }
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
         pollTimer?.invalidate()
         bannerResetTask?.cancel()
         hideWorkItem?.cancel()

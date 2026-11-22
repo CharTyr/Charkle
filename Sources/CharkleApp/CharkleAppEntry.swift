@@ -107,15 +107,25 @@ public final class CharkleRuntime {
             coordinator.showToast("剪贴板暂无可收藏的图片、链接或文本", icon: "doc.on.clipboard", tone: .warning)
             return
         }
+        let hasXPost = inputs.contains { input in
+            if case .webURL(let url, _, _) = input { return XPostURLParser.parse(url) != nil }
+            return false
+        }
         let (folderID, boardID, destLabel) = currentCaptureTarget()
+        if hasXPost {
+            notchController?.showProcessing("正在保存 X 推文及媒体…")
+        }
         Task {
             let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: boardID)
             if let boardID {
                 await moodboards.reloadActiveBoardIfNeeded(id: boardID)
                 await moodboards.refreshBoards()
             }
-            let msg = "剪贴板已收入「\(destLabel)」(\(max(created.count, inputs.count)) 项)"
-            coordinator.showToast(msg, icon: "doc.on.clipboard.fill", tone: .success)
+            let count = max(created.count, inputs.count)
+            let msg = hasXPost
+                ? "已保存 X 推文及媒体至「\(destLabel)」(\(count) 项)"
+                : "剪贴板已收入「\(destLabel)」(\(count) 项)"
+            coordinator.showToast(msg, icon: hasXPost ? "checkmark.circle.fill" : "doc.on.clipboard.fill", tone: .success)
             notchController?.flashConfirmation(msg)
         }
     }

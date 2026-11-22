@@ -26,6 +26,21 @@ public final actor DriveSyncEngine {
         if !running { currentStatus = status }
     }
 
+    func updateSignedInAccount(_ account: DriveAccountInfo?, activeMode: DriveTransportMode) async {
+        currentStatus.account = account
+        currentStatus.activeMode = activeMode
+        if account != nil {
+            currentStatus.lastError = nil
+            if case .error = currentStatus.phase {
+                currentStatus.phase = .idle
+            }
+        } else {
+            currentStatus.lastSyncedAt = nil
+            currentStatus.phase = .idle
+        }
+        try? await database.setState("lastSyncStatus", currentStatus)
+    }
+
     public func sync(using transport: any DriveTransport, config: DriveSyncConfig) async throws -> SyncReport {
         guard config.mode != .localOnly else { return SyncReport() }
         guard !running else { throw DriveTransportError.notConfigured("A sync is already running.") }

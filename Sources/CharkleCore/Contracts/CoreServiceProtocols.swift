@@ -66,7 +66,10 @@ public protocol CharkleEngineProtocol: Sendable {
     func runGDirectScan() async throws -> GDirectEnvironmentSnapshot
     func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot
     func importGoogleOAuthSecret(from url: URL) async throws
+    func hasGoogleOAuthClientConfig() async -> Bool
+    func saveGoogleOAuthClientConfig(clientID: String, clientSecret: String) async throws
     func signInGoogleDrive() async throws -> DriveAccountInfo
+    func signOutGoogleDrive() async throws
     func syncNow() async throws -> SyncReport
 
     // MARK: - First-Launch Curated Demo

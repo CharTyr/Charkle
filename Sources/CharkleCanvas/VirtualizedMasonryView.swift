@@ -103,6 +103,8 @@ public struct MasonryCallbacks {
     public var onTogglePinOffline: ([UUID], Bool) -> Void
     public var onCopyColorHex: (String) -> Void
     public var onTrashAssets: ([UUID]) -> Void
+    public var onRestoreAssets: ([UUID]) -> Void
+    public var onPermanentlyDeleteAssets: ([UUID]) -> Void
     public var onResolveDragFileURL: (UUID) -> URL?
 
     public init(
@@ -113,6 +115,8 @@ public struct MasonryCallbacks {
         onTogglePinOffline: @escaping ([UUID], Bool) -> Void = { _, _ in },
         onCopyColorHex: @escaping (String) -> Void = { _ in },
         onTrashAssets: @escaping ([UUID]) -> Void = { _ in },
+        onRestoreAssets: @escaping ([UUID]) -> Void = { _ in },
+        onPermanentlyDeleteAssets: @escaping ([UUID]) -> Void = { _ in },
         onResolveDragFileURL: @escaping (UUID) -> URL? = { _ in nil }
     ) {
         self.onOpenQuickLook = onOpenQuickLook
@@ -122,6 +126,8 @@ public struct MasonryCallbacks {
         self.onTogglePinOffline = onTogglePinOffline
         self.onCopyColorHex = onCopyColorHex
         self.onTrashAssets = onTrashAssets
+        self.onRestoreAssets = onRestoreAssets
+        self.onPermanentlyDeleteAssets = onPermanentlyDeleteAssets
         self.onResolveDragFileURL = onResolveDragFileURL
     }
 }
@@ -243,7 +249,9 @@ public struct VirtualizedMasonryView: View {
                                 callbacks.onTogglePinOffline(effectiveSelection(including: asset.id), !asset.pinnedOffline)
                             },
                             onCopyColorHex: { hex in callbacks.onCopyColorHex(hex) },
-                            onTrash: { callbacks.onTrashAssets(effectiveSelection(including: asset.id)) }
+                            onTrash: { callbacks.onTrashAssets(effectiveSelection(including: asset.id)) },
+                            onRestore: { callbacks.onRestoreAssets(effectiveSelection(including: asset.id)) },
+                            onPermanentlyDelete: { callbacks.onPermanentlyDeleteAssets(effectiveSelection(including: asset.id)) }
                         )
                         .frame(width: itemFrame.rect.width, height: itemFrame.rect.height)
                         .position(x: itemFrame.rect.midX, y: itemFrame.rect.midY)
@@ -533,6 +541,8 @@ private struct MasonryAssetCard: View {
     let onTogglePinOffline: () -> Void
     let onCopyColorHex: (String) -> Void
     let onTrash: () -> Void
+    let onRestore: () -> Void
+    let onPermanentlyDelete: () -> Void
 
     @State private var isHovered: Bool = false
 
@@ -588,15 +598,19 @@ private struct MasonryAssetCard: View {
 
                     Spacer(minLength: 4)
 
-                    // Top-right media kind / pin badge (only for non-static-image media or pinned)
+                    // Top-right media kind / always-available-offline badge (quiet & gallery-respectful)
                     HStack(spacing: 4) {
                         if asset.pinnedOffline {
-                            Image(systemName: "pin.fill")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 4)
-                                .background(Color.black.opacity(0.48), in: RoundedRectangle(cornerRadius: innerBadgeRadius, style: .continuous))
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.92))
+                                .frame(width: 18, height: 18)
+                                .background(Color.black.opacity(0.42), in: Circle())
+                                .overlay(
+                                    Circle()
+                                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
+                                )
+                                .help("已始终保留在本地")
                         }
 
                         if let badgeText = mediaBadgeText {
@@ -691,32 +705,51 @@ private struct MasonryAssetCard: View {
             Button("快速预览 (Space)") {
                 onDoubleClick()
             }
-            Button("加入情绪板…") {
-                onAddToMoodboard()
-            }
-            Divider()
-            Menu("移动到文件夹") {
-                Button("收件箱") { onMoveToFolder(nil) }
-                if !folders.isEmpty {
-                    Divider()
-                    ForEach(folders) { folder in
-                        Button(folder.name) {
-                            onMoveToFolder(folder.id)
+            if asset.isTrashed {
+                Divider()
+                Button {
+                    onRestore()
+                } label: {
+                    Label("放回原处", systemImage: "arrow.uturn.backward")
+                }
+                Button(role: .destructive) {
+                    onPermanentlyDelete()
+                } label: {
+                    Label("彻底删除", systemImage: "trash.slash")
+                }
+            } else {
+                Button("加入情绪板…") {
+                    onAddToMoodboard()
+                }
+                Divider()
+                Menu("移动到文件夹") {
+                    Button("收件箱") { onMoveToFolder(nil) }
+                    if !folders.isEmpty {
+                        Divider()
+                        ForEach(folders) { folder in
+                            Button(folder.name) {
+                                onMoveToFolder(folder.id)
+                            }
                         }
                     }
                 }
-            }
-            Button(asset.pinnedOffline ? "取消钉选离线" : "钉选离线（永不淘汰缓存）") {
-                onTogglePinOffline()
-            }
-            if let hex = asset.dominantColors.first?.hex {
-                Button("复制主色 \(hex.uppercased())") {
-                    onCopyColorHex(hex.uppercased())
+                Button {
+                    onTogglePinOffline()
+                } label: {
+                    Label(
+                        asset.pinnedOffline ? "取消始终保留在本地" : "始终保留在本地",
+                        systemImage: asset.pinnedOffline ? "icloud" : "arrow.down.circle"
+                    )
                 }
-            }
-            Divider()
-            Button("移至废纸篓", role: .destructive) {
-                onTrash()
+                if let hex = asset.dominantColors.first?.hex {
+                    Button("复制主色 \(hex.uppercased())") {
+                        onCopyColorHex(hex.uppercased())
+                    }
+                }
+                Divider()
+                Button("移至废纸篓", role: .destructive) {
+                    onTrash()
+                }
             }
         }
     }
