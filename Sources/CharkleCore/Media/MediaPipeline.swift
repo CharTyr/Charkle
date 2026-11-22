@@ -1,0 +1,410 @@
+import AVFoundation
+import CoreGraphics
+import CoreText
+import CryptoKit
+import Foundation
+import ImageIO
+import PDFKit
+import QuickLookThumbnailing
+import UniformTypeIdentifiers
+
+public nonisolated struct MediaPipeline: Sendable {
+    public let directory: URL
+    let originals: URL
+    let staging: URL
+    private let thumbnails: URL
+    private let previews: URL
+
+    public init(directory: URL) throws {
+        self.directory = directory
+        originals = directory.appending(path: "Originals", directoryHint: .isDirectory)
+        thumbnails = directory.appending(path: "Thumbnails", directoryHint: .isDirectory)
+        previews = directory.appending(path: "Previews", directoryHint: .isDirectory)
+        staging = directory.appending(path: "Staging", directoryHint: .isDirectory)
+        for location in [originals, thumbnails, previews, staging] {
+            try FileManager.default.createDirectory(at: location, withIntermediateDirectories: true)
+        }
+    }
+
+    public func thumbnailURL(for id: UUID, tier: ThumbnailTier) -> URL? {
+        let url = thumbnailPath(id, tier: tier)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    func thumbnailPath(_ id: UUID, tier: ThumbnailTier = .grid520) -> URL {
+        (tier == .grid520 ? thumbnails : previews).appending(path: id.uuidString + ".jpg")
+    }
+
+    func originalPath(for asset: AssetRecord) -> URL {
+        let ext = (asset.fileName as NSString).pathExtension.lowercased()
+        let safe = ext.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        let name = asset.id.uuidString + (safe.isEmpty ? "" : "." + safe.prefix(16))
+        return originals.appending(path: name)
+    }
+
+    public func cachedOriginal(for asset: AssetRecord) -> URL? {
+        let url = originalPath(for: asset)
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        // Drive can rename an existing file's extension while the old cache entry is still useful.
+        return (try? FileManager.default.contentsOfDirectory(at: originals, includingPropertiesForKeys: nil))?
+            .first { $0.deletingPathExtension().lastPathComponent == asset.id.uuidString }
+    }
+
+    func installOriginal(_ source: URL, for asset: AssetRecord) throws -> URL {
+        let destination = originalPath(for: asset)
+        if source == destination { return destination }
+        let previous = cachedOriginal(for: asset)
+        let temporary = staging.appending(path: UUID().uuidString)
+        try FileManager.default.copyItem(at: source, to: temporary)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        }
+        if let previous, previous != destination { try? FileManager.default.removeItem(at: previous) }
+        return destination
+    }
+
+    func removeFiles(for asset: AssetRecord) {
+        for url in [cachedOriginal(for: asset), thumbnailURL(for: asset.id, tier: .grid520), thumbnailURL(for: asset.id, tier: .preview1400)].compactMap({ $0 }) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func removeFiles(forIDs ids: Set<UUID>) throws {
+        for entry in originalEntries() where ids.contains(entry.id) {
+            try removeIfPresent(entry.url)
+        }
+        for id in ids {
+            for tier in [ThumbnailTier.grid520, .preview1400] {
+                try removeIfPresent(thumbnailPath(id, tier: tier))
+            }
+        }
+    }
+
+    private func removeIfPresent(_ url: URL) throws {
+        do { try FileManager.default.removeItem(at: url) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile { return }
+    }
+
+    static func digests(_ url: URL) throws -> (sha256: String, md5: String, bytes: Int64) {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var sha = SHA256()
+        var md5 = Insecure.MD5()
+        var size: Int64 = 0
+        while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
+            sha.update(data: data)
+            md5.update(data: data)
+            size += Int64(data.count)
+        }
+        return (hex(sha.finalize()), hex(md5.finalize()), size)
+    }
+
+    static func hex(_ bytes: some Sequence<UInt8>) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func mimeType(fileName: String) -> String {
+        UTType(filenameExtension: (fileName as NSString).pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+    }
+
+    struct Import: Sendable {
+        var asset: AssetRecord
+        let original: URL
+    }
+
+    @concurrent
+    func ingest(_ input: CaptureInput, folderID: UUID?, id: UUID = UUID()) async throws -> Import {
+        let temp = staging.appending(path: id.uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        var title: String?
+        var notes = ""
+        var source: URL?
+        let file: URL
+        switch input {
+        case .fileURL(let url):
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            let source = url.resolvingSymlinksInPath()
+            guard try source.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                throw LibraryDatabaseError("Select a regular file to import.")
+            }
+            file = temp.appending(path: Self.cleanName(url.lastPathComponent))
+            try FileManager.default.copyItem(at: source, to: file)
+        case .imageData(let data, let name, let sourceURL):
+            let name = Self.cleanName(name)
+            let type = CGImageSourceCreateWithData(data as CFData, nil)
+                .flatMap(CGImageSourceGetType).flatMap { UTType($0 as String) }
+            let given = (name as NSString).pathExtension
+            let filename: String
+            if given.isEmpty {
+                filename = name + "." + (type?.preferredFilenameExtension ?? "png")
+            } else if let type, let extensionForType = type.preferredFilenameExtension,
+                      UTType(filenameExtension: given) != type, !(given.lowercased() == "apng" && type == .png) {
+                filename = (name as NSString).deletingPathExtension + "." + extensionForType
+            } else {
+                filename = name
+            }
+            file = temp.appending(path: filename)
+            source = sourceURL.flatMap(URL.init(string:))
+            try data.write(to: file)
+        case .webURL(let url, let suppliedTitle, let suppliedNotes):
+            guard WebBookmark.isWebURL(url) else {
+                throw LibraryDatabaseError("Unsupported bookmark URL scheme.")
+            }
+            source = url
+            title = suppliedTitle
+            notes = suppliedNotes ?? ""
+            file = temp.appending(path: Self.cleanName(suppliedTitle ?? url.host() ?? "Bookmark") + ".webloc")
+            let data = try PropertyListSerialization.data(fromPropertyList: ["URL": url.absoluteString], format: .xml, options: 0)
+            try data.write(to: file)
+        case .textSnippet(let name, let text, let sourceURL):
+            title = name
+            source = sourceURL.flatMap(URL.init(string:))
+            file = temp.appending(path: Self.cleanName(name) + ".md")
+            try Data(text.utf8).write(to: file)
+        case .colorSwatch(let hex, let name):
+            let color = LabColor.fromHex(hex)
+            title = name ?? color.hex
+            file = temp.appending(path: Self.cleanName(title ?? "Swatch") + ".png")
+            guard let image = MediaArtwork.swatch(color), let data = MediaArtwork.encode(image, type: .png) else {
+                throw LibraryDatabaseError("Could not render color swatch.")
+            }
+            try data.write(to: file)
+        }
+
+        let mime = Self.mimeType(fileName: file.lastPathComponent)
+        let digests = try Self.digests(file)
+        var asset = AssetRecord(
+            id: id, title: title ?? file.deletingPathExtension().lastPathComponent, fileName: file.lastPathComponent,
+            folderID: folderID, contentHash: digests.sha256, mediaKind: MediaKind.detect(fileExtension: file.pathExtension, mimeType: mime),
+            mimeType: mime, fileSizeBytes: digests.bytes, sourceURL: source?.absoluteString,
+            sourceDomain: source?.host(), notes: notes, isLocalOriginalCached: true
+        )
+        try await render(file, for: &asset, preferredTitle: title)
+        return Import(asset: asset, original: try installOriginal(file, for: asset))
+    }
+
+    @concurrent
+    func refreshed(_ asset: AssetRecord, from file: URL) async throws -> AssetRecord {
+        var result = asset
+        try await render(file, for: &result, preferredTitle: asset.mediaKind == .webBookmark ? nil : asset.title)
+        return result
+    }
+
+    private func render(_ file: URL, for asset: inout AssetRecord, preferredTitle: String?) async throws {
+        let ext = asset.fileName.lowercased().split(separator: ".").last.map(String.init) ?? ""
+        var render: MediaRender? = nil
+        switch asset.mediaKind {
+        case .image, .animatedImage:
+            render = Self.raster(file)
+            if ext == "png", let duration = render?.duration, duration > 0 { asset.mediaKind = .animatedImage }
+        case .video:
+            render = await Self.video(file)
+        case .webBookmark:
+            let url = asset.sourceURL.flatMap(URL.init(string:)) ?? WebBookmark.url(in: file)
+            let bookmark = await WebBookmark.fetch(url)
+            asset.sourceURL = url?.absoluteString
+            asset.sourceDomain = url?.host()
+            asset.title = preferredTitle ?? bookmark.title ?? asset.title
+            if let poster = bookmark.poster { render = MediaRender(poster) }
+        case .document:
+            if ext == "pdf" { render = Self.pdf(file) }
+            if ["md", "markdown", "txt", "rtf"].contains(ext) {
+                let handle = try FileHandle(forReadingFrom: file)
+                defer { try? handle.close() }
+                if let data = try handle.read(upToCount: 65_536) {
+                    let text = String(decoding: data, as: UTF8.self)
+                    if let card = MediaArtwork.card(title: asset.title, label: ext.uppercased(), text: text) {
+                        render = MediaRender(card, text: String(text.prefix(8_000)))
+                    }
+                }
+            }
+            if render == nil { render = await Self.quickLook(file) }
+        case .designFile:
+            render = Self.raster(file)
+            if render == nil { render = await Self.quickLook(file) }
+            if render == nil, ext == "svg" { render = SVGPreview.render(file).map { MediaRender($0) } }
+        case .audio:
+            let audio = await Self.audio(file)
+            asset.durationSeconds = audio.duration
+            asset.waveformPeaks = audio.peaks
+        }
+        if let render {
+            asset.pixelWidth = render.width
+            asset.pixelHeight = render.height
+            asset.durationSeconds = render.duration
+            if let text = render.text { asset.ocrText = text }
+        }
+        guard let image = render?.poster ?? MediaArtwork.card(title: asset.title, label: asset.sourceDomain ?? asset.mediaKind.localizedLabel,
+                                                                 text: asset.notes, waveform: asset.waveformPeaks),
+              let grid = MediaArtwork.resize(image, maxSide: 520),
+              let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
+            throw LibraryDatabaseError("Could not render thumbnail for \(asset.fileName).")
+        }
+        if render == nil {
+            asset.pixelWidth = image.width
+            asset.pixelHeight = image.height
+        }
+        try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
+        let previewPath = thumbnailPath(asset.id, tier: .preview1400)
+        if max(image.width, image.height) > 520, let large = MediaArtwork.resize(image, maxSide: 1_400),
+           let preview = MediaArtwork.encode(large, type: .jpeg) {
+            try preview.write(to: previewPath, options: .atomic)
+        } else {
+            try removeIfPresent(previewPath)
+        }
+        if asset.mediaKind != .audio {
+            asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
+        }
+    }
+
+    private static func cleanName(_ raw: String) -> String {
+        let replaced = raw.components(separatedBy: CharacterSet(charactersIn: "/:\\").union(.controlCharacters))
+            .joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String(replaced.prefix(140))
+        return name.isEmpty || name == "." || name == ".." ? "Reference" : name
+    }
+
+    static func raster(_ url: URL) -> MediaRender? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return raster(source)
+    }
+
+    static func raster(_ source: CGImageSource) -> MediaRender? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_400,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
+        let width = props[kCGImagePropertyPixelWidth] as? Int ?? image.width
+        let height = props[kCGImagePropertyPixelHeight] as? Int ?? image.height
+        let count = CGImageSourceGetCount(source)
+        var seconds = 0.0
+        if count > 1 {
+            for index in 0..<count {
+                let frame = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] ?? [:]
+                if let gif = frame[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+                    seconds += gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double
+                        ?? gif[kCGImagePropertyGIFDelayTime] as? Double ?? 0.1
+                } else if let png = frame[kCGImagePropertyPNGDictionary] as? [CFString: Any] {
+                    seconds += png[kCGImagePropertyAPNGUnclampedDelayTime] as? Double
+                        ?? png[kCGImagePropertyAPNGDelayTime] as? Double ?? 0.1
+                }
+            }
+        }
+        let swapped = (5...8).contains(orientation)
+        return MediaRender(image, width: swapped ? height : width, height: swapped ? width : height,
+                           duration: seconds > 0 ? seconds : nil)
+    }
+
+    private static func video(_ url: URL) async -> MediaRender? {
+        let asset = AVURLAsset(url: url)
+        let duration = try? await asset.load(.duration).seconds
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first else { return nil }
+        let size = try? await track.load(.naturalSize)
+        let transform = try? await track.load(.preferredTransform)
+        let area = CGRect(origin: .zero, size: size ?? .zero).applying(transform ?? .identity)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 1_400, height: 1_400)
+        let time = CMTime(seconds: min(1, max(0, (duration ?? 0).isFinite ? (duration ?? 0) * 0.15 : 0)), preferredTimescale: 600)
+        guard let frame = try? await generator.image(at: time) else { return nil }
+        return MediaRender(frame.image, width: area.width > 0 ? Int(area.width.rounded()) : nil,
+                           height: area.height > 0 ? Int(area.height.rounded()) : nil, duration: duration)
+    }
+
+    private static func pdf(_ url: URL) -> MediaRender? {
+        guard let document = PDFDocument(url: url), let page = document.page(at: 0),
+              let reference = page.pageRef else { return nil }
+        let bounds = page.bounds(for: .cropBox)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        let scale = 1_400 / max(bounds.width, bounds.height)
+        let width = max(1, Int((bounds.width * scale).rounded()))
+        let height = max(1, Int((bounds.height * scale).rounded()))
+        guard let context = MediaArtwork.context(width: width, height: height) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(rect)
+        context.concatenate(reference.getDrawingTransform(.cropBox, rect: rect, rotate: 0, preserveAspectRatio: true))
+        context.drawPDFPage(reference)
+        guard let image = context.makeImage() else { return nil }
+        let text = (0..<min(5, document.pageCount)).compactMap { document.page(at: $0)?.string }.joined(separator: "\n")
+        return MediaRender(image, width: Int(bounds.width.rounded()), height: Int(bounds.height.rounded()),
+                           text: String(text.prefix(8_000)))
+    }
+
+    private static func quickLook(_ url: URL) async -> MediaRender? {
+        let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 1_400, height: 1_400),
+                                                    scale: 1, representationTypes: .thumbnail)
+        return await withCheckedContinuation { continuation in
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { image, _ in
+                continuation.resume(returning: image.map { MediaRender($0.cgImage) })
+            }
+        }
+    }
+
+    private static func audio(_ url: URL) async -> (duration: Double?, peaks: [Float]) {
+        let asset = AVURLAsset(url: url)
+        let duration = try? await asset.load(.duration).seconds
+        guard let file = try? AVAudioFile(forReading: url),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 8_192),
+              file.length > 0 else { return (duration.flatMap { $0.isFinite ? $0 : nil }, []) }
+        let frameCount = file.length
+        let bars = 48
+        var peaks = [Float](repeating: 0, count: bars)
+        var offset: AVAudioFramePosition = 0
+        while offset < frameCount {
+            guard (try? file.read(into: buffer)) != nil, let channels = buffer.floatChannelData,
+                  buffer.frameLength > 0 else { break }
+            for frame in 0..<Int(buffer.frameLength) {
+                let bin = min(bars - 1, Int((offset + Int64(frame)) * Int64(bars) / frameCount))
+                for channel in 0..<Int(buffer.format.channelCount) {
+                    peaks[bin] = max(peaks[bin], min(1, abs(channels[channel][frame])))
+                }
+            }
+            offset += Int64(buffer.frameLength)
+        }
+        return (duration.flatMap { $0.isFinite ? $0 : nil } ?? Double(frameCount) / file.fileFormat.sampleRate, peaks)
+    }
+
+    func thumbnailBytes() -> Int64 {
+        [thumbnails, previews].flatMap {
+            (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        }.reduce(0) { $0 + Self.bytes($1) }
+    }
+
+    func originalEntries() -> [(id: UUID, url: URL, bytes: Int64)] {
+        ((try? FileManager.default.contentsOfDirectory(at: originals, includingPropertiesForKeys: [.fileSizeKey])) ?? [])
+            .compactMap { url in
+                UUID(uuidString: url.deletingPathExtension().lastPathComponent).map { ($0, url, Self.bytes(url)) }
+            }
+    }
+
+    private static func bytes(_ url: URL) -> Int64 {
+        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    }
+}
+
+nonisolated struct MediaRender: Sendable {
+    let poster: CGImage
+    let width: Int
+    let height: Int
+    let duration: Double?
+    let text: String?
+
+    init(_ poster: CGImage, width: Int? = nil, height: Int? = nil, duration: Double? = nil, text: String? = nil) {
+        self.poster = poster
+        self.width = width ?? poster.width
+        self.height = height ?? poster.height
+        self.duration = duration.flatMap { $0.isFinite ? $0 : nil }
+        self.text = text
+    }
+}

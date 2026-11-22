@@ -6,4 +6,5 @@ dist/
 *.xcuserdata
 *.xcworkspace/
 design/icons/check-out/
+design/icons/*/check-out/
 design/icons/node_modules/

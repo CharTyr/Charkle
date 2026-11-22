@@ -74,8 +74,8 @@ public protocol CharkleEngineProtocol: Sendable {
 }
 
 public enum CharkleEngineFactory {
-    /// Returns the production engine once wired, or the in-memory stub during initial parallel UI bring-up.
+    /// Returns the live SQLite + MediaPipeline + DriveSync + Intelligence production engine.
     public static func makeDefault(appSupportDirectory: URL? = nil) throws -> any CharkleEngineProtocol {
-        PlaceholderCharkleEngine()
+        try LiveCharkleEngine.make(appSupportDirectory: appSupportDirectory)
     }
 }

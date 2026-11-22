@@ -1,0 +1,281 @@
+import CharkleCanvas
+import CharkleCore
+import SwiftUI
+
+/// Spotlight-style Liquid Glass command palette (`⌘J`) searching Moodboards, Folders, Tags,
+/// and Assets (zh/en/pinyin) with full keyboard navigation (`↑` / `↓` / `Return` / `Esc`).
+public struct JumpAnywhereView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public let coordinator: AppCoordinatorStore
+    public let library: LibraryStore
+    public let onSelectMatch: (QuickJumpMatch) -> Void
+    public let onTriggerQuickCommand: (QuickCommand) -> Void
+    public let onClose: () -> Void
+
+    public enum QuickCommand: String, CaseIterable, Identifiable, Sendable {
+        case newMoodboard
+        case openInbox
+        case toggleNotch
+        case captureArea
+
+        public var id: String { rawValue }
+
+        public var title: String {
+            switch self {
+            case .newMoodboard: "快速生成情绪板…"
+            case .openInbox: "前往收件箱清理台"
+            case .toggleNotch: "展开 / 收起刘海浮窗 (⌥⇧S)"
+            case .captureArea: "交互式区域截图 (⌥⇧A)"
+            }
+        }
+
+        public var icon: String {
+            switch self {
+            case .newMoodboard: "sparkle-board"
+            case .openInbox: "inbox"
+            case .toggleNotch: "notch"
+            case .captureArea: "screenshot"
+            }
+        }
+    }
+
+    @State private var query: String = ""
+    @State private var matches: [QuickJumpMatch] = []
+    @State private var selectedIndex: Int = 0
+    @State private var isPresentedVisual: Bool = false
+    @FocusState private var isSearchFocused: Bool
+
+    public init(
+        coordinator: AppCoordinatorStore,
+        library: LibraryStore,
+        onSelectMatch: @escaping (QuickJumpMatch) -> Void,
+        onTriggerQuickCommand: @escaping (QuickCommand) -> Void,
+        onClose: @escaping () -> Void
+    ) {
+        self.coordinator = coordinator
+        self.library = library
+        self.onSelectMatch = onSelectMatch
+        self.onTriggerQuickCommand = onTriggerQuickCommand
+        self.onClose = onClose
+    }
+
+    private var showingQuickCommands: Bool {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && matches.isEmpty
+    }
+
+    private var totalSelectableCount: Int {
+        showingQuickCommands ? QuickCommand.allCases.count : matches.count
+    }
+
+    public var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(colorScheme == .dark ? 0.38 : 0.22)
+                .ignoresSafeArea()
+                .onTapGesture { dismissWithAnimation() }
+
+            VStack(spacing: 0) {
+                // Search Input Header
+                HStack(spacing: 10) {
+                    CharkleIcon("search", style: .duotone, size: 17, color: .secondary)
+                    TextField("快速跳转情绪板、文件夹、标签或素材（支持拼音）…", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15, weight: .regular))
+                        .focused($isSearchFocused)
+                        .onSubmit { executeSelectedRow() }
+
+                    if !query.isEmpty {
+                        Button {
+                            query = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Text("ESC")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+
+                Divider()
+
+                // Results List
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        if showingQuickCommands {
+                            Text("快捷操作")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 14)
+                                .padding(.top, 8)
+                                .padding(.bottom, 4)
+
+                            ForEach(Array(QuickCommand.allCases.enumerated()), id: \.element.id) { idx, cmd in
+                                rowShell(isSelected: selectedIndex == idx) {
+                                    CharkleIcon(cmd.icon, style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
+                                    Text(cmd.title)
+                                        .font(.system(size: 13, weight: .medium))
+                                    Spacer()
+                                    Text("↵")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .onTapGesture {
+                                    onTriggerQuickCommand(cmd)
+                                    onClose()
+                                }
+                            }
+                        } else if matches.isEmpty {
+                            VStack(spacing: 6) {
+                                Text("未找到与「\(query)」匹配的内容")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Text("试试搜索文件夹名、情绪板标题、标签或拼音首字母")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 32)
+                        } else {
+                            ForEach(Array(matches.enumerated()), id: \.element.id) { idx, match in
+                                rowShell(isSelected: selectedIndex == idx) {
+                                    CharkleIcon(iconName(for: match.kind), style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(match.title)
+                                            .font(.system(size: 13, weight: .medium))
+                                            .lineLimit(1)
+                                        Text(match.subtitle)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text(kindLabel(for: match.kind))
+                                        .font(.system(size: 10.5, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2.5)
+                                        .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+                                }
+                                .onTapGesture {
+                                    onSelectMatch(match)
+                                    onClose()
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .frame(maxHeight: 360)
+            }
+            .frame(width: 580)
+            .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
+            .popoverOriginScale(isPresented: isPresentedVisual, anchor: .top, reducedMotion: reduceMotion)
+            .padding(.top, 92)
+        }
+        .onAppear {
+            isPresentedVisual = true
+            isSearchFocused = true
+            runSearch()
+        }
+        .onChange(of: query) { _, _ in
+            selectedIndex = 0
+            runSearch()
+        }
+        .onKeyPress(.escape) {
+            dismissWithAnimation()
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            if totalSelectableCount > 0 {
+                selectedIndex = (selectedIndex - 1 + totalSelectableCount) % totalSelectableCount
+            }
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            if totalSelectableCount > 0 {
+                selectedIndex = (selectedIndex + 1) % totalSelectableCount
+            }
+            return .handled
+        }
+        .onKeyPress(.return) {
+            executeSelectedRow()
+            return .handled
+        }
+    }
+
+    private func rowShell<Content: View>(isSelected: Bool, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 10) {
+            content()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            isSelected ? Color.accentColor.opacity(0.14) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+        .padding(.horizontal, 6)
+        .contentShape(Rectangle())
+    }
+
+    private func runSearch() {
+        let currentQuery = query
+        Task {
+            let results = await library.quickJump(query: currentQuery, limit: 24)
+            if currentQuery == query {
+                matches = results
+                if selectedIndex >= max(1, totalSelectableCount) {
+                    selectedIndex = 0
+                }
+            }
+        }
+    }
+
+    private func executeSelectedRow() {
+        if showingQuickCommands {
+            let commands = QuickCommand.allCases
+            guard selectedIndex < commands.count else { return }
+            onTriggerQuickCommand(commands[selectedIndex])
+            onClose()
+        } else {
+            guard selectedIndex < matches.count else { return }
+            onSelectMatch(matches[selectedIndex])
+            onClose()
+        }
+    }
+
+    private func dismissWithAnimation() {
+        isPresentedVisual = false
+        Task {
+            try? await Task.sleep(for: .milliseconds(reduceMotion ? 10 : 100))
+            onClose()
+        }
+    }
+
+    private func iconName(for kind: QuickJumpKind) -> String {
+        switch kind {
+        case .moodboard: "sparkle-board"
+        case .folder: "folder"
+        case .tag: "tag"
+        case .asset: "library"
+        }
+    }
+
+    private func kindLabel(for kind: QuickJumpKind) -> String {
+        switch kind {
+        case .moodboard: "情绪板"
+        case .folder: "文件夹"
+        case .tag: "标签"
+        case .asset: "素材"
+        }
+    }
+}

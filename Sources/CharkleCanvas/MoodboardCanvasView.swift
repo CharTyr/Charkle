@@ -1,0 +1,1947 @@
+import AppKit
+import CharkleCore
+import SwiftUI
+import UniformTypeIdentifiers
+
+// MARK: - Moodboard Interactive Tool Mode
+
+public enum MoodboardTool: String, CaseIterable, Sendable {
+    case select
+    case pan
+    case connector
+    case pen
+    case eraser
+
+    public var label: String {
+        switch self {
+        case .select: "选择"
+        case .pan: "抓手"
+        case .connector: "连线"
+        case .pen: "手绘"
+        case .eraser: "橡皮"
+        }
+    }
+
+    public var shortcutHint: String {
+        switch self {
+        case .select: "V"
+        case .pan: "H"
+        case .connector: "C"
+        case .pen: "P"
+        case .eraser: "E"
+        }
+    }
+}
+
+public struct MoodboardCanvasCallbacks {
+    public var onCommitDocument: (MoodboardDocument) -> Void
+    public var onUndo: () -> Void
+    public var onRedo: () -> Void
+    public var onSelectSwapTarget: (UUID?) -> Void
+    public var onOpenQuickLook: (AssetRecord) -> Void
+    public var onDropExternalInputs: ([CaptureInput], BoardPoint?) -> Void
+    public var onDropLibraryAssetIDs: ([UUID], BoardPoint?) -> Void
+    public var onCopyColorHex: (String) -> Void
+    public var onSearchByColorHex: (String) -> Void
+    public var onCopyExportedImage: (MoodboardExportOptions) -> Void
+    public var onSaveExportedImage: (MoodboardExportFormat, MoodboardExportOptions) -> Void
+
+    public init(
+        onCommitDocument: @escaping (MoodboardDocument) -> Void = { _ in },
+        onUndo: @escaping () -> Void = {},
+        onRedo: @escaping () -> Void = {},
+        onSelectSwapTarget: @escaping (UUID?) -> Void = { _ in },
+        onOpenQuickLook: @escaping (AssetRecord) -> Void = { _ in },
+        onDropExternalInputs: @escaping ([CaptureInput], BoardPoint?) -> Void = { _, _ in },
+        onDropLibraryAssetIDs: @escaping ([UUID], BoardPoint?) -> Void = { _, _ in },
+        onCopyColorHex: @escaping (String) -> Void = { _ in },
+        onSearchByColorHex: @escaping (String) -> Void = { _ in },
+        onCopyExportedImage: @escaping (MoodboardExportOptions) -> Void = { _ in },
+        onSaveExportedImage: @escaping (MoodboardExportFormat, MoodboardExportOptions) -> Void = { _, _ in }
+    ) {
+        self.onCommitDocument = onCommitDocument
+        self.onUndo = onUndo
+        self.onRedo = onRedo
+        self.onSelectSwapTarget = onSelectSwapTarget
+        self.onOpenQuickLook = onOpenQuickLook
+        self.onDropExternalInputs = onDropExternalInputs
+        self.onDropLibraryAssetIDs = onDropLibraryAssetIDs
+        self.onCopyColorHex = onCopyColorHex
+        self.onSearchByColorHex = onSearchByColorHex
+        self.onCopyExportedImage = onCopyExportedImage
+        self.onSaveExportedImage = onSaveExportedImage
+    }
+}
+
+// MARK: - Dual-Mode Moodboard Studio Canvas
+
+public struct MoodboardCanvasView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public let document: MoodboardDocument
+    public let assetsByID: [UUID: AssetRecord]
+    public let loader: ThumbnailImageLoader
+    public let swappingNodeID: UUID?
+    public let canUndo: Bool
+    public let canRedo: Bool
+    public let heroNamespace: Namespace.ID
+    public let callbacks: MoodboardCanvasCallbacks
+
+    @Namespace private var dockModeNamespace
+
+    // Canvas viewport & tool state
+    @State private var viewportSize: CGSize = CGSize(width: 1080, height: 760)
+    @State private var activeTool: MoodboardTool = .select
+    @State private var selectedNodeIDs: Set<UUID> = []
+    @State private var selectedConnectorID: UUID?
+    @State private var hoveredNodeID: UUID?
+    @State private var isDropTargeted: Bool = false
+
+    // Freeform infinite camera state (world -> screen: screen = (world - center) * zoom + viewport/2)
+    @State private var cameraCenter: CGPoint = CGPoint(x: 540, y: 360)
+    @State private var cameraZoom: CGFloat = 1.0
+    @State private var gestureStartZoom: CGFloat?
+    @State private var panStartCenter: CGPoint?
+    @State private var isSpaceKeyPanning: Bool = false
+
+    // Live interactive edits (1:1 pointer tracking without mutating undo stack every frame)
+    @State private var activeNodeDragID: UUID?
+    @State private var activeNodeDragDelta: CGSize = .zero
+    @State private var activeGroupChildIDs: Set<UUID> = []
+    @State private var snapGuidesX: [CGFloat] = []
+    @State private var snapGuidesY: [CGFloat] = []
+
+    @State private var resizingNodeID: UUID?
+    @State private var resizeStartFrame: BoardRect?
+    @State private var liveResizeFrame: BoardRect?
+
+    // Auto Editorial Kubai Tip 005 drag-to-reorder ripple state
+    @State private var editorialDraggingID: UUID?
+    @State private var editorialDragTranslation: CGSize = .zero
+    @State private var editorialTargetOrderIndex: Int?
+
+    // Connector creation & label editing
+    @State private var pendingConnectorSource: (nodeID: UUID, anchor: ConnectorAnchor, startWorld: CGPoint)?
+    @State private var pendingConnectorCursorWorld: CGPoint = .zero
+    @State private var connectorStyle: ConnectorStyle = .curved
+    @State private var connectorDashed: Bool = false
+    @State private var editingConnectorLabelID: UUID?
+    @State private var connectorLabelDraft: String = ""
+
+    // Freehand Ink Pen
+    @State private var inkColorHex: String = "#D95D48"
+    @State private var inkWidth: Double = 3.5
+    @State private var activeInkPoints: [InkStrokePoint] = []
+    @State private var exportIncludeAnnotations: Bool = true
+    @State private var exportIncludePalette: Bool = true
+
+    // Marquee selection in Freeform
+    @State private var freeformMarqueeStart: CGPoint?
+    @State private var freeformMarqueeCurrent: CGPoint?
+
+    private static let calmInkSwatches: [(name: String, hex: String)] = [
+        ("陶红", "#D95D48"),
+        ("墨炭", "#2C3038"),
+        ("钴蓝", "#3D6A99"),
+        ("青苔", "#4D7C5F"),
+        ("赭黄", "#C7933B"),
+        ("粉白", "#EFECE6")
+    ]
+
+    public init(
+        document: MoodboardDocument,
+        assetsByID: [UUID: AssetRecord],
+        loader: ThumbnailImageLoader,
+        swappingNodeID: UUID?,
+        canUndo: Bool,
+        canRedo: Bool,
+        heroNamespace: Namespace.ID,
+        callbacks: MoodboardCanvasCallbacks
+    ) {
+        self.document = document
+        self.assetsByID = assetsByID
+        self.loader = loader
+        self.swappingNodeID = swappingNodeID
+        self.canUndo = canUndo
+        self.canRedo = canRedo
+        self.heroNamespace = heroNamespace
+        self.callbacks = callbacks
+    }
+
+    private var isAutoEditorial: Bool {
+        document.mode.isAutoEditorial
+    }
+
+    private var autoConfig: AutoLayoutConfig {
+        switch document.mode {
+        case .autoEditorial(let cfg): cfg
+        case .freeform: AutoLayoutConfig()
+        }
+    }
+
+    public var body: some View {
+        ZStack {
+            CanvasSurface.ground(for: colorScheme)
+                .ignoresSafeArea()
+
+            if isAutoEditorial {
+                autoEditorialStage
+            } else {
+                freeformInfiniteStage
+            }
+
+            // Top floating Board Palette Strip (cleanly positioned below main floating search/header)
+            VStack {
+                if autoConfig.showPaletteStrip && !document.extractedPalette.isEmpty {
+                    BoardPaletteHeaderStrip(
+                        colors: document.extractedPalette,
+                        onCopyHex: callbacks.onCopyColorHex,
+                        onSearchColor: callbacks.onSearchByColorHex
+                    )
+                    .padding(.top, 14)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                }
+                Spacer()
+            }
+
+            // Bottom-Right Freeform Zoom Controls
+            if !isAutoEditorial {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        zoomControlsPill
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 20)
+                }
+            }
+
+            // Bottom-Center Floating Liquid Glass Tool Dock (single GlassEffectContainer!)
+            VStack {
+                Spacer()
+                floatingToolDock
+                    .padding(.bottom, 18)
+            }
+
+            // External drop highlight border
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.75), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .background(Color.accentColor.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(10)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onGeometryChange(for: CGSize.self) { proxy in
+            proxy.size
+        } action: { _, newSize in
+            if newSize.width > 120, newSize.height > 120 {
+                viewportSize = newSize
+            }
+        }
+        .onAppear {
+            syncCameraFromDocument()
+        }
+        .onChange(of: document.id) { _, _ in
+            selectedNodeIDs.removeAll()
+            selectedConnectorID = nil
+            activeTool = .select
+            syncCameraFromDocument()
+        }
+        .onDrop(of: [.fileURL, .url, .image, .plainText], isTargeted: $isDropTargeted) { providers, location in
+            handleCanvasDrop(providers: providers, screenLocation: location)
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.escape) {
+            if pendingConnectorSource != nil {
+                pendingConnectorSource = nil
+                return .handled
+            }
+            if editorialDraggingID != nil {
+                editorialDraggingID = nil
+                editorialDragTranslation = .zero
+                editorialTargetOrderIndex = nil
+                return .handled
+            }
+            if activeTool != .select {
+                activeTool = .select
+                return .handled
+            }
+            selectedNodeIDs.removeAll()
+            selectedConnectorID = nil
+            callbacks.onSelectSwapTarget(nil)
+            return .handled
+        }
+        .onKeyPress(.delete) {
+            deleteCurrentSelection()
+            return .handled
+        }
+        .onKeyPress(.space) {
+            if let firstID = selectedNodeIDs.first,
+               let node = document.nodes.first(where: { $0.id == firstID }),
+               let assetID = node.referencedAssetID,
+               let asset = assetsByID[assetID] {
+                callbacks.onOpenQuickLook(asset)
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "vhcpeVHCPE")) { press in
+            guard !isAutoEditorial, press.modifiers.isEmpty else { return .ignored }
+            switch press.characters.lowercased() {
+            case "v": activeTool = .select; return .handled
+            case "h": activeTool = .pan; return .handled
+            case "c": activeTool = .connector; return .handled
+            case "p": activeTool = .pen; return .handled
+            case "e": activeTool = .eraser; return .handled
+            default: return .ignored
+            }
+        }
+        .popover(isPresented: Binding(
+            get: { editingConnectorLabelID != nil },
+            set: { if !$0 { editingConnectorLabelID = nil } }
+        )) {
+            connectorLabelEditorPopover
+        }
+    }
+
+    // MARK: - 1. Auto Editorial Mode (With Kubai Tip 005 Drag-to-Reorder Ripple)
+
+    private var autoEditorialStage: some View {
+        let topPad: Double = (autoConfig.showPaletteStrip && !document.extractedPalette.isEmpty) ? 68 : 24
+        let solved = EditorialLayoutSolver.solve(
+            nodes: document.nodes,
+            config: autoConfig,
+            containerWidth: Double(max(420, viewportSize.width)),
+            assetsByID: assetsByID,
+            padding: 28
+        )
+        let orderedIDs = solved.orderedNodeIDs
+        let draggingIdx = editorialDraggingID.flatMap { orderedIDs.firstIndex(of: $0) }
+
+        return ScrollView(.vertical) {
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                    .frame(width: max(viewportSize.width, 320), height: max(solved.contentSize.height + topPad, viewportSize.height))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selectedNodeIDs.removeAll()
+                        callbacks.onSelectSwapTarget(nil)
+                    }
+
+                if document.nodes.isEmpty {
+                    emptyBoardPlaceholder
+                        .frame(width: viewportSize.width, height: max(420, viewportSize.height - 120))
+                } else {
+                    // Insertion drop line (Kubai 005: faint 15%-ink line growing from center)
+                    if let targetIdx = editorialTargetOrderIndex,
+                       let dragIdx = draggingIdx,
+                       targetIdx != dragIdx,
+                       targetIdx < orderedIDs.count,
+                       let targetRect = solved.frames[orderedIDs[targetIdx]] {
+                        Capsule(style: .continuous)
+                            .fill(Color.primary.opacity(0.18))
+                            .frame(width: 3, height: max(48, CGFloat(targetRect.height) - 16))
+                            .position(
+                                x: CGFloat(targetRect.minX) - 7,
+                                y: CGFloat(targetRect.midY + topPad)
+                            )
+                            .transition(.scale(scale: 0.2, anchor: .center).combined(with: .opacity))
+                            .allowsHitTesting(false)
+                    }
+
+                    ForEach(Array(orderedIDs.enumerated()), id: \.element) { orderIdx, nodeID in
+                        if let node = document.nodes.first(where: { $0.id == nodeID }),
+                           let rect = solved.frames[nodeID] {
+                            let isDragging = editorialDraggingID == nodeID
+                            let rippleX = computeEditorialRippleX(
+                                itemIndex: orderIdx,
+                                draggingIndex: draggingIdx,
+                                targetIndex: editorialTargetOrderIndex
+                            )
+                            let rippleDelay = computeEditorialRippleDelay(
+                                itemIndex: orderIdx,
+                                targetIndex: editorialTargetOrderIndex
+                            )
+
+                            renderNodeBody(node: node, isAutoMode: true)
+                                .frame(width: CGFloat(rect.width), height: CGFloat(rect.height))
+                                .scaleEffect(isDragging ? 0.94 : 1.0)
+                                .offset(
+                                    x: isDragging ? editorialDragTranslation.width : rippleX,
+                                    y: isDragging ? editorialDragTranslation.height : 0
+                                )
+                                .zIndex(isDragging ? 500 : Double(node.zIndex))
+                                .position(
+                                    x: CGFloat(rect.midX),
+                                    y: CGFloat(rect.midY + topPad)
+                                )
+                                .animation(
+                                    isDragging
+                                        ? nil
+                                        : CanvasMotion.accessible(
+                                            CanvasMotion.gestureSpring.delay(rippleDelay),
+                                            reduced: reduceMotion
+                                        ),
+                                    value: rippleX
+                                )
+                                .animation(
+                                    CanvasMotion.accessible(CanvasMotion.moveOnScreen, reduced: reduceMotion),
+                                    value: rect
+                                )
+                                .simultaneousGesture(
+                                    TapGesture(count: 1).onEnded {
+                                        selectedNodeIDs = [node.id]
+                                    }
+                                )
+                                .gesture(
+                                    editorialReorderGesture(
+                                        nodeID: nodeID,
+                                        solved: solved,
+                                        topPad: topPad
+                                    )
+                                )
+                        }
+                    }
+                }
+            }
+        }
+        .canvasScrollEdgeSoft(for: .top)
+    }
+
+    private func computeEditorialRippleX(itemIndex: Int, draggingIndex: Int?, targetIndex: Int?) -> CGFloat {
+        guard !reduceMotion,
+              let draggingIndex,
+              let targetIndex,
+              draggingIndex != targetIndex,
+              itemIndex != draggingIndex else { return 0 }
+        let dist = abs(itemIndex - targetIndex)
+        guard dist <= 5 else { return 0 }
+        let magnitude = CanvasMotion.rippleOffset(distance: dist, amplitude: 8)
+        return itemIndex < targetIndex ? -magnitude : magnitude
+    }
+
+    private func computeEditorialRippleDelay(itemIndex: Int, targetIndex: Int?) -> Double {
+        guard !reduceMotion, let targetIndex else { return 0 }
+        return CanvasMotion.rippleDelay(distance: abs(itemIndex - targetIndex))
+    }
+
+    private func editorialReorderGesture(
+        nodeID: UUID,
+        solved: EditorialLayoutResult,
+        topPad: Double
+    ) -> some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                if editorialDraggingID == nil {
+                    editorialDraggingID = nodeID
+                }
+                editorialDragTranslation = value.translation
+                guard let originRect = solved.frames[nodeID] else { return }
+                let probe = CGPoint(
+                    x: CGFloat(originRect.midX) + value.translation.width,
+                    y: CGFloat(originRect.midY + topPad) + value.translation.height
+                )
+                // Find closest editorial slot
+                var closestIdx: Int?
+                var bestDist = CGFloat.greatestFiniteMagnitude
+                for (idx, candidateID) in solved.orderedNodeIDs.enumerated() {
+                    guard let r = solved.frames[candidateID] else { continue }
+                    let d = hypot(probe.x - CGFloat(r.midX), probe.y - CGFloat(r.midY + topPad))
+                    if d < bestDist {
+                        bestDist = d
+                        closestIdx = idx
+                    }
+                }
+                editorialTargetOrderIndex = closestIdx
+            }
+            .onEnded { _ in
+                defer {
+                    withAnimation(CanvasMotion.accessible(CanvasMotion.gestureSpring, reduced: reduceMotion)) {
+                        editorialDraggingID = nil
+                        editorialDragTranslation = .zero
+                        editorialTargetOrderIndex = nil
+                    }
+                }
+                guard let fromIdx = solved.orderedNodeIDs.firstIndex(of: nodeID),
+                      let toIdx = editorialTargetOrderIndex,
+                      fromIdx != toIdx else { return }
+
+                var reordered = solved.orderedNodeIDs
+                let moved = reordered.remove(at: fromIdx)
+                reordered.insert(moved, at: min(toIdx, reordered.count))
+
+                var nextDoc = document
+                for (order, id) in reordered.enumerated() {
+                    if let idx = nextDoc.nodes.firstIndex(where: { $0.id == id }) {
+                        nextDoc.nodes[idx].editorialOrder = order
+                    }
+                }
+                withAnimation(CanvasMotion.accessible(CanvasMotion.gestureSpring, reduced: reduceMotion)) {
+                    callbacks.onCommitDocument(nextDoc)
+                }
+            }
+    }
+
+    // MARK: - 2. Freeform Infinite Canvas Mode (Viewport Culled + Connectors + Ink)
+
+    private var freeformInfiniteStage: some View {
+        let visibleWorld = visibleWorldRect(overscan: 360)
+        let sortedNodes = document.nodes.sorted { lhs, rhs in
+            let lGroup = if case .groupFrame = lhs.kind { true } else { false }
+            let rGroup = if case .groupFrame = rhs.kind { true } else { false }
+            if lGroup != rGroup { return lGroup }
+            return lhs.zIndex < rhs.zIndex
+        }
+        let culledNodes = sortedNodes.filter { node in
+            let rect = effectiveFrame(for: node)
+            return rect.cgRect.intersects(visibleWorld) || selectedNodeIDs.contains(node.id)
+        }
+        let nodeFramesMap: [UUID: BoardRect] = Dictionary(
+            uniqueKeysWithValues: document.nodes.map { ($0.id, effectiveFrame(for: $0)) }
+        )
+
+        return ZStack {
+            // Subtle architectural dot grid + connectors + ink strokes + snap guides rendered in Canvas
+            Canvas { context, size in
+                drawDotGrid(context: context, size: size)
+                drawSnapGuides(context: context, size: size)
+                drawConnectorsLayer(context: context, nodeFrames: nodeFramesMap, visibleWorld: visibleWorld)
+                drawInkStrokesLayer(context: context, visibleWorld: visibleWorld)
+            }
+            .allowsHitTesting(false)
+
+            // Native macOS trackpad scroll-pan & Option-scroll zoom bridge
+            FreeformTrackpadBridge(
+                onScrollDelta: { dx, dy in
+                    cameraCenter.x -= dx / cameraZoom
+                    cameraCenter.y -= dy / cameraZoom
+                },
+                onZoomDelta: { factor, cursorInView in
+                    applyZoom(factor: factor, anchorScreenPoint: cursorInView)
+                }
+            )
+            .allowsHitTesting(false)
+
+            // Interactive background canvas surface for pan, marquee, pen drawing, or erasing
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    selectedNodeIDs.removeAll()
+                    selectedConnectorID = nil
+                    callbacks.onSelectSwapTarget(nil)
+                }
+                .gesture(canvasBackgroundGesture)
+
+            // Culled visible nodes positioned in screen coordinates
+            ForEach(culledNodes) { node in
+                let worldRect = effectiveFrame(for: node)
+                let screenCenter = worldToScreen(CGPoint(x: worldRect.midX, y: worldRect.midY))
+                let screenW = CGFloat(worldRect.width) * cameraZoom
+                let screenH = CGFloat(worldRect.height) * cameraZoom
+                let isSelected = selectedNodeIDs.contains(node.id)
+                let isHovered = hoveredNodeID == node.id
+
+                ZStack {
+                    renderNodeBody(node: node, isAutoMode: false)
+                        .frame(width: max(24, screenW), height: max(24, screenH))
+
+                    // Magnetic edge ports for connectors
+                    if (activeTool == .connector || isHovered || isSelected) && activeTool != .pen && activeTool != .eraser {
+                        connectorPortsOverlay(node: node, worldRect: worldRect, width: screenW, height: screenH)
+                    }
+
+                    // Bottom-right corner resize handle on selected unlocked nodes
+                    if isSelected && !node.isLocked && activeTool == .select {
+                        resizeHandleOverlay(node: node, width: screenW, height: screenH)
+                    }
+                }
+                .frame(width: max(24, screenW), height: max(24, screenH))
+                .rotationEffect(.degrees(node.rotationDegrees))
+                .position(screenCenter)
+                .onHover { hovering in
+                    if hovering {
+                        hoveredNodeID = node.id
+                    } else if hoveredNodeID == node.id {
+                        hoveredNodeID = nil
+                    }
+                }
+                .simultaneousGesture(
+                    TapGesture(count: 1).onEnded {
+                        if activeTool == .select {
+                            let mods = NSEvent.modifierFlags
+                            if mods.contains(.command) || mods.contains(.shift) {
+                                if selectedNodeIDs.contains(node.id) {
+                                    selectedNodeIDs.remove(node.id)
+                                } else {
+                                    selectedNodeIDs.insert(node.id)
+                                }
+                            } else {
+                                selectedNodeIDs = [node.id]
+                            }
+                            selectedConnectorID = nil
+                        }
+                    }
+                )
+                .gesture(activeTool == .select ? nodeDragGesture(for: node) : nil)
+                .allowsHitTesting(activeTool != .pen && activeTool != .eraser && activeTool != .pan)
+            }
+
+            // Interactive connector midpoint labels (clickable to edit / delete)
+            ForEach(document.connectors) { connector in
+                if let fromR = nodeFramesMap[connector.fromNodeID],
+                   let toR = nodeFramesMap[connector.toNodeID] {
+                    let (start, end, c1, c2) = ConnectorGeometry.resolvePathPoints(
+                        fromRect: fromR.cgRect,
+                        fromAnchor: connector.fromAnchor,
+                        toRect: toR.cgRect,
+                        toAnchor: connector.toAnchor,
+                        style: connector.style
+                    )
+                    let midWorld = ConnectorGeometry.midpoint(start: start, end: end, c1: c1, c2: c2, style: connector.style)
+                    if visibleWorld.contains(midWorld) {
+                        let midScreen = worldToScreen(midWorld)
+                        let isSel = selectedConnectorID == connector.id
+                        Button {
+                            selectedConnectorID = connector.id
+                            connectorLabelDraft = connector.label ?? ""
+                            editingConnectorLabelID = connector.id
+                        } label: {
+                            Group {
+                                if let label = connector.label, !label.isEmpty {
+                                    Text(label)
+                                        .font(.system(size: max(9, 11 * min(1.2, cameraZoom)), weight: .medium))
+                                        .foregroundStyle(.primary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(CanvasSurface.elevated(for: colorScheme), in: Capsule(style: .continuous))
+                                        .overlay(
+                                            Capsule(style: .continuous)
+                                                .strokeBorder(isSel ? Color.accentColor : CanvasSurface.hairline(for: colorScheme), lineWidth: isSel ? 1.5 : 0.75)
+                                        )
+                                } else if isSel || activeTool == .connector {
+                                    Circle()
+                                        .fill(CanvasSurface.elevated(for: colorScheme))
+                                        .frame(width: 14, height: 14)
+                                        .overlay(
+                                            Image(systemName: "tag")
+                                                .font(.system(size: 7))
+                                                .foregroundStyle(.secondary)
+                                        )
+                                        .overlay(Circle().strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .position(midScreen)
+                        .allowsHitTesting(activeTool == .select || activeTool == .connector)
+                    }
+                }
+            }
+
+            // Freeform rubber-band marquee overlay
+            if let s = freeformMarqueeStart, let c = freeformMarqueeCurrent {
+                let rect = CGRect(x: min(s.x, c.x), y: min(s.y, c.y), width: abs(c.x - s.x), height: abs(c.y - s.y))
+                if rect.width > 3 || rect.height > 3 {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.11))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .strokeBorder(Color.accentColor.opacity(0.68), lineWidth: 1)
+                        )
+                        .frame(width: rect.width, height: rect.height)
+                        .position(x: rect.midX, y: rect.midY)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .clipped()
+        .simultaneousGesture(
+            MagnifyGesture()
+                .onChanged { value in
+                    if gestureStartZoom == nil {
+                        gestureStartZoom = cameraZoom
+                    }
+                    let base = gestureStartZoom ?? cameraZoom
+                    cameraZoom = max(0.2, min(3.0, base * value.magnification))
+                }
+                .onEnded { _ in
+                    gestureStartZoom = nil
+                    persistCameraViewport()
+                }
+        )
+    }
+
+    // MARK: - Freeform Drawing Helpers (Grid, Connectors, Ink, Snap Guides)
+
+    private func drawDotGrid(context: GraphicsContext, size: CGSize) {
+        let baseSpacing: CGFloat = 28
+        var worldStep = baseSpacing
+        while worldStep * cameraZoom < 16 { worldStep *= 2 }
+        while worldStep * cameraZoom > 56 { worldStep *= 0.5 }
+
+        let visible = visibleWorldRect(overscan: worldStep)
+        let startX = floor(visible.minX / worldStep) * worldStep
+        let startY = floor(visible.minY / worldStep) * worldStep
+        let dotColor = (colorScheme == .dark ? Color.white : Color.black).opacity(cameraZoom < 0.35 ? 0.05 : 0.10)
+        let dotRadius: CGFloat = max(0.8, min(1.5, cameraZoom))
+
+        var x = startX
+        while x <= visible.maxX {
+            var y = startY
+            while y <= visible.maxY {
+                let pt = worldToScreen(CGPoint(x: x, y: y))
+                if pt.x >= -4 && pt.x <= size.width + 4 && pt.y >= -4 && pt.y <= size.height + 4 {
+                    let dotRect = CGRect(x: pt.x - dotRadius, y: pt.y - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
+                    context.fill(Path(ellipseIn: dotRect), with: .color(dotColor))
+                }
+                y += worldStep
+            }
+            x += worldStep
+        }
+    }
+
+    private func drawSnapGuides(context: GraphicsContext, size: CGSize) {
+        let guideColor = Color.accentColor.opacity(0.65)
+        for wx in snapGuidesX {
+            let sx = worldToScreen(CGPoint(x: wx, y: 0)).x
+            var path = Path()
+            path.move(to: CGPoint(x: sx, y: 0))
+            path.addLine(to: CGPoint(x: sx, y: size.height))
+            context.stroke(path, with: .color(guideColor), style: StrokeStyle(lineWidth: 0.75, dash: [4, 4]))
+        }
+        for wy in snapGuidesY {
+            let sy = worldToScreen(CGPoint(x: 0, y: wy)).y
+            var path = Path()
+            path.move(to: CGPoint(x: 0, y: sy))
+            path.addLine(to: CGPoint(x: size.width, y: sy))
+            context.stroke(path, with: .color(guideColor), style: StrokeStyle(lineWidth: 0.75, dash: [4, 4]))
+        }
+    }
+
+    private func drawConnectorsLayer(
+        context: GraphicsContext,
+        nodeFrames: [UUID: BoardRect],
+        visibleWorld: CGRect
+    ) {
+        for connector in document.connectors {
+            guard let fromR = nodeFrames[connector.fromNodeID],
+                  let toR = nodeFrames[connector.toNodeID] else { continue }
+            let bounds = fromR.cgRect.union(toR.cgRect).insetBy(dx: -80, dy: -80)
+            guard bounds.intersects(visibleWorld) else { continue }
+
+            let (startW, endW, c1W, c2W) = ConnectorGeometry.resolvePathPoints(
+                fromRect: fromR.cgRect,
+                fromAnchor: connector.fromAnchor,
+                toRect: toR.cgRect,
+                toAnchor: connector.toAnchor,
+                style: connector.style
+            )
+            let start = worldToScreen(startW)
+            let end = worldToScreen(endW)
+            let c1 = worldToScreen(c1W)
+            let c2 = worldToScreen(c2W)
+
+            let isSel = selectedConnectorID == connector.id
+            let strokeColor = isSel ? Color.accentColor : Color(charkleHex: connector.colorHex)
+            var path = Path()
+            path.move(to: start)
+            switch connector.style {
+            case .curved:
+                path.addCurve(to: end, control1: c1, control2: c2)
+            case .elbow:
+                let midX = (start.x + end.x) * 0.5
+                path.addLine(to: CGPoint(x: midX, y: start.y))
+                path.addLine(to: CGPoint(x: midX, y: end.y))
+                path.addLine(to: end)
+            case .straight:
+                path.addLine(to: end)
+            }
+
+            let style = StrokeStyle(
+                lineWidth: max(1.5, (isSel ? 2.6 : 2.0) * cameraZoom),
+                lineCap: .round,
+                lineJoin: .round,
+                dash: connector.dashed ? [7 * cameraZoom, 5 * cameraZoom] : []
+            )
+            context.stroke(path, with: .color(strokeColor), style: style)
+
+            // Arrowhead
+            let tangentSrc: CGPoint = switch connector.style {
+            case .curved: c2
+            case .elbow: CGPoint(x: (start.x + end.x) * 0.5, y: end.y)
+            case .straight: start
+            }
+            let angle = atan2(end.y - tangentSrc.y, end.x - tangentSrc.x)
+            let arrowLen = max(7, 10 * cameraZoom)
+            let spread: CGFloat = .pi / 6.5
+            var head = Path()
+            head.move(to: CGPoint(x: end.x - arrowLen * cos(angle - spread), y: end.y - arrowLen * sin(angle - spread)))
+            head.addLine(to: end)
+            head.addLine(to: CGPoint(x: end.x - arrowLen * cos(angle + spread), y: end.y - arrowLen * sin(angle + spread)))
+            context.stroke(head, with: .color(strokeColor), style: StrokeStyle(lineWidth: max(1.5, 2.0 * cameraZoom), lineCap: .round, lineJoin: .round))
+        }
+
+        // Live drag preview while creating a connector
+        if let pending = pendingConnectorSource {
+            let s = worldToScreen(pending.startWorld)
+            let e = worldToScreen(pendingConnectorCursorWorld)
+            let dist = max(36, hypot(e.x - s.x, e.y - s.y) * 0.35)
+            var p = Path()
+            p.move(to: s)
+            p.addCurve(
+                to: e,
+                control1: CGPoint(x: s.x + dist * 0.5, y: s.y),
+                control2: CGPoint(x: e.x - dist * 0.5, y: e.y)
+            )
+            context.stroke(
+                p,
+                with: .color(Color.accentColor.opacity(0.85)),
+                style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [5, 4])
+            )
+        }
+    }
+
+    private func drawInkStrokesLayer(context: GraphicsContext, visibleWorld: CGRect) {
+        let allStrokes: [InkStroke] = if activeInkPoints.count >= 2 {
+            document.inkStrokes + [InkStroke(points: activeInkPoints, colorHex: inkColorHex, lineWidth: inkWidth)]
+        } else {
+            document.inkStrokes
+        }
+
+        for stroke in allStrokes where stroke.points.count >= 2 {
+            // Quick bounding cull
+            var minX = Double.greatestFiniteMagnitude
+            var minY = Double.greatestFiniteMagnitude
+            var maxX = -Double.greatestFiniteMagnitude
+            var maxY = -Double.greatestFiniteMagnitude
+            for pt in stroke.points {
+                if pt.x < minX { minX = pt.x }
+                if pt.y < minY { minY = pt.y }
+                if pt.x > maxX { maxX = pt.x }
+                if pt.y > maxY { maxY = pt.y }
+            }
+            let box = CGRect(x: minX - 12, y: minY - 12, width: (maxX - minX) + 24, height: (maxY - minY) + 24)
+            guard box.intersects(visibleWorld) else { continue }
+
+            let screenPts = stroke.points.map { worldToScreen(CGPoint(x: $0.x, y: $0.y)) }
+            var path = Path()
+            path.move(to: screenPts[0])
+            if screenPts.count == 2 {
+                path.addLine(to: screenPts[1])
+            } else {
+                for i in 1..<(screenPts.count - 1) {
+                    let mid = CGPoint(
+                        x: (screenPts[i].x + screenPts[i + 1].x) * 0.5,
+                        y: (screenPts[i].y + screenPts[i + 1].y) * 0.5
+                    )
+                    path.addQuadCurve(to: mid, control: screenPts[i])
+                }
+                if let last = screenPts.last {
+                    path.addLine(to: last)
+                }
+            }
+            context.stroke(
+                path,
+                with: .color(Color(charkleHex: stroke.colorHex).opacity(stroke.opacity)),
+                style: StrokeStyle(
+                    lineWidth: max(1.2, CGFloat(stroke.lineWidth) * cameraZoom),
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+        }
+    }
+
+    // MARK: - Freeform Interactive Gestures (Pan, Marquee, Pen, Eraser, Node Drag, Resize, Ports)
+
+    private var canvasBackgroundGesture: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                switch activeTool {
+                case .pan:
+                    if panStartCenter == nil { panStartCenter = cameraCenter }
+                    if let start = panStartCenter {
+                        cameraCenter = CGPoint(
+                            x: start.x - value.translation.width / cameraZoom,
+                            y: start.y - value.translation.height / cameraZoom
+                        )
+                    }
+                case .select:
+                    if NSEvent.modifierFlags.contains(.option) || isSpaceKeyPanning {
+                        if panStartCenter == nil { panStartCenter = cameraCenter }
+                        if let start = panStartCenter {
+                            cameraCenter = CGPoint(
+                                x: start.x - value.translation.width / cameraZoom,
+                                y: start.y - value.translation.height / cameraZoom
+                            )
+                        }
+                    } else {
+                        if freeformMarqueeStart == nil { freeformMarqueeStart = value.startLocation }
+                        freeformMarqueeCurrent = value.location
+                        if let s = freeformMarqueeStart {
+                            let w1 = screenToWorld(s)
+                            let w2 = screenToWorld(value.location)
+                            let worldBox = BoardRect(
+                                x: min(w1.x, w2.x),
+                                y: min(w1.y, w2.y),
+                                width: abs(w2.x - w1.x),
+                                height: abs(w2.y - w1.y)
+                            )
+                            selectedNodeIDs = Set(document.nodes.filter { $0.frame.intersects(worldBox) }.map(\.id))
+                        }
+                    }
+                case .pen:
+                    let worldPt = screenToWorld(value.location)
+                    if let last = activeInkPoints.last {
+                        if hypot(worldPt.x - last.x, worldPt.y - last.y) >= 2.0 / cameraZoom {
+                            activeInkPoints.append(InkStrokePoint(x: worldPt.x, y: worldPt.y, pressure: 0.6))
+                        }
+                    } else {
+                        activeInkPoints = [InkStrokePoint(x: worldPt.x, y: worldPt.y, pressure: 0.6)]
+                    }
+                case .eraser:
+                    eraseNear(worldPoint: screenToWorld(value.location))
+                case .connector:
+                    break
+                }
+            }
+            .onEnded { _ in
+                if panStartCenter != nil {
+                    panStartCenter = nil
+                    persistCameraViewport()
+                }
+                freeformMarqueeStart = nil
+                freeformMarqueeCurrent = nil
+                if activeTool == .pen && activeInkPoints.count >= 2 {
+                    var nextDoc = document
+                    let stroke = InkStroke(
+                        points: activeInkPoints,
+                        colorHex: inkColorHex,
+                        lineWidth: inkWidth,
+                        opacity: 0.92,
+                        zIndex: 1000 + nextDoc.inkStrokes.count
+                    )
+                    nextDoc.inkStrokes.append(stroke)
+                    activeInkPoints = []
+                    callbacks.onCommitDocument(nextDoc)
+                } else {
+                    activeInkPoints = []
+                }
+            }
+    }
+
+    private func nodeDragGesture(for node: BoardNode) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                guard !node.isLocked else { return }
+                if activeNodeDragID == nil {
+                    activeNodeDragID = node.id
+                    if !selectedNodeIDs.contains(node.id) {
+                        selectedNodeIDs = [node.id]
+                    }
+                    // If dragging a groupFrame, capture all enclosed child nodes so they move together!
+                    if case .groupFrame = node.kind {
+                        let enclosed = document.nodes.filter { other in
+                            guard other.id != node.id else { return false }
+                            let center = BoardPoint(x: other.frame.midX, y: other.frame.midY)
+                            return node.frame.contains(center)
+                        }.map(\.id)
+                        activeGroupChildIDs = Set(enclosed)
+                    } else {
+                        activeGroupChildIDs = []
+                    }
+                }
+                var dx = value.translation.width / cameraZoom
+                var dy = value.translation.height / cameraZoom
+
+                // Smart alignment snap guides (6pt threshold)
+                let snapThreshold = 6.0 / Double(cameraZoom)
+                let candidateMinX = node.frame.minX + Double(dx)
+                let candidateMidX = node.frame.midX + Double(dx)
+                let candidateMinY = node.frame.minY + Double(dy)
+                let candidateMidY = node.frame.midY + Double(dy)
+                var guidesX: [CGFloat] = []
+                var guidesY: [CGFloat] = []
+
+                let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union([node.id])
+                for other in document.nodes where !movingSet.contains(other.id) {
+                    if abs(candidateMinX - other.frame.minX) < snapThreshold {
+                        dx = CGFloat(other.frame.minX - node.frame.minX)
+                        guidesX = [CGFloat(other.frame.minX)]
+                    } else if abs(candidateMidX - other.frame.midX) < snapThreshold {
+                        dx = CGFloat(other.frame.midX - node.frame.midX)
+                        guidesX = [CGFloat(other.frame.midX)]
+                    }
+                    if abs(candidateMinY - other.frame.minY) < snapThreshold {
+                        dy = CGFloat(other.frame.minY - node.frame.minY)
+                        guidesY = [CGFloat(other.frame.minY)]
+                    } else if abs(candidateMidY - other.frame.midY) < snapThreshold {
+                        dy = CGFloat(other.frame.midY - node.frame.midY)
+                        guidesY = [CGFloat(other.frame.midY)]
+                    }
+                }
+                snapGuidesX = guidesX
+                snapGuidesY = guidesY
+                activeNodeDragDelta = CGSize(width: dx, height: dy)
+            }
+            .onEnded { _ in
+                defer {
+                    activeNodeDragID = nil
+                    activeNodeDragDelta = .zero
+                    activeGroupChildIDs = []
+                    snapGuidesX = []
+                    snapGuidesY = []
+                }
+                guard !node.isLocked,
+                      abs(activeNodeDragDelta.width) > 0.5 || abs(activeNodeDragDelta.height) > 0.5 else { return }
+
+                let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union([node.id])
+                var nextDoc = document
+                for idx in nextDoc.nodes.indices where movingSet.contains(nextDoc.nodes[idx].id) && !nextDoc.nodes[idx].isLocked {
+                    nextDoc.nodes[idx].frame.x += Double(activeNodeDragDelta.width)
+                    nextDoc.nodes[idx].frame.y += Double(activeNodeDragDelta.height)
+                    nextDoc.nodes[idx].updatedAt = Date()
+                }
+                callbacks.onCommitDocument(nextDoc)
+            }
+    }
+
+    private func resizeHandleOverlay(node: BoardNode, width: CGFloat, height: CGFloat) -> some View {
+        Circle()
+            .fill(Color.white)
+            .frame(width: 11, height: 11)
+            .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: 2))
+            .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+            .offset(x: width * 0.5, y: height * 0.5)
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        if resizingNodeID == nil {
+                            resizingNodeID = node.id
+                            resizeStartFrame = node.frame
+                        }
+                        guard let start = resizeStartFrame else { return }
+                        let dw = Double(value.translation.width / cameraZoom)
+                        let dh = Double(value.translation.height / cameraZoom)
+                        let newW = max(96, start.width + dw)
+                        var newH = max(64, start.height + dh)
+
+                        // Maintain aspect ratio for asset nodes unless Shift is held
+                        if case .assetRef = node.kind, !NSEvent.modifierFlags.contains(.shift) {
+                            let aspect = start.width / max(1, start.height)
+                            newH = max(64, newW / aspect)
+                        }
+                        liveResizeFrame = BoardRect(x: start.x, y: start.y, width: newW, height: newH)
+                    }
+                    .onEnded { _ in
+                        defer {
+                            resizingNodeID = nil
+                            resizeStartFrame = nil
+                            liveResizeFrame = nil
+                        }
+                        guard let finalRect = liveResizeFrame else { return }
+                        var nextDoc = document
+                        if let idx = nextDoc.nodes.firstIndex(where: { $0.id == node.id }) {
+                            nextDoc.nodes[idx].frame = finalRect
+                            nextDoc.nodes[idx].updatedAt = Date()
+                            callbacks.onCommitDocument(nextDoc)
+                        }
+                    }
+            )
+    }
+
+    private func connectorPortsOverlay(node: BoardNode, worldRect: BoardRect, width: CGFloat, height: CGFloat) -> some View {
+        let anchors: [(ConnectorAnchor, CGSize, CGPoint)] = [
+            (.top, CGSize(width: 0, height: -height * 0.5), CGPoint(x: worldRect.midX, y: worldRect.minY)),
+            (.bottom, CGSize(width: 0, height: height * 0.5), CGPoint(x: worldRect.midX, y: worldRect.maxY)),
+            (.leading, CGSize(width: -width * 0.5, height: 0), CGPoint(x: worldRect.minX, y: worldRect.midY)),
+            (.trailing, CGSize(width: width * 0.5, height: 0), CGPoint(x: worldRect.maxX, y: worldRect.midY))
+        ]
+        return ZStack {
+            ForEach(anchors, id: \.0) { anchor, offset, startWorld in
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 9, height: 9)
+                    .overlay(Circle().strokeBorder(Color.white, lineWidth: 1.5))
+                    .offset(offset)
+                    .gesture(
+                        DragGesture(minimumDistance: 2)
+                            .onChanged { value in
+                                if pendingConnectorSource == nil {
+                                    pendingConnectorSource = (node.id, anchor, startWorld)
+                                }
+                                pendingConnectorCursorWorld = CGPoint(
+                                    x: startWorld.x + value.translation.width / cameraZoom,
+                                    y: startWorld.y + value.translation.height / cameraZoom
+                                )
+                            }
+                            .onEnded { _ in
+                                defer { pendingConnectorSource = nil }
+                                guard let pending = pendingConnectorSource else { return }
+                                let dropWorld = BoardPoint(pendingConnectorCursorWorld)
+                                if let targetNode = document.nodes.first(where: { other in
+                                    other.id != pending.nodeID && other.frame.contains(dropWorld)
+                                }) {
+                                    var nextDoc = document
+                                    let conn = BoardConnector(
+                                        fromNodeID: pending.nodeID,
+                                        fromAnchor: pending.anchor,
+                                        toNodeID: targetNode.id,
+                                        toAnchor: .auto,
+                                        style: connectorStyle,
+                                        dashed: connectorDashed
+                                    )
+                                    nextDoc.connectors.append(conn)
+                                    selectedConnectorID = conn.id
+                                    callbacks.onCommitDocument(nextDoc)
+                                }
+                            }
+                    )
+            }
+        }
+    }
+
+    private func eraseNear(worldPoint: CGPoint) {
+        let hitRadius = 18.0 / Double(cameraZoom)
+        var nextDoc = document
+        let oldStrokes = nextDoc.inkStrokes.count
+        nextDoc.inkStrokes.removeAll { stroke in
+            stroke.points.contains { pt in
+                hypot(pt.x - Double(worldPoint.x), pt.y - Double(worldPoint.y)) <= hitRadius
+            }
+        }
+        let oldConnectors = nextDoc.connectors.count
+        let frames = Dictionary(uniqueKeysWithValues: nextDoc.nodes.map { ($0.id, $0.frame.cgRect) })
+        nextDoc.connectors.removeAll { conn in
+            guard let f = frames[conn.fromNodeID], let t = frames[conn.toNodeID] else { return false }
+            let (s, e, c1, c2) = ConnectorGeometry.resolvePathPoints(
+                fromRect: f, fromAnchor: conn.fromAnchor, toRect: t, toAnchor: conn.toAnchor, style: conn.style
+            )
+            let mid = ConnectorGeometry.midpoint(start: s, end: e, c1: c1, c2: c2, style: conn.style)
+            return hypot(Double(mid.x) - Double(worldPoint.x), Double(mid.y) - Double(worldPoint.y)) <= hitRadius * 1.4
+        }
+        if nextDoc.inkStrokes.count != oldStrokes || nextDoc.connectors.count != oldConnectors {
+            callbacks.onCommitDocument(nextDoc)
+        }
+    }
+
+    // MARK: - Shared Node Renderer
+
+    @ViewBuilder
+    private func renderNodeBody(node: BoardNode, isAutoMode: Bool) -> some View {
+        let isSelected = selectedNodeIDs.contains(node.id)
+        switch node.kind {
+        case .assetRef(let assetID, _, _, _):
+            BoardAssetNodeView(
+                node: node,
+                asset: assetsByID[assetID],
+                loader: loader,
+                isSelected: isSelected,
+                isSwapTarget: swappingNodeID == node.id,
+                isAutoEditorial: isAutoMode,
+                heroNamespace: heroNamespace,
+                onToggleHero: { toggleHeroWeight(nodeID: node.id) },
+                onTriggerSwap: { callbacks.onSelectSwapTarget(swappingNodeID == node.id ? nil : node.id) },
+                onOpenQuickLook: {
+                    if let asset = assetsByID[assetID] {
+                        callbacks.onOpenQuickLook(asset)
+                    }
+                },
+                onToggleLock: { toggleLock(nodeID: node.id) },
+                onDelete: { removeNode(id: node.id) }
+            )
+        case .note(let title, let text, let style, let fontSize):
+            BoardNoteNodeView(
+                node: node,
+                title: title,
+                text: text,
+                style: style,
+                fontSize: fontSize,
+                isSelected: isSelected,
+                onUpdate: { newTitle, newText, newStyle, newFontSize in
+                    updateNote(nodeID: node.id, title: newTitle, text: newText, style: newStyle, fontSize: newFontSize)
+                },
+                onDelete: { removeNode(id: node.id) }
+            )
+        case .groupFrame(let title, let tint):
+            BoardGroupFrameView(
+                title: title,
+                tint: tint,
+                isSelected: isSelected,
+                onUpdate: { newTitle, newTint in
+                    updateGroupFrame(nodeID: node.id, title: newTitle, tint: newTint)
+                },
+                onDelete: { removeNode(id: node.id) }
+            )
+        case .paletteStrip(let colors, let autoSync):
+            BoardPaletteStripNodeView(
+                colors: autoSync && !document.extractedPalette.isEmpty ? document.extractedPalette : colors,
+                autoSync: autoSync,
+                isSelected: isSelected,
+                onCopyHex: callbacks.onCopyColorHex,
+                onSearchColor: callbacks.onSearchByColorHex,
+                onToggleAutoSync: { togglePaletteAutoSync(nodeID: node.id) },
+                onDelete: { removeNode(id: node.id) }
+            )
+        }
+    }
+
+    // MARK: - Floating Liquid Glass Bottom Tool Dock (Single GlassEffectContainer)
+
+    private var floatingToolDock: some View {
+        CanvasGlassContainer(spacing: 10) {
+            HStack(spacing: 8) {
+                // Mode Segmented Pill (Auto Editorial <-> Freeform) with travelling indicator
+                HStack(spacing: 2) {
+                    dockModeButton(
+                        title: "自动排版",
+                        systemIcon: "rectangle.3.group",
+                        isActive: isAutoEditorial
+                    ) {
+                        switchToAutoEditorial()
+                    }
+                    dockModeButton(
+                        title: "自由画布",
+                        systemIcon: "scribble.variable",
+                        isActive: !isAutoEditorial
+                    ) {
+                        switchToFreeform()
+                    }
+                }
+                .padding(3)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                dockDivider
+
+                if isAutoEditorial {
+                    // Editorial Style Picker
+                    ForEach(EditorialStyle.allCases, id: \.self) { style in
+                        let active = autoConfig.style == style
+                        Button {
+                            updateAutoConfig { $0.style = style }
+                        } label: {
+                            Text(style.localizedLabel)
+                                .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                                .foregroundStyle(active ? .primary : .secondary)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 6)
+                                .background(
+                                    active ? Color.primary.opacity(0.10) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else {
+                    // Freeform Tool Buttons
+                    ForEach(MoodboardTool.allCases, id: \.self) { tool in
+                        let active = activeTool == tool
+                        Button {
+                            withAnimation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion)) {
+                                activeTool = tool
+                            }
+                        } label: {
+                            Image(systemName: toolIcon(tool))
+                                .font(.system(size: 13, weight: active ? .semibold : .regular))
+                                .foregroundStyle(active ? Color.accentColor : .primary.opacity(0.84))
+                                .frame(width: 30, height: 30)
+                                .background(
+                                    active ? Color.accentColor.opacity(0.14) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(tool.label) (\(tool.shortcutHint))")
+                    }
+
+                    // Contextual Ink Pen swatch & width controls
+                    if activeTool == .pen {
+                        dockDivider
+                        HStack(spacing: 4) {
+                            ForEach(Self.calmInkSwatches, id: \.hex) { swatch in
+                                Button {
+                                    inkColorHex = swatch.hex
+                                } label: {
+                                    Circle()
+                                        .fill(Color(charkleHex: swatch.hex))
+                                        .frame(width: 14, height: 14)
+                                        .overlay(
+                                            Circle().strokeBorder(
+                                                inkColorHex == swatch.hex ? Color.accentColor : Color.white.opacity(0.45),
+                                                lineWidth: inkColorHex == swatch.hex ? 2 : 0.75
+                                            )
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .help(swatch.name)
+                            }
+                            Picker("", selection: $inkWidth) {
+                                Text("细").tag(2.0)
+                                Text("中").tag(3.5)
+                                Text("粗").tag(6.5)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 84)
+                        }
+                    }
+
+                    // Contextual Connector style toggle
+                    if activeTool == .connector {
+                        dockDivider
+                        Picker("", selection: $connectorStyle) {
+                            Text("曲线").tag(ConnectorStyle.curved)
+                            Text("折线").tag(ConnectorStyle.elbow)
+                            Text("直线").tag(ConnectorStyle.straight)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 120)
+                    }
+                }
+
+                dockDivider
+
+                // Insert Nodes (Note / Group Frame / Palette Strip)
+                dockIconButton(systemName: "note.text.badge.plus", help: "添加便签卡片") {
+                    addNoteNode()
+                }
+                dockIconButton(systemName: "rectangle.dashed", help: "添加区域分组框") {
+                    addGroupFrameNode()
+                }
+                dockIconButton(systemName: "paintpalette", help: "添加全板色卡条") {
+                    addPaletteStripNode()
+                }
+
+                if !isAutoEditorial {
+                    dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版") {
+                        tidyFreeformNodes()
+                    }
+                }
+
+                dockDivider
+
+                // Undo / Redo
+                dockIconButton(systemName: "arrow.uturn.backward", help: "撤销 (⌘Z)", disabled: !canUndo) {
+                    callbacks.onUndo()
+                }
+                dockIconButton(systemName: "arrow.uturn.forward", help: "重做 (⇧⌘Z)", disabled: !canRedo) {
+                    callbacks.onRedo()
+                }
+
+                dockDivider
+
+                // Export / Copy for Figma
+                Menu {
+                    Button("复制 2× 高清图（直接 ⌘V 到 Figma / Keynote）") {
+                        callbacks.onCopyExportedImage(currentExportOptions)
+                    }
+                    Divider()
+                    Button("导出 2× Retina PNG…") {
+                        callbacks.onSaveExportedImage(.png, currentExportOptions)
+                    }
+                    Button("导出 2× Retina JPG…") {
+                        callbacks.onSaveExportedImage(.jpeg, currentExportOptions)
+                    }
+                    Divider()
+                    Toggle("包含连线与手绘批注", isOn: $exportIncludeAnnotations)
+                    Toggle("包含顶部板内色卡", isOn: $exportIncludePalette)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text("导出")
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            .padding(8)
+            .canvasLiquidGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+    }
+
+    private func dockModeButton(title: String, systemIcon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemIcon)
+                    .font(.system(size: 11.5, weight: .medium))
+                Text(title)
+                    .font(.system(size: 11.5, weight: isActive ? .semibold : .medium))
+            }
+            .foregroundStyle(isActive ? .primary : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background {
+                if isActive {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(CanvasSurface.elevated(for: colorScheme))
+                        .shadow(color: Color.black.opacity(0.08), radius: 3, y: 1)
+                        .matchedGeometryEffect(id: "board-mode-pill", in: dockModeNamespace)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func dockIconButton(
+        systemName: String,
+        help: String,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(disabled ? Color.secondary.opacity(0.4) : Color.primary.opacity(0.84))
+                .frame(width: 28, height: 28)
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    private var dockDivider: some View {
+        Rectangle()
+            .fill(CanvasSurface.hairline(for: colorScheme))
+            .frame(width: 1, height: 18)
+    }
+
+    private var zoomControlsPill: some View {
+        HStack(spacing: 4) {
+            Button {
+                applyZoom(factor: 0.82, anchorScreenPoint: CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5))
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("缩小画布")
+
+            Button {
+                withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
+                    cameraZoom = 1.0
+                }
+                persistCameraViewport()
+            } label: {
+                Text("\(Int((cameraZoom * 100).rounded()))%")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .frame(minWidth: 42)
+            }
+            .buttonStyle(.plain)
+            .help("重置为 100%")
+
+            Button {
+                applyZoom(factor: 1.22, anchorScreenPoint: CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5))
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("放大画布")
+
+            Rectangle()
+                .fill(CanvasSurface.hairline(for: colorScheme))
+                .frame(width: 1, height: 14)
+
+            Button {
+                fitBoardToScreen()
+            } label: {
+                Image(systemName: "arrow.up.left.and.down.right.magnifyingglass")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("适配全板视图")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .canvasLiquidGlass(in: Capsule(style: .continuous))
+    }
+
+    private var emptyBoardPlaceholder: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "rectangle.3.group.bubble")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.secondary.opacity(0.6))
+            Text("把素材拖进来，或从右侧候选池点击加入")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("支持直接从 Finder / 浏览器拖入新图（自动保存在 /Charkle/Inbox/ 并引用上板）")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+        }
+        .multilineTextAlignment(.center)
+        .padding(32)
+    }
+
+    private var connectorLabelEditorPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("连线标签与样式")
+                .font(.system(size: 12, weight: .semibold))
+            TextField("输入说明文字（如：色彩呼应、材质参考）", text: $connectorLabelDraft)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+            HStack {
+                Button("删除连线", role: .destructive) {
+                    if let id = editingConnectorLabelID {
+                        var nextDoc = document
+                        nextDoc.connectors.removeAll { $0.id == id }
+                        callbacks.onCommitDocument(nextDoc)
+                    }
+                    editingConnectorLabelID = nil
+                }
+                Spacer()
+                Button("保存") {
+                    if let id = editingConnectorLabelID,
+                       let idx = document.connectors.firstIndex(where: { $0.id == id }) {
+                        var nextDoc = document
+                        let trimmed = connectorLabelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        nextDoc.connectors[idx].label = trimmed.isEmpty ? nil : trimmed
+                        nextDoc.connectors[idx].updatedAt = Date()
+                        callbacks.onCommitDocument(nextDoc)
+                    }
+                    editingConnectorLabelID = nil
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(14)
+    }
+
+    // MARK: - Camera & Coordinate Helpers
+
+    private func worldToScreen(_ pt: CGPoint) -> CGPoint {
+        CGPoint(
+            x: (pt.x - cameraCenter.x) * cameraZoom + viewportSize.width * 0.5,
+            y: (pt.y - cameraCenter.y) * cameraZoom + viewportSize.height * 0.5
+        )
+    }
+
+    private func screenToWorld(_ pt: CGPoint) -> CGPoint {
+        CGPoint(
+            x: (pt.x - viewportSize.width * 0.5) / cameraZoom + cameraCenter.x,
+            y: (pt.y - viewportSize.height * 0.5) / cameraZoom + cameraCenter.y
+        )
+    }
+
+    private func visibleWorldRect(overscan: CGFloat) -> CGRect {
+        let topLeft = screenToWorld(CGPoint(x: -overscan, y: -overscan))
+        let bottomRight = screenToWorld(CGPoint(x: viewportSize.width + overscan, y: viewportSize.height + overscan))
+        return CGRect(
+            x: topLeft.x,
+            y: topLeft.y,
+            width: max(1, bottomRight.x - topLeft.x),
+            height: max(1, bottomRight.y - topLeft.y)
+        )
+    }
+
+    private func effectiveFrame(for node: BoardNode) -> BoardRect {
+        if resizingNodeID == node.id, let live = liveResizeFrame {
+            return live
+        }
+        if activeNodeDragID != nil {
+            let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union(activeNodeDragID.map { [$0] } ?? [])
+            if movingSet.contains(node.id) && !node.isLocked {
+                return BoardRect(
+                    x: node.frame.x + Double(activeNodeDragDelta.width),
+                    y: node.frame.y + Double(activeNodeDragDelta.height),
+                    width: node.frame.width,
+                    height: node.frame.height
+                )
+            }
+        }
+        return node.frame
+    }
+
+    private func applyZoom(factor: CGFloat, anchorScreenPoint: CGPoint) {
+        let worldBefore = screenToWorld(anchorScreenPoint)
+        let nextZoom = max(0.2, min(3.0, cameraZoom * factor))
+        cameraZoom = nextZoom
+        let worldAfter = screenToWorld(anchorScreenPoint)
+        cameraCenter.x += (worldBefore.x - worldAfter.x)
+        cameraCenter.y += (worldBefore.y - worldAfter.y)
+    }
+
+    private func fitBoardToScreen() {
+        guard !document.nodes.isEmpty else {
+            cameraCenter = CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5)
+            cameraZoom = 1.0
+            return
+        }
+        let minX = document.nodes.map(\.frame.minX).min() ?? 0
+        let minY = document.nodes.map(\.frame.minY).min() ?? 0
+        let maxX = document.nodes.map(\.frame.maxX).max() ?? 800
+        let maxY = document.nodes.map(\.frame.maxY).max() ?? 600
+        let w = max(200, maxX - minX)
+        let h = max(200, maxY - minY)
+        let fitZoom = min(
+            (viewportSize.width - 120) / CGFloat(w),
+            (viewportSize.height - 160) / CGFloat(h)
+        )
+        withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
+            cameraZoom = max(0.22, min(1.8, fitZoom))
+            cameraCenter = CGPoint(x: (minX + maxX) * 0.5, y: (minY + maxY) * 0.5)
+        }
+        persistCameraViewport()
+    }
+
+    private func syncCameraFromDocument() {
+        cameraZoom = max(0.2, min(3.0, CGFloat(document.viewportZoom > 0 ? document.viewportZoom : 1.0)))
+        if document.viewportCenter == .zero && !document.nodes.isEmpty {
+            let minX = document.nodes.map(\.frame.minX).min() ?? 0
+            let maxX = document.nodes.map(\.frame.maxX).max() ?? 1000
+            let minY = document.nodes.map(\.frame.minY).min() ?? 0
+            let maxY = document.nodes.map(\.frame.maxY).max() ?? 600
+            cameraCenter = CGPoint(x: (minX + maxX) * 0.5, y: min((minY + maxY) * 0.5, 420))
+        } else {
+            cameraCenter = document.viewportCenter.cgPoint
+        }
+    }
+
+    private func persistCameraViewport() {
+        var nextDoc = document
+        nextDoc.viewportCenter = BoardPoint(cameraCenter)
+        nextDoc.viewportZoom = Double(cameraZoom)
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    // MARK: - Document Mutations
+
+    private func switchToFreeform() {
+        guard isAutoEditorial else { return }
+        let frozen = EditorialLayoutSolver.freezeIntoFreeform(
+            document: document,
+            containerWidth: Double(max(420, viewportSize.width)),
+            assetsByID: assetsByID
+        )
+        withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
+            cameraZoom = CGFloat(frozen.viewportZoom)
+            cameraCenter = frozen.viewportCenter.cgPoint
+            callbacks.onCommitDocument(frozen)
+        }
+    }
+
+    private func switchToAutoEditorial() {
+        guard !isAutoEditorial else { return }
+        var nextDoc = document
+        nextDoc.mode = .autoEditorial(AutoLayoutConfig())
+        activeTool = .select
+        withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
+            callbacks.onCommitDocument(nextDoc)
+        }
+    }
+
+    private func updateAutoConfig(_ mutate: (inout AutoLayoutConfig) -> Void) {
+        var cfg = autoConfig
+        mutate(&cfg)
+        var nextDoc = document
+        nextDoc.mode = .autoEditorial(cfg)
+        withAnimation(CanvasMotion.accessible(CanvasMotion.moveOnScreen, reduced: reduceMotion)) {
+            callbacks.onCommitDocument(nextDoc)
+        }
+    }
+
+    private func tidyFreeformNodes() {
+        let tidied = EditorialLayoutSolver.tidyNodesInFreeform(
+            document: document,
+            selectedNodeIDs: selectedNodeIDs,
+            assetsByID: assetsByID
+        )
+        withAnimation(CanvasMotion.accessible(CanvasMotion.gestureSpring, reduced: reduceMotion)) {
+            callbacks.onCommitDocument(tidied)
+        }
+    }
+
+    private func toggleHeroWeight(nodeID: UUID) {
+        var nextDoc = document
+        guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }),
+              case .assetRef(let assetID, let crop, let weight, let autoplay) = nextDoc.nodes[idx].kind else { return }
+        nextDoc.nodes[idx].kind = .assetRef(assetID: assetID, crop: crop, weight: weight >= 2 ? 1 : 2, autoplayLoop: autoplay)
+        nextDoc.nodes[idx].updatedAt = Date()
+        withAnimation(CanvasMotion.accessible(CanvasMotion.moveOnScreen, reduced: reduceMotion)) {
+            callbacks.onCommitDocument(nextDoc)
+        }
+    }
+
+    private func toggleLock(nodeID: UUID) {
+        var nextDoc = document
+        guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }) else { return }
+        nextDoc.nodes[idx].isLocked.toggle()
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func addNoteNode() {
+        var nextDoc = document
+        let spawn = isAutoEditorial ? CGPoint(x: 80, y: 80) : cameraCenter
+        let node = BoardNode(
+            kind: .note(title: "灵感便签", text: "记录构图、材质、光影或排版思路…", style: .warm, fontSize: 14),
+            frame: BoardRect(x: Double(spawn.x - 120), y: Double(spawn.y - 80), width: 240, height: 170),
+            zIndex: (nextDoc.nodes.map(\.zIndex).max() ?? 0) + 1,
+            editorialOrder: nextDoc.nodes.count
+        )
+        nextDoc.nodes.append(node)
+        selectedNodeIDs = [node.id]
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func addGroupFrameNode() {
+        var nextDoc = document
+        if isAutoEditorial {
+            nextDoc = EditorialLayoutSolver.freezeIntoFreeform(
+                document: nextDoc,
+                containerWidth: Double(max(420, viewportSize.width)),
+                assetsByID: assetsByID
+            )
+            cameraZoom = CGFloat(nextDoc.viewportZoom)
+            cameraCenter = nextDoc.viewportCenter.cgPoint
+        }
+        let spawn = cameraCenter
+        let node = BoardNode(
+            kind: .groupFrame(title: "构图参考区", tint: .sand),
+            frame: BoardRect(x: Double(spawn.x - 220), y: Double(spawn.y - 160), width: 440, height: 320),
+            zIndex: -10,
+            editorialOrder: nextDoc.nodes.count
+        )
+        nextDoc.nodes.append(node)
+        selectedNodeIDs = [node.id]
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func addPaletteStripNode() {
+        var nextDoc = document
+        let spawn = isAutoEditorial ? CGPoint(x: 80, y: 80) : cameraCenter
+        let colors = nextDoc.extractedPalette.isEmpty
+            ? [LabColor.fromHex("#C8B8A6"), LabColor.fromHex("#5C6B73"), LabColor.fromHex("#253237"), LabColor.fromHex("#E0D6CC")]
+            : nextDoc.extractedPalette
+        let node = BoardNode(
+            kind: .paletteStrip(colors: colors, autoSyncWithBoard: true),
+            frame: BoardRect(x: Double(spawn.x - 210), y: Double(spawn.y - 42), width: 420, height: 84),
+            zIndex: (nextDoc.nodes.map(\.zIndex).max() ?? 0) + 1,
+            editorialOrder: nextDoc.nodes.count
+        )
+        nextDoc.nodes.append(node)
+        selectedNodeIDs = [node.id]
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func updateNote(nodeID: UUID, title: String?, text: String, style: NoteStyle, fontSize: Double) {
+        var nextDoc = document
+        guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }) else { return }
+        nextDoc.nodes[idx].kind = .note(title: title, text: text, style: style, fontSize: fontSize)
+        nextDoc.nodes[idx].updatedAt = Date()
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func updateGroupFrame(nodeID: UUID, title: String, tint: GroupTint) {
+        var nextDoc = document
+        guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }) else { return }
+        nextDoc.nodes[idx].kind = .groupFrame(title: title, tint: tint)
+        nextDoc.nodes[idx].updatedAt = Date()
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func togglePaletteAutoSync(nodeID: UUID) {
+        var nextDoc = document
+        guard let idx = nextDoc.nodes.firstIndex(where: { $0.id == nodeID }),
+              case .paletteStrip(let colors, let autoSync) = nextDoc.nodes[idx].kind else { return }
+        nextDoc.nodes[idx].kind = .paletteStrip(colors: colors, autoSyncWithBoard: !autoSync)
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func removeNode(id: UUID) {
+        var nextDoc = document
+        nextDoc.nodes.removeAll { $0.id == id }
+        nextDoc.connectors.removeAll { $0.fromNodeID == id || $0.toNodeID == id }
+        selectedNodeIDs.remove(id)
+        if swappingNodeID == id {
+            callbacks.onSelectSwapTarget(nil)
+        }
+        callbacks.onCommitDocument(nextDoc)
+    }
+
+    private func deleteCurrentSelection() {
+        var nextDoc = document
+        var changed = false
+        if !selectedNodeIDs.isEmpty {
+            let ids = selectedNodeIDs
+            nextDoc.nodes.removeAll { ids.contains($0.id) }
+            nextDoc.connectors.removeAll { ids.contains($0.fromNodeID) || ids.contains($0.toNodeID) }
+            selectedNodeIDs.removeAll()
+            changed = true
+        }
+        if let connID = selectedConnectorID {
+            nextDoc.connectors.removeAll { $0.id == connID }
+            selectedConnectorID = nil
+            changed = true
+        }
+        if changed {
+            callbacks.onCommitDocument(nextDoc)
+        }
+    }
+
+    private var currentExportOptions: MoodboardExportOptions {
+        MoodboardExportOptions(
+            scale: 2.0,
+            includeAnnotations: exportIncludeAnnotations,
+            includePaletteStrip: exportIncludePalette,
+            darkAppearance: colorScheme == .dark
+        )
+    }
+
+    private func toolIcon(_ tool: MoodboardTool) -> String {
+        switch tool {
+        case .select: "cursorarrow"
+        case .pan: "hand.raised"
+        case .connector: "arrow.up.right"
+        case .pen: "pencil.tip"
+        case .eraser: "eraser"
+        }
+    }
+
+    // MARK: - Live Drop-In (External Files/URLs OR Internal Charkle Assets)
+
+    private func handleCanvasDrop(providers: [NSItemProvider], screenLocation: CGPoint) -> Bool {
+        guard !providers.isEmpty else { return false }
+        let dropPoint: BoardPoint? = isAutoEditorial ? nil : BoardPoint(screenToWorld(screenLocation))
+
+        Task {
+            var internalIDs: [UUID] = []
+            var externalInputs: [CaptureInput] = []
+
+            for provider in providers {
+                if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
+                   let str = await loadPlainString(provider: provider) {
+                    if let decoded = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
+                        internalIDs.append(contentsOf: decoded)
+                        continue
+                    }
+                }
+                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+                   let url = await loadURL(provider: provider, type: UTType.fileURL) {
+                    externalInputs.append(.fileURL(url))
+                    continue
+                }
+                if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
+                   let url = await loadURL(provider: provider, type: UTType.url) {
+                    if url.isFileURL {
+                        externalInputs.append(.fileURL(url))
+                    } else if url.scheme == "http" || url.scheme == "https" {
+                        externalInputs.append(.webURL(url, title: nil, notes: nil))
+                    }
+                    continue
+                }
+                if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
+                   let data = await loadData(provider: provider, type: UTType.image) {
+                    externalInputs.append(.imageData(data, suggestedName: "BoardDrop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
+                    continue
+                }
+            }
+
+            if !internalIDs.isEmpty {
+                callbacks.onDropLibraryAssetIDs(internalIDs, dropPoint)
+            }
+            if !externalInputs.isEmpty {
+                callbacks.onDropExternalInputs(externalInputs, dropPoint)
+            }
+        }
+        return true
+    }
+
+    private func loadPlainString(provider: NSItemProvider) async -> String? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
+                if let str = item as? String { continuation.resume(returning: str) }
+                else if let data = item as? Data, let str = String(data: data, encoding: .utf8) { continuation.resume(returning: str) }
+                else { continuation.resume(returning: nil) }
+            }
+        }
+    }
+
+    private func loadURL(provider: NSItemProvider, type: UTType) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadItem(forTypeIdentifier: type.identifier, options: nil) { item, _ in
+                if let url = item as? URL { continuation.resume(returning: url) }
+                else if let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) { continuation.resume(returning: url) }
+                else if let str = item as? String, let url = URL(string: str) { continuation.resume(returning: url) }
+                else { continuation.resume(returning: nil) }
+            }
+        }
+    }
+
+    private func loadData(provider: NSItemProvider, type: UTType) async -> Data? {
+        await withCheckedContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                continuation.resume(returning: data)
+            }
+        }
+    }
+}
+
+// MARK: - AppKit Trackpad Scroll-Pan & Option/Command-Scroll Zoom Bridge
+
+private struct FreeformTrackpadBridge: NSViewRepresentable {
+    let onScrollDelta: (CGFloat, CGFloat) -> Void
+    let onZoomDelta: (CGFloat, CGPoint) -> Void
+
+    func makeNSView(context: Context) -> TrackpadEventCatcherView {
+        let view = TrackpadEventCatcherView()
+        view.onScrollDelta = onScrollDelta
+        view.onZoomDelta = onZoomDelta
+        return view
+    }
+
+    func updateNSView(_ nsView: TrackpadEventCatcherView, context: Context) {
+        nsView.onScrollDelta = onScrollDelta
+        nsView.onZoomDelta = onZoomDelta
+    }
+}
+
+private final class TrackpadEventCatcherView: NSView {
+    var onScrollDelta: ((CGFloat, CGFloat) -> Void)?
+    var onZoomDelta: ((CGFloat, CGPoint) -> Void)?
+    private var monitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        teardownMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+            guard let self, let win = self.window, event.window === win else { return event }
+            let locInView = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(locInView) else { return event }
+            // Convert AppKit bottom-left Y to SwiftUI top-left Y
+            let swiftUIPoint = CGPoint(x: locInView.x, y: self.bounds.height - locInView.y)
+            if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command) {
+                let factor = max(0.85, min(1.18, 1.0 + event.scrollingDeltaY * 0.008))
+                self.onZoomDelta?(factor, swiftUIPoint)
+            } else {
+                let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
+                self.onScrollDelta?(event.scrollingDeltaX * scale, event.scrollingDeltaY * scale)
+            }
+            return nil
+        }
+    }
+
+    private func teardownMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    isolated deinit {
+        teardownMonitor()
+    }
+}
