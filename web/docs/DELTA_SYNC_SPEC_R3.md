@@ -1,6 +1,6 @@
 # Charkle-Web Round 3 Delta Sync Specification
 
-> **Audit Scope**: All uncommitted Round 3 changes in `/Users/char/Documents/Projects/Charkle` (read-only audit) mapped onto `/Users/char/Documents/Projects/Charkle-Web`.
+> **Audit Scope**: All uncommitted Round 3 changes in the macOS repository root (`..`, read-only audit) mapped onto `./web`.
 >
 > **Summary of Upstream Changes Audited**:
 > 1. **Core / AI / Engine**: Live AI connection testing (`testAIConnection` across ChatGPT Subscription, Gemini, Anthropic Messages, OpenAI Chat Completions, OpenAI Responses via authenticated `GET /models` + 404/405 JSON-ping fallback), plus offline batched visual-index rebuild (`rebuildLocalVisualIndex`).
@@ -140,7 +140,7 @@ Mirror `CloudAIProvider.swift` (`AIHTTPClient.get`) and `LiveCharkleEngine.swift
   - Respond with `Content-Type: application/zip`, `Content-Disposition: attachment; filename="charkle-figma-bridge-plugin.zip"`, `Cache-Control: private, no-cache`.
 
 ### 1.5 Figma Plugin Static Assets (`figma-plugin/ui.html`)
-- **No action required** — verified byte-for-byte identical to `/Users/char/Documents/Projects/Charkle/Resources/FigmaPlugin/ui.html`.
+- **No action required** — verified byte-for-byte identical to `../Resources/FigmaPlugin/ui.html`.
 
 ### 1.6 Tests (`packages/server/tests/*`)
 - In `ai-routes-integration.test.ts` (or `ai-cloud-provider.test.ts`):
@@ -154,7 +154,7 @@ Mirror `CloudAIProvider.swift` (`AIHTTPClient.get`) and `LiveCharkleEngine.swift
 ## 2. Design System, Icons, Stores, Shell & Onboarding Delta (for `client-sync`)
 
 ### 2.1 Layered Hero Icons (`packages/client/public/icons/**` & `CharkleIcon.tsx`)
-- Copy byte-for-byte from `/Users/char/Documents/Projects/Charkle/Sources/CharkleApp/Resources/Icons/`:
+- Copy byte-for-byte from `../Sources/CharkleApp/Resources/Icons/`:
   - `layered-ai-spark.svg` → `packages/client/public/icons/layered-ai-spark.svg`
   - `layered-gallery.svg` → `packages/client/public/icons/layered-gallery.svg`
   - `layered-ready.svg` → `packages/client/public/icons/layered-ready.svg`

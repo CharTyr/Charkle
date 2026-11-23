@@ -72,11 +72,11 @@ describe('DriveSyncConfig & Core model helpers', () => {
       activeStorageLocationSummary(
         createDefaultDriveSyncConfig({
           mode: 'gdirectMount',
-          mountPath: '/Users/char/GoogleDrive',
+          mountPath: '/Users/demo/GoogleDrive',
           rootFolderName: 'Charkle',
         }),
       ),
-    ).toBe('/Users/char/GoogleDrive/Charkle');
+    ).toBe('/Users/demo/GoogleDrive/Charkle');
 
     expect(
       activeStorageLocationSummary(

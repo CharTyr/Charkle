@@ -1,6 +1,6 @@
 # Charkle-Web Wave 2 Delta Sync Specification
 
-> **Audit Scope**: All non-Notch changes in `/Users/char/Documents/Projects/Charkle` after Wave 1 (`ecd2212`, `2026-11-23 02:37`), verified against the current `/Users/char/Documents/Projects/Charkle-Web` codebase.
+> **Audit Scope**: All non-Notch changes in the macOS repository root (`..`) after Wave 1 (`ecd2212`, `2026-11-23 02:37`), verified against the current `./web` codebase.
 >
 > **Commits Audited**:
 > - `ac8f723` (`02:13`, pre-Wave-1): **Already synced in Wave 1** (all Duotone SVGs, brand icons, Folder Popover, rich viewers, Masonry/Justified/Filmstrip).
@@ -64,7 +64,7 @@ Native `f39bfa5` makes every newly created, seeded, or AI-curated Moodboard nati
 - **Tests**: Run `npm test -w @charkle/shared` and `npm test -w @charkle/server` (ensure `swift-codec.test.ts` and `editorial-layout.test.ts` remain green — they explicitly pass `mode: { type: 'autoEditorial', ... }`).
 
 ### 1.3 Figma Plugin (`Charkle-Web/figma-plugin/`)
-- **No action required** — verified byte-for-byte identical to `/Users/char/Documents/Projects/Charkle/Resources/FigmaPlugin/`.
+- **No action required** — verified byte-for-byte identical to `../Resources/FigmaPlugin/`.
 
 ---
 

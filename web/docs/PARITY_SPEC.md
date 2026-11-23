@@ -1,6 +1,6 @@
 # Charkle Web — macOS Feature & Contract Parity Specification
 
-> **Source of truth**: Working tree of `/Users/char/Documents/Projects/Charkle` (audited across `CharkleCore`, `CharkleApp`, `CharkleCanvas`, and `Resources/FigmaPlugin/code.js`).
+> **Source of truth**: Working tree of the macOS repository root (`..`, audited across `CharkleCore`, `CharkleApp`, `CharkleCanvas`, and `Resources/FigmaPlugin/code.js`).
 > **Audience**: Wave 2 Backend & Frontend engineers implementing `Charkle-Web` to 100% functional parity with zero omissions.
 
 ---
