@@ -269,6 +269,11 @@ public struct GalleryFilmstripView: View {
                 .background(HorizontalWheelScrollRedirector())
                 .frame(height: 96)
                 .background(CharkleTheme.surfaceElevated(for: colorScheme).opacity(0.86))
+                .onChange(of: selectedAssetIDs) { _, newSelection in
+                    if newSelection.count == 1, let target = newSelection.first, focusedAssetID != target {
+                        focusedAssetID = target
+                    }
+                }
                 .onChange(of: activeAsset?.id) { _, newID in
                     resetViewTransform(animated: false)
                     if let newID {

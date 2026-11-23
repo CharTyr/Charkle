@@ -40,6 +40,7 @@ public struct MoodboardCanvasCallbacks {
     public var onRedo: () -> Void
     public var onSelectSwapTarget: (UUID?) -> Void
     public var onOpenQuickLook: (AssetRecord) -> Void
+    public var onRevealInLibrary: (UUID) -> Void
     public var onRevealInFinder: (UUID) -> Void
     public var onCopyAssets: ([UUID]) -> Void
     public var onCutAssets: ([UUID]) -> Void
@@ -64,6 +65,7 @@ public struct MoodboardCanvasCallbacks {
         onRedo: @escaping () -> Void = {},
         onSelectSwapTarget: @escaping (UUID?) -> Void = { _ in },
         onOpenQuickLook: @escaping (AssetRecord) -> Void = { _ in },
+        onRevealInLibrary: @escaping (UUID) -> Void = { _ in },
         onRevealInFinder: @escaping (UUID) -> Void = { _ in },
         onCopyAssets: @escaping ([UUID]) -> Void = { _ in },
         onCutAssets: @escaping ([UUID]) -> Void = { _ in },
@@ -87,6 +89,7 @@ public struct MoodboardCanvasCallbacks {
         self.onRedo = onRedo
         self.onSelectSwapTarget = onSelectSwapTarget
         self.onOpenQuickLook = onOpenQuickLook
+        self.onRevealInLibrary = onRevealInLibrary
         self.onRevealInFinder = onRevealInFinder
         self.onCopyAssets = onCopyAssets
         self.onCutAssets = onCutAssets
@@ -1422,6 +1425,9 @@ public struct MoodboardCanvasView: View {
                     if let asset = assetsByID[assetID] {
                         callbacks.onOpenQuickLook(asset)
                     }
+                },
+                onRevealInLibrary: {
+                    callbacks.onRevealInLibrary(assetID)
                 },
                 onRevealInFinder: {
                     callbacks.onRevealInFinder(assetID)

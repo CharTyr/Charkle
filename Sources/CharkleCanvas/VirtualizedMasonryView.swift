@@ -278,6 +278,22 @@ public nonisolated enum MasonryLayoutEngine {
         )
     }
 
+    /// Computes the clamped vertical scroll origin that centers an asset card vertically within the usable
+    /// viewport area beneath `topInset` (and above `bottomInset`), used when revealing an asset from Moodboard or Jump.
+    public static func revealScrollY(
+        for itemRect: CGRect,
+        topInset: CGFloat,
+        bottomInset: CGFloat,
+        totalHeight: CGFloat,
+        viewportHeight: CGFloat
+    ) -> CGFloat {
+        let maxScrollY = max(0, totalHeight - viewportHeight)
+        guard maxScrollY > 0 else { return 0 }
+        let usableHeight = max(80, viewportHeight - topInset - min(bottomInset, viewportHeight * 0.25))
+        let targetCenterY = topInset + usableHeight * 0.5
+        return max(0, min(maxScrollY, itemRect.midY - targetCenterY))
+    }
+
     public static func compute(
         assets: [AssetRecord],
         layoutMode: GalleryLayoutMode = .verticalMasonry,
@@ -547,6 +563,16 @@ private struct MasonryAssetsSignature: Equatable {
     let lastID: UUID?
 }
 
+public struct MasonryRevealRequest: Equatable, Sendable {
+    public let assetID: UUID
+    public let nonce: UUID
+
+    public init(assetID: UUID, nonce: UUID = UUID()) {
+        self.assetID = assetID
+        self.nonce = nonce
+    }
+}
+
 public struct VirtualizedMasonryView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -563,6 +589,7 @@ public struct VirtualizedMasonryView: View {
     public let bottomContentInset: CGFloat
     public let heroNamespace: Namespace.ID
     public let activeQuickLookID: UUID?
+    public let revealRequest: MasonryRevealRequest?
     public let backgroundOverride: Color?
     public let callbacks: MasonryCallbacks
 
@@ -581,6 +608,7 @@ public struct VirtualizedMasonryView: View {
         bottomContentInset: CGFloat = 96,
         heroNamespace: Namespace.ID,
         activeQuickLookID: UUID? = nil,
+        revealRequest: MasonryRevealRequest? = nil,
         backgroundOverride: Color? = nil,
         callbacks: MasonryCallbacks = MasonryCallbacks()
     ) {
@@ -596,6 +624,7 @@ public struct VirtualizedMasonryView: View {
         self.bottomContentInset = bottomContentInset
         self.heroNamespace = heroNamespace
         self.activeQuickLookID = activeQuickLookID
+        self.revealRequest = revealRequest
         self.backgroundOverride = backgroundOverride
         self.callbacks = callbacks
     }
@@ -624,6 +653,7 @@ public struct VirtualizedMasonryView: View {
                 topContentInset: topContentInset,
                 bottomContentInset: bottomContentInset,
                 activeQuickLookID: activeQuickLookID,
+                revealRequest: revealRequest,
                 isDarkMode: colorScheme == .dark,
                 reduceMotion: reduceMotion,
                 callbacks: callbacks,
@@ -654,6 +684,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
     let topContentInset: CGFloat
     let bottomContentInset: CGFloat
     let activeQuickLookID: UUID?
+    let revealRequest: MasonryRevealRequest?
     let isDarkMode: Bool
     let reduceMotion: Bool
     let callbacks: MasonryCallbacks
@@ -681,6 +712,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             topInset: topContentInset,
             bottomInset: bottomContentInset,
             activeQuickLookID: activeQuickLookID,
+            revealRequest: revealRequest,
             isDarkMode: isDarkMode,
             reduceMotion: reduceMotion,
             callbacks: callbacks
@@ -709,6 +741,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             topInset: topContentInset,
             bottomInset: bottomContentInset,
             activeQuickLookID: activeQuickLookID,
+            revealRequest: revealRequest,
             isDarkMode: isDarkMode,
             reduceMotion: reduceMotion,
             callbacks: callbacks
@@ -1233,6 +1266,8 @@ private final class MasonryTileLayer {
         layer.removeAnimation(forKey: "charkle.shadowPath")
         layer.removeAnimation(forKey: "charkle.enterScale")
         layer.removeAnimation(forKey: "charkle.enterOpacity")
+        layer.removeAnimation(forKey: "charkle.revealPulse")
+        borderLayer.removeAnimation(forKey: "charkle.revealBorder")
         clipLayer.removeAnimation(forKey: "charkle.pos")
         clipLayer.removeAnimation(forKey: "charkle.bounds")
         imageLayer.removeAnimation(forKey: "charkle.pos")
@@ -1334,6 +1369,24 @@ private final class MasonryTileLayer {
         opAnim.duration = duration * 0.85
         opAnim.timingFunction = timing
         layer.add(opAnim, forKey: "charkle.enterOpacity")
+    }
+
+    /// Brief tactile spotlight pulse used when jumping from a Moodboard or Quick Jump directly to this asset.
+    func animateRevealSpotlight(reduceMotion: Bool) {
+        let borderPulse = CAKeyframeAnimation(keyPath: "borderWidth")
+        borderPulse.values = [2.5, 4.2, 2.5]
+        borderPulse.keyTimes = [0, 0.38, 1.0]
+        borderPulse.duration = reduceMotion ? 0.25 : 0.62
+        borderPulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        borderLayer.add(borderPulse, forKey: "charkle.revealBorder")
+
+        guard !reduceMotion else { return }
+        let scalePulse = CAKeyframeAnimation(keyPath: "transform.scale")
+        scalePulse.values = [1.0, 1.032, 1.0]
+        scalePulse.keyTimes = [0, 0.35, 1.0]
+        scalePulse.duration = 0.46
+        scalePulse.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+        layer.add(scalePulse, forKey: "charkle.revealPulse")
     }
 
     /// Fast geometry-only frame update used during sidebar/inspector drawer animations and live window resize,
@@ -1681,6 +1734,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     private var legacyPinchSettleWorkItem: DispatchWorkItem?
     private var scrollZoomAccumulator: CGFloat = 0
     private var lastScrollZoomStepAt: CFAbsoluteTime = 0
+    private var pendingRevealRequest: MasonryRevealRequest?
+    private var lastHandledRevealNonce: UUID?
 
     private let spacing: CGFloat = 12
     private let horizontalPadding: CGFloat = 20
@@ -1804,6 +1859,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         topInset: CGFloat,
         bottomInset: CGFloat,
         activeQuickLookID: UUID?,
+        revealRequest: MasonryRevealRequest?,
         isDarkMode: Bool,
         reduceMotion: Bool,
         callbacks: MasonryCallbacks
@@ -1855,12 +1911,17 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             && abs(targetColumnWidth - lastPublishedZoomWidth) < 1.0
             && (CFAbsoluteTimeGetCurrent() - lastInteractiveZoomAt) < 0.45
 
+        if let revealRequest, revealRequest.nonce != lastHandledRevealNonce {
+            pendingRevealRequest = revealRequest
+        }
+
         if isSelfZoomEcho {
             if invalidationChanged || appearanceChanged {
                 syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
             } else if visualFlagsChanged {
                 updateVisibleTileStatesOnly()
             }
+            fulfillPendingRevealIfPossible()
             return
         }
 
@@ -1909,6 +1970,45 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         } else if visualFlagsChanged {
             updateVisibleTileStatesOnly()
         }
+
+        fulfillPendingRevealIfPossible()
+    }
+
+    private func fulfillPendingRevealIfPossible() {
+        guard let request = pendingRevealRequest,
+              request.nonce != lastHandledRevealNonce,
+              let clipView = enclosingScrollView?.contentView,
+              clipView.bounds.height > 40,
+              lastLayoutWidth > 120,
+              let item = layoutItem(for: request.assetID) else {
+            return
+        }
+
+        lastHandledRevealNonce = request.nonce
+        pendingRevealRequest = nil
+        sessionZoomAnchor = nil
+        cancelOpticalTransformImmediate()
+
+        let targetScrollY = MasonryLayoutEngine.revealScrollY(
+            for: item.rect,
+            topInset: topInset,
+            bottomInset: bottomInset,
+            totalHeight: layout.totalHeight,
+            viewportHeight: clipView.bounds.height
+        )
+
+        isProgrammaticZoomScroll = true
+        clipView.scroll(to: NSPoint(x: 0, y: targetScrollY))
+        enclosingScrollView?.reflectScrolledClipView(clipView)
+        lastScrollY = targetScrollY
+        isProgrammaticZoomScroll = false
+
+        syncVisibleTiles()
+
+        if let tile = activeTiles[request.assetID] {
+            tile.animateRevealSpotlight(reduceMotion: reduceMotion)
+        }
+        window?.makeFirstResponder(self)
     }
 
     // MARK: - macOS Photos-Style Optical Pinch & ⌘+Scroll Gallery Zoom
@@ -2336,6 +2436,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             updateDocumentHeight(clipHeight: clipView.bounds.height)
             syncVisibleTiles()
         }
+        fulfillPendingRevealIfPossible()
     }
 
     func handleScrollBoundsChanged() {

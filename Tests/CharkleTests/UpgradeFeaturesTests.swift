@@ -193,6 +193,36 @@ struct UpgradeFeaturesTests {
         #expect(abs(projMidY - oldScreenRect.midY) < 0.001)
         #expect(abs(projW - oldScreenRect.width) < 0.001)
         #expect(abs(projH - oldScreenRect.height) < 0.001)
+
+        // 4. Reveal-in-library scroll centering clamps top/bottom cleanly and centers mid-list items below topInset
+        let topReveal = MasonryLayoutEngine.revealScrollY(
+            for: CGRect(x: 20, y: 76, width: 200, height: 180),
+            topInset: 76,
+            bottomInset: 44,
+            totalHeight: 4000,
+            viewportHeight: 800
+        )
+        #expect(topReveal == 0)
+
+        let midRect = CGRect(x: 20, y: 1800, width: 200, height: 200)
+        let midReveal = MasonryLayoutEngine.revealScrollY(
+            for: midRect,
+            topInset: 76,
+            bottomInset: 44,
+            totalHeight: 4000,
+            viewportHeight: 800
+        )
+        let expectedCenterY: CGFloat = 76 + (800 - 76 - 44) * 0.5
+        #expect(abs((midRect.midY - midReveal) - expectedCenterY) < 0.01)
+
+        let bottomReveal = MasonryLayoutEngine.revealScrollY(
+            for: CGRect(x: 20, y: 3820, width: 200, height: 160),
+            topInset: 76,
+            bottomInset: 44,
+            totalHeight: 4000,
+            viewportHeight: 800
+        )
+        #expect(bottomReveal == 3200)
     }
 
     @Test("GitHubRepoURLParser and SocialPostURLParser parse valid URLs and reject non-post/non-repo links")

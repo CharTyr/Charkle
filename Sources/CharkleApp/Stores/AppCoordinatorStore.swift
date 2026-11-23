@@ -1,3 +1,4 @@
+import CharkleCanvas
 import CharkleCore
 import Foundation
 import SwiftUI
@@ -67,6 +68,7 @@ public final class AppCoordinatorStore {
 
     public var quickLookAssetID: UUID?
     public var quickLookPlaylist: [UUID] = []
+    public var pendingGalleryReveal: MasonryRevealRequest?
 
     public var isJumpAnywherePresented: Bool = false
     public var isVisualFilterBarPresented: Bool = false
@@ -256,6 +258,10 @@ public final class AppCoordinatorStore {
 
     public func closeQuickLook() {
         quickLookAssetID = nil
+    }
+
+    public func requestRevealAssetInGallery(_ assetID: UUID) {
+        pendingGalleryReveal = MasonryRevealRequest(assetID: assetID)
     }
 
     public func stepQuickLook(delta: Int) {

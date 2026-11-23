@@ -576,6 +576,7 @@ public struct MainWindowView: View {
                     bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
                     heroNamespace: heroNamespace,
                     activeQuickLookID: coordinator.quickLookAssetID,
+                    revealRequest: coordinator.pendingGalleryReveal,
                     callbacks: MasonryCallbacks(
                         onOpenQuickLook: { asset in openQuickLook(asset) },
                         onDropExternalInputs: { inputs in
@@ -2317,6 +2318,9 @@ public struct MainWindowView: View {
                             }
                         }
                     },
+                    onRevealInLibrary: { assetID in
+                        revealAssetInLibrary(assetID)
+                    },
                     onRevealInFinder: { assetID in
                         Task {
                             let ok = await library.revealInFinder(assetID: assetID)
@@ -2502,6 +2506,78 @@ public struct MainWindowView: View {
             Task { await moodboards.refreshBoards() }
         default:
             Task { await library.applyDestination(destination) }
+        }
+    }
+
+    /// Jumps from a Moodboard asset node straight to that asset's actual location in the Library
+    /// (folder / inbox / trash), clears blocking search/visual filters if needed, selects & scrolls
+    /// directly to the exact card with a spotlight pulse, and offers a 1-click "返回情绪板" toast CTA.
+    private func revealAssetInLibrary(_ assetID: UUID) {
+        guard let asset = library.allAssetsByID[assetID] else {
+            coordinator.showToast("该素材已不在素材库中", icon: "exclamationmark.triangle", tone: .warning)
+            return
+        }
+
+        let sourceBoardID = moodboards.activeBoard?.id
+        coordinator.closeQuickLook()
+
+        let targetDestination: SidebarDestination
+        var resolvedLabel: String
+        if asset.isTrashed {
+            targetDestination = .trash
+            resolvedLabel = "废纸篓"
+        } else if let folderID = asset.folderID,
+                  library.folders.contains(where: { $0.id == folderID }) {
+            targetDestination = .folder(folderID)
+            resolvedLabel = library.folderDisplayPath(for: folderID)
+        } else if asset.folderID == nil {
+            targetDestination = .inbox
+            resolvedLabel = "收件箱"
+        } else {
+            targetDestination = .allItems
+            resolvedLabel = "全部素材"
+        }
+
+        coordinator.selectedDestination = targetDestination
+
+        Task {
+            await library.applyDestination(targetDestination)
+
+            if !library.assets.contains(where: { $0.id == assetID }) {
+                searchDraft = ""
+                library.filter.searchQuery = ""
+                library.filter.kinds.removeAll()
+                library.filter.selectedColorHex = nil
+                library.filter.shape = nil
+                library.filter.minRating = 0
+                library.filter.onlyPinnedOffline = false
+                if library.semanticSearchReport != nil {
+                    await library.clearSemanticSearch()
+                }
+                await library.applyDestination(targetDestination)
+            }
+
+            if !library.assets.contains(where: { $0.id == assetID }), targetDestination != .allItems {
+                coordinator.selectedDestination = .allItems
+                resolvedLabel = "全部素材"
+                await library.applyDestination(.allItems)
+            }
+
+            library.selectedAssetIDs = [assetID]
+            coordinator.requestRevealAssetInGallery(assetID)
+
+            if let sourceBoardID {
+                coordinator.showToast(
+                    "已定位到「\(resolvedLabel)」",
+                    icon: "scope",
+                    actionTitle: "返回情绪板",
+                    onAction: {
+                        navigate(to: .moodboard(sourceBoardID))
+                    }
+                )
+            } else {
+                coordinator.showToast("已定位到「\(resolvedLabel)」", icon: "scope")
+            }
         }
     }
 
@@ -2699,6 +2775,7 @@ public struct MainWindowView: View {
             if let id = match.targetUUID {
                 navigate(to: .allItems)
                 library.selectedAssetIDs = [id]
+                coordinator.requestRevealAssetInGallery(id)
                 if let asset = library.allAssetsByID[id] {
                     openQuickLook(asset)
                 }
