@@ -4,7 +4,7 @@
 
 ## 1. Goal & User Value
 
-Complete full macOS v1.0.1 feature parity on Windows and ship a production-ready `x64` NSIS `.exe` installer: Hybrid Cloud AI + TypeSafe System One (Jev) visual grounding, the centered **9-pane Settings overlay** + skippable **Onboarding Studio**, native **`charkle-cli.exe`** + 14-tool External Agent MCP/CLI service with independent channel switches, final Kubai motion/a11y polish, cross-platform macOS ↔ Windows sync QA, and release packaging.
+Complete full macOS v1.0.1 feature parity on Windows and ship a production-ready `x64` NSIS `.exe` installer: Hybrid Cloud AI + TypeSafe System One (Jev) visual grounding, the centered **9-pane Settings overlay** + skippable **Onboarding Studio**, native **`charkle-cli.exe`** + 14-tool External Agent MCP/CLI service with independent channel switches, final motion/a11y polish, cross-platform macOS ↔ Windows sync QA, and release packaging.
 
 ## 2. Requirements
 
@@ -24,7 +24,7 @@ Complete full macOS v1.0.1 feature parity on Windows and ship a production-ready
   - Build native `crates/charkle-cli` (`charkle-cli.exe`) supporting `--library-dir <path>`, `mcp` (JSON-RPC 2.0 stdio), and CLI subcommands (`status`, `overview`, `inbox`, `search`, `organize`, `board`, etc.).
   - Expose all 14 tools (8 read + 6 write) and 2 MCP resources (`charkle://library/overview`, `charkle://boards`) with Rust contact-sheet image renderer; enforce security invariant (**permanent delete NEVER allowed via external agents — soft trash only**) and independent `mcpEnabled`/`cliEnabled` switches; signal running desktop app via Windows named event (`Local\CharkleLibraryChanged`) for live UI refresh.
 - **M5-R5 Motion/A11y Polish, Cross-Platform QA, Spec Update & NSIS Release**:
-  - Final audit of Kubai motion tokens, `prefers-reduced-motion` / `prefers-reduced-transparency` / Windows Transparency Effects Off fallbacks across Light & Dark modes.
+  - Final audit of motion tokens, `prefers-reduced-motion` / `prefers-reduced-transparency` / Windows Transparency Effects Off fallbacks across Light & Dark modes.
   - End-to-end bidirectional `/.charkle/` sync test between macOS Charkle v1.0.1 and Windows Charkle (assets, nested folders, tags, smart folders, dual-mode moodboards, renames).
   - Package `x64` NSIS `.exe` installer via Tauri v2 bundler (bundling `charkle-cli.exe` sidecar/tool binary cleanly alongside the app) + verify clean install/launch/uninstall on Windows 11 (and Windows 10 1903+ fallback).
   - Update `.trellis/spec/` with Windows Tauri/Rust coding & interop conventions; verify existing macOS `swift test` remains untouched/green.

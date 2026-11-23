@@ -51,7 +51,7 @@ windows/
     ├── public/icons/                  # Synced original Duotone & Layered SVGs
     └── src/
         ├── api/                       # Pluggable `CharkleTransport` seam (`TauriTransport` now; `HttpTransport` ready)
-        ├── design-system/             # Gallery-First tokens, Windows Mica/Acrylic CSS, Kubai Motion, CharkleIcon
+        ├── design-system/             # Gallery-First tokens, Windows Mica/Acrylic CSS, CharkleMotion, CharkleIcon
         ├── stores/                    # 4 domain Zustand stores: coordinator, library, moodboard, syncAI
         ├── components/                # Titlebar (Snap Layout aware), Glass pills, Popovers, Drop rings
         └── features/
@@ -126,7 +126,7 @@ Following `.trellis/spec/` deep-module principles (introduce seams only where �
    - Created/shown on `Alt+Shift+A` over captured physical-pixel desktop snapshot; zero flicker, instant dismiss on `Esc` or mouse-up crop.
 
 ### 4.2 Motion & Accessibility Parity (`docs/MOTION_AND_ICON_SPEC.md`)
-- Exact Kubai Tip 011 easing tokens (`--ease-out`, `--ease-out-strong`, `--ease-in`, `--ease-in-out`, `--ease-overshoot`, spring response/damping), Tip 004 continuous concentric corners (`20/8→12`, `12/6→6`, `14/6→8`), Tip 005 drag-reorder ripple (`A * pow(0.7, n)`, `24ms * n` stagger), Tip 015 continuity (Card ↔ QuickLook hero zoom, travelling sidebar pill, Auto Editorial ↔ Freeform smooth coordinate interpolation).
+- Exact role-mapped easing tokens (`--ease-out`, `--ease-out-strong`, `--ease-in`, `--ease-in-out`, `--ease-overshoot`, spring response/damping), continuous concentric corners (`20/8→12`, `12/6→6`, `14/6→8`), drag-reorder neighbor ripple (`A * pow(0.7, n)`, `24ms * n` stagger), and UI continuity (Card ↔ QuickLook hero zoom, travelling sidebar pill, Auto Editorial ↔ Freeform smooth coordinate interpolation).
 - Windows keyboard ergonomics: `Ctrl+J` (Jump Anywhere), `Ctrl+Z` / `Ctrl+Y` & `Ctrl+Shift+Z` (Undo/Redo), `Space` (Quick Look), `1–9` (Inbox Triage), `Alt+Shift+A` (Capture), `Alt+Shift+S` (Toggle Top Drop Shelf), `Alt+Shift+V` (Quick Collect Clipboard).
 - Full `prefers-reduced-motion` (`0.15s` cross-fade) and `prefers-reduced-transparency` / Windows Transparency Effects Off solid fallback.
 

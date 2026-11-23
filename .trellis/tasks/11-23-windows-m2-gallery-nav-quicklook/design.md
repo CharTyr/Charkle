@@ -8,4 +8,4 @@
 ## Frontend Architecture (`./windows/ui/`)
 - **`CharkleTransport` Seam (`src/api/`)**: Every store and component calls `transport.*` — never raw `@tauri-apps/api` directly inside feature views — preserving clean Vitest mocking and optional future Web `HttpTransport`.
 - **Virtualization**: Vertical Masonry and Horizontal Justified Masonry compute pure O(N) item rects with `ResizeObserver` width tracking and viewport windowing (`scrollTop ± 1.5 * viewportHeight`) to stay locked at 60/120 FPS up to 50k items.
-- **Quick Look Continuity**: Captures source card `DOMRect` on `Space`/double-click to animate hero expansion with Kubai `--ease-spring`, collapsing to `150ms` opacity fade when `prefers-reduced-motion` is active.
+- **Quick Look Continuity**: Captures source card `DOMRect` on `Space`/double-click to animate hero expansion with `--ease-spring`, collapsing to `150ms` opacity fade when `prefers-reduced-motion` is active.
