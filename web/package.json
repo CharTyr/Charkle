@@ -1,0 +1,31 @@
+{
+  "name": "charkle-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted full-stack TypeScript visual reference library & rapid moodboard studio",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/client",
+    "packages/worker"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "npm run build -w @charkle/shared && (trap 'kill 0' EXIT; npm run dev -w @charkle/server & npm run dev -w @charkle/client & wait)",
+    "dev:server": "npm run build -w @charkle/shared && npm run dev -w @charkle/server",
+    "dev:client": "npm run build -w @charkle/shared && npm run dev -w @charkle/client",
+    "build": "npm run build -w @charkle/shared && npm run build -w @charkle/server && npm run build -w @charkle/client",
+    "test": "npm run build -w @charkle/shared && npm run build -w @charkle/server && npm run test --workspaces --if-present",
+    "typecheck": "npm run build -w @charkle/shared && npm run build -w @charkle/server && npm run typecheck -w @charkle/shared && npm run typecheck -w @charkle/server && npm run typecheck -w @charkle/client && npm run typecheck -w @charkle/worker",
+    "start": "npm run start -w @charkle/server",
+    "mcp": "npm run mcp -w @charkle/server",
+    "cf:pack": "npm run pack-zips -w @charkle/worker",
+    "cf:typecheck": "npm run build -w @charkle/shared && npm run build -w @charkle/server && npm run typecheck -w @charkle/worker",
+    "cf:dev": "npm run build && npm run dev -w @charkle/worker",
+    "cf:dry-run": "npm run build && npm run dry-run -w @charkle/worker",
+    "cf:deploy": "npm run build && npm run deploy -w @charkle/worker"
+  }
+}

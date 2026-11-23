@@ -1,0 +1,27 @@
+{
+  "name": "@charkle/worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers + Durable Objects SQLite + R2 deployment package for Charkle Web",
+  "scripts": {
+    "pack-zips": "node scripts/pack-zips.mjs",
+    "types": "wrangler types --include-runtime=false",
+    "typecheck": "node scripts/pack-zips.mjs && tsc -p tsconfig.json --noEmit",
+    "dev": "node scripts/pack-zips.mjs && wrangler dev",
+    "dry-run": "node scripts/pack-zips.mjs && wrangler deploy --dry-run",
+    "deploy": "node scripts/pack-zips.mjs && wrangler deploy",
+    "test": "node scripts/pack-zips.mjs && vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@charkle/server": "*",
+    "@charkle/shared": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261123.1",
+    "jszip": "^3.10.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1",
+    "wrangler": "^4.166.0"
+  }
+}

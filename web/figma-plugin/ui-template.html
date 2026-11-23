@@ -1,0 +1,112 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<style>
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;padding:22px;font:13px -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;background:var(--figma-color-bg,#fafafa);color:var(--figma-color-text,#1e2024)}
+h1{font-size:18px;font-weight:650;margin:0 0 8px;letter-spacing:-0.01em}
+p{line-height:1.55;margin:6px 0;color:var(--figma-color-text-secondary,#666)}
+.dropzone{border:1.5px dashed var(--figma-color-border-strong,#c8c8cc);border-radius:12px;padding:18px 14px;margin:14px 0;text-align:center;transition:border-color .15s,background .15s;cursor:pointer}
+.dropzone.drag{border-color:#2667ed;background:rgba(38,103,237,.06)}
+.dropzone input[type=file]{display:none}
+.dropzone strong{display:block;font-size:13px;margin-bottom:4px}
+.dropzone span{font-size:11.5px;color:var(--figma-color-text-secondary,#777)}
+button{font:inherit;font-weight:550;border:0;border-radius:8px;padding:10px 15px;cursor:pointer;background:#2667ed;color:white}
+button:disabled{opacity:.4;cursor:default}
+button.secondary{background:var(--figma-color-bg-secondary,#ececef);color:inherit}
+#summary{border:1px solid var(--figma-color-border,#dedee2);border-radius:10px;padding:12px 14px;margin:10px 0;display:none}
+#boardTitle{font-size:13.5px;font-weight:600;margin-bottom:4px}
+#counts{font-size:12px;color:var(--figma-color-text-secondary,#555)}
+#issues{max-height:110px;overflow:auto;font-size:11.5px;line-height:1.5;white-space:pre-wrap;margin-top:8px;padding-top:8px;border-top:1px solid var(--figma-color-border,#e5e5e8);color:var(--figma-color-text-secondary,#666)}
+label{display:flex;align-items:flex-start;gap:8px;margin:12px 0;line-height:1.5;font-size:12px}
+#status{margin:14px 0;white-space:pre-wrap;min-height:28px;font-size:12px;color:var(--figma-color-text-secondary,#555)}
+#actions{display:flex;gap:8px;flex-wrap:wrap}
+#report{display:none}
+small{display:block;margin-top:18px;line-height:1.55;font-size:11px;color:var(--figma-color-text-secondary,#808086)}
+</style>
+<h1>Charkle → Figma / FigJam</h1>
+<p>选择由 Charkle 导出的 <code>.charkleboard</code> 文件，以独立可编辑图层导入图片、便签、分组、色卡、连线与手绘批注。</p>
+<div id="dropzone" class="dropzone">
+  <input id="file" type="file" accept=".charkleboard,.zip">
+  <strong>点击选择或拖入 .charkleboard 文件</strong>
+  <span>原图像素无损导入 · 超 4096px 自动分块 · 支持 FigJam 原生 GIF 与连线</span>
+</div>
+<div id="summary">
+  <div id="boardTitle"></div>
+  <div id="counts"></div>
+  <div id="issues"></div>
+</div>
+<label id="reviewLabel" hidden><input id="allow" type="checkbox"><span>我已查看上述提示项，继续导入到当前画布。</span></label>
+<div id="actions">
+  <button id="import" disabled>导入到当前页面</button>
+  <button id="cancel" class="secondary" disabled>取消</button>
+  <button id="repair" class="secondary" hidden>补全已导入的 GIF</button>
+  <button id="report" class="secondary">保存报告</button>
+</div>
+<div id="status" role="status">请选择 Charkle 导出的情绪板包。</div>
+<small>纯本地离线解析与 SHA-256 校验，无需 API 密钥或联网权限；导入的图层与素材将随当前 Figma 文件保存。</small>
+<script>/*__JSZIP__*/</script><script>/*__SHA256__*/</script><script>
+let zip=null,board=null,lastReport=null,busy=false;
+const $=id=>document.getElementById(id);
+function send(message){parent.postMessage({pluginMessage:message},'*')}
+function update(){
+  $('import').disabled=!board||busy||((board.report?.reviewCount||0)>0&&!$('allow').checked);
+  $('file').disabled=busy;$('allow').disabled=busy;$('cancel').disabled=!busy;
+  $('repair').disabled=busy;
+  $('repair').hidden=!(board&&board.objects.some(o=>o.image&&o.image.animation));
+}
+$('allow').onchange=update;
+const dz=$('dropzone');
+dz.onclick=()=>{if(!busy)$('file').click()};
+dz.ondragover=e=>{e.preventDefault();if(!busy)dz.classList.add('drag')};
+dz.ondragleave=()=>dz.classList.remove('drag');
+dz.ondrop=e=>{e.preventDefault();dz.classList.remove('drag');if(!busy&&e.dataTransfer.files[0])loadBundle(e.dataTransfer.files[0])};
+$('file').onchange=()=>{if($('file').files[0])loadBundle($('file').files[0])};
+
+async function loadBundle(file){
+  zip=null;board=null;lastReport=null;$('report').style.display='none';$('summary').style.display='none';$('reviewLabel').hidden=true;$('allow').checked=false;update();
+  try{
+    if(file.size>2*1024*1024*1024)throw Error('导出包超过 2 GB，请拆分后再导出。');
+    $('status').textContent='正在读取导出包…';
+    zip=await JSZip.loadAsync(file);
+    const entry=zip.file('board.json');if(!entry)throw Error('导出包缺少 board.json。');
+    const value=JSON.parse(await entry.async('string'));
+    if(value.format!=='charkle-figma-bridge'||value.version!==1||!Array.isArray(value.objects)||!value.report)throw Error('不受支持的导出包格式，请使用 Charkle 导出。');
+    for(const o of value.objects)if(o.kind==='image')for(const t of o.image.tiles)if(!zip.file(t.file))throw Error('缺少图片分块：'+t.file);
+    board=value;lastReport=value.report;$('report').style.display='inline-block';$('summary').style.display='block';
+    $('boardTitle').textContent=board.name||'Charkle 情绪板';
+    const r=board.report;
+    const parts=[r.imageCount+' 张图片'];
+    if(r.noteCount)parts.push(r.noteCount+' 张便签');
+    if(r.groupCount)parts.push(r.groupCount+' 个分组');
+    if(r.paletteCount)parts.push(r.paletteCount+' 条色卡');
+    if(r.connectorCount)parts.push(r.connectorCount+' 条连线');
+    if(r.strokeCount)parts.push(r.strokeCount+' 笔手绘');
+    $('counts').textContent='共 '+board.objects.length+' 个对象 · '+parts.join(' · ');
+    $('issues').textContent=(r.warnings||[]).map(w=>w.name+'：'+w.issues.join('；')).join('\n')||'全部素材校验通过，无转换损耗提示。';
+    $('reviewLabel').hidden=!(r.reviewCount>0);
+    $('status').textContent=r.reviewCount?'有 '+r.reviewCount+' 条提示项，确认后点击导入。':'导出包校验就绪，可立即导入。';
+    update();
+  }catch(e){zip=null;board=null;$('status').textContent=e.message;update()}
+}
+$('import').onclick=()=>{if(!board||busy)return;busy=true;update();send({type:'import',board,allowReview:$('allow').checked})};
+$('cancel').onclick=()=>send({type:'cancel'});
+$('repair').onclick=()=>{if(!board||busy)return;busy=true;update();send({type:'repair-animations',board})};
+$('report').onclick=()=>{const a=document.createElement('a');const url=URL.createObjectURL(new Blob([JSON.stringify(lastReport,null,2)],{type:'application/json'}));a.href=url;a.download='charkle-figma-report.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+
+window.onmessage=async event=>{
+  const m=event.data.pluginMessage;if(!m)return;
+  if(m.type==='asset-request'){
+    try{
+      const entry=zip&&zip.file(m.file);if(!entry)throw Error('缺少素材文件：'+m.file);
+      const bytes=await entry.async('uint8array');
+      const asset=board.objects.flatMap(o=>o.image?[...o.image.tiles,...(o.image.animation?[o.image.animation]:[])]:[]).find(t=>t.file===m.file);
+      if(!asset||!asset.sha256)throw Error('缺少 SHA-256 校验值。');
+      if(sha256(bytes)!==asset.sha256)throw Error('SHA-256 校验失败：'+m.file);
+      send({type:'asset-response',id:m.id,bytes});
+    }catch(e){send({type:'asset-response',id:m.id,error:e.message})}
+  }else if(m.type==='progress'){$('status').textContent='正在导入 '+m.current+' / '+m.total+'\n'+m.name}
+  else if(m.type==='done'){busy=false;lastReport=m.result.report;$('report').style.display='inline-block';$('status').textContent='已完成导入（共 '+m.result.importedCount+' 个可编辑对象）。';update()}
+  else if(m.type==='error'){busy=false;$('status').textContent=m.error+'\n本次创建的临时图层已自动清理。';update()}
+  else if(m.type==='repaired'){busy=false;lastReport=m.result.report;$('status').textContent='已补全 '+m.result.repaired+' 个原生 GIF 动图。';update()}
+  else if(m.type==='repair-error'){busy=false;$('status').textContent=m.error;update()}
+};
+</script></html>
