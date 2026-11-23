@@ -1,0 +1,76 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "charkle-web",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-19",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Structured logs and traces in Cloudflare Workers Observability
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
+  },
+
+  // Static SPA assets built by `@charkle/client`; `/api/*` routes always run the Worker first
+  "assets": {
+    "directory": "../client/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // Singleton Durable Object hosting Charkle's SQLite library database, auth, vault & alarm sync
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHARKLE_LIBRARY",
+        "class_name": "CharkleLibraryDO"
+      }
+    ]
+  },
+
+  // SQLite-backed Durable Object migration
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CharkleLibraryDO"]
+    }
+  ],
+
+  // R2 object storage for original media files, thumbnails, and cached assets
+  // Create before deploying: `npx wrangler r2 bucket create charkle-media`
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "charkle-media",
+      "preview_bucket_name": "charkle-media-preview"
+    }
+  ],
+
+  // Optional Cloudflare Images binding for server-side edge thumbnail resizing (uncomment if enabled on your account):
+  // "images": {
+  //   "binding": "IMAGES"
+  // },
+
+  // Non-secret runtime variables.
+  //
+  // IMPORTANT — Configure secrets via Wrangler (NEVER commit secrets here):
+  //   npx wrangler secret put CHARKLE_VAULT_KEY           # Required in production (AES-256-GCM SecretVault key)
+  //   npx wrangler secret put CHARKLE_ADMIN_USERNAME      # Optional headless first-run admin username
+  //   npx wrangler secret put CHARKLE_ADMIN_PASSWORD      # Optional headless first-run admin password (min 8 chars)
+  //   npx wrangler secret put CHARKLE_GOOGLE_CLIENT_ID    # Optional Google Drive OAuth Client ID
+  //   npx wrangler secret put CHARKLE_GOOGLE_CLIENT_SECRET # Optional Google Drive OAuth Client Secret
+  //
+  // Google Drive OAuth Authorized Redirect URI:
+  //   https://<your-domain>/api/v1/sync/google/oauth/callback
+  "vars": {
+    "CHARKLE_LIBRARY_ID": "default"
+  }
+}
