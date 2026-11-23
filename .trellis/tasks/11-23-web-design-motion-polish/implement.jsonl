@@ -1,0 +1,6 @@
+{"file": "DESIGN.md", "reason": "Unified visual, typography, motion, component, and P0-P2 frontend polish constitution"}
+{"file": ".trellis/spec/web/index.md", "reason": "Web workspace architecture, copy rules, and verification commands"}
+{"file": ".trellis/spec/web/dual-runtime-guidelines.md", "reason": "Strict Node.js & Cloudflare Workers runtime seam contracts (zero node:fs/node:zlib in worker bundles)"}
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "/.charkle/ Swift wire compatibility, Figma Bridge contract, and repository purity rules"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "macOS EXIF/AI Prompt extraction contract (hasMeaningfulCameraExif & supported formats)"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "macOS v1.0.1 Quick Look long-strip and zero-flicker reorderable Inspector contracts"}

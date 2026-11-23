@@ -192,19 +192,29 @@ public struct InlineGuideDisclosure<Content: View>: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Spacer(minLength: 0)
                 }
                 .foregroundStyle(
                     isHovered || isExpanded
                         ? Color.primary.opacity(0.84)
                         : SettingsPalette.sectionLabel(for: colorScheme)
                 )
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .background(
+                    isHovered
+                        ? Color.primary.opacity(colorScheme == .dark ? 0.055 : 0.04)
+                        : Color.clear,
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { isHovered = $0 }
-            .padding(.horizontal, 16)
-            .padding(.top, 2)
-            .padding(.bottom, isExpanded ? 10 : 12)
+            .padding(.horizontal, 6)
+            .padding(.top, 0)
+            .padding(.bottom, isExpanded ? 6 : 8)
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {

@@ -54,6 +54,177 @@ struct UpgradeFeaturesTests {
         #expect(fast == brute)
     }
 
+    @Test("MasonryLayoutEngine Photos-style zoom stepping moves cleanly by exact 1 density level across viewport widths")
+    func masonryZoomSteppingPrecision() {
+        for containerW: CGFloat in [720, 960, 1240, 1540] {
+            let minCols = MasonryLayoutEngine.minReachableVerticalColumns(containerWidth: containerW)
+            let maxCols = MasonryLayoutEngine.maxReachableVerticalColumns(containerWidth: containerW)
+            #expect(minCols <= maxCols)
+
+            // Walk every reachable column count from densest to widest, verifying exact 1-column steps
+            var width = MasonryLayoutEngine.canonicalTargetWidth(forVerticalColumns: maxCols, containerWidth: containerW)
+            #expect(MasonryLayoutEngine.verticalColumnCount(containerWidth: containerW, targetColumnWidth: width) == maxCols)
+
+            for expectedCols in stride(from: maxCols - 1, through: minCols, by: -1) {
+                width = MasonryLayoutEngine.steppedColumnWidth(
+                    currentWidth: width,
+                    direction: 1,
+                    layoutMode: .verticalMasonry,
+                    containerWidth: containerW
+                )
+                let resolvedCols = MasonryLayoutEngine.verticalColumnCount(containerWidth: containerW, targetColumnWidth: width)
+                #expect(resolvedCols == expectedCols)
+            }
+
+            // Walk back out from widest to densest
+            for expectedCols in (minCols + 1)...maxCols {
+                width = MasonryLayoutEngine.steppedColumnWidth(
+                    currentWidth: width,
+                    direction: -1,
+                    layoutMode: .verticalMasonry,
+                    containerWidth: containerW
+                )
+                let resolvedCols = MasonryLayoutEngine.verticalColumnCount(containerWidth: containerW, targetColumnWidth: width)
+                #expect(resolvedCols == expectedCols)
+            }
+        }
+
+        // Horizontal Justified stops walk monotonically across all quantized stops
+        var jWidth = MasonryLayoutEngine.justifiedZoomStops.first!
+        for expected in MasonryLayoutEngine.justifiedZoomStops.dropFirst() {
+            jWidth = MasonryLayoutEngine.steppedColumnWidth(
+                currentWidth: jWidth,
+                direction: 1,
+                layoutMode: .horizontalJustified,
+                containerWidth: 1200
+            )
+            #expect(jWidth == expected)
+        }
+        #expect(MasonryLayoutEngine.snappedJustifiedTargetWidth(210) == 214)
+    }
+
+    @Test("MasonryLayoutEngine exact-asset zoom anchoring pins Row-2+ cards even from scrollY=0, preserves Row-1 top inset, and compensates optical rebase with zero jump")
+    func masonryExactAssetAnchorMath() {
+        var assets: [AssetRecord] = []
+        for i in 0..<80 {
+            assets.append(AssetRecord(
+                title: "A\(i)",
+                fileName: "a\(i).jpg",
+                mediaKind: .image,
+                pixelWidth: (i % 3 == 0) ? 1200 : 900,
+                pixelHeight: (i % 3 == 0) ? 900 : 1200
+            ))
+        }
+
+        let containerW: CGFloat = 1200
+        let viewportH: CGFloat = 760
+        let topInset: CGFloat = 76
+
+        let layout6 = MasonryLayoutEngine.compute(
+            assets: assets,
+            layoutMode: .verticalMasonry,
+            containerWidth: containerW,
+            targetColumnWidth: MasonryLayoutEngine.canonicalTargetWidth(forVerticalColumns: 6, containerWidth: containerW),
+            spacing: 12,
+            horizontalPadding: 20,
+            topInset: topInset,
+            bottomInset: 64
+        )
+        let layout3 = MasonryLayoutEngine.compute(
+            assets: assets,
+            layoutMode: .verticalMasonry,
+            containerWidth: containerW,
+            targetColumnWidth: MasonryLayoutEngine.canonicalTargetWidth(forVerticalColumns: 3, containerWidth: containerW),
+            spacing: 12,
+            horizontalPadding: 20,
+            topInset: topInset,
+            bottomInset: 64
+        )
+
+        // 1. Row-1 card at scrollY = 0 keeps scrollY = 0 so it never clips under the floating top bar
+        let row1Old = layout6.items[0].rect
+        let row1New = layout3.items[0].rect
+        let row1Scroll = MasonryLayoutEngine.anchoredScrollY(
+            oldScrollY: 0,
+            oldAnchorRect: row1Old,
+            newAnchorRect: row1New,
+            anchorNormV: 0.5,
+            anchorScreenY: row1Old.midY,
+            topInset: topInset,
+            totalHeight: layout3.totalHeight,
+            viewportHeight: viewportH
+        )
+        #expect(row1Scroll == 0)
+
+        // 2. Row-2+ card (index 10) zoomed IN from scrollY = 0 scrolls automatically to keep THAT exact card pinned
+        let row2Old = layout6.items[10].rect
+        let row2New = layout3.items[10].rect
+        let targetScreenY = row2Old.minY + 0.35 * row2Old.height
+        let row2Scroll = MasonryLayoutEngine.anchoredScrollY(
+            oldScrollY: 0,
+            oldAnchorRect: row2Old,
+            newAnchorRect: row2New,
+            anchorNormV: 0.35,
+            anchorScreenY: targetScreenY,
+            topInset: topInset,
+            totalHeight: layout3.totalHeight,
+            viewportHeight: viewportH
+        )
+        #expect(row2Scroll > 0)
+        let actualAnchoredScreenY = (row2New.minY + 0.35 * row2New.height) - row2Scroll
+        #expect(abs(actualAnchoredScreenY - targetScreenY) < 0.01)
+
+        // 3. Optical pinch rebase compensation projects frame 0 to the exact pre-handoff screen rect (0.0pt jump)
+        let oldScreenRect = CGRect(x: 412, y: 288, width: 210, height: 274)
+        let newScale: CGFloat = 0.91
+        let newPivot = CGPoint(x: 340, y: 390)
+        let fromDoc = MasonryLayoutEngine.compensatedFromRect(
+            oldScreenRect: oldScreenRect,
+            newScrollY: row2Scroll,
+            newOpticalScale: newScale,
+            newOpticalAnchorScreen: newPivot
+        )
+        // Re-project fromDoc through (newScrollY, newScale, newPivot) and confirm machine-precision match
+        let projMidX = newPivot.x + (fromDoc.midX - newPivot.x) * newScale
+        let projMidY = newPivot.y + ((fromDoc.midY - row2Scroll) - newPivot.y) * newScale
+        let projW = fromDoc.width * newScale
+        let projH = fromDoc.height * newScale
+        #expect(abs(projMidX - oldScreenRect.midX) < 0.001)
+        #expect(abs(projMidY - oldScreenRect.midY) < 0.001)
+        #expect(abs(projW - oldScreenRect.width) < 0.001)
+        #expect(abs(projH - oldScreenRect.height) < 0.001)
+
+        // 4. Reveal-in-library scroll centering clamps top/bottom cleanly and centers mid-list items below topInset
+        let topReveal = MasonryLayoutEngine.revealScrollY(
+            for: CGRect(x: 20, y: 76, width: 200, height: 180),
+            topInset: 76,
+            bottomInset: 44,
+            totalHeight: 4000,
+            viewportHeight: 800
+        )
+        #expect(topReveal == 0)
+
+        let midRect = CGRect(x: 20, y: 1800, width: 200, height: 200)
+        let midReveal = MasonryLayoutEngine.revealScrollY(
+            for: midRect,
+            topInset: 76,
+            bottomInset: 44,
+            totalHeight: 4000,
+            viewportHeight: 800
+        )
+        let expectedCenterY: CGFloat = 76 + (800 - 76 - 44) * 0.5
+        #expect(abs((midRect.midY - midReveal) - expectedCenterY) < 0.01)
+
+        let bottomReveal = MasonryLayoutEngine.revealScrollY(
+            for: CGRect(x: 20, y: 3820, width: 200, height: 160),
+            topInset: 76,
+            bottomInset: 44,
+            totalHeight: 4000,
+            viewportHeight: 800
+        )
+        #expect(bottomReveal == 3200)
+    }
+
     @Test("GitHubRepoURLParser and SocialPostURLParser parse valid URLs and reject non-post/non-repo links")
     func richURLParsers() throws {
         let u1 = try #require(URL(string: "https://github.com/apple/swift.git"))

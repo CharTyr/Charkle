@@ -634,7 +634,7 @@ public struct AISettingsPane: View {
                 .textFieldStyle(.roundedBorder)
             }
 
-            DisclosureGroup(isExpanded: $showGeminiAdvanced) {
+            CharkleDisclosureGroup(isExpanded: $showGeminiAdvanced) {
                 VStack(alignment: .leading, spacing: 8) {
                     sheetField("服务地址") {
                         TextField("https://generativelanguage.googleapis.com", text: $draftAIConfig.baseURL)
@@ -824,7 +824,7 @@ public struct AISettingsPane: View {
             }
             .frame(maxHeight: 240)
 
-            DisclosureGroup(isExpanded: $showTypeSafeEndpoint) {
+            CharkleDisclosureGroup(isExpanded: $showTypeSafeEndpoint) {
                 sheetField("自定义服务地址（默认 https://api.typesafe.ai）") {
                     TextField("https://api.typesafe.ai", text: $draftTypeSafeConfig.baseURL)
                         .textFieldStyle(.roundedBorder)

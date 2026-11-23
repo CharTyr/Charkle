@@ -40,6 +40,7 @@ public struct MoodboardCanvasCallbacks {
     public var onRedo: () -> Void
     public var onSelectSwapTarget: (UUID?) -> Void
     public var onOpenQuickLook: (AssetRecord) -> Void
+    public var onRevealInLibrary: (UUID) -> Void
     public var onRevealInFinder: (UUID) -> Void
     public var onCopyAssets: ([UUID]) -> Void
     public var onCutAssets: ([UUID]) -> Void
@@ -64,6 +65,7 @@ public struct MoodboardCanvasCallbacks {
         onRedo: @escaping () -> Void = {},
         onSelectSwapTarget: @escaping (UUID?) -> Void = { _ in },
         onOpenQuickLook: @escaping (AssetRecord) -> Void = { _ in },
+        onRevealInLibrary: @escaping (UUID) -> Void = { _ in },
         onRevealInFinder: @escaping (UUID) -> Void = { _ in },
         onCopyAssets: @escaping ([UUID]) -> Void = { _ in },
         onCutAssets: @escaping ([UUID]) -> Void = { _ in },
@@ -87,6 +89,7 @@ public struct MoodboardCanvasCallbacks {
         self.onRedo = onRedo
         self.onSelectSwapTarget = onSelectSwapTarget
         self.onOpenQuickLook = onOpenQuickLook
+        self.onRevealInLibrary = onRevealInLibrary
         self.onRevealInFinder = onRevealInFinder
         self.onCopyAssets = onCopyAssets
         self.onCutAssets = onCutAssets
@@ -118,6 +121,7 @@ public struct MoodboardCanvasView: View {
     public let swappingNodeID: UUID?
     public let canUndo: Bool
     public let canRedo: Bool
+    public let isOverlayPresented: Bool
     public let heroNamespace: Namespace.ID
     public let callbacks: MoodboardCanvasCallbacks
 
@@ -220,6 +224,7 @@ public struct MoodboardCanvasView: View {
         swappingNodeID: UUID?,
         canUndo: Bool,
         canRedo: Bool,
+        isOverlayPresented: Bool = false,
         heroNamespace: Namespace.ID,
         callbacks: MoodboardCanvasCallbacks
     ) {
@@ -229,6 +234,7 @@ public struct MoodboardCanvasView: View {
         self.swappingNodeID = swappingNodeID
         self.canUndo = canUndo
         self.canRedo = canRedo
+        self.isOverlayPresented = isOverlayPresented
         self.heroNamespace = heroNamespace
         self.callbacks = callbacks
     }
@@ -460,6 +466,7 @@ public struct MoodboardCanvasView: View {
 
             // 2. Native macOS trackpad scroll-pan, Option/Cmd zoom, Middle-mouse drag pan, and Hold-Space drag pan
             FreeformInputBridge(
+                isSuspended: isOverlayPresented,
                 onPanDelta: { dx, dy in
                     hoverState.markPanningActivity()
                     camera.panBy(screenDX: dx, screenDY: dy)
@@ -968,8 +975,7 @@ public struct MoodboardCanvasView: View {
     }
 
     private func openQuickLookForSelectedNode() -> Bool {
-        guard let firstID = selectedNodeIDs.first,
-              let node = document.nodes.first(where: { $0.id == firstID }),
+        guard let node = document.nodes.first(where: { selectedNodeIDs.contains($0.id) && $0.referencedAssetID != nil }),
               let assetID = node.referencedAssetID,
               let asset = assetsByID[assetID] else {
             return false
@@ -1419,6 +1425,9 @@ public struct MoodboardCanvasView: View {
                     if let asset = assetsByID[assetID] {
                         callbacks.onOpenQuickLook(asset)
                     }
+                },
+                onRevealInLibrary: {
+                    callbacks.onRevealInLibrary(assetID)
                 },
                 onRevealInFinder: {
                     callbacks.onRevealInFinder(assetID)
@@ -2308,6 +2317,7 @@ public struct MoodboardCanvasView: View {
 // MARK: - AppKit Trackpad Scroll, Option/Cmd Zoom, Middle-Mouse Drag Pan & Hold-Space Drag Pan Bridge
 
 private struct FreeformInputBridge: NSViewRepresentable {
+    let isSuspended: Bool
     let onPanDelta: (CGFloat, CGFloat) -> Void
     let onPanEnded: () -> Void
     let onZoomDelta: (CGFloat, CGPoint) -> Void
@@ -2316,6 +2326,7 @@ private struct FreeformInputBridge: NSViewRepresentable {
 
     func makeNSView(context: Context) -> CanvasInputCatcherView {
         let view = CanvasInputCatcherView()
+        view.isSuspended = isSuspended
         view.onPanDelta = onPanDelta
         view.onPanEnded = onPanEnded
         view.onZoomDelta = onZoomDelta
@@ -2325,6 +2336,7 @@ private struct FreeformInputBridge: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: CanvasInputCatcherView, context: Context) {
+        nsView.isSuspended = isSuspended
         nsView.onPanDelta = onPanDelta
         nsView.onPanEnded = onPanEnded
         nsView.onZoomDelta = onZoomDelta
@@ -2334,6 +2346,13 @@ private struct FreeformInputBridge: NSViewRepresentable {
 }
 
 private final class CanvasInputCatcherView: NSView {
+    var isSuspended: Bool = false {
+        didSet {
+            if isSuspended && !oldValue {
+                resetActivePanState()
+            }
+        }
+    }
     var onPanDelta: ((CGFloat, CGFloat) -> Void)?
     var onPanEnded: (() -> Void)?
     var onZoomDelta: ((CGFloat, CGPoint) -> Void)?
@@ -2383,7 +2402,8 @@ private final class CanvasInputCatcherView: NSView {
     }
 
     private func isEditingText(in window: NSWindow) -> Bool {
-        if window.firstResponder is NSTextView || window.firstResponder is NSTextField {
+        if let responder = window.firstResponder,
+           responder is NSTextView || responder is NSTextField || responder is NSText {
             return true
         }
         return false
@@ -2395,6 +2415,7 @@ private final class CanvasInputCatcherView: NSView {
     }
 
     private func handleLocalEvent(_ event: NSEvent, in window: NSWindow) -> NSEvent? {
+        guard !isSuspended else { return event }
         switch event.type {
         case .scrollWheel:
             let locInView = convert(event.locationInWindow, from: nil)
@@ -2438,8 +2459,8 @@ private final class CanvasInputCatcherView: NSView {
 
         case .keyDown:
             guard event.keyCode == 49 else { return event } // Spacebar
-            guard window.attachedSheet == nil else { return event }
-            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+            guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
+            guard event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
             guard !isEditingText(in: window) else { return event }
             if !isSpaceHeld {
                 isSpaceHeld = true

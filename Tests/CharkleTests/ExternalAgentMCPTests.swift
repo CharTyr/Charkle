@@ -3,7 +3,7 @@ import Foundation
 import ImageIO
 import Testing
 
-@Suite("External Agent MCP Server, Permissions & Headless Board Export")
+@Suite("External Agent MCP Server, Framing, Permissions & Headless Tools")
 struct ExternalAgentMCPTests {
     private func makeTestService() async throws -> (dir: URL, engine: LiveCharkleEngine, service: CharkleExternalAgentService, assets: [AssetRecord]) {
         let dir = try BackendFixture.directory()
@@ -24,65 +24,176 @@ struct ExternalAgentMCPTests {
         return (dir, engine, service, imported)
     }
 
-    private func sendRPC(_ service: CharkleExternalAgentService, _ request: [String: Any]) async throws -> [String: Any]? {
+    private func sendRPC(_ service: CharkleExternalAgentService, _ request: Any) async throws -> Any? {
         let reqData = try JSONSerialization.data(withJSONObject: request)
         guard let respData = await service.handleJSONRPC(reqData) else { return nil }
-        return try JSONSerialization.jsonObject(with: respData) as? [String: Any]
+        return try JSONSerialization.jsonObject(with: respData)
     }
 
-    @Test("MCP JSON-RPC lifecycle negotiates protocol, lists all 14 safe tools, and never exposes permanent delete")
-    func mcpProtocolLifecycleAndToolRegistry() async throws {
-        let (dir, _, service, _) = try await makeTestService()
-        defer { try? FileManager.default.removeItem(at: dir) }
+    private func decodeToolJSON(_ output: CharkleExternalAgentService.ToolOutput) throws -> [String: Any] {
+        let text = output.content.compactMap { if case .text(let t) = $0 { return t } else { return nil } }.joined()
+        let data = try #require(text.data(using: .utf8))
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
 
-        // 1. initialize
+    @Test("MCP JSON-RPC lifecycle negotiates protocol, lists 20 safe tools, resources, templates, prompts, and supports batch requests")
+    func mcpProtocolLifecycleAndToolRegistry() async throws {
+        let (dir, _, service, assets) = try await makeTestService()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let firstAsset = try #require(assets.first)
+
+        // 1. initialize (known modern version & unknown fallback negotiation)
         let initResp = try #require(await sendRPC(service, [
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": ["protocolVersion": "2025-03-26", "clientInfo": ["name": "claude-code", "version": "1.0"]]
-        ]))
+            "params": ["protocolVersion": "2025-11-25", "clientInfo": ["name": "claude-code", "version": "1.0"]]
+        ]) as? [String: Any])
         let initResult = try #require(initResp["result"] as? [String: Any])
-        #expect(initResult["protocolVersion"] as? String == "2025-03-26")
+        #expect(initResult["protocolVersion"] as? String == "2025-11-25")
+        let capabilities = try #require(initResult["capabilities"] as? [String: Any])
+        #expect(capabilities["tools"] != nil)
+        #expect(capabilities["resources"] != nil)
+        #expect(capabilities["prompts"] != nil)
+        #expect(capabilities["logging"] != nil)
         let serverInfo = try #require(initResult["serverInfo"] as? [String: Any])
         #expect(serverInfo["name"] as? String == "charkle")
+
+        let fallbackInit = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "initialize",
+            "params": ["protocolVersion": "1999-01-01"]
+        ]) as? [String: Any])
+        let fallbackResult = try #require(fallbackInit["result"] as? [String: Any])
+        #expect(fallbackResult["protocolVersion"] as? String == CharkleExternalAgentService.defaultProtocolVersion)
 
         // 2. notification returns nil (no JSON-RPC reply)
         let notifResp = try await sendRPC(service, ["jsonrpc": "2.0", "method": "notifications/initialized"])
         #expect(notifResp == nil)
 
-        // 3. ping
-        let pingResp = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 2, "method": "ping"]))
+        // 3. ping & logging/setLevel
+        let pingResp = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 2, "method": "ping"]) as? [String: Any])
         #expect(pingResp["result"] != nil)
+        let logResp = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "logging/setLevel",
+            "params": ["level": "info"]
+        ]) as? [String: Any])
+        #expect(logResp["result"] != nil)
 
-        // 4. tools/list
-        let toolsResp = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 3, "method": "tools/list"]))
+        // 4. tools/list -> 20 safe tools, full annotations, zero permanent/folder delete
+        let toolsResp = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 3, "method": "tools/list"]) as? [String: Any])
         let toolsResult = try #require(toolsResp["result"] as? [String: Any])
         let tools = try #require(toolsResult["tools"] as? [[String: Any]])
         let names = Set(tools.compactMap { $0["name"] as? String })
-        #expect(names.count == 14)
+        #expect(names.count == 20)
         #expect(names.contains("library_overview"))
+        #expect(names.contains("search_assets"))
         #expect(names.contains("render_contact_sheet"))
-        #expect(names.contains("get_board_context"))
-        #expect(names.contains("export_board_image"))
+        #expect(names.contains("find_similar_assets"))
+        #expect(names.contains("semantic_search"))
+        #expect(names.contains("quick_jump"))
+        #expect(names.contains("suggest_folder"))
+        #expect(names.contains("update_folder"))
+        #expect(names.contains("analyze_assets"))
         #expect(names.contains("compose_moodboard"))
+        #expect(names.contains("patch_moodboard"))
         #expect(names.contains("trash_assets"))
-        // Security invariant: NEVER expose permanent delete!
-        #expect(!names.contains(where: { $0.contains("permanent") || $0.contains("delete_asset") }))
 
-        // 5. resources/list & resources/read
-        let resResp = try #require(await sendRPC(service, [
+        // Security invariant: NEVER expose permanent delete or folder delete!
+        #expect(!names.contains(where: { $0.contains("permanent") || $0.contains("delete_") }))
+        for t in tools {
+            let ann = try #require(t["annotations"] as? [String: Any])
+            #expect(ann["destructiveHint"] as? Bool == false)
+            #expect((ann["title"] as? String)?.isEmpty == false)
+        }
+
+        // 5. resources/list, resources/templates/list, static & dynamic resources/read
+        let listRes = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 4, "method": "resources/list"]) as? [String: Any])
+        let resList = try #require((listRes["result"] as? [String: Any])?["resources"] as? [[String: Any]])
+        #expect(resList.count == 4)
+
+        let tmplRes = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 5, "method": "resources/templates/list"]) as? [String: Any])
+        let tmpls = try #require((tmplRes["result"] as? [String: Any])?["resourceTemplates"] as? [[String: Any]])
+        #expect(tmpls.count == 2)
+
+        let assetRes = try #require(await sendRPC(service, [
             "jsonrpc": "2.0",
-            "id": 4,
+            "id": 6,
             "method": "resources/read",
-            "params": ["uri": "charkle://library/overview"]
-        ]))
-        let resResult = try #require(resResp["result"] as? [String: Any])
-        let contents = try #require(resResult["contents"] as? [[String: Any]])
+            "params": ["uri": "charkle://assets/\(firstAsset.id.uuidString)"]
+        ]) as? [String: Any])
+        let contents = try #require((assetRes["result"] as? [String: Any])?["contents"] as? [[String: Any]])
         #expect(contents.first?["mimeType"] as? String == "application/json")
+        #expect((contents.first?["text"] as? String)?.contains(firstAsset.id.uuidString) == true)
+
+        // 6. prompts/list & prompts/get
+        let promptsResp = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 7, "method": "prompts/list"]) as? [String: Any])
+        let prompts = try #require((promptsResp["result"] as? [String: Any])?["prompts"] as? [[String: Any]])
+        #expect(prompts.count == 4)
+
+        let promptGet = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "prompts/get",
+            "params": ["name": "curate_moodboard", "arguments": ["brief": "warm terracotta editorial", "count": "8"]]
+        ]) as? [String: Any])
+        let promptMsgs = try #require((promptGet["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        #expect(promptMsgs.count == 1)
+
+        // 7. JSON-RPC 2.0 batch request (2 requests + 1 notification -> 2 replies)
+        let batchReply = try #require(await sendRPC(service, [
+            ["jsonrpc": "2.0", "id": 31, "method": "ping"],
+            ["jsonrpc": "2.0", "method": "notifications/initialized"],
+            ["jsonrpc": "2.0", "id": 32, "method": "prompts/list"]
+        ]) as? [[String: Any]])
+        #expect(batchReply.count == 2)
+        #expect(batchReply[0]["id"] as? Int == 31)
+        #expect(batchReply[1]["id"] as? Int == 32)
     }
 
-    @Test("Permission boundaries dynamically enforce disabled, readOnly, and readWriteOrganize (soft Trash only)")
+    @Test("MCPStdioFrameParser handles split Content-Length headers, mixed NDJSON, invalid limits, and EOF cleanly")
+    func mcpStdioFrameParserChunkBoundaries() throws {
+        var parser = MCPStdioFrameParser(maxFrameBytes: 4096)
+        let body1 = #"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+        let framed1 = "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: \(body1.utf8.count)\r\n\r\n\(body1)"
+
+        // Split right through the middle of `Content-Length` header and body across 4 chunks.
+        let bytes = Array(framed1.utf8)
+        let c1 = Data(bytes[0..<18])
+        let c2 = Data(bytes[18..<68])
+        let c3 = Data(bytes[68..<84])
+        let c4 = Data(bytes[84..<bytes.count])
+
+        #expect(parser.append(c1).isEmpty)
+        #expect(parser.append(c2).isEmpty)
+        #expect(parser.append(c3).isEmpty)
+        let ev1 = parser.append(c4)
+        #expect(ev1 == [.message(Data(body1.utf8), framing: .contentLength)])
+
+        // Mixed NDJSON + oversized Content-Length rejection + trailing EOF message
+        let ndjson = #"{"jsonrpc":"2.0","id":2,"method":"ping"}"# + "\n"
+        let ev2 = parser.append(Data(ndjson.utf8))
+        #expect(ev2 == [.message(Data(#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#.utf8), framing: .ndjson)])
+
+        let hugeHeader = "Content-Length: 99999999\r\n\r\n"
+        let ev3 = parser.append(Data(hugeHeader.utf8))
+        #expect(ev3.count == 1)
+        if case .invalidFrame(_, let framing) = ev3[0] {
+            #expect(framing == .contentLength)
+        } else {
+            Issue.record("Expected invalidFrame for oversized Content-Length")
+        }
+
+        let trailing = #"{"jsonrpc":"2.0","id":3,"method":"ping"}"#
+        #expect(parser.append(Data(trailing.utf8)).isEmpty)
+        let evEOF = parser.finishEOF()
+        #expect(evEOF == [.message(Data(trailing.utf8), framing: .ndjson)])
+    }
+
+    @Test("Permission boundaries, bug regressions, pagination, rich metadata, and all 20 safe tools work end-to-end")
     func permissionBoundariesAndEndToEndTools() async throws {
         let (dir, engine, service, assets) = try await makeTestService()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -95,10 +206,16 @@ struct ExternalAgentMCPTests {
         let blockedRead = await service.callTool(name: "library_overview", arguments: [:])
         #expect(blockedRead.isError == true)
 
-        // Policy 2: Default readOnly -> allows reads & Contact Sheet image, blocks writes
+        // Policy 2: Default readOnly -> allows reads, Contact Sheet, get_asset with inline image; blocks writes
         try ExternalAgentConfigStore.save(ExternalAgentConfig(enabled: true, accessLevel: .readOnly), in: service.configDirectory)
-        let sheetOut = await service.callTool(name: "render_contact_sheet", arguments: ["only_inbox": true])
+        let sheetOut = await service.callTool(name: "render_contact_sheet", arguments: ["only_inbox": true, "limit": 1, "offset": 0])
         #expect(sheetOut.isError == false)
+        let sheetMeta = try decodeToolJSON(sheetOut)
+        #expect(sheetMeta["totalMatched"] as? Int == 2)
+        #expect(sheetMeta["slotCount"] as? Int == 1)
+        #expect(sheetMeta["hasMore"] as? Bool == true)
+        #expect(sheetMeta["nextOffset"] as? Int == 1)
+
         var hasValidJPEG = false
         for item in sheetOut.content {
             if case .image(let mime, let data) = item {
@@ -109,48 +226,168 @@ struct ExternalAgentMCPTests {
         }
         #expect(hasValidJPEG == true)
 
+        // get_asset with inline JPEG preview
+        let assetImgOut = await service.callTool(name: "get_asset", arguments: [
+            "asset_id": a1.id.uuidString,
+            "include_image": true,
+            "image_max_side": 448
+        ])
+        #expect(assetImgOut.isError == false)
+        #expect(assetImgOut.content.contains { if case .image(let mime, _) = $0 { return mime == "image/jpeg" } else { return false } })
+
         let blockedWrite = await service.callTool(name: "create_folder", arguments: ["name": "ShouldFail"])
         #expect(blockedWrite.isError == true)
+        let blockedUpdateFolder = await service.callTool(name: "update_folder", arguments: ["folder_path": "None", "new_name": "X"])
+        #expect(blockedUpdateFolder.isError == true)
 
-        // Policy 3: Switch live to readWriteOrganize -> allows folder creation, organizing, board compose + PNG export, and soft Trash
+        // Policy 3: Switch live to readWriteOrganize
         try ExternalAgentConfigStore.save(ExternalAgentConfig(enabled: true, accessLevel: .readWriteOrganize), in: service.configDirectory)
 
-        let folderOut = await service.callTool(name: "create_folder", arguments: ["name": "Agent Curated"])
-        #expect(folderOut.isError == false)
+        // Create parent + child folders, then test `update_folder` (rename + color) and recursive search
+        let parentOut = await service.callTool(name: "create_folder", arguments: ["name": "Design", "color_hex": "#2A60E0"])
+        #expect(parentOut.isError == false)
+        let childOut = await service.callTool(name: "create_folder", arguments: ["name": "Posters", "parent_path": "Design"])
+        #expect(childOut.isError == false)
+        let childJSON = try decodeToolJSON(childOut)
+        #expect(childJSON["path"] as? String == "Design/Posters")
 
-        let orgOut = await service.callTool(name: "organize_assets", arguments: [
+        let renamedOut = await service.callTool(name: "update_folder", arguments: [
+            "folder_path": "Design/Posters",
+            "new_name": "Editorial Posters",
+            "color_hex": "#C86D51"
+        ])
+        #expect(renamedOut.isError == false)
+        let renamedJSON = try decodeToolJSON(renamedOut)
+        #expect(renamedJSON["path"] as? String == "Design/Editorial Posters")
+
+        // Organize asset 1 + verify `ai_description` CAN BE OVERWRITTEN (regression test!)
+        let orgOut1 = await service.callTool(name: "organize_assets", arguments: [
             "asset_ids": [a1.id.uuidString],
-            "folder_path": "Agent Curated",
+            "folder_path": "Design/Editorial Posters",
             "add_tags": ["terracotta", "editorial"],
             "rating": 5,
-            "ai_description": "暖陶土色平面海报参考"
+            "ai_description": "初版描述"
         ])
-        #expect(orgOut.isError == false)
+        #expect(orgOut1.isError == false)
+        let orgOut2 = await service.callTool(name: "organize_assets", arguments: [
+            "asset_ids": [a1.id.uuidString],
+            "ai_description": "更新后的暖陶土色平面海报参考"
+        ])
+        #expect(orgOut2.isError == false)
         let updatedA1 = try #require(await engine.fetchAsset(id: a1.id))
         #expect(updatedA1.rating == 5)
         #expect(updatedA1.tags.contains("terracotta"))
-        #expect((updatedA1.aiDescription ?? "").contains("陶土"))
+        #expect(updatedA1.aiDescription == "更新后的暖陶土色平面海报参考")
 
-        // Compose structured moodboard via MCP `compose_moodboard`
+        // Verify recursive subfolder search & pagination
+        let recursiveSearch = await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "Design",
+            "include_subfolders": true,
+            "media_kinds": ["image"],
+            "limit": 10
+        ])
+        #expect(recursiveSearch.isError == false)
+        let recJSON = try decodeToolJSON(recursiveSearch)
+        #expect(recJSON["totalMatched"] as? Int == 1)
+
+        // Verify `ingest_asset` returns freshly tagged assets immediately (regression test!)
+        let ingestOut = await service.callTool(name: "ingest_asset", arguments: [
+            "text": "Design system color token notes",
+            "title": "Token Spec",
+            "folder_path": "Design",
+            "tags": ["tokens", "spec"],
+            "rating": 4
+        ])
+        #expect(ingestOut.isError == false)
+        let ingestJSON = try decodeToolJSON(ingestOut)
+        let importedAssets = try #require(ingestJSON["assets"] as? [[String: Any]])
+        let importedTags = Set((importedAssets.first?["tags"] as? [String]) ?? [])
+        #expect(importedTags.contains("tokens"))
+        #expect(importedTags.contains("spec"))
+
+        // Verify Smart Folder filtering in search_assets
+        let sf = SmartFolderRecord(
+            name: "High Rated",
+            rule: SmartFolderRule(matchMode: .all, tags: ["editorial"], minRating: 4)
+        )
+        _ = try await engine.saveSmartFolder(sf)
+        let sfSearch = await service.callTool(name: "search_assets", arguments: ["smart_folder_name": "High Rated"])
+        #expect(sfSearch.isError == false)
+        #expect(try decodeToolJSON(sfSearch)["totalMatched"] as? Int == 1)
+
+        // Verify new discovery tools: find_similar_assets, semantic_search, quick_jump, suggest_folder, analyze_assets
+        let simOut = await service.callTool(name: "find_similar_assets", arguments: ["asset_id": a1.id.uuidString, "limit": 5])
+        #expect(simOut.isError == false)
+
+        let semOut = await service.callTool(name: "semantic_search", arguments: ["query": "terracotta editorial", "limit": 5])
+        #expect(semOut.isError == false)
+        #expect((try decodeToolJSON(semOut)["returned"] as? Int ?? 0) >= 1)
+
+        let jumpOut = await service.callTool(name: "quick_jump", arguments: ["query": "Editorial", "limit": 10])
+        #expect(jumpOut.isError == false)
+        #expect((try decodeToolJSON(jumpOut)["returned"] as? Int ?? 0) >= 1)
+
+        let suggestOut = await service.callTool(name: "suggest_folder", arguments: ["asset_ids": [a2.id.uuidString]])
+        #expect(suggestOut.isError == false)
+        #expect((try decodeToolJSON(suggestOut)["evaluatedCount"] as? Int) == 1)
+
+        let analyzeOut = await service.callTool(name: "analyze_assets", arguments: ["asset_ids": [a1.id.uuidString]])
+        #expect(analyzeOut.isError == false)
+        #expect((try decodeToolJSON(analyzeOut)["analyzedCount"] as? Int) == 1)
+
+        // Compose structured moodboard, lock one node, then test non-overlapping `patch_moodboard`
         let composeOut = await service.callTool(name: "compose_moodboard", arguments: [
             "title": "MCP 联调情绪板",
             "subtitle": "由外部 Agent 直接策展并写入 Charkle",
             "curator_note": "聚焦暖陶土与海蓝的冷暖撞色对比。",
+            "use_freeform": true,
             "sections": [
                 [
                     "title": "主视觉对比",
                     "tint": "terracotta",
                     "rationale": "冷暖对照",
-                    "asset_ids": [a1.id.uuidString, a2.id.uuidString],
+                    "asset_ids": [a1.id.uuidString],
                     "hero_asset_ids": [a1.id.uuidString]
                 ]
             ]
         ])
         #expect(composeOut.isError == false)
+        let boardIDStr = try #require(try decodeToolJSON(composeOut)["boardID"] as? String)
+        let boardUUID = try #require(UUID(uuidString: boardIDStr))
 
-        // Inspect board context & headless PNG export via MCP
+        // Lock a1 on the board and inspect pre-patch maxY
+        var loadedBoard = try #require(await engine.fetchBoard(id: boardUUID))
+        let maxYBefore = loadedBoard.nodes.map(\.frame.maxY).max() ?? 0
+        for idx in loadedBoard.nodes.indices where loadedBoard.nodes[idx].referencedAssetID == a1.id {
+            loadedBoard.nodes[idx].isLocked = true
+        }
+        _ = try await engine.saveBoard(loadedBoard)
+
+        // Patch: try removing locked a1 (must be skipped!), add section, add a2, add note (must not collide!)
+        let patchOut = await service.callTool(name: "patch_moodboard", arguments: [
+            "board_id": boardIDStr,
+            "remove_asset_ids": [a1.id.uuidString],
+            "add_section": "补充冷色参考",
+            "section_tint": "ocean",
+            "add_asset_ids": [a2.id.uuidString],
+            "add_note": "确认底部追加卡片不重叠",
+            "note_style": "warm"
+        ])
+        #expect(patchOut.isError == false)
+        let patchJSON = try decodeToolJSON(patchOut)
+        #expect(patchJSON["addedCount"] as? Int == 1)
+        #expect(patchJSON["removedCount"] as? Int == 0)
+        #expect((patchJSON["skippedLockedAssetIDs"] as? [String])?.contains(a1.id.uuidString) == true)
+
+        let patchedBoard = try #require(await engine.fetchBoard(id: boardUUID))
+        let addedCardNode = try #require(patchedBoard.nodes.first { $0.referencedAssetID == a2.id })
+        #expect(addedCardNode.frame.minY > maxYBefore)
+
+        // Inspect board context & headless high-res PNG export via MCP
         let ctxOut = await service.callTool(name: "get_board_context", arguments: ["title": "MCP 联调情绪板"])
         #expect(ctxOut.isError == false)
+        let ctxJSON = try decodeToolJSON(ctxOut)
+        #expect(ctxJSON["connectors"] != nil)
 
         let pngOutPath = dir.appending(path: "exported-board.png").path
         let exportOut = await service.callTool(name: "export_board_image", arguments: [
@@ -169,7 +406,7 @@ struct ExternalAgentMCPTests {
         }
         #expect(hasValidPNG == true)
 
-        // Soft Trash ONLY — record still exists with isTrashed == true so user can always recover
+        // Soft Trash ONLY — record still exists with isTrashed == true and is discoverable via only_trashed
         let trashOut = await service.callTool(name: "trash_assets", arguments: [
             "asset_ids": [a2.id.uuidString],
             "trashed": true
@@ -177,9 +414,13 @@ struct ExternalAgentMCPTests {
         #expect(trashOut.isError == false)
         let trashedA2 = try #require(await engine.fetchAsset(id: a2.id))
         #expect(trashedA2.isTrashed == true)
+
+        let listTrash = await service.callTool(name: "search_assets", arguments: ["only_trashed": true])
+        #expect(listTrash.isError == false)
+        #expect(try decodeToolJSON(listTrash)["totalMatched"] as? Int == 1)
     }
 
-    @Test("MCP and CLI services can be enabled or disabled independently with legacy config migration")
+    @Test("MCP and CLI services can be enabled or disabled independently with legacy config migration and diagnostics")
     func independentMCPAndCLIToggles() async throws {
         let (dir, _, service, _) = try await makeTestService()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -208,23 +449,22 @@ struct ExternalAgentMCPTests {
             "id": 10,
             "method": "initialize",
             "params": ["protocolVersion": "2025-03-26"]
-        ]))
+        ]) as? [String: Any])
         #expect(mcpInitBlocked["error"] != nil)
 
         let mcpListBlocked = try #require(await sendRPC(service, [
             "jsonrpc": "2.0",
             "id": 11,
             "method": "tools/list"
-        ]))
+        ]) as? [String: Any])
         #expect(mcpListBlocked["error"] != nil)
 
-        let mcpReadBlocked = try #require(await sendRPC(service, [
+        let mcpPromptsBlocked = try #require(await sendRPC(service, [
             "jsonrpc": "2.0",
             "id": 12,
-            "method": "resources/read",
-            "params": ["uri": "charkle://library/overview"]
-        ]))
-        #expect(mcpReadBlocked["error"] != nil)
+            "method": "prompts/list"
+        ]) as? [String: Any])
+        #expect(mcpPromptsBlocked["error"] != nil)
 
         let mcpToolBlocked = await service.callTool(name: "library_overview", arguments: [:], channel: .mcp)
         #expect(mcpToolBlocked.isError == true)
@@ -249,13 +489,20 @@ struct ExternalAgentMCPTests {
             "id": 20,
             "method": "initialize",
             "params": ["protocolVersion": "2025-03-26"]
-        ]))
+        ]) as? [String: Any])
         #expect(mcpInitAllowed["result"] != nil)
 
         let mcpToolAllowed = await service.callTool(name: "create_folder", arguments: ["name": "MCP Only Folder"], channel: .mcp)
         #expect(mcpToolAllowed.isError == false)
 
-        // 4. Persisted round-trip preserves independent channel flags
+        // 4. Diagnostics report works cleanly without leaking secrets
+        let diag = await service.runDiagnostics()
+        #expect(diag["ok"] as? Bool == true)
+        let caps = try #require(diag["capabilities"] as? [String: Any])
+        #expect(caps["toolCount"] as? Int == 20)
+        #expect(caps["permanentDeleteAllowed"] as? Bool == false)
+
+        // 5. Persisted round-trip preserves independent channel flags
         let reloaded = ExternalAgentConfigStore.load(in: service.configDirectory)
         #expect(reloaded.mcpEnabled == true)
         #expect(reloaded.cliEnabled == false)

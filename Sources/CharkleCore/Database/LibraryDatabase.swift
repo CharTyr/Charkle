@@ -7,24 +7,34 @@ public final actor LibraryDatabase {
 
     public init(path: String = ":memory:") throws {
         let connection = try SQLiteConnection(path: path)
-        try connection.script("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")
-        try connection.script("BEGIN IMMEDIATE")
-        do {
-            let version = try connection.query("PRAGMA user_version") { $0.integer(0) }.first ?? 0
-            guard version <= Self.schemaVersion else {
-                throw LibraryDatabaseError("Library schema \(version) requires a newer version of Charkle.")
+        try connection.script("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")
+        let journalMode = (try? connection.query("PRAGMA journal_mode") { $0.text(0) }.first)?.lowercased()
+        if path != ":memory:", journalMode != "wal" {
+            try connection.script("PRAGMA journal_mode = WAL;")
+        }
+        let initialVersion = try connection.query("PRAGMA user_version") { $0.integer(0) }.first ?? 0
+        guard initialVersion <= Self.schemaVersion else {
+            throw LibraryDatabaseError("Library schema \(initialVersion) requires a newer version of Charkle.")
+        }
+        if initialVersion < Self.schemaVersion {
+            try connection.script("BEGIN IMMEDIATE")
+            do {
+                let version = try connection.query("PRAGMA user_version") { $0.integer(0) }.first ?? 0
+                guard version <= Self.schemaVersion else {
+                    throw LibraryDatabaseError("Library schema \(version) requires a newer version of Charkle.")
+                }
+                if version == 0 { try connection.script(Self.initialSchema) }
+                if version < 2 {
+                    try connection.script("""
+                        CREATE INDEX IF NOT EXISTS assets_hash ON assets(content_hash) WHERE content_hash <> '';
+                        PRAGMA user_version = 2;
+                        """)
+                }
+                try connection.script("COMMIT")
+            } catch {
+                try? connection.script("ROLLBACK")
+                throw error
             }
-            if version == 0 { try connection.script(Self.initialSchema) }
-            if version < 2 {
-                try connection.script("""
-                    CREATE INDEX IF NOT EXISTS assets_hash ON assets(content_hash) WHERE content_hash <> '';
-                    PRAGMA user_version = 2;
-                    """)
-            }
-            try connection.script("COMMIT")
-        } catch {
-            try? connection.script("ROLLBACK")
-            throw error
         }
         self.connection = connection
     }

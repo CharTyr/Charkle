@@ -269,6 +269,11 @@ public struct GalleryFilmstripView: View {
                 .background(HorizontalWheelScrollRedirector())
                 .frame(height: 96)
                 .background(CharkleTheme.surfaceElevated(for: colorScheme).opacity(0.86))
+                .onChange(of: selectedAssetIDs) { _, newSelection in
+                    if newSelection.count == 1, let target = newSelection.first, focusedAssetID != target {
+                        focusedAssetID = target
+                    }
+                }
                 .onChange(of: activeAsset?.id) { _, newID in
                     resetViewTransform(animated: false)
                     if let newID {
@@ -928,17 +933,25 @@ public struct GalleryFilmstripView: View {
     private func handleStageKeyDown(_ event: NSEvent) -> NSEvent? {
         guard !isQuickLookPresented else { return event }
         if let window = event.window {
-            if window.attachedSheet != nil { return event }
-            if let responder = window.firstResponder, responder is NSTextView || responder is NSTextField {
+            if window.attachedSheet != nil || NSApp.modalWindow != nil { return event }
+            if let responder = window.firstResponder,
+               responder is NSTextView || responder is NSTextField || responder is NSText {
                 return event
             }
         }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let isUnmodified = flags.isEmpty || flags == .numericPad || flags == .function
-        let isShiftOnly = flags == .shift
+        // Explicitly ignore Caps Lock, NumPad, and Function flags so arrows and Space always respond.
+        let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let isUnmodified = primaryModifiers.isEmpty
+        let isShiftOnly = primaryModifiers == .shift
 
         if isUnmodified {
             switch event.keyCode {
+            case 49: // Space -> open Quick Look for active filmstrip asset
+                if event.isARepeat { return nil }
+                if let asset = activeAsset {
+                    onOpenQuickLook(asset)
+                    return nil
+                }
             case 123: // Left Arrow
                 step(by: -1)
                 return nil

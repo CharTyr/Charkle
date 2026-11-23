@@ -1,0 +1,3 @@
+{"file": "DESIGN.md", "reason": "Verify every P0-P2 change and §9 visual/motion/accessibility/purity gate"}
+{"file": ".trellis/spec/web/dual-runtime-guidelines.md", "reason": "Verify zero Cloudflare Workers bundling regressions"}
+{"file": ".trellis/spec/cross-platform/index.md", "reason": "Verify /.charkle/ wire parity and zero external reference mentions"}

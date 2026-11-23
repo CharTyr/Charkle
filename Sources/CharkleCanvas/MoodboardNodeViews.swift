@@ -156,6 +156,7 @@ struct BoardAssetNodeView: View {
     let onToggleHero: () -> Void
     let onTriggerSwap: () -> Void
     let onOpenQuickLook: () -> Void
+    let onRevealInLibrary: () -> Void
     let onRevealInFinder: () -> Void
     let onCopy: () -> Void
     let onCut: () -> Void
@@ -332,6 +333,11 @@ struct BoardAssetNodeView: View {
         .contextMenu {
             Button("快速预览 (Space)") { onOpenQuickLook() }
             if asset != nil {
+                Button {
+                    onRevealInLibrary()
+                } label: {
+                    Label("在素材库中定位", systemImage: "scope")
+                }
                 Button {
                     onRevealInFinder()
                 } label: {

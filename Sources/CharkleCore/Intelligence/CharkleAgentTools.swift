@@ -572,7 +572,10 @@ public nonisolated struct CharkleAgentTools: Sendable {
 
     // MARK: - Tool 5: Lazy Visual Insight Caching (Free Byproduct!)
 
-    public func persistVisualInsights(_ insights: [AgentVisualInsight]) async -> Int {
+    public func persistVisualInsights(
+        _ insights: [AgentVisualInsight],
+        overwriteDescription: Bool = false
+    ) async -> Int {
         guard !insights.isEmpty else { return 0 }
         do {
             return try await database.transaction { store in
@@ -580,7 +583,7 @@ public nonisolated struct CharkleAgentTools: Sendable {
                 var updatedCount = 0
                 for insight in insights {
                     guard var asset = try store.asset(id: insight.assetID) else { continue }
-                    let cleanDesc = insight.description.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let cleanDesc = String(insight.description.trimmingCharacters(in: .whitespacesAndNewlines).prefix(600))
                     let normalizedTags = CloudTagNormalizer.canonicalizeSuggestedTags(
                         asset.suggestedTags + insight.tags,
                         existingLibraryTags: existingLibraryTags,
@@ -588,9 +591,12 @@ public nonisolated struct CharkleAgentTools: Sendable {
                         maxCount: 6
                     )
                     var changed = false
-                    if (asset.aiDescription == nil || asset.aiDescription?.isEmpty == true), !cleanDesc.isEmpty {
-                        asset.aiDescription = String(cleanDesc.prefix(600))
-                        changed = true
+                    if !cleanDesc.isEmpty {
+                        let existingEmpty = asset.aiDescription?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+                        if (overwriteDescription && asset.aiDescription != cleanDesc) || existingEmpty {
+                            asset.aiDescription = cleanDesc
+                            changed = true
+                        }
                     }
                     if !insight.tags.isEmpty, normalizedTags != asset.suggestedTags {
                         asset.suggestedTags = normalizedTags

@@ -33,6 +33,7 @@ public struct MainWindowView: View {
     @State private var subfolderNameDraft: String = ""
     @State private var showInboxBatchTriageSheet: Bool = false
     @State private var selectedTriageIDs: Set<UUID> = []
+    @State private var galleryViewportWidth: CGFloat = 960
     @FocusState private var isSubfolderFieldFocused: Bool
 
     private static let filterColorPresets: [String] = [
@@ -134,6 +135,16 @@ public struct MainWindowView: View {
 
                 centerWorkspace
                     .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    .background {
+                        Color.clear
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                floor(max(240, proxy.size.width))
+                            } action: { _, newWidth in
+                                if abs(newWidth - galleryViewportWidth) >= 2 {
+                                    galleryViewportWidth = newWidth
+                                }
+                            }
+                    }
                     .clipped()
                     .layoutPriority(0)
 
@@ -198,6 +209,15 @@ public struct MainWindowView: View {
                     },
                     onStep: { delta in
                         coordinator.stepQuickLook(delta: delta)
+                    },
+                    onCopyHex: { copyColorHex($0) },
+                    onFilterByColor: { hex in
+                        Task {
+                            coordinator.selectedDestination = .allItems
+                            await library.applyDestination(.allItems)
+                            await library.filterByColorHex(hex)
+                            coordinator.isVisualFilterBarPresented = true
+                        }
                     }
                 )
                 .zIndex(200)
@@ -263,39 +283,15 @@ public struct MainWindowView: View {
                 .transition(.opacity)
             }
 
-            // Floating Toasts (Top-Trailing, enterSm / exitSm)
-            VStack {
-                HStack {
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 8) {
-                        ForEach(coordinator.toasts) { toast in
-                            HStack(spacing: 8) {
-                                Image(systemName: toast.iconName)
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(toastTint(toast.tone))
-                                Text(toast.message)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.primary)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                            .transition(
-                                .asymmetric(
-                                    insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .top)),
-                                    removal: .opacity.combined(with: .scale(scale: 0.96, anchor: .top))
-                                )
-                            )
-                        }
-                    }
-                    .padding(.top, 16)
-                    .padding(.trailing, 20)
-                }
-                Spacer()
+            // Interactive Floating Liquid Glass Toasts (Top-Trailing, hover-pause + Undo countdown)
+            CharkleToastOverlay(coordinator: coordinator)
+                .zIndex(300)
+        }
+        .background {
+            WindowKeyEventBridge { event, hostWindow in
+                handleMainWindowKeyDown(event, in: hostWindow)
             }
             .allowsHitTesting(false)
-            .zIndex(300)
-            .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: coordinator.toasts)
         }
         .animation(
             CharkleMotion.enterExit(
@@ -507,7 +503,17 @@ public struct MainWindowView: View {
                     onTrashAssets: { ids in
                         Task {
                             await library.trashAssets(ids)
-                            coordinator.showToast("已移至废纸篓 (\(ids.count) 项)", icon: "trash")
+                            coordinator.showToast(
+                                "已移至废纸篓 (\(ids.count) 项)",
+                                icon: "trash",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await library.restoreAssets(ids)
+                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                    }
+                                }
+                            )
                         }
                     },
                     onRestoreAssets: { ids in
@@ -570,6 +576,7 @@ public struct MainWindowView: View {
                     bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
                     heroNamespace: heroNamespace,
                     activeQuickLookID: coordinator.quickLookAssetID,
+                    revealRequest: coordinator.pendingGalleryReveal,
                     callbacks: MasonryCallbacks(
                         onOpenQuickLook: { asset in openQuickLook(asset) },
                         onDropExternalInputs: { inputs in
@@ -651,7 +658,17 @@ public struct MainWindowView: View {
                         onTrashAssets: { ids in
                             Task {
                                 await library.trashAssets(ids)
-                                coordinator.showToast("已移至废纸篓", icon: "trash")
+                                coordinator.showToast(
+                                    "已移至废纸篓 (\(ids.count) 项)",
+                                    icon: "trash",
+                                    actionTitle: "撤销",
+                                    onAction: {
+                                        Task {
+                                            await library.restoreAssets(ids)
+                                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                        }
+                                    }
+                                )
                             }
                         },
                         onRestoreAssets: { ids in
@@ -912,7 +929,12 @@ public struct MainWindowView: View {
                 if coordinator.galleryLayoutMode != .galleryFilmstrip {
                     HStack(spacing: 6) {
                         Button {
-                            coordinator.targetColumnWidth = max(130, coordinator.targetColumnWidth - 36)
+                            coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+                                currentWidth: CGFloat(coordinator.targetColumnWidth),
+                                direction: -1,
+                                layoutMode: coordinator.galleryLayoutMode,
+                                containerWidth: galleryViewportWidth
+                            ))
                         } label: {
                             Image(systemName: "square.grid.3x3")
                                 .font(.system(size: 11))
@@ -928,7 +950,12 @@ public struct MainWindowView: View {
                         .frame(width: 64)
 
                         Button {
-                            coordinator.targetColumnWidth = min(420, coordinator.targetColumnWidth + 36)
+                            coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+                                currentWidth: CGFloat(coordinator.targetColumnWidth),
+                                direction: 1,
+                                layoutMode: coordinator.galleryLayoutMode,
+                                containerWidth: galleryViewportWidth
+                            ))
                         } label: {
                             Image(systemName: "square.grid.2x2")
                                 .font(.system(size: 11.5))
@@ -1785,12 +1812,14 @@ public struct MainWindowView: View {
 
     private var emptyLibraryView: some View {
         let isTrash = coordinator.selectedDestination == .trash
+        let isFolder: Bool = {
+            if case .folder = coordinator.selectedDestination { return true }
+            return false
+        }()
         let isFiltered = library.filter.hasActiveVisualFilters || !library.filter.searchQuery.isEmpty
         return VStack(spacing: 14) {
             if isTrash && !isFiltered {
-                Image(systemName: "trash")
-                    .font(.system(size: 42, weight: .light))
-                    .foregroundStyle(.secondary.opacity(0.6))
+                CharkleEmptyStateVignette(.emptyTrash)
                 Text("废纸篓是空的")
                     .font(.system(size: 17, weight: .semibold))
                 Text("移至废纸篓的素材会暂存在这里，你可以随时放回原处或彻底删除。")
@@ -1799,8 +1828,10 @@ public struct MainWindowView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
             } else {
-                CharkleIcon("library", style: .layered, size: 60, color: .secondary.opacity(0.6))
-                Text(isFiltered ? "没有符合筛选条件的素材" : "这里还没有素材")
+                CharkleEmptyStateVignette(
+                    isFiltered ? .noFilterResults : (isFolder ? .emptyFolder : .emptyLibrary)
+                )
+                Text(isFiltered ? "没有符合筛选条件的素材" : (isFolder ? "当前文件夹还没有素材" : "这里还没有素材"))
                     .font(.system(size: 17, weight: .semibold))
                 Text("直接拖入图片、GIF、视频、PDF、音频、设计文件或 X / 网页链接，或按 ⌥⇧V 粘贴剪贴板内容。")
                     .font(.system(size: 12.5))
@@ -1999,7 +2030,17 @@ public struct MainWindowView: View {
                     Button(role: .destructive) {
                         Task {
                             await library.trashAssets(ids)
-                            coordinator.showToast("已移至废纸篓", icon: "trash")
+                            coordinator.showToast(
+                                "已移至废纸篓 (\(ids.count) 项)",
+                                icon: "trash",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await library.restoreAssets(ids)
+                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                    }
+                                }
+                            )
                         }
                     } label: {
                         Image(systemName: "trash")
@@ -2065,35 +2106,66 @@ public struct MainWindowView: View {
                     .buttonStyle(.borderedProminent)
                 }
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260, maximum: 340), spacing: 16)], spacing: 16) {
-                    // Quick Generate Card
-                    Button {
-                        coordinator.presentMoodboardGenerator(entry: .prompt)
-                    } label: {
-                        VStack(spacing: 10) {
-                            CharkleIcon("sparkle-board", style: .layered, size: 42, color: Color.accentColor)
-                            Text("新建灵感情绪板")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("支持灵感词 / 种子图 / 配色定调 / 框选成板")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 220)
-                        .padding(18)
-                        .background(
-                            CharkleTheme.surfaceElevated(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
-                        )
-                    }
-                    .buttonStyle(CharkleTactileButtonStyle())
+                if moodboards.boards.isEmpty {
+                    VStack(spacing: 14) {
+                        CharkleEmptyStateVignette(.emptyMoodboard)
+                        Text("还没有情绪板")
+                            .font(.system(size: 17, weight: .semibold))
+                        Text("通过灵感词、种子图、主色板或直接框选素材，10 秒生成首张可编辑情绪板。")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 400)
+                        HStack(spacing: 10) {
+                            Button("新建空白板") {
+                                Task {
+                                    if let blank = await moodboards.createBlankBoard(title: "新情绪板") {
+                                        coordinator.openMoodboard(blank.id)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
 
-                    ForEach(moodboards.boards) { board in
-                        moodboardSummaryCard(board)
+                            Button("10 秒快速生成") {
+                                coordinator.presentMoodboardGenerator(entry: .prompt)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding(.top, 2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 64)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260, maximum: 340), spacing: 16)], spacing: 16) {
+                        // Quick Generate Card
+                        Button {
+                            coordinator.presentMoodboardGenerator(entry: .prompt)
+                        } label: {
+                            VStack(spacing: 10) {
+                                CharkleIcon("sparkle-board", style: .layered, size: 42, color: Color.accentColor)
+                                Text("新建灵感情绪板")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text("支持灵感词 / 种子图 / 配色定调 / 框选成板")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 220)
+                            .padding(18)
+                            .background(
+                                CharkleTheme.surfaceElevated(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
+                            )
+                        }
+                        .buttonStyle(CharkleTactileButtonStyle())
+
+                        ForEach(moodboards.boards) { board in
+                            moodboardSummaryCard(board)
+                        }
                     }
                 }
             }
@@ -2211,6 +2283,12 @@ public struct MainWindowView: View {
                 swappingNodeID: moodboards.swappingNodeID,
                 canUndo: moodboards.canUndo,
                 canRedo: moodboards.canRedo,
+                isOverlayPresented: coordinator.quickLookAssetID != nil
+                    || coordinator.isSettingsPresented
+                    || coordinator.isJumpAnywherePresented
+                    || coordinator.isOnboardingPresented
+                    || coordinator.isMoodboardGeneratorPresented
+                    || coordinator.isSmartFolderEditorPresented,
                 heroNamespace: heroNamespace,
                 callbacks: MoodboardCanvasCallbacks(
                     onCommitDocument: { nextDoc in
@@ -2229,13 +2307,19 @@ public struct MainWindowView: View {
                     },
                     onOpenQuickLook: { asset in
                         if coordinator.quickLookAssetID != nil {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                                 coordinator.closeQuickLook()
                             }
                         } else {
+                            resignTextFocusIfNeeded()
                             let playlist = board.referencedAssetIDs
-                            coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                                coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                            }
                         }
+                    },
+                    onRevealInLibrary: { assetID in
+                        revealAssetInLibrary(assetID)
                     },
                     onRevealInFinder: { assetID in
                         Task {
@@ -2406,14 +2490,7 @@ public struct MainWindowView: View {
                 .padding(.trailing, 18)
             }
         } else {
-            VStack(spacing: 10) {
-                ProgressView()
-                Text("正在加载情绪板…")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(CharkleTheme.galleryGround(for: colorScheme))
+            CharkleBoardLoadingSkeleton()
         }
     }
 
@@ -2429,6 +2506,78 @@ public struct MainWindowView: View {
             Task { await moodboards.refreshBoards() }
         default:
             Task { await library.applyDestination(destination) }
+        }
+    }
+
+    /// Jumps from a Moodboard asset node straight to that asset's actual location in the Library
+    /// (folder / inbox / trash), clears blocking search/visual filters if needed, selects & scrolls
+    /// directly to the exact card with a spotlight pulse, and offers a 1-click "返回情绪板" toast CTA.
+    private func revealAssetInLibrary(_ assetID: UUID) {
+        guard let asset = library.allAssetsByID[assetID] else {
+            coordinator.showToast("该素材已不在素材库中", icon: "exclamationmark.triangle", tone: .warning)
+            return
+        }
+
+        let sourceBoardID = moodboards.activeBoard?.id
+        coordinator.closeQuickLook()
+
+        let targetDestination: SidebarDestination
+        var resolvedLabel: String
+        if asset.isTrashed {
+            targetDestination = .trash
+            resolvedLabel = "废纸篓"
+        } else if let folderID = asset.folderID,
+                  library.folders.contains(where: { $0.id == folderID }) {
+            targetDestination = .folder(folderID)
+            resolvedLabel = library.folderDisplayPath(for: folderID)
+        } else if asset.folderID == nil {
+            targetDestination = .inbox
+            resolvedLabel = "收件箱"
+        } else {
+            targetDestination = .allItems
+            resolvedLabel = "全部素材"
+        }
+
+        coordinator.selectedDestination = targetDestination
+
+        Task {
+            await library.applyDestination(targetDestination)
+
+            if !library.assets.contains(where: { $0.id == assetID }) {
+                searchDraft = ""
+                library.filter.searchQuery = ""
+                library.filter.kinds.removeAll()
+                library.filter.selectedColorHex = nil
+                library.filter.shape = nil
+                library.filter.minRating = 0
+                library.filter.onlyPinnedOffline = false
+                if library.semanticSearchReport != nil {
+                    await library.clearSemanticSearch()
+                }
+                await library.applyDestination(targetDestination)
+            }
+
+            if !library.assets.contains(where: { $0.id == assetID }), targetDestination != .allItems {
+                coordinator.selectedDestination = .allItems
+                resolvedLabel = "全部素材"
+                await library.applyDestination(.allItems)
+            }
+
+            library.selectedAssetIDs = [assetID]
+            coordinator.requestRevealAssetInGallery(assetID)
+
+            if let sourceBoardID {
+                coordinator.showToast(
+                    "已定位到「\(resolvedLabel)」",
+                    icon: "scope",
+                    actionTitle: "返回情绪板",
+                    onAction: {
+                        navigate(to: .moodboard(sourceBoardID))
+                    }
+                )
+            } else {
+                coordinator.showToast("已定位到「\(resolvedLabel)」", icon: "scope")
+            }
         }
     }
 
@@ -2450,7 +2599,81 @@ public struct MainWindowView: View {
         .help(helpText)
     }
 
+    private func isEditingText(in window: NSWindow?) -> Bool {
+        guard let responder = window?.firstResponder else { return false }
+        return responder is NSTextView || responder is NSTextField || responder is NSText
+    }
+
+    private func resignTextFocusIfNeeded() {
+        if let keyWindow = NSApp.keyWindow, isEditingText(in: keyWindow) {
+            keyWindow.makeFirstResponder(nil)
+        }
+    }
+
+    /// Top-priority window-level Spacebar coordinator for Quick Look open/close across all views.
+    /// Runs before nested stage monitors (Moodboard, Filmstrip, Masonry, AVPlayerView) and ignores Caps Lock / Fn flags.
+    private func handleMainWindowKeyDown(_ event: NSEvent, in hostWindow: NSWindow) -> NSEvent? {
+        guard hostWindow.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
+
+        let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard event.keyCode == 49, primaryModifiers.isEmpty else { return event }
+
+        // 1. Quick Look is OPEN -> Space closes Quick Look (unless user is actively editing in Quick Look's Inspector)
+        if coordinator.quickLookAssetID != nil {
+            if isEditingText(in: event.window) || isEditingText(in: hostWindow) {
+                return event
+            }
+            if event.isARepeat { return nil }
+            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
+                coordinator.closeQuickLook()
+            }
+            return nil
+        }
+
+        // 2. Quick Look is CLOSED -> Only handle events targeted directly at the main window (never popovers/panels)
+        guard event.window === hostWindow else { return event }
+        guard !coordinator.isSettingsPresented,
+              !coordinator.isJumpAnywherePresented,
+              !coordinator.isOnboardingPresented,
+              !coordinator.isMoodboardGeneratorPresented,
+              !coordinator.isSmartFolderEditorPresented,
+              !showInboxBatchTriageSheet else {
+            return event
+        }
+        guard !isEditingText(in: hostWindow) else { return event }
+
+        // Moodboard Canvas owns Space (Hold = Hand Pan, Quick Tap = Quick Look selected node)
+        if coordinator.isViewingMoodboard && moodboards.activeBoard != nil {
+            return event
+        }
+
+        if event.isARepeat { return nil }
+
+        // Gallery Filmstrip: always preview the selected or currently displayed stage asset
+        if coordinator.galleryLayoutMode == .galleryFilmstrip {
+            let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
+                ?? library.assets.first
+            if let asset = target {
+                openQuickLook(asset)
+                return nil
+            }
+            return event
+        }
+
+        // Vertical Masonry / Horizontal Justified: open Quick Look for selected asset regardless of focus pane
+        if !library.selectedAssetIDs.isEmpty {
+            let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
+                ?? library.selectedAssetIDs.first.flatMap { library.allAssetsByID[$0] }
+            if let asset = target {
+                openQuickLook(asset)
+                return nil
+            }
+        }
+        return event
+    }
+
     private func openQuickLook(_ asset: AssetRecord) {
+        resignTextFocusIfNeeded()
         let playlist = library.assets.map(\.id)
         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
             coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
@@ -2552,6 +2775,7 @@ public struct MainWindowView: View {
             if let id = match.targetUUID {
                 navigate(to: .allItems)
                 library.selectedAssetIDs = [id]
+                coordinator.requestRevealAssetInGallery(id)
                 if let asset = library.allAssetsByID[id] {
                     openQuickLook(asset)
                 }
@@ -2580,15 +2804,6 @@ public struct MainWindowView: View {
             } else if let err = syncAndAI.errorMessage {
                 coordinator.showToast(err, icon: "exclamationmark.icloud", tone: .warning)
             }
-        }
-    }
-
-    private func toastTint(_ tone: ToastTone) -> Color {
-        switch tone {
-        case .neutral: Color.accentColor
-        case .success: .green
-        case .warning: .orange
-        case .error: .red
         }
     }
 }
@@ -2830,8 +3045,8 @@ private struct InboxZeroCelebrationView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            CharkleIcon("inbox", style: .layered, size: 64, color: Color(charkleHex: "#6B8E76"))
-                .scaleEffect(appeared ? 1.0 : (reduceMotion ? 1.0 : 0.92))
+            CharkleEmptyStateVignette(.inboxZero)
+                .scaleEffect(appeared ? 1.0 : (reduceMotion ? 1.0 : 0.94))
                 .opacity(appeared ? 1.0 : 0.0)
                 .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: appeared)
 

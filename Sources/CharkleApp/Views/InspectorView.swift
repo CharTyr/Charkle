@@ -15,6 +15,8 @@ public struct InspectorView: View {
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
     public let moodboards: MoodboardStore
+    public let pinnedAsset: AssetRecord?
+    public let isQuickLookHosted: Bool
     public let onCopyHex: (String) -> Void
     public let onFilterByColor: (String) -> Void
     public let onOpenQuickLook: (AssetRecord) -> Void
@@ -22,6 +24,7 @@ public struct InspectorView: View {
     public let onSaveBoardImage: (MoodboardExportFormat) -> Void
     public let onExportFigmaBundle: () -> Void
     public let onOpenFigmaPluginGuide: () -> Void
+    public let onRequestCloseQuickLook: (() -> Void)?
 
     @State private var newTagInput: String = ""
     @State private var batchTagInput: String = ""
@@ -36,28 +39,28 @@ public struct InspectorView: View {
     @State private var draggingInspectorSection: InspectorInfoSection? = nil
     @State private var hoveredInspectorSection: InspectorInfoSection? = nil
 
-    private enum SingleInspectorTab: String, CaseIterable {
-        case info = "信息"
-        case similar = "类似项目"
-    }
-    @State private var singleInspectorTab: SingleInspectorTab = .info
     @Namespace private var inspectorTabNamespace
 
     public init(
         coordinator: AppCoordinatorStore,
         library: LibraryStore,
         moodboards: MoodboardStore,
+        pinnedAsset: AssetRecord? = nil,
+        isQuickLookHosted: Bool = false,
         onCopyHex: @escaping (String) -> Void,
         onFilterByColor: @escaping (String) -> Void,
         onOpenQuickLook: @escaping (AssetRecord) -> Void,
-        onCopyBoardImage: @escaping () -> Void,
-        onSaveBoardImage: @escaping (MoodboardExportFormat) -> Void,
+        onCopyBoardImage: @escaping () -> Void = {},
+        onSaveBoardImage: @escaping (MoodboardExportFormat) -> Void = { _ in },
         onExportFigmaBundle: @escaping () -> Void = {},
-        onOpenFigmaPluginGuide: @escaping () -> Void = {}
+        onOpenFigmaPluginGuide: @escaping () -> Void = {},
+        onRequestCloseQuickLook: (() -> Void)? = nil
     ) {
         self.coordinator = coordinator
         self.library = library
         self.moodboards = moodboards
+        self.pinnedAsset = pinnedAsset
+        self.isQuickLookHosted = isQuickLookHosted
         self.onCopyHex = onCopyHex
         self.onFilterByColor = onFilterByColor
         self.onOpenQuickLook = onOpenQuickLook
@@ -65,6 +68,7 @@ public struct InspectorView: View {
         self.onSaveBoardImage = onSaveBoardImage
         self.onExportFigmaBundle = onExportFigmaBundle
         self.onOpenFigmaPluginGuide = onOpenFigmaPluginGuide
+        self.onRequestCloseQuickLook = onRequestCloseQuickLook
     }
 
     public var body: some View {
@@ -73,7 +77,8 @@ public struct InspectorView: View {
                 .ignoresSafeArea()
 
             // Subtle low-saturation ambient tint ONLY for Single Asset Inspector
-            if !coordinator.isViewingMoodboard, let asset = library.primarySelectedAsset {
+            let ambientAsset: AssetRecord? = pinnedAsset ?? (!coordinator.isViewingMoodboard ? library.primarySelectedAsset : nil)
+            if let asset = ambientAsset {
                 LinearGradient(
                     colors: [
                         CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: colorScheme),
@@ -86,7 +91,9 @@ public struct InspectorView: View {
                 .allowsHitTesting(false)
             }
 
-            if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
+            if let pinnedAsset {
+                singleAssetInspector(pinnedAsset)
+            } else if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
                 moodboardRightRail(board)
             } else if library.selectedAssetIDs.count >= 2 {
                 multiSelectBatchInspector
@@ -117,6 +124,10 @@ public struct InspectorView: View {
             Button("彻底删除", role: .destructive) {
                 let ids = pendingPermanentDeleteIDs
                 pendingPermanentDeleteIDs = []
+                if let qlID = coordinator.quickLookAssetID, ids.contains(qlID) {
+                    onRequestCloseQuickLook?()
+                    coordinator.closeQuickLook()
+                }
                 Task {
                     await library.permanentlyDeleteAssets(ids)
                     coordinator.showToast("已彻底删除 \(ids.count) 项素材", icon: "trash.slash")
@@ -131,13 +142,13 @@ public struct InspectorView: View {
 
     private func singleAssetInspector(_ asset: AssetRecord) -> some View {
         VStack(spacing: 0) {
-            // Top Segmented Switcher (Info | Similar) matching reference Img 2
+            // Top Segmented Switcher (Info | Similar)
             HStack(spacing: 2) {
-                ForEach(SingleInspectorTab.allCases, id: \.self) { tab in
-                    let active = singleInspectorTab == tab
+                ForEach(InspectorDetailTab.allCases, id: \.self) { tab in
+                    let active = coordinator.selectedInspectorTab == tab
                     Button {
                         withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            singleInspectorTab = tab
+                            coordinator.selectedInspectorTab = tab
                         }
                     } label: {
                         HStack(spacing: 5) {
@@ -172,7 +183,7 @@ public struct InspectorView: View {
             .padding(.top, 12)
             .padding(.bottom, 8)
 
-            if singleInspectorTab == .similar {
+            if coordinator.selectedInspectorTab == .similar {
                 singleAssetSimilarTab(asset)
             } else {
                 singleAssetInfoScroll(asset)
@@ -200,7 +211,7 @@ public struct InspectorView: View {
 
                 if library.similarAssets.isEmpty {
                     VStack(spacing: 10) {
-                        CharkleIcon("similar", style: .duotone, size: 28)
+                        CharkleEmptyStateVignette(.noFilterResults, compact: true)
                         Text("暂无视觉或色彩相近的素材")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
@@ -210,7 +221,7 @@ public struct InspectorView: View {
                             .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 48)
+                    .padding(.vertical, 36)
                     .padding(.horizontal, 16)
                 } else {
                     LazyVGrid(
@@ -223,20 +234,23 @@ public struct InspectorView: View {
                                 asset: scored.asset,
                                 loader: library.thumbnailLoader,
                                 tier: .grid520,
-                                cornerRadius: 9
+                                cornerRadius: CharkleTheme.Radius.settingsInner
                             )
                             .frame(height: (132 / ratio).rounded())
                             .overlay(
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                                     .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                             )
-                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
                             .onTapGesture(count: 2) {
                                 library.selectedAssetIDs = [scored.asset.id]
                                 onOpenQuickLook(scored.asset)
                             }
                             .onTapGesture {
                                 library.selectedAssetIDs = [scored.asset.id]
+                                if isQuickLookHosted {
+                                    onOpenQuickLook(scored.asset)
+                                }
                             }
                             .onDrag {
                                 NSItemProvider(object: CharkleDragIdentifiers.encode(assetIDs: [scored.asset.id]) as NSString)
@@ -425,9 +439,11 @@ public struct InspectorView: View {
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    onOpenQuickLook(asset)
+                    if !isQuickLookHosted {
+                        onOpenQuickLook(asset)
+                    }
                 }
-                .help("点击打开 Quick Look 全屏预览")
+                .help(isQuickLookHosted ? asset.title : "点击打开 Quick Look 全屏预览")
 
                 inspectorInnerDivider
 
@@ -550,6 +566,10 @@ public struct InspectorView: View {
                                     }
                                     Divider()
                                     Button("以此图快速生成新情绪板…") {
+                                        library.selectedAssetIDs = [asset.id]
+                                        if isQuickLookHosted {
+                                            onRequestCloseQuickLook?()
+                                        }
                                         coordinator.presentMoodboardGenerator(entry: .seedAssets)
                                     }
                                 } label: {
@@ -612,9 +632,9 @@ public struct InspectorView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 5.5)
-                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                                         )
                                 }
@@ -630,9 +650,9 @@ public struct InspectorView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .padding(.horizontal, 9)
                                         .padding(.vertical, 5.5)
-                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                                         )
                                 }
@@ -648,9 +668,9 @@ public struct InspectorView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .padding(.horizontal, 9)
                                         .padding(.vertical, 5.5)
-                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                                         )
                                 }
@@ -1636,7 +1656,17 @@ public struct InspectorView: View {
                             Button(role: .destructive) {
                                 Task {
                                     await library.trashAssets(ids)
-                                    coordinator.showToast("已将 \(ids.count) 项移至废纸篓", icon: "trash")
+                                    coordinator.showToast(
+                                        "已将 \(ids.count) 项移至废纸篓",
+                                        icon: "trash",
+                                        actionTitle: "撤销",
+                                        onAction: {
+                                            Task {
+                                                await library.restoreAssets(ids)
+                                                coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                            }
+                                        }
+                                    )
                                 }
                             } label: {
                                 Label("移至废纸篓", systemImage: "trash")
@@ -2160,13 +2190,23 @@ public struct InspectorView: View {
                                     showBoardAgentTrace = willExpand
                                 }
                             } label: {
-                                HStack(spacing: 3) {
+                                HStack(spacing: 5) {
                                     Text(showBoardAgentTrace ? "收起策展步骤" : "查看策展步骤（\(moodboards.activeBoardAgentTrace.count) 步）")
-                                        .font(.system(size: 10, weight: .medium))
-                                    Image(systemName: showBoardAgentTrace ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right")
                                         .font(.system(size: 8.5, weight: .semibold))
+                                        .rotationEffect(.degrees(showBoardAgentTrace ? 90 : 0))
                                 }
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                                .background(
+                                    Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.035),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
 
@@ -2272,9 +2312,9 @@ public struct InspectorView: View {
     }
 
     private var emptyInspectorPlaceholder: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Spacer()
-            CharkleIcon("quicklook", style: .layered, size: 42, color: .secondary.opacity(0.5))
+            CharkleEmptyStateVignette(.emptyInspector, compact: true)
             Text("选择素材查看详情")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)

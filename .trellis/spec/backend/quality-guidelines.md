@@ -120,6 +120,6 @@ if Task.isCancelled {
    - **ALWAYS** build Release app bundles via `./scripts/build-app.sh release` and distributable arm64 DMGs via `./scripts/build-dmg.sh --rebuild`.
    - Never assemble or codesign `.app` bundles directly inside iCloud-synced `~/Documents` — FileProvider injects `com.apple.FinderInfo` / `com.apple.fileprovider.fpfs#P` xattrs that invalidate signatures. Both `build-app.sh` and `build-dmg.sh` stage in `/tmp` with `cp -RX` + `xattr -cr`, sign `Contents/Helpers/charkle` and `Charkle.app` with a stable certificate (preserving macOS Keychain ACLs across rebuilds), and verify `codesign -v --deep --strict` on the clean `/tmp` copy (never print certificate CN/email).
 4. **External Agent MCP Safety (`ExternalAgentPolicy.swift`)**:
-   - `CharkleCLI` MCP server exposes only safe read/organize/soft-trash tools (14 tools) and MUST NEVER expose permanent deletion (`ExternalAgentMCPTests.swift`).
+   - `CharkleCLI` MCP server exposes only safe read/organize/enrich/soft-trash tools (20 tools, 4+2 resources, 4 prompts) and MUST NEVER expose permanent deletion or folder deletion (`ExternalAgentMCPTests.swift`).
 5. **Cross-Platform & Repo Hygiene**:
    - Follow [Cross-Platform Contracts](../cross-platform/index.md) for `/.charkle/` sync wire compatibility, `.charkleboard` Figma Bridge ZIPs, and zero external inspiration/author mentions.

@@ -257,22 +257,23 @@ public struct CharkleHierarchicalFolderScopeTree: View {
         onTap: @escaping () -> Void,
         onToggleExpand: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 2) {
             if depth > 0 {
                 Spacer().frame(width: CGFloat(depth) * 16)
             }
 
             if hasChildren {
                 Button(action: onToggleExpand) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 18)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 22, height: 26)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             } else if id != nil {
-                Spacer().frame(width: 14)
+                Spacer().frame(width: 22)
             }
 
             Button(action: onTap) {

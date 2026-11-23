@@ -863,13 +863,26 @@ public struct SidebarView: View {
 
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                sectionHeader("标签")
-                Text("\(library.tagCounts.count)")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 4)
-                Spacer()
+                Button {
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                        isTagsSectionExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        sectionHeader("标签")
+                        Text("\(library.tagCounts.count)")
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .padding(.bottom, 4)
+                        Spacer(minLength: 4)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isTagsSectionExpanded ? "收起标签栏" : "展开常用标签")
+
                 Button {
                     isAllTagsPopoverPresented = true
                 } label: {
@@ -879,6 +892,7 @@ public struct SidebarView: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
+                        .contentShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .padding(.bottom, 4)
@@ -892,14 +906,15 @@ public struct SidebarView: View {
                         isTagsSectionExpanded.toggle()
                     }
                 } label: {
-                    Image(systemName: isTagsSectionExpanded ? "chevron.down" : "chevron.right")
+                    Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.tertiary)
-                        .frame(width: 18, height: 18)
+                        .rotationEffect(.degrees(isTagsSectionExpanded ? 90 : 0))
+                        .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 10)
+                .padding(.trailing, 8)
                 .padding(.bottom, 4)
                 .help(isTagsSectionExpanded ? "收起标签栏" : "展开常用标签")
             }
@@ -1130,7 +1145,7 @@ public struct SidebarView: View {
             return [folder.id]
         }()
 
-        return HStack(spacing: 4) {
+        return HStack(spacing: 2) {
             // Note: Use `.onTapGesture` instead of `Button` on the row and chevron so macOS SwiftUI `.onDrag`
             // initiates cleanly from ANY point on the row (including top-level parent folders with children).
             if node.hasChildren {
@@ -1138,7 +1153,7 @@ public struct SidebarView: View {
                     .font(.system(size: 8.5, weight: .bold))
                     .foregroundStyle(.secondary.opacity(0.8))
                     .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
-                    .frame(width: 16, height: 26)
+                    .frame(width: 22, height: 28)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
@@ -1150,7 +1165,7 @@ public struct SidebarView: View {
                         }
                     }
             } else {
-                Spacer().frame(width: 16)
+                Spacer().frame(width: 22)
             }
 
             HStack(spacing: 8) {
