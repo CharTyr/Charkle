@@ -6,7 +6,7 @@ import { Titlebar } from './features/chrome/Titlebar';
 import { GalleryView } from './features/gallery/GalleryView';
 import { InspectorView } from './features/inspector/InspectorView';
 import { JumpAnywhereModal } from './features/jump/JumpAnywhereModal';
-import { MoodboardsHomePlaceholder } from './features/moodboard/MoodboardsHomePlaceholder';
+import { MoodboardsHome } from './features/moodboard/MoodboardsHome';
 import { QuickLookOverlay } from './features/quicklook/QuickLookOverlay';
 import { SidebarView } from './features/sidebar/SidebarView';
 import {
@@ -41,6 +41,7 @@ export const App: React.FC = () => {
   const patchSingleAssetInMemory = useLibraryStore((s) => s.patchSingleAssetInMemory);
 
   const fetchBoards = useMoodboardStore((s) => s.fetchBoards);
+  const pushAgentStep = useMoodboardStore((s) => s.pushAgentStep);
   const refreshSyncAndCache = useSyncAIStore((s) => s.refreshSyncAndCache);
   const setSyncStatus = useSyncAIStore((s) => s.setSyncStatus);
 
@@ -88,6 +89,9 @@ export const App: React.FC = () => {
           } else if (payload.action === 'openBoard') {
             coord.setDestination({ type: 'moodboard', id: payload.id });
           }
+        },
+        onMoodboardAgentStep: (step) => {
+          pushAgentStep(step);
         },
       })
       .then((fn) => {
@@ -312,7 +316,7 @@ export const App: React.FC = () => {
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {sidebarOpen && <SidebarView />}
-        {isMoodboardView ? <MoodboardsHomePlaceholder /> : <GalleryView />}
+        {isMoodboardView ? <MoodboardsHome /> : <GalleryView />}
         {inspectorOpen && !isMoodboardView && <InspectorView />}
       </div>
 

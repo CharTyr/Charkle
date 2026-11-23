@@ -326,10 +326,126 @@ export interface FolderSuggestion {
   reason: string;
 }
 
+export interface BoardPoint {
+  x: number;
+  y: number;
+}
+
+export interface BoardRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface NormalizedCropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type EditorialStyle = 'balanced' | 'magazine' | 'compact';
+
+export interface AutoLayoutConfig {
+  columns: number;
+  spacing: number;
+  style: EditorialStyle;
+  showPaletteStrip: boolean;
+}
+
+export type BoardLayoutMode =
+  | { autoEditorial: { _0: AutoLayoutConfig } }
+  | { freeform: Record<string, never> };
+
+export function isAutoEditorialMode(
+  mode: BoardLayoutMode,
+): mode is { autoEditorial: { _0: AutoLayoutConfig } } {
+  return 'autoEditorial' in mode;
+}
+
+export type BoardNodeKind =
+  | {
+      assetRef: {
+        assetID: string;
+        crop?: NormalizedCropRect | null;
+        weight: number;
+        autoplayLoop: boolean;
+      };
+    }
+  | {
+      note: {
+        title?: string | null;
+        text: string;
+        style: NoteStyle;
+        fontSize: number;
+      };
+    }
+  | {
+      groupFrame: {
+        title: string;
+        tint: GroupTint;
+      };
+    }
+  | {
+      paletteStrip: {
+        colors: LabColor[];
+        autoSyncWithBoard: boolean;
+      };
+    };
+
+export interface BoardNode {
+  id: string;
+  kind: BoardNodeKind;
+  frame: BoardRect;
+  zIndex: number;
+  rotationDegrees: number;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  isLocked: boolean;
+  editorialOrder: number;
+  updatedAt: WireDate;
+}
+
+export type ConnectorAnchor = 'auto' | 'top' | 'bottom' | 'leading' | 'trailing';
+export type ConnectorStyle = 'curved' | 'elbow' | 'straight';
+
+export interface BoardConnector {
+  id: string;
+  fromNodeID: string;
+  fromAnchor: ConnectorAnchor;
+  fromNormalizedPoint?: BoardPoint | null;
+  toNodeID: string;
+  toAnchor: ConnectorAnchor;
+  toNormalizedPoint?: BoardPoint | null;
+  label?: string | null;
+  colorHex: string;
+  style: ConnectorStyle;
+  dashed: boolean;
+  updatedAt: WireDate;
+}
+
+export interface InkStrokePoint {
+  x: number;
+  y: number;
+  pressure: number;
+}
+
+export interface InkStroke {
+  id: string;
+  points: InkStrokePoint[];
+  colorHex: string;
+  lineWidth: number;
+  opacity: number;
+  zIndex: number;
+  createdAt: WireDate;
+}
+
 export interface MoodboardSummary {
   id: string;
   title: string;
   subtitle: string;
+  mode?: BoardLayoutMode;
   itemCount: number;
   previewAssetIDs: string[];
   paletteHexes: string[];
@@ -341,29 +457,111 @@ export interface MoodboardDocument {
   id: string;
   title: string;
   subtitle: string;
-  mode: unknown;
-  nodes: Array<{
-    id: string;
-    kind: unknown;
-    frame: { x: number; y: number; width: number; height: number };
-    zIndex: number;
-    rotationDegrees: number;
-    flipHorizontal: boolean;
-    flipVertical: boolean;
-    isLocked: boolean;
-    editorialOrder: number;
-    updatedAt: WireDate;
-  }>;
-  connectors: unknown[];
-  inkStrokes: unknown[];
+  mode: BoardLayoutMode;
+  nodes: BoardNode[];
+  connectors: BoardConnector[];
+  inkStrokes: InkStroke[];
   extractedPalette: LabColor[];
   candidateAssetIDs: string[];
   pinnedOffline: boolean;
-  viewportCenter: { x: number; y: number };
+  viewportCenter: BoardPoint;
   viewportZoom: number;
   createdAt: WireDate;
   updatedAt: WireDate;
   updatedHLC: number;
+}
+
+export type MoodboardAgentPhase =
+  | 'planning'
+  | 'retrieving'
+  | 'inspectingVisuals'
+  | 'composing'
+  | 'verifying'
+  | 'repairing'
+  | 'completed'
+  | 'fallbackOffline';
+
+export type MoodboardAgentStepStatus = 'running' | 'done' | 'warning';
+
+export interface MoodboardAgentStep {
+  id: string;
+  phase: MoodboardAgentPhase;
+  title: string;
+  detail: string;
+  status: MoodboardAgentStepStatus;
+  timestamp: WireDate;
+}
+
+export interface MoodboardSectionDraft {
+  id: string;
+  title: string;
+  tint: GroupTint;
+  rationale: string;
+  assetIDs: string[];
+  heroAssetIDs: string[];
+}
+
+export interface MoodboardCurationRequest {
+  prompt: string;
+  seedAssetIDs: string[];
+  scopeFolderIDs: string[];
+  requiredTags: string[];
+  targetPalette: LabColor[];
+  colorTolerance: number;
+  preferredCount: number;
+  candidateCount: number;
+  layoutStyle: EditorialStyle;
+  useFreeformLayout: boolean;
+  includeCuratorNotes: boolean;
+  excludedAssetIDs: string[];
+  lockedAssetIDs: string[];
+  existingBoard?: MoodboardDocument | null;
+  refinementInstruction?: string | null;
+  autoFocusDetailCrop: boolean;
+}
+
+export interface MoodboardProposal {
+  draftDocument: MoodboardDocument;
+  primaryMatches: ScoredAsset[];
+  candidatePool: ScoredAsset[];
+  extractedPalette: LabColor[];
+  usedCloudAi: boolean;
+  curatedSummary: string;
+  agentTrace: MoodboardAgentStep[];
+  sections: MoodboardSectionDraft[];
+  rejectedSummary?: string | null;
+  cachedVisualInsightsCount: number;
+}
+
+export type BoardImageFormat = 'png' | 'jpeg';
+
+export interface MoodboardExportOptions {
+  scale: number;
+  format: BoardImageFormat;
+  includeAnnotations: boolean;
+  includePaletteStrip: boolean;
+  darkAppearance: boolean;
+  containerWidth: number;
+}
+
+export interface FigmaBridgeExportReport {
+  objectCount: number;
+  imageCount: number;
+  noteCount: number;
+  groupCount: number;
+  paletteCount: number;
+  connectorCount: number;
+  strokeCount: number;
+  reviewCount: number;
+  bundlePath: string;
+}
+
+export interface EditorialLayoutResult {
+  frames: Record<string, BoardRect>;
+  orderedNodeIds: string[];
+  contentSize: { width: number; height: number };
+  columnWidth: number;
+  columnCount: number;
 }
 
 export type DriveTransportMode =

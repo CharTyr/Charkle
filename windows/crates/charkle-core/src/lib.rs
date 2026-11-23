@@ -5,6 +5,9 @@
 pub mod db;
 pub mod engine;
 pub mod error;
+pub mod export;
+pub mod intelligence;
+pub mod layout;
 pub mod media;
 pub mod models;
 pub mod sync;

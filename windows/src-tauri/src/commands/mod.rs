@@ -3,6 +3,7 @@
 pub mod assets;
 pub mod folders;
 pub mod media;
+pub mod moodboard;
 pub mod native;
 pub mod query;
 pub mod sync;

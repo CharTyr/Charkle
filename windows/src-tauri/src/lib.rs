@@ -251,6 +251,12 @@ pub fn run() {
             commands::native::get_ocr_diagnostics,
             commands::native::run_asset_ocr,
             commands::native::focus_main_window,
+            // M4 Moodboard Studio, Curator Harness & Exporters
+            commands::moodboard::curate_moodboard,
+            commands::moodboard::solve_editorial_layout,
+            commands::moodboard::export_board_image_file,
+            commands::moodboard::copy_board_image_to_clipboard,
+            commands::moodboard::export_board_figma_bridge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Charkle desktop application");

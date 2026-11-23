@@ -361,6 +361,91 @@ pub fn read_current_clipboard() -> Result<Option<ClipboardSnapshot>, String> {
     Ok(None)
 }
 
+/// Converts PNG bytes into a Windows `CF_DIB` buffer (40-byte `BITMAPINFOHEADER` + bottom-up 32-bit BGRA).
+pub fn png_bytes_to_dib(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let rgba = image::load_from_memory(png_bytes)
+        .map_err(|e| format!("Failed to decode PNG for clipboard: {e}"))?
+        .to_rgba8();
+    let w = rgba.width();
+    let h = rgba.height();
+    let mut dib = Vec::with_capacity(40 + (w as usize) * (h as usize) * 4);
+    dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    dib.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
+    dib.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight (positive = bottom-up for max compatibility)
+    dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    dib.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    dib.extend_from_slice(&((w * h * 4) as u32).to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+
+    let raw = rgba.as_raw();
+    let row_stride = (w as usize) * 4;
+    for y in (0..(h as usize)).rev() {
+        let row = &raw[y * row_stride..(y + 1) * row_stride];
+        for px in row.chunks_exact(4) {
+            dib.push(px[2]); // B
+            dib.push(px[1]); // G
+            dib.push(px[0]); // R
+            dib.push(px[3]); // A
+        }
+    }
+    Ok(dib)
+}
+
+/// Copies PNG bytes onto the Windows system clipboard as `CF_DIB` for direct `Ctrl+V` into
+/// Figma, PowerPoint, Photoshop, and Explorer.
+#[cfg(target_os = "windows")]
+pub fn write_png_to_clipboard(png_bytes: &[u8]) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Ole::CF_DIB;
+
+    let dib = png_bytes_to_dib(png_bytes)?;
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    // SAFETY: Standard Win32 clipboard write sequence transferring owned HGLOBAL to OS on success.
+    unsafe {
+        OpenClipboard(HWND::default()).map_err(|e| format!("OpenClipboard failed: {e}"))?;
+        let _guard = ClipboardGuard;
+        EmptyClipboard().map_err(|e| format!("EmptyClipboard failed: {e}"))?;
+
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, dib.len())
+            .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
+        let ptr = GlobalLock(hmem);
+        if ptr.is_null() {
+            let _ = GlobalFree(hmem);
+            return Err("GlobalLock failed".to_string());
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr.cast::<u8>(), dib.len());
+        let _ = GlobalUnlock(hmem);
+
+        if let Err(err) = SetClipboardData(CF_DIB.0 as u32, HANDLE(hmem.0)) {
+            let _ = GlobalFree(hmem);
+            return Err(format!("SetClipboardData failed: {err}"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn write_png_to_clipboard(_png_bytes: &[u8]) -> Result<(), String> {
+    Ok(())
+}
+
 /// Handle stopping the background `AddClipboardFormatListener` message window on drop.
 pub struct ClipboardListenerHandle {
     hwnd_raw: Arc<AtomicIsize>,
@@ -539,5 +624,26 @@ mod tests {
         assert!(png.starts_with(b"\x89PNG"));
         let img = image::load_from_memory(&png).expect("decode").to_rgba8();
         assert_eq!(img.get_pixel(0, 0).0, [42, 96, 224, 255]);
+    }
+
+    #[test]
+    fn roundtrips_png_bytes_to_cf_dib_and_back() {
+        let mut src = RgbaImage::new(4, 3);
+        src.put_pixel(0, 0, image::Rgba([210, 88, 64, 255]));
+        src.put_pixel(3, 2, image::Rgba([42, 96, 224, 255]));
+        let mut png_bytes = Vec::new();
+        DynamicImage::ImageRgba8(src)
+            .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
+            .expect("encode png");
+
+        let dib = png_bytes_to_dib(&png_bytes).expect("png to dib");
+        assert_eq!(dib.len(), 40 + 4 * 3 * 4);
+        let (decoded_png, w, h) = dib_bytes_to_png(&dib).expect("dib back to png");
+        assert_eq!((w, h), (4, 3));
+        let roundtripped = image::load_from_memory(&decoded_png)
+            .expect("decode roundtrip")
+            .to_rgba8();
+        assert_eq!(roundtripped.get_pixel(0, 0).0, [210, 88, 64, 255]);
+        assert_eq!(roundtripped.get_pixel(3, 2).0, [42, 96, 224, 255]);
     }
 }

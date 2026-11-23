@@ -3,7 +3,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import {
   matchesSmartFolderRule,
   msToCocoaSeconds,
@@ -18,11 +18,17 @@ import {
   type DesktopIntegrationStatus,
   type DragOutOutcome,
   type DriveSyncConfig,
+  type EditorialLayoutResult,
+  type FigmaBridgeExportReport,
   type FilterCriteria,
   type FolderRecord,
   type FolderSuggestion,
   type HotkeyConfig,
+  type MoodboardAgentStep,
+  type MoodboardCurationRequest,
   type MoodboardDocument,
+  type MoodboardExportOptions,
+  type MoodboardProposal,
   type MoodboardSummary,
   type OcrDiagnostics,
   type QuickJumpMatch,
@@ -44,6 +50,7 @@ export interface CharkleEventHandlers {
   onClipboardCollected?: (count: number) => void;
   onShelfState?: (state: { expanded: boolean; pinned: boolean }) => void;
   onDeepLinkNavigate?: (payload: DeepLinkPayload) => void;
+  onMoodboardAgentStep?: (step: MoodboardAgentStep) => void;
 }
 
 export interface CharkleTransport {
@@ -142,6 +149,28 @@ export interface CharkleTransport {
   getOcrDiagnostics(): Promise<OcrDiagnostics>;
   runAssetOcr(id: string): Promise<AssetRecord | null>;
   focusMainWindow(): Promise<void>;
+
+  // M4 Moodboard Studio, Curator Harness & Exporters
+  curateMoodboard(request: MoodboardCurationRequest): Promise<MoodboardProposal>;
+  solveEditorialLayout(document: MoodboardDocument, containerWidth: number): Promise<EditorialLayoutResult>;
+  exportBoardImageFile(
+    document: MoodboardDocument,
+    options: MoodboardExportOptions,
+    destinationPath: string,
+  ): Promise<number>;
+  copyBoardImageToClipboard(
+    document: MoodboardDocument,
+    options: MoodboardExportOptions,
+  ): Promise<number>;
+  exportBoardFigmaBridge(
+    document: MoodboardDocument,
+    options: MoodboardExportOptions,
+    destinationPath: string,
+  ): Promise<FigmaBridgeExportReport>;
+  saveFileDialog(
+    defaultPath: string,
+    filters: Array<{ name: string; extensions: string[] }>,
+  ): Promise<string | null>;
 
   // Live Events
   subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void>;
@@ -459,6 +488,48 @@ export class TauriTransport implements CharkleTransport {
     return invoke('focus_main_window');
   }
 
+  curateMoodboard(request: MoodboardCurationRequest): Promise<MoodboardProposal> {
+    return invoke('curate_moodboard', { request });
+  }
+
+  solveEditorialLayout(
+    document: MoodboardDocument,
+    containerWidth: number,
+  ): Promise<EditorialLayoutResult> {
+    return invoke('solve_editorial_layout', { document, containerWidth });
+  }
+
+  exportBoardImageFile(
+    document: MoodboardDocument,
+    options: MoodboardExportOptions,
+    destinationPath: string,
+  ): Promise<number> {
+    return invoke('export_board_image_file', { document, options, destinationPath });
+  }
+
+  copyBoardImageToClipboard(
+    document: MoodboardDocument,
+    options: MoodboardExportOptions,
+  ): Promise<number> {
+    return invoke('copy_board_image_to_clipboard', { document, options });
+  }
+
+  exportBoardFigmaBridge(
+    document: MoodboardDocument,
+    options: MoodboardExportOptions,
+    destinationPath: string,
+  ): Promise<FigmaBridgeExportReport> {
+    return invoke('export_board_figma_bridge', { document, options, destinationPath });
+  }
+
+  async saveFileDialog(
+    defaultPath: string,
+    filters: Array<{ name: string; extensions: string[] }>,
+  ): Promise<string | null> {
+    const selected = await saveDialog({ defaultPath, filters });
+    return typeof selected === 'string' && selected.length > 0 ? selected : null;
+  }
+
   async subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void> {
     const unsubs: UnlistenFn[] = [];
     if (handlers.onLibraryChanged) {
@@ -498,6 +569,13 @@ export class TauriTransport implements CharkleTransport {
       unsubs.push(
         await listen<DeepLinkPayload>('deep-link:navigate', (e) =>
           handlers.onDeepLinkNavigate?.(e.payload),
+        ),
+      );
+    }
+    if (handlers.onMoodboardAgentStep) {
+      unsubs.push(
+        await listen<MoodboardAgentStep>('moodboard:agent-step', (e) =>
+          handlers.onMoodboardAgentStep?.(e.payload),
         ),
       );
     }
@@ -555,6 +633,8 @@ export class InMemoryMockTransport implements CharkleTransport {
   public lastOutboundDragIds: string[] = [];
   public lastShelfHitRect: ClientRect | null = null;
   public lastCommittedCrop: { token: string; x: number; y: number; width: number; height: number } | null = null;
+  public lastExportedPath: string | null = null;
+  public lastClipboardExportCount = 0;
   private syncCfg: DriveSyncConfig = {
     mode: 'localOnly',
     rootFolderName: 'Charkle',
@@ -1184,16 +1264,22 @@ export class InMemoryMockTransport implements CharkleTransport {
   }
 
   async fetchBoards(): Promise<MoodboardSummary[]> {
-    return this.boards.map((b) => ({
-      id: b.id,
-      title: b.title,
-      subtitle: b.subtitle,
-      itemCount: b.nodes.length,
-      previewAssetIDs: b.candidateAssetIDs.slice(0, 4),
-      paletteHexes: b.extractedPalette.map((c) => c.hex),
-      pinnedOffline: b.pinnedOffline,
-      updatedAt: b.updatedAt,
-    }));
+    return this.boards.map((b) => {
+      const refIds = b.nodes
+        .map((n) => ('assetRef' in n.kind ? n.kind.assetRef.assetID : null))
+        .filter((x): x is string => Boolean(x));
+      return {
+        id: b.id,
+        title: b.title,
+        subtitle: b.subtitle,
+        mode: b.mode,
+        itemCount: b.nodes.length,
+        previewAssetIDs: (refIds.length > 0 ? refIds : b.candidateAssetIDs).slice(0, 4),
+        paletteHexes: b.extractedPalette.map((c) => c.hex),
+        pinnedOffline: b.pinnedOffline,
+        updatedAt: b.updatedAt,
+      };
+    });
   }
 
   async fetchBoard(id: string): Promise<MoodboardDocument | null> {
@@ -1448,6 +1534,140 @@ export class InMemoryMockTransport implements CharkleTransport {
   }
 
   async focusMainWindow(): Promise<void> {}
+
+  async curateMoodboard(request: MoodboardCurationRequest): Promise<MoodboardProposal> {
+    const now = msToCocoaSeconds(Date.now());
+    const active = this.assets.filter((a) => !a.isTrashed);
+    const primaryAssets = active.slice(0, Math.min(request.preferredCount || 4, Math.max(2, active.length - 1)));
+    const candidateAssets = active.filter((a) => !primaryAssets.some((p) => p.id === a.id));
+    const palette = primaryAssets.flatMap((a) => a.dominantColors).slice(0, 6);
+
+    const nodes = primaryAssets.map((a, idx) => ({
+      id: makeUuid(),
+      kind: {
+        assetRef: {
+          assetID: a.id,
+          crop: null,
+          weight: idx === 0 ? 2 : 1,
+          autoplayLoop: true,
+        },
+      },
+      frame: { x: 40 + (idx % 3) * 320, y: 40 + Math.floor(idx / 3) * 260, width: 290, height: 220 },
+      zIndex: idx,
+      rotationDegrees: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+      isLocked: false,
+      editorialOrder: idx,
+      updatedAt: now,
+    }));
+
+    const draftDocument: MoodboardDocument = {
+      id: request.existingBoard?.id ?? makeUuid(),
+      title: request.prompt.trim() || '智能灵感情绪板',
+      subtitle: request.prompt.trim() ? `主题策展 · ${request.prompt.trim()}` : '色彩与构图精选',
+      mode: request.useFreeformLayout
+        ? { freeform: {} }
+        : {
+            autoEditorial: {
+              _0: {
+                columns: 3,
+                spacing: 16,
+                style: request.layoutStyle,
+                showPaletteStrip: true,
+              },
+            },
+          },
+      nodes,
+      connectors: [],
+      inkStrokes: [],
+      extractedPalette: palette,
+      candidateAssetIDs: candidateAssets.map((a) => a.id),
+      pinnedOffline: false,
+      viewportCenter: { x: 560, y: 360 },
+      viewportZoom: 1,
+      createdAt: now,
+      updatedAt: now,
+      updatedHLC: Date.now(),
+    };
+
+    const phases: MoodboardAgentStep[] = [
+      { id: makeUuid(), phase: 'planning', title: '拆解主题与构图策略', detail: '解析关键词与构图目标', status: 'done', timestamp: now },
+      { id: makeUuid(), phase: 'retrieving', title: '召回候选素材与色彩匹配', detail: `召回 ${primaryAssets.length} 项主选 + ${candidateAssets.length} 项候选`, status: 'done', timestamp: now },
+      { id: makeUuid(), phase: 'inspectingVisuals', title: '视觉构图与色板分析', detail: '完成色彩和谐度与 MMR 多样性评估', status: 'done', timestamp: now },
+      { id: makeUuid(), phase: 'composing', title: '编排情绪板版面与策展分区', detail: `生成 ${nodes.length} 个画布节点`, status: 'done', timestamp: now },
+      { id: makeUuid(), phase: 'verifying', title: '校验视觉均衡与坐标完整性', detail: '全部节点坐标有效', status: 'done', timestamp: now },
+      { id: makeUuid(), phase: 'repairing', title: '版面微调与间距收敛', detail: '版面节奏均衡', status: 'done', timestamp: now },
+      { id: makeUuid(), phase: 'fallbackOffline', title: '本地离线策展完成', detail: '已生成可编辑情绪板', status: 'done', timestamp: now },
+    ];
+
+    return {
+      draftDocument,
+      primaryMatches: primaryAssets.map((asset, i) => ({ asset, score: 0.95 - i * 0.05, matchReasons: ['主题契合', '色彩和谐'] })),
+      candidatePool: candidateAssets.map((asset, i) => ({ asset, score: 0.8 - i * 0.04, matchReasons: ['风格补充'] })),
+      extractedPalette: palette,
+      usedCloudAi: false,
+      curatedSummary: `围绕「${request.prompt || '当前灵感'}」生成 ${primaryAssets.length} 项主选素材与 ${candidateAssets.length} 项候选替换池`,
+      agentTrace: phases,
+      sections: [],
+      rejectedSummary: null,
+      cachedVisualInsightsCount: primaryAssets.length,
+    };
+  }
+
+  async solveEditorialLayout(
+    document: MoodboardDocument,
+    containerWidth: number,
+  ): Promise<EditorialLayoutResult> {
+    const frames: Record<string, { x: number; y: number; width: number; height: number }> = {};
+    document.nodes.forEach((n, i) => {
+      frames[n.id] = { x: 28 + (i % 3) * 320, y: 28 + Math.floor(i / 3) * 260, width: 300, height: 220 };
+    });
+    return {
+      frames,
+      orderedNodeIds: document.nodes.map((n) => n.id),
+      contentSize: { width: containerWidth, height: 680 },
+      columnWidth: 300,
+      columnCount: 3,
+    };
+  }
+
+  async exportBoardImageFile(
+    _document: MoodboardDocument,
+    _options: MoodboardExportOptions,
+    destinationPath: string,
+  ): Promise<number> {
+    this.lastExportedPath = destinationPath;
+    return 128_000;
+  }
+
+  async copyBoardImageToClipboard(): Promise<number> {
+    this.lastClipboardExportCount += 1;
+    return 128_000;
+  }
+
+  async exportBoardFigmaBridge(
+    document: MoodboardDocument,
+    _options: MoodboardExportOptions,
+    destinationPath: string,
+  ): Promise<FigmaBridgeExportReport> {
+    this.lastExportedPath = destinationPath;
+    return {
+      objectCount: document.nodes.length,
+      imageCount: document.nodes.filter((n) => 'assetRef' in n.kind).length,
+      noteCount: document.nodes.filter((n) => 'note' in n.kind).length,
+      groupCount: document.nodes.filter((n) => 'groupFrame' in n.kind).length,
+      paletteCount: document.nodes.filter((n) => 'paletteStrip' in n.kind).length,
+      connectorCount: document.connectors.length,
+      strokeCount: document.inkStrokes.length,
+      reviewCount: 0,
+      bundlePath: destinationPath,
+    };
+  }
+
+  async saveFileDialog(defaultPath: string): Promise<string | null> {
+    return `mock-exports/${defaultPath}`;
+  }
 
   async subscribeEvents(): Promise<() => void> {
     return () => {};

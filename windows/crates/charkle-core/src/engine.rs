@@ -15,6 +15,11 @@ use uuid::Uuid;
 
 use crate::db::{search_text, LibraryDatabase};
 use crate::error::{CoreError, CoreResult};
+use crate::export::{
+    BoardImageExporter, FigmaBridgeExportReport, FigmaBridgeExporter, MoodboardExportOptions,
+};
+use crate::intelligence::MoodboardAgentHarness;
+use crate::layout::{EditorialLayoutResult, EditorialLayoutSolver};
 use crate::media::artwork::MediaArtwork;
 use crate::media::metadata::ImageMetadataExtractor;
 use crate::media::resolvers::{
@@ -27,7 +32,8 @@ use crate::models::core::{
 };
 use crate::models::media::{cosine_similarity, CacheStats, CaptureInput, ThumbnailTier};
 use crate::models::moodboard::{
-    BoardNode, BoardNodeKind, BoardRect, MoodboardDocument, MoodboardSummary,
+    AutoLayoutConfig, BoardLayoutMode, BoardNode, BoardNodeKind, BoardRect, MoodboardAgentStep,
+    MoodboardCurationRequest, MoodboardDocument, MoodboardProposal, MoodboardSummary,
 };
 use crate::models::sync::{
     tag_map, DeletedAssetFingerprint, DriveSyncConfig, DriveTransportMode, StorageMigrationReport,
@@ -1325,6 +1331,78 @@ impl LiveCharkleEngine {
             }
         }
         Ok(Some(asset))
+    }
+
+    // =========================================================================
+    // M4 Moodboard Curation, Editorial Layout & Exporters
+    // =========================================================================
+
+    pub async fn curate_moodboard<F>(
+        &self,
+        request: &MoodboardCurationRequest,
+        on_step: F,
+    ) -> CoreResult<MoodboardProposal>
+    where
+        F: FnMut(MoodboardAgentStep),
+    {
+        MoodboardAgentHarness::run(&self.db, request, None, on_step).await
+    }
+
+    pub fn solve_editorial_layout(
+        &self,
+        document: &MoodboardDocument,
+        container_width: f64,
+    ) -> CoreResult<EditorialLayoutResult> {
+        let assets = self.load_board_asset_map(document)?;
+        let cfg = match document.mode {
+            BoardLayoutMode::AutoEditorial(c) => c,
+            BoardLayoutMode::Freeform => AutoLayoutConfig::default(),
+        };
+        Ok(EditorialLayoutSolver::solve(
+            &document.nodes,
+            cfg,
+            container_width,
+            &assets,
+            28.0,
+        ))
+    }
+
+    pub fn export_board_image_bytes(
+        &self,
+        document: &MoodboardDocument,
+        options: &MoodboardExportOptions,
+    ) -> CoreResult<Vec<u8>> {
+        let assets = self.load_board_asset_map(document)?;
+        BoardImageExporter::render_bytes(document, &assets, &self.media, options)
+    }
+
+    pub fn export_board_figma_bridge(
+        &self,
+        document: &MoodboardDocument,
+        options: &MoodboardExportOptions,
+        destination_path: &Path,
+    ) -> CoreResult<FigmaBridgeExportReport> {
+        let assets = self.load_board_asset_map(document)?;
+        FigmaBridgeExporter::export_bundle(
+            document,
+            &assets,
+            &self.media,
+            options,
+            destination_path,
+        )
+    }
+
+    fn load_board_asset_map(
+        &self,
+        document: &MoodboardDocument,
+    ) -> CoreResult<HashMap<Uuid, AssetRecord>> {
+        let mut map = HashMap::new();
+        for id in document.referenced_asset_ids() {
+            if let Some(asset) = self.db.asset(id)? {
+                map.insert(id, asset);
+            }
+        }
+        Ok(map)
     }
 }
 
