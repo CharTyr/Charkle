@@ -1,0 +1,33 @@
+{
+  "id": "web-windows-mcp-cli-v2-parity",
+  "name": "web-windows-mcp-cli-v2-parity",
+  "title": "Web & Windows MCP v2 + CLI Ergonomics Parity",
+  "description": "Align Web (./web/packages/server/src/agent/external-agent-service.ts & mcp-stdio.ts) and Windows (./windows/crates/charkle-cli) with the macOS MCP v2 contract in .trellis/spec/cross-platform/index.md §3 (20 safe tools, dynamic resource templates, 4 prompts, batch JSON-RPC, rich EXIF/AI prompt serialization, pagination, non-overlapping board patches, and zero permanent deletion).",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": "web",
+  "priority": "P2",
+  "creator": "CharTyr",
+  "assignee": "CharTyr",
+  "createdAt": "2026-11-23",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    ".trellis/spec/cross-platform/index.md",
+    "Sources/CharkleCore/Intelligence/CharkleExternalAgentSchema.swift",
+    "Sources/CharkleCore/Intelligence/CharkleExternalAgentService.swift",
+    "Sources/CharkleCore/Intelligence/MCPStdioFrameParser.swift",
+    "web/packages/server/src/agent/external-agent-service.ts",
+    "web/packages/server/src/mcp-stdio.ts"
+  ],
+  "notes": "Issued from macOS control-tower session so Web and Windows adopt the upgraded 20-tool MCP v2 + CLI contract cleanly without cross-platform drift.",
+  "meta": {}
+}

@@ -73,12 +73,21 @@
 
 ---
 
-## 3. External Agent & MCP Safety Policy (14 Tools)
+## 3. External Agent & MCP Safety Policy (20 Tools · 4+2 Resources · 4 Prompts)
 
-- **Read Tools (8)**: `library_overview`, `search_assets`, `list_inbox`, `get_asset`, `render_contact_sheet`, `list_boards`, `get_board_context`, `export_board_image`.
-- **Write Tools (6)**: `organize_assets`, `create_folder`, `ingest_asset`, `compose_moodboard`, `patch_moodboard`, `trash_assets`.
-- **Resources (2)**: `charkle://library/overview`, `charkle://boards`.
-- **Non-Negotiable Invariant**: Permanent deletion is **STRICTLY FORBIDDEN** through any External Agent / MCP / CLI surface (`trash_assets` is soft-trash only). Channel switches (`mcpEnabled` / `cliEnabled`) and access level (`readOnly` / `readWriteOrganize`) are enforced independently.
+- **Protocol & Transport**:
+  - JSON-RPC 2.0 single & batch requests over stdio (`NDJSON` and split-chunk-safe `Content-Length` framing) or HTTP; negotiates `protocolVersion` against `["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]`; advertises `tools`, `resources`, `prompts`, and `logging`.
+  - Every tool emits complete MCP Tool Annotations (`title`, `readOnlyHint`, `destructiveHint: false`, `idempotentHint`, `openWorldHint`).
+- **Read Tools (12)**:
+  - `library_overview` (counts incl. untagged/trashed, folders, smart folders, top tags, cache stats), `search_assets` (full filters incl. `include_subfolders`, `media_kinds`, `aspect_shape`, `smart_folder_*`, `only_trashed`, `sort_by`, and `offset`/`hasMore`/`nextOffset` pagination), `list_inbox` (paginated), `get_asset` (hydrated EXIF, AI generation prompts, social post, GitHub repo metadata, optional `include_image: true` inline JPEG), `render_contact_sheet` (paginated, optional `include_image`, configurable `max_width`), `find_similar_assets`, `semantic_search`, `quick_jump`, `suggest_folder`, `list_boards`, `get_board_context` (with node frames, crops, connectors, candidate pool), `export_board_image` (high-res `preview1400` tiles, optional `include_image`).
+- **Safe Write Tools (8)**:
+  - `organize_assets` (explicit `ai_description` overwrite, tags, suggested tags, rating, notes, folder/Inbox, offline pin), `create_folder`, `update_folder` (rename, move, appearance — never delete), `ingest_asset` (single/batch files or directories, URLs, text; returns post-patch tagged assets), `compose_moodboard`, `patch_moodboard` (non-overlapping placement below existing content, locked-card protection, sections, notes), `trash_assets`, `analyze_assets` (local Vision/EXIF/AI-prompt analysis + optional live rich-metadata refresh).
+- **Resources (4 static + 2 templates)**:
+  - Static: `charkle://library/overview`, `charkle://boards`, `charkle://folders`, `charkle://smart-folders`
+  - Dynamic templates: `charkle://assets/{asset_id}`, `charkle://boards/{board_id}`
+- **Prompts (4)**:
+  - `triage_inbox`, `curate_moodboard`, `extract_design_tokens`, `inspect_ai_prompts`
+- **Non-Negotiable Invariant**: Permanent deletion of assets and deletion of folders are **STRICTLY FORBIDDEN** through any External Agent / MCP / CLI surface (`trash_assets` is soft-trash only). Channel switches (`mcpEnabled` / `cliEnabled`) and access level (`readOnly` / `readWriteOrganize`) are enforced independently.
 
 ---
 

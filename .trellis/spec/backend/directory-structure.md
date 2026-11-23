@@ -41,7 +41,7 @@ Sources/
 │   │   ├── TypeSafeSystemOneClient.swift / VisualGroundingEngine.swift # Jev Box/Noul/Score/Choice grounding
 │   │   ├── MoodboardCurator.swift / MoodboardAgentHarness.swift / ContactSheetRenderer.swift
 │   │   ├── KeychainStore.swift       # macOS Keychain wrapper (isolated per service in tests)
-│   │   └── CharkleExternalAgentService.swift / CharkleAgentTools.swift / ExternalAgentPolicy.swift
+│   │   └── CharkleExternalAgentService.swift / CharkleExternalAgentSchema.swift / MCPStdioFrameParser.swift / CharkleAgentTools.swift / ExternalAgentPolicy.swift
 │   ├── Sync/                         # Multi-backend sync transports & sharded op-log sync
 │   │   ├── DriveSyncEngine.swift     # Concurrent folder crawl, download, upload, tombstone reconciliation
 │   │   ├── DirectAPITransport.swift  # Google Drive v3 pooled URLSession + resumable uploads
@@ -55,7 +55,10 @@ Sources/
 │   │   └── PlaceholderEngine.swift   # In-memory CharkleEngineProtocol stub (must track protocol changes)
 │   └── LiveCharkleEngine.swift       # Top-level actor implementing CharkleEngineProtocol
 ├── CharkleCLI/
-│   └── CharkleCLI.swift              # CLI + JSON-RPC MCP stdio server (14 safe tools, soft-trash only)
+│   ├── CharkleCLI.swift              # CLI dispatcher & non-blocking MCP stdio server (20 safe tools, soft-trash only)
+│   ├── CLIArgParser.swift            # Flag/positional parser (--k=v, short flags, boolean-safe, per-subcommand help)
+│   ├── CLIFormatter.swift            # Dual-mode TTY human formatter & pipe-safe auto-JSON output
+│   └── CLICompletions.swift          # Shell completion generator (zsh / bash / fish)
 └── Tests/CharkleTests/               # Swift Testing suites (no XCTest boilerplate)
 ```
 

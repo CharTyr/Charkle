@@ -21,6 +21,9 @@ public final class SyncAndAIStore {
     public var isRebuildingVisualIndex: Bool = false
     public var rebuildVisualIndexProgress: (completed: Int, total: Int)? = nil
     public var cliLinkRevision: Int = 0
+    public var isRunningExternalAgentSelfCheck: Bool = false
+    public var externalAgentSelfCheckPassed: Bool? = nil
+    public var externalAgentSelfCheckSummary: String? = nil
     public var chatGPTSession: ChatGPTAccountSession = ChatGPTAccountSession()
     public var chatGPTModels: [ChatGPTModelInfo] = []
     public var isSigningInChatGPT: Bool = false
@@ -630,11 +633,38 @@ public final class SyncAndAIStore {
         return FileManager.default.isExecutableFile(atPath: resolvedHelperCLIPath())
     }
 
-    public var isCLILinkedInLocalBin: Bool {
+    public enum CLILinkStatus: Equatable, Sendable {
+        case notLinked
+        case linkedCurrent
+        case linkedStale(target: String)
+        case broken
+    }
+
+    public var cliLinkStatus: CLILinkStatus {
         _ = cliLinkRevision
-        let path = URL(fileURLWithPath: NSHomeDirectory())
+        let fm = FileManager.default
+        let linkPath = URL(fileURLWithPath: NSHomeDirectory())
             .appending(path: ".local/bin/charkle").path
-        return FileManager.default.isExecutableFile(atPath: path)
+        let currentHelper = URL(fileURLWithPath: resolvedHelperCLIPath()).resolvingSymlinksInPath().path
+
+        if let dest = try? fm.destinationOfSymbolicLink(atPath: linkPath) {
+            guard fm.isExecutableFile(atPath: linkPath) else {
+                return .broken
+            }
+            let resolvedDest = URL(fileURLWithPath: dest).resolvingSymlinksInPath().path
+            if fm.isExecutableFile(atPath: currentHelper) && resolvedDest != currentHelper {
+                return .linkedStale(target: dest)
+            }
+            return .linkedCurrent
+        }
+        return fm.isExecutableFile(atPath: linkPath) ? .linkedCurrent : .notLinked
+    }
+
+    public var isCLILinkedInLocalBin: Bool {
+        switch cliLinkStatus {
+        case .linkedCurrent, .linkedStale: true
+        case .notLinked, .broken: false
+        }
     }
 
     public func installCLIInLocalBin() {
@@ -653,9 +683,79 @@ public final class SyncAndAIStore {
             try FileManager.default.createSymbolicLink(atPath: targetURL.path, withDestinationPath: sourcePath)
             cliLinkRevision &+= 1
             errorMessage = nil
-            statusMessage = "已链接终端命令至 ~/.local/bin/charkle，可直接运行 charkle overview"
+            statusMessage = "已链接终端命令至 ~/.local/bin/charkle，可直接运行 charkle doctor"
         } catch {
             errorMessage = "创建命令行链接失败：\(error.localizedDescription)"
+        }
+    }
+
+    public func runExternalAgentSelfCheck() async {
+        guard !isRunningExternalAgentSelfCheck else { return }
+        isRunningExternalAgentSelfCheck = true
+        defer { isRunningExternalAgentSelfCheck = false }
+
+        let helperPath = resolvedHelperCLIPath()
+        let helperExists = FileManager.default.isExecutableFile(atPath: helperPath)
+        cliLinkRevision &+= 1
+
+        if helperExists {
+            let outcome: (ok: Bool, summary: String) = await Task.detached(priority: .userInitiated) {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: helperPath)
+                proc.arguments = ["doctor", "--json"]
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                proc.standardOutput = stdoutPipe
+                proc.standardError = stderrPipe
+                do {
+                    try proc.run()
+                    proc.waitUntilExit()
+                    let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    if proc.terminationStatus == 0,
+                       let obj = try? JSONSerialization.jsonObject(with: outData) as? [String: Any],
+                       (obj["ok"] as? Bool) == true {
+                        let caps = obj["capabilities"] as? [String: Any]
+                        let lib = obj["library"] as? [String: Any]
+                        let tools = (caps?["toolCount"] as? Int) ?? 0
+                        let prompts = (caps?["promptCount"] as? Int) ?? 0
+                        let assets = (lib?["totalAssets"] as? Int) ?? 0
+                        let boards = (lib?["boardCount"] as? Int) ?? 0
+                        return (true, "自检通过 · 原生助手响应正常（\(tools) 工具 / \(prompts) 工作流 / \(assets) 素材 / \(boards) 情绪板）")
+                    }
+                    let errStr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return (false, errStr.isEmpty ? "原生助手返回异常退出码 \(proc.terminationStatus)" : "自检失败：\(errStr)")
+                } catch {
+                    return (false, "无法启动原生助手：\(error.localizedDescription)")
+                }
+            }.value
+
+            externalAgentSelfCheckPassed = outcome.ok
+            externalAgentSelfCheckSummary = outcome.summary
+            if outcome.ok {
+                statusMessage = outcome.summary
+                errorMessage = nil
+            } else {
+                errorMessage = outcome.summary
+            }
+            return
+        }
+
+        // Fallback when running unbundled during local SwiftPM development: check in-process service.
+        if let liveEngine = engine as? LiveCharkleEngine {
+            let service = CharkleExternalAgentService(engine: liveEngine, notifyOnWrite: false)
+            let report = await service.runDiagnostics()
+            let ok = (report["ok"] as? Bool) == true
+            let caps = report["capabilities"] as? [String: Any]
+            let tools = (caps?["toolCount"] as? Int) ?? 0
+            let prompts = (caps?["promptCount"] as? Int) ?? 0
+            externalAgentSelfCheckPassed = ok
+            externalAgentSelfCheckSummary = ok
+                ? "开发态内核自检通过（\(tools) 工具 / \(prompts) 工作流），打包为 Charkle.app 后即内嵌独立原生助手"
+                : "内核自检未通过"
+        } else {
+            externalAgentSelfCheckPassed = false
+            externalAgentSelfCheckSummary = "未找到原生 charkle 助手程序"
         }
     }
 }

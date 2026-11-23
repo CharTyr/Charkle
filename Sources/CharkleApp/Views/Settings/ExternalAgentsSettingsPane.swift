@@ -2,7 +2,7 @@ import CharkleCore
 import SwiftUI
 
 /// Tab 7: 外部 Agent (Agents) — Native stdio MCP server & CLI setup with live readiness detection,
-/// folded client snippets, and copyable natural-language prompt examples.
+/// stale-symlink diagnostics, one-click self-check, folded client snippets, and copyable prompts.
 public struct ExternalAgentsSettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -11,9 +11,9 @@ public struct ExternalAgentsSettingsPane: View {
     @State private var draftConfig: ExternalAgentConfig = ExternalAgentConfig()
 
     private static let samplePrompts: [(title: String, prompt: String)] = [
-        ("找参考图并建情绪板", "帮我从 Charkle 素材库里挑 10 张温暖胶片质感、偏奶油色调的咖啡馆参考图，生成一块名为「早秋咖啡馆视觉」的情绪板。"),
-        ("快速整理收件箱", "帮我看看 Charkle 收件箱里未整理的素材，按画面风格和内容建议归档到现有文件夹，并补齐统一标签。"),
-        ("提取情绪板色板给开发", "读取我在 Charkle 里名为「品牌改版」的情绪板，导出主色板 HEX 和各分区批注，帮我整理成设计变量表。")
+        ("找参考图并建情绪板", "帮我从 Charkle 素材库里挑 10 张温暖胶片质感、偏奶油色调的咖啡馆参考图，先用联系表看图确认无重复，再生成一块名为「早秋咖啡馆视觉」的情绪板。"),
+        ("智能整理收件箱", "帮我用联系表和文件夹推荐看看 Charkle 收件箱里未整理的素材，按画面风格建议归档到现有文件夹，并补齐统一标签。"),
+        ("提取情绪板色板与 AI 配方", "读取我在 Charkle 里名为「品牌改版」的情绪板，导出主色板 HEX、分区批注与其中 AI 参考图的生成 Prompt，帮我整理成设计规范。")
     ]
 
     public init(syncAndAI: SyncAndAIStore) {
@@ -23,8 +23,9 @@ public struct ExternalAgentsSettingsPane: View {
     public var body: some View {
         let helperPath = syncAndAI.resolvedHelperCLIPath()
         let helperReady = syncAndAI.isBundledHelperAvailable
-        let cliLinked = syncAndAI.isCLILinkedInLocalBin
+        let linkStatus = syncAndAI.cliLinkStatus
         let claudeCodeCmd = "claude mcp add charkle -- \"\(helperPath)\" mcp"
+        let codexCmd = "codex mcp add charkle -- \"\(helperPath)\" mcp"
         let jsonConfig = """
         {
           "mcpServers": {
@@ -87,10 +88,8 @@ public struct ExternalAgentsSettingsPane: View {
 
                 SettingsRow(
                     title: "启用 CLI 命令行服务",
-                    subtitle: cliStatusSubtitle(enabled: draftConfig.cliEnabled, cliLinked: cliLinked),
-                    subtitleColor: !draftConfig.cliEnabled
-                        ? .secondary
-                        : (cliLinked ? SettingsPalette.positiveInk(for: colorScheme) : .secondary)
+                    subtitle: cliStatusSubtitle(enabled: draftConfig.cliEnabled, linkStatus: linkStatus),
+                    subtitleColor: cliStatusColor(enabled: draftConfig.cliEnabled, linkStatus: linkStatus)
                 ) {
                     HStack(spacing: 10) {
                         SettingsStatusBadge(
@@ -122,6 +121,22 @@ public struct ExternalAgentsSettingsPane: View {
                         .frame(width: 224)
                     }
 
+                    SettingsCardDivider()
+
+                    SettingsRow(
+                        title: "原生助手与数据库连通自检",
+                        subtitle: syncAndAI.externalAgentSelfCheckSummary
+                            ?? "验证内置 charkle 原生二进制、SQLite WAL 数据库、20 项安全工具与 4 套工作流 Prompts",
+                        subtitleColor: selfCheckSubtitleColor()
+                    ) {
+                        Button(syncAndAI.isRunningExternalAgentSelfCheck ? "自检中…" : "运行自检") {
+                            Task { await syncAndAI.runExternalAgentSelfCheck() }
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        .disabled(syncAndAI.isRunningExternalAgentSelfCheck)
+                        .fixedSize()
+                    }
+
                     InlineGuideDisclosure("数据安全如何保障？") {
                         SettingsGuideStep(
                             "1",
@@ -131,11 +146,11 @@ public struct ExternalAgentsSettingsPane: View {
                         SettingsGuideStep(
                             "2",
                             title: "永不开放公网或局域网端口",
-                            detail: "所有调用均通过本机标准输入输出（stdio）或本地 CLI 与数据库通信，外部网络无法访问。"
+                            detail: "所有调用均通过本机标准输入输出（stdio）或本地 CLI 与 WAL 数据库通信，外部网络无法访问。"
                         )
                         SettingsGuideStep(
                             "3",
-                            title: "永不允许彻底删除素材",
+                            title: "永不允许彻底删除素材或文件夹",
                             detail: "即使开启「允许整理与生板」，外部 Agent 也只能将素材移入废纸篓，随时可恢复。"
                         )
                     }
@@ -148,7 +163,7 @@ public struct ExternalAgentsSettingsPane: View {
             ) {
                 SettingsRow(
                     title: "Claude Code",
-                    subtitle: "在终端执行一行命令即可将 Charkle 注册为 MCP 工具"
+                    subtitle: "在终端执行一行命令即可将 Charkle 注册为原生 MCP 工具与 Prompts"
                 ) {
                     Button("一键复制命令") {
                         SettingsHelpers.copyToClipboard(
@@ -161,19 +176,19 @@ public struct ExternalAgentsSettingsPane: View {
                     .fixedSize()
                 }
 
-                InlineGuideDisclosure("查看完整命令与验证方式") {
-                    SettingsCodeSnippet(claudeCodeCmd)
+                InlineGuideDisclosure("查看 Claude Code / Codex CLI 接入命令") {
+                    SettingsCodeSnippet(claudeCodeCmd + "\n" + codexCmd)
                     SettingsGuideStep(
                         "1",
-                        title: "在终端粘贴运行上方命令，完成后重启 Claude Code 对话",
-                        detail: "输入「看看我的 Charkle 素材库概览」即可验证连通。"
+                        title: "在终端粘贴运行对应命令，完成后重启对话",
+                        detail: "输入「看看我的 Charkle 素材库概览」或触发内置 `triage_inbox` / `curate_moodboard` 工作流即可验证连通。"
                     )
                 }
 
                 SettingsCardDivider()
 
                 SettingsRow(
-                    title: "Cursor / Antigravity / Codex",
+                    title: "Cursor / Antigravity / 其他 MCP 客户端",
                     subtitle: "复制标准 MCP JSON 配置粘贴至对应客户端的配置文件"
                 ) {
                     Button("复制 JSON 配置") {
@@ -199,10 +214,8 @@ public struct ExternalAgentsSettingsPane: View {
             ) {
                 SettingsRow(
                     title: "本机命令链接",
-                    subtitle: cliLinked
-                        ? "已安装于 ~/.local/bin/charkle · 支持脚本与非 MCP 代理调用"
-                        : "尚未链接到 ~/.local/bin · 链接后可在终端直接运行 charkle overview / search",
-                    subtitleColor: cliLinked ? SettingsPalette.positiveInk(for: colorScheme) : .secondary
+                    subtitle: cliLinkRowSubtitle(linkStatus),
+                    subtitleColor: cliLinkRowColor(linkStatus)
                 ) {
                     HStack(spacing: 8) {
                         Button("复制路径") {
@@ -215,7 +228,7 @@ public struct ExternalAgentsSettingsPane: View {
                         .buttonStyle(SettingsSecondaryButtonStyle())
                         .fixedSize()
 
-                        Button(cliLinked ? "重新链接" : "链接到本机") {
+                        Button(cliLinkButtonTitle(linkStatus)) {
                             syncAndAI.installCLIInLocalBin()
                         }
                         .buttonStyle(SettingsSecondaryButtonStyle())
@@ -223,14 +236,19 @@ public struct ExternalAgentsSettingsPane: View {
                     }
                 }
 
-                InlineGuideDisclosure("常用命令行示例") {
+                InlineGuideDisclosure("常用命令行示例（交互终端自动排版，管道自动输出 JSON）") {
                     SettingsCodeSnippet(
                         """
-                        charkle status
-                        charkle overview --json
-                        charkle search "暖调陶艺" --limit 20
-                        charkle contact-sheet --query "海报"
-                        charkle board export <board-id> --json
+                        charkle doctor
+                        charkle overview
+                        charkle search "暖调陶艺" --subfolders --limit 20
+                        charkle semantic "极简陶瓷质感" --limit 12
+                        charkle similar <asset-uuid> --limit 8
+                        charkle inbox --suggest
+                        charkle contact-sheet --inbox --out /tmp/inbox.jpg
+                        charkle board patch <board-id> --add-note "配色已定稿"
+                        charkle board export <board-id> --out /tmp/board.png --dark
+                        charkle completions zsh
                         """
                     )
                 }
@@ -239,8 +257,8 @@ public struct ExternalAgentsSettingsPane: View {
 
             SettingsSection("使用指南") {
                 SettingsRow(
-                    title: "已开放的外部 Agent 能力",
-                    subtitle: "视觉联系表直接看图选材 · 读取情绪板与主色板 HEX · 批量打标归档与生成画布并实时热刷新窗口"
+                    title: "已开放的外部 Agent 能力（20 项安全工具 · 4 套内置工作流）",
+                    subtitle: "分页多维检索 / 语义与以图找图 / 联系表看图 / 读取 EXIF 与 AI 生图 Prompt / 情绪板色板与非重叠补丁 / 实时热刷新窗口"
                 ) {
                     EmptyView()
                 }
@@ -284,16 +302,69 @@ public struct ExternalAgentsSettingsPane: View {
             return "已关闭 · 所有 MCP 客户端请求将被即时拦截（不影响终端 CLI）"
         }
         return helperReady
-            ? "原生 Swift MCP 助手已就绪 · 仅本机 stdio 通信，零 Node/Python 依赖，不开放任何网络端口"
+            ? "原生 Swift MCP 助手已就绪 · 20 项安全工具、动态 Resources 与 4 套 Prompts，零 Node/Python 依赖"
             : "当前运行在开发态，正式打包为 Charkle.app 后将自动内置原生 MCP 助手"
     }
 
-    private func cliStatusSubtitle(enabled: Bool, cliLinked: Bool) -> String {
+    private func cliStatusSubtitle(enabled: Bool, linkStatus: SyncAndAIStore.CLILinkStatus) -> String {
         guard enabled else {
             return "已关闭 · 终端 charkle 读写命令将被即时拦截（不影响 MCP 客户端）"
         }
-        return cliLinked
-            ? "已开放终端命令行 · 已链接 ~/.local/bin/charkle，支持脚本与自动化调用"
-            : "已开放终端命令行 · 链接至 ~/.local/bin 后可在终端直接运行 charkle 命令"
+        switch linkStatus {
+        case .linkedCurrent:
+            return "已开放终端命令行 · ~/.local/bin/charkle 已指向当前版本，支持脚本与自动化调用"
+        case .linkedStale:
+            return "已开放终端命令行 · 检测到 ~/.local/bin/charkle 指向旧路径，建议点击下方「更新链接」"
+        case .broken:
+            return "已开放终端命令行 · ~/.local/bin/charkle 链接已失效，请点击下方「修复链接」"
+        case .notLinked:
+            return "已开放终端命令行 · 链接至 ~/.local/bin 后可在终端直接运行 charkle 命令"
+        }
+    }
+
+    private func cliStatusColor(enabled: Bool, linkStatus: SyncAndAIStore.CLILinkStatus) -> Color {
+        guard enabled else { return .secondary }
+        switch linkStatus {
+        case .linkedCurrent: return SettingsPalette.positiveInk(for: colorScheme)
+        case .linkedStale, .broken: return SettingsPalette.warningInk(for: colorScheme)
+        case .notLinked: return .secondary
+        }
+    }
+
+    private func cliLinkRowSubtitle(_ status: SyncAndAIStore.CLILinkStatus) -> String {
+        switch status {
+        case .linkedCurrent:
+            "已链接 ~/.local/bin/charkle 且与当前应用一致 · 支持交互排版与管道自动 JSON"
+        case .linkedStale:
+            "当前 ~/.local/bin/charkle 指向旧版或其他位置 · 点击右侧按钮即可更新到当前应用"
+        case .broken:
+            "~/.local/bin/charkle 软链接目标不存在 · 点击右侧按钮重新链接"
+        case .notLinked:
+            "尚未链接到 ~/.local/bin · 链接后可在终端直接运行 charkle doctor / overview / search"
+        }
+    }
+
+    private func cliLinkRowColor(_ status: SyncAndAIStore.CLILinkStatus) -> Color {
+        switch status {
+        case .linkedCurrent: SettingsPalette.positiveInk(for: colorScheme)
+        case .linkedStale, .broken: SettingsPalette.warningInk(for: colorScheme)
+        case .notLinked: .secondary
+        }
+    }
+
+    private func cliLinkButtonTitle(_ status: SyncAndAIStore.CLILinkStatus) -> String {
+        switch status {
+        case .linkedCurrent: "重新链接"
+        case .linkedStale: "更新链接"
+        case .broken: "修复链接"
+        case .notLinked: "链接到本机"
+        }
+    }
+
+    private func selfCheckSubtitleColor() -> Color {
+        guard let passed = syncAndAI.externalAgentSelfCheckPassed else { return .secondary }
+        return passed
+            ? SettingsPalette.positiveInk(for: colorScheme)
+            : SettingsPalette.warningInk(for: colorScheme)
     }
 }
