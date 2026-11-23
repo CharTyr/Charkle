@@ -1324,7 +1324,12 @@ private struct MarkdownDetailsDisclosureView: View {
     @State private var isExpanded: Bool = false
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
+        CharkleDisclosureGroup(
+            isExpanded: $isExpanded,
+            headerVerticalPadding: 4,
+            headerHorizontalPadding: 6,
+            negativeHorizontalBleed: 6
+        ) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(children) { child in
                     MarkdownBlockRowView(block: child, colorScheme: colorScheme)

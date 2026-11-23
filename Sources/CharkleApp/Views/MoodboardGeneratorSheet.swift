@@ -218,7 +218,7 @@ public struct MoodboardGeneratorSheet: View {
                 Divider()
 
                 // 3. Optional Seed Images
-                DisclosureGroup(isExpanded: $showSeedPicker) {
+                CharkleDisclosureGroup(isExpanded: $showSeedPicker) {
                     let candidates = library.allAssetsByID.values
                         .filter { !$0.isTrashed }
                         .sorted { $0.createdAt > $1.createdAt }
@@ -293,7 +293,7 @@ public struct MoodboardGeneratorSheet: View {
                 Divider()
 
                 // 4. Optional Color Direction
-                DisclosureGroup(isExpanded: $showColorPicker) {
+                CharkleDisclosureGroup(isExpanded: $showColorPicker) {
                     VStack(alignment: .leading, spacing: 10) {
                         CharkleFlowLayout(spacing: 7, lineSpacing: 7) {
                             ForEach(Self.curatedSwatches, id: \.self) { hex in
@@ -516,7 +516,12 @@ public struct MoodboardGeneratorSheet: View {
     }
 
     private var agentTimelineCard: some View {
-        DisclosureGroup(isExpanded: $showTraceExpanded) {
+        CharkleDisclosureGroup(
+            isExpanded: $showTraceExpanded,
+            headerVerticalPadding: 4,
+            headerHorizontalPadding: 6,
+            negativeHorizontalBleed: 6
+        ) {
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(moodboards.agentTrace) { step in
                     HStack(alignment: .top, spacing: 8) {

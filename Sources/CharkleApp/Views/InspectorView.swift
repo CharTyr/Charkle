@@ -2190,13 +2190,23 @@ public struct InspectorView: View {
                                     showBoardAgentTrace = willExpand
                                 }
                             } label: {
-                                HStack(spacing: 3) {
+                                HStack(spacing: 5) {
                                     Text(showBoardAgentTrace ? "收起策展步骤" : "查看策展步骤（\(moodboards.activeBoardAgentTrace.count) 步）")
-                                        .font(.system(size: 10, weight: .medium))
-                                    Image(systemName: showBoardAgentTrace ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right")
                                         .font(.system(size: 8.5, weight: .semibold))
+                                        .rotationEffect(.degrees(showBoardAgentTrace ? 90 : 0))
                                 }
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                                .background(
+                                    Color.primary.opacity(colorScheme == .dark ? 0.05 : 0.035),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
 

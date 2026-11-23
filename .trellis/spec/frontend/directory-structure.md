@@ -26,6 +26,7 @@ Sources/
     │   ├── CharkleToastOverlay.swift   # Interactive Liquid Glass toast stack (hover-pause + Undo countdown ring)
     │   ├── CharkleEmptyStateVignette.swift # 7 miniature product-UI empty-state vector schematics (Light/Dark)
     │   ├── CharkleLoadingKit.swift     # Anti-flicker 300ms delayed skeletons & board loading skeleton
+    │   ├── CharkleDisclosureGroup.swift # Full-row clickable macOS disclosure control (replaces bare DisclosureGroup)
     │   └── AppIconManager.swift        # Light/Dark dock icon switcher
     ├── Notch/
     │   ├── NotchShelfState.swift       # @Observable geometry & mode state (Compact vs Full Waterfall)

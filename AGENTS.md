@@ -38,6 +38,8 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
   - Resign underlying text focus when opening Quick Look, and suspend underlying canvas monitors (`isOverlayPresented`) while Quick Look or modal overlays are presented.
 - **Quick Look & Inspector Continuity**:
   - Reuse the full-height `300pt` `InspectorView` inside Quick Look rather than building a shrunk or read-only drawer, and keep visibility (`coordinator.isInspectorVisible`) plus active tab (`coordinator.selectedInspectorTab`) synchronized 1:1 with the main workspace.
+- **Full-Row Expandable Hit Targets**:
+  - Never use bare SwiftUI `DisclosureGroup` on macOS (it only accepts clicks on its tiny leading chevron). Always use `CharkleDisclosureGroup` (or full-width `.buttonStyle(.plain)` headers with `.contentShape(Rectangle())` and hover feedback) for collapsible sections.
 - **Photos-Style Gallery Zoom (`VirtualizedMasonryView`)**:
   - Lock consecutive zoom steps onto one persistent exact asset anchor (`sessionZoomAnchor`: cursor card > visible selected card > viewport center) until the user manually scrolls or changes selection.
   - Apply anchor-locked `newScrollY` *before* syncing tiles (keeping Row-1 flush beneath `topInset` at top, while Row-2+ cards scroll automatically even from `scrollY == 0`) and project pre-handoff rects via `ΔscrollY` + optical rebase compensation for 0pt frame-0 jump.
