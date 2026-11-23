@@ -1,4 +1,6 @@
 import {
+  customAIEndpointDefaultChatModel,
+  customAIEndpointLocalizedLabel,
   type AIProviderConfig,
   type AssetRecord,
   type ChatGPTAccountSession,
@@ -461,7 +463,7 @@ interface HTTPClientOptions {
   fetchFn?: FetchLike;
 }
 
-class AIHTTPClient {
+export class AIHTTPClient {
   readonly base: URL;
   private readonly authHeader?: string;
   private readonly authValue?: string;
@@ -474,6 +476,39 @@ class AIHTTPClient {
     this.authValue = opts.authValue;
     this.extraHeaders = opts.extraHeaders ?? {};
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
+  }
+
+  async get(path: string, timeoutMs = 20_000): Promise<{ status: number; text: string }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        ...this.extraHeaders,
+      };
+      if (this.authHeader && this.authValue) {
+        headers[this.authHeader] = this.authValue;
+      }
+      const res = await this.fetchFn(joinURL(this.base, path), {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      });
+      const text = await res.text().catch(() => '');
+      return { status: res.status, text };
+    } catch (err) {
+      if (err instanceof CloudAIError) throw err;
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new CloudAIError('连接超时，请检查网络或服务地址。', 'timeout', 504);
+      }
+      throw new CloudAIError(
+        `无法连接到服务地址：${err instanceof Error ? err.message : String(err)}`,
+        'network_error',
+        502,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async postJSON<T>(path: string, body: unknown, timeoutMs = 45_000): Promise<T> {
@@ -1425,6 +1460,166 @@ export function createCloudAIProvider(
       }
       return new AnthropicMessagesProvider(config, key, { usage: deps.usage, fetchFn: deps.fetchFn });
   }
+}
+
+export interface TestCloudAIConnectionParams {
+  config: AIProviderConfig;
+  apiKey?: string | null;
+  vault: SecretVaultLike;
+  chatGPTClient?: ChatGPTSubscriptionClient | null;
+  usage?: CloudAIUsageTracker | null;
+  fetchFn?: FetchLike;
+}
+
+export interface TestCloudAIConnectionResult {
+  summary: string;
+  models?: ChatGPTModelInfo[];
+}
+
+/**
+ * Live connection verification across all Cloud AI providers (ChatGPT Subscription,
+ * Google Gemini, Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, and keyless local Ollama).
+ */
+export async function testCloudAIConnection(
+  params: TestCloudAIConnectionParams,
+): Promise<TestCloudAIConnectionResult> {
+  const { config, vault, chatGPTClient, usage, fetchFn } = params;
+
+  if (config.provider === 'disabled') {
+    throw new CloudAIError('请先选择要测试的云端 AI 服务。', 'provider_disabled', 400);
+  }
+
+  if (config.provider === 'chatGPTSubscription') {
+    if (!chatGPTClient) {
+      throw new CloudAIError('ChatGPT 订阅客户端尚未初始化。', 'client_unavailable', 400);
+    }
+    const session = await chatGPTClient.currentSession();
+    if (session.status !== 'connected') {
+      throw new CloudAIError('尚未连接 ChatGPT 订阅账号，请先完成登录。', 'sign_in_required', 400);
+    }
+    if (!session.sharingEnabled) {
+      throw new CloudAIError('已登录 ChatGPT，但尚未开启订阅额度共享授权。', 'sharing_not_enabled', 400);
+    }
+    const models = await chatGPTClient.listModels();
+    return {
+      summary: `ChatGPT 订阅连接正常（可用模型 ${models.length} 个）`,
+      models,
+    };
+  }
+
+  if (config.provider === 'gemini') {
+    const key = params.apiKey?.trim() || vault.get(SECRET_KEYS.GEMINI_API_KEY)?.trim() || '';
+    if (!key) {
+      throw new CloudAIError('请先填写 Gemini API 密钥后再测试连接。', 'missing_api_key', 400);
+    }
+    const targetModel = (config.chatModel.trim() || 'gemini-2.5-flash').replace(/^models\//, '');
+    const baseURL = resolveProviderBaseURL(
+      config.baseURL || 'https://generativelanguage.googleapis.com',
+      'v1beta',
+      false,
+    );
+    const client = new AIHTTPClient({
+      baseURL,
+      authHeader: 'x-goog-api-key',
+      authValue: key,
+      fetchFn,
+    });
+
+    const res = await client.get(`models/${targetModel}`);
+    if (res.status >= 200 && res.status < 300) {
+      return { summary: `Gemini 连接成功 · 模型 ${targetModel} 可用` };
+    }
+    if (res.status === 404) {
+      const listRes = await client.get('models');
+      if (listRes.status >= 200 && listRes.status < 300) {
+        throw new CloudAIError(
+          `API 密钥有效，但未找到模型「${targetModel}」，请检查模型名称。`,
+          'model_not_found',
+          400,
+        );
+      }
+      const errStatus = listRes.status || res.status;
+      throw new CloudAIError(
+        `Gemini 服务返回 HTTP ${errStatus}，请检查 API 密钥或服务地址。`,
+        'http_error',
+        errStatus,
+      );
+    }
+    throw new CloudAIError(
+      `Gemini 服务返回 HTTP ${res.status}，请检查 API 密钥或服务地址。`,
+      'http_error',
+      res.status,
+    );
+  }
+
+  // openAICompatible
+  const key = params.apiKey?.trim() || vault.get(SECRET_KEYS.OPENAI_API_KEY)?.trim() || null;
+  const format = config.customEndpointFormat;
+  const labelModel = config.chatModel.trim() || customAIEndpointDefaultChatModel(format);
+
+  if (format === 'anthropicMessages') {
+    if (!key) {
+      throw new CloudAIError('请先填写 Anthropic API 密钥后再测试连接。', 'missing_api_key', 400);
+    }
+    const baseURL = resolveProviderBaseURL(
+      config.baseURL || 'https://api.anthropic.com',
+      'v1',
+      false,
+    );
+    const client = new AIHTTPClient({
+      baseURL,
+      authHeader: 'x-api-key',
+      authValue: key,
+      extraHeaders: { 'anthropic-version': '2023-06-01' },
+      fetchFn,
+    });
+    const res = await client.get('models');
+    if (res.status >= 200 && res.status < 300) {
+      return { summary: `Anthropic 连接成功 · 目标模型 ${labelModel}` };
+    }
+    if (res.status === 404 || res.status === 405) {
+      const provider = new AnthropicMessagesProvider(config, key, { usage, fetchFn });
+      await provider.completeJSON('Reply with {"ok":true}', 'ping', []);
+      return { summary: `Anthropic 兼容接口连通正常 · 模型 ${labelModel}` };
+    }
+    throw new CloudAIError(
+      `Anthropic 接口返回 HTTP ${res.status}，请检查 API 密钥与服务地址。`,
+      'http_error',
+      res.status,
+    );
+  }
+
+  // openAIChatCompletions / openAIResponses (including keyless localhost Ollama)
+  const baseURL = resolveProviderBaseURL(
+    config.baseURL || 'https://api.openai.com',
+    'v1',
+    key === null,
+  );
+  const client = new AIHTTPClient({
+    baseURL,
+    authHeader: key ? 'Authorization' : undefined,
+    authValue: key ? `Bearer ${key}` : undefined,
+    fetchFn,
+  });
+  const res = await client.get('models');
+  if (res.status >= 200 && res.status < 300) {
+    return {
+      summary: `连接成功 · ${customAIEndpointLocalizedLabel(format)}（${labelModel}）`,
+    };
+  }
+  if (res.status === 404 || res.status === 405) {
+    const provider =
+      format === 'openAIResponses'
+        ? new OpenAIResponsesProvider(config, key, { usage, fetchFn })
+        : new OpenAICompatibleProvider(config, key, { usage, fetchFn });
+    await provider.completeJSON('Reply with {"ok":true}', 'ping', []);
+    return { summary: `连接成功 · 模型 ${labelModel} 响应正常` };
+  }
+  throw new CloudAIError(
+    `服务返回 HTTP ${res.status}，请检查服务地址、端点格式或 API 密钥。`,
+    'http_error',
+    res.status,
+  );
 }
 
 // MARK: - Deterministic Fake Provider for Tests

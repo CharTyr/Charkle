@@ -429,12 +429,25 @@ export interface SaveAIConfigRequest {
   apiKey?: string | null;
 }
 
+export interface TestAIConnectionRequest {
+  config: AIProviderConfig;
+  apiKey?: string | null;
+}
+
+export interface TestAIConnectionResponse {
+  ok: true;
+  summary: string;
+  models?: ChatGPTModelInfo[];
+}
+
 export interface ChatGPTModelsResponse {
   models: ChatGPTModelInfo[];
 }
 
 export interface AnalyzeAssetsRequest {
   ids: UUID[];
+  /** When true, runs offline color + visual fingerprint rebuild only (never calls cloud AI). */
+  localOnly?: boolean;
 }
 
 export interface AnalyzeAssetsResponse {

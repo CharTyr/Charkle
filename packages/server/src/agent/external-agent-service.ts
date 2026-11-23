@@ -792,7 +792,8 @@ export class ExternalAgentService {
     const layoutStyle: EditorialStyle = (EDITORIAL_STYLES as readonly string[]).includes(layoutRaw)
       ? (layoutRaw as EditorialStyle)
       : 'magazine';
-    const useFreeform = asBool(args.use_freeform) ?? false;
+    const useFreeform =
+      asBool(args.use_freeform) ?? asBool(args.useFreeformLayout) ?? true;
 
     const explicitSections = Array.isArray(args.sections)
       ? (args.sections.filter((s) => s && typeof s === 'object') as Array<Record<string, unknown>>)
@@ -1354,7 +1355,10 @@ export class ExternalAgentService {
           subtitle: { type: 'string', description: 'Short subtitle.' },
           curator_note: { type: 'string', description: 'Art direction note card shown on the moodboard.' },
           layout_style: { type: 'string', enum: ['magazine', 'balanced', 'compact'], description: 'Editorial layout rhythm.' },
-          use_freeform: { type: 'boolean', description: 'Use freeform spatial canvas instead of Auto Editorial.' },
+          use_freeform: {
+            type: 'boolean',
+            description: 'Use freeform spatial canvas (default: true). Pass false for legacy Auto Editorial mode.',
+          },
           sections: {
             type: 'array',
             description: 'Explicit curated sections with asset_ids and optional hero_asset_ids.',

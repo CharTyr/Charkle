@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
+  createDefaultAutoLayoutConfig,
   createDefaultMoodboardDocument,
   deltaE76,
   deltaE2000,
+  freezeIntoFreeform,
   fuzzyScoreSearchText,
   getAssetAspectRatio,
   normalizeSearchText,
@@ -383,13 +385,35 @@ export class MoodboardCurator {
     );
 
     const cleanTitle = prompt.trim();
-    const document = createDefaultMoodboardDocument({
+    const primaryAssets = primary.map((p) => p.asset);
+    const baseNodes = MoodboardCurator.editorialNodes(primaryAssets);
+    const rawDocument = createDefaultMoodboardDocument({
       id: toSwiftUUID(randomUUID()),
       title: cleanTitle ? cleanTitle.slice(0, 120) : '新情绪板',
-      nodes: MoodboardCurator.editorialNodes(primary.map((p) => p.asset)),
+      mode:
+        primaryAssets.length > 0
+          ? {
+              type: 'autoEditorial',
+              config: createDefaultAutoLayoutConfig({
+                columns: Math.min(3, Math.max(2, primaryAssets.length)),
+                spacing: 18,
+                style: 'magazine',
+                showPaletteStrip: true,
+              }),
+            }
+          : { type: 'freeform' },
+      nodes: baseNodes,
       extractedPalette: extracted,
       candidateAssetIDs: candidates.map((c) => c.asset.id),
     });
+    const assetsByID: Record<string, AssetRecord> = {};
+    for (const a of primaryAssets) {
+      assetsByID[a.id] = a;
+    }
+    const document =
+      primaryAssets.length > 0
+        ? freezeIntoFreeform(rawDocument, 1080, assetsByID)
+        : rawDocument;
 
     const usedCloud = [...primary, ...candidates].some((m) =>
       m.matchReasons.includes(CLOUD_REASON),

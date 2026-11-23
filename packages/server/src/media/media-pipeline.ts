@@ -231,6 +231,14 @@ export class MediaPipeline implements IMediaPipeline {
     }
   }
 
+  /**
+   * Local-cache-only original path lookup (parity with Swift `cachedOriginalURL`).
+   * Never triggers remote cloud downloads or LRU mutations.
+   */
+  cachedOriginalPath(asset: AssetRecord): string | null {
+    return this.getOriginalPath(asset);
+  }
+
   async readThumbnailBuffer(id: UUID, tier: ThumbnailTier = 'grid520'): Promise<Buffer | null> {
     const p = this.getThumbnailPath(id, tier);
     if (!p) return null;

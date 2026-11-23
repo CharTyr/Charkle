@@ -1,13 +1,18 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Context, Hono } from 'hono';
 import { deleteCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
+import JSZip from 'jszip';
 import {
   activeStorageLocationSummary,
+  createDefaultAutoLayoutConfig,
   createDefaultMoodboardDocument,
   createDefaultSmartFolderRule,
+  freezeIntoFreeform,
   toSwiftUUID,
   type AssetBatchPatch,
   type AssetRecord,
@@ -716,15 +721,25 @@ export function registerCoreRoutes(
       if (!asset) {
         return c.json({ error: '素材不存在。', code: 'NOT_FOUND' }, 404);
       }
-      let filePath = ctx.media.getOriginalPath(asset);
-      if (!filePath) {
+      const cachedOnlyQuery = (c.req.query('cachedOnly') ?? '').trim().toLowerCase();
+      const cachedOnly = cachedOnlyQuery === '1' || cachedOnlyQuery === 'true';
+      let filePath = ctx.media.cachedOriginalPath(asset);
+      if (!filePath && !cachedOnly) {
         filePath = await ctx.sync.downloadOriginal(asset);
       }
       if (!filePath || !fs.existsSync(filePath)) {
-        return c.json({ error: '原始文件暂未缓存到本地。', code: 'NOT_FOUND' }, 404);
+        return c.json(
+          {
+            error: '原始文件暂未缓存到本地。',
+            code: cachedOnly ? 'NOT_CACHED' : 'NOT_FOUND',
+          },
+          404,
+        );
       }
 
-      ctx.db.touchOriginal(asset.id);
+      if (!cachedOnly) {
+        ctx.db.touchOriginal(asset.id);
+      }
       const stat = await fsp.stat(filePath);
       const totalSize = stat.size;
       const mimeType = asset.mimeType || 'application/octet-stream';
@@ -952,10 +967,12 @@ export function registerCoreRoutes(
       const seedIDs = Array.isArray(body.seedAssetIDs) ? body.seedAssetIDs : [];
       const nodes: BoardNode[] = [];
       const palette: LabColor[] = [];
+      const assetsByID: Record<string, AssetRecord> = {};
 
       for (let i = 0; i < seedIDs.length; i++) {
         const asset = ctx.db.getAsset(seedIDs[i]);
         if (!asset) continue;
+        assetsByID[asset.id] = asset;
         const ratio =
           asset.pixelWidth > 0 && asset.pixelHeight > 0
             ? Math.max(0.5, Math.min(2.2, asset.pixelWidth / asset.pixelHeight))
@@ -990,15 +1007,28 @@ export function registerCoreRoutes(
         }
       }
 
-      const doc = createDefaultMoodboardDocument({
+      const rawDoc = createDefaultMoodboardDocument({
         id: toSwiftUUID(crypto.randomUUID()),
         title: String(body.title ?? '').trim() || '未命名情绪板',
         subtitle: String(body.subtitle ?? ''),
+        mode:
+          nodes.length > 0
+            ? {
+                type: 'autoEditorial',
+                config: createDefaultAutoLayoutConfig({
+                  columns: Math.min(4, Math.max(2, nodes.length)),
+                  spacing: 16,
+                  style: 'balanced',
+                  showPaletteStrip: true,
+                }),
+              }
+            : { type: 'freeform' },
         nodes,
         extractedPalette: palette,
         createdAt: now,
         updatedAt: now,
       });
+      const doc = nodes.length > 0 ? freezeIntoFreeform(rawDoc, 1080, assetsByID) : rawDoc;
       const saved = ctx.db.saveBoardLocally(doc);
       ctx.events.emitBoardUpdated(saved.id);
       return c.json({ board: saved }, 201);
@@ -1197,4 +1227,203 @@ export function registerCoreRoutes(
       return handleRouteError(c, err);
     }
   });
+
+  // MARK: - Browser Clipper Extension ZIP Download
+
+  app.get('/api/v1/extension/download', async (c) => {
+    try {
+      const extDir = resolveExtensionDir();
+      if (!extDir) {
+        return c.json({ error: '浏览器扩展包暂不可用。', code: 'NOT_FOUND' }, 404);
+      }
+      const files = await collectExtensionFiles(extDir);
+      if (files.length === 0) {
+        return c.json({ error: '浏览器扩展目录为空。', code: 'NOT_FOUND' }, 404);
+      }
+
+      const zip = new JSZip();
+      for (const file of files) {
+        const data = await fsp.readFile(file.absPath);
+        zip.file(file.relPath, data);
+      }
+
+      const zipBuf = await zip.generateAsync({
+        type: 'nodebuffer',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      });
+
+      return new Response(new Uint8Array(zipBuf), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': 'attachment; filename="charkle-web-clipper-extension.zip"',
+          'Content-Length': String(zipBuf.length),
+          'Cache-Control': 'private, no-cache',
+        },
+      });
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
+  // MARK: - Figma / FigJam Bridge Plugin ZIP Download
+
+  app.get('/api/v1/figma-plugin/download', async (c) => {
+    try {
+      const pluginDir = resolveFigmaPluginDir();
+      if (!pluginDir) {
+        return c.json({ error: 'Figma 桥接插件包暂不可用。', code: 'NOT_FOUND' }, 404);
+      }
+      const files = await collectFigmaPluginFiles(pluginDir);
+      if (files.length === 0) {
+        return c.json({ error: 'Figma 桥接插件目录为空。', code: 'NOT_FOUND' }, 404);
+      }
+
+      const zip = new JSZip();
+      for (const file of files) {
+        const data = await fsp.readFile(file.absPath);
+        zip.file(file.relPath, data);
+      }
+
+      const zipBuf = await zip.generateAsync({
+        type: 'nodebuffer',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      });
+
+      return new Response(new Uint8Array(zipBuf), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': 'attachment; filename="charkle-figma-bridge-plugin.zip"',
+          'Content-Length': String(zipBuf.length),
+          'Cache-Control': 'private, no-cache',
+        },
+      });
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+}
+
+const EXCLUDED_EXTENSION_DIRS = new Set(['tests', 'test', '__tests__', 'node_modules']);
+const EXCLUDED_EXTENSION_FILES = new Set([
+  '.DS_Store',
+  'Thumbs.db',
+  'package.json',
+  'package-lock.json',
+  'tsconfig.json',
+]);
+
+function isExcludedExtensionFileName(name: string): boolean {
+  if (name.startsWith('.')) return true;
+  if (EXCLUDED_EXTENSION_FILES.has(name)) return true;
+  if (/^vitest\.config\./i.test(name)) return true;
+  if (/\.(?:test|spec)\.[^.]+$/i.test(name)) return true;
+  if (/\.map$/i.test(name)) return true;
+  return false;
+}
+
+export function resolveExtensionDir(): string | null {
+  const envDir = process.env.CHARKLE_EXTENSION_DIR?.trim();
+  if (envDir) {
+    const resolved = path.resolve(envDir);
+    return fs.existsSync(path.join(resolved, 'manifest.json')) ? resolved : null;
+  }
+
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, '../../../extension'),
+    path.resolve(process.cwd(), 'packages/extension'),
+    path.resolve(process.cwd(), '../extension'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'manifest.json'))) {
+      return dir;
+    }
+  }
+  return null;
+}
+
+async function collectExtensionFiles(
+  rootDir: string,
+  subDir = '',
+): Promise<Array<{ absPath: string; relPath: string }>> {
+  const currentDir = subDir ? path.join(rootDir, subDir) : rootDir;
+  const entries = await fsp.readdir(currentDir, { withFileTypes: true });
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  const results: Array<{ absPath: string; relPath: string }> = [];
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (entry.name.startsWith('.') || EXCLUDED_EXTENSION_DIRS.has(entry.name)) {
+        continue;
+      }
+      const nextSub = subDir ? `${subDir}/${entry.name}` : entry.name;
+      const nested = await collectExtensionFiles(rootDir, nextSub);
+      results.push(...nested);
+    } else if (entry.isFile()) {
+      if (isExcludedExtensionFileName(entry.name)) {
+        continue;
+      }
+      const absPath = path.join(currentDir, entry.name);
+      const relPath = subDir ? `${subDir}/${entry.name}` : entry.name;
+      results.push({ absPath, relPath });
+    }
+  }
+  return results;
+}
+
+const EXCLUDED_FIGMA_FILES = new Set(['.DS_Store', 'Thumbs.db', 'ui-template.html']);
+
+export function resolveFigmaPluginDir(): string | null {
+  const envDir = process.env.CHARKLE_FIGMA_PLUGIN_DIR?.trim();
+  if (envDir) {
+    const resolved = path.resolve(envDir);
+    return fs.existsSync(path.join(resolved, 'manifest.json')) ? resolved : null;
+  }
+
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, '../../../../figma-plugin'),
+    path.resolve(here, '../../../figma-plugin'),
+    path.resolve(process.cwd(), 'figma-plugin'),
+    path.resolve(process.cwd(), '../../figma-plugin'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'manifest.json'))) {
+      return dir;
+    }
+  }
+  return null;
+}
+
+async function collectFigmaPluginFiles(
+  rootDir: string,
+  subDir = '',
+): Promise<Array<{ absPath: string; relPath: string }>> {
+  const currentDir = subDir ? path.join(rootDir, subDir) : rootDir;
+  const entries = await fsp.readdir(currentDir, { withFileTypes: true });
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  const results: Array<{ absPath: string; relPath: string }> = [];
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (entry.name.startsWith('.') || EXCLUDED_EXTENSION_DIRS.has(entry.name)) {
+        continue;
+      }
+      const nextSub = subDir ? `${subDir}/${entry.name}` : entry.name;
+      const nested = await collectFigmaPluginFiles(rootDir, nextSub);
+      results.push(...nested);
+    } else if (entry.isFile()) {
+      if (entry.name.startsWith('.') || EXCLUDED_FIGMA_FILES.has(entry.name)) {
+        continue;
+      }
+      const absPath = path.join(currentDir, entry.name);
+      const relPath = subDir ? `${subDir}/${entry.name}` : entry.name;
+      results.push({ absPath, relPath });
+    }
+  }
+  return results;
 }

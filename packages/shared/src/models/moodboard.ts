@@ -297,7 +297,7 @@ export function createDefaultMoodboardDocument(
   const now = new Date().toISOString();
   return {
     subtitle: '',
-    mode: { type: 'autoEditorial', config: createDefaultAutoLayoutConfig() },
+    mode: { type: 'freeform' },
     nodes: [],
     connectors: [],
     inkStrokes: [],
@@ -396,7 +396,7 @@ export function createDefaultMoodboardCurationRequest(
     preferredCount: 12,
     candidateCount: 24,
     layoutStyle: 'magazine',
-    useFreeformLayout: false,
+    useFreeformLayout: true,
     includeCuratorNotes: true,
     excludedAssetIDs: [],
     lockedAssetIDs: [],

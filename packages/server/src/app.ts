@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { EventBus } from './api/events.js';
 import {
   createAuthMiddleware,
+  createExtensionCorsMiddleware,
   createSecurityHeadersMiddleware,
   type AppVariables,
 } from './api/middleware-auth.js';
@@ -157,6 +158,7 @@ export function createApp(
   const app = new Hono<{ Variables: AppVariables }>();
 
   app.use('*', createSecurityHeadersMiddleware());
+  app.use('/api/v1/*', createExtensionCorsMiddleware());
   app.use('/api/v1/*', createAuthMiddleware(ctx));
 
   if (typeof options.registerAI === 'function') {

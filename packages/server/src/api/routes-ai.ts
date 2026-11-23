@@ -24,6 +24,8 @@ import {
   type SaveExternalAgentConfigRequest,
   type SaveTypeSafeConfigRequest,
   type SemanticSearchRequest,
+  type TestAIConnectionRequest,
+  type TestAIConnectionResponse,
   type TestTypeSafeConnectionRequest,
   type TypeSafeExperimentalConfig,
   type UUID,
@@ -44,8 +46,10 @@ import {
   CloudAIError,
   CloudTagNormalizer,
   createCloudAIProvider,
+  testCloudAIConnection,
   type CloudAIProvider,
   type FetchLike,
+  type SecretVaultLike,
 } from '../intelligence/cloud-ai-provider.js';
 import { CloudAIUsageTracker } from '../intelligence/cloud-ai-usage-tracker.js';
 import { MoodboardAgentHarness } from '../intelligence/moodboard-agent-harness.js';
@@ -203,6 +207,7 @@ export function createAIRuntime(ctx: ServerContext, options: AIRouteOptions = {}
     curator,
     harness,
     agentService,
+    vaultWithEnvFallback,
     resolveProvider,
     getTypeSafeKey,
     buildAIConfigResponse,
@@ -251,6 +256,52 @@ export function registerAIRoutes<E extends Env = Env>(
         }
       }
       return c.json(await rt.buildAIConfigResponse());
+    } catch (err) {
+      return c.json({ error: errorMessage(err) }, errorStatusFor(err));
+    }
+  });
+
+  app.post('/api/v1/ai/test', async (c) => {
+    try {
+      const body = await safeJsonBody<Partial<TestAIConnectionRequest>>(c);
+      const config = body.config ?? ctx.configStore.getAIConfig();
+      const testVault: SecretVaultLike = {
+        get(key: string): string | null {
+          const stored = ctx.secretVault.get(key);
+          if (stored) return stored;
+          if (key === SECRET_KEYS.GEMINI_API_KEY) {
+            return process.env.GEMINI_API_KEY?.trim() || null;
+          }
+          if (key === SECRET_KEYS.OPENAI_API_KEY) {
+            if (config.customEndpointFormat === 'anthropicMessages') {
+              return (
+                process.env.ANTHROPIC_API_KEY?.trim() ||
+                process.env.OPENAI_API_KEY?.trim() ||
+                null
+              );
+            }
+            return process.env.OPENAI_API_KEY?.trim() || null;
+          }
+          return rt.vaultWithEnvFallback.get(key);
+        },
+        set: (k, v) => rt.vaultWithEnvFallback.set(k, v),
+        delete: (k) => rt.vaultWithEnvFallback.delete(k),
+        has: (k) => testVault.get(k) !== null,
+      };
+      const result = await testCloudAIConnection({
+        config,
+        apiKey: body.apiKey ?? null,
+        vault: testVault,
+        chatGPTClient: rt.chatGPT,
+        usage: rt.usage,
+        fetchFn: rt.fetchFn,
+      });
+      const response: TestAIConnectionResponse = {
+        ok: true,
+        summary: result.summary,
+        ...(result.models ? { models: result.models } : {}),
+      };
+      return c.json(response);
     } catch (err) {
       return c.json({ error: errorMessage(err) }, errorStatusFor(err));
     }
@@ -336,7 +387,7 @@ export function registerAIRoutes<E extends Env = Env>(
       const seen = new Set<UUID>();
       const updatedAssets: AssetRecord[] = [];
 
-      if (aiCfg.provider === 'disabled') {
+      if (body.localOnly || aiCfg.provider === 'disabled') {
         // Local-only visual color + perceptual fingerprint refresh
         for (const rawId of ids) {
           const id = toSwiftUUID(rawId);

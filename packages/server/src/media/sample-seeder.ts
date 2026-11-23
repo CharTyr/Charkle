@@ -4,6 +4,7 @@ import {
   createDefaultAutoLayoutConfig,
   createDefaultMoodboardDocument,
   createDefaultSmartFolderRule,
+  freezeIntoFreeform,
   labFromHex,
   toSwiftUUID,
   type AssetRecord,
@@ -621,7 +622,7 @@ export async function seedSampleLibrary(
   const paletteHexes = ['#D9B38B', '#C46A34', '#E8E5D5', '#80916E', '#765943', '#191816'];
   const extractedPalette = paletteHexes.map((hex, i) => labFromHex(hex, (6 - i) / 21));
 
-  const starterBoard = createDefaultMoodboardDocument({
+  const starterBoardDraft = createDefaultMoodboardDocument({
     id: toSwiftUUID(crypto.randomUUID()),
     title: '光、纸与泥 · Light, Paper & Clay',
     subtitle: '材质、建筑阴影与暖色纸面排版参考集',
@@ -643,6 +644,12 @@ export async function seedSampleLibrary(
     createdAt: now,
     updatedAt: now,
   });
+
+  const boardAssetsByID: Record<string, AssetRecord> = {};
+  for (const a of boardAssets) {
+    boardAssetsByID[a.id] = a;
+  }
+  const starterBoard = freezeIntoFreeform(starterBoardDraft, 1080, boardAssetsByID);
 
   db.saveBoardLocally(starterBoard);
   return true;

@@ -781,6 +781,7 @@ export class CharkleAgentTools {
 
     const assetByID = new Map(primaryAssets.map((a) => [a.id, a]));
     const effectiveStyle = request.layoutStyle;
+    const useFreeformLayout = request.useFreeformLayout ?? true;
     const nodes = CharkleAgentTools.buildBoardNodes({
       sections: verifiedSections,
       assetByID,
@@ -790,7 +791,7 @@ export class CharkleAgentTools {
         request.includeCuratorNotes &&
         (verifiedSections.length >= 2 ||
           (verifiedSections.length === 1 && verifiedSections[0].rationale.length > 0)),
-      useFreeformLayout: request.useFreeformLayout,
+      useFreeformLayout,
       style: effectiveStyle,
     });
 
@@ -803,7 +804,7 @@ export class CharkleAgentTools {
         : (request.existingBoard?.title ?? 'AI 策展情绪板');
     const finalSubtitle = plan.boardSubtitle.trim();
 
-    const boardMode: BoardLayoutMode = request.useFreeformLayout
+    const boardMode: BoardLayoutMode = useFreeformLayout
       ? { type: 'freeform' }
       : {
           type: 'autoEditorial',
@@ -820,6 +821,14 @@ export class CharkleAgentTools {
           },
         };
 
+    const viewportCenter =
+      useFreeformLayout && nodes.length > 0
+        ? {
+            x: Math.max(...nodes.map((n) => n.frame.x + n.frame.width)) * 0.5,
+            y: Math.min(Math.max(...nodes.map((n) => n.frame.y + n.frame.height)) * 0.5, 420),
+          }
+        : (request.existingBoard?.viewportCenter ?? { x: 0, y: 0 });
+
     const now = new Date().toISOString();
     const document: MoodboardDocument = request.existingBoard
       ? {
@@ -830,6 +839,8 @@ export class CharkleAgentTools {
           nodes,
           extractedPalette,
           candidateAssetIDs: candidateScored.map((c) => c.asset.id),
+          viewportCenter,
+          viewportZoom: useFreeformLayout ? 1.0 : request.existingBoard.viewportZoom,
           updatedAt: now,
         }
       : createDefaultMoodboardDocument({
@@ -840,6 +851,7 @@ export class CharkleAgentTools {
           nodes,
           extractedPalette,
           candidateAssetIDs: candidateScored.map((c) => c.asset.id),
+          viewportCenter,
         });
 
     const needsRepair =

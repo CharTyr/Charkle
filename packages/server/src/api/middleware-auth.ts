@@ -70,6 +70,69 @@ export function createSecurityHeadersMiddleware(): MiddlewareHandler {
   };
 }
 
+const EXTENSION_ORIGIN_RE = /^(?:chrome-extension|moz-extension):\/\/[a-zA-Z0-9._-]+$/;
+
+export function isAllowedExtensionOrigin(origin: string | undefined): origin is string {
+  return typeof origin === 'string' && EXTENSION_ORIGIN_RE.test(origin.trim());
+}
+
+function ensureVaryOrigin(headers: Headers): void {
+  const existing = headers.get('vary');
+  if (!existing) {
+    headers.set('Vary', 'Origin');
+    return;
+  }
+  const parts = existing.split(',').map((p) => p.trim().toLowerCase());
+  if (!parts.includes('origin')) {
+    headers.set('Vary', `${existing}, Origin`);
+  }
+}
+
+/**
+ * Allows browser clipper extensions (`chrome-extension://` and `moz-extension://`)
+ * to call `/api/v1/*` with `Authorization: Bearer chk_...` while keeping cookie auth
+ * strictly protected against cross-site CSRF:
+ * - Never sets `Access-Control-Allow-Credentials`.
+ * - Never echoes `http://`, `https://`, or wildcard origins.
+ */
+export function createExtensionCorsMiddleware(): MiddlewareHandler {
+  return async (c, next) => {
+    const origin = c.req.header('origin')?.trim();
+    if (!isAllowedExtensionOrigin(origin)) {
+      return next();
+    }
+
+    if (c.req.method.toUpperCase() === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': origin,
+          'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+          'Access-Control-Allow-Headers': 'Authorization,Content-Type',
+          'Access-Control-Max-Age': '86400',
+          Vary: 'Origin',
+        },
+      });
+    }
+
+    await next();
+
+    try {
+      c.res.headers.set('Access-Control-Allow-Origin', origin);
+      ensureVaryOrigin(c.res.headers);
+    } catch {
+      const headers = new Headers(c.res.headers);
+      headers.set('Access-Control-Allow-Origin', origin);
+      ensureVaryOrigin(headers);
+      c.res = new Response(c.res.body, {
+        status: c.res.status,
+        statusText: c.res.statusText,
+        headers,
+      });
+    }
+  };
+}
+
 /**
  * Strictly enforces session cookie OR Bearer PAT authentication on ALL `/api/v1/*` routes
  * except `/api/v1/health`, `/api/v1/auth/status`, `/api/v1/auth/setup`, `/api/v1/auth/login`.

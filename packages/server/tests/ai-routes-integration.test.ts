@@ -5,6 +5,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createDefaultAIProviderConfig,
   createDefaultMoodboardDocument,
   createDefaultTypeSafeExperimentalConfig,
   labFromHex,
@@ -20,6 +21,7 @@ import {
   type MoodboardProposalResponse,
   type ReplacementCandidatesResponse,
   type SemanticSearchResponse,
+  type TestAIConnectionResponse,
   type TypeSafeConfigResponse,
 } from '@charkle/shared';
 import { createApp, createServerContext } from '../src/app.js';
@@ -350,5 +352,330 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     const callRes = responses[2].result as { isError: boolean; content: Array<{ text: string }> };
     expect(callRes.isError).toBe(false);
     expect(JSON.parse(callRes.content[0].text)).toMatchObject({ totalAssets: 0, boardCount: 0 });
+  });
+
+  it('tests live Cloud AI connections via POST /api/v1/ai/test across all providers including fallbacks and keyless Ollama', async () => {
+    const dir = createTempDir();
+    const ctx = createServerContext({ dataDir: dir });
+
+    const calls: Array<{ url: string; method: string; headers: Record<string, string> }> = [];
+    const mockFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const rawHeaders = (init?.headers ?? {}) as Record<string, string>;
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rawHeaders)) {
+        headers[k.toLowerCase()] = String(v);
+      }
+      calls.push({ url, method, headers });
+
+      // Gemini endpoints
+      if (url.includes('generativelanguage.googleapis.com')) {
+        const key = headers['x-goog-api-key'];
+        if (key === 'bad-gemini-key') {
+          return new Response(JSON.stringify({ error: { message: 'API key invalid' } }), { status: 401 });
+        }
+        if (url.endsWith('/models/gemini-2.5-flash')) {
+          return new Response(JSON.stringify({ name: 'models/gemini-2.5-flash' }), { status: 200 });
+        }
+        if (url.endsWith('/models/nonexistent-model')) {
+          return new Response(JSON.stringify({ error: { message: 'Not found' } }), { status: 404 });
+        }
+        if (url.endsWith('/models')) {
+          return new Response(JSON.stringify({ models: [{ name: 'models/gemini-2.5-flash' }] }), { status: 200 });
+        }
+      }
+
+      // Anthropic endpoints
+      if (url.includes('api.anthropic.com')) {
+        if (method === 'GET' && url.endsWith('/models')) {
+          return new Response(JSON.stringify({ data: [{ id: 'claude-sonnet-4-5' }] }), { status: 200 });
+        }
+      }
+      if (url.includes('anthropic-proxy.example.com')) {
+        if (method === 'GET' && url.endsWith('/models')) {
+          return new Response('not found', { status: 404 });
+        }
+        if (method === 'POST' && url.endsWith('/messages')) {
+          return new Response(
+            JSON.stringify({
+              content: [{ type: 'text', text: '{"ok":true}' }],
+              usage: { input_tokens: 5, output_tokens: 3 },
+            }),
+            { status: 200 },
+          );
+        }
+      }
+
+      // OpenAI Chat Completions (direct /models hit & 404 ping fallback)
+      if (url.includes('api.openai.com') && method === 'GET' && url.endsWith('/models')) {
+        return new Response(
+          JSON.stringify({ data: [{ id: 'gpt-5.4-mini' }, { id: 'gpt-4.1-mini' }] }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('chat-fallback.example.com')) {
+        if (method === 'GET' && url.endsWith('/models')) {
+          return new Response('not found', { status: 404 });
+        }
+        if (method === 'POST' && url.endsWith('/chat/completions')) {
+          return new Response(
+            JSON.stringify({
+              choices: [{ message: { content: '{"ok":true}' } }],
+              usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+            }),
+            { status: 200 },
+          );
+        }
+      }
+
+      // OpenAI Responses 405 fallback ping
+      if (url.includes('responses-fallback.example.com')) {
+        if (method === 'GET' && url.endsWith('/models')) {
+          return new Response('method not allowed', { status: 405 });
+        }
+        if (method === 'POST' && url.endsWith('/responses')) {
+          return new Response(
+            JSON.stringify({
+              output_text: '{"ok":true}',
+              usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+            }),
+            { status: 200 },
+          );
+        }
+      }
+
+      // Keyless localhost Ollama
+      if (url.startsWith('http://localhost:11434/v1/models') && method === 'GET') {
+        return new Response(JSON.stringify({ data: [{ id: 'qwen2.5vl:7b' }] }), { status: 200 });
+      }
+
+      return new Response('unexpected url', { status: 500 });
+    };
+
+    const app = createApp(ctx, { staticClientDir: null, aiOptions: { fetchFn: mockFetch } });
+    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const pat = ctx.auth.createApiToken(user.id, 'ai-test-pat', ['read', 'write']);
+    const authHeaders = {
+      Authorization: `Bearer ${pat.token}`,
+      'Content-Type': 'application/json',
+    };
+
+    const postTest = (payload: Record<string, unknown>) =>
+      app.request('/api/v1/ai/test', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(payload),
+      });
+
+    try {
+      // 1. Disabled -> 400
+      const disabledRes = await postTest({
+        config: createDefaultAIProviderConfig({ provider: 'disabled' }),
+      });
+      expect(disabledRes.status).toBe(400);
+
+      // 2. Gemini 200 hit (strips leading models/ prefix)
+      const gemOk = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'gemini',
+          chatModel: 'models/gemini-2.5-flash',
+        }),
+        apiKey: 'good-gemini-key',
+      });
+      expect(gemOk.status).toBe(200);
+      const gemOkJson = (await gemOk.json()) as TestAIConnectionResponse;
+      expect(gemOkJson.ok).toBe(true);
+      expect(gemOkJson.summary).toContain('gemini-2.5-flash');
+
+      // 3. Gemini 404 model missing + 200 list fallback -> 400 model_not_found
+      const gemMissing = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'gemini',
+          chatModel: 'nonexistent-model',
+        }),
+        apiKey: 'good-gemini-key',
+      });
+      expect(gemMissing.status).toBe(400);
+      const gemMissingJson = (await gemMissing.json()) as { error: string };
+      expect(gemMissingJson.error).toContain('nonexistent-model');
+
+      // 4. Gemini 401 bad key -> 401
+      const gemBadKey = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'gemini',
+          chatModel: 'gemini-2.5-flash',
+        }),
+        apiKey: 'bad-gemini-key',
+      });
+      expect(gemBadKey.status).toBe(401);
+
+      // 5. OpenAI Chat Completions 200 /models
+      const oaiOk = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'openAICompatible',
+          customEndpointFormat: 'openAIChatCompletions',
+          baseURL: 'https://api.openai.com/v1',
+          chatModel: 'gpt-4.1-mini',
+        }),
+        apiKey: 'sk-test',
+      });
+      expect(oaiOk.status).toBe(200);
+      expect(((await oaiOk.json()) as TestAIConnectionResponse).summary).toContain('gpt-4.1-mini');
+
+      // 6. OpenAI Chat Completions 404 fallback ping
+      const oaiFallback = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'openAICompatible',
+          customEndpointFormat: 'openAIChatCompletions',
+          baseURL: 'https://chat-fallback.example.com/v1',
+          chatModel: 'deepseek-chat',
+        }),
+        apiKey: 'sk-ds',
+      });
+      expect(oaiFallback.status).toBe(200);
+      expect(((await oaiFallback.json()) as TestAIConnectionResponse).summary).toContain('deepseek-chat');
+
+      // 7. OpenAI Responses 405 fallback ping
+      const respFallback = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'openAICompatible',
+          customEndpointFormat: 'openAIResponses',
+          baseURL: 'https://responses-fallback.example.com/v1',
+          chatModel: 'gpt-5.4-mini',
+        }),
+        apiKey: 'sk-resp',
+      });
+      expect(respFallback.status).toBe(200);
+      expect(((await respFallback.json()) as TestAIConnectionResponse).summary).toContain('gpt-5.4-mini');
+
+      // 8. Anthropic Messages 200 /models & 404 ping fallback
+      const claudeOk = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'openAICompatible',
+          customEndpointFormat: 'anthropicMessages',
+          baseURL: 'https://api.anthropic.com/v1',
+          chatModel: 'claude-sonnet-4-5',
+        }),
+        apiKey: 'sk-ant-test',
+      });
+      expect(claudeOk.status).toBe(200);
+      expect(((await claudeOk.json()) as TestAIConnectionResponse).summary).toContain('claude-sonnet-4-5');
+
+      const claudeFallback = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'openAICompatible',
+          customEndpointFormat: 'anthropicMessages',
+          baseURL: 'https://anthropic-proxy.example.com/v1',
+          chatModel: 'claude-sonnet-4-5',
+        }),
+        apiKey: 'sk-ant-proxy',
+      });
+      expect(claudeFallback.status).toBe(200);
+      expect(((await claudeFallback.json()) as TestAIConnectionResponse).summary).toContain('Anthropic');
+
+      // 9. Keyless localhost Ollama -> 200 with NO Authorization header
+      calls.length = 0;
+      const ollamaRes = await postTest({
+        config: createDefaultAIProviderConfig({
+          provider: 'openAICompatible',
+          customEndpointFormat: 'openAIChatCompletions',
+          baseURL: 'http://localhost:11434/v1',
+          chatModel: 'qwen2.5vl:7b',
+        }),
+        apiKey: null,
+      });
+      expect(ollamaRes.status).toBe(200);
+      expect(((await ollamaRes.json()) as TestAIConnectionResponse).summary).toContain('qwen2.5vl:7b');
+      expect(calls[0].url).toBe('http://localhost:11434/v1/models');
+      expect(calls[0].headers.authorization).toBeUndefined();
+
+      // 10. ChatGPT Subscription: disconnected -> 400; connected -> 200 with models
+      const chatgptDisconnected = await postTest({
+        config: createDefaultAIProviderConfig({ provider: 'chatGPTSubscription' }),
+      });
+      expect(chatgptDisconnected.status).toBe(400);
+
+      const connectRes = await app.request('/api/v1/ai/chatgpt/connect', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ accessToken: 'cgpt-sub-token', email: 'designer@studio.test' }),
+      });
+      expect(connectRes.status).toBe(200);
+
+      const chatgptOk = await postTest({
+        config: createDefaultAIProviderConfig({ provider: 'chatGPTSubscription' }),
+      });
+      expect(chatgptOk.status).toBe(200);
+      const chatgptJson = (await chatgptOk.json()) as TestAIConnectionResponse;
+      expect(chatgptJson.ok).toBe(true);
+      expect(chatgptJson.models?.length).toBeGreaterThanOrEqual(2);
+      expect(chatgptJson.summary).toContain(`可用模型 ${chatgptJson.models!.length} 个`);
+    } finally {
+      ctx.db.close();
+    }
+  });
+
+  it('honors localOnly: true on POST /api/v1/ai/analyze without invoking configured Cloud AI', async () => {
+    const dir = createTempDir();
+    const ctx = createServerContext({ dataDir: dir });
+
+    let cloudFetchCalls = 0;
+    const spyFetch: typeof fetch = async () => {
+      cloudFetchCalls += 1;
+      return new Response('should never be called during localOnly', { status: 500 });
+    };
+
+    const app = createApp(ctx, { staticClientDir: null, aiOptions: { fetchFn: spyFetch } });
+    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const pat = ctx.auth.createApiToken(user.id, 'local-only-pat', ['read', 'write']);
+    const authHeaders = {
+      Authorization: `Bearer ${pat.token}`,
+      'Content-Type': 'application/json',
+    };
+
+    try {
+      // Configure Gemini cloud AI with a stored key
+      const saveCfg = await app.request('/api/v1/ai/config', {
+        method: 'PUT',
+        headers: authHeaders,
+        body: JSON.stringify({
+          config: createDefaultAIProviderConfig({
+            provider: 'gemini',
+            chatModel: 'gemini-2.5-flash',
+          }),
+          apiKey: 'stored-gemini-key',
+        }),
+      });
+      expect(saveCfg.status).toBe(200);
+
+      // Ingest a real image and wipe its dominantColors so we can prove offline rebuild populates them
+      const png = await sharp({
+        create: { width: 240, height: 180, channels: 3, background: { r: 210, g: 95, b: 60 } },
+      })
+        .png()
+        .toBuffer();
+      const id = toSwiftUUID('dddddddd-dddd-4ddd-8ddd-dddddddddd01');
+      const ing = await ctx.media.ingestUploadedFile(png, 'terracotta.png', 'image/png', null, id);
+      ctx.db.saveAssetLocally({ ...ing.asset, dominantColors: [] });
+      expect(ctx.db.getAsset(id)!.dominantColors).toHaveLength(0);
+
+      // Run POST /api/v1/ai/analyze with localOnly: true
+      const analyzeRes = await app.request('/api/v1/ai/analyze', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ ids: [id], localOnly: true }),
+      });
+      expect(analyzeRes.status).toBe(200);
+      const body = (await analyzeRes.json()) as AnalyzeAssetsResponse;
+      expect(body.assets).toHaveLength(1);
+      expect(body.assets[0].dominantColors.length).toBeGreaterThan(0);
+      expect(cloudFetchCalls).toBe(0);
+
+      const vec = ctx.db.getVector(id);
+      expect(vec?.featurePrint).toBeTruthy();
+    } finally {
+      ctx.db.close();
+    }
   });
 });

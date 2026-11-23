@@ -4,6 +4,7 @@ import { createDefaultAssetRecord } from '../src/models/core.js';
 import type { AssetRecord } from '../src/models/core.js';
 import {
   createDefaultAutoLayoutConfig,
+  createDefaultMoodboardCurationRequest,
   createDefaultMoodboardDocument,
   rectMaxX,
   rectMaxY,
@@ -189,5 +190,16 @@ describe('EditorialLayoutSolver', () => {
 
     const tidied = EditorialLayoutSolver.tidyNodesInFreeform(frozen, new Set(), assetsByID);
     expect(tidied.nodes).toHaveLength(4);
+  });
+
+  it('defaults new Moodboard documents and curation requests to freeform-first', () => {
+    const doc = createDefaultMoodboardDocument({
+      id: 'BBBBBBBB-0000-4000-8000-000000000002',
+      title: 'Default Freeform Board',
+    });
+    expect(doc.mode).toEqual({ type: 'freeform' });
+
+    const req = createDefaultMoodboardCurationRequest();
+    expect(req.useFreeformLayout).toBe(true);
   });
 });

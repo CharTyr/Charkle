@@ -43,6 +43,7 @@ export interface IMediaPipeline {
   getThumbnailPath(id: UUID, tier?: ThumbnailTier): string | null;
   thumbnailTargetPath(id: UUID, tier?: ThumbnailTier): string;
   getOriginalPath(asset: AssetRecord): string | null;
+  cachedOriginalPath(asset: AssetRecord): string | null;
   originalTargetPath(asset: AssetRecord): string;
   readThumbnailBuffer(id: UUID, tier?: ThumbnailTier): Promise<Buffer | null>;
   readOriginalBuffer(asset: AssetRecord): Promise<Buffer | null>;
