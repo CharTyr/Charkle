@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/11-23-windows-client/research/windows-tauri-architecture.md", "reason": "Windows Tauri v2 + Rust core + Win32/WinRT architecture blueprint and crate stack"}
+{"file": "web/docs/PARITY_SPEC.md", "reason": "Tracked cross-platform parity specification across macOS and Web"}
+{"file": "web/docs/DELTA_SYNC_SPEC.md", "reason": "Tracked /.charkle/ delta sync & Swift wire-format interop specification"}
+{"file": ".trellis/spec/guides/index.md", "reason": "Cross-layer and code reuse engineering guides"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Gallery-First UI, state management, and motion guidelines"}
