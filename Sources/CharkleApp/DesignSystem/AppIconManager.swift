@@ -64,8 +64,9 @@ public final class CharkleAppIconManager {
     }
 
     public func applyCurrentIcon(updateBundleFileIcon: Bool = false) {
+        guard let app = NSApp else { return }
         if let dockImg = dockImage(for: currentVariant) {
-            NSApp.applicationIconImage = dockImg
+            app.applicationIconImage = dockImg
             if updateBundleFileIcon, Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
                 let bundlePath = Bundle.main.bundlePath
                 if currentVariant == .light {

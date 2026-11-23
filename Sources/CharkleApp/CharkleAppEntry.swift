@@ -10,6 +10,8 @@ private let appLogger = Logger(subsystem: "com.charkle.app", category: "Lifecycl
 /// MacBook Notch Shelf controller, and Carbon Global Hotkey manager.
 @Observable
 public final class CharkleRuntime {
+    public static let shared = CharkleRuntime()
+
     public let engine: any CharkleEngineProtocol
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
@@ -19,6 +21,8 @@ public final class CharkleRuntime {
     private var notchController: NotchShelfController?
     private let hotkeyManager = GlobalHotkeyManager()
     @ObservationIgnored
+    private var hasStartedAppKitServices: Bool = false
+    @ObservationIgnored
     private nonisolated(unsafe) var externalRefreshObserver: NSObjectProtocol?
     @ObservationIgnored
     private nonisolated(unsafe) var syncCompletedObserver: NSObjectProtocol?
@@ -26,6 +30,8 @@ public final class CharkleRuntime {
     private nonisolated(unsafe) var appBecomeActiveObserver: NSObjectProtocol?
     @ObservationIgnored
     private nonisolated(unsafe) var systemDidWakeObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var onboardingRequestObserver: NSObjectProtocol?
     @ObservationIgnored
     private var lastForegroundSyncDate: Date = .distantPast
     @ObservationIgnored
@@ -46,10 +52,12 @@ public final class CharkleRuntime {
         self.moodboards = MoodboardStore(engine: resolvedEngine)
         self.syncAndAI = SyncAndAIStore(engine: resolvedEngine)
 
-        setupNotchAndHotkeys()
-        setupExternalAgentLiveRefresh()
-        setupRemoteSyncObservers()
-        CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
+        // IMPORTANT (macOS 15 compatibility):
+        // Never instantiate `NSHostingView` / `NSPanel` (NotchShelfController) or touch `NSApp`
+        // synchronously inside `init()`. On macOS 15.x, creating an `NSHostingView` during
+        // `AppGraph.init` / scene construction clears thread-local `AGSubgraph.current`, causing an
+        // immediate `AttributeGraph/Attribute.swift:485: attempting to create attribute with no subgraph`
+        // trap. AppKit services are started strictly after launch via `startAppKitServicesIfNeeded()`.
     }
 
     deinit {
@@ -65,6 +73,58 @@ public final class CharkleRuntime {
         if let observer = systemDidWakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+        if let observer = onboardingRequestObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    /// Starts AppKit windows (`NotchShelfController`), Carbon hotkeys, notification observers,
+    /// and Dock icon customization strictly after `NSApplication` & `AppGraph` have finished launching.
+    public func startAppKitServicesIfNeeded() {
+        guard !hasStartedAppKitServices else { return }
+        guard NSApp != nil else { return }
+        hasStartedAppKitServices = true
+
+        setupNotchAndHotkeys()
+        setupExternalAgentLiveRefresh()
+        setupRemoteSyncObservers()
+        setupOnboardingFocusObserver()
+        CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
+    }
+
+    private func setupOnboardingFocusObserver() {
+        onboardingRequestObserver = NotificationCenter.default.addObserver(
+            forName: AppCoordinatorStore.didRequestOnboardingPresentationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.focusMainWindowForOnboarding()
+            }
+        }
+    }
+
+    public func rerunOnboarding() {
+        startAppKitServicesIfNeeded()
+        coordinator.presentOnboarding()
+    }
+
+    private func focusMainWindowForOnboarding() {
+        coordinator.closeSettings()
+        guard let app = NSApp else { return }
+        for window in app.windows {
+            let identifier = window.identifier?.rawValue.lowercased() ?? ""
+            let title = window.title.lowercased()
+            let isSettingsWindow = identifier.contains("settings")
+                || title == "settings"
+                || title == "设置"
+                || title.contains("偏好设置")
+                || title.contains("charkle 设置")
+            if isSettingsWindow {
+                window.close()
+            }
+        }
+        activateMainWindow()
     }
 
     private func setupRemoteSyncObservers() {
@@ -191,13 +251,22 @@ public final class CharkleRuntime {
     }
 
     public func toggleNotchShelf() {
+        startAppKitServicesIfNeeded()
         notchController?.toggle()
     }
 
+    public func syncDefaultNotchTarget(_ mode: NotchTargetMode) {
+        notchController?.shelfState.targetMode = mode
+    }
+
     public func activateMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !$0.isMiniaturized }) {
+        guard let app = NSApp else { return }
+        app.activate(ignoringOtherApps: true)
+        if let window = app.windows.first(where: { $0.canBecomeMain && !$0.isMiniaturized }) {
             window.makeKeyAndOrderFront(nil)
+        } else if let miniaturized = app.windows.first(where: { $0.canBecomeMain && $0.isMiniaturized }) {
+            miniaturized.deminiaturize(nil)
+            miniaturized.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -265,9 +334,20 @@ public final class CharkleRuntime {
     }
 }
 
+final class CharkleAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Defer Notch NSPanel / NSHostingView & Dock icon setup until the next MainActor turn,
+        // strictly outside SwiftUI's AppGraph / AttributeGraph scene bootstrap transaction.
+        Task { @MainActor in
+            CharkleRuntime.shared.startAppKitServicesIfNeeded()
+        }
+    }
+}
+
 @main
 struct CharkleApp: App {
-    @State private var runtime = CharkleRuntime()
+    @NSApplicationDelegateAdaptor(CharkleAppDelegate.self) private var appDelegate
+    private let runtime = CharkleRuntime.shared
 
     var body: some Scene {
         WindowGroup("Charkle") {
@@ -278,13 +358,30 @@ struct CharkleApp: App {
                 syncAndAI: runtime.syncAndAI,
                 onToggleNotch: { runtime.toggleNotchShelf() },
                 onCaptureArea: { runtime.captureRegionScreenshot() },
-                onCollectClipboard: { runtime.collectClipboard() }
+                onCollectClipboard: { runtime.collectClipboard() },
+                onSyncHotkeysEnabled: { runtime.syncHotkeys(enabled: $0) },
+                onSyncDefaultNotchTarget: { runtime.syncDefaultNotchTarget($0) },
+                onAppReady: { runtime.startAppKitServicesIfNeeded() }
             )
             .frame(minWidth: 1020, minHeight: 660)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1360, height: 860)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") {
+                    runtime.activateMainWindow()
+                    runtime.coordinator.openSettings()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+
+            CommandGroup(after: .help) {
+                Button("重新运行首次使用引导…") {
+                    runtime.rerunOnboarding()
+                }
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button("快速生成情绪板…") {
                     runtime.coordinator.presentMoodboardGenerator(entry: .prompt)
@@ -355,15 +452,6 @@ struct CharkleApp: App {
             }
         }
 
-        Settings {
-            SettingsView(
-                coordinator: runtime.coordinator,
-                syncAndAI: runtime.syncAndAI,
-                onToggleNotchPreview: { runtime.toggleNotchShelf() },
-                onSyncHotkeysEnabled: { runtime.syncHotkeys(enabled: $0) }
-            )
-        }
-
         MenuBarExtra("Charkle", systemImage: "rectangle.3.group") {
             Button("打开 Charkle 主窗口") {
                 runtime.activateMainWindow()
@@ -389,6 +477,13 @@ struct CharkleApp: App {
                     await runtime.library.refreshAll()
                     await runtime.moodboards.refreshBoards()
                 }
+            }
+            Button("重新运行首次引导…") {
+                runtime.rerunOnboarding()
+            }
+            Button("设置…") {
+                runtime.activateMainWindow()
+                runtime.coordinator.openSettings()
             }
             Divider()
             Button("退出 Charkle") {

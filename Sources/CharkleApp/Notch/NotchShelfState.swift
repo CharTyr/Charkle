@@ -1,9 +1,17 @@
 import Foundation
 
-public enum NotchTargetMode: Hashable, Sendable {
+public enum NotchTargetMode: String, CaseIterable, Hashable, Sendable {
     case inbox
     case folder
     case activeMoodboard
+
+    public var localizedTitle: String {
+        switch self {
+        case .inbox: "收件箱"
+        case .folder: "指定文件夹"
+        case .activeMoodboard: "当前活跃情绪板"
+        }
+    }
 }
 
 /// Observable animation & interaction state driving the fixed transparent Notch Shelf NSPanel.

@@ -327,6 +327,7 @@ public final class NotchShelfController {
         self.onCaptureArea = onCaptureArea
         self.onCollectClipboard = onCollectClipboard
         self.onOpenMainWindow = onOpenMainWindow
+        self.shelfState.targetMode = coordinator.defaultNotchTargetMode
 
         promiseQueue.name = "com.charkle.notch.filepromises"
         createFixedPanel()
@@ -365,11 +366,13 @@ public final class NotchShelfController {
         if shelfState.isExpanded {
             collapse()
         } else {
-            expand(forDrag: false)
+            // Keep explicitly toggled Notch Shelf open (via ⌥⇧S hotkey, Menu Bar, or Preview button)
+            // even when the cursor is elsewhere on screen; pressing ⌥⇧S / Esc / × or unpinning dismisses it.
+            expand(forDrag: false, pinOpen: true)
         }
     }
 
-    public func expand(forDrag: Bool = false) {
+    public func expand(forDrag: Bool = false, pinOpen: Bool = false) {
         guard coordinator.notchShelfEnabled else { return }
         hideWorkItem?.cancel()
         cancelHoverExpand()
@@ -380,6 +383,9 @@ public final class NotchShelfController {
         panel.ignoresMouseEvents = false
         if !panel.isVisible {
             panel.orderFrontRegardless()
+        }
+        if pinOpen {
+            shelfState.isPinnedOpen = true
         }
         shelfState.isExpanded = true
     }
