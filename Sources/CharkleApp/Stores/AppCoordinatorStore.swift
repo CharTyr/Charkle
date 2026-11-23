@@ -30,12 +30,26 @@ public struct CharkleToast: Identifiable, Equatable, Sendable {
     public let message: String
     public let iconName: String
     public let tone: ToastTone
+    public let actionTitle: String?
+    public let duration: Double
+    public var isPaused: Bool
 
-    public init(id: UUID = UUID(), message: String, iconName: String = "checkmark.circle.fill", tone: ToastTone = .neutral) {
+    public init(
+        id: UUID = UUID(),
+        message: String,
+        iconName: String = "checkmark.circle.fill",
+        tone: ToastTone = .neutral,
+        actionTitle: String? = nil,
+        duration: Double = 2.6,
+        isPaused: Bool = false
+    ) {
         self.id = id
         self.message = message
         self.iconName = iconName
         self.tone = tone
+        self.actionTitle = actionTitle
+        self.duration = duration
+        self.isPaused = isPaused
     }
 }
 
@@ -113,6 +127,15 @@ public final class AppCoordinatorStore {
     }
 
     public var toasts: [CharkleToast] = []
+
+    private struct ToastTimerRecord {
+        var task: Task<Void, Never>?
+        var remaining: Double
+        var startedAt: Date?
+    }
+
+    @ObservationIgnored private var toastTimers: [UUID: ToastTimerRecord] = [:]
+    @ObservationIgnored private var toastActions: [UUID: @MainActor () -> Void] = [:]
 
     private enum Keys {
         static let notchShelfEnabled = "charkle.notchShelfEnabled"
@@ -237,16 +260,82 @@ public final class AppCoordinatorStore {
         quickLookAssetID = quickLookPlaylist[nextIdx]
     }
 
-    public func showToast(_ message: String, icon: String = "checkmark.circle.fill", tone: ToastTone = .neutral, duration: Double = 2.4) {
-        let toast = CharkleToast(message: message, iconName: icon, tone: tone)
+    @discardableResult
+    public func showToast(
+        _ message: String,
+        icon: String = "checkmark.circle.fill",
+        tone: ToastTone = .neutral,
+        duration: Double? = nil,
+        actionTitle: String? = nil,
+        onAction: (@MainActor () -> Void)? = nil
+    ) -> UUID {
+        let resolvedDuration = duration ?? (actionTitle != nil ? 4.8 : 2.6)
+        let toast = CharkleToast(
+            message: message,
+            iconName: icon,
+            tone: tone,
+            actionTitle: actionTitle,
+            duration: resolvedDuration,
+            isPaused: false
+        )
         toasts.append(toast)
-        if toasts.count > 3 {
-            toasts.removeFirst(toasts.count - 3)
+        if let onAction {
+            toastActions[toast.id] = onAction
         }
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(duration))
-            guard let self else { return }
-            self.toasts.removeAll { $0.id == toast.id }
+        while toasts.count > 3 {
+            let evicted = toasts.removeFirst()
+            cleanupToastResources(evicted.id)
         }
+        scheduleToastDismiss(id: toast.id, remaining: resolvedDuration)
+        return toast.id
+    }
+
+    public func pauseToast(_ id: UUID) {
+        guard let idx = toasts.firstIndex(where: { $0.id == id }), !toasts[idx].isPaused else { return }
+        toasts[idx].isPaused = true
+        if var record = toastTimers[id] {
+            record.task?.cancel()
+            record.task = nil
+            if let startedAt = record.startedAt {
+                record.remaining = max(0.35, record.remaining - Date().timeIntervalSince(startedAt))
+                record.startedAt = nil
+            }
+            toastTimers[id] = record
+        }
+    }
+
+    public func resumeToast(_ id: UUID) {
+        guard let idx = toasts.firstIndex(where: { $0.id == id }), toasts[idx].isPaused else { return }
+        toasts[idx].isPaused = false
+        let remaining = toastTimers[id]?.remaining ?? toasts[idx].duration
+        scheduleToastDismiss(id: id, remaining: remaining)
+    }
+
+    public func triggerToastAction(_ id: UUID) {
+        let action = toastActions.removeValue(forKey: id)
+        dismissToast(id)
+        action?()
+    }
+
+    public func dismissToast(_ id: UUID) {
+        cleanupToastResources(id)
+        toasts.removeAll { $0.id == id }
+    }
+
+    private func scheduleToastDismiss(id: UUID, remaining: Double) {
+        guard remaining > 0 else { return }
+        toastTimers[id]?.task?.cancel()
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(remaining))
+            guard !Task.isCancelled, let self else { return }
+            self.dismissToast(id)
+        }
+        toastTimers[id] = ToastTimerRecord(task: task, remaining: remaining, startedAt: Date())
+    }
+
+    private func cleanupToastResources(_ id: UUID) {
+        toastTimers[id]?.task?.cancel()
+        toastTimers.removeValue(forKey: id)
+        toastActions.removeValue(forKey: id)
     }
 }

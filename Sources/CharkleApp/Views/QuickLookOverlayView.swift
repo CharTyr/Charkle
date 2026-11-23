@@ -493,11 +493,14 @@ public struct QuickLookOverlayView: View {
                 .lineLimit(1)
 
             if library.similarAssets.isEmpty {
-                Text("暂无视觉或色彩相似素材")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 36)
+                VStack(spacing: 10) {
+                    CharkleEmptyStateVignette(.noFilterResults, compact: true)
+                    Text("暂无视觉或色彩相似素材")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
             } else {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
                     ForEach(library.similarAssets) { scored in
@@ -506,11 +509,11 @@ public struct QuickLookOverlayView: View {
                             asset: scored.asset,
                             loader: library.thumbnailLoader,
                             tier: .grid520,
-                            cornerRadius: 9
+                            cornerRadius: CharkleTheme.Radius.settingsInner
                         )
                         .frame(height: (126 / ratio).rounded())
                         .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
                         )
                         .onTapGesture {
@@ -896,7 +899,7 @@ public struct QuickLookOverlayView: View {
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 4)
-                                .background(Color.accentColor.opacity(0.72), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                .background(Color.accentColor.opacity(0.72), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
                             .help("还原旋转与翻转")

@@ -200,7 +200,7 @@ public struct InspectorView: View {
 
                 if library.similarAssets.isEmpty {
                     VStack(spacing: 10) {
-                        CharkleIcon("similar", style: .duotone, size: 28)
+                        CharkleEmptyStateVignette(.noFilterResults, compact: true)
                         Text("暂无视觉或色彩相近的素材")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
@@ -210,7 +210,7 @@ public struct InspectorView: View {
                             .multilineTextAlignment(.center)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 48)
+                    .padding(.vertical, 36)
                     .padding(.horizontal, 16)
                 } else {
                     LazyVGrid(
@@ -223,11 +223,11 @@ public struct InspectorView: View {
                                 asset: scored.asset,
                                 loader: library.thumbnailLoader,
                                 tier: .grid520,
-                                cornerRadius: 9
+                                cornerRadius: CharkleTheme.Radius.settingsInner
                             )
                             .frame(height: (132 / ratio).rounded())
                             .overlay(
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                                     .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                             )
                             .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -612,9 +612,9 @@ public struct InspectorView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .frame(maxWidth: .infinity)
                                         .padding(.vertical, 5.5)
-                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                                         )
                                 }
@@ -630,9 +630,9 @@ public struct InspectorView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .padding(.horizontal, 9)
                                         .padding(.vertical, 5.5)
-                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                                         )
                                 }
@@ -648,9 +648,9 @@ public struct InspectorView: View {
                                         .font(.system(size: 11, weight: .medium))
                                         .padding(.horizontal, 9)
                                         .padding(.vertical, 5.5)
-                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                                 .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                                         )
                                 }
@@ -1636,7 +1636,17 @@ public struct InspectorView: View {
                             Button(role: .destructive) {
                                 Task {
                                     await library.trashAssets(ids)
-                                    coordinator.showToast("已将 \(ids.count) 项移至废纸篓", icon: "trash")
+                                    coordinator.showToast(
+                                        "已将 \(ids.count) 项移至废纸篓",
+                                        icon: "trash",
+                                        actionTitle: "撤销",
+                                        onAction: {
+                                            Task {
+                                                await library.restoreAssets(ids)
+                                                coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                            }
+                                        }
+                                    )
                                 }
                             } label: {
                                 Label("移至废纸篓", systemImage: "trash")
@@ -2272,9 +2282,9 @@ public struct InspectorView: View {
     }
 
     private var emptyInspectorPlaceholder: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Spacer()
-            CharkleIcon("quicklook", style: .layered, size: 42, color: .secondary.opacity(0.5))
+            CharkleEmptyStateVignette(.emptyInspector, compact: true)
             Text("选择素材查看详情")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)

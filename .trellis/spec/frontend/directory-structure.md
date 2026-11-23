@@ -21,8 +21,11 @@ Sources/
     ├── CharkleAppEntry.swift           # App entry, WindowGroup, MenuBar commands (⌘\ sidebar toggle, shortcuts)
     ├── DesignSystem/
     │   ├── CharkleIcon.swift           # CharkleIcon, CharkleFolderIcon, CharkleIconCache (Duotone SVG + menuFolderIcon)
-    │   ├── CharkleTheme.swift          # Color tokens, hairlines, Liquid Glass helpers, tactile button style
+    │   ├── CharkleTheme.swift          # Color tokens, hairlines, Liquid Glass helpers, soft radial modal backdrop
     │   ├── CharkleMotion.swift         # Spring/ease tokens + Reduce Motion wrapper (`CharkleMotion.accessible`)
+    │   ├── CharkleToastOverlay.swift   # Interactive Liquid Glass toast stack (hover-pause + Undo countdown ring)
+    │   ├── CharkleEmptyStateVignette.swift # 7 miniature product-UI empty-state vector schematics (Light/Dark)
+    │   ├── CharkleLoadingKit.swift     # Anti-flicker 300ms delayed skeletons & board loading skeleton
     │   └── AppIconManager.swift        # Light/Dark dock icon switcher
     ├── Notch/
     │   ├── NotchShelfState.swift       # @Observable geometry & mode state (Compact vs Full Waterfall)

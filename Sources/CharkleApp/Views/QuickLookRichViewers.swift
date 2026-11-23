@@ -1171,7 +1171,7 @@ private struct MarkdownBlockRowView: View {
         case .none: Color.accentColor.opacity(0.55)
         case .note: Color(charkleHex: "#3B82F6")
         case .tip: Color(charkleHex: "#16A34A")
-        case .important: Color(charkleHex: "#8B5CF6")
+        case .important: Color(charkleHex: "#2A60E0")
         case .warning: Color(charkleHex: "#D97706")
         case .caution: Color(charkleHex: "#DC2626")
         }

@@ -263,39 +263,9 @@ public struct MainWindowView: View {
                 .transition(.opacity)
             }
 
-            // Floating Toasts (Top-Trailing, enterSm / exitSm)
-            VStack {
-                HStack {
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 8) {
-                        ForEach(coordinator.toasts) { toast in
-                            HStack(spacing: 8) {
-                                Image(systemName: toast.iconName)
-                                    .font(.system(size: 12.5, weight: .semibold))
-                                    .foregroundStyle(toastTint(toast.tone))
-                                Text(toast.message)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.primary)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                            .transition(
-                                .asymmetric(
-                                    insertion: .move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .top)),
-                                    removal: .opacity.combined(with: .scale(scale: 0.96, anchor: .top))
-                                )
-                            )
-                        }
-                    }
-                    .padding(.top, 16)
-                    .padding(.trailing, 20)
-                }
-                Spacer()
-            }
-            .allowsHitTesting(false)
-            .zIndex(300)
-            .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: coordinator.toasts)
+            // Interactive Floating Liquid Glass Toasts (Top-Trailing, hover-pause + Undo countdown)
+            CharkleToastOverlay(coordinator: coordinator)
+                .zIndex(300)
         }
         .animation(
             CharkleMotion.enterExit(
@@ -507,7 +477,17 @@ public struct MainWindowView: View {
                     onTrashAssets: { ids in
                         Task {
                             await library.trashAssets(ids)
-                            coordinator.showToast("已移至废纸篓 (\(ids.count) 项)", icon: "trash")
+                            coordinator.showToast(
+                                "已移至废纸篓 (\(ids.count) 项)",
+                                icon: "trash",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await library.restoreAssets(ids)
+                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                    }
+                                }
+                            )
                         }
                     },
                     onRestoreAssets: { ids in
@@ -651,7 +631,17 @@ public struct MainWindowView: View {
                         onTrashAssets: { ids in
                             Task {
                                 await library.trashAssets(ids)
-                                coordinator.showToast("已移至废纸篓", icon: "trash")
+                                coordinator.showToast(
+                                    "已移至废纸篓 (\(ids.count) 项)",
+                                    icon: "trash",
+                                    actionTitle: "撤销",
+                                    onAction: {
+                                        Task {
+                                            await library.restoreAssets(ids)
+                                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                        }
+                                    }
+                                )
                             }
                         },
                         onRestoreAssets: { ids in
@@ -1785,12 +1775,14 @@ public struct MainWindowView: View {
 
     private var emptyLibraryView: some View {
         let isTrash = coordinator.selectedDestination == .trash
+        let isFolder: Bool = {
+            if case .folder = coordinator.selectedDestination { return true }
+            return false
+        }()
         let isFiltered = library.filter.hasActiveVisualFilters || !library.filter.searchQuery.isEmpty
         return VStack(spacing: 14) {
             if isTrash && !isFiltered {
-                Image(systemName: "trash")
-                    .font(.system(size: 42, weight: .light))
-                    .foregroundStyle(.secondary.opacity(0.6))
+                CharkleEmptyStateVignette(.emptyTrash)
                 Text("废纸篓是空的")
                     .font(.system(size: 17, weight: .semibold))
                 Text("移至废纸篓的素材会暂存在这里，你可以随时放回原处或彻底删除。")
@@ -1799,8 +1791,10 @@ public struct MainWindowView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
             } else {
-                CharkleIcon("library", style: .layered, size: 60, color: .secondary.opacity(0.6))
-                Text(isFiltered ? "没有符合筛选条件的素材" : "这里还没有素材")
+                CharkleEmptyStateVignette(
+                    isFiltered ? .noFilterResults : (isFolder ? .emptyFolder : .emptyLibrary)
+                )
+                Text(isFiltered ? "没有符合筛选条件的素材" : (isFolder ? "当前文件夹还没有素材" : "这里还没有素材"))
                     .font(.system(size: 17, weight: .semibold))
                 Text("直接拖入图片、GIF、视频、PDF、音频、设计文件或 X / 网页链接，或按 ⌥⇧V 粘贴剪贴板内容。")
                     .font(.system(size: 12.5))
@@ -1999,7 +1993,17 @@ public struct MainWindowView: View {
                     Button(role: .destructive) {
                         Task {
                             await library.trashAssets(ids)
-                            coordinator.showToast("已移至废纸篓", icon: "trash")
+                            coordinator.showToast(
+                                "已移至废纸篓 (\(ids.count) 项)",
+                                icon: "trash",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await library.restoreAssets(ids)
+                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                    }
+                                }
+                            )
                         }
                     } label: {
                         Image(systemName: "trash")
@@ -2065,35 +2069,66 @@ public struct MainWindowView: View {
                     .buttonStyle(.borderedProminent)
                 }
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260, maximum: 340), spacing: 16)], spacing: 16) {
-                    // Quick Generate Card
-                    Button {
-                        coordinator.presentMoodboardGenerator(entry: .prompt)
-                    } label: {
-                        VStack(spacing: 10) {
-                            CharkleIcon("sparkle-board", style: .layered, size: 42, color: Color.accentColor)
-                            Text("新建灵感情绪板")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("支持灵感词 / 种子图 / 配色定调 / 框选成板")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 220)
-                        .padding(18)
-                        .background(
-                            CharkleTheme.surfaceElevated(for: colorScheme),
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
-                        )
-                    }
-                    .buttonStyle(CharkleTactileButtonStyle())
+                if moodboards.boards.isEmpty {
+                    VStack(spacing: 14) {
+                        CharkleEmptyStateVignette(.emptyMoodboard)
+                        Text("还没有情绪板")
+                            .font(.system(size: 17, weight: .semibold))
+                        Text("通过灵感词、种子图、主色板或直接框选素材，10 秒生成首张可编辑情绪板。")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 400)
+                        HStack(spacing: 10) {
+                            Button("新建空白板") {
+                                Task {
+                                    if let blank = await moodboards.createBlankBoard(title: "新情绪板") {
+                                        coordinator.openMoodboard(blank.id)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
 
-                    ForEach(moodboards.boards) { board in
-                        moodboardSummaryCard(board)
+                            Button("10 秒快速生成") {
+                                coordinator.presentMoodboardGenerator(entry: .prompt)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding(.top, 2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 64)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260, maximum: 340), spacing: 16)], spacing: 16) {
+                        // Quick Generate Card
+                        Button {
+                            coordinator.presentMoodboardGenerator(entry: .prompt)
+                        } label: {
+                            VStack(spacing: 10) {
+                                CharkleIcon("sparkle-board", style: .layered, size: 42, color: Color.accentColor)
+                                Text("新建灵感情绪板")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text("支持灵感词 / 种子图 / 配色定调 / 框选成板")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 220)
+                            .padding(18)
+                            .background(
+                                CharkleTheme.surfaceElevated(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
+                            )
+                        }
+                        .buttonStyle(CharkleTactileButtonStyle())
+
+                        ForEach(moodboards.boards) { board in
+                            moodboardSummaryCard(board)
+                        }
                     }
                 }
             }
@@ -2406,14 +2441,7 @@ public struct MainWindowView: View {
                 .padding(.trailing, 18)
             }
         } else {
-            VStack(spacing: 10) {
-                ProgressView()
-                Text("正在加载情绪板…")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(CharkleTheme.galleryGround(for: colorScheme))
+            CharkleBoardLoadingSkeleton()
         }
     }
 
@@ -2580,15 +2608,6 @@ public struct MainWindowView: View {
             } else if let err = syncAndAI.errorMessage {
                 coordinator.showToast(err, icon: "exclamationmark.icloud", tone: .warning)
             }
-        }
-    }
-
-    private func toastTint(_ tone: ToastTone) -> Color {
-        switch tone {
-        case .neutral: Color.accentColor
-        case .success: .green
-        case .warning: .orange
-        case .error: .red
         }
     }
 }
@@ -2830,8 +2849,8 @@ private struct InboxZeroCelebrationView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            CharkleIcon("inbox", style: .layered, size: 64, color: Color(charkleHex: "#6B8E76"))
-                .scaleEffect(appeared ? 1.0 : (reduceMotion ? 1.0 : 0.92))
+            CharkleEmptyStateVignette(.inboxZero)
+                .scaleEffect(appeared ? 1.0 : (reduceMotion ? 1.0 : 0.94))
                 .opacity(appeared ? 1.0 : 0.0)
                 .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: appeared)
 
