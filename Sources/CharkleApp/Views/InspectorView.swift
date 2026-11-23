@@ -2,6 +2,7 @@ import AppKit
 import CharkleCanvas
 import CharkleCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Adaptive Right Inspector cleanly organized into distinct surface cards, switching between:
 /// 1. Moodboard Right Rail (Identity, AI Curator, Candidate Swap Pool, Board Palette, Quick Add, Export & Figma Bridge)
@@ -32,6 +33,8 @@ public struct InspectorView: View {
     @State private var boardRefinementDraft: String = ""
     @State private var showBoardAgentTrace: Bool = false
     @State private var pendingPermanentDeleteIDs: [UUID] = []
+    @State private var draggingInspectorSection: InspectorInfoSection? = nil
+    @State private var hoveredInspectorSection: InspectorInfoSection? = nil
 
     private enum SingleInspectorTab: String, CaseIterable {
         case info = "信息"
@@ -245,111 +248,265 @@ public struct InspectorView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            .charkleCleanScrollbars(hidden: true)
         }
         .scrollIndicators(.hidden)
     }
 
+    private func visibleInfoSections(
+        for asset: AssetRecord,
+        resolvedMeta: ExtractedImageMetadata
+    ) -> [InspectorInfoSection] {
+        coordinator.inspectorInfoSectionOrder.filter { section in
+            switch section {
+            case .previewIdentity, .quickActions, .colorsAndTags, .notesAndOCR, .mediaSpecs:
+                return true
+            case .aiGeneration:
+                return resolvedMeta.aiGeneration?.isEmpty == false
+            case .photoExif:
+                return resolvedMeta.photoExif?.hasMeaningfulCameraExif == true
+            case .githubRepo:
+                return asset.richMetadata?.githubRepo != nil
+            case .socialMediaExtract:
+                return !(asset.richMetadata?.socialPost?.effectiveAttachments.isEmpty ?? true)
+            }
+        }
+    }
+
     private func singleAssetInfoScroll(_ asset: AssetRecord) -> some View {
-        ScrollView(.vertical) {
+        let resolvedMeta = library.resolvedImageMetadata(for: asset)
+        let visibleSections = visibleInfoSections(for: asset, resolvedMeta: resolvedMeta)
+
+        return ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 10) {
-                // Card 1: Preview & Identity
-                inspectorCard(padding: 12) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        let naturalRatio = max(0.35, min(3.2, CGFloat(asset.aspectRatio)))
-                        let previewContentWidth: CGFloat = 252
-                        let fittedHeight = min(280, max(108, (previewContentWidth / naturalRatio).rounded()))
-                        let fittedWidth = min(previewContentWidth, (fittedHeight * naturalRatio).rounded())
-
-                        ZStack {
-                            AssetThumbnailSurface(
-                                asset: asset,
-                                loader: library.thumbnailLoader,
-                                tier: .preview1400,
-                                cornerRadius: 8,
-                                contentMode: .fit
-                            )
-                            .frame(width: fittedWidth, height: fittedHeight)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                            )
-                        }
-                        .frame(maxWidth: .infinity)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            onOpenQuickLook(asset)
-                        }
-                        .help("点击打开 Quick Look 全屏预览")
-
-                        inspectorInnerDivider
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            TextField("素材标题", text: $titleDraft)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 13.5, weight: .semibold))
-                                .onSubmit { commitSingleAssetTitle(asset) }
-
-                            HStack(spacing: 8) {
-                                HStack(spacing: 3) {
-                                    ForEach(1...5, id: \.self) { star in
-                                        Button {
-                                            let target = asset.rating == star ? 0 : star
-                                            Task { await library.setRating(target, for: [asset.id]) }
-                                        } label: {
-                                            Image(systemName: star <= asset.rating ? "star.fill" : "star")
-                                                .font(.system(size: 12))
-                                                .foregroundStyle(star <= asset.rating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.42))
-                                                .scaleEffect(star == asset.rating && !reduceMotion ? 1.08 : 1.0)
-                                                .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: asset.rating)
-                                        }
-                                        .buttonStyle(CharkleTactileButtonStyle())
-                                    }
-                                }
-
-                                Spacer()
-
-                                if !asset.isTrashed {
-                                    Button {
-                                        let nextPinned = !asset.pinnedOffline
-                                        Task {
-                                            await library.togglePinOffline(ids: [asset.id], pinned: nextPinned)
-                                            coordinator.showToast(
-                                                nextPinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
-                                                icon: nextPinned ? "arrow.down.circle.fill" : "icloud"
-                                            )
-                                        }
-                                    } label: {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: asset.pinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle")
-                                                .font(.system(size: 10.5))
-                                            Text(asset.pinnedOffline ? "已保留本地" : "保留在本地")
-                                                .font(.system(size: 10.5, weight: .medium))
-                                        }
-                                        .foregroundStyle(asset.pinnedOffline ? Color.accentColor : .secondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(
-                                            asset.pinnedOffline ? Color.accentColor.opacity(0.12) : CharkleTheme.inspectorFieldSurface(for: colorScheme),
-                                            in: Capsule(style: .continuous)
-                                        )
-                                        .overlay(
-                                            Capsule(style: .continuous)
-                                                .strokeBorder(
-                                                    asset.pinnedOffline ? Color.accentColor.opacity(0.25) : CharkleTheme.hairline(for: colorScheme),
-                                                    lineWidth: 0.75
-                                                )
-                                        )
-                                    }
-                                    .buttonStyle(CharkleTactileButtonStyle())
-                                    .help(asset.pinnedOffline ? "已始终保留在本机，离线可用；点击取消" : "始终将原文件保留在本机，不会被缓存自动清理")
-                                }
+                ForEach(visibleSections) { section in
+                    let isDragged = draggingInspectorSection == section
+                    singleAssetSectionCard(
+                        section,
+                        for: asset,
+                        resolvedMeta: resolvedMeta,
+                        visibleSections: visibleSections
+                    )
+                        .opacity(isDragged ? 0.36 : 1.0)
+                        .overlay {
+                            if isDragged {
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(
+                                        Color.accentColor.opacity(0.50),
+                                        style: StrokeStyle(lineWidth: 1.25, dash: [5, 4])
+                                    )
+                                    .allowsHitTesting(false)
                             }
+                        }
+                        .onHover { hovering in
+                            if hovering {
+                                hoveredInspectorSection = section
+                            } else if hoveredInspectorSection == section {
+                                hoveredInspectorSection = nil
+                            }
+                            if draggingInspectorSection != nil && NSEvent.pressedMouseButtons == 0 {
+                                draggingInspectorSection = nil
+                            }
+                        }
+                        .onDrop(
+                            of: [.plainText],
+                            delegate: InspectorSectionDropDelegate(
+                                targetSection: section,
+                                draggingSection: $draggingInspectorSection,
+                                reduceMotion: reduceMotion,
+                                onMove: { dragged, target in
+                                    coordinator.moveInspectorSection(dragged, toTarget: target)
+                                }
+                            )
+                        )
+                }
+
+                if coordinator.isInspectorSectionOrderCustomized {
+                    Button {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+                            coordinator.resetInspectorSectionOrder()
+                        }
+                        coordinator.showToast("已恢复信息栏默认排序", icon: "arrow.counterclockwise")
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 10, weight: .medium))
+                            Text("恢复信息栏默认排序")
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.04), in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(CharkleTactileButtonStyle())
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 2)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .animation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion), value: coordinator.inspectorInfoSectionOrder)
+            .charkleCleanScrollbars(hidden: true)
+        }
+        .scrollIndicators(.hidden)
+        .task(id: asset.id) {
+            await library.hydrateImageMetadataIfNeeded(for: asset.id)
+        }
+    }
+
+    @ViewBuilder
+    private func singleAssetSectionCard(
+        _ section: InspectorInfoSection,
+        for asset: AssetRecord,
+        resolvedMeta: ExtractedImageMetadata,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        switch section {
+        case .previewIdentity:
+            singleAssetPreviewIdentityCard(asset, visibleSections: visibleSections)
+        case .quickActions:
+            singleAssetQuickActionsCard(asset, visibleSections: visibleSections)
+        case .colorsAndTags:
+            singleAssetColorsAndTagsCard(asset, visibleSections: visibleSections)
+        case .notesAndOCR:
+            singleAssetNotesAndOCRCard(asset, visibleSections: visibleSections)
+        case .aiGeneration:
+            if let aiGen = resolvedMeta.aiGeneration, !aiGen.isEmpty {
+                aiGenerationInspectorCard(aiGen, visibleSections: visibleSections)
+            }
+        case .photoExif:
+            if let exif = resolvedMeta.photoExif, exif.hasMeaningfulCameraExif {
+                photoExifInspectorCard(exif, visibleSections: visibleSections)
+            }
+        case .mediaSpecs:
+            singleAssetMediaSpecsCard(asset, resolvedExif: resolvedMeta.photoExif, visibleSections: visibleSections)
+        case .githubRepo:
+            if let repo = asset.richMetadata?.githubRepo {
+                singleAssetGitHubRepoCard(asset, repo: repo, visibleSections: visibleSections)
+            }
+        case .socialMediaExtract:
+            if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
+                singleAssetSocialExtractCard(asset, post: post, visibleSections: visibleSections)
+            }
+        }
+    }
+
+    private func singleAssetPreviewIdentityCard(
+        _ asset: AssetRecord,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "素材预览",
+            systemImage: "photo",
+            reorderSection: .previewIdentity,
+            visibleSections: visibleSections
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                let naturalRatio = max(0.35, min(3.2, CGFloat(asset.aspectRatio)))
+                let previewContentWidth: CGFloat = 252
+                let fittedHeight = min(280, max(108, (previewContentWidth / naturalRatio).rounded()))
+                let fittedWidth = min(previewContentWidth, (fittedHeight * naturalRatio).rounded())
+
+                ZStack {
+                    AssetThumbnailSurface(
+                        asset: asset,
+                        loader: library.thumbnailLoader,
+                        tier: .preview1400,
+                        cornerRadius: 8,
+                        contentMode: .fit
+                    )
+                    .frame(width: fittedWidth, height: fittedHeight)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+                    )
+                }
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onOpenQuickLook(asset)
+                }
+                .help("点击打开 Quick Look 全屏预览")
+
+                inspectorInnerDivider
+
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("素材标题", text: $titleDraft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .onSubmit { commitSingleAssetTitle(asset) }
+
+                    HStack(spacing: 8) {
+                        HStack(spacing: 3) {
+                            ForEach(1...5, id: \.self) { star in
+                                Button {
+                                    let target = asset.rating == star ? 0 : star
+                                    Task { await library.setRating(target, for: [asset.id]) }
+                                } label: {
+                                    Image(systemName: star <= asset.rating ? "star.fill" : "star")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(star <= asset.rating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.42))
+                                        .scaleEffect(star == asset.rating && !reduceMotion ? 1.08 : 1.0)
+                                        .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: asset.rating)
+                                }
+                                .buttonStyle(CharkleTactileButtonStyle())
+                            }
+                        }
+
+                        Spacer()
+
+                        if !asset.isTrashed {
+                            Button {
+                                let nextPinned = !asset.pinnedOffline
+                                Task {
+                                    await library.togglePinOffline(ids: [asset.id], pinned: nextPinned)
+                                    coordinator.showToast(
+                                        nextPinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
+                                        icon: nextPinned ? "arrow.down.circle.fill" : "icloud"
+                                    )
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: asset.pinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle")
+                                        .font(.system(size: 10.5))
+                                    Text(asset.pinnedOffline ? "已保留本地" : "保留在本地")
+                                        .font(.system(size: 10.5, weight: .medium))
+                                }
+                                .foregroundStyle(asset.pinnedOffline ? Color.accentColor : .secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    asset.pinnedOffline ? Color.accentColor.opacity(0.12) : CharkleTheme.inspectorFieldSurface(for: colorScheme),
+                                    in: Capsule(style: .continuous)
+                                )
+                                .overlay(
+                                    Capsule(style: .continuous)
+                                        .strokeBorder(
+                                            asset.pinnedOffline ? Color.accentColor.opacity(0.25) : CharkleTheme.hairline(for: colorScheme),
+                                            lineWidth: 0.75
+                                        )
+                                )
+                            }
+                            .buttonStyle(CharkleTactileButtonStyle())
+                            .help(asset.pinnedOffline ? "已始终保留在本机，离线可用；点击取消" : "始终将原文件保留在本机，不会被缓存自动清理")
                         }
                     }
                 }
+            }
+        }
+    }
 
-                // Card 2: Quick Actions
-                inspectorSectionCard(asset.isTrashed ? "废纸篓操作" : "快捷操作", systemImage: asset.isTrashed ? "trash" : "bolt") {
+    private func singleAssetQuickActionsCard(
+        _ asset: AssetRecord,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            asset.isTrashed ? "废纸篓操作" : "快捷操作",
+            systemImage: asset.isTrashed ? "trash" : "bolt",
+            reorderSection: .quickActions,
+            visibleSections: visibleSections
+        ) {
                     if asset.isTrashed {
                         HStack(spacing: 8) {
                             Button {
@@ -413,14 +570,14 @@ public struct InspectorView: View {
                                 .menuStyle(.borderlessButton)
 
                                 Menu {
-                                    Button("收件箱") {
-                                        Task { await library.moveAssets([asset.id], toFolderID: nil) }
-                                    }
-                                    Divider()
-                                    ForEach(library.folders) { folder in
-                                        Button(library.folderDisplayPath(for: folder.id)) {
-                                            Task { await library.moveAssets([asset.id], toFolderID: folder.id) }
-                                        }
+                                    CharkleHierarchicalFolderMenuContent(
+                                        folders: library.folders,
+                                        includeInbox: true,
+                                        selectedFolderID: asset.folderID,
+                                        highlightSelection: true,
+                                        parentSelfPrefix: "放入"
+                                    ) { folderID in
+                                        Task { await library.moveAssets([asset.id], toFolderID: folderID) }
                                     }
                                 } label: {
                                     HStack(spacing: 4) {
@@ -439,6 +596,7 @@ public struct InspectorView: View {
                                     )
                                 }
                                 .menuStyle(.borderlessButton)
+                                .help(asset.folderID.map { "当前所在：\(library.folderDisplayPath(for: $0))" } ?? "当前所在：收件箱")
                             }
 
                             HStack(spacing: 6) {
@@ -501,9 +659,18 @@ public struct InspectorView: View {
                         }
                     }
                 }
+    }
 
-                // Card 3: Palette & Tags
-                inspectorSectionCard("色板与标签", systemImage: "swatchpalette") {
+    private func singleAssetColorsAndTagsCard(
+        _ asset: AssetRecord,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "色板与标签",
+            systemImage: "swatchpalette",
+            reorderSection: .colorsAndTags,
+            visibleSections: visibleSections
+        ) {
                     VStack(alignment: .leading, spacing: 10) {
                         if !asset.dominantColors.isEmpty || asset.mediaKind == .image || asset.mediaKind == .webBookmark {
                             VStack(alignment: .leading, spacing: 6) {
@@ -695,9 +862,18 @@ public struct InspectorView: View {
                         }
                     }
                 }
+    }
 
-                // Card 4: Notes & OCR Text
-                inspectorSectionCard("备注与识别文本", systemImage: "note.text") {
+    private func singleAssetNotesAndOCRCard(
+        _ asset: AssetRecord,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "备注与识别文本",
+            systemImage: "note.text",
+            reorderSection: .notesAndOCR,
+            visibleSections: visibleSections
+        ) {
                     VStack(alignment: .leading, spacing: 8) {
                         ZStack(alignment: .topLeading) {
                             if notesDraft.isEmpty {
@@ -755,142 +931,444 @@ public struct InspectorView: View {
                         }
                     }
                 }
+    }
 
-                // Card 5: Media & EXIF Specifications
-                inspectorSectionCard("媒体信息", systemImage: "info.circle") {
-                    VStack(spacing: 0) {
-                        specRow("类型", asset.displayTypeLabel)
+    private func singleAssetMediaSpecsCard(
+        _ asset: AssetRecord,
+        resolvedExif: PhotoExifMetadata?,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "媒体信息",
+            systemImage: "info.circle",
+            reorderSection: .mediaSpecs,
+            visibleSections: visibleSections
+        ) {
+            VStack(spacing: 0) {
+                specRow("类型", asset.displayTypeLabel)
+                inspectorRowDivider
+                specRow("尺寸", "\(asset.pixelWidth) × \(asset.pixelHeight) (\(asset.aspectShape.localizedLabel))")
+                inspectorRowDivider
+                specRow("大小", ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file))
+                if let duration = asset.durationSeconds {
+                    inspectorRowDivider
+                    specRow("时长", CanvasFormatters.durationString(duration))
+                }
+                if let exif = resolvedExif, !exif.hasMeaningfulCameraExif {
+                    if let profile = exif.colorProfile {
                         inspectorRowDivider
-                        specRow("尺寸", "\(asset.pixelWidth) × \(asset.pixelHeight) (\(asset.aspectShape.localizedLabel))")
-                        inspectorRowDivider
-                        specRow("大小", ByteCountFormatter.string(fromByteCount: asset.fileSizeBytes, countStyle: .file))
-                        if let duration = asset.durationSeconds {
+                        specRow("色彩空间", profile)
+                    }
+                    if exif.bitDepth != nil || exif.dpiWidth != nil {
+                        let depthDPI = [
+                            exif.bitDepth.map { "\($0)-bit" },
+                            exif.dpiWidth.map { "\($0) DPI" }
+                        ].compactMap { $0 }.joined(separator: " · ")
+                        if !depthDPI.isEmpty {
                             inspectorRowDivider
-                            specRow("时长", CanvasFormatters.durationString(duration))
-                        }
-                        inspectorRowDivider
-                        specRow("原文件状态", asset.isLocalOriginalCached ? "已缓存本地" : "云端按需拉取")
-                        if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
-                            inspectorRowDivider
-                            HStack {
-                                Text("来源")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Link(asset.sourceDomain ?? url.host ?? "打开链接", destination: url)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .lineLimit(1)
-                            }
-                            .padding(.vertical, 5)
+                            specRow("色深 / 分辨率", depthDPI)
                         }
                     }
                 }
+                inspectorRowDivider
+                specRow("原文件状态", asset.isLocalOriginalCached ? "已缓存本地" : "云端按需拉取")
+                if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+                    inspectorRowDivider
+                    HStack {
+                        Text("来源")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Link(asset.sourceDomain ?? url.host ?? "打开链接", destination: url)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .padding(.vertical, 5)
+                }
+            }
+        }
+    }
 
-                // Rich Media Extra Actions (GitHub Repo / Social Post Photo Extraction)
-                if let repo = asset.richMetadata?.githubRepo {
-                    inspectorSectionCard("GitHub 仓库信息", systemImage: "chevron.left.forwardslash.chevron.right") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 10) {
-                                Text("★ \(repo.stars)")
-                                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                                Text("⑂ \(repo.forks)")
-                                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.secondary)
-                                if let lang = repo.language, !lang.isEmpty {
-                                    Text(lang)
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
+    private func singleAssetGitHubRepoCard(
+        _ asset: AssetRecord,
+        repo: GitHubRepoMetadata,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "GitHub 仓库信息",
+            systemImage: "chevron.left.forwardslash.chevron.right",
+            reorderSection: .githubRepo,
+            visibleSections: visibleSections
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Text("★ \(repo.stars)")
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    Text("⑂ \(repo.forks)")
+                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    if let lang = repo.language, !lang.isEmpty {
+                        Text(lang)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                Button {
+                    onOpenQuickLook(asset)
+                } label: {
+                    Label("在应用内阅读完整 README", systemImage: "doc.richtext")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func singleAssetSocialExtractCard(
+        _ asset: AssetRecord,
+        post: SocialPostMetadata,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        let attachments = post.effectiveAttachments
+        return inspectorSectionCard(
+            "推文媒体提取",
+            systemImage: "photo.on.rectangle.angled",
+            reorderSection: .socialMediaExtract,
+            visibleSections: visibleSections
+        ) {
+            Text("\(attachments.count) 项")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+        } content: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("可将推文里的图片或视频单独存为素材，并自动保留原推文作者、正文与链接。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                if attachments.count > 1 {
+                    Button {
+                        Task {
+                            let extracted = await library.extractAllMediaFromSocialPost(postAsset: asset)
+                            if !extracted.isEmpty {
+                                coordinator.showToast("已全部提取 \(extracted.count) 项推文媒体", icon: "square.and.arrow.down.on.square")
+                            } else if let err = library.lastError {
+                                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
                             }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.and.arrow.down.on.square")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("全部提取为独立素材（\(attachments.count) 项）")
+                                .font(.system(size: 11.5, weight: .semibold))
+                            Spacer()
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6.5)
+                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
+                    let isVideoLike = attachment.kind == .video || attachment.kind == .gif
+                    Button {
+                        Task {
+                            if let extracted = await library.extractMediaFromSocialPost(
+                                postAsset: asset,
+                                attachment: attachment,
+                                index: idx
+                            ) {
+                                coordinator.showToast("已单独提取「\(extracted.title)」并保留推文来源", icon: isVideoLike ? "film" : "photo.badge.plus")
+                            } else if let err = library.lastError {
+                                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: isVideoLike ? "film" : "photo.badge.plus")
+                                .font(.system(size: 11))
+                            Text("提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材")
+                                .font(.system(size: 11.5, weight: .medium))
+                            Spacer()
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    // MARK: - AI Generation Prompt & Photo EXIF Inspector Cards
+
+    private func aiGenerationInspectorCard(
+        _ aiGen: AIGenerationMetadata,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "AI 生图信息",
+            systemImage: "sparkles.rectangle.stack",
+            reorderSection: .aiGeneration,
+            visibleSections: visibleSections
+        ) {
+            if let generator = aiGen.generator, !generator.isEmpty {
+                Text(generator)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 6.5)
+                    .padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                    .lineLimit(1)
+            }
+        } content: {
+            VStack(alignment: .leading, spacing: 9) {
+                if let prompt = aiGen.prompt, !prompt.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text("正向提示词 (Prompt)")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
                             Button {
-                                onOpenQuickLook(asset)
+                                copyInspectorText(prompt, toast: "已复制正向 Prompt")
                             } label: {
-                                Label("在应用内阅读完整 README", systemImage: "doc.richtext")
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                Label("复制", systemImage: "doc.on.doc")
+                                    .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(Color.accentColor)
                             }
                             .buttonStyle(.plain)
                         }
+
+                        Text(prompt)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.primary.opacity(0.90))
+                            .lineSpacing(3.5)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                 }
 
-                if let post = asset.richMetadata?.socialPost, !post.effectiveAttachments.isEmpty {
-                    let attachments = post.effectiveAttachments
-                    inspectorSectionCard("推文媒体提取", systemImage: "photo.on.rectangle.angled") {
-                        Text("\(attachments.count) 项")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                    } content: {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("可将推文里的图片或视频单独存为素材，并自动保留原推文作者、正文与链接。")
+                if let neg = aiGen.negativePrompt, !neg.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text("负向提示词 (Negative)")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button {
+                                copyInspectorText(neg, toast: "已复制负向 Prompt")
+                            } label: {
+                                Label("复制", systemImage: "doc.on.doc")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Text(neg)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(3)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                }
+
+                VStack(spacing: 0) {
+                    if let model = aiGen.modelName, !model.isEmpty {
+                        let modelLabel = aiGen.modelHash.map { "\(model) (\($0))" } ?? model
+                        specRow("模型", modelLabel)
+                    }
+                    if let sampler = aiGen.sampler, !sampler.isEmpty {
+                        if aiGen.modelName != nil { inspectorRowDivider }
+                        let samplerLabel = aiGen.scheduler.map { "\(sampler) / \($0)" } ?? sampler
+                        specRow("采样器", samplerLabel)
+                    }
+                    if aiGen.steps != nil || aiGen.cfgScale != nil {
+                        inspectorRowDivider
+                        let parts = [
+                            aiGen.steps.map { "\($0) 步" },
+                            aiGen.cfgScale.map { String(format: "CFG %.1f", $0).replacingOccurrences(of: ".0", with: "") }
+                        ].compactMap { $0 }.joined(separator: " · ")
+                        specRow("步数 / CFG", parts)
+                    }
+                    if let seed = aiGen.seed, !seed.isEmpty {
+                        inspectorRowDivider
+                        HStack {
+                            Text("随机种子")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
-                            if attachments.count > 1 {
-                                Button {
-                                    Task {
-                                        let extracted = await library.extractAllMediaFromSocialPost(postAsset: asset)
-                                        if !extracted.isEmpty {
-                                            coordinator.showToast("已全部提取 \(extracted.count) 项推文媒体", icon: "square.and.arrow.down.on.square")
-                                        } else if let err = library.lastError {
-                                            coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
-                                        }
-                                    }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "square.and.arrow.down.on.square")
-                                            .font(.system(size: 11, weight: .semibold))
-                                        Text("全部提取为独立素材（\(attachments.count) 项）")
-                                            .font(.system(size: 11.5, weight: .semibold))
-                                        Spacer()
-                                    }
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6.5)
-                                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            Spacer()
+                            Button {
+                                copyInspectorText(seed, toast: "已复制 Seed：\(seed)")
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(seed)
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .monospacedDigit()
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(.tertiary)
                                 }
-                                .buttonStyle(.plain)
                             }
-                            ForEach(Array(attachments.enumerated()), id: \.offset) { idx, attachment in
-                                let isVideoLike = attachment.kind == .video || attachment.kind == .gif
-                                Button {
-                                    Task {
-                                        if let extracted = await library.extractMediaFromSocialPost(
-                                            postAsset: asset,
-                                            attachment: attachment,
-                                            index: idx
-                                        ) {
-                                            coordinator.showToast("已单独提取「\(extracted.title)」并保留推文来源", icon: isVideoLike ? "film" : "photo.badge.plus")
-                                        } else if let err = library.lastError {
-                                            coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
-                                        }
-                                    }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: isVideoLike ? "film" : "photo.badge.plus")
-                                            .font(.system(size: 11))
-                                        Text("提取第 \(idx + 1) 个\(attachment.kind.localizedLabel)为独立素材")
-                                            .font(.system(size: 11.5, weight: .medium))
-                                        Spacer()
-                                    }
-                                    .foregroundStyle(Color.accentColor)
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 6)
-                                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
+                            .buttonStyle(.plain)
+                            .help("点击复制 Seed")
+                        }
+                        .padding(.vertical, 5)
+                    }
+                    if let sizeText = aiGen.sizeText, !sizeText.isEmpty {
+                        inspectorRowDivider
+                        specRow("生成尺寸", sizeText)
+                    }
+                    if let clip = aiGen.clipSkip {
+                        inspectorRowDivider
+                        specRow("Clip Skip", "\(clip)")
+                    }
+                }
+
+                if !aiGen.loras.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("LoRA")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        CharkleFlowLayout(spacing: 5, lineSpacing: 5) {
+                            ForEach(aiGen.loras, id: \.self) { lora in
+                                Text(lora)
+                                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.primary.opacity(0.85))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                             }
                         }
                     }
                 }
+
+                if let raw = aiGen.rawParameters, !raw.isEmpty {
+                    Button {
+                        copyInspectorText(raw, toast: "已复制完整生图参数")
+                    } label: {
+                        Label("复制完整生图参数", systemImage: "square.on.square")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 5.5)
+                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.65)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
         }
-        .scrollIndicators(.hidden)
+    }
+
+    private func photoExifInspectorCard(
+        _ exif: PhotoExifMetadata,
+        visibleSections: [InspectorInfoSection]
+    ) -> some View {
+        inspectorSectionCard(
+            "拍摄参数 (EXIF)",
+            systemImage: "camera.aperture",
+            reorderSection: .photoExif,
+            visibleSections: visibleSections
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let summary = exif.exposureSummary {
+                    Text(summary)
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 6.5)
+                        .padding(.horizontal, 8)
+                        .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                VStack(spacing: 0) {
+                    let rows: [(String, String)] = {
+                        var list: [(String, String)] = []
+                        if let cam = exif.cameraDisplayName { list.append(("相机", cam)) }
+                        if let lens = exif.lensModel { list.append(("镜头", lens)) }
+                        if let date = exif.capturedAt { list.append(("拍摄时间", date)) }
+                        if let focal = exif.formattedFocalLength { list.append(("焦距", focal)) }
+                        if let ap = exif.formattedAperture { list.append(("光圈", ap)) }
+                        if let exp = exif.exposureTime { list.append(("快门", exp)) }
+                        if let iso = exif.iso { list.append(("ISO", "\(iso)")) }
+                        if let ev = exif.exposureBiasEV, abs(ev) > 0.01 {
+                            list.append(("曝光补偿", String(format: "%+.1f EV", ev)))
+                        }
+                        if let metering = exif.meteringMode { list.append(("测光模式", metering)) }
+                        if let wb = exif.whiteBalance { list.append(("白平衡", wb)) }
+                        if let flash = exif.flashFired { list.append(("闪光灯", flash ? "已闪光" : "未闪光")) }
+                        if let profile = exif.colorProfile { list.append(("色彩空间", profile)) }
+                        if exif.bitDepth != nil || exif.dpiWidth != nil {
+                            let parts = [
+                                exif.bitDepth.map { "\($0)-bit" },
+                                exif.dpiWidth.map { "\($0) DPI" }
+                            ].compactMap { $0 }.joined(separator: " · ")
+                            list.append(("色深 / 分辨率", parts))
+                        }
+                        if let sw = exif.software { list.append(("软件", sw)) }
+                        if let artist = exif.artist { list.append(("作者", artist)) }
+                        if let copy = exif.copyright { list.append(("版权", copy)) }
+                        return list
+                    }()
+
+                    ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
+                        if idx > 0 { inspectorRowDivider }
+                        specRow(row.0, row.1)
+                    }
+
+                    if let lat = exif.latitude, let lon = exif.longitude {
+                        if !rows.isEmpty { inspectorRowDivider }
+                        let coordText = String(format: "%.5f, %.5f", lat, lon)
+                        let mapsURL = URL(string: "https://maps.apple.com/?ll=\(lat),\(lon)")
+                        HStack {
+                            Text("拍摄位置")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if let mapsURL {
+                                Link(destination: mapsURL) {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "mappin.and.ellipse")
+                                            .font(.system(size: 10))
+                                        Text(coordText)
+                                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                    }
+                                }
+                                .help("在 Apple 地图中查看拍摄位置")
+                            } else {
+                                Text(coordText)
+                                    .font(.system(size: 10.5, design: .monospaced))
+                            }
+                        }
+                        .padding(.vertical, 5)
+                    }
+                }
+            }
+        }
+    }
+
+    private func copyInspectorText(_ text: String, toast: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        coordinator.showToast(toast, icon: "doc.on.doc")
     }
 
     // MARK: - 2. Multi-Select Batch Inspector
@@ -979,14 +1457,12 @@ public struct InspectorView: View {
                                     .font(.system(size: 10.5, weight: .medium))
                                     .foregroundStyle(.secondary)
                                 Menu {
-                                    Button("收件箱") {
-                                        Task { await library.moveAssets(ids, toFolderID: nil) }
-                                    }
-                                    Divider()
-                                    ForEach(library.folders) { folder in
-                                        Button(library.folderDisplayPath(for: folder.id)) {
-                                            Task { await library.moveAssets(ids, toFolderID: folder.id) }
-                                        }
+                                    CharkleHierarchicalFolderMenuContent(
+                                        folders: library.folders,
+                                        includeInbox: true,
+                                        parentSelfPrefix: "放入"
+                                    ) { folderID in
+                                        Task { await library.moveAssets(ids, toFolderID: folderID) }
                                     }
                                 } label: {
                                     HStack {
@@ -1178,6 +1654,7 @@ public struct InspectorView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
+            .charkleCleanScrollbars(hidden: true)
         }
         .scrollIndicators(.hidden)
     }
@@ -1543,6 +2020,7 @@ public struct InspectorView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
+            .charkleCleanScrollbars(hidden: true)
             .animation(
                 CharkleMotion.enterExit(moodboards.swappingNodeID != nil, reduced: reduceMotion),
                 value: moodboards.swappingNodeID != nil
@@ -1819,14 +2297,17 @@ public struct InspectorView: View {
         return content()
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(CharkleTheme.surfaceElevated(for: colorScheme), in: shape)
+            .background {
+                shape
+                    .fill(CharkleTheme.surfaceElevated(for: colorScheme))
+                    .shadow(
+                        color: Color.black.opacity(colorScheme == .dark ? 0.22 : 0.035),
+                        radius: 3,
+                        y: 1
+                    )
+            }
             .overlay(
                 shape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
-            )
-            .shadow(
-                color: Color.black.opacity(colorScheme == .dark ? 0.22 : 0.035),
-                radius: 3,
-                y: 1
             )
     }
 
@@ -1834,12 +2315,14 @@ public struct InspectorView: View {
         _ title: String,
         systemImage: String,
         iconColor: Color? = nil,
+        reorderSection: InspectorInfoSection? = nil,
+        visibleSections: [InspectorInfoSection] = [],
         @ViewBuilder trailing: () -> Trailing,
         @ViewBuilder content: () -> Content
     ) -> some View {
         inspectorCard(padding: 12) {
             VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 5) {
+                let headerRow = HStack(spacing: 5) {
                     Image(systemName: systemImage)
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(iconColor ?? .secondary)
@@ -1848,7 +2331,94 @@ public struct InspectorView: View {
                         .foregroundStyle(.primary.opacity(0.84))
                     Spacer(minLength: 4)
                     trailing()
+                    if let section = reorderSection {
+                        InspectorDragGripDots(
+                            isHighlighted: hoveredInspectorSection == section || draggingInspectorSection == section
+                        )
+                        .padding(.leading, 2)
+                    }
                 }
+                .contentShape(Rectangle())
+
+                if let section = reorderSection {
+                    let visIdx = visibleSections.firstIndex(of: section)
+                    let isFirst = (visIdx == 0)
+                    let isLast = (visIdx != nil && visIdx == visibleSections.count - 1)
+
+                    headerRow
+                        .help("按住标题栏拖拽可自由调整排序 · 右键可快速置顶或恢复默认")
+                        .onDrag {
+                            draggingInspectorSection = section
+                            return NSItemProvider(object: "charkle-inspector-card:\(section.rawValue)" as NSString)
+                        } preview: {
+                            HStack(spacing: 6) {
+                                Image(systemName: systemImage)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                Text(title)
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(CharkleTheme.surfaceElevated(for: colorScheme), in: Capsule(style: .continuous))
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 0.75)
+                            )
+                        }
+                        .contextMenu {
+                            Button {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+                                    coordinator.moveInspectorSectionToTop(section)
+                                }
+                            } label: {
+                                Label("移到最顶部", systemImage: "arrow.up.to.line")
+                            }
+                            .disabled(isFirst)
+
+                            Button {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+                                    coordinator.stepInspectorSection(section, delta: -1, visibleSections: visibleSections)
+                                }
+                            } label: {
+                                Label("上移一项", systemImage: "arrow.up")
+                            }
+                            .disabled(isFirst)
+
+                            Button {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+                                    coordinator.stepInspectorSection(section, delta: 1, visibleSections: visibleSections)
+                                }
+                            } label: {
+                                Label("下移一项", systemImage: "arrow.down")
+                            }
+                            .disabled(isLast)
+
+                            Button {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+                                    coordinator.moveInspectorSectionToBottom(section)
+                                }
+                            } label: {
+                                Label("移到最底部", systemImage: "arrow.down.to.line")
+                            }
+                            .disabled(isLast)
+
+                            if coordinator.isInspectorSectionOrderCustomized {
+                                Divider()
+                                Button {
+                                    withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+                                        coordinator.resetInspectorSectionOrder()
+                                    }
+                                    coordinator.showToast("已恢复信息栏默认排序", icon: "arrow.counterclockwise")
+                                } label: {
+                                    Label("恢复默认排序", systemImage: "arrow.counterclockwise")
+                                }
+                            }
+                        }
+                } else {
+                    headerRow
+                }
+
                 content()
             }
         }
@@ -1858,9 +2428,17 @@ public struct InspectorView: View {
         _ title: String,
         systemImage: String,
         iconColor: Color? = nil,
+        reorderSection: InspectorInfoSection? = nil,
+        visibleSections: [InspectorInfoSection] = [],
         @ViewBuilder content: () -> Content
     ) -> some View {
-        inspectorSectionCard(title, systemImage: systemImage, iconColor: iconColor) {
+        inspectorSectionCard(
+            title,
+            systemImage: systemImage,
+            iconColor: iconColor,
+            reorderSection: reorderSection,
+            visibleSections: visibleSections
+        ) {
             EmptyView()
         } content: {
             content()
@@ -1987,5 +2565,63 @@ public struct InspectorView: View {
                 return hay.contains(q)
             }
             .sorted { $0.createdAt > $1.createdAt }
+    }
+}
+
+// MARK: - Drag-to-Reorder Helpers for Single-Asset Inspector Cards
+
+private struct InspectorDragGripDots: View {
+    let isHighlighted: Bool
+
+    var body: some View {
+        VStack(spacing: 2.2) {
+            ForEach(0..<3, id: \.self) { _ in
+                HStack(spacing: 2.2) {
+                    Circle().frame(width: 2.2, height: 2.2)
+                    Circle().frame(width: 2.2, height: 2.2)
+                }
+            }
+        }
+        .foregroundStyle(Color.primary.opacity(isHighlighted ? 0.56 : 0.22))
+        .padding(.horizontal, 3)
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct InspectorSectionDropDelegate: DropDelegate {
+    let targetSection: InspectorInfoSection
+    @Binding var draggingSection: InspectorInfoSection?
+    let reduceMotion: Bool
+    let onMove: (InspectorInfoSection, InspectorInfoSection) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggingSection != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let dragged = draggingSection, dragged != targetSection else { return }
+        withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
+            onMove(dragged, targetSection)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        draggingSection != nil ? DropProposal(operation: .move) : DropProposal(operation: .cancel)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingSection = nil
+        return true
+    }
+
+    func dropExited(info: DropInfo) {
+        // Guard against drags cancelled outside the window so the source card never remains dimmed.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            if draggingSection != nil && NSEvent.pressedMouseButtons == 0 {
+                draggingSection = nil
+            }
+        }
     }
 }

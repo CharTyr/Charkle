@@ -805,21 +805,14 @@ public struct GalleryFilmstripView: View {
             }
 
             Menu {
-                Button {
-                    onMoveToFolder(targetIDs, nil)
-                } label: {
-                    Label("收件箱", systemImage: "tray")
-                }
-
-                if !folders.isEmpty {
-                    Divider()
-                    ForEach(folders) { folder in
-                        Button {
-                            onMoveToFolder(targetIDs, folder.id)
-                        } label: {
-                            Label(folder.name, systemImage: "folder")
-                        }
-                    }
+                CharkleHierarchicalFolderMenuContent(
+                    folders: folders,
+                    includeInbox: true,
+                    selectedFolderID: targetIDs.count == 1 ? item.folderID : nil,
+                    highlightSelection: targetIDs.count == 1,
+                    parentSelfPrefix: "放入"
+                ) { folderID in
+                    onMoveToFolder(targetIDs, folderID)
                 }
             } label: {
                 Label("移动到文件夹\(countSuffix)", systemImage: "folder.badge.plus")
@@ -866,7 +859,8 @@ public struct GalleryFilmstripView: View {
 
     private func applyWheelZoom(factor: CGFloat) {
         guard supportsVisualTransform else { return }
-        let next = max(0.5, min(5.0, zoomScale * factor))
+        let ceiling = maxZoomLimit
+        let next = max(0.5, min(ceiling, zoomScale * factor))
         zoomScale = next
         if next <= 1.01 {
             panOffset = .zero
@@ -874,10 +868,17 @@ public struct GalleryFilmstripView: View {
         }
     }
 
+    private var maxZoomLimit: CGFloat {
+        guard let asset = activeAsset else { return 6.0 }
+        let longest = max(asset.pixelWidth, asset.pixelHeight)
+        return max(6.0, min(16.0, CGFloat(longest) / 550.0))
+    }
+
     private func stepZoom(by factor: CGFloat) {
         guard supportsVisualTransform else { return }
+        let ceiling = maxZoomLimit
         withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-            let next = max(0.5, min(5.0, zoomScale * factor))
+            let next = max(0.5, min(ceiling, zoomScale * factor))
             zoomScale = next
             if next <= 1.01 {
                 panOffset = .zero
@@ -1014,16 +1015,32 @@ public struct GalleryFilmstripView: View {
     private func loadPreview(for id: UUID) {
         previewLoadTask?.cancel()
         activeOriginalURL = nil
-        if let cached = loader.cachedImage(for: id, tier: .preview1400) ?? loader.cachedImage(for: id, tier: .grid520) {
+        if let cachedOrig = loader.cachedOriginalImage(for: id) {
+            previewImage = cachedOrig
+        } else if let cached = loader.cachedImage(for: id, tier: .preview1400) ?? loader.cachedImage(for: id, tier: .grid520) {
             previewImage = cached
         } else {
             previewImage = nil
         }
+        let targetAsset = assets.first(where: { $0.id == id })
         previewLoadTask = Task {
             let orig = await resolveOriginalURL(id)
             guard !Task.isCancelled else { return }
             activeOriginalURL = orig
-            if let img = await loader.loadImage(for: id, tier: .preview1400) {
+
+            let wantsOriginalRaster = targetAsset.map {
+                !$0.isGitHubRepo && !$0.isSocialPost && ($0.mediaKind == .image || $0.mediaKind == .designFile)
+            } ?? true
+
+            if wantsOriginalRaster, let orig,
+               let fullImage = await loader.loadOriginalImage(for: id, url: orig) {
+                guard !Task.isCancelled else { return }
+                previewImage = fullImage
+                return
+            }
+
+            if previewImage == nil || targetAsset?.mediaKind != .webBookmark,
+               let img = await loader.loadImage(for: id, tier: .preview1400) {
                 guard !Task.isCancelled else { return }
                 previewImage = img
             }

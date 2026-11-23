@@ -526,6 +526,11 @@ private final class MasonryScrollView: NSScrollView {
     let masonryDocument = MasonryDocumentView()
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
+    override var scrollerStyle: NSScroller.Style {
+        get { .overlay }
+        set { super.scrollerStyle = .overlay }
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         configure()
@@ -591,6 +596,16 @@ private final class MasonryScrollView: NSScrollView {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.masonryDocument.handleViewportFrameChanged()
+            }
+        })
+        observers.append(nc.addObserver(
+            forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.scrollerStyle = .overlay
+                self?.autohidesScrollers = true
             }
         })
         observers.append(nc.addObserver(
@@ -1097,6 +1112,34 @@ private final class MasonryTileLayer {
         opAnim.duration = duration * 0.85
         opAnim.timingFunction = timing
         layer.add(opAnim, forKey: "charkle.enterOpacity")
+    }
+
+    /// Fast geometry-only frame update used during sidebar/inspector drawer animations and live window resize,
+    /// avoiding redundant selection, badge, color, and thumbnail cache work on every frame.
+    func updateFrameOnly(_ rect: CGRect) {
+        layer.frame = rect
+        let localBounds = CGRect(origin: .zero, size: rect.size)
+        clipLayer.frame = localBounds
+        imageLayer.frame = localBounds
+        borderLayer.frame = localBounds
+
+        if lastShadowSize != rect.size {
+            lastShadowSize = rect.size
+            layer.shadowPath = CGPath(roundedRect: localBounds, cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+            cutDashLayer.frame = localBounds
+            cutDashLayer.path = CGPath(roundedRect: localBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+        }
+
+        var rightCursor = rect.width - 6
+        if !mediaBadgeLayer.isHidden {
+            let w = mediaBadgeLayer.bounds.width
+            let h = mediaBadgeLayer.bounds.height
+            mediaBadgeLayer.frame = CGRect(x: rightCursor - w, y: 6, width: w, height: h)
+            rightCursor -= (w + 4)
+        }
+        if !pinBadgeLayer.isHidden {
+            pinBadgeLayer.frame = CGRect(x: rightCursor - 18, y: 6, width: 18, height: 18)
+        }
     }
 
     func configure(
@@ -1611,7 +1654,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let width = floor(clipView.bounds.width)
         guard width > 120 else { return }
         if abs(width - lastLayoutWidth) >= 1 {
-            recomputeLayout(animate: false)
+            recomputeLayout(animate: false, reconfigureExisting: false)
         } else {
             updateDocumentHeight(clipHeight: clipView.bounds.height)
             syncVisibleTiles()
@@ -1644,7 +1687,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     private func recomputeLayout(
         animate: Bool,
         animateNewTiles: Bool = false,
-        animationDuration: CFTimeInterval = 0.26
+        animationDuration: CFTimeInterval = 0.26,
+        reconfigureExisting: Bool = true
     ) {
         let clipBounds = enclosingScrollView?.contentView.bounds ?? bounds
         let width = max(240, floor(clipBounds.width > 120 ? clipBounds.width : max(lastLayoutWidth, 960)))
@@ -1663,7 +1707,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         updateDocumentHeight(clipHeight: clipBounds.height)
         syncVisibleTiles(
-            forceReconfigure: true,
+            forceReconfigure: reconfigureExisting,
             animateMoves: animate && !isLiveScrolling,
             animateNewTiles: animateNewTiles && !isLiveScrolling,
             animationDuration: animationDuration
@@ -1725,7 +1769,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
             if let existing = activeTiles[asset.id] {
                 let previousRect = existing.frame
-                if forceReconfigure || previousRect != itemFrame.rect {
+                if forceReconfigure {
                     existing.configure(
                         asset: asset,
                         frame: itemFrame.rect,
@@ -1738,6 +1782,11 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                         forceReloadImage: forceReloadImages
                     )
                     if animateMoves && previousRect != itemFrame.rect {
+                        existing.animateFrameTransition(from: previousRect, to: itemFrame.rect, duration: animationDuration)
+                    }
+                } else if previousRect != itemFrame.rect {
+                    existing.updateFrameOnly(itemFrame.rect)
+                    if animateMoves {
                         existing.animateFrameTransition(from: previousRect, to: itemFrame.rect, duration: animationDuration)
                     }
                 }
@@ -2199,16 +2248,25 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             let moveItem = NSMenuItem(title: "移动到文件夹", action: nil, keyEquivalent: "")
             moveItem.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: nil)
             let moveSubmenu = NSMenu()
-            moveSubmenu.addItem(makeMenuItem(title: "收件箱", symbol: "tray") { [weak self] in
+            let currentSingleFolderID: UUID? = targets.count == 1 ? asset.folderID : nil
+            let highlightCurrent = targets.count == 1
+            let inboxItem = makeMenuItem(title: "收件箱", symbol: "tray") { [weak self] in
                 self?.callbacks.onMoveToFolder(targets, nil)
-            })
-            if !folders.isEmpty {
+            }
+            if highlightCurrent && currentSingleFolderID == nil {
+                inboxItem.state = .on
+            }
+            moveSubmenu.addItem(inboxItem)
+            let folderRoots = FolderHierarchyNode.buildTree(from: folders)
+            if !folderRoots.isEmpty {
                 moveSubmenu.addItem(.separator())
-                for folder in folders {
-                    moveSubmenu.addItem(makeMenuItem(title: folder.name, symbol: "folder") { [weak self] in
-                        self?.callbacks.onMoveToFolder(targets, folder.id)
-                    })
-                }
+                populateHierarchicalFolderMenu(
+                    moveSubmenu,
+                    nodes: folderRoots,
+                    targets: targets,
+                    currentFolderID: highlightCurrent ? currentSingleFolderID : nil,
+                    highlightCurrent: highlightCurrent
+                )
             }
             moveItem.submenu = moveSubmenu
             menu.addItem(moveItem)
@@ -2232,6 +2290,54 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             })
         }
         return menu
+    }
+
+    private func populateHierarchicalFolderMenu(
+        _ menu: NSMenu,
+        nodes: [FolderHierarchyNode],
+        targets: [UUID],
+        currentFolderID: UUID?,
+        highlightCurrent: Bool
+    ) {
+        for node in nodes {
+            let folder = node.folder
+            if node.hasChildren {
+                let isBranchSelected = highlightCurrent && node.contains(folderID: currentFolderID)
+                let parentItem = NSMenuItem(
+                    title: isBranchSelected ? "\(folder.name) •" : folder.name,
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                parentItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+
+                let submenu = NSMenu()
+                let selfItem = makeMenuItem(title: "放入「\(folder.name)」", symbol: "folder.badge.plus") { [weak self] in
+                    self?.callbacks.onMoveToFolder(targets, folder.id)
+                }
+                if highlightCurrent && currentFolderID == folder.id {
+                    selfItem.state = .on
+                }
+                submenu.addItem(selfItem)
+                submenu.addItem(.separator())
+                populateHierarchicalFolderMenu(
+                    submenu,
+                    nodes: node.children,
+                    targets: targets,
+                    currentFolderID: currentFolderID,
+                    highlightCurrent: highlightCurrent
+                )
+                parentItem.submenu = submenu
+                menu.addItem(parentItem)
+            } else {
+                let leafItem = makeMenuItem(title: folder.name, symbol: "folder") { [weak self] in
+                    self?.callbacks.onMoveToFolder(targets, folder.id)
+                }
+                if highlightCurrent && currentFolderID == folder.id {
+                    leafItem.state = .on
+                }
+                menu.addItem(leafItem)
+            }
+        }
     }
 
     // MARK: - Keyboard Shortcuts (When Masonry Is Focused)

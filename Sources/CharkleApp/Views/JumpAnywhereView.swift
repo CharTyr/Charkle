@@ -70,9 +70,7 @@ public struct JumpAnywhereView: View {
 
     public var body: some View {
         ZStack(alignment: .top) {
-            Color.black.opacity(colorScheme == .dark ? 0.38 : 0.22)
-                .ignoresSafeArea()
-                .onTapGesture { onClose() }
+            CharkleModalBackdrop(onTap: onClose)
 
             VStack(spacing: 0) {
                 // Search Input Header
@@ -173,6 +171,7 @@ public struct JumpAnywhereView: View {
                         }
                     }
                     .padding(.vertical, 6)
+                    .charkleCleanScrollbars(hidden: false)
                 }
                 .frame(maxHeight: 360)
             }
@@ -180,6 +179,7 @@ public struct JumpAnywhereView: View {
             .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
             .padding(.top, 92)
         }
+        .ignoresSafeArea(.all)
         .onAppear {
             isSearchFocused = true
             runSearch()

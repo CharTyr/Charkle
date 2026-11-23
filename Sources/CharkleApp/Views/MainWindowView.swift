@@ -10,7 +10,6 @@ import UniformTypeIdentifiers
 public struct MainWindowView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.openSettings) private var openSettings
 
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
@@ -19,6 +18,9 @@ public struct MainWindowView: View {
     public let onToggleNotch: () -> Void
     public let onCaptureArea: () -> Void
     public let onCollectClipboard: () -> Void
+    public let onSyncHotkeysEnabled: (Bool) -> Void
+    public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
+    public let onAppReady: () -> Void
 
     @Namespace private var heroNamespace
 
@@ -29,7 +31,6 @@ public struct MainWindowView: View {
     @State private var pendingPermanentDeleteIDs: [UUID] = []
     @State private var showCreateSubfolderPopover: Bool = false
     @State private var subfolderNameDraft: String = ""
-    @State private var showFigmaPluginGuideSheet: Bool = false
     @State private var showInboxBatchTriageSheet: Bool = false
     @State private var selectedTriageIDs: Set<UUID> = []
     @FocusState private var isSubfolderFieldFocused: Bool
@@ -47,7 +48,10 @@ public struct MainWindowView: View {
         syncAndAI: SyncAndAIStore,
         onToggleNotch: @escaping () -> Void,
         onCaptureArea: @escaping () -> Void,
-        onCollectClipboard: @escaping () -> Void
+        onCollectClipboard: @escaping () -> Void,
+        onSyncHotkeysEnabled: @escaping (Bool) -> Void = { _ in },
+        onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
+        onAppReady: @escaping () -> Void = {}
     ) {
         self.coordinator = coordinator
         self.library = library
@@ -56,6 +60,9 @@ public struct MainWindowView: View {
         self.onToggleNotch = onToggleNotch
         self.onCaptureArea = onCaptureArea
         self.onCollectClipboard = onCollectClipboard
+        self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
+        self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
+        self.onAppReady = onAppReady
     }
 
     public var body: some View {
@@ -122,10 +129,7 @@ public struct MainWindowView: View {
                 .disabled(!isSidebarVisible)
                 .accessibilityHidden(!isSidebarVisible)
                 .frame(width: isSidebarVisible ? (sidebarTargetWidth + 1) : 0, alignment: .trailing)
-                .mask {
-                    Rectangle()
-                        .ignoresSafeArea(.container, edges: .top)
-                }
+                .clipped()
                 .layoutPriority(1)
 
                 centerWorkspace
@@ -159,7 +163,9 @@ public struct MainWindowView: View {
                         exportCurrentBoardToFigmaBundle(options: MoodboardExportOptions(darkAppearance: colorScheme == .dark))
                     },
                     onOpenFigmaPluginGuide: {
-                        showFigmaPluginGuideSheet = true
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                            coordinator.openSettings(tab: .extensions)
+                        }
                     }
                 )
                 .frame(width: 300)
@@ -169,10 +175,7 @@ public struct MainWindowView: View {
                 .disabled(!coordinator.isInspectorVisible)
                 .accessibilityHidden(!coordinator.isInspectorVisible)
                 .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
-                .mask {
-                    Rectangle()
-                        .ignoresSafeArea(.container, edges: .top)
-                }
+                .clipped()
                 .layoutPriority(1)
             }
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidebarVisible)
@@ -189,7 +192,7 @@ public struct MainWindowView: View {
                     coordinator: coordinator,
                     heroNamespace: heroNamespace,
                     onClose: {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                             coordinator.closeQuickLook()
                         }
                     },
@@ -217,6 +220,47 @@ public struct MainWindowView: View {
                     }
                 )
                 .zIndex(250)
+            }
+
+            // Centered Refto-Inspired Settings Overlay (⌘, or bottom-left sidebar gear)
+            if coordinator.isSettingsPresented {
+                SettingsOverlayView(
+                    coordinator: coordinator,
+                    library: library,
+                    syncAndAI: syncAndAI,
+                    onToggleNotchPreview: onToggleNotch,
+                    onSyncHotkeysEnabled: onSyncHotkeysEnabled,
+                    onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
+                    onClose: {
+                        withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
+                            coordinator.closeSettings()
+                        }
+                    }
+                )
+                .zIndex(260)
+                .transition(.opacity)
+            }
+
+            // First-Launch & Re-Runnable Onboarding Studio
+            if coordinator.isOnboardingPresented {
+                OnboardingView(
+                    coordinator: coordinator,
+                    syncAndAI: syncAndAI,
+                    onToggleNotchPreview: onToggleNotch,
+                    onSyncHotkeysEnabled: onSyncHotkeysEnabled,
+                    onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
+                    onOpenSettings: { tab in
+                        coordinator.openSettings(tab: tab)
+                    },
+                    onFinish: {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.exitMd, reduced: reduceMotion)) {
+                            coordinator.completeOnboarding()
+                        }
+                    }
+                )
+                .id(coordinator.onboardingRunID)
+                .zIndex(280)
+                .transition(.opacity)
             }
 
             // Floating Toasts (Top-Trailing, Kubai Tip 011 enterSm / exitSm)
@@ -253,6 +297,24 @@ public struct MainWindowView: View {
             .zIndex(300)
             .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: coordinator.toasts)
         }
+        .animation(
+            CharkleMotion.enterExit(
+                coordinator.isOnboardingPresented,
+                enter: CharkleMotion.enterLg,
+                exit: CharkleMotion.exitMd,
+                reduced: reduceMotion
+            ),
+            value: coordinator.isOnboardingPresented
+        )
+        .animation(
+            CharkleMotion.enterExit(
+                coordinator.isSettingsPresented,
+                enter: CharkleMotion.enterMd,
+                exit: CharkleMotion.exitMd,
+                reduced: reduceMotion
+            ),
+            value: coordinator.isSettingsPresented
+        )
         .sheet(isPresented: Binding(
             get: { coordinator.isMoodboardGeneratorPresented },
             set: { coordinator.isMoodboardGeneratorPresented = $0 }
@@ -263,9 +325,6 @@ public struct MainWindowView: View {
                 moodboards: moodboards,
                 syncAndAI: syncAndAI
             )
-        }
-        .sheet(isPresented: $showFigmaPluginGuideSheet) {
-            figmaPluginGuideSheet
         }
         .sheet(isPresented: $showInboxBatchTriageSheet) {
             inboxBatchTriageSheet
@@ -309,12 +368,14 @@ public struct MainWindowView: View {
             Text("彻底删除后将无法从废纸篓恢复。")
         }
         .task {
+            onAppReady()
             await library.bootstrap()
             await moodboards.refreshBoards()
             await syncAndAI.loadAll()
             if coordinator.activeMoodboardID == nil {
                 coordinator.activeMoodboardID = moodboards.boards.first?.id
             }
+            coordinator.presentOnboardingIfFirstLaunch()
         }
         .onChange(of: searchDraft) { _, newValue in
             library.filter.searchQuery = newValue
@@ -681,10 +742,11 @@ public struct MainWindowView: View {
         }
         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: library.selectedAssetIDs.count >= 2)
         .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
+            let orderedFolders = library.flattenedFolderHierarchy.map(\.folder)
             guard isInbox, press.modifiers.isEmpty,
                   let digit = Int(press.characters),
-                  digit >= 1, digit <= library.folders.count else { return .ignored }
-            let targetFolder = library.folders[digit - 1]
+                  digit >= 1, digit <= orderedFolders.count else { return .ignored }
+            let targetFolder = orderedFolders[digit - 1]
             let targetIDs: [UUID] = if !library.selectedAssetIDs.isEmpty {
                 Array(library.selectedAssetIDs)
             } else if let first = library.assets.first {
@@ -695,7 +757,7 @@ public struct MainWindowView: View {
             guard !targetIDs.isEmpty else { return .ignored }
             Task {
                 await library.moveAssets(targetIDs, toFolderID: targetFolder.id)
-                coordinator.showToast("已快捷键归档至「\(targetFolder.name)」", icon: "folder.fill")
+                coordinator.showToast("已快捷键归档至「\(library.folderDisplayPath(for: targetFolder.id))」", icon: "folder.fill")
             }
             return .handled
         }
@@ -906,7 +968,12 @@ public struct MainWindowView: View {
                 // Isolated Sync Status Pill so 20Hz live sync progress updates never re-render MainWindowView or VirtualizedMasonryView
                 FloatingSyncStatusPill(
                     syncAndAI: syncAndAI,
-                    onOpenSettings: { openSettings() },
+                    onOpenSettings: {
+                        let targetTab: CharkleSettingsTab = syncAndAI.syncConfig.mode == .localOnly ? .library : .sync
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                            coordinator.openSettings(tab: targetTab)
+                        }
+                    },
                     onTriggerManualSync: triggerManualCloudSync
                 )
 
@@ -1281,6 +1348,7 @@ public struct MainWindowView: View {
                             .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                     }
+                    .charkleCleanScrollbars(hidden: false)
                 }
                 .frame(maxHeight: 360)
             }
@@ -1390,15 +1458,17 @@ public struct MainWindowView: View {
                 .help("使用 TypeSafe Jev (Choice + 伴随 Noul) 批量识别收件箱素材并推荐归档目录")
             }
 
-            // Quick 1–9 Folder Archive Chips
+            // Quick 1–9 Folder Archive Chips (in deterministic tree order + full hierarchical menu)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 5) {
-                    ForEach(Array(library.folders.prefix(9).enumerated()), id: \.element.id) { idx, folder in
+                    let orderedNodes = Array(library.flattenedFolderHierarchy.prefix(9))
+                    ForEach(Array(orderedNodes.enumerated()), id: \.element.id) { idx, node in
+                        let folder = node.folder
                         Button {
                             guard !targetIDs.isEmpty else { return }
                             Task {
                                 await library.moveAssets(targetIDs, toFolderID: folder.id)
-                                coordinator.showToast("已归档至「\(folder.name)」", icon: "folder.fill")
+                                coordinator.showToast("已归档至「\(library.folderDisplayPath(for: folder.id))」", icon: "folder.fill")
                             }
                         } label: {
                             HStack(spacing: 4) {
@@ -1407,7 +1477,7 @@ public struct MainWindowView: View {
                                     .foregroundStyle(.secondary)
                                     .frame(width: 14, height: 14)
                                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                                Text(folder.name)
+                                Text(node.depth > 0 ? "↳ \(folder.name)" : folder.name)
                                     .font(.system(size: 11, weight: .medium))
                             }
                             .padding(.horizontal, 8)
@@ -1415,6 +1485,36 @@ public struct MainWindowView: View {
                             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         }
                         .buttonStyle(CharkleTactileButtonStyle())
+                        .help(library.folderDisplayPath(for: folder.id))
+                    }
+
+                    if !library.folders.isEmpty {
+                        Menu {
+                            CharkleHierarchicalFolderMenuContent(
+                                folders: library.folders,
+                                includeInbox: false,
+                                parentSelfPrefix: "归档至"
+                            ) { folderID in
+                                guard !targetIDs.isEmpty, let folderID else { return }
+                                Task {
+                                    await library.moveAssets(targetIDs, toFolderID: folderID)
+                                    coordinator.showToast("已归档至「\(library.folderDisplayPath(for: folderID))」", icon: "folder.fill")
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 10, weight: .medium))
+                                Text("全部目录")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
                     }
                 }
             }
@@ -1792,14 +1892,15 @@ public struct MainWindowView: View {
                     .buttonStyle(CharkleTactileButtonStyle())
 
                     Menu {
-                        Button("收件箱") { Task { await library.moveAssets(ids, toFolderID: nil) } }
-                        Divider()
-                        ForEach(library.folders) { folder in
-                            Button(library.folderDisplayPath(for: folder.id)) {
-                                Task {
-                                    await library.moveAssets(ids, toFolderID: folder.id)
-                                    coordinator.showToast("已移动到「\(folder.name)」", icon: "folder")
-                                }
+                        CharkleHierarchicalFolderMenuContent(
+                            folders: library.folders,
+                            includeInbox: true,
+                            parentSelfPrefix: "放入"
+                        ) { folderID in
+                            Task {
+                                await library.moveAssets(ids, toFolderID: folderID)
+                                let dest = folderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
+                                coordinator.showToast("已移动到「\(dest)」", icon: "folder")
                             }
                         }
                     } label: {
@@ -1997,6 +2098,7 @@ public struct MainWindowView: View {
                 }
             }
             .padding(24)
+            .charkleCleanScrollbars(hidden: false)
         }
         .charkleScrollEdgeSoft(for: .top)
         .background(CharkleTheme.galleryGround(for: colorScheme))
@@ -2211,7 +2313,9 @@ public struct MainWindowView: View {
                         exportCurrentBoardToFigmaBundle(options: options)
                     },
                     onOpenFigmaPluginGuide: {
-                        showFigmaPluginGuideSheet = true
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                            coordinator.openSettings(tab: .extensions)
+                        }
                     },
                     onSmartFocusNode: { nodeID, assetID, query in
                         let label = query.map { "正在定位「\($0)」…" } ?? "正在识别画面主体…"
@@ -2347,9 +2451,8 @@ public struct MainWindowView: View {
     }
 
     private func openQuickLook(_ asset: AssetRecord) {
-        library.markAssetOpened(asset.id)
         let playlist = library.assets.map(\.id)
-        withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
+        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
             coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
         }
     }
@@ -2433,94 +2536,6 @@ public struct MainWindowView: View {
                 )
             } catch {
                 coordinator.showToast("导出 Figma 包失败：\(error.localizedDescription)", icon: "exclamationmark.triangle", tone: .error)
-            }
-        }
-    }
-
-    private var figmaPluginGuideSheet: some View {
-        let pluginDir = FigmaBridgeExporter.bundledPluginDirectoryURL()
-        let manifestPath = pluginDir?.appending(path: "manifest.json").path
-
-        return VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.14))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: "puzzlepiece.extension.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(Color.accentColor)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Charkle → Figma / FigJam Bridge 插件")
-                        .font(.system(size: 15.5, weight: .semibold))
-                    Text("纯本地离线导入，无需 API 密钥；保留独立图层、原图像素、GIF、便签、分组、色卡与连线。")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 10) {
-                figmaGuideStep(number: "1", title: "在 Figma 桌面端导入本地插件（仅首次需要）", detail: "打开 Figma 桌面端的 Design 或 FigJam 文件，菜单栏选择：Plugins → Development → Import plugin from manifest…")
-                figmaGuideStep(number: "2", title: "选择 Charkle 内置的 manifest.json", detail: manifestPath ?? "未找到内置插件目录，请使用正式打包的 Charkle.app。")
-                figmaGuideStep(number: "3", title: "导入 .charkleboard 文件", detail: "在情绪板底部「导出」菜单导出 .charkleboard 文件，然后在 Figma 运行「Charkle → Figma Bridge」拖入即可。")
-            }
-
-            if let pluginDir, let manifestPath {
-                HStack(spacing: 10) {
-                    Button {
-                        NSWorkspace.shared.activateFileViewerSelecting([pluginDir.appending(path: "manifest.json")])
-                    } label: {
-                        Label("在访达中定位 manifest.json", systemImage: "folder")
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Button {
-                        let pb = NSPasteboard.general
-                        pb.clearContents()
-                        pb.setString(manifestPath, forType: .string)
-                        coordinator.showToast("已复制插件 manifest.json 路径", icon: "doc.on.doc")
-                    } label: {
-                        Label("复制路径", systemImage: "doc.on.doc")
-                    }
-                    .buttonStyle(.bordered)
-
-                    Spacer()
-
-                    Button("完成") {
-                        showFigmaPluginGuideSheet = false
-                    }
-                    .buttonStyle(.bordered)
-                }
-            } else {
-                HStack {
-                    Spacer()
-                    Button("关闭") { showFigmaPluginGuideSheet = false }
-                        .buttonStyle(.borderedProminent)
-                }
-            }
-        }
-        .padding(22)
-        .frame(width: 540)
-    }
-
-    private func figmaGuideStep(number: String, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(number)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 20, height: 20)
-                .background(Color.accentColor, in: Circle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 12.5, weight: .semibold))
-                Text(detail)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
             }
         }
     }

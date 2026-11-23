@@ -55,6 +55,8 @@ public final class LibraryStore {
     public var lastError: String?
 
     private var inspectorContextTask: Task<Void, Never>?
+    @ObservationIgnored private var metadataHydrationAttemptedIDs: Set<UUID> = []
+    @ObservationIgnored private var imageMetadataCache: [UUID: ExtractedImageMetadata] = [:]
     private var retagTask: Task<RetagBatchOutcome, Never>?
     @ObservationIgnored private var enrichmentObserver: NSObjectProtocol?
     private static let recentTagsDefaultsKey = "com.charkle.recentlyTouchedTags"
@@ -729,14 +731,15 @@ public final class LibraryStore {
     }
 
     public func childFolders(of parentID: UUID?) -> [FolderRecord] {
-        folders
-            .filter { $0.parentID == parentID }
-            .sorted { lhs, rhs in
-                if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
-                let cmp = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
-                if cmp != .orderedSame { return cmp == .orderedAscending }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
+        FolderHierarchyNode.sortedSiblings(folders.filter { $0.parentID == parentID })
+    }
+
+    public var folderHierarchyRoots: [FolderHierarchyNode] {
+        FolderHierarchyNode.buildTree(from: folders)
+    }
+
+    public var flattenedFolderHierarchy: [FolderHierarchyNode] {
+        FolderHierarchyNode.flattened(from: folders)
     }
 
     public func folderBreadcrumbs(for folderID: UUID) -> [FolderRecord] {
@@ -936,6 +939,50 @@ public final class LibraryStore {
             } catch {
                 // Non-fatal in inspector context
             }
+        }
+    }
+
+    /// Synchronously resolves EXIF & AI generation metadata on Frame 0 (from DB, memory cache,
+    /// or fast local file header read) so switching assets in the Inspector NEVER flashes or shifts cards.
+    public func resolvedImageMetadata(for asset: AssetRecord) -> ExtractedImageMetadata {
+        if asset.richMetadata?.photoExif != nil || asset.richMetadata?.aiGeneration != nil {
+            return ExtractedImageMetadata(
+                photoExif: asset.richMetadata?.photoExif,
+                aiGeneration: asset.richMetadata?.aiGeneration
+            )
+        }
+        if let cached = imageMetadataCache[asset.id] {
+            return cached
+        }
+        guard asset.mediaKind == .image || asset.mediaKind == .animatedImage || asset.mediaKind == .designFile,
+              asset.isLocalOriginalCached,
+              let orig = engine.cachedOriginalURL(for: asset) else {
+            return ExtractedImageMetadata()
+        }
+        let extracted = ImageMetadataExtractor.extract(from: orig)
+        if imageMetadataCache.count >= 512 {
+            imageMetadataCache.removeAll(keepingCapacity: true)
+        }
+        imageMetadataCache[asset.id] = extracted
+        return extracted
+    }
+
+    /// Quietly persists already-extracted EXIF & AI prompt metadata into SQLite + FTS in the background
+    /// without mutating visible UI arrays or causing layout shifts.
+    public func hydrateImageMetadataIfNeeded(for assetID: UUID) async {
+        guard metadataHydrationAttemptedIDs.insert(assetID).inserted else { return }
+        guard let asset = allAssetsByID[assetID],
+              asset.mediaKind == .image || asset.mediaKind == .animatedImage || asset.mediaKind == .designFile,
+              asset.richMetadata?.photoExif == nil && asset.richMetadata?.aiGeneration == nil,
+              asset.isLocalOriginalCached else {
+            return
+        }
+        if let updated = try? await engine.hydrateImageMetadataIfNeeded(id: assetID) {
+            imageMetadataCache[updated.id] = ExtractedImageMetadata(
+                photoExif: updated.richMetadata?.photoExif,
+                aiGeneration: updated.richMetadata?.aiGeneration
+            )
+            allAssetsByID[updated.id] = updated
         }
     }
 

@@ -176,7 +176,7 @@ public struct NotchShelfView: View {
            let folder = library.folders.first(where: { $0.id == folderID }) {
             return folder.name
         }
-        return library.folders.first?.name ?? "默认文件夹"
+        return library.folderHierarchyRoots.first?.folder.name ?? library.folders.first?.name ?? "默认文件夹"
     }
 
     private var recentAssets: [AssetRecord] {
@@ -739,8 +739,16 @@ public struct NotchShelfView: View {
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         case .folder:
             Menu {
-                ForEach(library.folders) { folder in
-                    Button(folder.name) { shelfState.selectedFolderID = folder.id }
+                CharkleHierarchicalFolderMenuContent(
+                    folders: library.folders,
+                    includeInbox: false,
+                    selectedFolderID: shelfState.selectedFolderID ?? library.folderHierarchyRoots.first?.id,
+                    highlightSelection: true,
+                    parentSelfPrefix: "选择"
+                ) { folderID in
+                    if let folderID {
+                        shelfState.selectedFolderID = folderID
+                    }
                 }
             } label: {
                 HStack(spacing: 3) {
@@ -779,7 +787,7 @@ public struct NotchShelfView: View {
             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
                 shelfState.targetMode = mode
                 if mode == .folder && shelfState.selectedFolderID == nil {
-                    shelfState.selectedFolderID = library.folders.first?.id
+                    shelfState.selectedFolderID = library.folderHierarchyRoots.first?.id ?? library.folders.first?.id
                 }
             }
         } label: {

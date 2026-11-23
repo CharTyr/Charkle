@@ -221,7 +221,8 @@ public struct SidebarView: View {
     // MARK: - Collapsed Icon-Only Rail (56pt)
 
     private var collapsedRailBody: some View {
-        ScrollView(.vertical) {
+        VStack(spacing: 0) {
+            // Pinned top controls below the hidden titlebar traffic lights
             VStack(spacing: 8) {
                 Button {
                     withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
@@ -234,7 +235,6 @@ public struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("展开侧边栏 (⌘\\)")
-                .padding(.top, 10)
 
                 Button {
                     coordinator.isJumpAnywherePresented = true
@@ -245,9 +245,14 @@ public struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("快速跳转 (⌘J)")
+            }
+            .padding(.top, 10)
+            .padding(.bottom, 8)
 
-                railDivider
+            railDivider
 
+            ScrollView(.vertical) {
+                VStack(spacing: 8) {
                 railButton(destination: .allItems, icon: "library", tooltip: "全部素材")
                 railButton(
                     destination: .inbox,
@@ -338,12 +343,39 @@ public struct SidebarView: View {
                     }
                 }
 
-                railButton(destination: .trash, icon: "trash", tooltip: "废纸篓")
+                    railButton(destination: .trash, icon: "trash", tooltip: "废纸篓")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 6)
+                .padding(.bottom, 12)
+                .charkleCleanScrollbars(hidden: true)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.bottom, 16)
+            .scrollIndicators(.hidden)
+            .clipped()
+
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(height: 0.75)
+
+            Button {
+                withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                    coordinator.openSettings()
+                }
+            } label: {
+                CharkleIcon("settings", style: .duotone, size: 19, isActive: coordinator.isSettingsPresented)
+                    .frame(width: 38, height: 34)
+                    .background(
+                        coordinator.isSettingsPresented
+                            ? Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
+                            : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("设置 (⌘,)")
+            .padding(.vertical, 8)
         }
-        .scrollIndicators(.hidden)
     }
 
     private var railDivider: some View {
@@ -398,48 +430,52 @@ public struct SidebarView: View {
     // MARK: - Expanded Full Sidebar (226pt)
 
     private var expandedSidebarBody: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 14) {
-                // Brand compact header + Collapse toggle
-                HStack(spacing: 8) {
-                    CharkleBrandMark(size: 22)
-                    Text("Charkle")
-                        .font(.system(size: 14, weight: .semibold))
-                        .tracking(-0.2)
-                    Spacer()
-                    Button {
-                        coordinator.isJumpAnywherePresented = true
-                    } label: {
-                        HStack(spacing: 3) {
-                            CharkleIcon("search", style: .duotone, size: 12)
-                            Text("⌘J")
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        }
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3.5)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        VStack(spacing: 0) {
+            // Pinned compact brand header + quick jump + collapse toggle (strictly below traffic lights)
+            HStack(spacing: 8) {
+                CharkleBrandMark(size: 22)
+                Text("Charkle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .tracking(-0.2)
+                Spacer()
+                Button {
+                    coordinator.isJumpAnywherePresented = true
+                } label: {
+                    HStack(spacing: 3) {
+                        CharkleIcon("search", style: .duotone, size: 12)
+                        Text("⌘J")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
                     }
-                    .buttonStyle(.plain)
-                    .help("快速跳转 (⌘J)")
-
-                    Button {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            coordinator.isSidebarCollapsed = true
-                        }
-                    } label: {
-                        CharkleIcon("sidebar-toggle", style: .duotone, size: 17)
-                            .frame(width: 24, height: 24)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("收起为仅图标侧边栏 (⌘\\)")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
+                .buttonStyle(.plain)
+                .help("快速跳转 (⌘J)")
 
-                sidebarSectionDivider
+                Button {
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                        coordinator.isSidebarCollapsed = true
+                    }
+                } label: {
+                    CharkleIcon("sidebar-toggle", style: .duotone, size: 17)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("收起为仅图标侧边栏 (⌘\\)")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
 
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(height: 0.75)
+
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 14) {
                 // Section 1: Library
                 VStack(alignment: .leading, spacing: 2) {
                     sectionHeader("素材库")
@@ -757,15 +793,53 @@ public struct SidebarView: View {
                     }
                 }
 
-                // Section 5: Smart Capped Tags (Top 10 Most Used + up to 5 Recent Frequent + "View All" Popover)
-                if !library.tagCounts.isEmpty {
-                    sidebarSectionDivider
-                    sidebarTagsSection
+                    // Section 5: Smart Capped Tags (Top 10 Most Used + up to 5 Recent Frequent + "View All" Popover)
+                    if !library.tagCounts.isEmpty {
+                        sidebarSectionDivider
+                        sidebarTagsSection
+                    }
                 }
+                .padding(.top, 10)
+                .padding(.bottom, 14)
+                .charkleCleanScrollbars(hidden: true)
             }
-            .padding(.bottom, 20)
+            .scrollIndicators(.hidden)
+            .clipped()
+
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(height: 0.75)
+
+            Button {
+                withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                    coordinator.openSettings()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    CharkleIcon("settings", style: .duotone, size: 17, isActive: coordinator.isSettingsPresented)
+                    Text("设置")
+                        .font(.system(size: 12.5, weight: coordinator.isSettingsPresented ? .semibold : .medium))
+                        .foregroundStyle(coordinator.isSettingsPresented ? Color.primary : Color.primary.opacity(0.84))
+                    Spacer()
+                    Text("⌘,")
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    coordinator.isSettingsPresented
+                        ? Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08)
+                        : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .help("打开 Charkle 设置 (⌘,)")
         }
-        .scrollIndicators(.hidden)
     }
 
     // MARK: - Smart Capped Tags Section & Searchable All-Tags Popover

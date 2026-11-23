@@ -22,18 +22,16 @@ struct QuickLookGitHubRepoCard: View {
     }
 
     var body: some View {
+        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let cardFill = colorScheme == .dark ? Color(charkleHex: "#18191D") : Color(charkleHex: "#FAFAFB")
+
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 18) {
                 // Header: Owner Avatar + owner / repo + Actions
                 HStack(alignment: .center, spacing: 12) {
                     if let avatarStr = repo.ownerAvatarURL, let avatarURL = URL(string: avatarStr) {
-                        AsyncImage(url: avatarURL) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            default:
-                                ownerMonogram
-                            }
+                        RemoteCachedImageView(url: avatarURL, contentMode: .fill) {
+                            ownerMonogram
                         }
                         .frame(width: 36, height: 36)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -153,18 +151,14 @@ struct QuickLookGitHubRepoCard: View {
                 // GitHub Social OpenGraph Preview Card
                 let ogStr = repo.openGraphImageURL ?? "https://opengraph.githubassets.com/1/\(repo.owner)/\(repo.repo)"
                 if let ogURL = URL(string: ogStr) {
-                    AsyncImage(url: ogURL) { phase in
-                        if case .success(let image) = phase {
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
-                                )
-                        }
+                    RemoteCachedImageView(url: ogURL, contentMode: .fit) {
+                        EmptyView()
                     }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                    )
                 }
 
                 Divider()
@@ -177,7 +171,10 @@ struct QuickLookGitHubRepoCard: View {
                         .foregroundStyle(.secondary)
 
                     if let readme = repo.readmeMarkdown, !readme.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        QuickLookMarkdownContentView(markdown: readme)
+                        QuickLookMarkdownContentView(
+                            markdown: readme,
+                            urlContext: .github(owner: repo.owner, repo: repo.repo, branch: repo.defaultBranch)
+                        )
                     } else {
                         Text("暂未拉取到 README 内容，可点击右上角刷新重试或前往 GitHub 查看。")
                             .font(.system(size: 13))
@@ -186,17 +183,19 @@ struct QuickLookGitHubRepoCard: View {
                 }
             }
             .padding(26)
+            .charkleCleanScrollbars(hidden: false)
         }
-        .frame(maxWidth: 740, maxHeight: 680)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(colorScheme == .dark ? Color(charkleHex: "#18191D") : Color(charkleHex: "#FAFAFB"))
-        )
+        .frame(maxWidth: 760, maxHeight: 680)
+        .clipShape(cardShape)
+        .background {
+            cardShape
+                .fill(cardFill)
+                .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
+        }
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            cardShape
                 .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.45), lineWidth: 0.75)
         )
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 14)
     }
 
     private var ownerMonogram: some View {
@@ -262,17 +261,16 @@ struct QuickLookSocialPostCard: View {
     }
 
     var body: some View {
+        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let cardFill = colorScheme == .dark ? Color(charkleHex: "#1B1C20") : Color.white
+
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 16) {
                 // Author Header
                 HStack(spacing: 11) {
                     if let avatarStr = post.authorAvatarURL, let url = URL(string: avatarStr) {
-                        AsyncImage(url: url) { phase in
-                            if case .success(let img) = phase {
-                                img.resizable().aspectRatio(contentMode: .fill)
-                            } else {
-                                authorFallbackAvatar
-                            }
+                        RemoteCachedImageView(url: url, contentMode: .fill) {
+                            authorFallbackAvatar
                         }
                         .frame(width: 40, height: 40)
                         .clipShape(Circle())
@@ -449,17 +447,19 @@ struct QuickLookSocialPostCard: View {
                 }
             }
             .padding(24)
+            .charkleCleanScrollbars(hidden: false)
         }
         .frame(maxWidth: 680, maxHeight: 680)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(colorScheme == .dark ? Color(charkleHex: "#1B1C20") : Color.white)
-        )
+        .clipShape(cardShape)
+        .background {
+            cardShape
+                .fill(cardFill)
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.40 : 0.14), radius: 24, y: 10)
+        }
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            cardShape
                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
         )
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 24, y: 10)
     }
 
     @ViewBuilder
@@ -491,18 +491,14 @@ struct QuickLookSocialPostCard: View {
                 let previewStr = attachment.thumbnailURL ?? attachment.url
                 ZStack(alignment: .bottomTrailing) {
                     if let imgURL = URL(string: previewStr) {
-                        AsyncImage(url: imgURL) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(maxHeight: attachments.count == 1 ? 420 : 240)
-                            case .failure:
-                                mediaFailedPlaceholder
-                            default:
-                                ProgressView().frame(height: 180)
-                            }
+                        RemoteCachedImageView(
+                            url: imgURL,
+                            contentMode: .fit,
+                            maxHeight: attachments.count == 1 ? 420 : 240
+                        ) {
+                            ProgressView().frame(height: 180)
+                        } failurePlaceholder: {
+                            mediaFailedPlaceholder
                         }
                         .frame(maxWidth: .infinity)
                         .background(Color.primary.opacity(0.05))
@@ -602,6 +598,33 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
 
     final class Coordinator {
         var currentURL: URL?
+        var loadTask: Task<Void, Never>?
+
+        func attach(url: URL, to view: AVPlayerView) {
+            loadTask?.cancel()
+            currentURL = url
+            view.player?.pause()
+            view.player = nil
+
+            // Defer AVPlayer / VideoToolbox initialization slightly past the opening animation frame
+            // and prepare AVURLAsset off-main-thread so opening X video posts stays 120fps smooth.
+            loadTask = Task { @MainActor [weak view] in
+                try? await Task.sleep(for: .milliseconds(90))
+                guard !Task.isCancelled, let view else { return }
+                let asset = AVURLAsset(url: url)
+                _ = try? await asset.load(.isPlayable)
+                guard !Task.isCancelled else { return }
+                let item = AVPlayerItem(asset: asset)
+                view.player = AVPlayer(playerItem: item)
+            }
+        }
+
+        func teardown(_ view: AVPlayerView) {
+            loadTask?.cancel()
+            loadTask = nil
+            view.player?.pause()
+            view.player = nil
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -611,22 +634,18 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .floating
-        view.player = AVPlayer(url: url)
-        context.coordinator.currentURL = url
+        context.coordinator.attach(url: url, to: view)
         return view
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         if context.coordinator.currentURL != url {
-            nsView.player?.pause()
-            nsView.player = AVPlayer(url: url)
-            context.coordinator.currentURL = url
+            context.coordinator.attach(url: url, to: nsView)
         }
     }
 
-    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
-        nsView.player?.pause()
-        nsView.player = nil
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
+        coordinator.teardown(nsView)
     }
 }
 
@@ -646,6 +665,8 @@ struct QuickLookMarkdownReaderCard: View {
     }
 
     var body: some View {
+        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text(CanvasFormatters.fileExtensionBadge(for: asset.fileName))
@@ -685,22 +706,29 @@ struct QuickLookMarkdownReaderCard: View {
             Divider()
 
             ScrollView(.vertical) {
-                if isMarkdown && !showRawSource {
-                    QuickLookMarkdownContentView(markdown: fullText)
-                        .padding(24)
-                } else {
-                    Text(fullText.isEmpty ? "暂无可预览正文" : fullText)
-                        .font(showRawSource ? .system(size: 12.5, design: .monospaced) : .system(size: 14))
-                        .lineSpacing(6)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(24)
+                Group {
+                    if isMarkdown && !showRawSource {
+                        QuickLookMarkdownContentView(markdown: fullText)
+                            .padding(24)
+                    } else {
+                        Text(fullText.isEmpty ? "暂无可预览正文" : fullText)
+                            .font(showRawSource ? .system(size: 12.5, design: .monospaced) : .system(size: 14))
+                            .lineSpacing(6)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(24)
+                    }
                 }
+                .charkleCleanScrollbars(hidden: false)
             }
         }
         .frame(maxWidth: 740, maxHeight: 620)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.38), radius: 26, y: 12)
+        .clipShape(cardShape)
+        .background {
+            cardShape
+                .fill(CharkleTheme.surfaceElevated(for: colorScheme))
+                .shadow(color: .black.opacity(0.36), radius: 24, y: 10)
+        }
         .task(id: originalURL) {
             if let url = originalURL,
                let data = try? Data(contentsOf: url),
@@ -714,175 +742,394 @@ struct QuickLookMarkdownReaderCard: View {
     }
 }
 
-/// Lightweight native Markdown block renderer (headings, fenced code blocks, blockquotes, lists, inline markdown).
-struct QuickLookMarkdownContentView: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let markdown: String
+// MARK: - Cached Remote Image Loader (Supports SVG, WebP, PNG, JPEG, GIF)
 
-    private enum Block: Identifiable {
-        case heading(id: Int, level: Int, text: String)
-        case code(id: Int, language: String, content: String)
-        case quote(id: Int, text: String)
-        case bullet(id: Int, text: String)
-        case divider(id: Int)
-        case paragraph(id: Int, text: String)
+private final class RemoteImageMemoryCache: @unchecked Sendable {
+    static let shared = RemoteImageMemoryCache()
+    private let cache = NSCache<NSString, NSImage>()
 
-        var id: Int {
-            switch self {
-            case .heading(let id, _, _),
-                 .code(let id, _, _),
-                 .quote(let id, _),
-                 .bullet(let id, _),
-                 .divider(let id),
-                 .paragraph(let id, _):
-                return id
-            }
-        }
+    private init() {
+        cache.countLimit = 120
+        cache.totalCostLimit = 96 * 1024 * 1024
     }
 
-    private var blocks: [Block] {
-        var result: [Block] = []
-        let lines = markdown.components(separatedBy: .newlines)
-        var i = 0
-        var nextID = 0
+    func image(for url: URL) -> NSImage? {
+        cache.object(forKey: url.absoluteString as NSString)
+    }
 
-        while i < lines.count {
-            let line = lines[i]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+    func store(_ image: NSImage, for url: URL) {
+        let w = max(1, Int(image.size.width))
+        let h = max(1, Int(image.size.height))
+        cache.setObject(image, forKey: url.absoluteString as NSString, cost: w * h * 4)
+    }
+}
 
-            if trimmed.isEmpty {
-                i += 1
-                continue
-            }
+private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
+    let url: URL
+    let contentMode: ContentMode
+    let fixedWidth: CGFloat?
+    let fixedHeight: CGFloat?
+    let maxHeight: CGFloat?
+    let placeholder: () -> Placeholder
+    let failurePlaceholder: () -> Failure
 
-            // Fenced code block
-            if trimmed.hasPrefix("```") {
-                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                var codeLines: [String] = []
-                i += 1
-                while i < lines.count && !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                    codeLines.append(lines[i])
-                    i += 1
-                }
-                i += 1
-                result.append(.code(id: nextID, language: lang, content: codeLines.joined(separator: "\n")))
-                nextID += 1
-                continue
-            }
+    @State private var loadedImage: NSImage?
+    @State private var didFail: Bool = false
 
-            // Horizontal rule
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                result.append(.divider(id: nextID))
-                nextID += 1
-                i += 1
-                continue
-            }
+    init(
+        url: URL,
+        contentMode: ContentMode = .fit,
+        fixedWidth: CGFloat? = nil,
+        fixedHeight: CGFloat? = nil,
+        maxHeight: CGFloat? = nil,
+        @ViewBuilder placeholder: @escaping () -> Placeholder,
+        @ViewBuilder failurePlaceholder: @escaping () -> Failure
+    ) {
+        self.url = url
+        self.contentMode = contentMode
+        self.fixedWidth = fixedWidth
+        self.fixedHeight = fixedHeight
+        self.maxHeight = maxHeight
+        self.placeholder = placeholder
+        self.failurePlaceholder = failurePlaceholder
+        _loadedImage = State(initialValue: RemoteImageMemoryCache.shared.image(for: url))
+    }
 
-            // Heading
-            if trimmed.hasPrefix("#") {
-                let hashes = trimmed.prefix(while: { $0 == "#" }).count
-                if hashes <= 6 && trimmed.dropFirst(hashes).first == " " {
-                    let title = String(trimmed.dropFirst(hashes + 1)).trimmingCharacters(in: .whitespaces)
-                    result.append(.heading(id: nextID, level: hashes, text: title))
-                    nextID += 1
-                    i += 1
-                    continue
-                }
-            }
-
-            // Blockquote
-            if trimmed.hasPrefix(">") {
-                var quoteLines: [String] = []
-                while i < lines.count && lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
-                    let stripped = lines[i].trimmingCharacters(in: .whitespaces).dropFirst().trimmingCharacters(in: .whitespaces)
-                    quoteLines.append(stripped)
-                    i += 1
-                }
-                result.append(.quote(id: nextID, text: quoteLines.joined(separator: "\n")))
-                nextID += 1
-                continue
-            }
-
-            // Bullet list item
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-                result.append(.bullet(id: nextID, text: String(trimmed.dropFirst(2))))
-                nextID += 1
-                i += 1
-                continue
-            }
-
-            // Paragraph
-            var paraLines: [String] = [line]
-            i += 1
-            while i < lines.count {
-                let peek = lines[i].trimmingCharacters(in: .whitespaces)
-                if peek.isEmpty || peek.hasPrefix("#") || peek.hasPrefix("```") || peek.hasPrefix(">")
-                    || peek.hasPrefix("- ") || peek.hasPrefix("* ") || peek == "---" {
-                    break
-                }
-                paraLines.append(lines[i])
-                i += 1
-            }
-            result.append(.paragraph(id: nextID, text: paraLines.joined(separator: "\n")))
-            nextID += 1
-        }
-        return result
+    init(
+        url: URL,
+        contentMode: ContentMode = .fit,
+        fixedWidth: CGFloat? = nil,
+        fixedHeight: CGFloat? = nil,
+        maxHeight: CGFloat? = nil,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) where Failure == Placeholder {
+        self.init(
+            url: url,
+            contentMode: contentMode,
+            fixedWidth: fixedWidth,
+            fixedHeight: fixedHeight,
+            maxHeight: maxHeight,
+            placeholder: placeholder,
+            failurePlaceholder: placeholder
+        )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            ForEach(blocks) { block in
-                switch block {
-                case .heading(_, let level, let text):
-                    inlineMarkdownText(text)
-                        .font(.system(size: level == 1 ? 20 : (level == 2 ? 17 : 15), weight: .bold))
-                        .padding(.top, level <= 2 ? 8 : 4)
-                case .code(_, let lang, let content):
-                    VStack(alignment: .leading, spacing: 4) {
-                        if !lang.isEmpty {
-                            Text(lang.uppercased())
-                                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            Text(content)
-                                .font(.system(size: 12, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                case .quote(_, let text):
-                    HStack(spacing: 10) {
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.accentColor.opacity(0.6))
-                            .frame(width: 3)
-                        inlineMarkdownText(text)
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 2)
-                case .bullet(_, let text):
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("•")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(.secondary)
-                        inlineMarkdownText(text)
-                            .font(.system(size: 13.5))
-                            .lineSpacing(4)
-                    }
-                case .divider:
-                    Divider().padding(.vertical, 4)
-                case .paragraph(_, let text):
-                    inlineMarkdownText(text)
-                        .font(.system(size: 13.5))
-                        .lineSpacing(5)
+        Group {
+            if let img = loadedImage {
+                let base = Image(nsImage: img)
+                    .renderingMode(.original)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: contentMode)
+                if let fixedWidth, let fixedHeight {
+                    base.frame(width: fixedWidth, height: fixedHeight)
+                } else if let fixedWidth {
+                    base.frame(width: fixedWidth)
+                } else if let fixedHeight {
+                    base.frame(height: fixedHeight)
+                } else if let maxHeight {
+                    base.frame(maxHeight: maxHeight)
+                } else {
+                    base
                 }
+            } else if didFail {
+                failurePlaceholder()
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: url) {
+            if let cached = RemoteImageMemoryCache.shared.image(for: url) {
+                loadedImage = cached
+                didFail = false
+                return
+            }
+            didFail = false
+            let targetURL = url
+            let fetched: NSImage? = await Task.detached(priority: .utility) {
+                var request = URLRequest(url: targetURL, timeoutInterval: 10)
+                request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+                request.setValue("image/svg+xml,image/webp,image/png,image/jpeg,image/gif,image/*", forHTTPHeaderField: "Accept")
+                guard let (data, response) = try? await URLSession.shared.data(for: request),
+                      let http = response as? HTTPURLResponse,
+                      (200..<300).contains(http.statusCode),
+                      !data.isEmpty else {
+                    return nil
+                }
+                // `NSImage(data:)` natively renders SVG, WebP, PNG, JPEG, and GIF on macOS 15+.
+                guard let image = NSImage(data: data), image.size.width > 0, image.size.height > 0 else {
+                    return nil
+                }
+                image.isTemplate = false
+                return image
+            }.value
+
+            guard !Task.isCancelled else { return }
+            if let fetched {
+                RemoteImageMemoryCache.shared.store(fetched, for: url)
+                loadedImage = fetched
+            } else {
+                didFail = true
+            }
+        }
+    }
+}
+
+// MARK: - Parsed Markdown Block Cache (Zero Main-Thread Re-Parsing)
+
+private final class ParsedMarkdownCache: @unchecked Sendable {
+    static let shared = ParsedMarkdownCache()
+
+    private final class Box: @unchecked Sendable {
+        let blocks: [MarkdownBlock]
+        init(_ blocks: [MarkdownBlock]) { self.blocks = blocks }
+    }
+
+    private let cache = NSCache<NSString, Box>()
+
+    private init() {
+        cache.countLimit = 48
+    }
+
+    func key(markdown: String, urlContext: MarkdownURLContext) -> NSString {
+        var hasher = Hasher()
+        hasher.combine(markdown)
+        hasher.combine(urlContext)
+        return "\(markdown.count)-\(hasher.finalize())" as NSString
+    }
+
+    func blocks(for key: NSString) -> [MarkdownBlock]? {
+        cache.object(forKey: key)?.blocks
+    }
+
+    func store(_ blocks: [MarkdownBlock], for key: NSString) {
+        cache.setObject(Box(blocks), forKey: key)
+    }
+}
+
+/// High-performance GitHub-Flavored Markdown & README HTML renderer.
+/// Parses off-main-thread once with `NSCache` memoization and virtualizes blocks via `LazyVStack`,
+/// supporting centered HTML hero headers, SVG/WebP/PNG/GIF images, GFM tables, alerts, `<details>`,
+/// ordered/task lists, inline links, and code blocks.
+struct QuickLookMarkdownContentView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let markdown: String
+    let urlContext: MarkdownURLContext
+
+    @State private var blocks: [MarkdownBlock]
+
+    init(markdown: String, urlContext: MarkdownURLContext = MarkdownURLContext()) {
+        self.markdown = markdown
+        self.urlContext = urlContext
+        let key = ParsedMarkdownCache.shared.key(markdown: markdown, urlContext: urlContext)
+        if let cached = ParsedMarkdownCache.shared.blocks(for: key) {
+            _blocks = State(initialValue: cached)
+        } else if markdown.count <= 3_500 {
+            let parsed = MarkdownDocumentParser.parse(markdown, urlContext: urlContext)
+            ParsedMarkdownCache.shared.store(parsed, for: key)
+            _blocks = State(initialValue: parsed)
+        } else {
+            _blocks = State(initialValue: [])
+        }
+    }
+
+    private var cacheKey: NSString {
+        ParsedMarkdownCache.shared.key(markdown: markdown, urlContext: urlContext)
+    }
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 11) {
+            ForEach(blocks) { block in
+                MarkdownBlockRowView(block: block, colorScheme: colorScheme)
             }
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: cacheKey) {
+            let key = cacheKey
+            if let cached = ParsedMarkdownCache.shared.blocks(for: key) {
+                if blocks != cached { blocks = cached }
+                return
+            }
+            let src = markdown
+            let ctx = urlContext
+            let parsed = await Task.detached(priority: .userInitiated) {
+                MarkdownDocumentParser.parse(src, urlContext: ctx)
+            }.value
+            guard !Task.isCancelled else { return }
+            ParsedMarkdownCache.shared.store(parsed, for: key)
+            blocks = parsed
+        }
+    }
+}
+
+private struct MarkdownBlockRowView: View {
+    let block: MarkdownBlock
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        switch block {
+        case .heading(_, let level, let text, let alignment):
+            VStack(alignment: horizontalAlignment(for: alignment), spacing: 6) {
+                inlineMarkdownText(text)
+                    .font(.system(
+                        size: level == 1 ? 22 : (level == 2 ? 17.5 : (level == 3 ? 15 : 13.5)),
+                        weight: .bold
+                    ))
+                    .multilineTextAlignment(textAlignment(for: alignment))
+                    .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
+
+                if level <= 2 && alignment == .leading {
+                    Rectangle()
+                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.08))
+                        .frame(height: 0.75)
+                }
+            }
+            .padding(.top, level <= 2 ? 8 : 4)
+
+        case .paragraph(_, let text, let alignment):
+            inlineMarkdownText(text)
+                .font(.system(size: 13.5))
+                .lineSpacing(5)
+                .multilineTextAlignment(textAlignment(for: alignment))
+                .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
+
+        case .image(_, let item, let alignment):
+            markdownImageElement(item, isInlineBadge: false)
+                .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
+                .padding(.vertical, 2)
+
+        case .imageRow(_, let items, let alignment):
+            QuickLookFlowWrap(spacing: 6) {
+                ForEach(items) { item in
+                    markdownImageElement(item, isInlineBadge: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
+            .padding(.vertical, 2)
+
+        case .code(_, let lang, let content):
+            MarkdownCodeBlockView(language: lang, content: content, colorScheme: colorScheme)
+
+        case .quote(_, let alertKind, let text):
+            let accent = alertAccentColor(for: alertKind)
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(accent)
+                    .frame(width: 3)
+                VStack(alignment: .leading, spacing: 4) {
+                    if let alertKind {
+                        Text(alertKind.label.uppercased())
+                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(accent)
+                    }
+                    if !text.isEmpty {
+                        inlineMarkdownText(text)
+                            .font(.system(size: 13))
+                            .foregroundStyle(alertKind == nil ? Color.secondary : Color.primary.opacity(0.88))
+                            .lineSpacing(4)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, alertKind == nil ? 0 : 10)
+            .padding(.vertical, alertKind == nil ? 2 : 8)
+            .background(
+                alertKind == nil ? Color.clear : accent.opacity(colorScheme == .dark ? 0.12 : 0.08),
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+            )
+
+        case .listItem(_, let marker, let indent, let text):
+            HStack(alignment: .top, spacing: 8) {
+                switch marker {
+                case .bullet:
+                    Text("•")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, alignment: .center)
+                case .ordered(let num):
+                    Text("\(num).")
+                        .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 20, alignment: .trailing)
+                case .task(let checked):
+                    Image(systemName: checked ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(checked ? Color.accentColor : .secondary)
+                        .padding(.top, 2)
+                }
+                inlineMarkdownText(text)
+                    .font(.system(size: 13.5))
+                    .lineSpacing(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, CGFloat(indent) * 16)
+
+        case .table(_, let headers, let alignments, let rows):
+            MarkdownTableView(
+                headers: headers,
+                alignments: alignments,
+                rows: rows,
+                colorScheme: colorScheme
+            )
+
+        case .details(_, let summary, let children):
+            MarkdownDetailsDisclosureView(summary: summary, children: children, colorScheme: colorScheme)
+
+        case .divider:
+            Divider().padding(.vertical, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func markdownImageElement(_ item: MarkdownImageItem, isInlineBadge: Bool) -> some View {
+        if let url = URL(string: item.url) {
+            let fixedW = item.width.map { CGFloat(min($0, 680)) }
+            let fixedH = item.height.map { CGFloat(min($0, 480)) }
+            let maxH: CGFloat? = isInlineBadge ? 28 : (fixedH == nil ? 420 : nil)
+
+            let imageBody = RemoteCachedImageView(
+                url: url,
+                contentMode: .fit,
+                fixedWidth: fixedW,
+                fixedHeight: fixedH,
+                maxHeight: maxH
+            ) {
+                if fixedW != nil || fixedH != nil {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                        .frame(width: fixedW ?? 72, height: fixedH ?? 72)
+                } else if !isInlineBadge {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.primary.opacity(0.04))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 120)
+                }
+            } failurePlaceholder: {
+                if !item.alt.isEmpty {
+                    Text(item.alt)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: isInlineBadge ? 4 : 10, style: .continuous))
+
+            if let linkStr = item.linkURL, let linkURL = URL(string: linkStr) {
+                Button {
+                    NSWorkspace.shared.open(linkURL)
+                } label: {
+                    imageBody
+                }
+                .buttonStyle(.plain)
+            } else {
+                imageBody
+            }
+        }
     }
 
     private func inlineMarkdownText(_ raw: String) -> Text {
@@ -893,6 +1140,210 @@ struct QuickLookMarkdownContentView: View {
             return Text(attributed)
         }
         return Text(raw)
+    }
+
+    private func horizontalAlignment(for alignment: MarkdownAlignment) -> HorizontalAlignment {
+        switch alignment {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private func frameAlignment(for alignment: MarkdownAlignment) -> Alignment {
+        switch alignment {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private func textAlignment(for alignment: MarkdownAlignment) -> TextAlignment {
+        switch alignment {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private func alertAccentColor(for kind: MarkdownAlertKind?) -> Color {
+        switch kind {
+        case .none: Color.accentColor.opacity(0.55)
+        case .note: Color(charkleHex: "#3B82F6")
+        case .tip: Color(charkleHex: "#16A34A")
+        case .important: Color(charkleHex: "#8B5CF6")
+        case .warning: Color(charkleHex: "#D97706")
+        case .caution: Color(charkleHex: "#DC2626")
+        }
+    }
+}
+
+private struct MarkdownCodeBlockView: View {
+    let language: String
+    let content: String
+    let colorScheme: ColorScheme
+    @State private var copied: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(language.isEmpty ? "CODE" : language.uppercased())
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(content, forType: .string)
+                    copied = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.2))
+                        copied = false
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(copied ? "已复制" : "复制")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundStyle(copied ? Color.accentColor : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(content)
+                    .font(.system(size: 12, design: .monospaced))
+                    .lineSpacing(3.5)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), lineWidth: 0.5)
+        )
+    }
+}
+
+private struct MarkdownTableView: View {
+    let headers: [String]
+    let alignments: [MarkdownAlignment]
+    let rows: [[String]]
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        let colCount = max(1, headers.count)
+        let borderColor = Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.09)
+        let headerBg = Color.primary.opacity(colorScheme == .dark ? 0.075 : 0.045)
+        let stripeBg = Color.primary.opacity(colorScheme == .dark ? 0.035 : 0.02)
+        let tableContent = Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(0..<colCount, id: \.self) { col in
+                    let align = col < alignments.count ? alignments[col] : .leading
+                    inlineCellText(col < headers.count ? headers[col] : "", isHeader: true)
+                        .multilineTextAlignment(textAlignment(align))
+                        .frame(maxWidth: .infinity, alignment: frameAlignment(align))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                }
+            }
+            .background(headerBg)
+
+            ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
+                Divider().overlay(borderColor)
+                GridRow {
+                    ForEach(0..<colCount, id: \.self) { col in
+                        let align = col < alignments.count ? alignments[col] : .leading
+                        let rawCell = col < row.count ? row[col] : ""
+                        inlineCellText(rawCell, isHeader: false)
+                            .multilineTextAlignment(textAlignment(align))
+                            .frame(maxWidth: .infinity, alignment: frameAlignment(align))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .background(rowIdx.isMultiple(of: 2) ? Color.clear : stripeBg)
+            }
+        }
+        .background(Color.primary.opacity(colorScheme == .dark ? 0.03 : 0.015))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: 0.75)
+        )
+
+        if colCount > 4 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                tableContent.frame(minWidth: CGFloat(colCount) * 140)
+            }
+        } else {
+            tableContent
+        }
+    }
+
+    private func inlineCellText(_ raw: String, isHeader: Bool) -> Text {
+        let baseFont: Font = isHeader ? .system(size: 12, weight: .semibold) : .system(size: 12.5)
+        if let attributed = try? AttributedString(
+            markdown: raw,
+            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            return Text(attributed).font(baseFont)
+        }
+        return Text(raw).font(baseFont)
+    }
+
+    private func frameAlignment(_ align: MarkdownAlignment) -> Alignment {
+        switch align {
+        case .leading: .topLeading
+        case .center: .top
+        case .trailing: .topTrailing
+        }
+    }
+
+    private func textAlignment(_ align: MarkdownAlignment) -> TextAlignment {
+        switch align {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+}
+
+private struct MarkdownDetailsDisclosureView: View {
+    let summary: String
+    let children: [MarkdownBlock]
+    let colorScheme: ColorScheme
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(children) { child in
+                    MarkdownBlockRowView(block: child, colorScheme: colorScheme)
+                }
+            }
+            .padding(.top, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Text(summary)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.07), lineWidth: 0.5)
+        )
     }
 }
 

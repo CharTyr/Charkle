@@ -82,6 +82,7 @@ public final class ThumbnailImageLoader {
 
     @ObservationIgnored private let engine: any CharkleEngineProtocol
     @ObservationIgnored private let cache = NSCache<NSString, CachedImageBox>()
+    @ObservationIgnored private let originalCache = NSCache<NSString, CachedImageBox>()
     @ObservationIgnored private var inFlight: [String: InFlightEntry] = [:]
     @ObservationIgnored private let scheduler = ThumbnailDecodeScheduler(maxConcurrent: 6)
     @ObservationIgnored private var prefetchTasks: [String: Task<Void, Never>] = [:]
@@ -94,6 +95,8 @@ public final class ThumbnailImageLoader {
         self.engine = engine
         cache.countLimit = maxCount
         cache.totalCostLimit = maxCostBytes
+        originalCache.countLimit = 4
+        originalCache.totalCostLimit = 180 * 1024 * 1024
     }
 
     private func cacheKey(assetID: UUID, tier: ThumbnailTier) -> String {
@@ -102,6 +105,34 @@ public final class ThumbnailImageLoader {
 
     public func cachedImage(for assetID: UUID, tier: ThumbnailTier = .grid520) -> NSImage? {
         cache.object(forKey: cacheKey(assetID: assetID, tier: tier) as NSString)?.nsImage
+    }
+
+    public func cachedOriginalImage(for assetID: UUID) -> NSImage? {
+        originalCache.object(forKey: assetID.uuidString as NSString)?.nsImage
+    }
+
+    /// Loads the true full-resolution original image off the main thread (applying EXIF orientation
+    /// and staying safely within Metal's 16,384px texture dimension limit for extreme tall-strip screenshots).
+    public func loadOriginalImage(for assetID: UUID, url: URL) async -> NSImage? {
+        let key = assetID.uuidString as NSString
+        if let hit = originalCache.object(forKey: key) {
+            return hit.nsImage
+        }
+        guard !Task.isCancelled else { return nil }
+        if let cg = await Self.decodeOriginalCGImage(from: url) {
+            guard !Task.isCancelled else { return nil }
+            let box = CachedImageBox(cgImage: cg)
+            let cost = max(1, cg.width * cg.height * 4)
+            originalCache.setObject(box, forKey: key, cost: cost)
+            return box.nsImage
+        }
+        // Vector fallback (e.g. .svg originals where CGImageSource cannot rasterize directly)
+        if url.pathExtension.lowercased() == "svg",
+           let data = try? Data(contentsOf: url),
+           let vectorImage = NSImage(data: data) {
+            return vectorImage
+        }
+        return nil
     }
 
     /// Zero-bridging `CGImage` cache hit for direct `CALayer.contents` hardware compositing.
@@ -166,7 +197,7 @@ public final class ThumbnailImageLoader {
         } else {
             let engine = self.engine
             let scheduler = self.scheduler
-            let maxPixel = tier == .grid520 ? 520 : 1400
+            let maxPixel = tier == .grid520 ? 720 : 1400
             let task = Task<CachedImageBox?, Never> {
                 guard await scheduler.acquire() else { return nil }
                 defer { Task { await scheduler.release() } }
@@ -216,6 +247,7 @@ public final class ThumbnailImageLoader {
     }
 
     public func invalidate(assetID: UUID) {
+        originalCache.removeObject(forKey: assetID.uuidString as NSString)
         for tier in [ThumbnailTier.grid520, .preview1400] {
             let key = cacheKey(assetID: assetID, tier: tier)
             cache.removeObject(forKey: key as NSString)
@@ -229,6 +261,7 @@ public final class ThumbnailImageLoader {
 
     public func clearMemoryCache() {
         cache.removeAllObjects()
+        originalCache.removeAllObjects()
         for entry in inFlight.values { entry.task.cancel() }
         inFlight.removeAll()
         for task in prefetchTasks.values { task.cancel() }
@@ -252,6 +285,46 @@ public final class ThumbnailImageLoader {
         ]
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
+
+    @concurrent
+    private static func decodeOriginalCGImage(from url: URL) async -> CGImage? {
+        guard !Task.isCancelled else { return nil }
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
+            return nil
+        }
+        guard !Task.isCancelled else { return nil }
+
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let pixelW = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let pixelH = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+
+        // Apple Silicon Metal max single texture edge is 16,384px; cap total decoded area at ~64MP (~256MB RGBA)
+        // so normal high-res art and long vertical strips decode at true 100% original resolution without GPU drops.
+        let maxTextureSide = 16_000
+        let maxPixelArea: Double = 64_000_000.0
+
+        var targetMaxSide = max(pixelW, pixelH)
+        if targetMaxSide <= 0 {
+            targetMaxSide = 4_096
+        }
+        if pixelW > 0 && pixelH > 0 {
+            let area = Double(pixelW) * Double(pixelH)
+            if area > maxPixelArea {
+                let scale = sqrt(maxPixelArea / area)
+                targetMaxSide = max(1_400, Int((Double(max(pixelW, pixelH)) * scale).rounded(.down)))
+            }
+        }
+        targetMaxSide = min(targetMaxSide, maxTextureSide)
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: targetMaxSide,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
 }
 
 // MARK: - Gallery-Grade Media Thumbnail Surface (With Procedural 7-Kind Fallbacks)
@@ -269,6 +342,7 @@ public struct AssetThumbnailSurface: View {
     public let enableHoverPlayback: Bool
 
     @State private var loadedImage: NSImage?
+    @State private var loadedAssetID: UUID?
     @State private var isPointerHovering: Bool = false
 
     public init(
@@ -300,7 +374,10 @@ public struct AssetThumbnailSurface: View {
 
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let displayImage = loadedImage ?? loader.cachedImage(for: asset.id, tier: tier)
+        let activeLoaded = (loadedAssetID == asset.id) ? loadedImage : nil
+        let displayImage = activeLoaded
+            ?? loader.cachedImage(for: asset.id, tier: tier)
+            ?? (tier != .grid520 ? loader.cachedImage(for: asset.id, tier: .grid520) : nil)
         let canHoverPlay = enableHoverPlayback && crop == nil && HoverMediaPreviewLayerController.supportsHoverPlayback(asset)
         Color.clear
             .overlay {
@@ -336,14 +413,17 @@ public struct AssetThumbnailSurface: View {
                 }
             }
             .task(id: "\(asset.id.uuidString)-\(tier.rawValue)-\(loader.invalidationVersion)") {
-                if let cached = loader.cachedImage(for: asset.id, tier: tier) {
-                    if loadedImage !== cached {
+                let targetID = asset.id
+                if let cached = loader.cachedImage(for: targetID, tier: tier) {
+                    if loadedAssetID != targetID || loadedImage !== cached {
+                        loadedAssetID = targetID
                         loadedImage = cached
                     }
                     return
                 }
-                let img = await loader.loadImage(for: asset.id, tier: tier)
+                let img = await loader.loadImage(for: targetID, tier: tier)
                 if !Task.isCancelled {
+                    loadedAssetID = targetID
                     loadedImage = img
                 }
             }

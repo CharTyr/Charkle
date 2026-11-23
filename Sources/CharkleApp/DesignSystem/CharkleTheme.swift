@@ -239,6 +239,205 @@ public extension View {
     func charkleScrollEdgeSoft(for edges: Edge.Set = .top) -> some View {
         modifier(CharkleScrollEdgeModifier(edges: edges))
     }
+
+    /// Forces the enclosing macOS `NSScrollView` into borderless `.overlay` scroller style
+    /// (and optionally hides scrollers completely) so plugging in an external mouse or tablet
+    /// never injects a legacy 15pt white rectangular scrollbar track into translucent surfaces.
+    /// Apply directly to the inner content inside a SwiftUI `ScrollView`.
+    func charkleCleanScrollbars(hidden: Bool = false) -> some View {
+        background(CharkleOverlayScrollbarBridge(hideScrollers: hidden))
+    }
+}
+
+// MARK: - Soft Edge-to-Edge Modal Backdrop (Kubai Tip 009)
+
+/// Calibrated full-window modal backdrop covering the hidden titlebar seamlessly without a top seam.
+/// Uses a pure GPU-composited soft radial veil (avoiding full-window `NSVisualEffectView` opacity-fade stutter
+/// while keeping light-mode gallery artwork luminous instead of muddy gray).
+public struct CharkleModalBackdrop: View {
+    @Environment(\.colorScheme) private var colorScheme
+    private let onTap: (() -> Void)?
+
+    public init(onTap: (() -> Void)? = nil) {
+        self.onTap = onTap
+    }
+
+    public var body: some View {
+        let centerAlpha: Double = colorScheme == .dark ? 0.34 : 0.075
+        let edgeAlpha: Double = colorScheme == .dark ? 0.50 : 0.165
+        let tint = Color(charkleHex: "#101216")
+
+        RadialGradient(
+            colors: [tint.opacity(centerAlpha), tint.opacity(edgeAlpha)],
+            center: .center,
+            startRadius: 80,
+            endRadius: 900
+        )
+        .ignoresSafeArea(.all)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onTap?()
+        }
+    }
+}
+
+// MARK: - AppKit Overlay Scrollbar Enforcer (Zero Legacy Rectangular Track Box)
+
+private struct CharkleOverlayScrollbarBridge: NSViewRepresentable {
+    let hideScrollers: Bool
+
+    func makeNSView(context: Context) -> ScrollbarEnforcerView {
+        let view = ScrollbarEnforcerView()
+        view.hideScrollers = hideScrollers
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollbarEnforcerView, context: Context) {
+        nsView.hideScrollers = hideScrollers
+        nsView.applyToEnclosingScrollView()
+    }
+
+    final class ScrollbarEnforcerView: NSView {
+        var hideScrollers: Bool = false
+        private nonisolated(unsafe) var styleObserver: NSObjectProtocol?
+        private weak var observedScrollView: NSScrollView?
+        private var scrollerStyleKVO: NSKeyValueObservation?
+        private var verticalScrollerKVO: NSKeyValueObservation?
+        private var horizontalScrollerKVO: NSKeyValueObservation?
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            styleObserver = NotificationCenter.default.addObserver(
+                forName: NSScroller.preferredScrollerStyleDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.applyToEnclosingScrollView()
+                }
+            }
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+        }
+
+        deinit {
+            if let styleObserver {
+                NotificationCenter.default.removeObserver(styleObserver)
+            }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            scheduleApply()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            scheduleApply()
+        }
+
+        private func scheduleApply() {
+            applyToEnclosingScrollView()
+            DispatchQueue.main.async { [weak self] in
+                self?.applyToEnclosingScrollView()
+            }
+        }
+
+        private func attachKVOIfNeeded(to scrollView: NSScrollView) {
+            guard observedScrollView !== scrollView else { return }
+            observedScrollView = scrollView
+
+            scrollerStyleKVO = scrollView.observe(\.scrollerStyle, options: [.new]) { [weak self] sv, _ in
+                MainActor.assumeIsolated {
+                    guard self != nil else { return }
+                    if sv.scrollerStyle != .overlay {
+                        sv.scrollerStyle = .overlay
+                    }
+                    if !sv.autohidesScrollers {
+                        sv.autohidesScrollers = true
+                    }
+                }
+            }
+            verticalScrollerKVO = scrollView.observe(\.hasVerticalScroller, options: [.new]) { [weak self] sv, _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.hideScrollers else { return }
+                    if sv.hasVerticalScroller {
+                        sv.hasVerticalScroller = false
+                    }
+                    sv.verticalScroller?.isHidden = true
+                    sv.verticalScroller?.alphaValue = 0
+                }
+            }
+            horizontalScrollerKVO = scrollView.observe(\.hasHorizontalScroller, options: [.new]) { [weak self] sv, _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.hideScrollers else { return }
+                    if sv.hasHorizontalScroller {
+                        sv.hasHorizontalScroller = false
+                    }
+                    sv.horizontalScroller?.isHidden = true
+                    sv.horizontalScroller?.alphaValue = 0
+                }
+            }
+        }
+
+        func applyToEnclosingScrollView() {
+            guard let scrollView = resolveScrollView() else { return }
+            attachKVOIfNeeded(to: scrollView)
+            if scrollView.scrollerStyle != .overlay {
+                scrollView.scrollerStyle = .overlay
+            }
+            if !scrollView.autohidesScrollers {
+                scrollView.autohidesScrollers = true
+            }
+            if scrollView.drawsBackground {
+                scrollView.drawsBackground = false
+            }
+            if scrollView.borderType != .noBorder {
+                scrollView.borderType = .noBorder
+            }
+            if hideScrollers {
+                if scrollView.hasVerticalScroller {
+                    scrollView.hasVerticalScroller = false
+                }
+                if scrollView.hasHorizontalScroller {
+                    scrollView.hasHorizontalScroller = false
+                }
+                scrollView.verticalScroller?.isHidden = true
+                scrollView.horizontalScroller?.isHidden = true
+                scrollView.verticalScroller?.alphaValue = 0
+                scrollView.horizontalScroller?.alphaValue = 0
+            } else {
+                if scrollView.verticalScroller?.scrollerStyle != .overlay {
+                    scrollView.verticalScroller?.scrollerStyle = .overlay
+                }
+                if scrollView.horizontalScroller?.scrollerStyle != .overlay {
+                    scrollView.horizontalScroller?.scrollerStyle = .overlay
+                }
+                scrollView.verticalScroller?.controlSize = .small
+                scrollView.horizontalScroller?.controlSize = .small
+            }
+        }
+
+        private func resolveScrollView() -> NSScrollView? {
+            if let direct = enclosingScrollView {
+                return direct
+            }
+            var cursor = superview
+            while let current = cursor {
+                if let sv = current as? NSScrollView {
+                    return sv
+                }
+                cursor = current.superview
+            }
+            return nil
+        }
+    }
 }
 
 // MARK: - Wrapping Flow Layout (for Tags, AI Suggestions, gdirect Account & Endpoint Chips)

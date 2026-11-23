@@ -22,6 +22,9 @@ public struct QuickLookOverlayView: View {
 
     @State private var originalURL: URL?
     @State private var highResImage: NSImage?
+    @State private var isLoadingOriginalImage: Bool = false
+    @State private var isLongStripScrollMode: Bool = false
+    @State private var stageAppeared: Bool = false
     @State private var zoomScale: CGFloat = 1.0
     @State private var gestureStartScale: CGFloat?
     @State private var panOffset: CGSize = .zero
@@ -44,6 +47,20 @@ public struct QuickLookOverlayView: View {
     private var supportsVisualTransform: Bool {
         !asset.isGitHubRepo && !asset.isSocialPost
             && (asset.mediaKind == .image || asset.mediaKind == .designFile || asset.mediaKind == .animatedImage)
+    }
+
+    private var isTallStripImage: Bool {
+        guard !asset.isGitHubRepo && !asset.isSocialPost,
+              asset.mediaKind == .image || asset.mediaKind == .designFile,
+              asset.pixelWidth > 0, asset.pixelHeight >= 1600 else {
+            return false
+        }
+        return Double(asset.pixelHeight) / Double(asset.pixelWidth) >= 2.2
+    }
+
+    private var maxZoomLimit: CGFloat {
+        let longest = max(asset.pixelWidth, asset.pixelHeight)
+        return max(6.0, min(16.0, CGFloat(longest) / 550.0))
     }
 
     private var displayRotationDegrees: Int {
@@ -159,7 +176,9 @@ public struct QuickLookOverlayView: View {
                 // Center Media Surface + Optional Right Info|Similar Drawer (Img 2)
                 HStack(spacing: 16) {
                     mediaStage
-                        .matchedGeometryEffect(id: asset.id, in: heroNamespace)
+                        .scaleEffect(stageAppeared || reduceMotion ? 1.0 : 0.97)
+                        .opacity(stageAppeared ? 1.0 : 0.0)
+                        .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: stageAppeared)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background {
                             Color.clear
@@ -174,9 +193,9 @@ public struct QuickLookOverlayView: View {
                         }
                         .overlay {
                             StageInteractiveBridge(
-                                isWheelZoomEnabled: supportsVisualTransform && !confirmPermanentDelete,
+                                isWheelZoomEnabled: supportsVisualTransform && !isLongStripScrollMode && !confirmPermanentDelete,
                                 onWheelZoom: { factor in
-                                    let next = max(0.5, min(5.0, zoomScale * factor))
+                                    let next = max(0.5, min(maxZoomLimit, zoomScale * factor))
                                     zoomScale = next
                                     if next <= 1.01 {
                                         panOffset = .zero
@@ -221,25 +240,61 @@ public struct QuickLookOverlayView: View {
             }
         }
         .task(id: asset.id) {
-            library.markAssetOpened(asset.id)
-            library.refreshInspectorContext(for: asset.id)
+            let assetID = asset.id
+            let isRichWebCard = asset.isGitHubRepo || asset.isSocialPost
+            let wantsOriginalRaster = !isRichWebCard && (asset.mediaKind == .image || asset.mediaKind == .designFile)
+
             zoomScale = 1.0
             panOffset = .zero
             panStartOffset = .zero
             rotationDegrees = 0
             flipHorizontal = false
             flipVertical = false
+            isLongStripScrollMode = isTallStripImage
             originalURL = nil
-            highResImage = nil
-            async let orig = library.resolveOriginalURL(for: asset.id)
-            async let preview = library.thumbnailLoader.loadImage(for: asset.id, tier: .preview1400)
-            let (resolvedURL, previewImg) = await (orig, preview)
-            if !Task.isCancelled {
-                originalURL = resolvedURL
-                highResImage = previewImg
+
+            if wantsOriginalRaster {
+                highResImage = library.thumbnailLoader.cachedOriginalImage(for: assetID)
+                    ?? library.thumbnailLoader.cachedImage(for: assetID, tier: .preview1400)
+                    ?? library.thumbnailLoader.cachedImage(for: assetID, tier: .grid520)
+                isLoadingOriginalImage = (library.thumbnailLoader.cachedOriginalImage(for: assetID) == nil)
+            } else {
+                highResImage = nil
+                isLoadingOriginalImage = false
             }
+
+            let resolvedURL = await library.resolveOriginalURL(for: assetID)
+            guard !Task.isCancelled else { return }
+            originalURL = resolvedURL
+
+            if wantsOriginalRaster {
+                if let resolvedURL,
+                   let originalImg = await library.thumbnailLoader.loadOriginalImage(for: assetID, url: resolvedURL) {
+                    guard !Task.isCancelled else { return }
+                    highResImage = originalImg
+                    isLoadingOriginalImage = false
+                } else if let fallbackPreview = await library.thumbnailLoader.loadImage(for: assetID, tier: .preview1400) {
+                    guard !Task.isCancelled else { return }
+                    highResImage = fallbackPreview
+                    isLoadingOriginalImage = false
+                } else {
+                    isLoadingOriginalImage = false
+                }
+            } else if !isRichWebCard && asset.mediaKind != .video && asset.mediaKind != .audio && asset.mediaKind != .model3D {
+                if let previewImg = await library.thumbnailLoader.loadImage(for: assetID, tier: .preview1400) {
+                    guard !Task.isCancelled else { return }
+                    highResImage = previewImg
+                }
+            }
+
+            // Defer non-critical background bookkeeping so opening animations never contend with DB/vector work.
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            library.markAssetOpened(assetID)
+            library.refreshInspectorContext(for: assetID)
         }
         .onAppear {
+            stageAppeared = true
             if reduceMotion {
                 showSecondaryControls = true
             } else {
@@ -412,106 +467,14 @@ public struct QuickLookOverlayView: View {
             .padding(14)
 
             ScrollView(.vertical) {
-                if sidePanelTab == .similar {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("与「\(asset.title)」相似的素材")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.68))
-                            .lineLimit(1)
-
-                        if library.similarAssets.isEmpty {
-                            Text("暂无视觉或色彩相似素材")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.white.opacity(0.5))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 36)
-                        } else {
-                            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                                ForEach(library.similarAssets) { scored in
-                                    let ratio = max(0.68, min(1.5, CGFloat(scored.asset.aspectRatio)))
-                                    AssetThumbnailSurface(
-                                        asset: scored.asset,
-                                        loader: library.thumbnailLoader,
-                                        tier: .grid520,
-                                        cornerRadius: 9
-                                    )
-                                    .frame(height: (126 / ratio).rounded())
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
-                                    )
-                                    .onTapGesture {
-                                        library.selectedAssetIDs = [scored.asset.id]
-                                        coordinator.openQuickLook(assetID: scored.asset.id, playlist: coordinator.quickLookPlaylist)
-                                    }
-                                    .help(scored.asset.title)
-                                }
-                            }
-                        }
+                Group {
+                    if sidePanelTab == .similar {
+                        quickLookSideSimilarTab
+                    } else {
+                        quickLookSideInfoTab
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 14)
-                } else {
-                    VStack(alignment: .leading, spacing: 14) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(asset.title)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white)
-                            Text("\(asset.mediaKind.localizedLabel) · \(asset.pixelWidth) × \(asset.pixelHeight)")
-                                .font(.system(size: 11.5, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.62))
-                        }
-
-                        if !asset.dominantColors.isEmpty {
-                            HStack(spacing: 6) {
-                                ForEach(asset.dominantColors.prefix(5), id: \.hex) { swatch in
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .fill(Color(charkleHex: swatch.hex))
-                                        .frame(height: 24)
-                                }
-                            }
-                        }
-
-                        if !asset.tags.isEmpty {
-                            QuickLookFlowWrap(spacing: 6) {
-                                ForEach(asset.tags, id: \.self) { tag in
-                                    Text("#\(tag)")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.white.opacity(0.86))
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3.5)
-                                        .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
-                                }
-                            }
-                        }
-
-                        if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("来源链接")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.52))
-                                Link(urlStr, destination: url)
-                                    .font(.system(size: 11.5))
-                                    .lineLimit(2)
-                            }
-                        }
-
-                        if !asset.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("备注 / 来源详情")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.52))
-                                Text(asset.notes)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.white.opacity(0.84))
-                                    .lineSpacing(4)
-                                    .textSelection(.enabled)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 16)
                 }
+                .charkleCleanScrollbars(hidden: true)
             }
             .scrollIndicators(.hidden)
         }
@@ -522,64 +485,271 @@ public struct QuickLookOverlayView: View {
         )
     }
 
-    private var zoomableImageStage: some View {
-        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
-        return ZStack {
-            if let image = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520) {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .clipShape(shape)
+    private var quickLookSideSimilarTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("与「\(asset.title)」相似的素材")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.68))
+                .lineLimit(1)
+
+            if library.similarAssets.isEmpty {
+                Text("暂无视觉或色彩相似素材")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 36)
             } else {
-                ProceduralMediaFallbackCard(asset: asset)
-                    .aspectRatio(max(0.65, min(1.85, asset.aspectRatio)), contentMode: .fit)
-                    .frame(maxWidth: 720, maxHeight: 540)
-                    .clipShape(shape)
-            }
-        }
-        .rotationEffect(.degrees(rotationDegrees))
-        .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
-        .scaleEffect(zoomScale * quarterTurnFitScale)
-        .offset(panOffset)
-        .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
-        .gesture(
-            MagnifyGesture()
-                .onChanged { val in
-                    if gestureStartScale == nil { gestureStartScale = zoomScale }
-                    zoomScale = max(0.5, min(5.0, (gestureStartScale ?? 1.0) * val.magnification))
-                }
-                .onEnded { _ in
-                    gestureStartScale = nil
-                    if zoomScale < 1.02 {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                            zoomScale = 1.0
-                            panOffset = .zero
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                    ForEach(library.similarAssets) { scored in
+                        let ratio = max(0.68, min(1.5, CGFloat(scored.asset.aspectRatio)))
+                        AssetThumbnailSurface(
+                            asset: scored.asset,
+                            loader: library.thumbnailLoader,
+                            tier: .grid520,
+                            cornerRadius: 9
+                        )
+                        .frame(height: (126 / ratio).rounded())
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
+                        )
+                        .onTapGesture {
+                            library.selectedAssetIDs = [scored.asset.id]
+                            coordinator.openQuickLook(assetID: scored.asset.id, playlist: coordinator.quickLookPlaylist)
                         }
+                        .help(scored.asset.title)
                     }
                 }
-        )
-        .simultaneousGesture(
-            DragGesture()
-                .onChanged { val in
-                    guard zoomScale > 1.01 else { return }
-                    panOffset = CGSize(
-                        width: panStartOffset.width + val.translation.width,
-                        height: panStartOffset.height + val.translation.height
-                    )
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+    }
+
+    private var quickLookSideInfoTab: some View {
+        let resolvedMeta = library.resolvedImageMetadata(for: asset)
+        return VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(asset.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("\(asset.mediaKind.localizedLabel) · \(asset.pixelWidth) × \(asset.pixelHeight)")
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+
+            if !asset.dominantColors.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(asset.dominantColors.prefix(5), id: \.hex) { swatch in
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color(charkleHex: swatch.hex))
+                            .frame(height: 24)
+                    }
                 }
-                .onEnded { _ in
-                    panStartOffset = panOffset
+            }
+
+            if !asset.tags.isEmpty {
+                QuickLookFlowWrap(spacing: 6) {
+                    ForEach(asset.tags, id: \.self) { tag in
+                        Text("#\(tag)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.86))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3.5)
+                            .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
+                    }
                 }
-        )
-        .onTapGesture(count: 2) {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                if zoomScale > 1.1 {
-                    zoomScale = 1.0
-                    panOffset = .zero
-                    panStartOffset = .zero
+            }
+
+            if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("来源链接")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                    Link(urlStr, destination: url)
+                        .font(.system(size: 11.5))
+                        .lineLimit(2)
+                }
+            }
+
+            if let aiGen = resolvedMeta.aiGeneration, !aiGen.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(aiGen.generator ?? "AI 生图提示词")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                        Spacer()
+                        if let prompt = aiGen.prompt, !prompt.isEmpty {
+                            Button {
+                                let pb = NSPasteboard.general
+                                pb.clearContents()
+                                pb.setString(prompt, forType: .string)
+                                coordinator.showToast("已复制正向 Prompt", icon: "doc.on.doc")
+                            } label: {
+                                Text("复制 Prompt")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2.5)
+                                    .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    if let prompt = aiGen.prompt, !prompt.isEmpty {
+                        Text(prompt)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.white.opacity(0.86))
+                            .lineSpacing(3.5)
+                            .textSelection(.enabled)
+                    }
+                    if let model = aiGen.modelName, !model.isEmpty {
+                        Text("模型：\(model)")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.62))
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            if let exif = resolvedMeta.photoExif, exif.hasMeaningfulCameraExif {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("拍摄参数 (EXIF)")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                    if let cam = exif.cameraDisplayName {
+                        Text(cam)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.90))
+                    }
+                    if let lens = exif.lensModel {
+                        Text(lens)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.72))
+                    }
+                    if let summary = exif.exposureSummary {
+                        Text(summary)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.82))
+                    }
+                    if let date = exif.capturedAt {
+                        Text(date)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.56))
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            if !asset.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("备注 / 来源详情")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                    Text(asset.notes)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.84))
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 16)
+    }
+
+    @ViewBuilder
+    private var zoomableImageStage: some View {
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let activeImage = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520)
+
+        if isLongStripScrollMode && !hasActiveVisualTransform && zoomScale <= 1.01, let image = activeImage {
+            let backingScale = NSScreen.main?.backingScaleFactor ?? 2.0
+            let naturalWidthPt = CGFloat(max(asset.pixelWidth, Int(image.size.width))) / max(1.0, backingScale)
+            let targetWidth = min(
+                max(520, naturalWidthPt),
+                max(360, stageViewportSize.width * 0.84),
+                1040
+            )
+            ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: targetWidth)
+                        .clipShape(shape)
+                        .overlay(
+                            shape.strokeBorder(Color.white.opacity(0.10), lineWidth: 0.75)
+                        )
+                }
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                .charkleCleanScrollbars(hidden: false)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ZStack {
+                if let image = activeImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .clipShape(shape)
                 } else {
-                    zoomScale = 2.0
+                    ProceduralMediaFallbackCard(asset: asset)
+                        .aspectRatio(max(0.65, min(1.85, asset.aspectRatio)), contentMode: .fit)
+                        .frame(maxWidth: 720, maxHeight: 540)
+                        .clipShape(shape)
+                }
+            }
+            .rotationEffect(.degrees(rotationDegrees))
+            .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
+            .scaleEffect(zoomScale * quarterTurnFitScale)
+            .offset(panOffset)
+            .shadow(color: .black.opacity(0.38), radius: 24, y: 10)
+            .gesture(
+                MagnifyGesture()
+                    .onChanged { val in
+                        if gestureStartScale == nil { gestureStartScale = zoomScale }
+                        zoomScale = max(0.5, min(maxZoomLimit, (gestureStartScale ?? 1.0) * val.magnification))
+                    }
+                    .onEnded { _ in
+                        gestureStartScale = nil
+                        if zoomScale < 1.02 {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
+                                zoomScale = 1.0
+                                panOffset = .zero
+                            }
+                        }
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture()
+                    .onChanged { val in
+                        guard zoomScale > 1.01 else { return }
+                        panOffset = CGSize(
+                            width: panStartOffset.width + val.translation.width,
+                            height: panStartOffset.height + val.translation.height
+                        )
+                    }
+                    .onEnded { _ in
+                        panStartOffset = panOffset
+                    }
+            )
+            .onTapGesture(count: 2) {
+                withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
+                    if zoomScale > 1.1 {
+                        zoomScale = 1.0
+                        panOffset = .zero
+                        panStartOffset = .zero
+                    } else {
+                        zoomScale = 2.0
+                    }
                 }
             }
         }
@@ -632,8 +802,40 @@ public struct QuickLookOverlayView: View {
         CharkleGlassContainer(spacing: 10) {
             HStack(spacing: 10) {
                 if supportsVisualTransform {
+                    if isTallStripImage {
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                isLongStripScrollMode.toggle()
+                                if isLongStripScrollMode {
+                                    zoomScale = 1.0
+                                    panOffset = .zero
+                                    panStartOffset = .zero
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: isLongStripScrollMode ? "arrow.up.and.down.text.horizontal" : "rectangle.arrowtriangle.2.inward")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(isLongStripScrollMode ? "长图滚动" : "适应窗口")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                isLongStripScrollMode ? Color.accentColor.opacity(0.78) : Color.white.opacity(0.14),
+                                in: Capsule(style: .continuous)
+                            )
+                        }
+                        .buttonStyle(CharkleTactileButtonStyle())
+                        .help("切换长图按宽滚动阅读 / 适应窗口缩放查看")
+
+                        hudDivider
+                    }
+
                     HStack(spacing: 4) {
                         hudIconButton("minus.magnifyingglass", help: "缩小") {
+                            isLongStripScrollMode = false
                             withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
                                 zoomScale = max(0.5, zoomScale * 0.8)
                             }
@@ -644,8 +846,9 @@ public struct QuickLookOverlayView: View {
                             .foregroundStyle(.white.opacity(0.88))
                             .frame(minWidth: 42)
                         hudIconButton("plus.magnifyingglass", help: "放大") {
+                            isLongStripScrollMode = false
                             withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                                zoomScale = min(5.0, zoomScale * 1.25)
+                                zoomScale = min(maxZoomLimit, zoomScale * 1.25)
                             }
                         }
                         hudIconButton("1.magnifyingglass", help: "重置缩放与变换 (0)") {

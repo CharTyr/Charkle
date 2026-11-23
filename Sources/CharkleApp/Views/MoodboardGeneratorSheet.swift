@@ -10,7 +10,6 @@ public struct MoodboardGeneratorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.openSettings) private var openSettings
 
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
@@ -146,7 +145,7 @@ public struct MoodboardGeneratorSheet: View {
                 if !isCloudAIReady {
                     Button("去开启") {
                         dismiss()
-                        openSettings()
+                        coordinator.openSettings(tab: .ai)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
@@ -210,12 +209,10 @@ public struct MoodboardGeneratorSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
-                        folderScopeChip(id: nil, label: "全部素材")
-                        ForEach(library.folders) { folder in
-                            folderScopeChip(id: folder.id, label: library.folderDisplayPath(for: folder.id))
-                        }
-                    }
+                    CharkleHierarchicalFolderScopeTree(
+                        folders: library.folders,
+                        selectedFolderIDs: $scopeFolderIDs
+                    )
                 }
 
                 Divider()
@@ -438,37 +435,8 @@ public struct MoodboardGeneratorSheet: View {
                 .disabled(moodboards.isGeneratingProposal)
             }
             .padding(18)
+            .charkleCleanScrollbars(hidden: false)
         }
-    }
-
-    private func folderScopeChip(id: UUID?, label: String) -> some View {
-        let isSelected = id == nil ? scopeFolderIDs.isEmpty : scopeFolderIDs.contains(id!)
-        return Button {
-            if let id {
-                if scopeFolderIDs.contains(id) {
-                    scopeFolderIDs.remove(id)
-                } else {
-                    scopeFolderIDs.insert(id)
-                }
-            } else {
-                scopeFolderIDs.removeAll()
-            }
-        } label: {
-            Text(label)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(
-                    isSelected ? Color.accentColor.opacity(0.12) : CharkleTheme.surfaceElevated(for: colorScheme),
-                    in: Capsule(style: .continuous)
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(isSelected ? Color.accentColor.opacity(0.45) : CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
-                )
-        }
-        .buttonStyle(CharkleTactileButtonStyle())
     }
 
     // MARK: - Right Agent Harness Workbench & Live Sectioned Preview
@@ -511,6 +479,7 @@ public struct MoodboardGeneratorSheet: View {
                     }
                 }
                 .padding(18)
+                .charkleCleanScrollbars(hidden: false)
                 .animation(CharkleMotion.enterExit(showTimeline, reduced: reduceMotion), value: showTimeline)
                 .animation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion), value: moodboards.lastError)
                 .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: moodboards.proposal?.draftDocument.updatedAt)
