@@ -111,7 +111,7 @@ export const SidebarView: React.FC = () => {
     [counts],
   );
 
-  // Kubai 015 Travelling Active Indicator index for primary nav
+  // Travelling active indicator index for primary nav
   const activePrimaryIndex = useMemo(
     () => primaryItems.findIndex((item) => item.dest.type === destination.type),
     [primaryItems, destination.type],
@@ -296,7 +296,7 @@ export const SidebarView: React.FC = () => {
 
       {/* Main Scrollable Navigation */}
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll px-2 pb-3 flex flex-col gap-4">
-        {/* Section 1: Library Primary Destinations with Kubai 015 Travelling Active Indicator */}
+        {/* Section 1: Library Primary Destinations with Travelling Active Indicator */}
         <div className="relative flex flex-col gap-0.5">
           {activePrimaryIndex >= 0 && (
             <div

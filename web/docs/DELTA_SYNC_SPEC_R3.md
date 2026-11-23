@@ -21,7 +21,7 @@
    - Keep **Auth Login** (`AuthGate` before `CharkleWorkspace`) and the **`账号与安全`** (`accountSecurity`) Settings pane (password change, active sessions, `chk_...` PAT management).
    - Keep the **Browser Clipper Extension** (`packages/extension/`, `/api/v1/extension/download`) + Safari/Mobile Bookmarklet, now cleanly housed in the new **`插件与扩展`** (`extensions`) Settings pane and Step 2 of Onboarding.
 3. **STRICT USER-FACING COPY RULE**:
-   - **FORBIDDEN** in any user-facing label, title, subtitle, badge, tooltip, guide step, or toast: `Kubai`, `Gallery-First`, `Liquid Glass`, `16-Grid`, `Layered`, `Duotone`, `Manifest V3`, `scrypt`, `FTS5`, `CIELAB`, `MMR`, `Agent Harness`.
+   - **FORBIDDEN** in any user-facing label, title, subtitle, badge, tooltip, guide step, or toast: `Gallery-First`, `Liquid Glass`, `16-Grid`, `Layered`, `Duotone`, `Manifest V3`, `scrypt`, `FTS5`, `CIELAB`, `MMR`, `Agent Harness`.
    - **NO** macOS-only terms in Web copy: replace `Apple Vision` → `内置视觉分析`, `macOS 钥匙串` → `服务端加密保存`, `访达` / `程序坞` / `每台 Mac` → `浏览器` / `多设备`.
    - **NO** developer icon showcase wall and **NO** verbose marketing slogans. Keep only genuinely useful user controls and crisp plain Chinese labels.
 
@@ -287,7 +287,7 @@ Portal modal (`z-[120]`, `w-[min(840px,calc(100vw-48px))] h-[min(636px,calc(100v
 - **`ExportBoardModal.tsx`** (L405–447): add a subtle `"打开插件与扩展设置 →"` button in the Figma guide block that calls `onClose(); openSettings('extensions')` so users can one-click download the Figma plugin zip.
 
 ### 3.2 Modular Settings Architecture (`packages/client/src/features/settings/*`)
-Replace the old monolithic 7-tab implementation (`SettingsModal.tsx`, `SettingsPrimitives.tsx`, `AccountSecurityTab.tsx`, `CloudSyncTab.tsx`, `IntelligenceTab.tsx`, `AppearanceAndOtherTabs.tsx`, `StorageMigrationModal.tsx`) with the calm, Refto-inspired **4-section, 9-pane** architecture matching `Sources/CharkleApp/Views/Settings/*.swift` (adapted cleanly for Web). Keep `export { SettingsModal } from './SettingsModal'` in `features/settings/index.ts`.
+Replace the old monolithic 7-tab implementation (`SettingsModal.tsx`, `SettingsPrimitives.tsx`, `AccountSecurityTab.tsx`, `CloudSyncTab.tsx`, `IntelligenceTab.tsx`, `AppearanceAndOtherTabs.tsx`, `StorageMigrationModal.tsx`) with the calm **4-section, 9-pane** architecture matching `Sources/CharkleApp/Views/Settings/*.swift` (adapted cleanly for Web). Keep `export { SettingsModal } from './SettingsModal'` in `features/settings/index.ts`.
 
 #### Shared Chrome (`SettingsChrome.tsx`)
 - `SettingsSection`: external `11.5px` muted section label (`var(--settings-label)`) + optional caption above `SettingsCard`.
@@ -383,7 +383,7 @@ Replace the old monolithic 7-tab implementation (`SettingsModal.tsx`, `SettingsP
 2. `npm test` — all existing + new server tests pass (`POST /api/v1/ai/test`, `POST /api/v1/ai/analyze` with `localOnly: true`, `GET /api/v1/figma-plugin/download`).
 3. `npm run build` — clean production bundle.
 4. **Copy & UI Audit**:
-   - Grep `packages/client/src` user-facing strings to confirm **0 occurrences** of `Kubai`, `Gallery-First`, `Liquid Glass`, `16-Grid`, `Layered`, `Duotone`, `Manifest V3`, `scrypt`, `FTS5`, `CIELAB`, `MMR`, `Agent Harness`, `Apple Vision`, `gdirect`, `刘海`.
+   - Grep `packages/client/src` user-facing strings to confirm **0 occurrences** of `Gallery-First`, `Liquid Glass`, `16-Grid`, `Layered`, `Duotone`, `Manifest V3`, `scrypt`, `FTS5`, `CIELAB`, `MMR`, `Agent Harness`, `Apple Vision`, `gdirect`, `刘海`.
    - Verify centered 9-pane Settings overlay opens via `⌘,` and bottom-left Sidebar Settings button (both expanded & collapsed rail), supports `Esc` & backdrop close, and switches cleanly between Light & Dark themes.
    - Verify 6-step Onboarding opens on first launch (when `charkle.hasCompletedOnboarding` is unset), every step and overall flow is skippable, shockwave seal plays on `完成`, and `"重新查看"` in `设置 → 通用` + `⌘J` re-opens it cleanly.
    - Verify all deep-links route to the exact pane (`MoodboardGeneratorModal` → `ai`, `ExportBoardModal` / `QuickCaptureModal` / `JumpAnywhereModal` install → `extensions`, Sidebar sync pill → `library`/`sync`, User menu → `accountSecurity`).

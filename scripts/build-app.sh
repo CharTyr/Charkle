@@ -38,7 +38,7 @@ cp -X "$CLI_BIN_PATH" "$STAGE_BUNDLE/Contents/Helpers/charkle"
 chmod +x "$STAGE_BUNDLE/Contents/Helpers/charkle"
 cp -X "$ROOT_DIR/Resources/Info.plist" "$STAGE_BUNDLE/Contents/Info.plist"
 
-# Copy SwiftPM resource bundles (including kubai-icons SVG assets)
+# Copy SwiftPM resource bundles (including bundled SVG icon assets)
 for bundle in "$BIN_DIR"/*.bundle; do
   if [[ -d "$bundle" ]]; then
     cp -RX "$bundle" "$STAGE_BUNDLE/Contents/Resources/"

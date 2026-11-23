@@ -410,7 +410,7 @@ export async function seedSampleLibrary(
     owner: 'charkle-studio',
     repo: 'gallery-design-tokens',
     fullName: 'charkle-studio/gallery-design-tokens',
-    description: 'Neutral Gallery-First surfaces, concentric radii, CIELAB palettes, and Kubai motion curves for visual curation tools.',
+    description: 'Neutral Gallery-First surfaces, concentric radii, CIELAB palettes, and calibrated motion curves for visual curation tools.',
     stars: 2840,
     forks: 196,
     watchers: 84,

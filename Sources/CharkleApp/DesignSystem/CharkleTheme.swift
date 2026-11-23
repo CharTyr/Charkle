@@ -1,7 +1,7 @@
 import CharkleCanvas
 import SwiftUI
 
-/// Gallery-First neutral surfaces, Kubai Tip 004 continuous concentric radii,
+/// Gallery-First neutral surfaces, continuous concentric radii,
 /// and Restrained Apple Liquid Glass tokens (macOS 26+ native with calibrated macOS 15
 /// and Reduce Transparency fallbacks).
 public enum CharkleTheme {
@@ -41,7 +41,7 @@ public enum CharkleTheme {
         return Color(charkleHex: hex).opacity(scheme == .dark ? 0.10 : 0.06)
     }
 
-    // MARK: - Continuous Concentric Corner Tokens (Kubai Tip 004, 4pt Grid)
+    // MARK: - Continuous Concentric Corner Tokens (4pt Grid)
 
     public enum Radius {
         public static let dockOuter: CGFloat = 20
@@ -184,7 +184,7 @@ public struct CharkleLiquidGlassModifier<S: InsettableShape>: ViewModifier {
             content
                 .glassEffect(finalGlass, in: shape)
         } else {
-            // Calibrated macOS 15 fallback with Kubai 010 bright specular rim highlight
+            // Calibrated macOS 15 fallback with crisp specular rim highlight
             content
                 .background(.ultraThinMaterial, in: shape)
                 .overlay {
@@ -249,7 +249,7 @@ public extension View {
     }
 }
 
-// MARK: - Soft Edge-to-Edge Modal Backdrop (Kubai Tip 009)
+// MARK: - Soft Edge-to-Edge Modal Backdrop
 
 /// Calibrated full-window modal backdrop covering the hidden titlebar seamlessly without a top seam.
 /// Uses a pure GPU-composited soft radial veil (avoiding full-window `NSVisualEffectView` opacity-fade stutter

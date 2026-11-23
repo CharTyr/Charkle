@@ -6,7 +6,7 @@ import SwiftUI
 /// High-craft first-launch & re-runnable onboarding studio for Charkle,
 /// visually and functionally aligned with Charkle's modular 9-pane Settings overlay:
 /// - Warm neutral `SettingsPalette` & `SettingsChrome` surfaces, hairline borders, and calm typography
-/// - Bespoke Kubai layered hero icons (`layered-notch`, `layered-ai-spark`, `layered-gallery`, `layered-ready`)
+/// - Bespoke layered hero icons (`layered-notch`, `layered-ai-spark`, `layered-gallery`, `layered-ready`)
 /// - Live macOS Screen Recording permission check (`ScreenCapturePermissionChecker`) & default Notch target
 /// - Google Drive OAuth setup sheet reuse (`GoogleOAuthSetupSheet`), WebDAV, ChatGPT & AI presets
 /// - Every individual step and the entire onboarding flow are explicitly skippable at any time
@@ -310,7 +310,7 @@ public struct OnboardingView: View {
 
             Spacer(minLength: 8)
 
-            // Travelling active capsule indicator (Kubai Tip 011 moveOnScreen + 015 continuity)
+            // Travelling active capsule indicator (moveOnScreen continuity)
             HStack(spacing: 2.5) {
                 ForEach(Step.allCases) { step in
                     let isActive = currentStep == step
@@ -392,7 +392,7 @@ public struct OnboardingView: View {
         }
     }
 
-    // MARK: - Footer Navigation Bar (Always Skippable + Kubai Tip 001 Primary CTA)
+    // MARK: - Footer Navigation Bar (Always Skippable + Tactile Primary CTA)
 
     private var footerBar: some View {
         HStack(spacing: 10) {
@@ -540,7 +540,7 @@ public struct OnboardingView: View {
                 }
             }
 
-            // 4 staggered pillars showcasing our bespoke Kubai layered icons
+            // 4 staggered pillars showcasing our layered icons
             HStack(spacing: 12) {
                 welcomePillarCard(
                     index: 0,
@@ -1562,7 +1562,7 @@ public struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 5: Ready Summary & Kubai Tip 013 Shockwave Glow
+    // MARK: - Step 5: Ready Summary & Completion Shockwave Glow
 
     private var readyStep: some View {
         let storageSummary: String = switch draftSyncConfig.mode {
@@ -1598,7 +1598,7 @@ public struct OnboardingView: View {
         return VStack(spacing: 20) {
             Spacer(minLength: 4)
 
-            // Hero Ready Seal with Kubai Tip 013 radial shockwave ring (one-shot GPU burst)
+            // Hero Ready Seal with radial shockwave ring (one-shot GPU burst)
             ZStack {
                 if !reduceMotion {
                     Circle()

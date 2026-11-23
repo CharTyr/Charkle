@@ -20,7 +20,7 @@ Shipped full gallery/notch/folder/rich-media/moodboard upgrade, fixed Swift 6 mu
 
 ### Main Changes
 
-- Gallery 3 views (Vertical, Justified, Filmstrip), gesture zoom GPU animation, Kubai Duotone in-app icons (36 SVGs), collapsible sidebar, smart folders, folder customization & recursive parent-folder display.
+- Gallery 3 views (Vertical, Justified, Filmstrip), gesture zoom GPU animation, bundled duotone in-app icons (36 SVGs), collapsible sidebar, smart folders, folder customization & recursive parent-folder display.
 - Structured Social Post (X/Threads/Bluesky) & GitHub Repo rich viewers in QuickLook + Gallery with standalone photo & video extraction; Moodboard candidate drag & smart frame resize.
 - Fixed multi-item drag SIGTRAP (nonisolated isFlipped), bounded VisionConcurrencyGate(limit: 3), cached Notch drag pasteboard & recent activity, and clipped Notch morphing animation.
 - Bootstrapped .trellis/spec/{backend,frontend,guides} with executable contracts and archived 00-bootstrap-guidelines.

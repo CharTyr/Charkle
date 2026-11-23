@@ -20,7 +20,7 @@ Sources/
 └── CharkleApp/                         # @MainActor macOS executable target
     ├── CharkleAppEntry.swift           # App entry, WindowGroup, MenuBar commands (⌘\ sidebar toggle, shortcuts)
     ├── DesignSystem/
-    │   ├── CharkleIcon.swift           # CharkleIcon, CharkleFolderIcon, CharkleIconCache (Kubai Duotone + menuFolderIcon)
+    │   ├── CharkleIcon.swift           # CharkleIcon, CharkleFolderIcon, CharkleIconCache (Duotone SVG + menuFolderIcon)
     │   ├── CharkleTheme.swift          # Color tokens, hairlines, Liquid Glass helpers, tactile button style
     │   ├── CharkleMotion.swift         # Spring/ease tokens + Reduce Motion wrapper (`CharkleMotion.accessible`)
     │   └── AppIconManager.swift        # Light/Dark dock icon switcher
@@ -49,7 +49,7 @@ Sources/
     │   ├── JumpAnywhereView.swift      # ⌘J Pinyin/Chinese Quick Jump palette
     │   ├── MoodboardGeneratorSheet.swift    # 4-entry rapid moodboard generator
     │   └── SettingsView.swift          # Sync backends, AI providers, TypeSafe Jev, MCP agent policy, cache & Notch prefs
-    └── Resources/Icons/                # 36 Kubai Duotone SVGs (`duotone-*.svg`, source palette #445C94 / #B4BED4)
+    └── Resources/Icons/                # 36 bundled duotone SVGs (`duotone-*.svg`, source palette #445C94 / #B4BED4)
 ```
 
 ---

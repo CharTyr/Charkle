@@ -65,3 +65,7 @@ The Windows desktop client is planned in `./windows/` as a self-contained Cargo 
 
 - **macOS Modules**: `Sources/CharkleCore` (`nonisolated`), `Sources/CharkleCanvas` (`@MainActor`), `Sources/CharkleApp` (`@MainActor`), `Sources/CharkleCLI`, `Tests/CharkleTests`
 - **Design & Specs**: [`docs/BLUEPRINT.md`](./docs/BLUEPRINT.md) · [`docs/MOTION_AND_ICON_SPEC.md`](./docs/MOTION_AND_ICON_SPEC.md) · [`web/README.md`](./web/README.md) · [`windows/README.md`](./windows/README.md)
+
+## Acknowledgements
+
+- **[`gdirect`](https://github.com/mizorewww/gdirect)** — Used as the direct-connection fallback and acceleration layer for Google Drive sync.

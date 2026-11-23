@@ -8,7 +8,7 @@
 
 - **Targets**:
   - `Sources/CharkleCanvas/` (`@MainActor` default isolation): High-FPS AppKit-backed `VirtualizedMasonryView`, freeform `MoodboardCanvasView`, `EditorialLayoutSolver`, `FigmaBridgeExporter`, `ThumbnailImageLoader`, `HoverMediaPreview`, `CanvasSupport` (`HorizontalWheelScrollRedirector`, `StageInteractiveBridge`).
-  - `Sources/CharkleApp/` (`@MainActor` default isolation): SwiftUI desktop shell, collapsible sidebar, Gallery Filmstrip view, Inspector, Quick Look rich viewers, hardware MacBook Notch Shelf, `@Observable` domain stores, Kubai Duotone icon system & motion tokens.
+  - `Sources/CharkleApp/` (`@MainActor` default isolation): SwiftUI desktop shell, collapsible sidebar, Gallery Filmstrip view, Inspector, Quick Look rich viewers, hardware MacBook Notch Shelf, `@Observable` domain stores, bundled duotone icon system & motion tokens.
 - **Platform**: macOS 15+ (Swift 6.2, Apple Silicon). Restrained Apple Liquid Glass (`charkleLiquidGlass`), gallery-first visual hierarchy, 120 FPS interaction discipline.
 
 ---
@@ -18,7 +18,7 @@
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | `CharkleCanvas` and `CharkleApp` layout, resource bundling, component placement | Active |
-| [Component Guidelines](./component-guidelines.md) | SwiftUI composition, Kubai Duotone icons, macOS menu color swatches, Notch morphing clip contract, rich viewers | Active |
+| [Component Guidelines](./component-guidelines.md) | SwiftUI composition, duotone SVG icons, macOS menu color swatches, Notch morphing clip contract, rich viewers | Active |
 | [AppKit Bridge Guidelines](./appkit-bridge-guidelines.md) | SwiftUI↔AppKit drag/drop rules, `nonisolated isFlipped`, multi-item drag, pasteboard caching, GPU zoom animations | Active |
 | [State Management](./state-management.md) | `@Observable` domain stores, derived caches, `@ObservationIgnored` + `isolated deinit`, isolated canvas camera state | Active |
 | [Type Safety](./type-safety.md) | Swift 6 `@MainActor` isolation, typed drag envelopes (`CharkleDragIdentifiers`), exhaustive enums | Active |

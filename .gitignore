@@ -5,9 +5,6 @@
 dist/
 *.xcuserdata
 *.xcworkspace/
-design/icons/check-out/
-design/icons/*/check-out/
-design/icons/node_modules/
 Resources/GoogleOAuthClient.json
 
 # Windows Client (Tauri v2 + Rust Core + React UI)

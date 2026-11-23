@@ -71,7 +71,7 @@ func drawCharkleIcon(size: Int) -> CGImage? {
         )
     }
 
-    // Inner subtle moodboard frame backing (Kubai layered construction: back plate + cards)
+    // Inner subtle moodboard frame backing (layered construction: back plate + cards)
     let frameInset = s * 0.195
     let frameRect = CGRect(x: frameInset, y: frameInset, width: s - frameInset * 2, height: s - frameInset * 2)
     let gap = s * 0.044
@@ -95,7 +95,7 @@ func drawCharkleIcon(size: Int) -> CGImage? {
         if let g = CGGradient(colorsSpace: cs, colors: [topColor, bottomColor] as CFArray, locations: [0, 1]) {
             ctx.drawLinearGradient(g, start: CGPoint(x: rect.midX, y: rect.maxY), end: CGPoint(x: rect.midX, y: rect.minY), options: [])
         }
-        // Top inner specular highlight (Kubai layered inner glow)
+        // Top inner specular highlight (layered inner glow)
         let hiRect = CGRect(x: rect.minX, y: rect.maxY - rect.height * 0.16, width: rect.width, height: rect.height * 0.16)
         if let hiGrad = CGGradient(
             colorsSpace: cs,
@@ -125,7 +125,7 @@ func drawCharkleIcon(size: Int) -> CGImage? {
     let rightTopRect = CGRect(x: frameRect.minX + colW + gap, y: frameRect.maxY - rightShortH, width: colW, height: rightShortH)
     let rightBotRect = CGRect(x: frameRect.minX + colW + gap, y: frameRect.minY, width: colW, height: rightTallH)
 
-    // 1. Studio Cobalt hero card (with minimal horizon/sun motif like Kubai images icon)
+    // 1. Studio Cobalt hero card (with minimal horizon/sun motif)
     drawLayeredTile(
         leftTopRect,
         topColor: CGColor(red: 0.34, green: 0.59, blue: 0.96, alpha: 1),

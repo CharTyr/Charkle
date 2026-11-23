@@ -1047,7 +1047,7 @@ private final class MasonryTileLayer {
         borderLayer.removeAnimation(forKey: "charkle.bounds")
     }
 
-    /// GPU-composited transition from a previous frame to the current model frame (Kubai Tip 011 ease-out).
+    /// GPU-composited transition from a previous frame to the current model frame (ease-out).
     /// Completely interruptible: starts from the live presentation layer if an animation is already in flight.
     func animateFrameTransition(from oldRect: CGRect, to newRect: CGRect, duration: CFTimeInterval = 0.26) {
         guard oldRect != newRect, oldRect.width > 1, oldRect.height > 1 else { return }

@@ -2,15 +2,15 @@
 
 > **状态**：规划评审稿（确认后再开始建仓与编码）  
 > **应用名称**：**Charkle**（Bundle ID: `com.charkle.app` · URL Scheme: `charkle://` · Drive 根目录: `/Charkle/`）  
-> **目标平台**：macOS 15+（Apple Silicon，优先适配本机 macOS 26/27 原生 Liquid Glass 与 Swift 6.4 并发模型）  
-> **正式仓库规划**：`~/Documents/Projects/Charkle`（从 `.t3/scratch/` 原型提炼底层能力、按新架构干净重组）
+> **目标平台**：macOS 15+（Apple Silicon，优先适配 macOS 原生 Liquid Glass 与 Swift 6.4 并发模型）  
+> **仓库结构**：统一多端 Monorepo（macOS 原生、Web 版、Windows 原生规划）
 
 ---
 
 ## 1. 产品灵魂与 v1.0 范围边界
 
 ### 核心差异化：从「素材囤积库」到「10 秒情绪板创作台」
-传统参考图工具（Eagle / Refto）擅长收集，白板工具（PureRef / Freeform / Milanote）擅长排布，但两者之间存在明显断层。**Charkle** 把两条链路合为一体，并以**人类可读的 Google Drive** 作为多端云底座：
+传统参考图工具擅长收集，白板工具擅长排布，但两者之间存在明显断层。**Charkle** 把两条链路合为一体，并以**人类可读的 Google Drive** 作为多端云底座：
 
 1. **素材库（Library）**：长期全媒体视觉记忆（图片、动图/短视频、网页快照、PDF/排版/色卡、音频与 SVG/PSD/Figma 链接），原始文件在 Google Drive 中按真实文件夹清晰存放。
 2. **收件箱（Inbox）**：零摩擦采集缓冲区（`/Charkle/Inbox/`）+ 高效键盘/AI 归档清理台，也是情绪板的快速供血通道。
@@ -215,25 +215,22 @@ Google Drive /
 
 ---
 
-## 5. 原型资产复用与清理清单
+## 5. 核心模块实现清单
 
-当前原型（`/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c`，约 12.8k 行）将作为只读参考源，迁移到新仓库 `~/Documents/Projects/Charkle`：
-
-- **提炼复用（改造为深模块内部实现）**：
-  - [ColorExtractor.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/CharkCore/Intelligence/ColorExtractor.swift)（CIELAB 主色与 ΔE 计算）
-  - [VisionAnalyzer.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/CharkCore/Intelligence/VisionAnalyzer.swift)（Apple Vision 中英文 OCR 与 `VNFeaturePrint`）
-  - [KeychainStore.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/CharkCore/Storage/KeychainStore.swift)（macOS 钥匙串封装）
-  - [GoogleOAuthClient.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/CharkCore/GoogleDrive/GoogleOAuthClient.swift) & [GoogleDriveAPIBackend.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/CharkCore/GoogleDrive/GoogleDriveAPIBackend.swift)（PKCE OAuth + Drive API v3 骨架，扩展增量 Changes 与直连 IP）
-  - [GDirectIntegration.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/CharkCore/GoogleDrive/GDirectIntegration.swift)（`gdirect` 环境检测、版本不匹配告警、`rclone` PATH、POSIX `st_dev` 校验）
-  - [GlobalHotkeyManager.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/Chark/App/GlobalHotkeyManager.swift) & [ScreenshotCapturer.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/Chark/App/ScreenshotCapturer.swift)
-  - [NotchShelfController.swift](/Users/char/.t3/scratch/2026-11-22-google-drive-google-drive-https-c5bd211c/Sources/Chark/Views/NotchShelfController.swift) 中的 `NSDraggingDestination` 与防 Mission Control 经验
-- **按新架构全新实现**：
-  - `LibraryDatabase`（替代单文件 `index.json`）
-  - `DriveSyncEngine`（替代全量覆盖合并，升级为分片增量 + FileID 追踪）
+- **底层能力模块（`CharkleCore` 深模块）**：
+  - `ColorExtractor.swift`（CIELAB 主色与 ΔE 计算）
+  - `VisionAnalyzer.swift`（Apple Vision 中英文 OCR 与 `VNFeaturePrint`）
+  - `KeychainStore.swift`（macOS 钥匙串封装）
+  - `GoogleOAuthClient.swift` & `DirectAPITransport.swift`（PKCE OAuth + Drive API v3 增量 Changes 与直连 IP）
+  - `GDirectIntegration.swift`（`gdirect` 环境检测、版本告警、`rclone` PATH、POSIX `st_dev` 校验）
+  - `GlobalHotkeyManager.swift` & `ScreenshotCapturer.swift`（全局快捷键与交互式区域截图）
+  - `NotchShelfController.swift`（`NSDraggingDestination` 与防 Mission Control 触发）
+- **核心引擎与界面层**：
+  - `LibraryDatabase`（SQLite WAL + FTS5 + 拼音 + 向量索引）
+  - `DriveSyncEngine`（分片增量同步 + FileID 改名追踪）
   - `MediaPipeline`（全媒体管线 + 两级 LRU 缓存）
   - `MoodboardCurator` + `CharkleCanvas`（双模情绪板与虚拟化瀑布流）
-  - 全新分域 `@Observable` 状态层 + Gallery-First & Liquid Glass UI + 新版设置页
-- **暂存至 v1.1**：`MediaTools.swift`、`BrowserExtension/`、`LocalCollectorServer.swift`。
+  - 分域 `@Observable` 状态层 + Gallery-First & Liquid Glass UI + 模块化设置页
 
 ---
 

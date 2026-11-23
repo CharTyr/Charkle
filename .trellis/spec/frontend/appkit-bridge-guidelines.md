@@ -86,7 +86,7 @@ ThumbnailCard(item)
 - **Live scroll (`isLiveScrolling == true`)**: ZERO animations (`stripLayoutAnimations()`), pure `CALayer` recycling from `reusePool`, O(log N) binary-search `visibleItems(minY:maxY:)`.
 - **Zoom (`magnify(with:)`, `⌘ + scrollWheel`, toolbar slider) & Layout Switch**:
   - Always pass `animate: !reduceMotion` in `handleInteractiveZoom` (never gate on `abs(scaleFactor - 1.0) > 0.04`, which suppresses `⌘ + scroll` animations!).
-  - Chain interruptible GPU `CABasicAnimation`s (`MasonryTileLayer.animateFrameTransition`) starting from `layer.presentation()?.frame ?? oldRect` with Kubai Tip 011 ease-out `CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)`.
+  - Chain interruptible GPU `CABasicAnimation`s (`MasonryTileLayer.animateFrameTransition`) starting from `layer.presentation()?.frame ?? oldRect` with ease-out `CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)`.
   - Guard `updateNSView` round-trips with `isRecentPinch = (CFAbsoluteTimeGetCurrent() - lastInteractiveZoomAt) < 0.26` so syncing `callbacks.onZoomColumnWidth` back to SwiftUI never cancels the active GPU animation.
 
 ---

@@ -162,7 +162,7 @@ public struct SettingsRow<Control: View>: View {
     }
 }
 
-/// Refto-inspired quiet inline disclosure link (`如何开启 >`, `查看安装步骤 >`)
+/// Quiet inline disclosure link (`如何开启 >`, `查看安装步骤 >`)
 /// that keeps the default surface calm while offering step-by-step guidance right in context.
 public struct InlineGuideDisclosure<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme

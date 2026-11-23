@@ -182,7 +182,7 @@ public struct MainWindowView: View {
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
 
-            // Full-Media Quick Look Hero Continuity Overlay (Kubai Tip 015)
+            // Full-Media Quick Look Hero Continuity Overlay
             if let qlID = coordinator.quickLookAssetID,
                let qlAsset = library.allAssetsByID[qlID] ?? library.assets.first(where: { $0.id == qlID }) {
                 QuickLookOverlayView(
@@ -222,7 +222,7 @@ public struct MainWindowView: View {
                 .zIndex(250)
             }
 
-            // Centered Refto-Inspired Settings Overlay (⌘, or bottom-left sidebar gear)
+            // Centered Settings Overlay (⌘, or bottom-left sidebar gear)
             if coordinator.isSettingsPresented {
                 SettingsOverlayView(
                     coordinator: coordinator,
@@ -263,7 +263,7 @@ public struct MainWindowView: View {
                 .transition(.opacity)
             }
 
-            // Floating Toasts (Top-Trailing, Kubai Tip 011 enterSm / exitSm)
+            // Floating Toasts (Top-Trailing, enterSm / exitSm)
             VStack {
                 HStack {
                     Spacer()

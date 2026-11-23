@@ -228,7 +228,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
 
       return (
         <div key={folder.id} className="relative">
-          {/* Kubai 005 thin insertion line */}
+          {/* Thin drag-reorder insertion line */}
           {isDropBefore && (
             <div className="absolute left-3 right-3 top-0 h-[2px] rounded-full bg-[var(--accent)] pointer-events-none z-10" />
           )}

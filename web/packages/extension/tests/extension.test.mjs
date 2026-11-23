@@ -148,7 +148,7 @@ test('CSS, HTML, and runtime UI files pass motion, token, CSP, DOM-ID, and clean
 
   // Zero developer jargon / internal design-system terms across extension UI & runtime files
   const forbiddenJargon =
-    /\b(Manifest V3|Bearer|PAT|Personal Access Token|Shadow DOM|CORS|Gallery-First|Kubai|Liquid Glass|16-Grid|Layered|Duotone|scrypt|HttpOnly|FTS5)\b|唯一主角|零摩擦/i;
+    /\b(Manifest V3|Bearer|PAT|Personal Access Token|Shadow DOM|CORS|Gallery-First|Liquid Glass|16-Grid|Layered|Duotone|scrypt|HttpOnly|FTS5)\b|唯一主角|零摩擦/i;
   for (const rel of [
     'popup.html',
     'popup.css',
@@ -181,7 +181,7 @@ test('detectSpecialSource matches X, Threads, Bluesky, GitHub repos, and generic
   assert.equal(detectSpecialSource('https://github.com/vercel/next.js/tree/canary').kind, 'github');
   assert.equal(detectSpecialSource('https://github.com/vercel/next.js/issues/123').kind, 'web');
   assert.equal(detectSpecialSource('https://github.com/settings/tokens').kind, 'web');
-  assert.equal(detectSpecialSource('https://are.na/channels/minimal').kind, 'web');
+  assert.equal(detectSpecialSource('https://example.com/channels/minimal').kind, 'web');
   assert.equal(detectSpecialSource('chrome://extensions').kind, 'unsupported');
 });
 

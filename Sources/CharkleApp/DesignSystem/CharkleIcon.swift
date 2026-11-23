@@ -6,7 +6,7 @@ public enum CharkleIconStyle: String, Sendable {
     case layered
 }
 
-/// Canonical icon loader for `/kubai-icons` SVGs (`duotone-<name>.svg`, `layered-<name>.svg`)
+/// Canonical icon loader for bundled SVG icons (`duotone-<name>.svg`, `layered-<name>.svg`)
 /// bundled inside `Bundle.module`, with automatic Light/Dark & Active-state dual-tone adaptation,
 /// `NSCache` acceleration, and crisp SF Symbol fallback.
 public struct CharkleIcon: View {
@@ -122,7 +122,7 @@ final class CharkleIconCache {
         }
     }
 
-    // Exported canonical Kubai Duotone palette in Resources/Icons/duotone-*.svg
+    // Exported canonical duotone SVG palette in Resources/Icons/duotone-*.svg
     private static let sourcePrimary = "#445C94"
     private static let sourceSecondary = "#B4BED4"
 
@@ -224,7 +224,7 @@ final class CharkleIconCache {
             .replacingOccurrences(of: Self.sourceSecondary, with: targetSecondary, options: .caseInsensitive)
     }
 
-    /// Derives Kubai Duotone primary + secondary hex pair from any user-selected folder color hex
+    /// Derives a duotone primary + secondary hex pair from any user-selected folder color hex
     /// (40% tint over white in Light Mode, 38% tint over charcoal in Dark Mode).
     private static func deriveDuotonePair(from rawHex: String, isDark: Bool) -> (primary: String, secondary: String)? {
         let cleaned = rawHex.trimmingCharacters(in: CharacterSet(charactersIn: "#").union(.whitespacesAndNewlines))
@@ -269,7 +269,7 @@ private extension NSColor {
     }
 }
 
-/// Renders a Kubai Duotone folder icon with optional macOS-style custom color tint
+/// Renders a duotone folder icon with optional macOS-style custom color tint
 /// and embossed SF Symbol or Emoji badge centered on the folder face.
 public struct CharkleFolderIcon: View {
     @Environment(\.colorScheme) private var colorScheme

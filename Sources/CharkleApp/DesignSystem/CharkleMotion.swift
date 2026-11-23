@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// Exact Kubai Design Tips (011 Easing Curves, 005 Drag Ripple, 015 UI Continuity, Note: Popover Origin)
-/// motion token registry for Charkle.
+/// Role-mapped motion token registry for Charkle (easing curves, drag ripple, UI continuity,
+/// and trigger-origin popovers).
 ///
 /// Every transition in Charkle uses one of these role-mapped curves rather than default `.easeInOut`
 /// or `.linear` for spatial movement.
 public enum CharkleMotion {
-    // MARK: - Role-Mapped Timing Curves (Kubai Tip 011 + Emil Kowalski Motion Craft)
+    // MARK: - Role-Mapped Timing Curves
 
     /// Strong `ease-out` (0.23, 1, 0.32, 1) — Small UI entering (toasts, tooltips, menus, popovers).
     public static let enterSm = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.18)
@@ -29,7 +29,7 @@ public enum CharkleMotion {
     /// Confident `ease-in-out` (0.77, 0, 0.175, 1) — Elements already on screen moving/resizing (segmented indicator, reflow).
     public static let moveOnScreen = Animation.timingCurve(0.77, 0, 0.175, 1, duration: 0.24)
 
-    /// Drawer & side-panel slide curve (0.32, 0.72, 0, 1) — Apple/Vaul sheet & inspector curve.
+    /// Drawer & side-panel slide curve (0.32, 0.72, 0, 1) — smooth sheet & inspector deceleration.
     public static let drawerEase = Animation.timingCurve(0.32, 0.72, 0, 1, duration: 0.30)
 
     /// `--ease-overshoot` (0.34, 1.56, 0.64, 1) — Tiny ≤64px confirmations ONLY (checkbox tick, rating star, badge pop).
@@ -57,7 +57,7 @@ public enum CharkleMotion {
     /// Rare/first-time delight spring for onboarding hero layered icons & completion seal.
     public static let onboardingDelightSpring = Animation.spring(duration: 0.48, bounce: 0.16)
 
-    /// Kubai Tip 013 radial shockwave ring expansion on onboarding completion.
+    /// Radial shockwave ring expansion on onboarding completion.
     public static let onboardingShockwave = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.68)
 
     /// Reduced-motion clean cross-fade (`0.15s`).
@@ -69,7 +69,7 @@ public enum CharkleMotion {
         reduced ? reducedMotionFade : animation
     }
 
-    /// Asymmetric enter/exit animation per Kubai Tip 011 (exits shorter than entrances,
+    /// Asymmetric enter/exit animation (exits shorter than entrances,
     /// reduced motion collapses both to a clean 150ms fade).
     public static func enterExit(
         _ isVisible: Bool,
@@ -107,7 +107,7 @@ public enum CharkleMotion {
         )
     }
 
-    // MARK: - Kubai Tip 005 Drag-to-Reorder Ripple
+    // MARK: - Drag-to-Reorder Ripple
 
     /// Neighbor displacement away from the insertion gap: `A * pow(0.7, n)` (`A = 8pt` cards / `6pt` rows).
     public static func rippleOffset(distance: Int, amplitude: CGFloat = 8) -> CGFloat {
@@ -122,7 +122,7 @@ public enum CharkleMotion {
     }
 }
 
-// MARK: - Popover Origin Modifier (Kubai Popover Origin Note)
+// MARK: - Popover Origin Modifier
 
 public struct PopoverOriginScaleModifier: ViewModifier {
     let isPresented: Bool
@@ -143,7 +143,7 @@ public struct PopoverOriginScaleModifier: ViewModifier {
 }
 
 public extension View {
-    /// Applies Kubai Popover Origin scaling (`0.96 -> 1.0`, opacity `0 -> 1`, `0.16s` enter / `0.11s` exit)
+    /// Applies origin-anchored popover scaling (`0.96 -> 1.0`, opacity `0 -> 1`, `0.16s` enter / `0.11s` exit)
     /// aligned strictly to the trigger edge anchor.
     func popoverOriginScale(
         isPresented: Bool,
@@ -169,14 +169,14 @@ public struct CharkleTactileButtonStyle: ButtonStyle {
     }
 }
 
-// MARK: - Kubai Tip 001 Skeuomorphic Tactile Keycap Button Style
+// MARK: - Skeuomorphic Tactile Keycap Button Style
 
 public enum CharkleSkeuoVariant: Sendable {
     case primary
     case secondary
 }
 
-/// Calm, top-lit 5-layer tactile button per Kubai Tip 001 (face gradient, 1pt outer edge,
+/// Calm, top-lit 5-layer tactile button (face gradient, 1pt outer edge,
 /// inner top highlight, inner bottom shade, dual-layer contact + lift shadow, 1pt press travel).
 public struct CharkleSkeuoButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var colorScheme

@@ -104,7 +104,7 @@ private nonisolated struct NotchShellRimPath: Shape {
     }
 }
 
-/// Pure-black Refto-inspired Hardware MacBook Notch Shelf:
+/// Pure-black Hardware MacBook Notch Shelf:
 /// - Compact mode (Img 5): quick capture toolbar + drop well + Recent Assets horizontal strip
 ///   (ranking both recently saved AND recently opened assets) with hover quick actions & drag-out.
 /// - Expanded Full-Waterfall mode (Img 6): smooth multi-column infinite masonry of all recent assets
@@ -265,7 +265,7 @@ public struct NotchShelfView: View {
 
     private var expandedContent: some View {
         VStack(spacing: 0) {
-            // Band 1: Physical MacBook Notch Wing Bar (Refto-style Pin + Open + Close in right wing)
+            // Band 1: Physical MacBook Notch Wing Bar (Pin + Open + Close in right wing)
             HStack(spacing: 0) {
                 HStack(spacing: 7) {
                     CharkleIcon("notch", style: .duotone, size: 17, color: .white.opacity(0.92), isActive: true)

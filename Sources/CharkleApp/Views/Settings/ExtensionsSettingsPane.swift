@@ -2,7 +2,7 @@ import AppKit
 import CharkleCanvas
 import SwiftUI
 
-/// Tab 8: 插件与扩展 (Extensions) — Refto-inspired native integration hub surfacing the bundled
+/// Tab 8: 插件与扩展 (Extensions) — native integration hub surfacing the bundled
 /// Figma / FigJam Bridge plugin with inline setup steps, plus a clean slot for future browser extensions.
 public struct ExtensionsSettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme

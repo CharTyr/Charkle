@@ -156,7 +156,7 @@ public nonisolated enum NotchDropGeometry {
     }
 }
 
-// MARK: - Kubai Tip 011 Motion Tokens (Canvas Layer)
+// MARK: - Motion Tokens (Canvas Layer)
 
 public enum CanvasMotion {
     public static let enterSm = Animation.timingCurve(0.23, 1, 0.32, 1, duration: 0.18)
@@ -177,13 +177,13 @@ public enum CanvasMotion {
         reduced ? reducedFade : animation
     }
 
-    /// Kubai Tip 005 drag-ripple offset: `A * pow(0.7, n)`.
+    /// Drag-ripple neighbor displacement offset: `A * pow(0.7, n)`.
     public static func rippleOffset(distance: Int, amplitude: CGFloat = 8) -> CGFloat {
         guard distance >= 0 else { return 0 }
         return amplitude * pow(0.7, CGFloat(distance))
     }
 
-    /// Kubai Tip 005 drag-ripple stagger delay: `24ms * n`.
+    /// Drag-ripple outward stagger delay: `24ms * n`.
     public static func rippleDelay(distance: Int) -> Double {
         guard distance > 0 else { return 0 }
         return 0.024 * Double(min(distance, 8))

@@ -5,7 +5,7 @@ import CharkleCore
 import PDFKit
 import SwiftUI
 
-/// Full-Media Quick Look (`Space` to open/close) with Kubai Tip 015 continuous card-to-overlay hero zoom,
+/// Full-Media Quick Look (`Space` to open/close) with continuous card-to-overlay hero zoom,
 /// soft blurred low-saturation ambient backdrop, floating Apple Liquid Glass bottom HUD controls,
 /// and dedicated playback/inspection for all 7 `MediaKind`s.
 public struct QuickLookOverlayView: View {
@@ -129,7 +129,7 @@ public struct QuickLookOverlayView: View {
 
             // Hero Media Stage
             VStack(spacing: 0) {
-                // Top minimal title bar (fades in after 45% hero continuity per Kubai 015)
+                // Top minimal title bar (fades in after 45% hero continuity)
                 HStack(spacing: 10) {
                     Text(asset.title)
                         .font(.system(size: 13.5, weight: .semibold))
@@ -908,7 +908,7 @@ public struct QuickLookOverlayView: View {
                     hudDivider
                 }
 
-                // Rating stars (matching InspectorView Kubai microOvershoot)
+                // Rating stars (matching InspectorView microOvershoot)
                 HStack(spacing: 3) {
                     ForEach(1...5, id: \.self) { star in
                         Button {

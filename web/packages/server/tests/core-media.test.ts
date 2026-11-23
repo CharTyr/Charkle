@@ -306,7 +306,7 @@ describe('MediaPipeline (All 8 MediaKinds, Rich Resolvers, Seeder & Pinned LRU E
 
   it('wraps English descriptions on word boundaries without mid-word breaks', () => {
     const desc =
-      'Neutral Gallery-First surfaces, concentric radii, CIELAB palettes, and Kubai motion curves for visual curation tools.';
+      'Neutral Gallery-First surfaces, concentric radii, CIELAB palettes, and calibrated motion curves for visual curation tools.';
     const lines = wrapLines(desc, 44, 4);
     expect(lines.length).toBeGreaterThanOrEqual(2);
     expect(lines.length).toBeLessThanOrEqual(4);

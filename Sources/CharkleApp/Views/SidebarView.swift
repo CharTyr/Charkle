@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 
 /// Refined translucent macOS Sidebar supporting:
 /// - Smooth collapse into an icon-only rail (`56pt` <-> `226pt`)
-/// - Upgraded `/kubai-icons` duotone solid icons (`18–20pt`)
+/// - Custom duotone solid SVG icons (`18–20pt`)
 /// - Smart Folders with live rule matching
 /// - Hierarchical Folders with in-app drag-to-reorder / drag-to-nest AND external Finder folder drop
 /// - Capped Tags section (Top 10 most-used + up to 5 recent frequent + searchable All Tags popover)

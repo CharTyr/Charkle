@@ -45,16 +45,16 @@ struct CharkleV101PolishTests {
           <img src="site/src/app/icon.svg" width="72" height="72" alt="" />
         </p>
 
-        <h1 align="center">Kubai Icons</h1>
+        <h1 align="center">Sample Icons</h1>
 
         <p align="center">
-          <strong>An agent skill that draws animated icons.</strong><br />
+          <strong>An open toolkit that draws animated icons.</strong><br />
           Plus 2,800+ open-source icons drawn with it.
         </p>
 
         <p align="center">
-          <a href="#install-the-skill">Install the skill</a> &middot;
-          <a href="https://icons.kubai.design/icons/">Browse the icons</a>
+          <a href="#install-the-kit">Install the kit</a> &middot;
+          <a href="https://icons.example.com/icons/">Browse the icons</a>
         </p>
 
         <p align="center">
@@ -65,15 +65,15 @@ struct CharkleV101PolishTests {
 
         | Part | What you get |
         | --- | :---: |
-        | **Agent skill** | Rules and engine |
-        | **Website** | [icons.kubai.design](https://icons.kubai.design) |
+        | **Toolkit** | Rules and engine |
+        | **Website** | [icons.example.com](https://icons.example.com) |
 
         ```html
         <p align="center">Keep raw code untouched</p>
         ```
         """
 
-        let ctx = MarkdownURLContext.github(owner: "kubai087", repo: "kubai-icons", branch: "main")
+        let ctx = MarkdownURLContext.github(owner: "example-org", repo: "sample-icons", branch: "main")
         let blocks = MarkdownDocumentParser.parse(readme, urlContext: ctx)
 
         // 1. Centered SVG image with width=72, height=72 & resolved raw URL
@@ -82,7 +82,7 @@ struct CharkleV101PolishTests {
             return
         }
         #expect(iconAlign == .center)
-        #expect(iconImg.url == "https://raw.githubusercontent.com/kubai087/kubai-icons/main/site/src/app/icon.svg")
+        #expect(iconImg.url == "https://raw.githubusercontent.com/example-org/sample-icons/main/site/src/app/icon.svg")
         #expect(iconImg.width == 72)
         #expect(iconImg.height == 72)
 
@@ -92,7 +92,7 @@ struct CharkleV101PolishTests {
             return
         }
         #expect(level == 1)
-        #expect(h1Text == "Kubai Icons")
+        #expect(h1Text == "Sample Icons")
         #expect(h1Align == .center)
 
         // 3. Centered paragraph with converted **strong** and <br />
@@ -101,7 +101,7 @@ struct CharkleV101PolishTests {
             return
         }
         #expect(pAlign == .center)
-        #expect(pText.contains("**An agent skill that draws animated icons.**"))
+        #expect(pText.contains("**An open toolkit that draws animated icons.**"))
         #expect(pText.contains("\nPlus 2,800+ open-source icons drawn with it."))
 
         // 4. Centered link bar with resolved GitHub anchor + decoded &middot;
@@ -110,7 +110,7 @@ struct CharkleV101PolishTests {
             return
         }
         #expect(linksAlign == .center)
-        #expect(linksText.contains("[Install the skill](https://github.com/kubai087/kubai-icons#install-the-skill)"))
+        #expect(linksText.contains("[Install the kit](https://github.com/example-org/sample-icons#install-the-kit)"))
         #expect(linksText.contains("·"))
 
         // 5. Centered hover.webp resolved against raw.githubusercontent.com
@@ -119,7 +119,7 @@ struct CharkleV101PolishTests {
             return
         }
         #expect(hoverAlign == .center)
-        #expect(hoverImg.url == "https://raw.githubusercontent.com/kubai087/kubai-icons/main/assets/hover.webp")
+        #expect(hoverImg.url == "https://raw.githubusercontent.com/example-org/sample-icons/main/assets/hover.webp")
 
         // 6. H2 + GFM Table
         guard case .heading(_, 2, "What's included", .leading) = blocks[5] else {
@@ -133,8 +133,8 @@ struct CharkleV101PolishTests {
         #expect(headers == ["Part", "What you get"])
         #expect(aligns == [.leading, .center])
         #expect(rows.count == 2)
-        #expect(rows[0][0] == "**Agent skill**")
-        #expect(rows[1][1] == "[icons.kubai.design](https://icons.kubai.design)")
+        #expect(rows[0][0] == "**Toolkit**")
+        #expect(rows[1][1] == "[icons.example.com](https://icons.example.com)")
 
         // 7. Fenced code block preserves raw HTML verbatim
         guard case .code(_, let lang, let code) = blocks[7] else {

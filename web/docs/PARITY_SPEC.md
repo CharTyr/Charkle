@@ -304,7 +304,7 @@
 ## 8. Moodboard Studio & AI Agent Harness
 
 ### 8.1 Dual Modes (`MoodboardCanvasView`, `MoodboardNodeViews`)
-- **Auto Editorial Mode**: Styles `balanced` ("呼吸均衡"), `magazine` ("杂志主次", Hero weight=2 spans 2 columns), `compact` ("紧凑拼贴"). Drag-to-reorder uses Kubai 005 neighbor ripple (`amplitude = 8px`, `distance <= 5`, `delay = 24ms * n`). `"转为自由画布"` (`freezeIntoFreeform`) bakes computed frames into absolute coordinates.
+- **Auto Editorial Mode**: Styles `balanced` ("呼吸均衡"), `magazine` ("杂志主次", Hero weight=2 spans 2 columns), `compact` ("紧凑拼贴"). Drag-to-reorder uses neighbor ripple (`amplitude = 8px`, `distance <= 5`, `delay = 24ms * n`). `"转为自由画布"` (`freezeIntoFreeform`) bakes computed frames into absolute coordinates.
 - **Freeform Infinite Canvas**:
   - **5 Tools**: `select (V)`, `pan (H)`, `connector (C)`, `pen (P)`, `eraser (E)`.
   - **Camera**: Zoom `0.2x..3.0x` (button steps `×0.82` / `×1.22`, Fit-to-Canvas clamps `0.22..1.8`). Dot grid `worldStep = 28` quantized screen spacing `16..56`. Middle-mouse drag OR hold `Space` pans; quick tap `Space` on selected asset opens Quick Look.
@@ -592,7 +592,7 @@ Mirror macOS Notch Shelf as a floating/dockable **Web Quick Drop Shelf** drawer/
 
 - **Concentric 4pt Radii**: `dockOuter = 20px` / `dockInner = 12px` (`8px` pad); `cardOuter = 12px` / `innerBadge = 6px` (`6px` pad); `settingsOuter = 14px` / `settingsInner = 8px`; `popoverOuter = 16px` / `popoverInner = 10px`; `chip = 8px`.
 
-### 15.2 Motion Curves (`CharkleMotion` — Kubai Tip 011)
+### 15.2 Motion Curves (`CharkleMotion`)
 | Token | Curve | Duration | Usage |
 |---|---|---|---|
 | `enterSm` / `enterMd` / `enterLg` | `cubic-bezier(0, 0, 0.58, 1)` | `180ms` / `260ms` / `360ms` | Entrances by footprint |

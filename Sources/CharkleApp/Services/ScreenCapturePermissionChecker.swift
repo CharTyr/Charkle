@@ -3,7 +3,7 @@ import CoreGraphics
 import Foundation
 
 /// Non-intrusive macOS Screen Recording permission status checker & System Settings deep-linker
-/// used by the Capture & Shortcuts Settings pane to provide Refto-style inline guidance.
+/// used by the Capture & Shortcuts Settings pane to provide inline setup guidance.
 public enum ScreenCapturePermissionChecker {
     public static func hasScreenRecordingAccess() -> Bool {
         CGPreflightScreenCaptureAccess()

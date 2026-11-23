@@ -30,7 +30,7 @@ interface ComputedPosition {
 }
 
 /**
- * Trigger-origin aware Popover strictly implementing Kubai Popover Origin Note:
+ * Trigger-origin aware Popover:
  * scales `0.96 -> 1.0` with `opacity: 0 -> 1` from the exact trigger edge (and flips
  * transform-origin automatically if the popover flips above or shifts to fit viewport).
  */

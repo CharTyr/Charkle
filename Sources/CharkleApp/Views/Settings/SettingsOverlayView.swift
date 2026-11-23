@@ -1,7 +1,7 @@
 import CharkleCore
 import SwiftUI
 
-/// Centered Refto-inspired Settings modal overlay presented above `MainWindowView`.
+/// Centered Settings modal overlay presented above `MainWindowView`.
 /// Supports backdrop click dismissal, `Esc` dismissal, deep-link tab selection, and calm Light/Dark parity.
 public struct SettingsOverlayView: View {
     @Environment(\.colorScheme) private var colorScheme

@@ -43,7 +43,7 @@
   --danger: #D93B30;
   --danger-soft: rgba(217, 59, 48, 0.11);
 
-  /* Kubai Tip 004 — Concentric Continuous Radii (4px grid) */
+  /* Concentric Continuous Radii (4px grid) */
   --radius-dock-outer: 20px;
   --radius-dock-inner: 12px;
   --radius-card-outer: 12px;
@@ -54,7 +54,7 @@
   --radius-popover-inner: 10px;
   --radius-chip: 8px;
 
-  /* Kubai Tip 010 — Restrained Apple Liquid Glass (Light) */
+  /* Restrained Apple Liquid Glass (Light) */
   --glass-bg: rgba(255, 255, 255, 0.74);
   --glass-bg-hover: rgba(255, 255, 255, 0.84);
   --glass-backdrop: blur(22px) saturate(180%) brightness(1.04);
@@ -73,7 +73,7 @@
     0 0 0 0.5px rgba(255, 255, 255, 0.11),
     0 12px 36px rgba(0, 0, 0, 0.42);
 
-  /* Kubai Tip 011 + Emil Kowalski Motion Craft — Role-Mapped Easing Curves */
+  /* Role-Mapped Easing Curves */
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-out-strong: cubic-bezier(0.22, 1, 0.36, 1);
   /* Deprecated alias: UI exits must start immediately with --ease-out, never ease-in */
@@ -161,7 +161,7 @@
   color-scheme: dark;
 }
 
-/* Kubai Tip 004: Progressive superellipse continuous corners */
+/* Progressive superellipse continuous corners */
 @supports (corner-shape: superellipse(1.25)) {
   :where(*) {
     corner-shape: superellipse(1.25);

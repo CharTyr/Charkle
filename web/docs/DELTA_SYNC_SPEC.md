@@ -71,7 +71,7 @@ Native `f39bfa5` makes every newly created, seeded, or AI-curated Moodboard nati
 ## 2. Design System, Motion & Gallery / Quick Look / Sidebar / Jump Delta (for `client-sync`)
 
 ### 2.1 Motion Craft Token Upgrades (`packages/client/src/design-system/tokens.css`)
-Exact parity with `CharkleMotion.swift` & `CanvasMotion` (`CanvasSupport.swift`) from `f39bfa5` (Kubai Tip 011 + Emil Kowalski Motion Craft):
+Exact parity with `CharkleMotion.swift` & `CanvasMotion` (`CanvasSupport.swift`) from `f39bfa5`:
 
 | Token | Old Value | New Value | Usage |
 | --- | --- | --- | --- |
@@ -79,7 +79,7 @@ Exact parity with `CharkleMotion.swift` & `CanvasMotion` (`CanvasSupport.swift`)
 | `--ease-out-strong` | `cubic-bezier(0.22, 1, 0.36, 1)` | `cubic-bezier(0.22, 1, 0.36, 1)` | Active pills, filter chips, stepped reveals (`220ms`) |
 | `--ease-in` | `cubic-bezier(0.42, 0, 1, 1)` | **Deprecate / alias to `var(--ease-out)`** | **NEVER use ease-in for UI exits** — exits must start instantaneously |
 | `--ease-in-out` | `cubic-bezier(0.42, 0, 0.58, 1)` | **`cubic-bezier(0.77, 0, 0.175, 1)`** | Confident on-screen moves/reflow (`240ms`) |
-| **`--ease-drawer`** *(NEW)* | *(missing)* | **`cubic-bezier(0.32, 0.72, 0, 1)`** | Apple/Vaul drawer & side-panel slide (`300ms`): Sidebar, Inspector, Quick Look rail, Candidate Pool |
+| **`--ease-drawer`** *(NEW)* | *(missing)* | **`cubic-bezier(0.32, 0.72, 0, 1)`** | Smooth drawer & side-panel slide (`300ms`): Sidebar, Inspector, Quick Look rail, Candidate Pool |
 | `--ease-overshoot` | `cubic-bezier(0.34, 1.56, 0.64, 1)` | `cubic-bezier(0.34, 1.56, 0.64, 1)` | Strictly `<= 64px` confirmations (stars, checkboxes, pins) at **`260ms`** |
 | `--duration-press` | `120ms` | `120ms` | Tactile hover/press & sidebar drop highlights |
 | `--duration-sm` | `180ms` | `180ms` | Small enters (toasts, menus, folder preview transitions) |
@@ -242,7 +242,7 @@ Native `f39bfa5` unified the Moodboard Studio onto a **single, high-craft Freefo
 
 ### 3.2 `packages/client/src/features/moodboard/MoodboardCanvasView.tsx` & `FloatingToolDock.tsx`
 - **Remove Dual-Mode Split & Auto Editorial Stage**:
-  - Delete `isAuto` / `autoConfig` branching, `editorialDrag` state & Kubai ripple insertion line, `handleSwitchMode`, `modeTransitioning`, and the entire `isAuto ? (...) : (...)` JSX stage branch in `MoodboardCanvasView.tsx` — ALWAYS render the Freeform Infinite Canvas stage!
+  - Delete `isAuto` / `autoConfig` branching, `editorialDrag` state & ripple insertion line, `handleSwitchMode`, `modeTransitioning`, and the entire `isAuto ? (...) : (...)` JSX stage branch in `MoodboardCanvasView.tsx` — ALWAYS render the Freeform Infinite Canvas stage!
   - **Silent Legacy Upgrade (`ensureFreeformModeIfLegacy`)**:
     - On mount / `[document.id]` change, if `isAutoEditorialMode(document.mode)`:
       - Run `const frozen = freezeIntoFreeform(document, Math.max(640, viewport.width), assetsByID);`

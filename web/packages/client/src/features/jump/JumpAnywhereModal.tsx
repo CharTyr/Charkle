@@ -308,7 +308,7 @@ export const JumpAnywhereModal: React.FC = () => {
     return <ImageIcon size={16} className="text-[var(--text-secondary)]" />;
   };
 
-  // Deliberately zero open animation on 100+/day keyboard palette per Emil Kowalski `animate` rule!
+  // Deliberately zero open animation on high-frequency keyboard command palette for instant response.
   return (
     <div
       className="fixed inset-0 z-[140] flex items-start justify-center pt-[14vh] px-4 bg-black/32"

@@ -1,12 +1,12 @@
 # Frontend Component Guidelines
 
-> Conventions for SwiftUI views, Kubai Duotone functional icons, macOS context menus, rich media stages, and hardware Notch Shelf animations.
+> Conventions for SwiftUI views, duotone functional SVG icons, macOS context menus, rich media stages, and hardware Notch Shelf animations.
 
 ---
 
 ## In-App Functional Icons (`CharkleIcon.swift`)
 
-- All in-app toolbar, sidebar, inspector, and notch functional icons use Kubai Duotone SVGs stored at `Sources/CharkleApp/Resources/Icons/duotone-*.svg` (canonical palette: primary `#445C94`, secondary `#B4BED4`), sized `17–20pt`.
+- All in-app toolbar, sidebar, inspector, and notch functional icons use bundled duotone SVGs stored at `Sources/CharkleApp/Resources/Icons/duotone-*.svg` (canonical palette: primary `#445C94`, secondary `#B4BED4`), sized `17–20pt`.
 - `CharkleIconCache` dynamically adapts `#445C94` / `#B4BED4` for Light, Dark, Active, and custom folder `tintHex` variants and caches resulting `NSImage`s with `isTemplate = false`.
 - **Folders with custom appearance**: Use `CharkleFolderIcon(colorHex:customSymbol:size:isActive:)` in `SidebarView`, `MainWindowView` folder breadcrumb/subfolder pills, and `FolderCustomizationPopover`.
 - **Do NOT touch AppIcon PNGs/ICNS** when asked to update in-app functional icons.
