@@ -37,7 +37,6 @@ public struct QuickLookOverlayView: View {
     @State private var stageViewportSize: CGSize = CGSize(width: 960, height: 640)
     @State private var showSecondaryControls: Bool = false
     @State private var confirmPermanentDelete: Bool = false
-    @State private var isSidePanelOpen: Bool = false
 
     private var supportsVisualTransform: Bool {
         !asset.isGitHubRepo && !asset.isSocialPost
@@ -145,12 +144,12 @@ public struct QuickLookOverlayView: View {
 
                         Button {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
-                                isSidePanelOpen.toggle()
+                                coordinator.isInspectorVisible.toggle()
                             }
                         } label: {
                             Image(systemName: "sidebar.right")
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(isSidePanelOpen ? Color.accentColor : .white.opacity(0.86))
+                                .foregroundStyle(coordinator.isInspectorVisible ? Color.accentColor : .white.opacity(0.86))
                                 .frame(width: 28, height: 28)
                                 .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
                         }
@@ -207,7 +206,7 @@ public struct QuickLookOverlayView: View {
                             )
                             .allowsHitTesting(false)
                         }
-                        .padding(.horizontal, isSidePanelOpen ? 28 : 48)
+                        .padding(.horizontal, coordinator.isInspectorVisible ? 28 : 48)
 
                     Spacer(minLength: 12)
 
@@ -256,15 +255,15 @@ public struct QuickLookOverlayView: View {
             )
             .frame(width: 300)
             .frame(maxHeight: .infinity)
-            .opacity(isSidePanelOpen ? 1 : 0)
-            .allowsHitTesting(isSidePanelOpen)
-            .disabled(!isSidePanelOpen)
-            .accessibilityHidden(!isSidePanelOpen)
-            .frame(width: isSidePanelOpen ? 300 : 0, alignment: .leading)
+            .opacity(coordinator.isInspectorVisible ? 1 : 0)
+            .allowsHitTesting(coordinator.isInspectorVisible)
+            .disabled(!coordinator.isInspectorVisible)
+            .accessibilityHidden(!coordinator.isInspectorVisible)
+            .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
             .clipped()
             .layoutPriority(1)
         }
-        .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidePanelOpen)
+        .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
         .task(id: asset.id) {
             let assetID = asset.id
             let isRichWebCard = asset.isGitHubRepo || asset.isSocialPost
@@ -842,11 +841,11 @@ public struct QuickLookOverlayView: View {
         let isUnmodified = primaryModifiers.isEmpty
         let isShiftOnly = primaryModifiers == .shift
 
-        // ⌘⌥I toggles the docked 300pt Inspector while Quick Look is open
+        // ⌘⌥I toggles the docked 300pt Inspector synchronously with main library view
         if primaryModifiers == [.command, .option],
            event.charactersIgnoringModifiers?.lowercased() == "i" {
             withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
-                isSidePanelOpen.toggle()
+                coordinator.isInspectorVisible.toggle()
             }
             return nil
         }

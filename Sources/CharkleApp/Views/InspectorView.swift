@@ -39,11 +39,6 @@ public struct InspectorView: View {
     @State private var draggingInspectorSection: InspectorInfoSection? = nil
     @State private var hoveredInspectorSection: InspectorInfoSection? = nil
 
-    private enum SingleInspectorTab: String, CaseIterable {
-        case info = "信息"
-        case similar = "类似项目"
-    }
-    @State private var singleInspectorTab: SingleInspectorTab = .info
     @Namespace private var inspectorTabNamespace
 
     public init(
@@ -147,13 +142,13 @@ public struct InspectorView: View {
 
     private func singleAssetInspector(_ asset: AssetRecord) -> some View {
         VStack(spacing: 0) {
-            // Top Segmented Switcher (Info | Similar) matching reference Img 2
+            // Top Segmented Switcher (Info | Similar)
             HStack(spacing: 2) {
-                ForEach(SingleInspectorTab.allCases, id: \.self) { tab in
-                    let active = singleInspectorTab == tab
+                ForEach(InspectorDetailTab.allCases, id: \.self) { tab in
+                    let active = coordinator.selectedInspectorTab == tab
                     Button {
                         withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            singleInspectorTab = tab
+                            coordinator.selectedInspectorTab = tab
                         }
                     } label: {
                         HStack(spacing: 5) {
@@ -188,7 +183,7 @@ public struct InspectorView: View {
             .padding(.top, 12)
             .padding(.bottom, 8)
 
-            if singleInspectorTab == .similar {
+            if coordinator.selectedInspectorTab == .similar {
                 singleAssetSimilarTab(asset)
             } else {
                 singleAssetInfoScroll(asset)

@@ -231,6 +231,53 @@ public nonisolated enum MasonryLayoutEngine {
         }
     }
 
+    /// Computes the exact post-zoom scroll origin Y that keeps an exact anchor asset's normalized vertical point
+    /// `(anchorNormV)` pinned to `anchorScreenY` on screen (accounting for any rebased optical pinch scale).
+    /// Row-1 cards at the very top of the library (`oldScrollY <= 2 && oldAnchorRect.minY <= topInset + 4`) stay
+    /// cleanly anchored at `scrollY = 0` so they never clip beneath the floating top bar, while Row-2+ cards
+    /// scroll automatically to remain stationary under the user's eye even when zooming from the top.
+    public static func anchoredScrollY(
+        oldScrollY: CGFloat,
+        oldAnchorRect: CGRect,
+        newAnchorRect: CGRect,
+        anchorNormV: CGFloat,
+        anchorScreenY: CGFloat,
+        newOpticalScale: CGFloat = 1.0,
+        opticalAnchorScreenY: CGFloat = 0,
+        topInset: CGFloat = 76,
+        totalHeight: CGFloat,
+        viewportHeight: CGFloat
+    ) -> CGFloat {
+        let maxScrollY = max(0, totalHeight - viewportHeight)
+        if oldScrollY <= 2 && oldAnchorRect.minY <= topInset + 4 {
+            return 0
+        }
+        let newAnchorPointY = newAnchorRect.minY + anchorNormV * newAnchorRect.height
+        let targetRawY = opticalAnchorScreenY + (anchorScreenY - opticalAnchorScreenY) / max(0.1, newOpticalScale)
+        return max(0, min(maxScrollY, newAnchorPointY - targetRawY))
+    }
+
+    /// Projects a tile's pre-handoff visual screen rect into post-scroll, post-optical document coordinates
+    /// so frame 0 of the reflow animation starts at the exact same on-screen pixel (0.0pt jump).
+    public static func compensatedFromRect(
+        oldScreenRect: CGRect,
+        newScrollY: CGFloat,
+        newOpticalScale: CGFloat = 1.0,
+        newOpticalAnchorScreen: CGPoint = .zero
+    ) -> CGRect {
+        let invS = 1.0 / max(0.1, newOpticalScale)
+        let docMidX = newOpticalAnchorScreen.x + (oldScreenRect.midX - newOpticalAnchorScreen.x) * invS
+        let docMidY = (newScrollY + newOpticalAnchorScreen.y) + (oldScreenRect.midY - newOpticalAnchorScreen.y) * invS
+        let docW = oldScreenRect.width * invS
+        let docH = oldScreenRect.height * invS
+        return CGRect(
+            x: docMidX - docW * 0.5,
+            y: docMidY - docH * 0.5,
+            width: docW,
+            height: docH
+        )
+    }
+
     public static func compute(
         assets: [AssetRecord],
         layoutMode: GalleryLayoutMode = .verticalMasonry,
@@ -1169,6 +1216,7 @@ private final class MasonryTileLayer {
         loadTask?.cancel()
         loadTask = nil
         stripLayoutAnimations()
+        layer.zPosition = 0
         boundAssetID = nil
         boundAsset = nil
         imageLayer.contents = nil
@@ -1618,11 +1666,18 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     private var lastPublishedZoomWidth: CGFloat = 228
     private var lastAppliedJustifiedWidth: CGFloat = 214
 
-    // Photos-style live optical pinch & ⌘+scroll zoom state
+    // Photos-style persistent exact-asset zoom anchor & live optical pinch state
+    private struct ZoomAssetAnchor {
+        let assetID: UUID
+        let normU: CGFloat
+        let normV: CGFloat
+        var screenY: CGFloat
+    }
+    private var sessionZoomAnchor: ZoomAssetAnchor?
+    private var isProgrammaticZoomScroll: Bool = false
     private var isPinching: Bool = false
     private var pinchOpticalScale: CGFloat = 1.0
     private var pinchAnchorScreenPoint: CGPoint = .zero
-    private var pinchAnchorAssetID: UUID?
     private var legacyPinchSettleWorkItem: DispatchWorkItem?
     private var scrollZoomAccumulator: CGFloat = 0
     private var lastScrollZoomStepAt: CFAbsoluteTime = 0
@@ -1760,9 +1815,14 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let insetsChanged = abs(self.topInset - topInset) >= 0.5 || abs(self.bottomInset - bottomInset) >= 0.5
         let invalidationChanged = (self.loaderInvalidationVersion != loaderInvalidationVersion)
         let appearanceChanged = (self.isDarkMode != isDarkMode)
-        let visualFlagsChanged = (self.selectedAssetIDs != selectedIDs)
+        let selectionChanged = (self.selectedAssetIDs != selectedIDs)
+        let visualFlagsChanged = selectionChanged
             || (self.cutAssetIDs != cutIDs)
             || (self.activeQuickLookID != activeQuickLookID)
+
+        if assetsChanged || selectionChanged {
+            sessionZoomAnchor = nil
+        }
 
         self.assets = assets
         self.assetsSignature = signature
@@ -1807,9 +1867,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         if assetsChanged || layoutModeChanged || insetsChanged || layout.items.count != assets.count {
             let shouldAnimate = !reduceMotion && hadAssetsBefore && (layoutModeChanged || assetsChanged)
             if layoutModeChanged && hadAssetsBefore {
-                recomputeLayoutAnchored(
+                _ = recomputeLayoutAnchored(
                     anchorDocPoint: nil,
-                    preferredAnchorAssetID: nil,
+                    forceCursorLookup: false,
                     animate: shouldAnimate,
                     animationDuration: 0.28
                 )
@@ -1833,9 +1893,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             }
             if densityChanged {
                 cancelOpticalTransformImmediate()
-                recomputeLayoutAnchored(
+                _ = recomputeLayoutAnchored(
                     anchorDocPoint: nil,
-                    preferredAnchorAssetID: nil,
+                    forceCursorLookup: false,
                     animate: !reduceMotion && hadAssetsBefore,
                     animationDuration: 0.28
                 )
@@ -1890,7 +1950,6 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         legacyPinchSettleWorkItem = nil
         isPinching = false
         pinchOpticalScale = 1.0
-        pinchAnchorAssetID = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         tilesContainerLayer.removeAnimation(forKey: "charkle.pinchSettle")
@@ -1904,7 +1963,6 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let fromTransform = tilesContainerLayer.presentation()?.transform ?? tilesContainerLayer.transform
         isPinching = false
         pinchOpticalScale = 1.0
-        pinchAnchorAssetID = nil
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1925,55 +1983,96 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         refreshHoverForCurrentMouseLocation()
     }
 
-    /// Picks the best visual anchor card to keep stationary during zoom/reflow:
-    /// cursor card (during pinch/scroll) > visible selected card > viewport center card.
-    private func pickAnchorItem(near docPoint: CGPoint?, preferredID: UUID?) -> MasonryItemFrame? {
-        if let preferredID,
-           let idx = assetIndexByID[preferredID],
-           idx < layout.items.count,
-           layout.items[idx].id == preferredID {
-            let item = layout.items[idx]
-            if item.rect.intersects(visibleRect.insetBy(dx: 0, dy: -tileOverscan)) {
-                return item
+    private func layoutItem(for assetID: UUID) -> MasonryItemFrame? {
+        guard let idx = assetIndexByID[assetID],
+              idx < layout.items.count,
+              layout.items[idx].id == assetID else {
+            return nil
+        }
+        return layout.items[idx]
+    }
+
+    /// Resolves and persists ONE exact asset card as the zoom anchor across the entire zoom session
+    /// (pinch steps, slider drags, +/- clicks, or ⌘+scroll bursts) until the user scrolls manually or changes selection.
+    private func resolveSessionZoomAnchor(
+        near docPoint: CGPoint?,
+        forceCursorLookup: Bool,
+        oldScrollY: CGFloat,
+        oldOpticalScale: CGFloat = 1.0,
+        oldOpticalAnchorScreen: CGPoint = .zero
+    ) -> (anchor: ZoomAssetAnchor, item: MasonryItemFrame)? {
+        func makeAnchor(for item: MasonryItemFrame, docHitPoint: CGPoint?) -> ZoomAssetAnchor {
+            let u: CGFloat
+            let v: CGFloat
+            if let pt = docHitPoint, item.rect.width > 1, item.rect.height > 1 {
+                u = max(0.05, min(0.95, (pt.x - item.rect.minX) / item.rect.width))
+                v = max(0.05, min(0.95, (pt.y - item.rect.minY) / item.rect.height))
+            } else {
+                u = 0.5
+                v = 0.5
+            }
+            let rawY = item.rect.minY + v * item.rect.height - oldScrollY
+            let screenY = oldOpticalAnchorScreen.y + (rawY - oldOpticalAnchorScreen.y) * oldOpticalScale
+            return ZoomAssetAnchor(assetID: item.id, normU: u, normV: v, screenY: screenY)
+        }
+
+        // 1. Pointer-driven lookup (pinch .began or ⌘+scroll over a specific card): lock to exact card under cursor
+        if forceCursorLookup, let docPoint {
+            if let hit = hitTestCard(at: docPoint), let item = layoutItem(for: hit.asset.id) {
+                if let existing = sessionZoomAnchor, existing.assetID == item.id {
+                    return (existing, item)
+                }
+                let anchor = makeAnchor(for: item, docHitPoint: docPoint)
+                sessionZoomAnchor = anchor
+                return (anchor, item)
             }
         }
 
-        if let docPoint {
-            if let hit = hitTestCard(at: docPoint),
-               let idx = assetIndexByID[hit.asset.id],
-               idx < layout.items.count {
-                return layout.items[idx]
-            }
-            let candidates = layout.visibleItems(minY: max(0, visibleRect.minY - 60), maxY: visibleRect.maxY + 60)
-            return candidates.min { a, b in
-                let da = hypot(a.rect.midX - docPoint.x, a.rect.midY - docPoint.y)
-                let db = hypot(b.rect.midX - docPoint.x, b.rect.midY - docPoint.y)
-                return da < db
-            }
+        // 2. Reuse existing session anchor so consecutive steps stay locked on the EXACT same asset
+        if let existing = sessionZoomAnchor, let item = layoutItem(for: existing.assetID) {
+            return (existing, item)
         }
 
+        // 3. Fallback priority: visible selected asset > card nearest cursor > card nearest viewport center
         let vis = visibleRect
         if !selectedAssetIDs.isEmpty {
             let visibleSelected = selectedAssetIDs.compactMap { id -> MasonryItemFrame? in
-                guard let idx = assetIndexByID[id], idx < layout.items.count else { return nil }
-                let item = layout.items[idx]
-                return item.rect.intersects(vis) ? item : nil
+                guard let item = layoutItem(for: id), item.rect.intersects(vis) else { return nil }
+                return item
             }
             if let bestSel = visibleSelected.min(by: {
                 hypot($0.rect.midX - vis.midX, $0.rect.midY - vis.midY) < hypot($1.rect.midX - vis.midX, $1.rect.midY - vis.midY)
             }) {
-                return bestSel
+                let anchor = makeAnchor(for: bestSel, docHitPoint: nil)
+                sessionZoomAnchor = anchor
+                return (anchor, bestSel)
+            }
+        }
+
+        if let docPoint {
+            let candidates = layout.visibleItems(minY: max(0, vis.minY - 60), maxY: vis.maxY + 60)
+            if let nearest = candidates.min(by: {
+                hypot($0.rect.midX - docPoint.x, $0.rect.midY - docPoint.y) < hypot($1.rect.midX - docPoint.x, $1.rect.midY - docPoint.y)
+            }) {
+                let anchor = makeAnchor(for: nearest, docHitPoint: nil)
+                sessionZoomAnchor = anchor
+                return (anchor, nearest)
             }
         }
 
         let visCandidates = layout.visibleItems(minY: vis.minY, maxY: vis.maxY)
-        return visCandidates.min { a, b in
-            hypot(a.rect.midX - vis.midX, a.rect.midY - vis.midY) < hypot(b.rect.midX - vis.midX, b.rect.midY - vis.midY)
+        if let centerItem = visCandidates.min(by: {
+            hypot($0.rect.midX - vis.midX, $0.rect.midY - vis.midY) < hypot($1.rect.midX - vis.midX, $1.rect.midY - vis.midY)
+        }) {
+            let anchor = makeAnchor(for: centerItem, docHitPoint: nil)
+            sessionZoomAnchor = anchor
+            return (anchor, centerItem)
         }
+        return nil
     }
 
-    /// Continuous trackpad two-finger pinch: 120fps GPU optical scaling around cursor with seamless
-    /// optical-rebased handoff across column/density steps and critically damped settle on release.
+    /// Continuous trackpad two-finger pinch: 120fps GPU optical scaling pivoted on the exact anchor asset
+    /// with seamless optical-rebased handoff across column/density steps and critically damped settle on release.
     func handleMagnifyGesture(_ event: NSEvent) {
         guard !assets.isEmpty else { return }
 
@@ -1992,20 +2091,34 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         if phase.contains(.began) || !isPinching {
             isPinching = true
-            pinchAnchorScreenPoint = cursorScreen
-            pinchAnchorAssetID = pickAnchorItem(near: cursorInDoc, preferredID: nil)?.id
+            // Fresh pinch gesture re-measures exact live (u, v, screenY) on the card under cursor
+            sessionZoomAnchor = nil
+            // Pick up live visual scale if interrupting an in-flight settle spring
+            let liveScale = tilesContainerLayer.presentation()?.transform.m11 ?? 1.0
+            pinchOpticalScale = max(0.84, min(1.18, liveScale))
+            tilesContainerLayer.removeAnimation(forKey: "charkle.pinchSettle")
+
+            // Lock to the EXACT card under the cursor (or visible selected / center card) and pivot optical zoom on it
+            if let resolved = resolveSessionZoomAnchor(
+                near: cursorInDoc,
+                forceCursorLookup: true,
+                oldScrollY: scrollY,
+                oldOpticalScale: 1.0,
+                oldOpticalAnchorScreen: cursorScreen
+            ) {
+                let item = resolved.item
+                let pivotX = item.rect.minX + resolved.anchor.normU * item.rect.width
+                pinchAnchorScreenPoint = CGPoint(x: pivotX, y: resolved.anchor.screenY)
+            } else {
+                pinchAnchorScreenPoint = cursorScreen
+            }
+
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
             hoverMediaPreview.stop()
             for tile in activeTiles.values {
                 tile.stripLayoutAnimations()
             }
-            // Pick up live visual scale if interrupting an in-flight settle spring
-            let liveScale = tilesContainerLayer.presentation()?.transform.m11 ?? 1.0
-            pinchOpticalScale = max(0.84, min(1.18, liveScale))
-            tilesContainerLayer.removeAnimation(forKey: "charkle.pinchSettle")
-        } else {
-            pinchAnchorScreenPoint = cursorScreen
         }
 
         let mag = event.magnification
@@ -2108,21 +2221,25 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         if let nextTargetWidth = steppedTargetWidth {
             let oldOptical = pinchOpticalScale
+            let oldPivot = pinchAnchorScreenPoint
             let rebasedOptical = max(0.84, min(1.18, rawNext / max(0.4, stepRatio)))
             lastInteractiveZoomAt = CFAbsoluteTimeGetCurrent()
             lastPublishedZoomWidth = nextTargetWidth
             targetColumnWidth = nextTargetWidth
             pinchOpticalScale = rebasedOptical
 
-            recomputeLayoutAnchored(
+            let updatedPivot = recomputeLayoutAnchored(
                 anchorDocPoint: cursorInDoc,
-                preferredAnchorAssetID: pinchAnchorAssetID,
+                forceCursorLookup: false,
                 animate: !reduceMotion,
-                animationDuration: 0.26,
+                animationDuration: 0.28,
                 oldOpticalScale: oldOptical,
                 newOpticalScale: rebasedOptical,
-                opticalAnchorScreen: pinchAnchorScreenPoint
+                oldOpticalAnchorScreen: oldPivot
             )
+            if let updatedPivot {
+                pinchAnchorScreenPoint = updatedPivot
+            }
             callbacks.onZoomColumnWidth?(nextTargetWidth)
         } else {
             // Pure GPU 120fps optical scaling between density stops (with soft Photos-style rubber-band at limits)
@@ -2149,7 +2266,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         }
     }
 
-    /// Cleanly steps density on ⌘+scroll wheel (mouse wheel or trackpad) with anchor-card scroll locking
+    /// Cleanly steps density on ⌘+scroll wheel (mouse wheel or trackpad) with exact-asset anchor locking
     /// and cooldown hysteresis so rapid wheel notches glide smoothly instead of thrashing.
     func handleCommandScrollZoom(
         delta: CGFloat,
@@ -2198,9 +2315,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         lastPublishedZoomWidth = nextWidth
         targetColumnWidth = nextWidth
 
-        recomputeLayoutAnchored(
+        _ = recomputeLayoutAnchored(
             anchorDocPoint: anchorDocPoint,
-            preferredAnchorAssetID: nil,
+            forceCursorLookup: true,
             animate: !reduceMotion,
             animationDuration: 0.28
         )
@@ -2212,6 +2329,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let width = floor(clipView.bounds.width)
         guard width > 120 else { return }
         if abs(width - lastLayoutWidth) >= 1 {
+            sessionZoomAnchor = nil
             cancelOpticalTransformImmediate()
             recomputeLayout(animate: false, reconfigureExisting: false)
         } else {
@@ -2223,6 +2341,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     func handleScrollBoundsChanged() {
         let visY = visibleRect.minY
         if abs(visY - lastScrollY) > 1 {
+            if !isProgrammaticZoomScroll && !isPinching && abs(visY - lastScrollY) > 3 {
+                sessionZoomAnchor = nil
+            }
             scrollingDown = visY >= lastScrollY
             lastScrollY = visY
         }
@@ -2232,6 +2353,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     func setLiveScrolling(_ scrolling: Bool) {
         isLiveScrolling = scrolling
         if scrolling {
+            sessionZoomAnchor = nil
             cancelOpticalTransformImmediate()
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
@@ -2244,29 +2366,32 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         }
     }
 
-    /// Recomputes layout while locking the visual position of an anchor card (under cursor, selected, or viewport center)
-    /// and compensating every tile's animation start rect for `ΔscrollY` + any optical pinch transform rebase.
+    /// Recomputes layout while persistently locking ONE exact anchor asset card across consecutive zoom steps,
+    /// keeping the anchor tile continuously animated on top (`zPosition = 40`), and compensating every tile's
+    /// animation start rect for `ΔscrollY` + any optical pinch transform rebase.
+    @discardableResult
     private func recomputeLayoutAnchored(
         anchorDocPoint: CGPoint?,
-        preferredAnchorAssetID: UUID?,
+        forceCursorLookup: Bool,
         animate: Bool,
         animationDuration: CFTimeInterval = 0.28,
         oldOpticalScale: CGFloat = 1.0,
         newOpticalScale: CGFloat = 1.0,
-        opticalAnchorScreen: CGPoint = .zero
-    ) {
+        oldOpticalAnchorScreen: CGPoint = .zero
+    ) -> CGPoint? {
         let clipView = enclosingScrollView?.contentView
         let clipBounds = clipView?.bounds ?? bounds
         let width = activeContainerWidth()
         lastLayoutWidth = width
 
         let oldScrollY = clipBounds.origin.y
-        let anchorItem = pickAnchorItem(near: anchorDocPoint, preferredID: preferredAnchorAssetID)
-        let anchorID = anchorItem?.id
-        let anchorOldScreenY: CGFloat? = anchorItem.map { item in
-            let rawY = item.rect.midY - oldScrollY
-            return opticalAnchorScreen.y + (rawY - opticalAnchorScreen.y) * oldOpticalScale
-        }
+        let resolvedAnchor = resolveSessionZoomAnchor(
+            near: anchorDocPoint,
+            forceCursorLookup: forceCursorLookup,
+            oldScrollY: oldScrollY,
+            oldOpticalScale: oldOpticalScale,
+            oldOpticalAnchorScreen: oldOpticalAnchorScreen
+        )
 
         // Snapshot EVERY currently mounted tile's exact visual screen rect BEFORE layout/scroll mutates
         var oldScreenRects: [UUID: CGRect] = [:]
@@ -2274,8 +2399,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             oldScreenRects.reserveCapacity(activeTiles.count)
             for (id, tile) in activeTiles {
                 let pres = tile.layer.presentation()?.frame ?? tile.frame
-                let cx = opticalAnchorScreen.x + (pres.midX - opticalAnchorScreen.x) * oldOpticalScale
-                let cy = opticalAnchorScreen.y + ((pres.midY - oldScrollY) - opticalAnchorScreen.y) * oldOpticalScale
+                let cx = oldOpticalAnchorScreen.x + (pres.midX - oldOpticalAnchorScreen.x) * oldOpticalScale
+                let cy = oldOpticalAnchorScreen.y + ((pres.midY - oldScrollY) - oldOpticalAnchorScreen.y) * oldOpticalScale
                 let w = pres.width * oldOpticalScale
                 let h = pres.height * oldOpticalScale
                 oldScreenRects[id] = CGRect(x: cx - w * 0.5, y: cy - h * 0.5, width: w, height: h)
@@ -2302,49 +2427,59 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         // Compute & apply exact anchor-locked scroll origin BEFORE mounting/animating visible tiles
         var newScrollY = oldScrollY
+        var newOpticalAnchorScreen = oldOpticalAnchorScreen
+        let anchorID = resolvedAnchor?.anchor.assetID
+
         if let clipView {
             let maxScrollY = max(0, layout.totalHeight - clipBounds.height)
-            if oldScrollY <= 2 {
-                newScrollY = 0
-            } else if let anchorID,
-                      let anchorOldScreenY,
-                      let idx = assetIndexByID[anchorID],
-                      idx < layout.items.count,
-                      layout.items[idx].id == anchorID {
-                let newAnchorRect = layout.items[idx].rect
-                let targetRawY = opticalAnchorScreen.y + (anchorOldScreenY - opticalAnchorScreen.y) / max(0.1, newOpticalScale)
-                newScrollY = max(0, min(maxScrollY, newAnchorRect.midY - targetRawY))
+            if let resolved = resolvedAnchor, let newAnchorItem = layoutItem(for: resolved.anchor.assetID) {
+                let newAnchorRect = newAnchorItem.rect
+                let targetScreenY = resolved.anchor.screenY
+                newScrollY = MasonryLayoutEngine.anchoredScrollY(
+                    oldScrollY: oldScrollY,
+                    oldAnchorRect: resolved.item.rect,
+                    newAnchorRect: newAnchorRect,
+                    anchorNormV: resolved.anchor.normV,
+                    anchorScreenY: targetScreenY,
+                    newOpticalScale: newOpticalScale,
+                    opticalAnchorScreenY: targetScreenY,
+                    topInset: topInset,
+                    totalHeight: layout.totalHeight,
+                    viewportHeight: clipBounds.height
+                )
+
+                // Track the exact anchor asset's post-handoff visual pivot so optical pinch follows THAT photo
+                let newAnchorRawX = newAnchorRect.minX + resolved.anchor.normU * newAnchorRect.width
+                let newAnchorRawY = newAnchorRect.minY + resolved.anchor.normV * newAnchorRect.height - newScrollY
+                newOpticalAnchorScreen = CGPoint(x: newAnchorRawX, y: newAnchorRawY)
             } else {
                 newScrollY = max(0, min(maxScrollY, oldScrollY))
             }
 
             if abs(newScrollY - oldScrollY) >= 0.5 {
+                isProgrammaticZoomScroll = true
+                defer { isProgrammaticZoomScroll = false }
                 clipView.scroll(to: NSPoint(x: 0, y: newScrollY))
                 enclosingScrollView?.reflectScrolledClipView(clipView)
                 lastScrollY = newScrollY
             }
         }
 
-        // Apply rebased optical scale around the updated scroll anchor before computing tile from-rects
+        // Apply rebased optical scale around the exact anchor asset's updated screen pivot
         if abs(newOpticalScale - 1.0) > 0.0005 || abs(oldOpticalScale - 1.0) > 0.0005 {
-            applyOpticalTransformImmediate(scale: newOpticalScale, anchorScreen: opticalAnchorScreen)
+            applyOpticalTransformImmediate(scale: newOpticalScale, anchorScreen: newOpticalAnchorScreen)
         }
 
         // Map each tile's old visual screen rect into the new post-scroll, post-optical document space
         var compensatedFromRects: [UUID: CGRect] = [:]
         if animate && !isLiveScrolling && !oldScreenRects.isEmpty {
             compensatedFromRects.reserveCapacity(oldScreenRects.count)
-            let invS = 1.0 / max(0.1, newOpticalScale)
             for (id, screenRect) in oldScreenRects {
-                let docMidX = opticalAnchorScreen.x + (screenRect.midX - opticalAnchorScreen.x) * invS
-                let docMidY = (newScrollY + opticalAnchorScreen.y) + (screenRect.midY - opticalAnchorScreen.y) * invS
-                let docW = screenRect.width * invS
-                let docH = screenRect.height * invS
-                compensatedFromRects[id] = CGRect(
-                    x: docMidX - docW * 0.5,
-                    y: docMidY - docH * 0.5,
-                    width: docW,
-                    height: docH
+                compensatedFromRects[id] = MasonryLayoutEngine.compensatedFromRect(
+                    oldScreenRect: screenRect,
+                    newScrollY: newScrollY,
+                    newOpticalScale: newOpticalScale,
+                    newOpticalAnchorScreen: newOpticalAnchorScreen
                 )
             }
         }
@@ -2354,8 +2489,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             animateMoves: animate && !isLiveScrolling,
             animateNewTiles: animate && !isLiveScrolling,
             animationDuration: animationDuration,
-            compensatedFromRects: compensatedFromRects.isEmpty ? nil : compensatedFromRects
+            compensatedFromRects: compensatedFromRects.isEmpty ? nil : compensatedFromRects,
+            anchorAssetID: anchorID
         )
+        return newOpticalAnchorScreen
     }
 
     private func recomputeLayout(
@@ -2424,7 +2561,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         animateMoves: Bool = false,
         animateNewTiles: Bool = false,
         animationDuration: CFTimeInterval = 0.26,
-        compensatedFromRects: [UUID: CGRect]? = nil
+        compensatedFromRects: [UUID: CGRect]? = nil,
+        anchorAssetID: UUID? = nil
     ) {
         let vis = visibleRect
         guard vis.height > 0 || !assets.isEmpty else { return }
@@ -2438,8 +2576,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             neededIDs.insert(item.id)
         }
 
-        // Far-jump crossfade threshold: cards wrapping wildly across columns softly dissolve in place
-        // instead of flying diagonally over 10 other cards.
+        // Far-jump crossfade threshold: non-anchor cards wrapping wildly across columns softly dissolve in place
+        // instead of flying diagonally over 10 other cards. The exact anchor asset ALWAYS glides continuously on top.
         let maxGlideDistance = max(layout.columnWidth * 1.55, 290)
 
         let scale = currentScale
@@ -2463,10 +2601,12 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             let isSelected = selectedAssetIDs.contains(asset.id)
             let isCut = cutAssetIDs.contains(asset.id)
             let isHidden = (activeQuickLookID == asset.id)
+            let isAnchorTile = (anchorAssetID != nil && asset.id == anchorAssetID)
 
             if let existing = activeTiles[asset.id] {
                 let rawPrevious = existing.frame
                 let fromRect = compensatedFromRects?[asset.id] ?? rawPrevious
+                existing.layer.zPosition = (animateMoves && isAnchorTile) ? 40 : 0
                 if forceReconfigure {
                     existing.configure(
                         asset: asset,
@@ -2481,7 +2621,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                     )
                     if animateMoves && fromRect != itemFrame.rect {
                         let dist = hypot(itemFrame.rect.midX - fromRect.midX, itemFrame.rect.midY - fromRect.midY)
-                        if dist <= maxGlideDistance {
+                        if isAnchorTile || dist <= maxGlideDistance {
                             existing.animateFrameTransition(from: fromRect, to: itemFrame.rect, duration: animationDuration)
                         } else {
                             existing.animateEnter(duration: min(0.22, animationDuration))
@@ -2491,7 +2631,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                     existing.updateFrameOnly(itemFrame.rect)
                     if animateMoves && fromRect != itemFrame.rect {
                         let dist = hypot(itemFrame.rect.midX - fromRect.midX, itemFrame.rect.midY - fromRect.midY)
-                        if dist <= maxGlideDistance {
+                        if isAnchorTile || dist <= maxGlideDistance {
                             existing.animateFrameTransition(from: fromRect, to: itemFrame.rect, duration: animationDuration)
                         } else {
                             existing.animateEnter(duration: min(0.22, animationDuration))
@@ -2500,6 +2640,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                 }
             } else {
                 let tile = reusePool.popLast() ?? MasonryTileLayer()
+                tile.layer.zPosition = (animateMoves && isAnchorTile) ? 40 : 0
                 tile.configure(
                     asset: asset,
                     frame: itemFrame.rect,
@@ -2670,6 +2811,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
     private func commitSelection(_ newSelection: Set<UUID>) {
         guard selectedAssetIDs != newSelection else { return }
+        sessionZoomAnchor = nil
         selectedAssetIDs = newSelection
         updateVisibleTileStatesOnly()
         onSelectionChanged?(newSelection)

@@ -53,6 +53,11 @@ public struct CharkleToast: Identifiable, Equatable, Sendable {
     }
 }
 
+public enum InspectorDetailTab: String, CaseIterable, Sendable {
+    case info = "信息"
+    case similar = "类似项目"
+}
+
 /// Top-level UI coordination store: navigation destination, active moodboard target,
 /// Quick Look target/playlist, modal presentations, column density, Notch Shelf preferences, and toast queue.
 @Observable
@@ -66,6 +71,7 @@ public final class AppCoordinatorStore {
     public var isJumpAnywherePresented: Bool = false
     public var isVisualFilterBarPresented: Bool = false
     public var isInspectorVisible: Bool = true
+    public var selectedInspectorTab: InspectorDetailTab = .info
     public var isMoodboardGeneratorPresented: Bool = false
     public var generatorInitialEntry: MoodboardGeneratorEntry = .prompt
     public var isSmartFolderEditorPresented: Bool = false
