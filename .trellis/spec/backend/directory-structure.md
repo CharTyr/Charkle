@@ -20,9 +20,11 @@ Sources/
 │   │   ├── SQLiteConnection.swift    # Low-level sqlite3 C-API wrapper
 │   │   ├── AssetVector.swift         # Binary FeaturePrint + float16/float32 semantic embedding codec
 │   │   └── SearchText.swift          # FTS5 tokenization, Mandarin Pinyin & initials indexing
-│   ├── Media/                        # Ingestion, thumbnails, rich URL resolvers, LRU cache
+│   ├── Media/                        # Ingestion, thumbnails, rich URL resolvers, metadata, LRU cache
 │   │   ├── MediaPipeline.swift       # All-media import (raster, animated, video, audio, PDF, MD/text, SVG, 3D)
 │   │   ├── MediaPipeline+Cache.swift # 2-tier original cache LRU eviction & offline pin protection
+│   │   ├── ImageMetadataExtractor.swift # Full EXIF/TIFF/GPS/IPTC + AI prompt extraction (A1111/ComfyUI/NovelAI/InvokeAI/XMP)
+│   │   ├── MarkdownDocumentParser.swift # GitHub README HTML hero, relative image URLs & GFM tables parser
 │   │   ├── MediaArtwork.swift        # Procedural CoreGraphics posters (GitHub, Social, 3D, Audio, Swatch)
 │   │   ├── GitHubRepoResolver.swift  # github.com/owner/repo parser, API metadata & README.md fetcher
 │   │   ├── SocialPostResolver.swift  # X/Twitter, Threads, Bluesky unified post & attachment resolver

@@ -54,3 +54,20 @@ Every rich asset type MUST render its native interactive viewer in **both** `Qui
 - **Folder Counts**: Always display `library.subtreeAssetCount(for: folder.id)` (not `folder.assetCount`) so parent folders show total nested asset counts matching the recursive folder view.
 - **Smart Tag Cap**: Render Top 10 most-used + up to 5 recent/frequent tags inline; hide remaining tags behind the searchable `"全部"` / `"查看全部 N 个标签"` popover (`allTagsPopoverContent`), while keeping any actively selected tag visible.
 - **Folder Insertion Slots**: Always keep a dedicated trailing root insertion slot after `ForEach(visibleFolderTree)` (even when the last top-level folder is expanded), and adjust same-parent downward drag indices (`if oldIndex < runningInsertIndex { adjustedIndex = runningInsertIndex - 1 }`) so drops land exactly on the highlighted blue insertion line.
+
+---
+
+## Original Full-Resolution & Tall Long-Strip Quick Look (`QuickLookOverlayView.swift`)
+
+- **Always preview original resolution**: Opening Quick Look MUST load the actual original image (`highResImage`) rather than stopping at the `grid520` / `preview1400` thumbnail (which looks blurry on long web screenshots and high-DPI illustrations).
+- **Long-strip scroll mode**: Automatically detect tall strip images (`isTallStripImage`: `pixelHeight >= 1600 && Double(pixelHeight) / Double(pixelWidth) >= 2.2`) and default into smooth vertical full-width scrolling (`isLongStripScrollMode`) with an explicit toggle back to fit-to-stage view, plus dynamic `maxZoomLimit` scaled up to `16x` for ultra-high-resolution artwork.
+
+---
+
+## Reorderable Inspector Cards & Zero-Flicker Switching (`InspectorView.swift`, `ThumbnailImageLoader.swift`)
+
+- **Persisted custom card ordering**: `AppCoordinatorStore.inspectorInfoSectionOrder` persists user drag-reordered `InspectorInfoSection` cards (e.g., dragging `photoExif` or `aiGeneration` to the top) via `InspectorInfoSection.normalizedOrder(from:)`, `moving(_:toTarget:in:)`, and `stepping(_:delta:visible:in:)`.
+- **Zero-flicker asset switching (two required guards)**:
+  1. **Frame-0 synchronous metadata resolution (`LibraryStore.resolvedImageMetadata(for:)`)**: Resolve EXIF & AI prompt metadata synchronously with an in-memory cache instead of popping cards in asynchronously after a selection change, and gate the camera EXIF card strictly on `photoExif.hasMeaningfulCameraExif` (so generic `sRGB / 8-bit` profiles never flash on ordinary illustrations).
+  2. **Thumbnail identity tracking (`AssetThumbnailSurface.loadedAssetID`)**: Track `@State private var loadedAssetID: UUID?` alongside `loadedImage` and gate rendering with `let activeLoaded = (loadedAssetID == asset.id) ? loadedImage : nil` so switching between assets NEVER flashes the previously selected asset's thumbnail.
+- **Tests Required**: `CharkleV101PolishTests` (`InspectorInfoSection normalizes persisted order, drags EXIF to top, and steps past hidden cards`).

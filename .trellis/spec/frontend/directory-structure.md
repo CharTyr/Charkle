@@ -31,25 +31,27 @@ Sources/
     ├── Services/
     │   ├── ClipboardCollector.swift    # Clipboard image/file/URL/GitHub/X/Threads/Bluesky capture
     │   ├── GlobalHotkeyManager.swift   # Carbon global hotkeys (capture, clipboard, notch toggle)
+    │   ├── ScreenCapturePermissionChecker.swift # Screen Recording status check & System Settings deep-linker
     │   └── ScreenshotCapturer.swift    # Interactive macOS area screenshot capture
     ├── Stores/
-    │   ├── AppCoordinatorStore.swift   # Navigation, sidebar collapse, galleryLayoutMode, sheets, QuickLook, toasts
-    │   ├── LibraryStore.swift          # Assets, folders, smart folders, tags, cachedRecentActivityAssets, media extraction
+    │   ├── AppCoordinatorStore.swift   # Navigation, sidebar collapse, galleryLayoutMode, inspectorInfoSectionOrder, onboarding/settings, QuickLook, toasts
+    │   ├── LibraryStore.swift          # Assets, folders, smart folders, tags, cachedRecentActivityAssets, synchronous metadata cache, media extraction
     │   ├── MoodboardStore.swift        # Active board, undo/redo, candidate pool, AI curation, palette sync
     │   └── SyncAndAIStore.swift        # Cloud sync status, AI config, TypeSafe Jev config, usage tracking
     ├── Views/
     │   ├── MainWindowView.swift        # Top-level split layout, toolbar, 3-mode gallery switcher, folder breadcrumb bar
     │   ├── SidebarView.swift           # Collapsible rail, smart folders, multi-select draggable folder tree, smart tag cap
     │   ├── GalleryFilmstripView.swift  # Finder-style hero stage (with live rich viewers) + bottom filmstrip scrubber
-    │   ├── InspectorView.swift         # Single asset (信息 | 类似项目), multi-select batch edit, moodboard candidate pool
-    │   ├── QuickLookOverlayView.swift  # Fullscreen immersive preview + collapsible right drawer (信息 | 类似项目)
+    │   ├── InspectorView.swift         # Reorderable single-asset cards (EXIF/AI prompt/palette/similar), batch edit, moodboard rail
+    │   ├── QuickLookOverlayView.swift  # Fullscreen original-res & long-strip preview + collapsible right drawer (信息 | 类似项目)
     │   ├── QuickLookRichViewers.swift  # GitHub Repo + README, Social Post + AVPlayer + extract, Markdown, 3D SceneKit
+    │   ├── OnboardingView.swift        # Skippable 6-step first-launch & re-runnable onboarding studio
     │   ├── FolderCustomizationPopover.swift # macOS-style color presets + ColorPicker + categorized SF Symbols + Emoji
     │   ├── SmartFolderEditorSheet.swift     # Rule builder (tags, description, multi-CIELAB colors, media kinds, rating)
     │   ├── JumpAnywhereView.swift      # ⌘J Pinyin/Chinese Quick Jump palette
     │   ├── MoodboardGeneratorSheet.swift    # 4-entry rapid moodboard generator
-    │   └── SettingsView.swift          # Sync backends, AI providers, TypeSafe Jev, MCP agent policy, cache & Notch prefs
-    └── Resources/Icons/                # 36 bundled duotone SVGs (`duotone-*.svg`, source palette #445C94 / #B4BED4)
+    │   └── Settings/                   # Centered 4-section, 9-pane SettingsOverlayView + SettingsChrome + GoogleOAuthSetupSheet
+    └── Resources/Icons/                # 48 bundled SVG icons (`duotone-*.svg` & `layered-*.svg`, source palette #445C94 / #B4BED4)
 ```
 
 ---

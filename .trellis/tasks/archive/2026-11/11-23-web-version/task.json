@@ -1,0 +1,32 @@
+{
+  "id": "web-version",
+  "name": "web-version",
+  "title": "Charkle Web Full-Parity Sync Development",
+  "description": "Build a full-parity local-first Web version of Charkle under ./web/ with 100% /.charkle/ sync compatibility",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "CharTyr",
+  "assignee": "CharTyr",
+  "createdAt": "2026-11-23",
+  "completedAt": "2026-11-23",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-23-web-m1-core-db-media-sync",
+    "11-23-web-m2-gallery-nav-quicklook",
+    "11-23-web-m3-moodboard-studio-figma",
+    "11-23-web-m4-ai-typesafe-settings-shelf-mcp",
+    "11-23-web-m5-motion-polish-e2e-verification"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "Delivered via Charkle-Web merge into ./web/ (commit 729c15e); archived after extracting wire contracts to .trellis/spec/cross-platform/.",
+  "meta": {}
+}

@@ -83,6 +83,28 @@ if Task.isCancelled {
 
 ---
 
+## Scenario 3: Full Camera EXIF & AI Generation Prompt Extraction (`ImageMetadataExtractor.swift`)
+
+### 1. Scope / Trigger
+- Trigger: Photography assets require complete EXIF/TIFF/GPS/IPTC inspection, and AI-generated assets embed prompt/model/sampler/LoRA parameters inside PNG `tEXt`/`iTXt`/`zTXt` chunks, XMP packets, or EXIF `UserComment`.
+
+### 2. Signatures
+- `Sources/CharkleCore/Contracts/CoreModels.swift`:
+  - `PhotoExifMetadata` (`hasMeaningfulCameraExif: Bool`, `isEmpty: Bool`, `cameraDisplayName`, `exposureSummary`, `formattedAperture`, `formattedFocalLength`)
+  - `AIGenerationMetadata` (`generator`, `prompt`, `negativePrompt`, `modelName`, `modelHash`, `sampler`, `scheduler`, `steps`, `cfgScale`, `seed`, `sizeText`, `clipSkip`, `loras`)
+- `Sources/CharkleCore/Media/ImageMetadataExtractor.swift`:
+  - `ImageMetadataExtractor.extract(from url: URL) -> ExtractedImageMetadata` (bounded 2 MB binary chunk scan cap)
+
+### 3. Contracts
+- Extract both `photoExif` and `aiGeneration` during image ingest (`MediaPipeline.swift`) and support synchronous on-demand hydration with in-memory caching for legacy assets imported before v1.0.1.
+- **Meaningful EXIF gate**: UI cards MUST gate camera EXIF presentation on `photoExif.hasMeaningfulCameraExif` (camera/lens/date/exposure/ISO/focal/GPS/software/artist/copyright), NOT `!photoExif.isEmpty` — otherwise ordinary illustrations with only generic `sRGB / 8-bit` color profile pop up spurious EXIF cards.
+- **Supported AI prompt formats**: A1111/Forge/Civitai `parameters`, ComfyUI workflow/prompt JSON graph traversal, NovelAI, InvokeAI, Draw Things, Midjourney, XMP, and EXIF `UserComment` (stripping ASCII/UNICODE prefix safely via `.flatMap`).
+
+### 4. Tests Required
+- `CharkleV101PolishTests`: `ImageMetadataExtractor parses A1111 parameters, ComfyUI graph JSON, and real PNG tEXt + JPEG EXIF`.
+
+---
+
 ## Compilation, Testing & Release Build Standards
 
 1. **Zero-Warning Policy**: Always compile with strict warnings-as-errors:
@@ -94,9 +116,10 @@ if Task.isCancelled {
    swift test --skip-build
    node scripts/test-figma-plugin.cjs
    ```
-3. **Release Bundle & Code Signing (`scripts/build-app.sh`)**:
-   - **ALWAYS** build Release app bundles via `./scripts/build-app.sh release`.
-   - Never assemble or codesign `.app` bundles directly inside iCloud-synced `~/Documents` — FileProvider injects `com.apple.FinderInfo` / `com.apple.fileprovider.fpfs#P` xattrs that invalidate signatures. `build-app.sh` stages in `/tmp`, runs `xattr -cr`, signs `Contents/Helpers/charkle` and `Charkle.app` with a stable certificate (so macOS Keychain ACLs remain stable across rebuilds), and copies via `ditto` to `dist/Charkle.app`.
-   - Verify with `codesign -v --deep dist/Charkle.app` (never print certificate CN/email).
+3. **Release Bundle, DMG & Code Signing (`scripts/build-app.sh`, `scripts/build-dmg.sh`)**:
+   - **ALWAYS** build Release app bundles via `./scripts/build-app.sh release` and distributable arm64 DMGs via `./scripts/build-dmg.sh --rebuild`.
+   - Never assemble or codesign `.app` bundles directly inside iCloud-synced `~/Documents` — FileProvider injects `com.apple.FinderInfo` / `com.apple.fileprovider.fpfs#P` xattrs that invalidate signatures. Both `build-app.sh` and `build-dmg.sh` stage in `/tmp` with `cp -RX` + `xattr -cr`, sign `Contents/Helpers/charkle` and `Charkle.app` with a stable certificate (preserving macOS Keychain ACLs across rebuilds), and verify `codesign -v --deep --strict` on the clean `/tmp` copy (never print certificate CN/email).
 4. **External Agent MCP Safety (`ExternalAgentPolicy.swift`)**:
    - `CharkleCLI` MCP server exposes only safe read/organize/soft-trash tools (14 tools) and MUST NEVER expose permanent deletion (`ExternalAgentMCPTests.swift`).
+5. **Cross-Platform & Repo Hygiene**:
+   - Follow [Cross-Platform Contracts](../cross-platform/index.md) for `/.charkle/` sync wire compatibility, `.charkleboard` Figma Bridge ZIPs, and zero external inspiration/author mentions.

@@ -24,6 +24,15 @@ These guides help you **ask the right questions before coding**.
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
 
+### Related Platform Code-Specs
+
+| Layer | Index | Scope |
+|-------|-------|-------|
+| **Cross-Platform Contracts** | [Cross-Platform Index](../cross-platform/index.md) | `/.charkle/` sync wire format, `.charkleboard` Figma ZIP, 14-tool MCP policy, repo purity |
+| **macOS Backend** | [Backend Index](../backend/index.md) | `Sources/CharkleCore/`, `Sources/CharkleCLI/` |
+| **macOS Frontend** | [Frontend Index](../frontend/index.md) | `Sources/CharkleApp/`, `Sources/CharkleCanvas/` |
+| **Web Monorepo** | [Web Index](../web/index.md) | `web/packages/{shared,server,client,worker,extension}` |
+
 ---
 
 ## Quick Reference: Thinking Triggers

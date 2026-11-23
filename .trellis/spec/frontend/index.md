@@ -36,6 +36,7 @@ Before editing `Sources/CharkleApp/` or `Sources/CharkleCanvas/`:
 - [ ] Never sort `allAssetsByID.values` inside a SwiftUI `View.body` — read precomputed store caches (`library.cachedRecentActivityAssets`).
 - [ ] For macOS `.contextMenu` color icons, render `NSImage` with `isTemplate = false` (`CharkleIconCache.shared.menuFolderIcon`).
 - [ ] Keep Notch Shelf content at its fixed final target width inside `.clipShape(shape)` with `animatableData` on both shell and rim paths.
+- [ ] In `InspectorView`, resolve image metadata synchronously via `library.resolvedImageMetadata(for:)` and keep `AssetThumbnailSurface` gated by `loadedAssetID == asset.id` so switching assets never flickers.
 
 ---
 
@@ -44,5 +45,5 @@ Before editing `Sources/CharkleApp/` or `Sources/CharkleCanvas/`:
 ```bash
 swift build --build-tests -Xswiftc -warnings-as-errors
 swift test --skip-build
-./scripts/build-app.sh release && codesign -v --deep dist/Charkle.app
+./scripts/build-dmg.sh --rebuild
 ```
