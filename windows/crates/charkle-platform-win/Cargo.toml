@@ -1,0 +1,15 @@
+[package]
+name = "charkle-platform-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+charkle-core = { path = "../charkle-core" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

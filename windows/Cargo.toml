@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/charkle-core",
+    "crates/charkle-platform-win",
+    "crates/charkle-cli",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+fast_image_resize = { version = "5", features = ["image"] }
+flate2 = "1"
+hex = "0.4"
+image = "0.25"
+kamadak-exif = "0.6"
+md-5 = "0.10"
+pinyin = "0.10"
+pulldown-cmark = "0.12"
+quick-xml = "0.37"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
+resvg = "0.44"
+rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
+scraper = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+symphonia = { version = "0.5", features = ["all"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

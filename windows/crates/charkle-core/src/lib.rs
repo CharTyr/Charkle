@@ -1,0 +1,12 @@
+//! Pure OS-agnostic Charkle core library for Windows.
+//!
+//! Mirrors macOS `Sources/CharkleCore` with lossless `/.charkle/` sync parity.
+
+pub mod db;
+pub mod engine;
+pub mod error;
+pub mod media;
+pub mod models;
+pub mod sync;
+pub mod traits;
+pub mod wire;

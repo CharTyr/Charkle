@@ -1,0 +1,20 @@
+[package]
+name = "charkle-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "charkle-cli"
+path = "src/main.rs"
+
+[dependencies]
+charkle-core = { path = "../charkle-core" }
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
