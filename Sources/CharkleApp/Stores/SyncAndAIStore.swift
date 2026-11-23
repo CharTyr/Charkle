@@ -16,7 +16,11 @@ public final class SyncAndAIStore {
     public var typeSafeConfig: TypeSafeExperimentalConfig = TypeSafeExperimentalConfig()
     public var hasStoredTypeSafeKey: Bool = false
     public var typeSafeModels: [TypeSafeModelInfo] = []
+    public var isTestingAI: Bool = false
     public var isTestingTypeSafe: Bool = false
+    public var isRebuildingVisualIndex: Bool = false
+    public var rebuildVisualIndexProgress: (completed: Int, total: Int)? = nil
+    public var cliLinkRevision: Int = 0
     public var chatGPTSession: ChatGPTAccountSession = ChatGPTAccountSession()
     public var chatGPTModels: [ChatGPTModelInfo] = []
     public var isSigningInChatGPT: Bool = false
@@ -99,6 +103,8 @@ public final class SyncAndAIStore {
         }
     }
 
+    public private(set) var hasLoadedInitialState: Bool = false
+
     public func loadAll() async {
         async let cfg = engine.syncConfig()
         async let status = engine.syncStatus()
@@ -114,19 +120,25 @@ public final class SyncAndAIStore {
         let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV, chatGPT, loadedTS, loadedTSKey) = await (
             cfg, status, gd, ai, stats, oauthConfigured, webdavPwd, gptSession, tsCfg, tsHasKey
         )
-        syncConfig = sCfg
-        syncStatus = sStatus
-        gdirectSnapshot = gdSnap
-        aiConfig = aiCfg
-        typeSafeConfig = loadedTS
-        hasStoredTypeSafeKey = loadedTSKey
-        cacheStats = cStats
-        hasGoogleOAuthClient = hasOAuth
-        hasWebDAVPassword = hasWebDAV
-        chatGPTSession = chatGPT
-        externalAgentConfig = ExternalAgentConfigStore.load()
-        aiUsage = CloudAIUsageStore.shared.snapshot()
-        hasStoredAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
+        let loadedAgentCfg = ExternalAgentConfigStore.load()
+        let loadedUsage = CloudAIUsageStore.shared.snapshot()
+        let loadedAIKey = await engine.hasStoredAIKey(for: aiCfg.provider)
+
+        if syncConfig != sCfg { syncConfig = sCfg }
+        if syncStatus != sStatus { syncStatus = sStatus }
+        if gdirectSnapshot != gdSnap { gdirectSnapshot = gdSnap }
+        if aiConfig != aiCfg { aiConfig = aiCfg }
+        if typeSafeConfig != loadedTS { typeSafeConfig = loadedTS }
+        if hasStoredTypeSafeKey != loadedTSKey { hasStoredTypeSafeKey = loadedTSKey }
+        if cacheStats != cStats { cacheStats = cStats }
+        if hasGoogleOAuthClient != hasOAuth { hasGoogleOAuthClient = hasOAuth }
+        if hasWebDAVPassword != hasWebDAV { hasWebDAVPassword = hasWebDAV }
+        if chatGPTSession != chatGPT { chatGPTSession = chatGPT }
+        if externalAgentConfig != loadedAgentCfg { externalAgentConfig = loadedAgentCfg }
+        if aiUsage != loadedUsage { aiUsage = loadedUsage }
+        if hasStoredAIKey != loadedAIKey { hasStoredAIKey = loadedAIKey }
+        hasLoadedInitialState = true
+
         if chatGPT.status == .connected && chatGPT.sharingEnabled && chatGPTModels.isEmpty {
             await refreshChatGPTModels(quiet: true)
         }
@@ -406,6 +418,58 @@ public final class SyncAndAIStore {
     }
 
     @discardableResult
+    public func testAIConnection(config: AIProviderConfig, apiKey: String?) async -> Bool {
+        isTestingAI = true
+        defer { isTestingAI = false }
+        errorMessage = nil
+        do {
+            let summary = try await engine.testAIConnection(config: config, apiKey: apiKey)
+            if config.provider == .chatGPTSubscription {
+                chatGPTSession = await engine.chatGPTSession()
+                await refreshChatGPTModels(quiet: true)
+            }
+            statusMessage = summary
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func rebuildLocalVisualIndex(assetIDs: [UUID]) async -> Int {
+        guard !assetIDs.isEmpty else {
+            statusMessage = "当前素材库暂无需要扫描的素材"
+            return 0
+        }
+        isRebuildingVisualIndex = true
+        rebuildVisualIndexProgress = (0, assetIDs.count)
+        defer {
+            isRebuildingVisualIndex = false
+            rebuildVisualIndexProgress = nil
+        }
+        errorMessage = nil
+        let batchSize = 16
+        var processed = 0
+        do {
+            var idx = 0
+            while idx < assetIDs.count {
+                let end = min(assetIDs.count, idx + batchSize)
+                let slice = Array(assetIDs[idx..<end])
+                let updated = try await engine.analyzeAssetsLocally(ids: slice)
+                processed += updated.count
+                rebuildVisualIndexProgress = (end, assetIDs.count)
+                idx = end
+            }
+            statusMessage = "已完成本机视觉与文字索引扫描（共更新 \(processed) 项素材）"
+            return processed
+        } catch {
+            errorMessage = "重建视觉索引失败：\(error.localizedDescription)"
+            return processed
+        }
+    }
+
+    @discardableResult
     public func signInWithChatGPT(reconsent: Bool = false, switchAccount: Bool = false) async -> Bool {
         isSigningInChatGPT = true
         defer { isSigningInChatGPT = false }
@@ -531,9 +595,16 @@ public final class SyncAndAIStore {
             externalAgentConfig = config
             errorMessage = nil
             if !quiet {
-                statusMessage = config.enabled
-                    ? "外部 Agent 权限已更新：\(config.accessLevel.displayTitle)"
-                    : "已关闭外部 Agent 接入"
+                switch (config.mcpEnabled, config.cliEnabled) {
+                case (true, true):
+                    statusMessage = "MCP 与 CLI 服务均已开启 · 权限：\(config.accessLevel.displayTitle)"
+                case (true, false):
+                    statusMessage = "已开启 MCP 服务（CLI 已关闭）· 权限：\(config.accessLevel.displayTitle)"
+                case (false, true):
+                    statusMessage = "已开启 CLI 命令行服务（MCP 已关闭）· 权限：\(config.accessLevel.displayTitle)"
+                case (false, false):
+                    statusMessage = "已关闭 MCP 与 CLI 外部接入服务"
+                }
             }
         } catch {
             errorMessage = "保存外部 Agent 配置失败：\(error.localizedDescription)"
@@ -554,6 +625,18 @@ public final class SyncAndAIStore {
         return bundled
     }
 
+    public var isBundledHelperAvailable: Bool {
+        _ = cliLinkRevision
+        return FileManager.default.isExecutableFile(atPath: resolvedHelperCLIPath())
+    }
+
+    public var isCLILinkedInLocalBin: Bool {
+        _ = cliLinkRevision
+        let path = URL(fileURLWithPath: NSHomeDirectory())
+            .appending(path: ".local/bin/charkle").path
+        return FileManager.default.isExecutableFile(atPath: path)
+    }
+
     public func installCLIInLocalBin() {
         let sourcePath = resolvedHelperCLIPath()
         guard FileManager.default.isExecutableFile(atPath: sourcePath) else {
@@ -568,6 +651,7 @@ public final class SyncAndAIStore {
                 try FileManager.default.removeItem(at: targetURL)
             }
             try FileManager.default.createSymbolicLink(atPath: targetURL.path, withDestinationPath: sourcePath)
+            cliLinkRevision &+= 1
             errorMessage = nil
             statusMessage = "已链接终端命令至 ~/.local/bin/charkle，可直接运行 charkle overview"
         } catch {

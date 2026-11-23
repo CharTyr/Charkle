@@ -1,0 +1,740 @@
+import CharkleCore
+import SwiftUI
+
+/// Tab 3: 云同步 (Sync) — Status-first cloud account & sync controls for Google Drive and WebDAV,
+/// team shared folder collaboration, and sync preferences. Low-level `gdirect` internals live in Tab 9.
+public struct SyncSettingsPane: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    public let coordinator: AppCoordinatorStore
+    public let syncAndAI: SyncAndAIStore
+
+    @State private var draftConfig: DriveSyncConfig = DriveSyncConfig()
+    @State private var didLoadDraft: Bool = false
+
+    @State private var showOAuthSetupSheet: Bool = false
+    @State private var showWebDAVConfigSheet: Bool = false
+    @State private var webDAVDraftURL: String = ""
+    @State private var webDAVDraftUsername: String = ""
+    @State private var webDAVDraftRemotePath: String = "/Charkle"
+    @State private var webDAVPasswordInput: String = ""
+
+    public init(coordinator: AppCoordinatorStore, syncAndAI: SyncAndAIStore) {
+        self.coordinator = coordinator
+        self.syncAndAI = syncAndAI
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            if draftConfig.mode == .localOnly {
+                localOnboardingSection
+            } else {
+                liveSyncStatusSection
+
+                switch draftConfig.mode {
+                case .directAPIWithGDirect, .gdirectMount:
+                    googleDriveAccountSection
+                    googleSharedCollaborationSection
+                case .webDAV:
+                    webDAVAccountSection
+                case .localOnly:
+                    EmptyView()
+                }
+
+                syncPreferencesSection
+            }
+        }
+        .onAppear {
+            draftConfig = syncAndAI.syncConfig
+            didLoadDraft = true
+        }
+        .onChange(of: syncAndAI.syncConfig) { _, latest in
+            draftConfig = latest
+        }
+        .sheet(isPresented: $showOAuthSetupSheet) {
+            GoogleOAuthSetupSheet(syncAndAI: syncAndAI, autoSignInAfterSave: true)
+        }
+        .sheet(isPresented: $showWebDAVConfigSheet) {
+            webDAVEditorSheet
+        }
+    }
+
+    // MARK: - State A: Local-Only Guidance
+
+    private var localOnboardingSection: some View {
+        SettingsSection("云端同步服务") {
+            SettingsRow(
+                title: "当前素材库仅保存在本机",
+                subtitle: "路径：\(draftConfig.localLibraryPath) · 启用云同步可在多台 Mac 间自动同步并支持团队共享"
+            ) {
+                Button("管理素材库位置") {
+                    coordinator.selectedSettingsTab = .library
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .fixedSize()
+            }
+
+            SettingsCardDivider()
+
+            SettingsRow(
+                title: "Google Drive 云端直连",
+                subtitle: "推荐 · 原始文件按可读目录保存在你的 Google Drive，支持共享协作与网页端直接拖入新素材"
+            ) {
+                Button("启用 Google 同步") {
+                    draftConfig.mode = .directAPIWithGDirect
+                    persistIfReady()
+                }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+                .fixedSize()
+            }
+
+            InlineGuideDisclosure("开始前需要准备什么？（仅首次需 3 分钟配置凭据）") {
+                SettingsGuideStep(
+                    "1",
+                    title: "直连你自己的 Google Drive，不经任何第三方中转服务器",
+                    detail: "因此首次登录前需要准备一份个人桌面端 OAuth 凭据（client_secret.json）。"
+                )
+                SettingsGuideStep(
+                    "2",
+                    title: "如果你本机已装过 gdirect，可直接一键导入",
+                    detail: "启用 Google 同步后，Charkle 会自动检测本机 gdirect 并提供免填导入。"
+                )
+                SettingsGuideStep(
+                    "3",
+                    title: "想把已有本地素材一并迁上云盘？",
+                    detail: "请前往「素材库 → 更改或转移…」选择完整无损迁移，自动搬运原件与情绪板。"
+                )
+            }
+
+            SettingsCardDivider()
+
+            SettingsRow(
+                title: "WebDAV 云盘",
+                subtitle: "兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务"
+            ) {
+                Button("配置 WebDAV…") {
+                    openWebDAVEditor()
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .fixedSize()
+            }
+        }
+    }
+
+    // MARK: - Live Sync Progress Section
+
+    private var liveSyncStatusSection: some View {
+        let status = syncAndAI.syncStatus
+        let isSyncing = status.isSyncing || syncAndAI.isBusy
+        let percentText = status.progressFraction.map { "\(Int(($0 * 100).rounded()))%" }
+
+        return SettingsSection("同步状态") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center, spacing: 12) {
+                    if isSyncing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Circle()
+                            .fill(syncIndicatorColor(status))
+                            .frame(width: 8, height: 8)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(isSyncing ? status.localizedPhaseTitle : syncIdleHeadline(status))
+                                .font(.system(size: 13, weight: .medium))
+                            if isSyncing, let percentText {
+                                Text(percentText)
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Text(syncSubheadline(status: status, isSyncing: isSyncing))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(status.lastError != nil && !isSyncing ? SettingsPalette.destructiveInk(for: colorScheme) : .secondary)
+                            .lineLimit(2)
+                    }
+
+                    Spacer(minLength: 10)
+
+                    Button {
+                        Task { _ = await syncAndAI.syncNow() }
+                    } label: {
+                        Text(isSyncing ? "同步中…" : "立即同步")
+                    }
+                    .buttonStyle(SettingsPrimaryButtonStyle())
+                    .fixedSize()
+                    .disabled(isSyncing)
+                }
+
+                if isSyncing {
+                    if let fraction = status.progressFraction {
+                        ProgressView(value: min(1.0, max(0.0, fraction)))
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    Label(
+                        status.lastSyncedAt.map { "上次同步：\(SettingsHelpers.relativeTimeText($0))" } ?? "尚未完成首次同步",
+                        systemImage: "clock"
+                    )
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                    if status.pendingOpCount > 0 {
+                        Label("待上传 \(status.pendingOpCount) 项", systemImage: "arrow.up.circle")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(SettingsPalette.warningInk(for: colorScheme))
+                            .monospacedDigit()
+                    }
+
+                    Spacer()
+
+                    if let report = syncAndAI.lastSyncReport {
+                        Text("↑ \(report.uploadedOps)  ↓ \(report.downloadedOps)  +\(report.discoveredRemoteAssets) 新发现")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+    }
+
+    // MARK: - Google Drive Account Section
+
+    private var googleDriveAccountSection: some View {
+        let snap = syncAndAI.gdirectSnapshot
+        let isMountMode = draftConfig.mode == .gdirectMount
+        let gdirectEmail = draftConfig.selectedGDirectAccount ?? snap.defaultAccount ?? snap.accounts.first
+        let directAccount: DriveAccountInfo? = {
+            guard let acc = syncAndAI.syncStatus.account,
+                  acc.source != "WebDAV",
+                  acc.source != "本地文件夹",
+                  acc.source != "gdirect",
+                  acc.source != "gdirect mount" else { return nil }
+            return acc
+        }()
+        let activeAccount: DriveAccountInfo? = {
+            if isMountMode {
+                return gdirectEmail.map { DriveAccountInfo(email: $0, displayName: nil, source: "gdirect mount") }
+            }
+            return directAccount
+                ?? gdirectEmail.map { DriveAccountInfo(email: $0, displayName: nil, source: "gdirect") }
+        }()
+        let isUsingGDirectFallback = !isMountMode && directAccount == nil && activeAccount != nil
+
+        return SettingsSection("Google Drive 账号") {
+            if isMountMode {
+                SettingsRow(
+                    title: gdirectEmail ?? "当前处于 gdirect 本地挂载模式",
+                    subtitle: snap.isMountActive
+                        ? "已挂载至 \(draftConfig.mountPath)（如需切回免挂载高速直连，可前往「高级与关于」管理）"
+                        : "当前挂载卷未激活，可在「高级与关于」执行挂载或切回标准直连 API",
+                    subtitleColor: snap.isMountActive
+                        ? SettingsPalette.positiveInk(for: colorScheme)
+                        : SettingsPalette.warningInk(for: colorScheme)
+                ) {
+                    HStack(spacing: 8) {
+                        Button("切回标准直连") {
+                            draftConfig.mode = .directAPIWithGDirect
+                            persistIfReady()
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        .fixedSize()
+
+                        Button("挂载管理") {
+                            coordinator.selectedSettingsTab = .advancedAbout
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        .fixedSize()
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(SettingsPalette.subtleFill(for: colorScheme))
+                                .frame(width: 38, height: 38)
+                            Image(systemName: activeAccount != nil ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundStyle(activeAccount != nil ? SettingsPalette.positiveInk(for: colorScheme) : .secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(activeAccount?.displayName ?? activeAccount?.email ?? "未登录 Google 账号")
+                                    .font(.system(size: 13, weight: .semibold))
+                                if directAccount != nil {
+                                    SettingsStatusBadge("已直连", tint: SettingsPalette.positiveInk(for: colorScheme))
+                                } else if isUsingGDirectFallback {
+                                    SettingsStatusBadge("gdirect 兜底", tint: SettingsPalette.warningInk(for: colorScheme))
+                                }
+                            }
+
+                            if let account = activeAccount, let name = account.displayName, !name.isEmpty {
+                                Text(account.email)
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(googleAccountHint(hasOAuth: syncAndAI.hasGoogleOAuthClient, hasGDirect: snap.cliPath != nil, isFallback: isUsingGDirectFallback))
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+
+                        Spacer(minLength: 8)
+
+                        if directAccount != nil {
+                            HStack(spacing: 8) {
+                                Button("切换账号") {
+                                    triggerGoogleSignIn()
+                                }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                                .fixedSize()
+                                .disabled(syncAndAI.isBusy)
+
+                                Button("退出") {
+                                    Task { await syncAndAI.signOutGoogleDrive() }
+                                }
+                                .buttonStyle(SettingsDestructiveButtonStyle())
+                                .fixedSize()
+                                .disabled(syncAndAI.isBusy)
+                            }
+                        } else if !syncAndAI.hasGoogleOAuthClient && snap.cliPath != nil {
+                            HStack(spacing: 8) {
+                                Button("从 gdirect 导入并登录") {
+                                    Task {
+                                        if await syncAndAI.importGoogleOAuthFromGDirect() {
+                                            _ = await syncAndAI.signInGoogleDrive()
+                                        }
+                                    }
+                                }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                                .fixedSize()
+                                .disabled(syncAndAI.isBusy)
+
+                                Button("手动配置…") {
+                                    showOAuthSetupSheet = true
+                                }
+                                .buttonStyle(SettingsSecondaryButtonStyle())
+                                .fixedSize()
+                            }
+                        } else {
+                            Button(syncAndAI.hasGoogleOAuthClient ? "使用 Google 登录" : "配置凭据并登录") {
+                                triggerGoogleSignIn()
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                            .fixedSize()
+                            .disabled(syncAndAI.isBusy)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 13)
+
+                    if let used = activeAccount?.storageUsedBytes,
+                       let limit = activeAccount?.storageLimitBytes, limit > 0 {
+                        let ratio = min(1.0, max(0.0, Double(used) / Double(limit)))
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text("Google Drive 云端空间")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(ByteCountFormatter.string(fromByteCount: used, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            ProgressView(value: ratio)
+                                .progressViewStyle(.linear)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 12)
+                    }
+
+                    if !syncAndAI.hasGoogleOAuthClient && directAccount == nil {
+                        InlineGuideDisclosure("为什么首次登录需要配置一次凭据？") {
+                            SettingsGuideStep(
+                                "1",
+                                title: "你的素材直连个人 Google Drive，零中转",
+                                detail: "Charkle 不经过云端代理服务器，所有原图和情绪板直接读写你自己的网盘。"
+                            )
+                            SettingsGuideStep(
+                                "2",
+                                title: "按教程 3 分钟创建一次桌面端 Client ID 即可长期使用",
+                                detail: "点击「配置凭据并登录」即可打开官方教程链接，支持直接导入下载的 client_secret.json。"
+                            )
+                        }
+                    }
+                }
+            }
+
+            SettingsCardDivider()
+
+            SettingsRow(
+                title: "云端保存路径",
+                subtitle: draftConfig.resolvedSharedFolderID != nil
+                    ? "当前已绑定下方共享协作目录；清除后将恢复使用此路径"
+                    : "支持单级目录（Charkle）或多级路径（Design/Charkle）"
+            ) {
+                TextField("Charkle", text: $draftConfig.rootFolderName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 210)
+                    .disabled(draftConfig.resolvedSharedFolderID != nil)
+                    .onSubmit { persistIfReady() }
+            }
+        }
+    }
+
+    // MARK: - Google Drive Shared Collaboration
+
+    private var googleSharedCollaborationSection: some View {
+        let isSignedIn = syncAndAI.syncStatus.account != nil
+            && syncAndAI.syncStatus.account?.source != "WebDAV"
+            && syncAndAI.syncStatus.account?.source != "本地文件夹"
+            && syncAndAI.syncStatus.account?.source != "gdirect"
+            && syncAndAI.syncStatus.account?.source != "gdirect mount"
+        let trimmed = draftConfig.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return SettingsSection("团队共享协作（可选）") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("共享协作目录")
+                            .font(.system(size: 13, weight: .medium))
+                        if let sharedID = draftConfig.resolvedSharedFolderID {
+                            Text("已启用协作模式（目录 ID：\(String(sharedID.prefix(12)))…）")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
+                        } else if !trimmed.isEmpty {
+                            Text("链接或 ID 格式无效，请检查是否包含 /folders/…")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(SettingsPalette.warningInk(for: colorScheme))
+                        } else {
+                            Text("粘贴 Google Drive「与我共享」目录链接或 ID，多人可共同整理与浏览")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    if isSignedIn {
+                        Menu {
+                            if syncAndAI.sharedFolders.isEmpty {
+                                Button("加载「与我共享」目录列表…") {
+                                    Task { await syncAndAI.loadSharedFolders() }
+                                }
+                            } else {
+                                ForEach(syncAndAI.sharedFolders, id: \.id) { folder in
+                                    Button {
+                                        draftConfig.sharedFolderURLOrID = folder.webViewLink ?? folder.id
+                                        persistIfReady()
+                                    } label: {
+                                        Label(folder.name, systemImage: "folder.badge.person.crop")
+                                    }
+                                }
+                                Divider()
+                                Button("刷新列表") {
+                                    Task { await syncAndAI.loadSharedFolders() }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                if syncAndAI.isLoadingSharedFolders {
+                                    ProgressView().controlSize(.mini)
+                                }
+                                Text("选择与我共享")
+                            }
+                        }
+                        .menuStyle(.borderlessButton)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .fixedSize()
+                        .onTapGesture {
+                            if syncAndAI.sharedFolders.isEmpty && !syncAndAI.isLoadingSharedFolders {
+                                Task { await syncAndAI.loadSharedFolders() }
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("https://drive.google.com/drive/folders/… 或目录 ID", text: $draftConfig.sharedFolderURLOrID)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { persistIfReady() }
+
+                    if !trimmed.isEmpty {
+                        Button("清除") {
+                            draftConfig.sharedFolderURLOrID = ""
+                            persistIfReady()
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        .fixedSize()
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+
+            InlineGuideDisclosure("如何与团队成员共享同一个素材库") {
+                SettingsGuideStep(
+                    "1",
+                    title: "在 Google Drive 网页端将 Charkle 文件夹共享给协作者（编辑者权限）"
+                )
+                SettingsGuideStep(
+                    "2",
+                    title: "协作者登录 Charkle 后，点击上方「选择与我共享」或直接粘贴目录链接",
+                    detail: "所有成员对标签、文件夹与情绪板的编辑都会通过增量日志安全合并，互不覆盖。"
+                )
+            }
+        }
+    }
+
+    // MARK: - WebDAV Account Section
+
+    private var webDAVAccountSection: some View {
+        let isConnected = syncAndAI.syncStatus.account?.source == "WebDAV"
+        let host = URL(string: draftConfig.webDAVServerURL)?.host() ?? draftConfig.webDAVServerURL
+
+        return SettingsSection("WebDAV 服务") {
+            SettingsRow(
+                title: host.isEmpty ? "尚未配置 WebDAV 服务器" : host,
+                subtitle: host.isEmpty
+                    ? "支持坚果云、Nextcloud、群晖 NAS、Alist 等标准 WebDAV 服务"
+                    : "账号：\(draftConfig.webDAVUsername.isEmpty ? "未填写" : draftConfig.webDAVUsername) · 路径：\(draftConfig.webDAVRemotePath)",
+                subtitleColor: isConnected ? SettingsPalette.positiveInk(for: colorScheme) : .secondary
+            ) {
+                HStack(spacing: 8) {
+                    Button("测试连接") {
+                        let cfg = draftConfig
+                        Task { _ = await syncAndAI.testWebDAVConnection(config: cfg, password: nil) }
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                    .disabled(draftConfig.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncAndAI.isBusy)
+
+                    Button("编辑配置…") {
+                        openWebDAVEditor()
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                }
+            }
+
+            InlineGuideDisclosure("坚果云 / 群晖 NAS 如何获取应用密码") {
+                SettingsGuideStep(
+                    "1",
+                    title: "坚果云用户请使用「第三方应用管理」生成的专用密码",
+                    detail: "服务器地址一般为 https://dav.jianguoyun.com/dav/，不要直接使用网页登录密码。"
+                )
+                SettingsGuideStep(
+                    "2",
+                    title: "密码仅加密保存于 macOS 钥匙串",
+                    detail: "不会明文写入任何配置文件。"
+                )
+            }
+        }
+    }
+
+    // MARK: - Sync Preferences
+
+    private var syncPreferencesSection: some View {
+        SettingsSection("同步偏好") {
+            SettingsRow(
+                title: "同步轻量化预览图",
+                subtitle: "切换其他 Mac 时秒看完整画廊，无需等待下载原始大文件"
+            ) {
+                Toggle("", isOn: $draftConfig.syncThumbnails)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: draftConfig.syncThumbnails) { _, _ in persistIfReady() }
+            }
+
+            SettingsCardDivider()
+
+            SettingsRow(
+                title: "同步智能搜索索引",
+                subtitle: "在多台设备间共享搜索索引，保持一致的搜图与情绪板推荐体验"
+            ) {
+                Toggle("", isOn: $draftConfig.syncEmbeddings)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: draftConfig.syncEmbeddings) { _, _ in persistIfReady() }
+            }
+        }
+    }
+
+    // MARK: - WebDAV Editor Sheet
+
+    private var webDAVEditorSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "externaldrive.connected.to.line.below.fill")
+                    .font(.system(size: 18))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("配置 WebDAV 云盘")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                fieldRow("服务器地址") {
+                    TextField("https://dav.jianguoyun.com/dav/", text: $webDAVDraftURL)
+                        .textFieldStyle(.roundedBorder)
+                }
+                fieldRow("账号 / 用户名") {
+                    TextField("邮箱或用户名", text: $webDAVDraftUsername)
+                        .textFieldStyle(.roundedBorder)
+                }
+                fieldRow("应用密码（保存至 macOS 钥匙串）") {
+                    SecureField(syncAndAI.hasWebDAVPassword ? "••••••••（留空保持不变）" : "输入密码或应用授权码", text: $webDAVPasswordInput)
+                        .textFieldStyle(.roundedBorder)
+                }
+                fieldRow("云端保存路径") {
+                    TextField("/Charkle", text: $webDAVDraftRemotePath)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            HStack {
+                Button("取消") {
+                    showWebDAVConfigSheet = false
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("测试连接") {
+                    var testCfg = draftConfig
+                    testCfg.mode = .webDAV
+                    testCfg.webDAVServerURL = webDAVDraftURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    testCfg.webDAVUsername = webDAVDraftUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+                    testCfg.webDAVRemotePath = webDAVDraftRemotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let pwd = webDAVPasswordInput
+                    Task {
+                        let ok = await syncAndAI.testWebDAVConnection(config: testCfg, password: pwd.isEmpty ? nil : pwd)
+                        if ok {
+                            draftConfig = syncAndAI.syncConfig
+                            webDAVPasswordInput = ""
+                        }
+                    }
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .disabled(webDAVDraftURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncAndAI.isBusy)
+
+                Button("保存配置") {
+                    var updated = draftConfig
+                    updated.mode = .webDAV
+                    updated.webDAVServerURL = webDAVDraftURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    updated.webDAVUsername = webDAVDraftUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+                    updated.webDAVRemotePath = webDAVDraftRemotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let pwd = webDAVPasswordInput
+                    Task {
+                        if !pwd.isEmpty {
+                            _ = await syncAndAI.saveWebDAVPassword(pwd)
+                            webDAVPasswordInput = ""
+                        }
+                        await syncAndAI.saveSyncConfig(updated, quiet: false)
+                        draftConfig = syncAndAI.syncConfig
+                        showWebDAVConfigSheet = false
+                    }
+                }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(webDAVDraftURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || syncAndAI.isBusy)
+            }
+        }
+        .padding(22)
+        .frame(width: 480)
+    }
+
+    private func fieldRow<F: View>(_ label: String, @ViewBuilder field: () -> F) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            field()
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func openWebDAVEditor() {
+        webDAVDraftURL = draftConfig.webDAVServerURL
+        webDAVDraftUsername = draftConfig.webDAVUsername
+        webDAVDraftRemotePath = draftConfig.webDAVRemotePath.isEmpty ? "/Charkle" : draftConfig.webDAVRemotePath
+        webDAVPasswordInput = ""
+        showWebDAVConfigSheet = true
+    }
+
+    private func triggerGoogleSignIn() {
+        Task {
+            if syncAndAI.hasGoogleOAuthClient {
+                _ = await syncAndAI.signInGoogleDrive()
+            } else {
+                showOAuthSetupSheet = true
+            }
+        }
+    }
+
+    private func persistIfReady() {
+        guard didLoadDraft else { return }
+        let snapshot = draftConfig
+        Task { await syncAndAI.saveSyncConfig(snapshot, quiet: true) }
+    }
+
+    private func googleAccountHint(hasOAuth: Bool, hasGDirect: Bool, isFallback: Bool) -> String {
+        if isFallback {
+            return "当前暂用本机 gdirect 兜底，独立登录 Google 账号后可启用免挂载 HTTP/2 高速直连"
+        }
+        if !hasOAuth {
+            return hasGDirect
+                ? "检测到本机 gdirect，可一键导入凭据并完成登录"
+                : "首次登录需配置一次 Google 桌面端凭据，完成后自动开启直连同步"
+        }
+        return "登录 Google 账号后，素材与情绪板将自动直连同步"
+    }
+
+    private func syncIndicatorColor(_ status: SyncStatus) -> Color {
+        switch status.phase {
+        case .error: return SettingsPalette.destructiveInk(for: colorScheme)
+        case .scanning, .uploading, .downloading, .merging: return SettingsPalette.warningInk(for: colorScheme)
+        case .idle:
+            if status.pendingOpCount > 0 { return SettingsPalette.warningInk(for: colorScheme) }
+            return status.lastSyncedAt != nil ? SettingsPalette.positiveInk(for: colorScheme) : .secondary
+        }
+    }
+
+    private func syncIdleHeadline(_ status: SyncStatus) -> String {
+        if case .error = status.phase { return "上次同步遇到异常" }
+        if status.pendingOpCount > 0 { return "有 \(status.pendingOpCount) 项本地变更待同步" }
+        return status.lastSyncedAt != nil ? "已与云端保持同步" : "等待首次同步"
+    }
+
+    private func syncSubheadline(status: SyncStatus, isSyncing: Bool) -> String {
+        if isSyncing {
+            if let detail = status.currentDetail, !detail.isEmpty { return detail }
+            return "正在与 \(draftConfig.activeStorageLocationSummary) 同步…"
+        }
+        if let err = status.lastError, !err.isEmpty { return err }
+        return "目标：\(draftConfig.activeStorageLocationSummary)"
+    }
+}

@@ -539,6 +539,16 @@ nonisolated struct AIHTTPClient: Sendable {
         self.session = session
     }
 
+    func get(_ path: String, timeout: TimeInterval = 20) async throws -> (Data, Int) {
+        var request = URLRequest(url: base.appending(path: path), timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        if let secret { request.setValue(secret, forHTTPHeaderField: header) }
+        for (k, v) in extraHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        return (data, http.statusCode)
+    }
+
     func post<T: Decodable>(_ path: String, body: [String: Any], timeout: TimeInterval = 45) async throws -> T {
         var request = URLRequest(url: base.appending(path: path), timeoutInterval: timeout)
         request.httpMethod = "POST"
