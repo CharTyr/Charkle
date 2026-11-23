@@ -33,6 +33,7 @@ public struct MainWindowView: View {
     @State private var subfolderNameDraft: String = ""
     @State private var showInboxBatchTriageSheet: Bool = false
     @State private var selectedTriageIDs: Set<UUID> = []
+    @State private var galleryViewportWidth: CGFloat = 960
     @FocusState private var isSubfolderFieldFocused: Bool
 
     private static let filterColorPresets: [String] = [
@@ -134,6 +135,16 @@ public struct MainWindowView: View {
 
                 centerWorkspace
                     .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    .background {
+                        Color.clear
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                floor(max(240, proxy.size.width))
+                            } action: { _, newWidth in
+                                if abs(newWidth - galleryViewportWidth) >= 2 {
+                                    galleryViewportWidth = newWidth
+                                }
+                            }
+                    }
                     .clipped()
                     .layoutPriority(0)
 
@@ -198,6 +209,15 @@ public struct MainWindowView: View {
                     },
                     onStep: { delta in
                         coordinator.stepQuickLook(delta: delta)
+                    },
+                    onCopyHex: { copyColorHex($0) },
+                    onFilterByColor: { hex in
+                        Task {
+                            coordinator.selectedDestination = .allItems
+                            await library.applyDestination(.allItems)
+                            await library.filterByColorHex(hex)
+                            coordinator.isVisualFilterBarPresented = true
+                        }
                     }
                 )
                 .zIndex(200)
@@ -266,6 +286,12 @@ public struct MainWindowView: View {
             // Interactive Floating Liquid Glass Toasts (Top-Trailing, hover-pause + Undo countdown)
             CharkleToastOverlay(coordinator: coordinator)
                 .zIndex(300)
+        }
+        .background {
+            WindowKeyEventBridge { event, hostWindow in
+                handleMainWindowKeyDown(event, in: hostWindow)
+            }
+            .allowsHitTesting(false)
         }
         .animation(
             CharkleMotion.enterExit(
@@ -902,7 +928,12 @@ public struct MainWindowView: View {
                 if coordinator.galleryLayoutMode != .galleryFilmstrip {
                     HStack(spacing: 6) {
                         Button {
-                            coordinator.targetColumnWidth = max(130, coordinator.targetColumnWidth - 36)
+                            coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+                                currentWidth: CGFloat(coordinator.targetColumnWidth),
+                                direction: -1,
+                                layoutMode: coordinator.galleryLayoutMode,
+                                containerWidth: galleryViewportWidth
+                            ))
                         } label: {
                             Image(systemName: "square.grid.3x3")
                                 .font(.system(size: 11))
@@ -918,7 +949,12 @@ public struct MainWindowView: View {
                         .frame(width: 64)
 
                         Button {
-                            coordinator.targetColumnWidth = min(420, coordinator.targetColumnWidth + 36)
+                            coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+                                currentWidth: CGFloat(coordinator.targetColumnWidth),
+                                direction: 1,
+                                layoutMode: coordinator.galleryLayoutMode,
+                                containerWidth: galleryViewportWidth
+                            ))
                         } label: {
                             Image(systemName: "square.grid.2x2")
                                 .font(.system(size: 11.5))
@@ -2246,6 +2282,12 @@ public struct MainWindowView: View {
                 swappingNodeID: moodboards.swappingNodeID,
                 canUndo: moodboards.canUndo,
                 canRedo: moodboards.canRedo,
+                isOverlayPresented: coordinator.quickLookAssetID != nil
+                    || coordinator.isSettingsPresented
+                    || coordinator.isJumpAnywherePresented
+                    || coordinator.isOnboardingPresented
+                    || coordinator.isMoodboardGeneratorPresented
+                    || coordinator.isSmartFolderEditorPresented,
                 heroNamespace: heroNamespace,
                 callbacks: MoodboardCanvasCallbacks(
                     onCommitDocument: { nextDoc in
@@ -2264,12 +2306,15 @@ public struct MainWindowView: View {
                     },
                     onOpenQuickLook: { asset in
                         if coordinator.quickLookAssetID != nil {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                                 coordinator.closeQuickLook()
                             }
                         } else {
+                            resignTextFocusIfNeeded()
                             let playlist = board.referencedAssetIDs
-                            coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                                coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)
+                            }
                         }
                     },
                     onRevealInFinder: { assetID in
@@ -2478,7 +2523,81 @@ public struct MainWindowView: View {
         .help(helpText)
     }
 
+    private func isEditingText(in window: NSWindow?) -> Bool {
+        guard let responder = window?.firstResponder else { return false }
+        return responder is NSTextView || responder is NSTextField || responder is NSText
+    }
+
+    private func resignTextFocusIfNeeded() {
+        if let keyWindow = NSApp.keyWindow, isEditingText(in: keyWindow) {
+            keyWindow.makeFirstResponder(nil)
+        }
+    }
+
+    /// Top-priority window-level Spacebar coordinator for Quick Look open/close across all views.
+    /// Runs before nested stage monitors (Moodboard, Filmstrip, Masonry, AVPlayerView) and ignores Caps Lock / Fn flags.
+    private func handleMainWindowKeyDown(_ event: NSEvent, in hostWindow: NSWindow) -> NSEvent? {
+        guard hostWindow.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
+
+        let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard event.keyCode == 49, primaryModifiers.isEmpty else { return event }
+
+        // 1. Quick Look is OPEN -> Space closes Quick Look (unless user is actively editing in Quick Look's Inspector)
+        if coordinator.quickLookAssetID != nil {
+            if isEditingText(in: event.window) || isEditingText(in: hostWindow) {
+                return event
+            }
+            if event.isARepeat { return nil }
+            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
+                coordinator.closeQuickLook()
+            }
+            return nil
+        }
+
+        // 2. Quick Look is CLOSED -> Only handle events targeted directly at the main window (never popovers/panels)
+        guard event.window === hostWindow else { return event }
+        guard !coordinator.isSettingsPresented,
+              !coordinator.isJumpAnywherePresented,
+              !coordinator.isOnboardingPresented,
+              !coordinator.isMoodboardGeneratorPresented,
+              !coordinator.isSmartFolderEditorPresented,
+              !showInboxBatchTriageSheet else {
+            return event
+        }
+        guard !isEditingText(in: hostWindow) else { return event }
+
+        // Moodboard Canvas owns Space (Hold = Hand Pan, Quick Tap = Quick Look selected node)
+        if coordinator.isViewingMoodboard && moodboards.activeBoard != nil {
+            return event
+        }
+
+        if event.isARepeat { return nil }
+
+        // Gallery Filmstrip: always preview the selected or currently displayed stage asset
+        if coordinator.galleryLayoutMode == .galleryFilmstrip {
+            let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
+                ?? library.assets.first
+            if let asset = target {
+                openQuickLook(asset)
+                return nil
+            }
+            return event
+        }
+
+        // Vertical Masonry / Horizontal Justified: open Quick Look for selected asset regardless of focus pane
+        if !library.selectedAssetIDs.isEmpty {
+            let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
+                ?? library.selectedAssetIDs.first.flatMap { library.allAssetsByID[$0] }
+            if let asset = target {
+                openQuickLook(asset)
+                return nil
+            }
+        }
+        return event
+    }
+
     private func openQuickLook(_ asset: AssetRecord) {
+        resignTextFocusIfNeeded()
         let playlist = library.assets.map(\.id)
         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
             coordinator.openQuickLook(assetID: asset.id, playlist: playlist.isEmpty ? [asset.id] : playlist)

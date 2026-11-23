@@ -19,6 +19,8 @@ public struct QuickLookOverlayView: View {
     public let heroNamespace: Namespace.ID
     public let onClose: () -> Void
     public let onStep: (Int) -> Void
+    public let onCopyHex: (String) -> Void
+    public let onFilterByColor: (String) -> Void
 
     @State private var originalURL: URL?
     @State private var highResImage: NSImage?
@@ -36,13 +38,6 @@ public struct QuickLookOverlayView: View {
     @State private var showSecondaryControls: Bool = false
     @State private var confirmPermanentDelete: Bool = false
     @State private var isSidePanelOpen: Bool = false
-    @State private var sidePanelTab: SidePanelTab = .similar
-    @Namespace private var qlSideTabNamespace
-
-    private enum SidePanelTab: String, CaseIterable {
-        case info = "信息"
-        case similar = "类似项目"
-    }
 
     private var supportsVisualTransform: Bool {
         !asset.isGitHubRepo && !asset.isSocialPost
@@ -106,7 +101,9 @@ public struct QuickLookOverlayView: View {
         coordinator: AppCoordinatorStore,
         heroNamespace: Namespace.ID,
         onClose: @escaping () -> Void,
-        onStep: @escaping (Int) -> Void
+        onStep: @escaping (Int) -> Void,
+        onCopyHex: @escaping (String) -> Void = { _ in },
+        onFilterByColor: @escaping (String) -> Void = { _ in }
     ) {
         self.asset = asset
         self.library = library
@@ -115,66 +112,68 @@ public struct QuickLookOverlayView: View {
         self.heroNamespace = heroNamespace
         self.onClose = onClose
         self.onStep = onStep
+        self.onCopyHex = onCopyHex
+        self.onFilterByColor = onFilterByColor
     }
 
     public var body: some View {
-        ZStack {
-            // Soft blurred neutral ambient backdrop (zero visual color distortion)
+        HStack(spacing: 0) {
             ZStack {
-                (colorScheme == .dark ? Color.black.opacity(0.76) : Color(charkleHex: "#151619").opacity(0.68))
-                CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: .dark)
-            }
-            .ignoresSafeArea()
-            .onTapGesture { onClose() }
-
-            // Hero Media Stage
-            VStack(spacing: 0) {
-                // Top minimal title bar (fades in after 45% hero continuity)
-                HStack(spacing: 10) {
-                    Text(asset.title)
-                        .font(.system(size: 13.5, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.94))
-                        .lineLimit(1)
-
-                    Text("\(asset.pixelWidth) × \(asset.pixelHeight) · \(asset.mediaKind.localizedLabel)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.62))
-
-                    Spacer()
-
-                    Button {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
-                            isSidePanelOpen.toggle()
-                        }
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(isSidePanelOpen ? Color.accentColor : .white.opacity(0.86))
-                            .frame(width: 28, height: 28)
-                            .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
-                    }
-                    .buttonStyle(CharkleTactileButtonStyle())
-                    .help("显示 / 隐藏右侧信息与类似项目")
-
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.86))
-                            .frame(width: 28, height: 28)
-                            .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
-                    }
-                    .buttonStyle(CharkleTactileButtonStyle())
-                    .help("关闭预览 (Space / Esc)")
+                // Soft blurred neutral ambient backdrop (zero visual color distortion)
+                ZStack {
+                    (colorScheme == .dark ? Color.black.opacity(0.76) : Color(charkleHex: "#151619").opacity(0.68))
+                    CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: .dark)
                 }
-                .padding(.horizontal, 24)
-                .padding(.top, 18)
-                .opacity(showSecondaryControls ? 1 : 0)
+                .ignoresSafeArea()
+                .onTapGesture { onClose() }
 
-                Spacer(minLength: 12)
+                // Hero Media Stage
+                VStack(spacing: 0) {
+                    // Top minimal title bar (fades in after 45% hero continuity)
+                    HStack(spacing: 10) {
+                        Text(asset.title)
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.94))
+                            .lineLimit(1)
 
-                // Center Media Surface + Optional Right Info|Similar Drawer (Img 2)
-                HStack(spacing: 16) {
+                        Text("\(asset.pixelWidth) × \(asset.pixelHeight) · \(asset.mediaKind.localizedLabel)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.62))
+
+                        Spacer()
+
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
+                                isSidePanelOpen.toggle()
+                            }
+                        } label: {
+                            Image(systemName: "sidebar.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(isSidePanelOpen ? Color.accentColor : .white.opacity(0.86))
+                                .frame(width: 28, height: 28)
+                                .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
+                        }
+                        .buttonStyle(CharkleTactileButtonStyle())
+                        .help("显示 / 隐藏右侧详情栏 (⌘⌥I)")
+
+                        Button(action: onClose) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.86))
+                                .frame(width: 28, height: 28)
+                                .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
+                        }
+                        .buttonStyle(CharkleTactileButtonStyle())
+                        .help("关闭预览 (Space / Esc)")
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 18)
+                    .opacity(showSecondaryControls ? 1 : 0)
+
+                    Spacer(minLength: 12)
+
+                    // Center Media Surface
                     mediaStage
                         .scaleEffect(stageAppeared || reduceMotion ? 1.0 : 0.97)
                         .opacity(stageAppeared ? 1.0 : 0.0)
@@ -208,37 +207,64 @@ public struct QuickLookOverlayView: View {
                             )
                             .allowsHitTesting(false)
                         }
+                        .padding(.horizontal, isSidePanelOpen ? 28 : 48)
 
-                    if isSidePanelOpen {
-                        quickLookSidePanel
-                            .frame(width: 292)
-                            .frame(maxHeight: 680)
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    Spacer(minLength: 12)
+
+                    // Floating Liquid Glass Bottom HUD Controls
+                    floatingBottomHUD
+                        .padding(.bottom, 22)
+                        .opacity(showSecondaryControls ? 1 : 0)
+                        .scaleEffect(showSecondaryControls ? 1.0 : (reduceMotion ? 1.0 : 0.96), anchor: .bottom)
+                }
+
+                // Left / Right gallery stepping chevrons
+                if coordinator.quickLookPlaylist.count > 1 && showSecondaryControls {
+                    HStack {
+                        stepChevronButton(systemName: "chevron.left", delta: -1)
+                        Spacer()
+                        stepChevronButton(systemName: "chevron.right", delta: 1)
                     }
+                    .padding(.horizontal, 18)
+                    .transition(.opacity)
                 }
-                .padding(.horizontal, isSidePanelOpen ? 24 : 48)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Spacer(minLength: 12)
-
-                // Floating Liquid Glass Bottom HUD Controls
-                floatingBottomHUD
-                    .padding(.bottom, 22)
-                    .opacity(showSecondaryControls ? 1 : 0)
-                    .scaleEffect(showSecondaryControls ? 1.0 : (reduceMotion ? 1.0 : 0.96), anchor: .bottom)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .layoutPriority(0)
 
-            // Left / Right gallery stepping chevrons
-            if coordinator.quickLookPlaylist.count > 1 && showSecondaryControls {
-                HStack {
-                    stepChevronButton(systemName: "chevron.left", delta: -1)
-                    Spacer()
-                    stepChevronButton(systemName: "chevron.right", delta: 1)
-                }
-                .padding(.horizontal, 18)
-                .transition(.opacity)
-            }
+            // Full-Height 300pt Inspector (1:1 parity in size, cards, editing, and Similar tab with main window InspectorView)
+            InspectorView(
+                coordinator: coordinator,
+                library: library,
+                moodboards: moodboards,
+                pinnedAsset: asset,
+                isQuickLookHosted: true,
+                onCopyHex: onCopyHex,
+                onFilterByColor: { hex in
+                    onClose()
+                    onFilterByColor(hex)
+                },
+                onOpenQuickLook: { target in
+                    library.selectedAssetIDs = [target.id]
+                    let playlist = coordinator.quickLookPlaylist.contains(target.id)
+                        ? coordinator.quickLookPlaylist
+                        : coordinator.quickLookPlaylist + [target.id]
+                    coordinator.openQuickLook(assetID: target.id, playlist: playlist)
+                },
+                onRequestCloseQuickLook: onClose
+            )
+            .frame(width: 300)
+            .frame(maxHeight: .infinity)
+            .opacity(isSidePanelOpen ? 1 : 0)
+            .allowsHitTesting(isSidePanelOpen)
+            .disabled(!isSidePanelOpen)
+            .accessibilityHidden(!isSidePanelOpen)
+            .frame(width: isSidePanelOpen ? 300 : 0, alignment: .leading)
+            .clipped()
+            .layoutPriority(1)
         }
+        .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidePanelOpen)
         .task(id: asset.id) {
             let assetID = asset.id
             let isRichWebCard = asset.isGitHubRepo || asset.isSocialPost
@@ -315,24 +341,6 @@ public struct QuickLookOverlayView: View {
             }
         } message: {
             Text("彻底删除后将无法恢复。")
-        }
-        .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.space) {
-            onClose()
-            return .handled
-        }
-        .onKeyPress(.escape) {
-            onClose()
-            return .handled
-        }
-        .onKeyPress(.leftArrow) {
-            onStep(-1)
-            return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            onStep(1)
-            return .handled
         }
     }
 
@@ -432,237 +440,6 @@ public struct QuickLookOverlayView: View {
                 webBookmarkDetailCard
             }
         }
-    }
-
-    // MARK: - QuickLook Side Info | Similar Drawer (Reference Img 2)
-
-    private var quickLookSidePanel: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 2) {
-                ForEach(SidePanelTab.allCases, id: \.self) { tab in
-                    let active = sidePanelTab == tab
-                    Button {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            sidePanelTab = tab
-                        }
-                    } label: {
-                        Text(tab.rawValue)
-                            .font(.system(size: 12, weight: active ? .semibold : .medium))
-                            .foregroundStyle(active ? .white : .white.opacity(0.65))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background {
-                                if active {
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .fill(Color.white.opacity(0.16))
-                                        .matchedGeometryEffect(id: "ql-side-tab", in: qlSideTabNamespace)
-                                }
-                            }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(3)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .padding(14)
-
-            ScrollView(.vertical) {
-                Group {
-                    if sidePanelTab == .similar {
-                        quickLookSideSimilarTab
-                    } else {
-                        quickLookSideInfoTab
-                    }
-                }
-                .charkleCleanScrollbars(hidden: true)
-            }
-            .scrollIndicators(.hidden)
-        }
-        .background(Color(charkleHex: "#15161A").opacity(0.92), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
-        )
-    }
-
-    private var quickLookSideSimilarTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("与「\(asset.title)」相似的素材")
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(.white.opacity(0.68))
-                .lineLimit(1)
-
-            if library.similarAssets.isEmpty {
-                VStack(spacing: 10) {
-                    CharkleEmptyStateVignette(.noFilterResults, compact: true)
-                    Text("暂无视觉或色彩相似素材")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 28)
-            } else {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    ForEach(library.similarAssets) { scored in
-                        let ratio = max(0.68, min(1.5, CGFloat(scored.asset.aspectRatio)))
-                        AssetThumbnailSurface(
-                            asset: scored.asset,
-                            loader: library.thumbnailLoader,
-                            tier: .grid520,
-                            cornerRadius: CharkleTheme.Radius.settingsInner
-                        )
-                        .frame(height: (126 / ratio).rounded())
-                        .overlay(
-                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.75)
-                        )
-                        .onTapGesture {
-                            library.selectedAssetIDs = [scored.asset.id]
-                            coordinator.openQuickLook(assetID: scored.asset.id, playlist: coordinator.quickLookPlaylist)
-                        }
-                        .help(scored.asset.title)
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 14)
-    }
-
-    private var quickLookSideInfoTab: some View {
-        let resolvedMeta = library.resolvedImageMetadata(for: asset)
-        return VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(asset.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text("\(asset.mediaKind.localizedLabel) · \(asset.pixelWidth) × \(asset.pixelHeight)")
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.62))
-            }
-
-            if !asset.dominantColors.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(asset.dominantColors.prefix(5), id: \.hex) { swatch in
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color(charkleHex: swatch.hex))
-                            .frame(height: 24)
-                    }
-                }
-            }
-
-            if !asset.tags.isEmpty {
-                QuickLookFlowWrap(spacing: 6) {
-                    ForEach(asset.tags, id: \.self) { tag in
-                        Text("#\(tag)")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.86))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3.5)
-                            .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
-                    }
-                }
-            }
-
-            if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("来源链接")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.52))
-                    Link(urlStr, destination: url)
-                        .font(.system(size: 11.5))
-                        .lineLimit(2)
-                }
-            }
-
-            if let aiGen = resolvedMeta.aiGeneration, !aiGen.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(aiGen.generator ?? "AI 生图提示词")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                        Spacer()
-                        if let prompt = aiGen.prompt, !prompt.isEmpty {
-                            Button {
-                                let pb = NSPasteboard.general
-                                pb.clearContents()
-                                pb.setString(prompt, forType: .string)
-                                coordinator.showToast("已复制正向 Prompt", icon: "doc.on.doc")
-                            } label: {
-                                Text("复制 Prompt")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.85))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2.5)
-                                    .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    if let prompt = aiGen.prompt, !prompt.isEmpty {
-                        Text(prompt)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.white.opacity(0.86))
-                            .lineSpacing(3.5)
-                            .textSelection(.enabled)
-                    }
-                    if let model = aiGen.modelName, !model.isEmpty {
-                        Text("模型：\(model)")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.62))
-                    }
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-
-            if let exif = resolvedMeta.photoExif, exif.hasMeaningfulCameraExif {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("拍摄参数 (EXIF)")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.52))
-                    if let cam = exif.cameraDisplayName {
-                        Text(cam)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.90))
-                    }
-                    if let lens = exif.lensModel {
-                        Text(lens)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.72))
-                    }
-                    if let summary = exif.exposureSummary {
-                        Text(summary)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.82))
-                    }
-                    if let date = exif.capturedAt {
-                        Text(date)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.56))
-                    }
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-
-            if !asset.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("备注 / 来源详情")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.52))
-                    Text(asset.notes)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.84))
-                        .lineSpacing(4)
-                        .textSelection(.enabled)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 16)
     }
 
     @ViewBuilder
@@ -1051,11 +828,37 @@ public struct QuickLookOverlayView: View {
         }
     }
 
+    private func isEditingText(in window: NSWindow?) -> Bool {
+        guard let responder = window?.firstResponder else { return false }
+        return responder is NSTextView || responder is NSTextField || responder is NSText
+    }
+
     private func handleQuickLookKeyDown(_ event: NSEvent) -> NSEvent? {
         if confirmPermanentDelete { return event }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let isUnmodified = flags.isEmpty || flags == .numericPad || flags == .function
-        let isShiftOnly = flags == .shift
+        if event.window?.attachedSheet != nil || NSApp.modalWindow != nil { return event }
+
+        // Explicitly ignore Caps Lock, NumPad, and Function flags so Space, Esc, and Arrow keys never fail.
+        let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let isUnmodified = primaryModifiers.isEmpty
+        let isShiftOnly = primaryModifiers == .shift
+
+        // ⌘⌥I toggles the docked 300pt Inspector while Quick Look is open
+        if primaryModifiers == [.command, .option],
+           event.charactersIgnoringModifiers?.lowercased() == "i" {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
+                isSidePanelOpen.toggle()
+            }
+            return nil
+        }
+
+        // Respect active text editing inside Quick Look's docked InspectorView (title, tags, notes)
+        if isEditingText(in: event.window) {
+            if isUnmodified && event.keyCode == 53 { // Escape exits field focus first
+                event.window?.makeFirstResponder(nil)
+                return nil
+            }
+            return event
+        }
 
         if isUnmodified {
             switch event.keyCode {

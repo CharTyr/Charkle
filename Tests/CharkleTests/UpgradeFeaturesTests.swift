@@ -54,6 +54,55 @@ struct UpgradeFeaturesTests {
         #expect(fast == brute)
     }
 
+    @Test("MasonryLayoutEngine Photos-style zoom stepping moves cleanly by exact 1 density level across viewport widths")
+    func masonryZoomSteppingPrecision() {
+        for containerW: CGFloat in [720, 960, 1240, 1540] {
+            let minCols = MasonryLayoutEngine.minReachableVerticalColumns(containerWidth: containerW)
+            let maxCols = MasonryLayoutEngine.maxReachableVerticalColumns(containerWidth: containerW)
+            #expect(minCols <= maxCols)
+
+            // Walk every reachable column count from densest to widest, verifying exact 1-column steps
+            var width = MasonryLayoutEngine.canonicalTargetWidth(forVerticalColumns: maxCols, containerWidth: containerW)
+            #expect(MasonryLayoutEngine.verticalColumnCount(containerWidth: containerW, targetColumnWidth: width) == maxCols)
+
+            for expectedCols in stride(from: maxCols - 1, through: minCols, by: -1) {
+                width = MasonryLayoutEngine.steppedColumnWidth(
+                    currentWidth: width,
+                    direction: 1,
+                    layoutMode: .verticalMasonry,
+                    containerWidth: containerW
+                )
+                let resolvedCols = MasonryLayoutEngine.verticalColumnCount(containerWidth: containerW, targetColumnWidth: width)
+                #expect(resolvedCols == expectedCols)
+            }
+
+            // Walk back out from widest to densest
+            for expectedCols in (minCols + 1)...maxCols {
+                width = MasonryLayoutEngine.steppedColumnWidth(
+                    currentWidth: width,
+                    direction: -1,
+                    layoutMode: .verticalMasonry,
+                    containerWidth: containerW
+                )
+                let resolvedCols = MasonryLayoutEngine.verticalColumnCount(containerWidth: containerW, targetColumnWidth: width)
+                #expect(resolvedCols == expectedCols)
+            }
+        }
+
+        // Horizontal Justified stops walk monotonically across all quantized stops
+        var jWidth = MasonryLayoutEngine.justifiedZoomStops.first!
+        for expected in MasonryLayoutEngine.justifiedZoomStops.dropFirst() {
+            jWidth = MasonryLayoutEngine.steppedColumnWidth(
+                currentWidth: jWidth,
+                direction: 1,
+                layoutMode: .horizontalJustified,
+                containerWidth: 1200
+            )
+            #expect(jWidth == expected)
+        }
+        #expect(MasonryLayoutEngine.snappedJustifiedTargetWidth(210) == 214)
+    }
+
     @Test("GitHubRepoURLParser and SocialPostURLParser parse valid URLs and reject non-post/non-repo links")
     func richURLParsers() throws {
         let u1 = try #require(URL(string: "https://github.com/apple/swift.git"))

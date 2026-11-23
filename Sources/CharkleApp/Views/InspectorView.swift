@@ -15,6 +15,8 @@ public struct InspectorView: View {
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
     public let moodboards: MoodboardStore
+    public let pinnedAsset: AssetRecord?
+    public let isQuickLookHosted: Bool
     public let onCopyHex: (String) -> Void
     public let onFilterByColor: (String) -> Void
     public let onOpenQuickLook: (AssetRecord) -> Void
@@ -22,6 +24,7 @@ public struct InspectorView: View {
     public let onSaveBoardImage: (MoodboardExportFormat) -> Void
     public let onExportFigmaBundle: () -> Void
     public let onOpenFigmaPluginGuide: () -> Void
+    public let onRequestCloseQuickLook: (() -> Void)?
 
     @State private var newTagInput: String = ""
     @State private var batchTagInput: String = ""
@@ -47,17 +50,22 @@ public struct InspectorView: View {
         coordinator: AppCoordinatorStore,
         library: LibraryStore,
         moodboards: MoodboardStore,
+        pinnedAsset: AssetRecord? = nil,
+        isQuickLookHosted: Bool = false,
         onCopyHex: @escaping (String) -> Void,
         onFilterByColor: @escaping (String) -> Void,
         onOpenQuickLook: @escaping (AssetRecord) -> Void,
-        onCopyBoardImage: @escaping () -> Void,
-        onSaveBoardImage: @escaping (MoodboardExportFormat) -> Void,
+        onCopyBoardImage: @escaping () -> Void = {},
+        onSaveBoardImage: @escaping (MoodboardExportFormat) -> Void = { _ in },
         onExportFigmaBundle: @escaping () -> Void = {},
-        onOpenFigmaPluginGuide: @escaping () -> Void = {}
+        onOpenFigmaPluginGuide: @escaping () -> Void = {},
+        onRequestCloseQuickLook: (() -> Void)? = nil
     ) {
         self.coordinator = coordinator
         self.library = library
         self.moodboards = moodboards
+        self.pinnedAsset = pinnedAsset
+        self.isQuickLookHosted = isQuickLookHosted
         self.onCopyHex = onCopyHex
         self.onFilterByColor = onFilterByColor
         self.onOpenQuickLook = onOpenQuickLook
@@ -65,6 +73,7 @@ public struct InspectorView: View {
         self.onSaveBoardImage = onSaveBoardImage
         self.onExportFigmaBundle = onExportFigmaBundle
         self.onOpenFigmaPluginGuide = onOpenFigmaPluginGuide
+        self.onRequestCloseQuickLook = onRequestCloseQuickLook
     }
 
     public var body: some View {
@@ -73,7 +82,8 @@ public struct InspectorView: View {
                 .ignoresSafeArea()
 
             // Subtle low-saturation ambient tint ONLY for Single Asset Inspector
-            if !coordinator.isViewingMoodboard, let asset = library.primarySelectedAsset {
+            let ambientAsset: AssetRecord? = pinnedAsset ?? (!coordinator.isViewingMoodboard ? library.primarySelectedAsset : nil)
+            if let asset = ambientAsset {
                 LinearGradient(
                     colors: [
                         CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: colorScheme),
@@ -86,7 +96,9 @@ public struct InspectorView: View {
                 .allowsHitTesting(false)
             }
 
-            if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
+            if let pinnedAsset {
+                singleAssetInspector(pinnedAsset)
+            } else if coordinator.isViewingMoodboard, let board = moodboards.activeBoard {
                 moodboardRightRail(board)
             } else if library.selectedAssetIDs.count >= 2 {
                 multiSelectBatchInspector
@@ -117,6 +129,10 @@ public struct InspectorView: View {
             Button("彻底删除", role: .destructive) {
                 let ids = pendingPermanentDeleteIDs
                 pendingPermanentDeleteIDs = []
+                if let qlID = coordinator.quickLookAssetID, ids.contains(qlID) {
+                    onRequestCloseQuickLook?()
+                    coordinator.closeQuickLook()
+                }
                 Task {
                     await library.permanentlyDeleteAssets(ids)
                     coordinator.showToast("已彻底删除 \(ids.count) 项素材", icon: "trash.slash")
@@ -230,13 +246,16 @@ public struct InspectorView: View {
                                 RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                                     .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.6)
                             )
-                            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous))
                             .onTapGesture(count: 2) {
                                 library.selectedAssetIDs = [scored.asset.id]
                                 onOpenQuickLook(scored.asset)
                             }
                             .onTapGesture {
                                 library.selectedAssetIDs = [scored.asset.id]
+                                if isQuickLookHosted {
+                                    onOpenQuickLook(scored.asset)
+                                }
                             }
                             .onDrag {
                                 NSItemProvider(object: CharkleDragIdentifiers.encode(assetIDs: [scored.asset.id]) as NSString)
@@ -425,9 +444,11 @@ public struct InspectorView: View {
                 .frame(maxWidth: .infinity)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    onOpenQuickLook(asset)
+                    if !isQuickLookHosted {
+                        onOpenQuickLook(asset)
+                    }
                 }
-                .help("点击打开 Quick Look 全屏预览")
+                .help(isQuickLookHosted ? asset.title : "点击打开 Quick Look 全屏预览")
 
                 inspectorInnerDivider
 
@@ -550,6 +571,10 @@ public struct InspectorView: View {
                                     }
                                     Divider()
                                     Button("以此图快速生成新情绪板…") {
+                                        library.selectedAssetIDs = [asset.id]
+                                        if isQuickLookHosted {
+                                            onRequestCloseQuickLook?()
+                                        }
                                         coordinator.presentMoodboardGenerator(entry: .seedAssets)
                                     }
                                 } label: {

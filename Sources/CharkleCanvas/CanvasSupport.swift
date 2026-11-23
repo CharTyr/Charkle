@@ -578,9 +578,11 @@ public struct StageInteractiveBridge: NSViewRepresentable {
             }
             if keyMonitor == nil {
                 keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    guard let self, let hostWindow = self.window, event.window === hostWindow else {
+                    guard let self, let hostWindow = self.window else {
                         return event
                     }
+                    let sameWindow = (event.window === hostWindow) || (event.window?.parent === hostWindow)
+                    guard sameWindow else { return event }
                     return self.onKeyDown?(event) ?? event
                 }
             }
@@ -624,6 +626,72 @@ public struct StageInteractiveBridge: NSViewRepresentable {
             let factor = exp(clampedDelta * sensitivity)
             onWheelZoom?(factor)
             return nil
+        }
+    }
+}
+
+// MARK: - Window-Scoped KeyDown Event Bridge (Top-Priority Spacebar & Global Stage Shortcuts)
+
+/// Lightweight AppKit `.keyDown` monitor attached at the root of a window so top-priority shortcuts
+/// (such as Quick Look `Space` open/close) run deterministically before nested views and regardless of
+/// SwiftUI/AppKit focus drift. Updates its closure on every `updateNSView` and cleans up in `dismantleNSView`/`deinit`.
+public struct WindowKeyEventBridge: NSViewRepresentable {
+    public let onKeyDown: (NSEvent, NSWindow) -> NSEvent?
+
+    public init(onKeyDown: @escaping (NSEvent, NSWindow) -> NSEvent?) {
+        self.onKeyDown = onKeyDown
+    }
+
+    public func makeNSView(context: Context) -> KeyBridgeNSView {
+        let view = KeyBridgeNSView()
+        view.onKeyDown = onKeyDown
+        return view
+    }
+
+    public func updateNSView(_ nsView: KeyBridgeNSView, context: Context) {
+        nsView.onKeyDown = onKeyDown
+    }
+
+    public static func dismantleNSView(_ nsView: KeyBridgeNSView, coordinator: ()) {
+        nsView.teardown()
+    }
+
+    public final class KeyBridgeNSView: NSView {
+        var onKeyDown: ((NSEvent, NSWindow) -> NSEvent?)?
+        private var keyMonitor: Any?
+
+        public override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                installMonitorIfNeeded()
+            } else {
+                teardown()
+            }
+        }
+
+        private func installMonitorIfNeeded() {
+            guard keyMonitor == nil else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let hostWindow = self.window else { return event }
+                let belongsToWindow = (event.window === hostWindow) || (event.window?.parent === hostWindow)
+                guard belongsToWindow else { return event }
+                return self.onKeyDown?(event, hostWindow) ?? event
+            }
+        }
+
+        func teardown() {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
+        }
+
+        isolated deinit {
+            teardown()
         }
     }
 }
