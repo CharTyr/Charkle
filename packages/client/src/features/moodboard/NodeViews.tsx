@@ -20,6 +20,7 @@ import {
   Star,
   Trash2,
   Unlock,
+  VolumeX,
 } from 'lucide-react';
 import {
   GROUP_TINTS,
@@ -35,7 +36,8 @@ import type {
   NormalizedCropRect,
   NoteStyle,
 } from '@charkle/shared';
-import { originalMediaURL, thumbnailURL } from '../../api/client';
+import { thumbnailURL } from '../../api/client';
+import { HoverMediaPreview } from '../../components/HoverMediaPreview';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { GlassSurface } from '../../design-system/GlassSurface';
 import { Popover } from '../../design-system/Popover';
@@ -293,7 +295,6 @@ export interface AssetNodeViewProps {
   cacheBustVersion: number;
   isSelected: boolean;
   isSwapTarget: boolean;
-  isAutoEditorial: boolean;
   isCropping: boolean;
   onStartInlineCrop: () => void;
   onCommitCrop: (crop: NormalizedCropRect | null) => void;
@@ -319,7 +320,6 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
   cacheBustVersion,
   isSelected,
   isSwapTarget,
-  isAutoEditorial,
   isCropping,
   onStartInlineCrop,
   onCommitCrop,
@@ -342,6 +342,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
   const [menuPoint, setMenuPoint] = useState<{ x: number; y: number } | null>(null);
   const menuBtnRef = useRef<HTMLButtonElement | null>(null);
   const [hovered, setHovered] = useState(false);
+  const [previewRevealed, setPreviewRevealed] = useState(false);
   const [draftCrop, setDraftCrop] = useState<NormalizedCropRect>({ x: 0.1, y: 0.1, width: 0.8, height: 0.8 });
 
   const kind = node.kind.type === 'assetRef' ? node.kind : null;
@@ -362,11 +363,14 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
 
   const isVideo = asset?.mediaKind === 'video';
   const isGif = asset?.mediaKind === 'animatedImage';
+  // Always render lightweight static thumbnail at rest for BOTH videos & animated GIFs;
+  // HoverMediaPreview handles 140ms-dwell muted cached-only hover playback smoothly with zero black flash.
   const imgSrc = asset
-    ? isGif
-      ? originalMediaURL(asset.id)
-      : thumbnailURL(asset.id, weight >= 2 ? 'preview1400' : 'grid520', cacheBustVersion)
+    ? thumbnailURL(asset.id, weight >= 2 ? 'preview1400' : 'grid520', cacheBustVersion)
     : '';
+  const allowHoverPlayback = Boolean(
+    asset && !isCropping && !hasCrop && (kind?.autoplayLoop ?? true),
+  );
 
   // Compute cropped image style using CSS translate/scale so non-destructive crop renders cleanly
   const croppedMediaStyle: React.CSSProperties =
@@ -410,18 +414,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
       {/* Artwork Surface */}
       <div className="relative w-full h-full overflow-hidden" style={{ transform: flipTransform }}>
         {asset ? (
-          isVideo && hovered && kind?.autoplayLoop && !isCropping ? (
-            <video
-              src={originalMediaURL(asset.id)}
-              poster={thumbnailURL(asset.id, 'grid520', cacheBustVersion)}
-              autoPlay
-              muted
-              loop
-              playsInline
-              className="object-cover block"
-              style={croppedMediaStyle}
-            />
-          ) : (
+          <>
             <img
               src={imgSrc}
               alt={asset.title}
@@ -429,7 +422,17 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
               className="object-cover block"
               style={croppedMediaStyle}
             />
-          )
+            {allowHoverPlayback && (
+              <HoverMediaPreview
+                asset={asset}
+                active={hovered}
+                fit="cover"
+                badgePosition="bottom-left"
+                showMutedBadge={!node.flipHorizontal && !node.flipVertical}
+                onRevealChange={setPreviewRevealed}
+              />
+            )}
+          </>
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 text-[var(--text-tertiary)]">
             <ImageIcon size={20} />
@@ -437,6 +440,21 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Upright muted badge when video node is flipped so the speaker glyph never mirrors */}
+      {!isCropping &&
+        previewRevealed &&
+        isVideo &&
+        (node.flipHorizontal || node.flipVertical) &&
+        node.frame.width >= 92 &&
+        node.frame.height >= 64 && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute bottom-2 left-2 z-20 h-5 w-5 rounded-[10px] bg-black/56 backdrop-blur-xs text-white flex items-center justify-center shadow-xs"
+          >
+            <VolumeX size={12} strokeWidth={2.2} />
+          </span>
+        )}
 
       {/* Inline non-destructive crop editor */}
       {isCropping && (
@@ -450,8 +468,8 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
       )}
 
       {/* Subtle media badges (GIF / VIDEO) when idle */}
-      {!isCropping && asset && (isGif || isVideo) && (
-        <span className="pointer-events-none absolute top-2 right-2 px-1.5 py-0.5 rounded-[var(--radius-card-inner)] bg-black/55 text-white text-[9.5px] font-semibold tracking-wide group-hover/asset:opacity-0 transition-opacity duration-150">
+      {!isCropping && asset && (isGif || isVideo) && !previewRevealed && (
+        <span className="pointer-events-none absolute top-2 right-2 px-1.5 py-0.5 rounded-[var(--radius-card-inner)] bg-black/55 text-white text-[9.5px] font-semibold tracking-wide group-hover/asset:opacity-0 transition-opacity duration-[var(--duration-exit-sm,130ms)] ease-[var(--ease-out)]">
           {isGif ? 'GIF' : 'VIDEO'}
         </span>
       )}
@@ -460,7 +478,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
       {!isCropping && (
         <div
           className={[
-            'absolute inset-0 pointer-events-none flex flex-col justify-between p-1.5 transition-opacity duration-150',
+            'absolute inset-0 pointer-events-none flex flex-col justify-between p-1.5 transition-opacity duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
             isSwapTarget
               ? 'opacity-100'
               : 'opacity-0 group-hover/asset:opacity-100 group-focus-within/asset:opacity-100 [@media(hover:none)]:opacity-100',
@@ -469,24 +487,22 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
           {/* Top Row */}
           <div className="flex items-center justify-between gap-1 pointer-events-auto">
             <div className="flex items-center gap-1">
-              {(weight >= 2 || isAutoEditorial) && (
-                <button
-                  type="button"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleHero();
-                  }}
-                  title="切换 2× 跨列主图权重"
-                  className={[
-                    'charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-card-inner)] text-[10px] font-semibold text-white cursor-pointer',
-                    weight >= 2 ? 'bg-[var(--accent)]' : 'bg-black/58 hover:bg-black/75',
-                  ].join(' ')}
-                >
-                  <Star size={10} fill={weight >= 2 ? 'currentColor' : 'none'} />
-                  {weight >= 2 ? '主图 2×' : '设为主图'}
-                </button>
-              )}
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleHero();
+                }}
+                title="切换 2× 主图权重（杂志主次重排时跨列强调）"
+                className={[
+                  'charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-card-inner)] text-[10px] font-semibold text-white cursor-pointer',
+                  weight >= 2 ? 'bg-[var(--accent)]' : 'bg-black/58 hover:bg-black/75',
+                ].join(' ')}
+              >
+                <Star size={10} fill={weight >= 2 ? 'currentColor' : 'none'} />
+                {weight >= 2 ? '主图 2×' : '设为主图'}
+              </button>
               {node.isLocked && (
                 <span
                   title="已锁定位置"
@@ -605,8 +621,8 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
           />
 
           <div className="my-1 border-t border-[var(--border-hairline)]" />
-          <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-            智能取景与标注 (Jev Box)
+          <div className="px-2 py-1 text-[10px] font-semibold text-[var(--text-tertiary)]">
+            智能取景与标注
           </div>
           <MenuAction
             icon={<Focus size={13} />}
@@ -800,7 +816,7 @@ export const NoteNodeView: React.FC<NoteNodeViewProps> = ({
                 title={NOTE_STYLE_PALETTE[s].label}
                 aria-label={`便签主题 ${NOTE_STYLE_PALETTE[s].label}`}
                 onClick={() => onUpdate(title ?? null, text, s, fontSize)}
-                className="w-3.5 h-3.5 rounded-full cursor-pointer transition-transform duration-120 hover:scale-110"
+                className="w-3.5 h-3.5 rounded-full cursor-pointer transition-transform duration-[var(--duration-press,120ms)] ease-[var(--ease-out)] [@media(hover:hover)_and_(pointer:fine)]:hover:scale-110"
                 style={{
                   backgroundColor: NOTE_STYLE_PALETTE[s].background,
                   boxShadow:
@@ -861,7 +877,6 @@ export interface GroupFrameNodeViewProps {
   node: BoardNode;
   enclosedCount: number;
   isSelected: boolean;
-  isAutoEditorial: boolean;
   onUpdate: (title: string, tint: GroupTint) => void;
   onAutoReflow: () => void;
   onDelete: () => void;
@@ -872,7 +887,6 @@ export const GroupFrameNodeView: React.FC<GroupFrameNodeViewProps> = ({
   node,
   enclosedCount,
   isSelected,
-  isAutoEditorial,
   onUpdate,
   onAutoReflow,
   onDelete,
@@ -908,23 +922,21 @@ export const GroupFrameNodeView: React.FC<GroupFrameNodeViewProps> = ({
             onChange={(e) => onUpdate(e.target.value, tint)}
             className="min-w-0 flex-1 bg-transparent border-0 outline-none text-[12.5px] font-semibold text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)]"
           />
-          {!isAutoEditorial && (
-            <span className="text-[10.5px] font-medium px-1.5 py-0.5 rounded-full bg-[var(--bg-elevated)]/70 text-[var(--text-secondary)] shrink-0 tabular-nums">
-              {enclosedCount} 项
-            </span>
-          )}
+          <span className="text-[10.5px] font-medium px-1.5 py-0.5 rounded-full bg-[var(--bg-elevated)]/70 text-[var(--text-secondary)] shrink-0 tabular-nums">
+            {enclosedCount} 项
+          </span>
         </div>
 
         <div
           onPointerDown={(e) => e.stopPropagation()}
           className={[
-            'flex items-center gap-1.5 shrink-0 transition-opacity duration-150',
+            'flex items-center gap-1.5 shrink-0 transition-opacity duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
             isSelected
               ? 'opacity-100'
               : 'opacity-0 group-hover/group:opacity-100 group-focus-within/group:opacity-100 [@media(hover:none)]:opacity-100',
           ].join(' ')}
         >
-          {!isAutoEditorial && enclosedCount > 0 && (
+          {enclosedCount > 0 && (
             <button
               type="button"
               onClick={onAutoReflow}
@@ -945,7 +957,7 @@ export const GroupFrameNodeView: React.FC<GroupFrameNodeViewProps> = ({
                 title={GROUP_TINT_PALETTE[t].label}
                 aria-label={`分组色系 ${GROUP_TINT_PALETTE[t].label}`}
                 onClick={() => onUpdate(title, t)}
-                className="w-3 h-3 rounded-full cursor-pointer transition-transform duration-120 hover:scale-115"
+                className="w-3 h-3 rounded-full cursor-pointer transition-transform duration-[var(--duration-press,120ms)] ease-[var(--ease-out)] [@media(hover:hover)_and_(pointer:fine)]:hover:scale-115"
                 style={{
                   backgroundColor: GROUP_TINT_PALETTE[t].accent,
                   boxShadow: t === tint ? '0 0 0 1.5px var(--text-primary)' : undefined,
@@ -966,8 +978,8 @@ export const GroupFrameNodeView: React.FC<GroupFrameNodeViewProps> = ({
         </div>
       </div>
 
-      {/* Live Side-Edge Auto-Reflow Capsules (Freeform mode) */}
-      {!isAutoEditorial && !node.isLocked && onSideResizeStart && (
+      {/* Live Side-Edge Auto-Reflow Capsules */}
+      {!node.isLocked && onSideResizeStart && (
         <>
           <div
             onPointerDown={(e) => {

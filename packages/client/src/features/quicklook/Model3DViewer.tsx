@@ -61,7 +61,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     } catch {
       setLoading(false);
-      setErrorMsg('当前浏览器环境不支持 WebGL 3D 渲染');
+      setErrorMsg('当前浏览器环境不支持 3D 渲染');
       return;
     }
 
@@ -233,7 +233,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
       {/* Studio Overlay Controls */}
       <div className="absolute top-3.5 left-3.5 flex items-center gap-2 pointer-events-none">
         <span className="px-2.5 py-1 rounded-full bg-black/55 backdrop-blur-md text-[11px] font-mono font-semibold text-white border border-white/12">
-          {ext.toUpperCase()} · 3D STUDIO
+          {ext.toUpperCase()} · 3D
         </span>
       </div>
 

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AssetRecord, UUID } from '@charkle/shared';
+import { notifyLiveScrolling } from '../../components/HoverMediaPreview';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { AssetCard } from './AssetCard';
@@ -54,16 +55,20 @@ export const HorizontalJustifiedView: React.FC<HorizontalJustifiedViewProps> = (
   useEffect(() => {
     const scroller = scrollContainerRef.current;
     if (!scroller) return;
-    const onScroll = () => {
+    const syncViewport = () => {
       setScrollTop(scroller.scrollTop);
       setViewportHeight(scroller.clientHeight || 800);
     };
-    onScroll();
+    const onScroll = () => {
+      notifyLiveScrolling();
+      syncViewport();
+    };
+    syncViewport();
     scroller.addEventListener('scroll', onScroll, { passive: true });
-    window.addEventListener('resize', onScroll);
+    window.addEventListener('resize', syncViewport);
     return () => {
       scroller.removeEventListener('scroll', onScroll);
-      window.removeEventListener('resize', onScroll);
+      window.removeEventListener('resize', syncViewport);
     };
   }, [scrollContainerRef]);
 

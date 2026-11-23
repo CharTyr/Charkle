@@ -16,12 +16,9 @@ export const InboxZeroView: React.FC = () => {
         <CharkleIcon name="inbox" style="layered" size={84} />
       </div>
 
-      <h2 className="text-[18px] font-semibold tracking-[-0.015em] text-[var(--text-primary)]">
+      <h2 className="text-[17px] font-semibold tracking-[-0.015em] text-[var(--text-primary)]">
         收件箱已清空
       </h2>
-      <p className="text-[13px] text-[var(--text-secondary)] mt-1.5 max-w-[360px] leading-relaxed">
-        所有灵感素材均已归档整理。随时拖入文件、粘贴链接或通过顶部快捷采集栏收集新素材。
-      </p>
 
       <div className="flex items-center gap-2.5 mt-5">
         <Button variant="primary" size="sm" onClick={() => navigate({ type: 'allItems' })}>

@@ -49,7 +49,9 @@ export const SidebarView: React.FC = () => {
   const activeBoardID = useCoordinatorStore((s) => s.activeBoardID);
   const setActiveBoardID = useCoordinatorStore((s) => s.setActiveBoardID);
   const setJumpAnywhereOpen = useCoordinatorStore((s) => s.setJumpAnywhereOpen);
+  const settingsOpen = useCoordinatorStore((s) => s.settingsOpen);
   const openSettings = useCoordinatorStore((s) => s.openSettings);
+  const presentOnboarding = useCoordinatorStore((s) => s.presentOnboarding);
   const openGeneratorModal = useCoordinatorStore((s) => s.openGeneratorModal);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
@@ -67,6 +69,7 @@ export const SidebarView: React.FC = () => {
   const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
 
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
+  const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const sseConnected = useSyncAIStore((s) => s.sseConnected);
 
   const user = useAuthStore((s) => s.user);
@@ -238,7 +241,7 @@ export const SidebarView: React.FC = () => {
     <aside
       className={[
         'h-full shrink-0 flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-hairline)]',
-        'transition-[width] duration-[240ms] ease-[var(--ease-in-out)] select-none',
+        'transition-[width] duration-[var(--duration-drawer)] ease-[var(--ease-drawer)] select-none',
         sidebarCollapsed ? 'w-[58px]' : 'w-[240px]',
       ].join(' ')}
     >
@@ -323,7 +326,7 @@ export const SidebarView: React.FC = () => {
                 onDrop={item.acceptDropInbox ? (e) => void handleDropOnInbox(e) : undefined}
                 title={sidebarCollapsed ? item.label : undefined}
                 className={[
-                  'charkle-pressable relative z-10 h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer',
+                  'charkle-pressable relative z-10 h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer transition-[box-shadow,background-color,color] duration-[var(--duration-press)] ease-[var(--ease-out)]',
                   sidebarCollapsed ? 'justify-center px-0' : 'px-2.5',
                   active
                     ? 'text-[var(--text-primary)] font-medium'
@@ -425,7 +428,7 @@ export const SidebarView: React.FC = () => {
                   }}
                   onDrop={(e) => void handleDropOnBoard(e, board.id, board.title)}
                   className={[
-                    'group charkle-pressable h-7.5 flex items-center gap-2 pl-4 pr-2 rounded-[var(--radius-chip)] text-[12.5px] cursor-pointer',
+                    'group charkle-pressable h-7.5 flex items-center gap-2 pl-4 pr-2 rounded-[var(--radius-chip)] text-[12.5px] cursor-pointer transition-[box-shadow,background-color,color] duration-[var(--duration-press)] ease-[var(--ease-out)]',
                     active
                       ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.05)]'
                       : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/70',
@@ -650,11 +653,11 @@ export const SidebarView: React.FC = () => {
         )}
       </div>
 
-      {/* Bottom Sync Status Pill + Settings + User Menu */}
+      {/* Bottom Sync Status Pill + User + Dedicated Bottom-Left Settings Entry */}
       <div className="shrink-0 p-2 border-t border-[var(--border-hairline)] flex flex-col gap-1.5">
         <button
           type="button"
-          onClick={() => openSettings('cloudSync')}
+          onClick={() => openSettings(syncConfig?.mode === 'localOnly' ? 'library' : 'sync')}
           title={`存储与同步：${syncLabel}`}
           className={[
             'charkle-pressable h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer',
@@ -678,41 +681,68 @@ export const SidebarView: React.FC = () => {
           )}
         </button>
 
-        <div
-          className={[
-            'flex items-center gap-1',
-            sidebarCollapsed ? 'flex-col' : 'justify-between',
-          ].join(' ')}
-        >
-          <button
-            ref={userBtnRef}
-            type="button"
-            onClick={() => setUserMenuOpen((v) => !v)}
-            title={user?.displayName || user?.username || '账号'}
-            className={[
-              'charkle-pressable h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[12.5px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer min-w-0',
-              sidebarCollapsed ? 'w-8 justify-center px-0' : 'flex-1 px-2',
-            ].join(' ')}
-          >
-            <span className="h-5.5 w-5.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-semibold inline-flex items-center justify-center shrink-0">
-              {(user?.displayName || user?.username || 'C').slice(0, 1).toUpperCase()}
-            </span>
-            {!sidebarCollapsed && (
-              <span className="truncate font-medium text-[var(--text-primary)]">
-                {user?.displayName || user?.username || '管理员'}
-              </span>
-            )}
-          </button>
+        <div className="h-px bg-[var(--border-hairline)] mx-0.5" />
 
-          <button
-            type="button"
-            onClick={() => openSettings('accountSecurity')}
-            title="设置中心 (⌘,)"
-            className="charkle-pressable h-8 w-8 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0"
-          >
-            <Settings size={16} />
-          </button>
-        </div>
+        {sidebarCollapsed ? (
+          <div className="flex flex-col items-center gap-1">
+            <button
+              type="button"
+              onClick={() => openSettings()}
+              title="设置 (⌘,)"
+              className={[
+                'charkle-pressable h-[34px] w-[38px] inline-flex items-center justify-center rounded-[var(--radius-chip)] cursor-pointer',
+                settingsOpen
+                  ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs border border-[var(--border-hairline)]'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+              ].join(' ')}
+            >
+              <CharkleIcon name="settings" style="duotone" size={17} isActive={settingsOpen} />
+            </button>
+            <button
+              ref={userBtnRef}
+              type="button"
+              onClick={() => setUserMenuOpen((v) => !v)}
+              title={user?.displayName || user?.username || '账号'}
+              className="charkle-pressable h-8 w-8 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+            >
+              <span className="h-5.5 w-5.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-semibold inline-flex items-center justify-center shrink-0">
+                {(user?.displayName || user?.username || 'C').slice(0, 1).toUpperCase()}
+              </span>
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => openSettings()}
+              title="设置 (⌘,)"
+              className={[
+                'charkle-pressable flex-1 min-w-0 h-8 px-2.5 flex items-center gap-2 rounded-[var(--radius-chip)] text-[12.5px] cursor-pointer',
+                settingsOpen
+                  ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-xs border border-[var(--border-hairline)]'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+              ].join(' ')}
+            >
+              <CharkleIcon name="settings" style="duotone" size={17} isActive={settingsOpen} />
+              <span className="flex-1 text-left truncate">设置</span>
+              <kbd className="text-[10.5px] font-mono text-[var(--text-tertiary)] shrink-0">
+                ⌘,
+              </kbd>
+            </button>
+
+            <button
+              ref={userBtnRef}
+              type="button"
+              onClick={() => setUserMenuOpen((v) => !v)}
+              title={user?.displayName || user?.username || '账号'}
+              className="charkle-pressable h-8 w-8 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0"
+            >
+              <span className="h-5.5 w-5.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-semibold inline-flex items-center justify-center shrink-0">
+                {(user?.displayName || user?.username || 'C').slice(0, 1).toUpperCase()}
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* All Tags Popover */}
@@ -787,6 +817,17 @@ export const SidebarView: React.FC = () => {
           >
             <Settings size={14} className="text-[var(--text-secondary)]" />
             账号与安全设置
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setUserMenuOpen(false);
+              presentOnboarding();
+            }}
+            className="charkle-pressable flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] cursor-pointer"
+          >
+            <Sparkles size={14} className="text-[var(--text-secondary)]" />
+            重新查看新手引导
           </button>
           <button
             type="button"

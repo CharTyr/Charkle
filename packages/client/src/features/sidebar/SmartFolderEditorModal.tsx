@@ -131,7 +131,6 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
       onClose={onClose}
       width="md"
       title={editingFolder ? '编辑智能文件夹' : '新建智能文件夹'}
-      subtitle="根据标签、关键词、CIELAB 色彩、媒体类型与评分动态聚合素材"
       headerRight={
         <span className="px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-[var(--accent-soft)] text-[var(--accent)]">
           当前匹配 {liveMatchCount} 项
@@ -245,7 +244,7 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
         {/* Keywords */}
         <div className="flex flex-col gap-1.5">
           <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-            标题 / 备注 / OCR / AI 描述关键词
+            关键词
           </label>
           <input
             type="text"
@@ -256,14 +255,14 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
           />
         </div>
 
-        {/* CIELAB Colors + Tolerance */}
+        {/* Color Matching + Tolerance */}
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-              CIELAB 色彩匹配
+              色彩匹配
             </label>
             <span className="text-[11.5px] text-[var(--text-tertiary)] font-mono">
-              容差 ΔE ≤ {Math.round(rule.colorTolerance)}
+              容差 {Math.round(rule.colorTolerance)}
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-2">

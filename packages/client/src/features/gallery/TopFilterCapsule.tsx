@@ -10,7 +10,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   Star,
-  Upload,
   X,
 } from 'lucide-react';
 import {
@@ -35,13 +34,12 @@ import { useLibraryStore } from '../../stores/libraryStore';
 export interface TopFilterCapsuleProps {
   destinationTitle: string;
   assetCount: number;
-  onTriggerUpload: () => void;
+  onTriggerUpload?: () => void;
 }
 
 export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   destinationTitle,
   assetCount,
-  onTriggerUpload,
 }) => {
   const layoutMode = useCoordinatorStore((s) => s.layoutMode);
   const setLayoutMode = useCoordinatorStore((s) => s.setLayoutMode);
@@ -50,6 +48,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   const inspectorOpen = useCoordinatorStore((s) => s.inspectorOpen);
   const toggleInspector = useCoordinatorStore((s) => s.toggleInspector);
   const openGeneratorModal = useCoordinatorStore((s) => s.openGeneratorModal);
+  const openQuickCapture = useCoordinatorStore((s) => s.openQuickCapture);
 
   const criteria = useLibraryStore((s) => s.criteria);
   const setCriteria = useLibraryStore((s) => s.setCriteria);
@@ -158,7 +157,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
               placeholder={
                 semanticSearchEnabled
                   ? '描述画面、情绪或材质，回车语义检索…'
-                  : '搜索标题、标签、拼音、OCR…'
+                  : '搜索标题、标签、拼音、文字…'
               }
               className="flex-1 min-w-0 bg-transparent text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none"
             />
@@ -178,7 +177,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             )}
             <button
               type="button"
-              title="混合语义检索（FTS5 + 向量 + TypeSafe Jev 视觉重排）"
+              title="智能语义搜索"
               onClick={() => {
                 const next = !semanticSearchEnabled;
                 setSemanticSearchEnabled(next);
@@ -271,14 +270,14 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
           {/* Right Quick Actions */}
           <div className="flex items-center gap-1 ml-auto shrink-0">
             <Button
-              variant="secondary"
+              variant="primary"
               size="xs"
-              onClick={onTriggerUpload}
-              title="上传本地文件至当前位置"
-              className="px-2 gap-1"
+              onClick={() => openQuickCapture()}
+              title="快速采集素材 (⇧⌘N)"
+              className="px-2.5 gap-1"
             >
-              <Upload size={13} />
-              <span className="hidden sm:inline">导入</span>
+              <Plus size={13.5} strokeWidth={2.25} />
+              <span className="hidden sm:inline">采集</span>
             </Button>
 
             <Button
@@ -444,7 +443,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
                       className="w-20 accent-[var(--accent)] cursor-pointer"
                     />
                     <span className="text-[11px] text-[var(--text-secondary)] tabular-nums">
-                      ΔE {Math.round(criteria.colorTolerance)} ({toleranceLabel})
+                      容差 {Math.round(criteria.colorTolerance)} ({toleranceLabel})
                     </span>
                   </div>
                 )}

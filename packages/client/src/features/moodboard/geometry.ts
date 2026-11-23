@@ -1,11 +1,22 @@
+import {
+  createDefaultAutoLayoutConfig,
+  rectMaxX,
+  rectMinX,
+  rectMinY,
+  solveEditorialLayout,
+  tidyNodesInFreeform,
+} from '@charkle/shared';
 import type {
+  AssetRecord,
   BoardConnector,
   BoardNode,
   BoardPoint,
   BoardRect,
   ConnectorAnchor,
   ConnectorStyle,
+  EditorialStyle,
   InkStrokePoint,
+  MoodboardDocument,
   UUID,
 } from '@charkle/shared';
 
@@ -79,8 +90,8 @@ export function computeFitCamera(
   viewportWidth: number,
   viewportHeight: number,
   margin = 72,
-  topClearance = 60,
-  bottomClearance = 92,
+  topClearance = 64,
+  bottomClearance = 96,
 ): CameraState {
   if (nodes.length === 0) {
     return {
@@ -570,40 +581,61 @@ export function hitTestInkStroke(
 }
 
 /**
- * Kubai Tip 005 neighbor ripple offset during Auto Editorial drag-to-reorder:
- * `A * Math.pow(0.7, n)` with `24ms * n` stagger, capped at distance 5.
+ * Re-tidies either the selected nodes (>= 2) or the entire board into crisp editorial alignment
+ * while keeping the document strictly in Freeform mode. Supports all 3 editorial rhythm presets:
+ * `balanced` (呼吸均衡), `magazine` (杂志主次), and `compact` (紧凑拼贴).
  */
-export function computeKubaiRippleOffset(
-  nodeIndex: number,
-  targetInsertIndex: number | null,
-  draggedIndex: number | null,
-  amplitude = 8,
-): { offsetY: number; delayMs: number } {
-  if (targetInsertIndex === null || draggedIndex === null) {
-    return { offsetY: 0, delayMs: 0 };
+export function tidyNodesWithStyle(
+  document: MoodboardDocument,
+  selectedNodeIDs: ReadonlySet<UUID>,
+  assetsByID: Record<UUID, AssetRecord>,
+  style: EditorialStyle = 'balanced',
+): MoodboardDocument {
+  if (style === 'balanced') {
+    const tidied = tidyNodesInFreeform(document, selectedNodeIDs, assetsByID);
+    return { ...tidied, mode: { type: 'freeform' } };
   }
-  if (nodeIndex === draggedIndex) {
-    return { offsetY: 0, delayMs: 0 };
-  }
-  const dist =
-    nodeIndex < targetInsertIndex
-      ? targetInsertIndex - 1 - nodeIndex
-      : nodeIndex - targetInsertIndex;
-  if (dist > 5) return { offsetY: 0, delayMs: 0 };
-  const direction = nodeIndex < targetInsertIndex ? -1 : 1;
-  return {
-    offsetY: direction * amplitude * Math.pow(0.7, dist),
-    delayMs: 24 * dist,
-  };
-}
 
-export function reorderNodeIDs(
-  orderedIDs: readonly UUID[],
-  draggedID: UUID,
-  insertIndex: number,
-): UUID[] {
-  const withoutDragged = orderedIDs.filter((id) => id !== draggedID);
-  const clamped = Math.max(0, Math.min(withoutDragged.length, insertIndex));
-  withoutDragged.splice(clamped, 0, draggedID);
-  return withoutDragged;
+  const targetNodes =
+    selectedNodeIDs.size >= 2
+      ? document.nodes.filter((n) => selectedNodeIDs.has(n.id))
+      : document.nodes;
+  if (targetNodes.length === 0) {
+    return { ...document, mode: { type: 'freeform' } };
+  }
+
+  const minX = Math.min(...targetNodes.map((n) => rectMinX(n.frame)));
+  const minY = Math.min(...targetNodes.map((n) => rectMinY(n.frame)));
+  const maxX = Math.max(...targetNodes.map((n) => rectMaxX(n.frame)));
+  const width = Math.max(760, Math.min(1440, maxX - minX + 56));
+  const spacing = style === 'compact' ? 8 : 20;
+  const columns = style === 'compact' ? 5 : 3;
+
+  const solved = solveEditorialLayout(
+    targetNodes,
+    createDefaultAutoLayoutConfig({ columns, spacing, style }),
+    width,
+    assetsByID,
+    0,
+  );
+
+  const nodes = document.nodes.map((node) => {
+    const rect = solved.frames[node.id];
+    if (!rect) return node;
+    return {
+      ...node,
+      frame: {
+        x: minX + rect.x,
+        y: minY + rect.y,
+        width: rect.width,
+        height: rect.height,
+      },
+    };
+  });
+
+  return {
+    ...document,
+    mode: { type: 'freeform' },
+    nodes,
+  };
 }

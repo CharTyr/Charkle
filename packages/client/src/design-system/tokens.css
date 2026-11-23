@@ -11,6 +11,18 @@
   --bg-inspector: #F1F0EC;
   --bg-inspector-field: #F6F5F1;
 
+  /* Calibrated Settings & Onboarding Neutral Surfaces — Light */
+  --settings-rail: #F0EFEA;
+  --settings-content: #F6F6F4;
+  --settings-card: #FFFFFF;
+  --settings-subtle: rgba(0, 0, 0, 0.04);
+  --settings-label: rgba(0, 0, 0, 0.48);
+  --settings-divider: rgba(0, 0, 0, 0.065);
+  --settings-border: rgba(0, 0, 0, 0.08);
+  --settings-positive: #15803D;
+  --settings-warning: #B45309;
+  --settings-destructive: #DC2626;
+
   --border-hairline: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.14);
 
@@ -61,22 +73,31 @@
     0 0 0 0.5px rgba(255, 255, 255, 0.11),
     0 12px 36px rgba(0, 0, 0, 0.42);
 
-  /* Kubai Tip 011 — Role-Mapped Easing Curves */
-  --ease-out: cubic-bezier(0, 0, 0.58, 1);
+  /* Kubai Tip 011 + Emil Kowalski Motion Craft — Role-Mapped Easing Curves */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-out-strong: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-in: cubic-bezier(0.42, 0, 1, 1);
-  --ease-in-out: cubic-bezier(0.42, 0, 0.58, 1);
+  /* Deprecated alias: UI exits must start immediately with --ease-out, never ease-in */
+  --ease-in: var(--ease-out);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
 
   --duration-press: 120ms;
   --duration-sm: 180ms;
-  --duration-md: 260ms;
-  --duration-lg: 360ms;
-  --duration-exit-sm: 140ms;
-  --duration-exit-md: 190ms;
+  --duration-settle: 220ms;
+  --duration-move: 240ms;
+  --duration-md: 240ms;
+  --duration-lg: 280ms;
+  --duration-drawer: 300ms;
+  --duration-exit-sm: 130ms;
+  --duration-exit-md: 170ms;
+  --duration-overshoot: 260ms;
   --duration-popover-in: 160ms;
   --duration-popover-out: 110ms;
+  --duration-onboarding-step: 280ms;
+  --duration-onboarding-delight: 480ms;
+  --duration-onboarding-shockwave: 680ms;
 
   color-scheme: light;
 }
@@ -95,6 +116,18 @@
   --bg-sidebar: #17191D;
   --bg-inspector: #131519;
   --bg-inspector-field: #16181D;
+
+  /* Calibrated Settings & Onboarding Neutral Surfaces — Dark */
+  --settings-rail: #17181B;
+  --settings-content: #121316;
+  --settings-card: #1B1C20;
+  --settings-subtle: rgba(255, 255, 255, 0.05);
+  --settings-label: rgba(255, 255, 255, 0.46);
+  --settings-divider: rgba(255, 255, 255, 0.065);
+  --settings-border: rgba(255, 255, 255, 0.085);
+  --settings-positive: #4ADE80;
+  --settings-warning: #FBBF24;
+  --settings-destructive: #F87171;
 
   --border-hairline: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.16);
@@ -259,12 +292,12 @@ body,
 }
 
 .charkle-micro-pop {
-  animation: charkle-micro-pop 280ms var(--ease-overshoot) both;
+  animation: charkle-micro-pop var(--duration-overshoot) var(--ease-overshoot) both;
 }
 
 /* Hover-only zoom inside asset frames (gated to fine hover pointers) */
 .charkle-media-zoom {
-  transition: transform 220ms var(--ease-out-strong);
+  transition: transform var(--duration-settle) var(--ease-out-strong);
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -273,24 +306,256 @@ body,
   }
 }
 
+/* Filmstrip active thumbnail focus lift */
+.charkle-filmstrip-thumb {
+  transition:
+    transform var(--duration-settle) var(--ease-out-strong),
+    opacity var(--duration-sm) var(--ease-out),
+    box-shadow var(--duration-sm) var(--ease-out);
+}
+
+.charkle-filmstrip-thumb[data-active="true"] {
+  transform: scale(1.04);
+}
+
+/* Onboarding Step Transitions & Completion Shockwave */
+@keyframes charkle-step-from-right {
+  from {
+    opacity: 0;
+    transform: translate3d(24px, 0, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes charkle-step-from-left {
+  from {
+    opacity: 0;
+    transform: translate3d(-24px, 0, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.charkle-step-from-right {
+  animation: charkle-step-from-right var(--duration-onboarding-step) var(--ease-out) both;
+}
+
+.charkle-step-from-left {
+  animation: charkle-step-from-left var(--duration-onboarding-step) var(--ease-out) both;
+}
+
+@keyframes charkle-shockwave-primary {
+  from {
+    opacity: 0.45;
+    transform: scale(0.88);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.85);
+  }
+}
+
+@keyframes charkle-shockwave-secondary {
+  from {
+    opacity: 0.25;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.25);
+  }
+}
+
+.charkle-shockwave-primary {
+  animation: charkle-shockwave-primary var(--duration-onboarding-shockwave) var(--ease-out-strong) both;
+}
+
+.charkle-shockwave-secondary {
+  animation: charkle-shockwave-secondary var(--duration-onboarding-shockwave) var(--ease-out-strong) 80ms both;
+}
+
+/* 5-Layer Tactile Keycap Buttons (port of CharkleSkeuoButtonStyle) */
+.charkle-skeuo-primary {
+  background: linear-gradient(180deg, #404859 0%, #273042 100%);
+  border: 1px solid #12161F;
+  color: #FFFFFF;
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24),
+    0 3px 7px rgba(18, 22, 31, 0.28),
+    0 1px 1.5px rgba(0, 0, 0, 0.18);
+  transition:
+    transform var(--duration-press) var(--ease-out),
+    box-shadow var(--duration-press) var(--ease-out),
+    opacity var(--duration-press) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .charkle-skeuo-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #4A5366 0%, #2F394D 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.26),
+      0 5px 10px rgba(18, 22, 31, 0.30),
+      0 1px 1.5px rgba(0, 0, 0, 0.18);
+  }
+}
+
+.charkle-skeuo-primary:active:not(:disabled) {
+  background: linear-gradient(180deg, #273042 0%, #404859 100%);
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 1px rgba(0, 0, 0, 0.34),
+    0 1px 1.5px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-theme="dark"] .charkle-skeuo-primary,
+.dark .charkle-skeuo-primary {
+  background: linear-gradient(180deg, #414B60 0%, #283144 100%);
+  border-color: #151923;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.32),
+    0 3px 7px rgba(0, 0, 0, 0.45),
+    0 1px 1.5px rgba(0, 0, 0, 0.36);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-theme="dark"] .charkle-skeuo-primary:hover:not(:disabled),
+  .dark .charkle-skeuo-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #4D5870 0%, #313A4D 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.24),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.34),
+      0 5px 10px rgba(0, 0, 0, 0.50),
+      0 1px 1.5px rgba(0, 0, 0, 0.36);
+  }
+}
+
+:root[data-theme="dark"] .charkle-skeuo-primary:active:not(:disabled),
+.dark .charkle-skeuo-primary:active:not(:disabled) {
+  background: linear-gradient(180deg, #283144 0%, #414B60 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(0, 0, 0, 0.38),
+    0 1px 1.5px rgba(0, 0, 0, 0.36);
+}
+
+.charkle-skeuo-secondary {
+  background: linear-gradient(180deg, #FFFFFF 0%, #F1F3F6 100%);
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  color: #1F2633;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.06),
+    0 3px 7px rgba(15, 23, 42, 0.09),
+    0 1px 1.5px rgba(15, 23, 42, 0.06);
+  transition:
+    transform var(--duration-press) var(--ease-out),
+    box-shadow var(--duration-press) var(--ease-out),
+    opacity var(--duration-press) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .charkle-skeuo-secondary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #FFFFFF 0%, #F7F8FA 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.96),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.05),
+      0 5px 10px rgba(15, 23, 42, 0.11),
+      0 1px 1.5px rgba(15, 23, 42, 0.06);
+  }
+}
+
+.charkle-skeuo-secondary:active:not(:disabled) {
+  background: linear-gradient(180deg, #F1F3F6 0%, #FFFFFF 100%);
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 1px rgba(0, 0, 0, 0.14),
+    0 1px 1.5px rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="dark"] .charkle-skeuo-secondary,
+.dark .charkle-skeuo-secondary {
+  background: linear-gradient(180deg, #272A31 0%, #1F2127 100%);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--text-primary);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 3px 7px rgba(0, 0, 0, 0.30),
+    0 1px 1.5px rgba(0, 0, 0, 0.26);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-theme="dark"] .charkle-skeuo-secondary:hover:not(:disabled),
+  .dark .charkle-skeuo-secondary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #2E3139 0%, #23262C 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.14),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+      0 5px 10px rgba(0, 0, 0, 0.34),
+      0 1px 1.5px rgba(0, 0, 0, 0.26);
+  }
+}
+
+:root[data-theme="dark"] .charkle-skeuo-secondary:active:not(:disabled),
+.dark .charkle-skeuo-secondary:active:not(:disabled) {
+  background: linear-gradient(180deg, #1F2127 0%, #272A31 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(0, 0, 0, 0.24),
+    0 1px 1.5px rgba(0, 0, 0, 0.26);
+}
+
 /* Reduced Motion: collapse spatial motion & springs into 150ms opacity cross-fade */
 @media (prefers-reduced-motion: reduce) {
   :root {
     --duration-press: 150ms;
     --duration-sm: 150ms;
+    --duration-settle: 150ms;
+    --duration-move: 150ms;
     --duration-md: 150ms;
     --duration-lg: 150ms;
+    --duration-drawer: 150ms;
     --duration-exit-sm: 150ms;
     --duration-exit-md: 150ms;
+    --duration-overshoot: 150ms;
     --duration-popover-in: 150ms;
     --duration-popover-out: 150ms;
+    --duration-onboarding-step: 150ms;
+    --duration-onboarding-delight: 150ms;
+    --duration-onboarding-shockwave: 150ms;
     --ease-spring: linear;
     --ease-overshoot: linear;
+    --ease-drawer: var(--ease-out);
   }
 
   .charkle-pressable:active:not(:disabled),
-  .group:hover .charkle-media-zoom {
+  .charkle-skeuo-primary:active:not(:disabled),
+  .charkle-skeuo-secondary:active:not(:disabled),
+  .group:hover .charkle-media-zoom,
+  .charkle-filmstrip-thumb[data-active="true"] {
     transform: none;
+  }
+
+  .charkle-shockwave-primary,
+  .charkle-shockwave-secondary {
+    display: none;
+  }
+
+  @keyframes charkle-step-from-right {
+    from { opacity: 0; transform: none; }
+    to { opacity: 1; transform: none; }
+  }
+
+  @keyframes charkle-step-from-left {
+    from { opacity: 0; transform: none; }
+    to { opacity: 1; transform: none; }
   }
 
   @keyframes charkle-popover-enter {

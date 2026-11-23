@@ -25,6 +25,11 @@ import {
 import type { AssetRecord, ScoredAsset, UUID } from '@charkle/shared';
 import { apiClient } from '../../api/client';
 import {
+  HoverMediaPreview,
+  notifyLiveScrolling,
+  stopAllHoverPreviews,
+} from '../../components/HoverMediaPreview';
+import {
   Button,
   CharkleIcon,
   computeAmbientTintStyle,
@@ -73,6 +78,7 @@ export const InspectorView: React.FC = () => {
 
   const [similarItems, setSimilarItems] = useState<ScoredAsset[]>([]);
   const [loadingSimilar, setLoadingSimilar] = useState(false);
+  const [hoveredSimilarID, setHoveredSimilarID] = useState<UUID | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   const selectedAssets: AssetRecord[] = useMemo(() => {
@@ -113,7 +119,6 @@ export const InspectorView: React.FC = () => {
     };
   }, [singleAsset?.id, tab]);
 
-  if (!inspectorOpen) return null;
   // Moodboard workspace has its own studio Candidate Pool panel
   if (destination.type === 'moodboard') return null;
 
@@ -206,7 +211,23 @@ export const InspectorView: React.FC = () => {
     : {};
 
   return (
-    <aside className="relative w-[300px] shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--border-hairline)] flex flex-col overflow-hidden">
+    <aside
+      aria-hidden={!inspectorOpen}
+      className={[
+        'relative shrink-0 h-full bg-[var(--bg-inspector)] overflow-hidden',
+        'transition-[width,border-color] duration-[var(--duration-drawer)] ease-[var(--ease-drawer)]',
+        inspectorOpen
+          ? 'w-[300px] border-l border-[var(--border-hairline)]'
+          : 'w-0 border-l-0 border-transparent pointer-events-none',
+      ].join(' ')}
+    >
+      <div
+        className={[
+          'relative w-[300px] h-full flex flex-col overflow-hidden',
+          'transition-[opacity,transform] duration-[var(--duration-drawer)] ease-[var(--ease-drawer)]',
+          inspectorOpen ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-3',
+        ].join(' ')}
+      >
       {/* Ultra-subtle top 200px ambient tint strictly in Single Asset mode */}
       {singleAsset && (
         <div
@@ -241,7 +262,10 @@ export const InspectorView: React.FC = () => {
           </div>
 
           {tab === 'similar' ? (
-            <div className="flex-1 overflow-y-auto charkle-scroll p-3">
+            <div
+              onScroll={() => notifyLiveScrolling()}
+              className="flex-1 overflow-y-auto charkle-scroll p-3"
+            >
               {loadingSimilar ? (
                 <div className="py-12 flex items-center justify-center gap-2 text-[12.5px] text-[var(--text-secondary)]">
                   <span className="h-3.5 w-3.5 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
@@ -258,6 +282,11 @@ export const InspectorView: React.FC = () => {
                       key={item.asset.id}
                       type="button"
                       title={item.matchReasons.join(' · ') || item.asset.title}
+                      onMouseEnter={() => setHoveredSimilarID(item.asset.id)}
+                      onMouseLeave={() =>
+                        setHoveredSimilarID((cur) => (cur === item.asset.id ? null : cur))
+                      }
+                      onMouseDown={() => stopAllHoverPreviews()}
                       onClick={() => selectAsset(item.asset.id, 'replace')}
                       onDoubleClick={() => openQuickLook(item.asset.id)}
                       className="group relative aspect-square overflow-hidden rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] cursor-pointer text-left"
@@ -267,7 +296,13 @@ export const InspectorView: React.FC = () => {
                         alt={item.asset.title}
                         className="w-full h-full object-cover charkle-media-zoom"
                       />
-                      <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px] font-mono">
+                      <HoverMediaPreview
+                        asset={item.asset}
+                        active={hoveredSimilarID === item.asset.id}
+                        fit="cover"
+                        roundedClass="rounded-[var(--radius-settings-inner)]"
+                      />
+                      <span className="absolute bottom-1 right-1 z-20 px-1.5 py-0.5 rounded bg-black/60 text-white text-[10px] font-mono">
                         {Math.round(item.score * 100)}%
                       </span>
                     </button>
@@ -443,7 +478,7 @@ export const InspectorView: React.FC = () => {
               <div className="flex flex-col gap-2 p-2.5 rounded-[var(--radius-settings-outer)] bg-[var(--bg-elevated)]/80 border border-[var(--border-hairline)]">
                 <div className="flex items-center justify-between">
                   <span className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
-                    CIELAB 色板
+                    主色板
                   </span>
                   <span className="text-[10.5px] text-[var(--text-tertiary)]">
                     点击复制 · 右键搜色
@@ -1016,14 +1051,13 @@ export const InspectorView: React.FC = () => {
         </div>
       ) : (
         /* Mode 3: Empty Inspector State */
-        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center gap-2">
+        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center gap-1.5">
           <CharkleIcon name="quicklook" size={28} className="opacity-65" />
           <div className="text-[13px] font-medium text-[var(--text-primary)]">未选中素材</div>
-          <p className="text-[12px] text-[var(--text-tertiary)] leading-relaxed">
-            点击任意卡片查看色板、标签与元信息；支持 Shift 连选或拖拽框选进行批量编辑。
-          </p>
+          <p className="text-[12px] text-[var(--text-tertiary)]">选择素材查看详情与标签</p>
         </div>
       )}
+      </div>
     </aside>
   );
 };

@@ -44,6 +44,16 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
   onAppendAsset,
 }) => {
   const [filterQuery, setFilterQuery] = useState('');
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const sync = () => setPrefersReducedMotion(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
 
   const boardAssetIDs = useMemo(() => new Set(getBoardReferencedAssetIDs(document)), [document]);
 
@@ -105,15 +115,32 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
     return filtered.slice(0, 40);
   }, [candidatePool, document.candidateAssetIDs, assetsByID, allLibraryAssets, boardAssetIDs, filterQuery]);
 
-  if (!open) return null;
-
   const refreshSeedID =
     swappingAsset?.id ?? getBoardReferencedAssetIDs(document)[0] ?? allLibraryAssets[0]?.id;
 
   return (
     <aside
       aria-label="候选替换素材池"
-      className="w-[300px] shrink-0 h-full border-l border-[var(--border-hairline)] bg-[var(--bg-inspector)] flex flex-col select-none"
+      aria-hidden={!open}
+      inert={!open ? true : undefined}
+      className={[
+        'absolute top-0 right-0 bottom-0 z-30 w-[300px] h-full border-l border-[var(--border-hairline)] bg-[var(--bg-inspector)] shadow-xl flex flex-col select-none',
+        'transition-[transform,opacity]',
+        open ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
+      ].join(' ')}
+      style={{
+        transitionDuration: open
+          ? 'var(--duration-drawer, 300ms)'
+          : 'var(--duration-exit-md, 170ms)',
+        transitionTimingFunction: open
+          ? 'var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1))'
+          : 'var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1))',
+        transform: open
+          ? 'translate3d(0, 0, 0)'
+          : prefersReducedMotion
+            ? 'translate3d(0, 0, 0)'
+            : 'translate3d(100%, 0, 0)',
+      }}
     >
       {/* Header */}
       <div className="px-3.5 py-3 border-b border-[var(--border-hairline)] flex items-center justify-between gap-2">
@@ -232,12 +259,12 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                 </div>
 
                 {/* Hover / Focus quick button */}
-                <div className="absolute inset-0 bg-black/0 group-hover/cand:bg-black/32 group-focus-within/cand:bg-black/32 transition-colors duration-150 flex items-center justify-center p-2">
+                <div className="absolute inset-0 bg-black/0 group-hover/cand:bg-black/32 group-focus-within/cand:bg-black/32 transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)] flex items-center justify-center p-2">
                   {swappingNodeID ? (
                     <button
                       type="button"
                       onClick={() => onSwapWithAsset(swappingNodeID, item.asset.id)}
-                      className="charkle-pressable opacity-0 group-hover/cand:opacity-100 group-focus-within/cand:opacity-100 transition-opacity duration-150 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--accent)] text-white text-[11px] font-medium shadow-md cursor-pointer"
+                      className="charkle-pressable opacity-0 group-hover/cand:opacity-100 group-focus-within/cand:opacity-100 transition-opacity duration-[var(--duration-press,120ms)] ease-[var(--ease-out)] inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--accent)] text-white text-[11px] font-medium shadow-md cursor-pointer"
                     >
                       <ArrowLeftRight size={11} />
                       替换此图
@@ -246,7 +273,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => onAppendAsset(item.asset.id)}
-                      className="charkle-pressable opacity-0 group-hover/cand:opacity-100 group-focus-within/cand:opacity-100 transition-opacity duration-150 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#141517]/88 text-white text-[11px] font-medium shadow-md cursor-pointer"
+                      className="charkle-pressable opacity-0 group-hover/cand:opacity-100 group-focus-within/cand:opacity-100 transition-opacity duration-[var(--duration-press,120ms)] ease-[var(--ease-out)] inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#141517]/88 text-white text-[11px] font-medium shadow-md cursor-pointer"
                     >
                       <Plus size={11} />
                       追加到画布

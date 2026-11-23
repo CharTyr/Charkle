@@ -1,10 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  createDefaultAutoLayoutConfig,
   freezeIntoFreeform,
   isAutoEditorialMode,
   reflowNodesInsideGroupFrame,
-  solveEditorialLayout,
 } from '@charkle/shared';
 import type {
   AssetRecord,
@@ -22,12 +20,14 @@ import type {
   NoteStyle,
   UUID,
 } from '@charkle/shared';
-import { isEditableElement } from '../shelf/captureUtils';
+import { stopAllHoverPreviews } from '../../components/HoverMediaPreview';
+import { isEditableElement } from '../capture/captureUtils';
 import { ConnectorLayer } from './ConnectorLayer';
 import type { PendingConnectorPreview } from './ConnectorLayer';
 import {
   FloatingToolDock,
   FreeformZoomControls,
+  SelectedConnectorBar,
   SelectedTransformBar,
 } from './FloatingToolDock';
 import { InkLayer, InkPenControlsPill } from './InkLayer';
@@ -41,14 +41,12 @@ import {
 import {
   clampZoom,
   computeFitCamera,
-  computeKubaiRippleOffset,
   computeResizedFrame,
   computeSnapDelta,
   findNodesInsideGroupFrame,
   getNodeMinSize,
   hitTestInkStroke,
   rectsIntersect,
-  reorderNodeIDs,
   screenToWorld,
   snapRotationDegrees,
   zoomCameraAtScreenPoint,
@@ -64,8 +62,10 @@ export interface MoodboardCanvasViewProps {
   canUndo: boolean;
   canRedo: boolean;
   camera: CameraState;
+  tidyAnimating?: boolean;
+  drawerOpen?: boolean;
   onCameraChange: (next: CameraState, persist?: boolean) => void;
-  onViewportWidthChange?: (width: number) => void;
+  onViewportChange?: (size: { width: number; height: number }) => void;
   onSelectNodes: (ids: Iterable<UUID>) => void;
   onToggleSelectNode: (id: UUID, multi: boolean) => void;
   onClearSelection: () => void;
@@ -73,6 +73,7 @@ export interface MoodboardCanvasViewProps {
     updater: (doc: MoodboardDocument) => MoodboardDocument,
     options?: { recordHistory?: boolean; immediateSave?: boolean },
   ) => void;
+  onTidyBoard: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onTriggerSwap: (nodeID: UUID) => void;
@@ -116,12 +117,15 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   canUndo,
   canRedo,
   camera,
+  tidyAnimating = false,
+  drawerOpen = false,
   onCameraChange,
-  onViewportWidthChange,
+  onViewportChange,
   onSelectNodes,
   onToggleSelectNode,
   onClearSelection,
   onCommitDocument,
+  onTidyBoard,
   onUndo,
   onRedo,
   onTriggerSwap,
@@ -138,8 +142,8 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   onPinpointAnnotate,
 }) => {
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState({ width: 1120, height: 740 });
+  const [viewportMeasured, setViewportMeasured] = useState(false);
 
   const [activeTool, setActiveTool] = useState<MoodboardTool>('select');
   const [selectedConnectorID, setSelectedConnectorID] = useState<UUID | null>(null);
@@ -148,6 +152,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const [isDropTargeted, setIsDropTargeted] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   const spacePannedRef = useRef(false);
+  const upgradedLegacyRef = useRef<Set<UUID>>(new Set());
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return;
@@ -158,29 +163,15 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     return () => mq.removeEventListener('change', sync);
   }, []);
 
-  // Smooth zero-jump transition flag when switching Auto <-> Freeform
-  const [modeTransitioning, setModeTransitioning] = useState(false);
-
   // Live Freeform interaction overrides (1:1 pointer tracking, zero undo spam per frame)
   const [liveFrames, setLiveFrames] = useState<Record<UUID, BoardRect>>({});
   const [liveRotations, setLiveRotations] = useState<Record<UUID, number>>({});
   const [snapGuides, setSnapGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] });
   const [marqueeRect, setMarqueeRect] = useState<BoardRect | null>(null);
 
-  // Auto Editorial Kubai Tip 005 drag-to-reorder ripple state
-  const [editorialDrag, setEditorialDrag] = useState<{
-    nodeID: UUID;
-    draggedIndex: number;
-    startClientX: number;
-    startClientY: number;
-    dx: number;
-    dy: number;
-    targetInsertIndex: number;
-  } | null>(null);
-
   // Connector tool & Ink pen state
   const [pendingConnector, setPendingConnector] = useState<PendingConnectorPreview | null>(null);
-  const [connectorStyle] = useState<ConnectorStyle>('curved');
+  const [connectorStyle, setConnectorStyle] = useState<ConnectorStyle>('curved');
   const [inkColorHex, setInkColorHex] = useState('#D95D48');
   const [inkLineWidth, setInkLineWidth] = useState(3.5);
   const [inkOpacity, setInkOpacity] = useState(0.92);
@@ -209,14 +200,6 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const marqueeRef = useRef<{ startWorld: BoardPoint } | null>(null);
   const inkDrawingRef = useRef(false);
 
-  const isAuto = isAutoEditorialMode(document.mode);
-  const autoConfig =
-    document.mode.type === 'autoEditorial'
-      ? document.mode.config
-      : createDefaultAutoLayoutConfig();
-  const showPaletteHeader = autoConfig.showPaletteStrip && document.extractedPalette.length > 0;
-  const paletteTopOffset = showPaletteHeader ? 56 : 0;
-
   // Measure viewport cleanly via ResizeObserver
   useEffect(() => {
     const el = stageRef.current;
@@ -227,36 +210,55 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       setViewport((prev) =>
         Math.abs(prev.width - w) >= 2 || Math.abs(prev.height - h) >= 2 ? { width: w, height: h } : prev,
       );
-      onViewportWidthChange?.(w);
+      setViewportMeasured(true);
+      onViewportChange?.({ width: w, height: h });
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [onViewportWidthChange]);
+  }, [onViewportChange]);
 
-  // Solve Auto Editorial layout deterministically from @charkle/shared
-  const editorialLayout = useMemo(() => {
-    return solveEditorialLayout(
-      document.nodes,
-      autoConfig,
-      viewport.width,
-      assetsByID,
-      28,
+  // Silently freeze any legacy autoEditorial board into Freeform on open with zero visual jump
+  useEffect(() => {
+    if (!viewportMeasured) return;
+    if (!isAutoEditorialMode(document.mode)) return;
+    if (upgradedLegacyRef.current.has(document.id)) return;
+
+    upgradedLegacyRef.current.add(document.id);
+    const frozen = freezeIntoFreeform(document, Math.max(640, viewport.width), assetsByID);
+    const fitCam = computeFitCamera(frozen.nodes, viewport.width, viewport.height, 64, 76, 108);
+    onCameraChange(fitCam, false);
+    onCommitDocument(
+      () => ({
+        ...frozen,
+        viewportCenter: { x: fitCam.centerX, y: fitCam.centerY },
+        viewportZoom: fitCam.zoom,
+      }),
+      { recordHistory: false, immediateSave: true },
     );
-  }, [document.nodes, autoConfig, viewport.width, assetsByID]);
+  }, [
+    document,
+    viewportMeasured,
+    viewport.width,
+    viewport.height,
+    assetsByID,
+    onCameraChange,
+    onCommitDocument,
+  ]);
 
-  // Effective displayed node frames (merges Auto Editorial solved frames or Freeform frames + live pointer drag overrides)
+  const showTopPaletteStrip =
+    (document.mode.type === 'autoEditorial' ? document.mode.config.showPaletteStrip : true) &&
+    document.extractedPalette.length > 0;
+
+  // Effective displayed node frames (Freeform frames + live pointer drag overrides)
   const effectiveNodes = useMemo(() => {
     return document.nodes.map((node) => {
-      const baseFrame = isAuto
-        ? editorialLayout.frames[node.id] ?? node.frame
-        : node.frame;
-      const frame = liveFrames[node.id] ?? baseFrame;
+      const frame = liveFrames[node.id] ?? node.frame;
       const rotationDegrees = liveRotations[node.id] ?? node.rotationDegrees;
       return { ...node, frame, rotationDegrees };
     });
-  }, [document.nodes, isAuto, editorialLayout.frames, liveFrames, liveRotations]);
+  }, [document.nodes, liveFrames, liveRotations]);
 
   const effectiveNodesByID = useMemo(() => {
     const map = new Map<UUID, BoardNode>();
@@ -280,44 +282,31 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     [document.nodes, selectedNodeIDs],
   );
 
-  // Switch between Auto Editorial and Freeform with zero jump
-  const handleSwitchMode = useCallback(
-    (targetMode: 'autoEditorial' | 'freeform') => {
-      if (targetMode === 'freeform' && isAuto) {
-        const scrollTop = scrollRef.current?.scrollTop ?? 0;
-        const frozen = freezeIntoFreeform(document, viewport.width, assetsByID);
-        // Align Freeform camera directly onto the user's current Auto Editorial scroll position
-        // including paletteTopOffset so cards stay strictly below the floating palette strip with zero jump!
-        const alignedCenter = {
-          x: viewport.width * 0.5,
-          y: scrollTop + viewport.height * 0.5 - paletteTopOffset,
-        };
-        setModeTransitioning(true);
-        window.setTimeout(() => setModeTransitioning(false), 320);
+  const selectedConnector = useMemo(
+    () =>
+      selectedConnectorID
+        ? document.connectors.find((c) => c.id === selectedConnectorID) ?? null
+        : null,
+    [document.connectors, selectedConnectorID],
+  );
 
-        onCameraChange({ centerX: alignedCenter.x, centerY: alignedCenter.y, zoom: 1.0 }, true);
-        onCommitDocument(
-          () => ({
-            ...frozen,
-            viewportCenter: alignedCenter,
-            viewportZoom: 1.0,
-          }),
-          { recordHistory: true, immediateSave: true },
-        );
-      } else if (targetMode === 'autoEditorial' && !isAuto) {
-        setModeTransitioning(true);
-        window.setTimeout(() => setModeTransitioning(false), 320);
-        setActiveTool('select');
-        onCommitDocument(
-          (doc) => ({
-            ...doc,
-            mode: { type: 'autoEditorial', config: createDefaultAutoLayoutConfig() },
-          }),
-          { recordHistory: true, immediateSave: true },
-        );
+  const activeConnectorStyle = selectedConnector ? selectedConnector.style : connectorStyle;
+
+  const handleChangeConnectorStyle = useCallback(
+    (nextStyle: ConnectorStyle) => {
+      setConnectorStyle(nextStyle);
+      if (selectedConnectorID) {
+        onCommitDocument((doc) => ({
+          ...doc,
+          connectors: doc.connectors.map((c) =>
+            c.id === selectedConnectorID
+              ? { ...c, style: nextStyle, updatedAt: new Date().toISOString() }
+              : c,
+          ),
+        }));
       }
     },
-    [isAuto, document, viewport.width, viewport.height, assetsByID, paletteTopOffset, onCameraChange, onCommitDocument],
+    [selectedConnectorID, onCommitDocument],
   );
 
   // Node mutations
@@ -428,16 +417,10 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     }));
   }, [selectedNodes, onCommitDocument]);
 
-  // Add new nodes centered in viewport
+  // Add new nodes centered in Freeform camera world coordinates
   const spawnPoint = useCallback((): BoardPoint => {
-    if (!isAuto) {
-      return { x: camera.centerX, y: camera.centerY };
-    }
-    return {
-      x: viewport.width * 0.5,
-      y: (scrollRef.current?.scrollTop ?? 0) + viewport.height * 0.35,
-    };
-  }, [isAuto, camera.centerX, camera.centerY, viewport.width, viewport.height]);
+    return { x: camera.centerX, y: camera.centerY };
+  }, [camera.centerX, camera.centerY]);
 
   const handleAddNote = useCallback(() => {
     const pt = spawnPoint();
@@ -461,6 +444,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       immediateSave: true,
     });
     onSelectNodes([newNode.id]);
+    setSelectedConnectorID(null);
   }, [spawnPoint, document.nodes, onCommitDocument, onSelectNodes]);
 
   const handleAddGroupFrame = useCallback(() => {
@@ -485,6 +469,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       immediateSave: true,
     });
     onSelectNodes([newNode.id]);
+    setSelectedConnectorID(null);
   }, [spawnPoint, document.nodes, onCommitDocument, onSelectNodes]);
 
   const handleAddPaletteStrip = useCallback(() => {
@@ -513,9 +498,10 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       immediateSave: true,
     });
     onSelectNodes([newNode.id]);
+    setSelectedConnectorID(null);
   }, [spawnPoint, document.nodes, document.extractedPalette, onCommitDocument, onSelectNodes]);
 
-  // Keyboard shortcuts (instant state changes, never sluggish)
+  // Keyboard shortcuts (instant state changes, zero sluggish animation)
   useEffect(() => {
     const hasOpenModalDialog = () =>
       typeof window !== 'undefined' &&
@@ -551,10 +537,6 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           setPendingConnector(null);
           return;
         }
-        if (editorialDrag) {
-          setEditorialDrag(null);
-          return;
-        }
         if (activeTool !== 'select') {
           setActiveTool('select');
           return;
@@ -583,17 +565,9 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       }
 
       if (e.code === 'Space' && !e.repeat) {
-        if (!isAuto) {
-          e.preventDefault();
-          spacePannedRef.current = false;
-          setSpacePressed(true);
-        } else if (selectedNodes.length === 1 && selectedNodes[0].kind.type === 'assetRef') {
-          const asset = assetsByID[selectedNodes[0].kind.assetID];
-          if (asset) {
-            e.preventDefault();
-            onOpenQuickLook(asset);
-          }
-        }
+        e.preventDefault();
+        spacePannedRef.current = false;
+        setSpacePressed(true);
         return;
       }
 
@@ -620,7 +594,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         }
       }
 
-      if (!meta && !e.shiftKey && !isAuto) {
+      if (!meta && !e.shiftKey) {
         if (lower === 'v') setActiveTool('select');
         else if (lower === 'h') setActiveTool('pan');
         else if (lower === 'c') setActiveTool('connector');
@@ -633,7 +607,11 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       if (hasOpenModalDialog()) return;
       if (e.code === 'Space') {
         setSpacePressed(false);
-        if (!isAuto && !spacePannedRef.current && selectedNodes.length === 1 && selectedNodes[0].kind.type === 'assetRef') {
+        if (
+          !spacePannedRef.current &&
+          selectedNodes.length === 1 &&
+          selectedNodes[0].kind.type === 'assetRef'
+        ) {
           const asset = assetsByID[selectedNodes[0].kind.assetID];
           if (asset) {
             onOpenQuickLook(asset);
@@ -649,11 +627,9 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       window.removeEventListener('keyup', onKeyUp);
     };
   }, [
-    isAuto,
     activeTool,
     croppingNodeID,
     pendingConnector,
-    editorialDrag,
     selectedConnectorID,
     selectedNodeIDs,
     selectedNodes,
@@ -673,8 +649,8 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   // Freeform Wheel / Pinch Zoom & Trackpad Pan
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
-      if (isAuto) return;
       e.preventDefault();
+      stopAllHoverPreviews();
       const rect = stageRef.current?.getBoundingClientRect();
       if (!rect) return;
       const pointerScreen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -700,7 +676,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         );
       }
     },
-    [isAuto, camera, viewport.width, viewport.height, onCameraChange],
+    [camera, viewport.width, viewport.height, onCameraChange],
   );
 
   // Convert client pointer to Freeform world point
@@ -716,13 +692,16 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
 
   // Stage pointer handlers (Freeform pan, marquee, pen, eraser)
   const handleStagePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isAuto) {
-      if (e.target === e.currentTarget) {
-        onClearSelection();
-        setSelectedConnectorID(null);
-      }
+    const targetEl = e.target instanceof Element ? e.target : null;
+    if (
+      targetEl?.closest(
+        'button, input, textarea, select, a, [role="toolbar"], [role="radiogroup"], [role="menu"], [data-canvas-hud="true"]',
+      )
+    ) {
       return;
     }
+
+    stopAllHoverPreviews();
 
     const isMiddleButton = e.button === 1;
     if (isMiddleButton || spacePressed || activeTool === 'pan') {
@@ -789,46 +768,15 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 2. Auto Editorial Kubai 005 Drag-to-Reorder
-    if (editorialDrag && isAuto) {
-      const dx = e.clientX - editorialDrag.startClientX;
-      const dy = e.clientY - editorialDrag.startClientY;
-      const containerRect = scrollRef.current?.getBoundingClientRect();
-      const scrollTop = scrollRef.current?.scrollTop ?? 0;
-      const pointerX = containerRect ? e.clientX - containerRect.left : e.clientX;
-      const pointerY =
-        (containerRect ? e.clientY - containerRect.top + scrollTop : e.clientY) - paletteTopOffset;
-
-      let bestIdx = editorialDrag.draggedIndex;
-      let bestDist = Number.POSITIVE_INFINITY;
-      editorialLayout.orderedNodeIDs.forEach((id, idx) => {
-        const f = editorialLayout.frames[id];
-        if (!f) return;
-        const cx = f.x + f.width * 0.5;
-        const cy = f.y + f.height * 0.5;
-        const d = Math.hypot(pointerX - cx, pointerY - cy);
-        if (d < bestDist) {
-          bestDist = d;
-          bestIdx = pointerY > cy ? idx + 1 : idx;
-        }
-      });
-
-      setEditorialDrag((prev) =>
-        prev ? { ...prev, dx, dy, targetInsertIndex: bestIdx } : null,
-      );
-      return;
-    }
-
-    if (isAuto) return;
     const worldPt = clientToWorld(e.clientX, e.clientY);
 
-    // 3. Pending connector drag
+    // 2. Pending connector drag
     if (pendingConnector) {
       setPendingConnector((prev) => (prev ? { ...prev, cursorWorld: worldPt } : null));
       return;
     }
 
-    // 4. Ink Pen drawing
+    // 3. Ink Pen drawing
     if (inkDrawingRef.current) {
       setActiveInkPoints((prev) => {
         const last = prev[prev.length - 1];
@@ -840,7 +788,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 5. Node drag with smart alignment snap guides
+    // 4. Node drag with smart alignment snap guides
     if (nodeDragRef.current) {
       const drag = nodeDragRef.current;
       let dx = worldPt.x - drag.startWorld.x;
@@ -877,13 +825,12 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 6. Node 8-handle resize (+ live group frame auto-reflow!)
+    // 5. Node 8-handle resize (+ live group frame auto-reflow!)
     if (resizeRef.current) {
       const rs = resizeRef.current;
       const dx = worldPt.x - rs.startWorld.x;
       const dy = worldPt.y - rs.startWorld.y;
-      const lockAspect =
-        rs.node.kind.type === 'assetRef' ? !e.shiftKey : e.shiftKey;
+      const lockAspect = rs.node.kind.type === 'assetRef' ? !e.shiftKey : e.shiftKey;
       const nextFrame = computeResizedFrame(
         rs.node.frame,
         rs.handle,
@@ -903,7 +850,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 7. Node rotation
+    // 6. Node rotation
     if (rotateRef.current) {
       const rt = rotateRef.current;
       const angleNow =
@@ -914,7 +861,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 8. Marquee selection
+    // 7. Marquee selection
     if (marqueeRef.current) {
       const sw = marqueeRef.current.startWorld;
       const rect: BoardRect = {
@@ -933,31 +880,6 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     if (panRef.current) {
       panRef.current = null;
       onCameraChange(camera, true);
-      return;
-    }
-
-    if (editorialDrag) {
-      const { nodeID, draggedIndex, targetInsertIndex } = editorialDrag;
-      setEditorialDrag(null);
-      const moved = Math.hypot(editorialDrag.dx, editorialDrag.dy) > 8;
-      if (moved && targetInsertIndex !== draggedIndex && targetInsertIndex !== draggedIndex + 1) {
-        const nextOrder = reorderNodeIDs(
-          editorialLayout.orderedNodeIDs,
-          nodeID,
-          targetInsertIndex > draggedIndex ? targetInsertIndex - 1 : targetInsertIndex,
-        );
-        const orderMap = new Map(nextOrder.map((id, idx) => [id, idx]));
-        onCommitDocument(
-          (doc) => ({
-            ...doc,
-            nodes: doc.nodes.map((n) => ({
-              ...n,
-              editorialOrder: orderMap.get(n.id) ?? n.editorialOrder,
-            })),
-          }),
-          { recordHistory: true, immediateSave: true },
-        );
-      }
       return;
     }
 
@@ -999,8 +921,14 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         // Hold Alt while dropping inside a card to create an internal normalized pinpoint anchor!
         const toNormalizedPoint = e.altKey
           ? {
-              x: Math.max(0.05, Math.min(0.95, (worldPt.x - targetNode.frame.x) / Math.max(1, targetNode.frame.width))),
-              y: Math.max(0.05, Math.min(0.95, (worldPt.y - targetNode.frame.y) / Math.max(1, targetNode.frame.height))),
+              x: Math.max(
+                0.05,
+                Math.min(0.95, (worldPt.x - targetNode.frame.x) / Math.max(1, targetNode.frame.width)),
+              ),
+              y: Math.max(
+                0.05,
+                Math.min(0.95, (worldPt.y - targetNode.frame.y) / Math.max(1, targetNode.frame.height)),
+              ),
             }
           : null;
         const newConnector: BoardConnector = {
@@ -1076,7 +1004,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   };
 
   // Start dragging a node
-  const handleNodePointerDown = (node: BoardNode, indexInEditorial: number, e: React.PointerEvent) => {
+  const handleNodePointerDown = (node: BoardNode, e: React.PointerEvent) => {
     if (e.button !== 0) return;
     if (spacePressed || activeTool === 'pan' || activeTool === 'pen' || activeTool === 'eraser') {
       return;
@@ -1084,10 +1012,11 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     if (croppingNodeID === node.id) return;
 
     e.stopPropagation();
+    stopAllHoverPreviews();
     setSelectedConnectorID(null);
 
     // Connector creation tool
-    if (!isAuto && activeTool === 'connector') {
+    if (activeTool === 'connector') {
       const worldPt = clientToWorld(e.clientX, e.clientY);
       setPendingConnector({
         fromNodeID: node.id,
@@ -1117,22 +1046,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
 
     if (node.isLocked) return;
 
-    // Auto Editorial -> Kubai Tip 005 Drag-to-Reorder
-    if (isAuto) {
-      stageRef.current?.setPointerCapture(e.pointerId);
-      setEditorialDrag({
-        nodeID: node.id,
-        draggedIndex: indexInEditorial,
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        dx: 0,
-        dy: 0,
-        targetInsertIndex: indexInEditorial,
-      });
-      return;
-    }
-
-    // Freeform -> Drag node(s) (+ enclosed children if dragging a GroupFrame!)
+    // Drag node(s) (+ enclosed children if dragging a GroupFrame!)
     const movingIDs = new Set<UUID>();
     for (const id of willBeSelected) {
       const target = document.nodes.find((n) => n.id === id);
@@ -1164,12 +1078,11 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const startResize = (node: BoardNode, handle: ResizeHandle, e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    if (node.isLocked || isAuto) return;
+    if (node.isLocked) return;
+    stopAllHoverPreviews();
     stageRef.current?.setPointerCapture(e.pointerId);
     const reflowChildren =
-      node.kind.type === 'groupFrame'
-        ? findNodesInsideGroupFrame(node, document.nodes)
-        : [];
+      node.kind.type === 'groupFrame' ? findNodesInsideGroupFrame(node, document.nodes) : [];
     resizeRef.current = {
       node,
       handle,
@@ -1182,7 +1095,8 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const startRotate = (node: BoardNode, e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    if (node.isLocked || isAuto) return;
+    if (node.isLocked) return;
+    stopAllHoverPreviews();
     stageRef.current?.setPointerCapture(e.pointerId);
     const centerWorld = {
       x: node.frame.x + node.frame.width * 0.5,
@@ -1199,7 +1113,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     };
   };
 
-  // External file drop & library asset drop directly on canvas
+  // External file drop & library asset drop directly onto world coordinates
   const handleDragOver = (e: React.DragEvent) => {
     if (
       e.dataTransfer.types.includes('Files') ||
@@ -1214,7 +1128,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDropTargeted(false);
-    const dropWorld = isAuto ? null : clientToWorld(e.clientX, e.clientY);
+    const dropWorld = clientToWorld(e.clientX, e.clientY);
 
     const rawAssetIDs = e.dataTransfer.getData('application/x-charkle-asset-ids');
     if (rawAssetIDs) {
@@ -1237,8 +1151,12 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
 
   // Dot grid geometry for Freeform canvas
   const dotStepScreen = Math.max(16, Math.min(56, 28 * camera.zoom));
-  const dotOffsetX = ((viewport.width * 0.5 - camera.centerX * camera.zoom) % dotStepScreen + dotStepScreen) % dotStepScreen;
-  const dotOffsetY = ((viewport.height * 0.5 - camera.centerY * camera.zoom) % dotStepScreen + dotStepScreen) % dotStepScreen;
+  const dotOffsetX =
+    (((viewport.width * 0.5 - camera.centerX * camera.zoom) % dotStepScreen) + dotStepScreen) %
+    dotStepScreen;
+  const dotOffsetY =
+    (((viewport.height * 0.5 - camera.centerY * camera.zoom) % dotStepScreen) + dotStepScreen) %
+    dotStepScreen;
 
   // Render an individual node's inner view
   const renderNodeBody = (node: BoardNode) => {
@@ -1254,7 +1172,6 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
             cacheBustVersion={cacheBustVersion}
             isSelected={isSelected}
             isSwapTarget={swappingNodeID === node.id}
-            isAutoEditorial={isAuto}
             isCropping={croppingNodeID === node.id}
             onStartInlineCrop={() => setCroppingNodeID(node.id)}
             onCommitCrop={(crop: NormalizedCropRect | null) => {
@@ -1326,7 +1243,6 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
             node={node}
             enclosedCount={enclosed.length}
             isSelected={isSelected}
-            isAutoEditorial={isAuto}
             onUpdate={(title, tint: GroupTint) =>
               mutateNode(
                 node.id,
@@ -1345,7 +1261,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
               }));
             }}
             onDelete={() => deleteNodes(new Set([node.id]))}
-            onSideResizeStart={!isAuto ? (edge, ev) => startResize(node, edge, ev) : undefined}
+            onSideResizeStart={(edge, ev) => startResize(node, edge, ev)}
           />
         );
       }
@@ -1371,24 +1287,6 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     }
   };
 
-  // Insertion line geometry for Kubai Tip 005 Auto Editorial drag-to-reorder
-  const insertionLineRect = useMemo(() => {
-    if (!editorialDrag || !isAuto) return null;
-    const { targetInsertIndex, draggedIndex } = editorialDrag;
-    if (targetInsertIndex === draggedIndex || targetInsertIndex === draggedIndex + 1) {
-      return null;
-    }
-    const refID =
-      editorialLayout.orderedNodeIDs[Math.min(targetInsertIndex, editorialLayout.orderedNodeIDs.length - 1)];
-    const refFrame = refID ? editorialLayout.frames[refID] : null;
-    if (!refFrame) return null;
-    const y =
-      (targetInsertIndex >= editorialLayout.orderedNodeIDs.length
-        ? refFrame.y + refFrame.height + 6
-        : refFrame.y - 8) + paletteTopOffset;
-    return { x: refFrame.x, y, width: refFrame.width };
-  }, [editorialDrag, isAuto, editorialLayout, paletteTopOffset]);
-
   const stageCursor =
     panRef.current
       ? 'grabbing'
@@ -1401,6 +1299,8 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const hasCroppedSelection = selectedNodes.some(
     (n) => n.kind.type === 'assetRef' && Boolean(n.kind.crop),
   );
+
+  const shouldAnimateTidy = tidyAnimating && !prefersReducedMotion;
 
   return (
     <div
@@ -1415,146 +1315,71 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       className="relative flex-1 min-w-0 h-full overflow-hidden bg-[var(--bg-gallery)] select-none"
       style={{ cursor: stageCursor }}
     >
-      {/* Mode 1: Auto Editorial Canvas */}
-      {isAuto ? (
+      {/* Unified Freeform Infinite Canvas */}
+      <div className="relative w-full h-full overflow-hidden">
+        {/* Calm architectural dot grid */}
         <div
-          ref={scrollRef}
-          className="w-full h-full overflow-y-auto overflow-x-hidden charkle-scroll relative"
-        >
-          <div
-            className="relative mx-auto"
-            style={{
-              width: editorialLayout.contentSize.width,
-              minHeight: editorialLayout.contentSize.height + paletteTopOffset + 96,
-            }}
-          >
-            {document.nodes.length === 0 ? (
-              <div
-                className="py-36 flex flex-col items-center justify-center text-center text-[var(--text-secondary)] gap-2"
-                style={{ paddingTop: paletteTopOffset + 120 }}
-              >
-                <p className="text-[14px] font-medium text-[var(--text-primary)]">
-                  拖入本地图片、或从右侧候选池追加素材到此情绪板
-                </p>
-                <p className="text-[12px] text-[var(--text-tertiary)]">
-                  自动排版模式将实时求解杂志级版面，随时可无跳变冻结为无限自由画布
-                </p>
-              </div>
-            ) : (
-              editorialLayout.orderedNodeIDs.map((nodeID, idx) => {
-                const node = effectiveNodesByID.get(nodeID);
-                if (!node) return null;
-                const isDragged = editorialDrag?.nodeID === node.id;
-                const ripple =
-                  editorialDrag && !prefersReducedMotion
-                    ? computeKubaiRippleOffset(
-                        idx,
-                        editorialDrag.targetInsertIndex,
-                        editorialDrag.draggedIndex,
-                        8,
-                      )
-                    : { offsetY: 0, delayMs: 0 };
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 opacity-45"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle, var(--text-tertiary) 1px, transparent 1px)',
+            backgroundSize: `${dotStepScreen}px ${dotStepScreen}px`,
+            backgroundPosition: `${dotOffsetX}px ${dotOffsetY}px`,
+          }}
+        />
 
-                const tx = node.frame.x + (isDragged ? editorialDrag.dx : 0);
-                const ty =
-                  node.frame.y +
-                  paletteTopOffset +
-                  (isDragged ? editorialDrag.dy : ripple.offsetY);
-
-                return (
-                  <div
-                    key={node.id}
-                    onPointerDown={(e) => handleNodePointerDown(node, idx, e)}
-                    className="absolute top-0 left-0"
-                    style={{
-                      width: node.frame.width,
-                      height: node.frame.height,
-                      zIndex: isDragged ? 60 : node.kind.type === 'groupFrame' ? 1 : 10,
-                      transform: `translate3d(${tx}px, ${ty}px, 0) scale(${isDragged && !prefersReducedMotion ? 0.94 : 1}) rotate(${node.rotationDegrees}deg)`,
-                      transition:
-                        isDragged || prefersReducedMotion
-                          ? 'none'
-                          : `transform 250ms var(--ease-spring) ${ripple.delayMs}ms, width 240ms var(--ease-in-out), height 240ms var(--ease-in-out)`,
-                      cursor: node.isLocked ? 'default' : isDragged ? 'grabbing' : 'grab',
-                    }}
-                  >
-                    {renderNodeBody(node)}
-                  </div>
-                );
-              })
-            )}
-
-            {/* Kubai Tip 005 thin 15%-ink insertion line */}
-            {insertionLineRect && (
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute z-50 h-[2px] rounded-full"
-                style={{
-                  left: insertionLineRect.x,
-                  top: insertionLineRect.y,
-                  width: insertionLineRect.width,
-                  backgroundColor: 'var(--text-primary)',
-                  opacity: 0.18,
-                  transformOrigin: 'center',
-                }}
-              />
-            )}
+        {/* Empty canvas guidance */}
+        {document.nodes.length === 0 && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-6">
+            <p className="text-[13.5px] font-medium text-[var(--text-secondary)]">
+              拖入图片、按 ⌘V 粘贴，或从右侧候选池添加素材
+            </p>
           </div>
-        </div>
-      ) : (
-        /* Mode 2: Freeform Infinite Canvas */
-        <div className="relative w-full h-full overflow-hidden">
-          {/* Calm architectural dot grid */}
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-0 opacity-45"
-            style={{
-              backgroundImage:
-                'radial-gradient(circle, var(--text-tertiary) 1px, transparent 1px)',
-              backgroundSize: `${dotStepScreen}px ${dotStepScreen}px`,
-              backgroundPosition: `${dotOffsetX}px ${dotOffsetY}px`,
-            }}
-          />
+        )}
 
-          {/* World Transform Plane */}
-          <div
-            className="absolute top-0 left-0 origin-top-left"
-            style={{
-              transform: `translate3d(${viewport.width * 0.5 - camera.centerX * camera.zoom}px, ${viewport.height * 0.5 - camera.centerY * camera.zoom}px, 0) scale(${camera.zoom})`,
-              transition: modeTransitioning ? 'transform 260ms var(--ease-in-out)' : 'none',
-            }}
-          >
-            {/* Nodes */}
-            {zSortedNodes.map((node, idx) => {
-              const isSelected = selectedNodeIDs.has(node.id);
-              const showTransformHandles =
-                isSelected &&
-                selectedNodeIDs.size === 1 &&
-                !node.isLocked &&
-                activeTool === 'select' &&
-                croppingNodeID !== node.id;
+        {/* World Transform Plane */}
+        <div
+          className="absolute top-0 left-0 origin-top-left"
+          style={{
+            transform: `translate3d(${viewport.width * 0.5 - camera.centerX * camera.zoom}px, ${viewport.height * 0.5 - camera.centerY * camera.zoom}px, 0) scale(${camera.zoom})`,
+            transition: shouldAnimateTidy
+              ? 'transform var(--duration-move, 240ms) var(--ease-in-out)'
+              : 'none',
+          }}
+        >
+          {/* Nodes */}
+          {zSortedNodes.map((node, idx) => {
+            const isSelected = selectedNodeIDs.has(node.id);
+            const showTransformHandles =
+              isSelected &&
+              selectedNodeIDs.size === 1 &&
+              !node.isLocked &&
+              activeTool === 'select' &&
+              croppingNodeID !== node.id;
 
-              return (
-                <div
-                  key={node.id}
-                  onPointerDown={(e) => handleNodePointerDown(node, idx, e)}
-                  className="absolute top-0 left-0"
-                  style={{
-                    width: node.frame.width,
-                    height: node.frame.height,
-                    zIndex: node.kind.type === 'groupFrame' ? 1 : 10 + idx,
-                    transform: `translate3d(${node.frame.x}px, ${node.frame.y}px, 0) rotate(${node.rotationDegrees}deg)`,
-                    transition: modeTransitioning
-                      ? 'transform 260ms var(--ease-in-out), width 260ms var(--ease-in-out), height 260ms var(--ease-in-out)'
-                      : 'none',
-                  }}
-                >
-                  {renderNodeBody(node)}
+            return (
+              <div
+                key={node.id}
+                onPointerDown={(e) => handleNodePointerDown(node, e)}
+                className="absolute top-0 left-0"
+                style={{
+                  width: node.frame.width,
+                  height: node.frame.height,
+                  zIndex: node.kind.type === 'groupFrame' ? 1 : 10 + idx,
+                  transform: `translate3d(${node.frame.x}px, ${node.frame.y}px, 0) rotate(${node.rotationDegrees}deg)`,
+                  transition: shouldAnimateTidy
+                    ? 'transform var(--duration-move, 240ms) var(--ease-in-out), width var(--duration-move, 240ms) var(--ease-in-out), height var(--duration-move, 240ms) var(--ease-in-out)'
+                    : 'none',
+                }}
+              >
+                {renderNodeBody(node)}
 
-                  {/* Connector anchor dots when connector tool active */}
-                  {activeTool === 'connector' && (
-                    <>
-                      {(['top', 'bottom', 'leading', 'trailing'] as const).map((anchor: ConnectorAnchor) => {
+                {/* Connector anchor dots when connector tool active */}
+                {activeTool === 'connector' && (
+                  <>
+                    {(['top', 'bottom', 'leading', 'trailing'] as const).map(
+                      (anchor: ConnectorAnchor) => {
                         const posStyle: React.CSSProperties =
                           anchor === 'top'
                             ? { left: '50%', top: -6, transform: 'translateX(-50%)' }
@@ -1586,155 +1411,163 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
                             style={posStyle}
                           />
                         );
-                      })}
-                    </>
-                  )}
+                      },
+                    )}
+                  </>
+                )}
 
-                  {/* 8-Handle Resize + Top-Center Rotate Handle */}
-                  {showTransformHandles && (
-                    <>
-                      {ALL_RESIZE_HANDLES.map((h) => (
-                        <div
-                          key={h.handle}
-                          onPointerDown={(ev) => startResize(node, h.handle, ev)}
-                          className="absolute z-30 w-2.5 h-2.5 rounded-[3px] bg-white border-[1.5px] border-[var(--accent)] shadow-xs"
-                          style={{
-                            left: h.left,
-                            right: h.right,
-                            top: h.top,
-                            bottom: h.bottom,
-                            transform:
-                              h.left === '50%'
-                                ? 'translateX(-50%)'
-                                : h.top === '50%'
-                                  ? 'translateY(-50%)'
-                                  : undefined,
-                            cursor: h.cursor,
-                          }}
-                        />
-                      ))}
-
-                      {/* Rotation stem & knob (double-click resets to 0°) */}
+                {/* 8-Handle Resize + Top-Center Rotate Handle */}
+                {showTransformHandles && (
+                  <>
+                    {ALL_RESIZE_HANDLES.map((h) => (
                       <div
-                        className="absolute left-1/2 -translate-x-1/2 -top-7 flex flex-col items-center z-30"
-                        onPointerDown={(ev) => startRotate(node, ev)}
-                        onDoubleClick={(ev) => {
-                          ev.stopPropagation();
-                          mutateNode(node.id, (n) => ({ ...n, rotationDegrees: 0 }));
+                        key={h.handle}
+                        onPointerDown={(ev) => startResize(node, h.handle, ev)}
+                        className="absolute z-30 w-2.5 h-2.5 rounded-[3px] bg-white border-[1.5px] border-[var(--accent)] shadow-xs"
+                        style={{
+                          left: h.left,
+                          right: h.right,
+                          top: h.top,
+                          bottom: h.bottom,
+                          transform:
+                            h.left === '50%'
+                              ? 'translateX(-50%)'
+                              : h.top === '50%'
+                                ? 'translateY(-50%)'
+                                : undefined,
+                          cursor: h.cursor,
                         }}
-                        title="拖动旋转（按住 Shift 吸附 15°，双击归零）"
-                      >
-                        <div className="w-4.5 h-4.5 rounded-full bg-white border-[1.5px] border-[var(--accent)] shadow-xs cursor-grab active:cursor-grabbing flex items-center justify-center">
-                          <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)]" />
-                        </div>
-                        <div className="w-px h-2.5 bg-[var(--accent)]" />
+                      />
+                    ))}
+
+                    {/* Rotation stem & knob (double-click resets to 0°) */}
+                    <div
+                      className="absolute left-1/2 -translate-x-1/2 -top-7 flex flex-col items-center z-30"
+                      onPointerDown={(ev) => startRotate(node, ev)}
+                      onDoubleClick={(ev) => {
+                        ev.stopPropagation();
+                        mutateNode(node.id, (n) => ({ ...n, rotationDegrees: 0 }));
+                      }}
+                      title="拖动旋转（按住 Shift 吸附 15°，双击归零）"
+                    >
+                      <div className="w-4.5 h-4.5 rounded-full bg-white border-[1.5px] border-[var(--accent)] shadow-xs cursor-grab active:cursor-grabbing flex items-center justify-center">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)]" />
                       </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
+                      <div className="w-px h-2.5 bg-[var(--accent)]" />
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
 
-            {/* Connectors Layer */}
-            <div className="absolute inset-0 z-40 pointer-events-none">
-              <ConnectorLayer
-                connectors={document.connectors}
-                nodesByID={effectiveNodesByID}
-                selectedConnectorID={selectedConnectorID}
-                pendingConnector={pendingConnector}
-                zoom={camera.zoom}
-                interactive={activeTool === 'select' || activeTool === 'connector'}
-                onSelectConnector={(cid) => {
-                  setSelectedConnectorID(cid);
-                  if (cid) onClearSelection();
-                }}
-                onUpdateConnector={(cid, patch) => {
-                  onCommitDocument((doc) => ({
-                    ...doc,
-                    connectors: doc.connectors.map((c) =>
-                      c.id === cid ? { ...c, ...patch, updatedAt: new Date().toISOString() } : c,
-                    ),
-                  }));
-                }}
-                onDeleteConnector={(cid) => {
-                  setSelectedConnectorID(null);
-                  onCommitDocument((doc) => ({
-                    ...doc,
-                    connectors: doc.connectors.filter((c) => c.id !== cid),
-                  }));
-                }}
-              />
-            </div>
-
-            {/* Freehand Ink Annotation Layer */}
-            <div className="absolute inset-0 z-50 pointer-events-none">
-              <InkLayer
-                strokes={document.inkStrokes}
-                activeStrokePoints={activeInkPoints}
-                activeColorHex={inkColorHex}
-                activeLineWidth={inkLineWidth}
-                activeOpacity={inkOpacity}
-                eraserActive={activeTool === 'eraser'}
-                onEraseStroke={(sid) => {
-                  onCommitDocument((doc) => ({
-                    ...doc,
-                    inkStrokes: doc.inkStrokes.filter((s) => s.id !== sid),
-                  }));
-                }}
-              />
-            </div>
-
-            {/* Smart Alignment Snap Guides */}
-            {(snapGuides.x.length > 0 || snapGuides.y.length > 0) && (
-              <svg className="absolute inset-0 overflow-visible pointer-events-none z-50" width="1" height="1">
-                {snapGuides.x.map((gx) => (
-                  <line
-                    key={`gx-${gx}`}
-                    x1={gx}
-                    y1={camera.centerY - 4000}
-                    x2={gx}
-                    y2={camera.centerY + 4000}
-                    stroke="var(--accent)"
-                    strokeWidth={1 / camera.zoom}
-                    strokeDasharray={`${4 / camera.zoom} ${3 / camera.zoom}`}
-                  />
-                ))}
-                {snapGuides.y.map((gy) => (
-                  <line
-                    key={`gy-${gy}`}
-                    x1={camera.centerX - 4000}
-                    y1={gy}
-                    x2={camera.centerX + 4000}
-                    y2={gy}
-                    stroke="var(--accent)"
-                    strokeWidth={1 / camera.zoom}
-                    strokeDasharray={`${4 / camera.zoom} ${3 / camera.zoom}`}
-                  />
-                ))}
-              </svg>
-            )}
-
-            {/* Rubber-Band Marquee Selection Box */}
-            {marqueeRect && marqueeRect.width > 2 && marqueeRect.height > 2 && (
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute z-50 rounded-[4px] border border-[var(--accent)] bg-[var(--accent-soft)]"
-                style={{
-                  left: marqueeRect.x,
-                  top: marqueeRect.y,
-                  width: marqueeRect.width,
-                  height: marqueeRect.height,
-                }}
-              />
-            )}
+          {/* Connectors Layer */}
+          <div className="absolute inset-0 z-40 pointer-events-none">
+            <ConnectorLayer
+              connectors={document.connectors}
+              nodesByID={effectiveNodesByID}
+              selectedConnectorID={selectedConnectorID}
+              pendingConnector={pendingConnector}
+              zoom={camera.zoom}
+              interactive={activeTool === 'select' || activeTool === 'connector'}
+              onSelectConnector={(cid) => {
+                setSelectedConnectorID(cid);
+                if (cid) onClearSelection();
+              }}
+              onUpdateConnector={(cid, patch) => {
+                onCommitDocument((doc) => ({
+                  ...doc,
+                  connectors: doc.connectors.map((c) =>
+                    c.id === cid ? { ...c, ...patch, updatedAt: new Date().toISOString() } : c,
+                  ),
+                }));
+              }}
+              onDeleteConnector={(cid) => {
+                setSelectedConnectorID(null);
+                onCommitDocument((doc) => ({
+                  ...doc,
+                  connectors: doc.connectors.filter((c) => c.id !== cid),
+                }));
+              }}
+            />
           </div>
+
+          {/* Freehand Ink Annotation Layer */}
+          <div className="absolute inset-0 z-50 pointer-events-none">
+            <InkLayer
+              strokes={document.inkStrokes}
+              activeStrokePoints={activeInkPoints}
+              activeColorHex={inkColorHex}
+              activeLineWidth={inkLineWidth}
+              activeOpacity={inkOpacity}
+              eraserActive={activeTool === 'eraser'}
+              onEraseStroke={(sid) => {
+                onCommitDocument((doc) => ({
+                  ...doc,
+                  inkStrokes: doc.inkStrokes.filter((s) => s.id !== sid),
+                }));
+              }}
+            />
+          </div>
+
+          {/* Smart Alignment Snap Guides */}
+          {(snapGuides.x.length > 0 || snapGuides.y.length > 0) && (
+            <svg
+              className="absolute inset-0 overflow-visible pointer-events-none z-50"
+              width="1"
+              height="1"
+            >
+              {snapGuides.x.map((gx) => (
+                <line
+                  key={`gx-${gx}`}
+                  x1={gx}
+                  y1={camera.centerY - 4000}
+                  x2={gx}
+                  y2={camera.centerY + 4000}
+                  stroke="var(--accent)"
+                  strokeWidth={1 / camera.zoom}
+                  strokeDasharray={`${4 / camera.zoom} ${3 / camera.zoom}`}
+                />
+              ))}
+              {snapGuides.y.map((gy) => (
+                <line
+                  key={`gy-${gy}`}
+                  x1={camera.centerX - 4000}
+                  y1={gy}
+                  x2={camera.centerX + 4000}
+                  y2={gy}
+                  stroke="var(--accent)"
+                  strokeWidth={1 / camera.zoom}
+                  strokeDasharray={`${4 / camera.zoom} ${3 / camera.zoom}`}
+                />
+              ))}
+            </svg>
+          )}
+
+          {/* Rubber-Band Marquee Selection Box */}
+          {marqueeRect && marqueeRect.width > 2 && marqueeRect.height > 2 && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute z-50 rounded-[4px] border border-[var(--accent)] bg-[var(--accent-soft)]"
+              style={{
+                left: marqueeRect.x,
+                top: marqueeRect.y,
+                width: marqueeRect.width,
+                height: marqueeRect.height,
+              }}
+            />
+          )}
         </div>
-      )}
+      </div>
 
       {/* Top Floating Board Palette Strip */}
-      {autoConfig.showPaletteStrip && document.extractedPalette.length > 0 && (
-        <div className="pointer-events-none absolute top-3 left-0 right-0 z-30 flex justify-center px-4">
-          <div className="pointer-events-auto">
+      {showTopPaletteStrip && (
+        <div className="pointer-events-none absolute top-3 left-0 right-0 z-20 flex justify-center px-4">
+          <div
+            data-canvas-hud="true"
+            onPointerDown={(e) => e.stopPropagation()}
+            className="pointer-events-auto"
+          >
             <BoardPaletteHeaderStrip
               colors={document.extractedPalette}
               onCopyHex={onCopyHex}
@@ -1744,29 +1577,47 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         </div>
       )}
 
-      {/* Bottom-Right Freeform Zoom Controls */}
-      {!isAuto && (
-        <div className="absolute right-5 bottom-5 z-30">
-          <FreeformZoomControls
-            zoom={camera.zoom}
-            onZoomOut={() =>
-              onCameraChange({ ...camera, zoom: clampZoom(camera.zoom * 0.82) }, true)
-            }
-            onZoomIn={() =>
-              onCameraChange({ ...camera, zoom: clampZoom(camera.zoom * 1.22) }, true)
-            }
-            onResetZoom={() => onCameraChange({ ...camera, zoom: 1.0 }, true)}
-            onFitBoard={() =>
-              onCameraChange(computeFitCamera(document.nodes, viewport.width, viewport.height), true)
-            }
-          />
-        </div>
-      )}
+      {/* Bottom-Right Freeform Zoom Controls (glides smoothly clear of Candidate Pool drawer) */}
+      <div
+        data-canvas-hud="true"
+        onPointerDown={(e) => e.stopPropagation()}
+        className="absolute right-5 bottom-5 z-20 transition-transform"
+        style={{
+          transitionDuration: drawerOpen
+            ? 'var(--duration-drawer, 300ms)'
+            : 'var(--duration-exit-md, 170ms)',
+          transitionTimingFunction: drawerOpen
+            ? 'var(--ease-drawer, cubic-bezier(0.32, 0.72, 0, 1))'
+            : 'var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1))',
+          transform: drawerOpen ? 'translate3d(-300px, 0, 0)' : 'translate3d(0, 0, 0)',
+        }}
+      >
+        <FreeformZoomControls
+          zoom={camera.zoom}
+          onZoomOut={() =>
+            onCameraChange({ ...camera, zoom: clampZoom(camera.zoom * 0.82) }, true)
+          }
+          onZoomIn={() =>
+            onCameraChange({ ...camera, zoom: clampZoom(camera.zoom * 1.22) }, true)
+          }
+          onResetZoom={() => onCameraChange({ ...camera, zoom: 1.0 }, true)}
+          onFitBoard={() =>
+            onCameraChange(
+              computeFitCamera(document.nodes, viewport.width, viewport.height, 64, 76, 108),
+              true,
+            )
+          }
+        />
+      </div>
 
-      {/* Bottom-Center Contextual Pill + Floating Liquid Glass Tool Dock */}
-      <div className="pointer-events-none absolute bottom-4 left-0 right-0 z-30 flex flex-col items-center gap-2 px-4">
-        {!isAuto && activeTool === 'pen' && (
-          <div className="pointer-events-auto">
+      {/* Bottom-Center Contextual Pill + Floating Tool Dock */}
+      <div className="pointer-events-none absolute bottom-4 left-0 right-0 z-20 flex flex-col items-center gap-2 px-4">
+        {activeTool === 'pen' && (
+          <div
+            data-canvas-hud="true"
+            onPointerDown={(e) => e.stopPropagation()}
+            className="pointer-events-auto"
+          >
             <InkPenControlsPill
               colorHex={inkColorHex}
               lineWidth={inkLineWidth}
@@ -1778,8 +1629,44 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           </div>
         )}
 
+        {activeTool !== 'pen' && selectedConnector && selectedNodes.length === 0 && (
+          <div
+            data-canvas-hud="true"
+            onPointerDown={(e) => e.stopPropagation()}
+            className="pointer-events-auto"
+          >
+            <SelectedConnectorBar
+              dashed={selectedConnector.dashed}
+              onToggleDashed={() => {
+                const cid = selectedConnector.id;
+                const nextDashed = !selectedConnector.dashed;
+                onCommitDocument((doc) => ({
+                  ...doc,
+                  connectors: doc.connectors.map((c) =>
+                    c.id === cid
+                      ? { ...c, dashed: nextDashed, updatedAt: new Date().toISOString() }
+                      : c,
+                  ),
+                }));
+              }}
+              onDelete={() => {
+                const cid = selectedConnector.id;
+                setSelectedConnectorID(null);
+                onCommitDocument((doc) => ({
+                  ...doc,
+                  connectors: doc.connectors.filter((c) => c.id !== cid),
+                }));
+              }}
+            />
+          </div>
+        )}
+
         {activeTool === 'select' && selectedNodes.length > 0 && (
-          <div className="pointer-events-auto">
+          <div
+            data-canvas-hud="true"
+            onPointerDown={(e) => e.stopPropagation()}
+            className="pointer-events-auto"
+          >
             <SelectedTransformBar
               selectedCount={selectedNodes.length}
               allLocked={selectedNodes.every((n) => n.isLocked)}
@@ -1797,17 +1684,24 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           </div>
         )}
 
-        <div className="pointer-events-auto">
+        <div
+          data-canvas-hud="true"
+          onPointerDown={(e) => e.stopPropagation()}
+          className="pointer-events-auto"
+        >
           <FloatingToolDock
-            isAutoEditorial={isAuto}
             activeTool={activeTool}
+            connectorStyle={activeConnectorStyle}
+            showConnectorStylePicker={activeTool === 'connector' || selectedConnector !== null}
             canUndo={canUndo}
             canRedo={canRedo}
+            hasNodes={document.nodes.length > 0}
             onSelectTool={setActiveTool}
+            onChangeConnectorStyle={handleChangeConnectorStyle}
             onAddNote={handleAddNote}
             onAddGroupFrame={handleAddGroupFrame}
             onAddPaletteStrip={handleAddPaletteStrip}
-            onSwitchMode={handleSwitchMode}
+            onTidy={onTidyBoard}
             onUndo={onUndo}
             onRedo={onRedo}
             onOpenExport={onOpenExport}

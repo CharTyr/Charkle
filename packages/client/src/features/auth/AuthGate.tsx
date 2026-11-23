@@ -71,7 +71,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
         <CharkleBrandMark size={48} />
         <div className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)]">
           <span className="h-3.5 w-3.5 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
-          正在检查会话状态…
+          正在载入…
         </div>
       </div>
     );
@@ -144,16 +144,9 @@ export const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
           {/* Header */}
           <div className="flex flex-col items-center text-center gap-3">
             <CharkleBrandMark size={52} />
-            <div>
-              <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--text-primary)]">
-                {!initialized ? '初始化管理员账号' : '登录 Charkle'}
-              </h1>
-              <p className="text-[13px] text-[var(--text-secondary)] mt-1 leading-relaxed">
-                {!initialized
-                  ? '首次启动需创建本实例管理员账号。所有素材、原图流媒体、同步密钥与 MCP 接口均受登录认证保护。'
-                  : 'Gallery-First 视觉参考库与双模式情绪板工作台'}
-              </p>
-            </div>
+            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--text-primary)]">
+              {!initialized ? '创建管理员账号' : '登录'}
+            </h1>
           </div>
 
           {!initialized ? (
@@ -267,12 +260,8 @@ export const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
                 className="w-full justify-center mt-1 h-10"
               >
                 <ShieldCheck size={16} />
-                创建管理员并进入工作台
+                创建管理员账号
               </Button>
-
-              <p className="text-[11.5px] text-[var(--text-tertiary)] text-center leading-relaxed">
-                密码采用加盐 scrypt 摘要存储于本地 SQLite，登录会话通过 HttpOnly Cookie 保护。
-              </p>
             </form>
           ) : (
             <form onSubmit={handleLoginSubmit} className="flex flex-col gap-3.5">
@@ -352,7 +341,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
                 disabled={countdownSec > 0}
                 className="w-full justify-center mt-1 h-10"
               >
-                {countdownSec > 0 ? `请等待 ${countdownSec} 秒后重试` : '登录工作台'}
+                {countdownSec > 0 ? `请等待 ${countdownSec} 秒后重试` : '登录'}
               </Button>
             </form>
           )}

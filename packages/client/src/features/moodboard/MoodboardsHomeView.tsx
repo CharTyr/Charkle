@@ -8,7 +8,7 @@ import {
   Star,
   Trash2,
 } from 'lucide-react';
-import { isAutoEditorialMode, isLightHex } from '@charkle/shared';
+import { isLightHex } from '@charkle/shared';
 import type { MoodboardSummary, UUID } from '@charkle/shared';
 import { apiClient, thumbnailURL } from '../../api/client';
 import { Button } from '../../design-system/Button';
@@ -124,14 +124,14 @@ export const MoodboardsHomeView: React.FC = () => {
       {/* Clean Studio Header */}
       <header className="px-6 py-4 border-b border-[var(--border-hairline)] flex flex-wrap items-center justify-between gap-4 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
-          <CharkleIcon name="moodboard" style="layered" size={30} />
-          <div className="min-w-0">
+          <CharkleIcon name="moodboard" style="layered" size={28} />
+          <div className="flex items-center gap-2 min-w-0">
             <h1 className="text-[17px] font-semibold tracking-[-0.015em] text-[var(--text-primary)]">
-              情绪板工作室
+              情绪板
             </h1>
-            <p className="text-[12px] text-[var(--text-secondary)]">
-              自动编辑部排版与无限自由画布无缝切换 · 共 {boards.length} 块情绪板
-            </p>
+            <span className="px-2 py-0.5 rounded-full bg-[var(--bg-subtle)] text-[11px] font-medium text-[var(--text-secondary)] tabular-nums">
+              {boards.length}
+            </span>
           </div>
         </div>
 
@@ -154,10 +154,10 @@ export const MoodboardsHomeView: React.FC = () => {
             <CharkleIcon name="moodboard" style="layered" size={64} />
             <div>
               <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
-                开始你的第一块情绪板
+                暂无情绪板
               </h2>
               <p className="text-[13px] text-[var(--text-secondary)] mt-1.5 leading-relaxed">
-                用自然语言、种子图或目标色卡让 AI 视觉策展，或直接新建空白画布自由拼贴、连线与批注。
+                新建空白画布，或从素材库自动生成情绪板。
               </p>
             </div>
             <div className="flex items-center gap-2.5 pt-1">
@@ -175,7 +175,6 @@ export const MoodboardsHomeView: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
             {boards.map((board) => {
               const isActiveTarget = activeBoardID === board.id;
-              const isAuto = isAutoEditorialMode(board.mode);
               const isRenaming = renamingID === board.id;
               const isConfirmingDelete = confirmDeleteID === board.id;
 
@@ -230,7 +229,7 @@ export const MoodboardsHomeView: React.FC = () => {
                     {/* Top-left Active Board / Mode Badge */}
                     <div className="absolute top-3 left-3 flex items-center gap-1.5">
                       <span className="px-2 py-0.5 rounded-[var(--radius-card-inner)] bg-black/58 text-white text-[10px] font-medium backdrop-blur-sm">
-                        {isAuto ? '自动排版' : '自由画布'}
+                        自由画布
                       </span>
                       {isActiveTarget && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-card-inner)] bg-[var(--success)] text-white text-[10px] font-semibold">

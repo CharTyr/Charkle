@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Compass,
   CornerDownLeft,
   Folder,
   Hash,
   Image as ImageIcon,
   Inbox,
   LayoutGrid,
-  Monitor,
+  PlusCircle,
+  Puzzle,
   Search,
   Settings,
   Sparkles,
@@ -26,17 +28,31 @@ interface JumpRow {
   subtitle: string;
   targetUUID?: string | null;
   tagName?: string | null;
-  commandKey?: 'generateBoard' | 'gotoInbox' | 'toggleShelf' | 'openSettings';
+  commandKey?:
+    | 'generateBoard'
+    | 'gotoInbox'
+    | 'openQuickCapture'
+    | 'installExtension'
+    | 'rerunOnboarding'
+    | 'openSettings';
   score: number;
 }
 
 const QUICK_COMMANDS: JumpRow[] = [
   {
+    id: 'cmd-quick-capture',
+    kind: 'command',
+    commandKey: 'openQuickCapture',
+    title: '打开快速采集',
+    subtitle: '上传文件、链接、笔记、色卡或截屏 (⇧⌘N)',
+    score: 1.01,
+  },
+  {
     id: 'cmd-generate-board',
     kind: 'command',
     commandKey: 'generateBoard',
     title: '快速生成情绪板…',
-    subtitle: '启动 AI 多阶段策展工作台',
+    subtitle: '按提示词、素材或色板生成情绪板',
     score: 1,
   },
   {
@@ -44,23 +60,31 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'gotoInbox',
     title: '前往收件箱清理台',
-    subtitle: '使用 1–9 快捷键或批量智能分拣归档素材',
+    subtitle: '使用数字键 1–9 快速归档素材',
     score: 0.99,
   },
   {
-    id: 'cmd-toggle-shelf',
+    id: 'cmd-install-extension',
     kind: 'command',
-    commandKey: 'toggleShelf',
-    title: '展开 / 收起快速采集浮窗',
-    subtitle: '顶部暗色玻璃速记与拖放收集舱',
+    commandKey: 'installExtension',
+    title: '安装浏览器采集扩展',
+    subtitle: '下载扩展包并获取访问令牌',
     score: 0.98,
+  },
+  {
+    id: 'cmd-rerun-onboarding',
+    kind: 'command',
+    commandKey: 'rerunOnboarding',
+    title: '重新运行首次使用引导',
+    subtitle: '快速配置素材库、浏览器扩展、AI 与外观',
+    score: 0.975,
   },
   {
     id: 'cmd-open-settings',
     kind: 'command',
     commandKey: 'openSettings',
     title: '打开设置中心',
-    subtitle: '账号安全、云盘同步、AI 模型、MCP 与缓存管理',
+    subtitle: '账号、同步、智能与存储设置',
     score: 0.97,
   },
 ];
@@ -73,8 +97,8 @@ export const JumpAnywhereModal: React.FC = () => {
   const openQuickLook = useCoordinatorStore((s) => s.openQuickLook);
   const openGeneratorModal = useCoordinatorStore((s) => s.openGeneratorModal);
   const openSettings = useCoordinatorStore((s) => s.openSettings);
-  const quickDropShelfOpen = useCoordinatorStore((s) => s.quickDropShelfOpen);
-  const setQuickDropShelfOpen = useCoordinatorStore((s) => s.setQuickDropShelfOpen);
+  const openQuickCapture = useCoordinatorStore((s) => s.openQuickCapture);
+  const presentOnboarding = useCoordinatorStore((s) => s.presentOnboarding);
 
   const folders = useLibraryStore((s) => s.folders);
   const tags = useLibraryStore((s) => s.tags);
@@ -218,8 +242,10 @@ export const JumpAnywhereModal: React.FC = () => {
     if (row.kind === 'command') {
       if (row.commandKey === 'generateBoard') openGeneratorModal();
       else if (row.commandKey === 'gotoInbox') navigate({ type: 'inbox' });
-      else if (row.commandKey === 'toggleShelf') setQuickDropShelfOpen(!quickDropShelfOpen);
-      else if (row.commandKey === 'openSettings') openSettings('accountSecurity');
+      else if (row.commandKey === 'openQuickCapture') openQuickCapture();
+      else if (row.commandKey === 'installExtension') openSettings('extensions');
+      else if (row.commandKey === 'rerunOnboarding') presentOnboarding();
+      else if (row.commandKey === 'openSettings') openSettings('general');
       return;
     }
     if (row.kind === 'moodboard' && row.targetUUID) {
@@ -253,9 +279,11 @@ export const JumpAnywhereModal: React.FC = () => {
 
   const renderRowIcon = (row: JumpRow) => {
     if (row.kind === 'command') {
+      if (row.commandKey === 'openQuickCapture') return <PlusCircle size={16} className="text-[var(--accent)]" />;
       if (row.commandKey === 'generateBoard') return <Sparkles size={16} className="text-[var(--accent)]" />;
       if (row.commandKey === 'gotoInbox') return <Inbox size={16} className="text-[var(--text-secondary)]" />;
-      if (row.commandKey === 'toggleShelf') return <Monitor size={16} className="text-[var(--text-secondary)]" />;
+      if (row.commandKey === 'installExtension') return <Puzzle size={16} className="text-[var(--text-secondary)]" />;
+      if (row.commandKey === 'rerunOnboarding') return <Compass size={16} className="text-[var(--text-secondary)]" />;
       return <Settings size={16} className="text-[var(--text-secondary)]" />;
     }
     if (row.kind === 'moodboard') return <CharkleIcon name="moodboard" size={17} />;

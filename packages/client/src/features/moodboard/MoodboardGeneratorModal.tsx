@@ -44,11 +44,11 @@ import {
 type EntryMode = 'combined' | 'prompt' | 'seedAssets' | 'palette' | 'manualSelection';
 
 const ENTRY_MODE_TABS: ReadonlyArray<{ id: EntryMode; label: string; hint: string }> = [
-  { id: 'combined', label: '多信号组合', hint: '同时融合灵感词、目录、种子图与色板' },
-  { id: 'prompt', label: '灵感词', hint: '用自然语言描述氛围、题材与排除项' },
-  { id: 'seedAssets', label: '种子图', hint: '选 1–4 张定调参考图延展同频素材' },
-  { id: 'palette', label: '目标色板', hint: '以 CIELAB 色域与 ΔE 容差聚合同色调灵感' },
-  { id: 'manualSelection', label: '框选素材', hint: '直接使用已选素材快速生成编排版面' },
+  { id: 'combined', label: '多条件组合', hint: '结合关键词、目录、参考图与色板' },
+  { id: 'prompt', label: '灵感词', hint: '用文字描述想要的风格与氛围' },
+  { id: 'seedAssets', label: '参考图', hint: '选择 1–4 张参考图匹配相近素材' },
+  { id: 'palette', label: '目标色板', hint: '按目标颜色与色差容差筛选素材' },
+  { id: 'manualSelection', label: '已选素材', hint: '直接使用所选素材生成情绪板' },
 ];
 
 export const MoodboardGeneratorModal: React.FC = () => {
@@ -92,7 +92,6 @@ export const MoodboardGeneratorModal: React.FC = () => {
   const [colorTolerance, setColorTolerance] = useState(26);
   const [preferredCount, setPreferredCount] = useState<6 | 10 | 16>(10);
   const [layoutStyle, setLayoutStyle] = useState<EditorialStyle>('magazine');
-  const [useFreeformLayout, setUseFreeformLayout] = useState(false);
   const [includeCuratorNotes, setIncludeCuratorNotes] = useState(true);
   const [autoFocusDetailCrop, setAutoFocusDetailCrop] = useState(false);
 
@@ -137,18 +136,17 @@ export const MoodboardGeneratorModal: React.FC = () => {
   const isCloudAIReady = hasGenerativeAI || isTypeSafeReady;
 
   const providerBadge = useMemo(() => {
-    if (!hasGenerativeAI && isTypeSafeReady) return 'TypeSafe Jev 视觉策展';
-    if (!hasGenerativeAI) return '本机离线策展模式';
-    const suffix = isTypeSafeReady ? ' + Jev 精排' : '';
+    if (!hasGenerativeAI && isTypeSafeReady) return '视觉定位模型';
+    if (!hasGenerativeAI) return '本地生成';
     switch (aiConfig.provider) {
       case 'chatGPTSubscription':
-        return `ChatGPT 视觉策展${suffix}`;
+        return 'ChatGPT';
       case 'gemini':
-        return `Gemini 视觉策展${suffix}`;
+        return 'Gemini';
       case 'openAICompatible':
-        return `云端视觉模型策展${suffix}`;
+        return '云端模型';
       default:
-        return '本机离线策展模式';
+        return '本地生成';
     }
   }, [aiConfig.provider, hasGenerativeAI, isTypeSafeReady]);
 
@@ -235,7 +233,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
       preferredCount,
       candidateCount: 28,
       layoutStyle,
-      useFreeformLayout,
+      useFreeformLayout: true,
       includeCuratorNotes,
       excludedAssetIDs: Array.from(excludedAssetIDs),
       lockedAssetIDs: Array.from(lockedAssetIDs),
@@ -287,10 +285,9 @@ export const MoodboardGeneratorModal: React.FC = () => {
       title={
         <span className="inline-flex items-center gap-2.5">
           <CharkleIcon name="sparkle-board" style="layered" size={24} />
-          <span>AI 情绪板策展工作台</span>
+          <span>AI 生成情绪板</span>
         </span>
       }
-      subtitle="组合灵感词、目录、种子图与色板，由 Agent 视觉审片、宁缺毋滥挑选并编排分区"
       headerRight={
         <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px]">
           <span
@@ -303,7 +300,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
               type="button"
               onClick={() => {
                 handleClose();
-                openSettings('intelligence');
+                openSettings('ai');
               }}
               className="charkle-pressable inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-hairline)] text-[11px] font-medium cursor-pointer"
             >
@@ -355,10 +352,10 @@ export const MoodboardGeneratorModal: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-[368px_1fr] h-[min(70vh,620px)] overflow-hidden">
         {/* Left Studio: 4+1 Composable Brief Controls */}
         <div className="border-r border-[var(--border-hairline)] bg-[var(--bg-gallery)] overflow-y-auto charkle-scroll p-4 flex flex-col gap-4">
-          {/* 4+1 Entry Mode Switcher */}
+          {/* Entry Mode Switcher */}
           <div>
             <div className="text-[12px] font-semibold text-[var(--text-primary)] mb-2">
-              入口模式 (4+1)
+              生成方式
             </div>
             <div className="flex flex-wrap gap-1.5">
               {ENTRY_MODE_TABS.map((m) => {
@@ -469,7 +466,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
             </div>
           )}
 
-          {/* 3. Target Palette + ΔE Tolerance */}
+          {/* 3. Target Palette + Color Tolerance */}
           {(entryMode === 'combined' || entryMode === 'palette') && (
             <div className="flex flex-col gap-2 pt-2 border-t border-[var(--border-hairline)]">
               <div className="flex items-center justify-between">
@@ -519,7 +516,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
               </div>
               {selectedPaletteHexes.length > 0 && (
                 <div className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)] pt-1">
-                  <span>精确</span>
+                  <span>色差容差</span>
                   <input
                     type="range"
                     min={12}
@@ -529,7 +526,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                     onChange={(e) => setColorTolerance(Number(e.target.value))}
                     className="flex-1 accent-[var(--accent)] cursor-pointer"
                   />
-                  <span>宽松 (ΔE {colorTolerance})</span>
+                  <span className="tabular-nums">{colorTolerance}</span>
                 </div>
               )}
             </div>
@@ -611,7 +608,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
             <span className="text-[12px] font-semibold text-[var(--text-primary)]">版面与构成</span>
 
             <div className="flex items-center justify-between gap-2 text-[11.5px]">
-              <span className="text-[var(--text-secondary)]">排版节奏</span>
+              <span className="text-[var(--text-secondary)]">初始构图节奏</span>
               <div className="inline-flex p-0.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
                 {EDITORIAL_STYLES.map((style) => (
                   <button
@@ -619,45 +616,15 @@ export const MoodboardGeneratorModal: React.FC = () => {
                     type="button"
                     onClick={() => setLayoutStyle(style)}
                     className={[
-                      'px-2 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer',
+                      'px-2 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
                       layoutStyle === style
                         ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                        : 'text-[var(--text-secondary)]',
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
                     ].join(' ')}
                   >
                     {editorialStyleLocalizedLabel(style)}
                   </button>
                 ))}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 text-[11.5px]">
-              <span className="text-[var(--text-secondary)]">画布模式</span>
-              <div className="inline-flex p-0.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                <button
-                  type="button"
-                  onClick={() => setUseFreeformLayout(false)}
-                  className={[
-                    'px-2.5 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer',
-                    !useFreeformLayout
-                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                      : 'text-[var(--text-secondary)]',
-                  ].join(' ')}
-                >
-                  自动排版
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUseFreeformLayout(true)}
-                  className={[
-                    'px-2.5 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer',
-                    useFreeformLayout
-                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                      : 'text-[var(--text-secondary)]',
-                  ].join(' ')}
-                >
-                  自由拼贴
-                </button>
               </div>
             </div>
 
@@ -695,8 +662,8 @@ export const MoodboardGeneratorModal: React.FC = () => {
             <label
               title={
                 isTypeSafeReady
-                  ? '入选主图将通过 Jev Box 自动定位局部细节并写入非破坏性裁切框'
-                  : '需在「设置 → 智能与搜索」中开启 TypeSafe System One (Jev)'
+                  ? '入选主图将自动定位局部细节并写入非破坏性裁切框'
+                  : '需在「设置 → 智能与搜索」中开启视觉定位引擎'
               }
               className={[
                 'inline-flex items-center gap-2 text-[11.5px]',
@@ -712,7 +679,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                 onChange={(e) => setAutoFocusDetailCrop(e.target.checked)}
                 className="accent-[var(--accent)]"
               />
-              细节特写自动裁切 (Jev Box Stage 3.5)
+              自动裁切画面细节
             </label>
           </div>
 
@@ -731,10 +698,10 @@ export const MoodboardGeneratorModal: React.FC = () => {
             >
               <Sparkles size={14} />
               {isCurating
-                ? 'Agent 正在审片策展…'
+                ? '正在生成…'
                 : isCloudAIReady
-                  ? '开始 AI 视觉策展'
-                  : '生成离线策展初稿'}
+                  ? '开始生成'
+                  : '生成情绪板'}
             </Button>
             {isCurating && (
               <Button variant="secondary" size="md" onClick={cancelCuration}>
@@ -744,7 +711,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Workbench: Live SSE Agent Harness Timeline + Section Draft Preview + Refinement */}
+        {/* Right Workbench: Live Progress Timeline + Section Draft Preview + Refinement */}
         <div className="bg-[var(--bg-elevated)] flex flex-col min-h-0 overflow-hidden">
           <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-5 flex flex-col gap-4">
             {/* Error callout */}
@@ -755,7 +722,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
               </div>
             )}
 
-            {/* Live SSE Moodboard Agent Harness Timeline */}
+            {/* Live Progress Timeline */}
             {(isCurating || agentSteps.length > 0) && (
               <div className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] overflow-hidden">
                 <button
@@ -769,7 +736,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                     ) : (
                       <CheckCircle2 size={13} className="text-[var(--success)]" />
                     )}
-                    Moodboard Agent Harness 实时阶段轨迹 ({agentSteps.length})
+                    生成进度 ({agentSteps.length})
                   </span>
                   {traceExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </button>
@@ -778,7 +745,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                   <div className="px-3.5 pb-3 pt-1 flex flex-col gap-2 border-t border-[var(--border-hairline)]">
                     {agentSteps.length === 0 ? (
                       <div className="text-[12px] text-[var(--text-secondary)] py-1.5">
-                        正在初始化规划与多路召回引擎…
+                        正在分析素材库…
                       </div>
                     ) : (
                       agentSteps.map((step) => {
@@ -827,10 +794,10 @@ export const MoodboardGeneratorModal: React.FC = () => {
                 <CharkleIcon name="sparkle-board" style="layered" size={52} />
                 <div>
                   <div className="text-[14.5px] font-semibold text-[var(--text-primary)]">
-                    准备好开始视觉策展
+                    准备生成情绪板
                   </div>
                   <p className="text-[12.5px] text-[var(--text-secondary)] mt-1 leading-relaxed">
-                    在左侧设定灵感词、目录、种子图或目标色板，点击「开始策展」即可实时观看 Agent 联系表审片与分区编排。
+                    在左侧设置条件后点击「开始生成」。
                   </p>
                 </div>
               </div>
@@ -850,7 +817,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                       </p>
                     </div>
                     <span className="px-2 py-0.5 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-secondary)] shrink-0">
-                      {proposal.usedCloudAI ? '云端视觉审片' : '本机离线策展'} ·{' '}
+                      {proposal.usedCloudAI ? '云端生成' : '本地生成'} ·{' '}
                       {proposal.primaryMatches.length} 张主选
                     </span>
                   </div>
@@ -875,7 +842,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
 
                   {proposal.rejectedSummary && (
                     <div className="text-[11.5px] text-[var(--text-tertiary)] border-t border-[var(--border-hairline)] pt-2">
-                      宁缺毋滥过滤说明：{proposal.rejectedSummary}
+                      过滤说明：{proposal.rejectedSummary}
                     </div>
                   )}
                 </div>

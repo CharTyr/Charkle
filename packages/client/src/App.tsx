@@ -3,6 +3,11 @@ import { createDefaultAssetBatchPatch, hasVisibleLibraryChanges } from '@charkle
 import { connectCharkleSSE } from './api/sse';
 import { applyThemeToDocument, ToastHost } from './design-system';
 import { AuthGate } from './features/auth/AuthGate';
+import {
+  QuickCaptureModal,
+  useGlobalPasteCapture,
+  WindowDropOverlay,
+} from './features/capture';
 import { GalleryView } from './features/gallery/GalleryView';
 import { InspectorView } from './features/inspector/InspectorView';
 import { JumpAnywhereModal } from './features/jump/JumpAnywhereModal';
@@ -11,9 +16,9 @@ import {
   MoodboardsHomeView,
   MoodboardWorkspaceView,
 } from './features/moodboard';
+import { OnboardingModal } from './features/onboarding';
 import { QuickLookOverlay } from './features/quicklook/QuickLookOverlay';
 import { SettingsModal } from './features/settings';
-import { QuickDropShelf } from './features/shelf';
 import { SidebarView } from './features/sidebar/SidebarView';
 import { useAuthStore } from './stores/authStore';
 import { useCoordinatorStore } from './stores/coordinatorStore';
@@ -33,6 +38,36 @@ const CharkleWorkspace: React.FC = () => {
   const themeMode = useCoordinatorStore((s) => s.themeMode);
   const brandIconVariant = useCoordinatorStore((s) => s.brandIconVariant);
 
+  // Headless global ⌘V clipboard capture (images, URLs, #HEX swatches, text snippets)
+  useGlobalPasteCapture();
+
+  // Safari / Mobile Bookmarklet query param handoff (?clip_url=&clip_title=&clip_text=&clip_hex=)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const clipUrl = params.get('clip_url')?.trim() || undefined;
+    const clipTitle = params.get('clip_title')?.trim() || undefined;
+    const clipText = params.get('clip_text')?.trim() || undefined;
+    const clipHex = params.get('clip_hex')?.trim() || undefined;
+    if (!clipUrl && !clipText && !clipHex) return;
+
+    useCoordinatorStore.getState().openQuickCapture({
+      tab: clipUrl ? 'url' : clipHex ? 'color' : 'note',
+      url: clipUrl,
+      title: clipTitle,
+      text: clipText,
+      hex: clipHex,
+    });
+
+    params.delete('clip_url');
+    params.delete('clip_title');
+    params.delete('clip_text');
+    params.delete('clip_hex');
+    const remaining = params.toString();
+    const cleanUrl = `${window.location.pathname}${remaining ? `?${remaining}` : ''}${window.location.hash}`;
+    window.history.replaceState({}, '', cleanUrl);
+  }, []);
+
   // Keep OS color scheme synced when themeMode === 'system'
   useEffect(() => {
     applyThemeToDocument(themeMode, brandIconVariant);
@@ -43,9 +78,17 @@ const CharkleWorkspace: React.FC = () => {
     return () => mq.removeEventListener('change', handler);
   }, [themeMode, brandIconVariant]);
 
-  // Initial library bootstrap + SSE subscription
+  // Initial library bootstrap + SSE subscription + first-launch onboarding check
   useEffect(() => {
-    void useLibraryStore.getState().bootstrap();
+    void useLibraryStore
+      .getState()
+      .bootstrap()
+      .finally(() => {
+        const coord = useCoordinatorStore.getState();
+        if (!coord.showQuickCapture) {
+          coord.presentOnboardingIfFirstLaunch();
+        }
+      });
 
     const conn = connectCharkleSSE(
       (event) => {
@@ -146,6 +189,12 @@ const CharkleWorkspace: React.FC = () => {
         coord.toggleInspector();
         return;
       }
+      if (mod && e.shiftKey && key === 'n') {
+        e.preventDefault();
+        if (coord.showQuickCapture) coord.closeQuickCapture();
+        else coord.openQuickCapture();
+        return;
+      }
       if (mod && e.shiftKey && key === 's') {
         e.preventDefault();
         lib.setShowVisualFilterBar(!lib.showVisualFilterBar);
@@ -158,7 +207,9 @@ const CharkleWorkspace: React.FC = () => {
         coord.quickLookAssetID ||
         coord.jumpAnywhereOpen ||
         coord.settingsOpen ||
-        coord.generatorModalOpen
+        coord.onboardingOpen ||
+        coord.generatorModalOpen ||
+        coord.showQuickCapture
       ) {
         return;
       }
@@ -279,8 +330,8 @@ const CharkleWorkspace: React.FC = () => {
       {/* Left Navigation Sidebar */}
       <SidebarView />
 
-      {/* Center Workspace Stage (top 24px reserved for flush 22px Quick Drop Notch) */}
-      <main className="flex-1 min-w-0 h-full pt-[24px] flex flex-col overflow-hidden">
+      {/* Center Workspace Stage (clean full-height Gallery-First chrome) */}
+      <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
         {destination.type === 'moodboardsHome' ? (
           <MoodboardsHomeView />
         ) : destination.type === 'moodboard' ? (
@@ -293,12 +344,14 @@ const CharkleWorkspace: React.FC = () => {
       {/* Right Collapsible Inspector */}
       <InspectorView />
 
-      {/* Floating Overlays, Shelf & Studio Modals */}
-      <QuickDropShelf />
+      {/* Floating Overlays, Web-Native Capture & Studio Modals */}
+      <WindowDropOverlay />
+      <QuickCaptureModal />
       <QuickLookOverlay />
       <JumpAnywhereModal />
       <MoodboardGeneratorModal />
       <SettingsModal />
+      <OnboardingModal />
       <ToastHost />
     </div>
   );

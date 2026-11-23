@@ -47,6 +47,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
   containerWidth = 1280,
 }) => {
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+  const openSettings = useCoordinatorStore((s) => s.openSettings);
 
   const [tab, setTab] = useState<ExportTab>('image');
   const [format, setFormat] = useState<MoodboardExportFormat>('png');
@@ -163,10 +164,10 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
       title={
         <span className="inline-flex items-center gap-2">
           <CharkleIcon name="export" size={18} />
-          导出与交付情绪板
+          导出情绪板
         </span>
       }
-      subtitle={`「${document.title}」 · ${document.nodes.length} 个画布元素`}
+      subtitle={`「${document.title}」 · ${document.nodes.length} 项`}
     >
       <div className="flex flex-col gap-5">
         {/* 2-Tab Segmented Switcher */}
@@ -206,7 +207,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
             ].join(' ')}
           >
             <Layers size={15} />
-            Figma / FigJam 无损桥接 (.charkleboard)
+            Figma / FigJam (.charkleboard)
           </button>
         </div>
 
@@ -225,7 +226,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
                 <div>
                   <div className="text-[13px] font-medium text-[var(--text-primary)]">输出格式</div>
                   <div className="text-[11.5px] text-[var(--text-secondary)]">
-                    PNG 保留无损清晰度，JPG 体积更小便于即时分享
+                    PNG 清晰度更高，JPG 文件更小
                   </div>
                 </div>
                 <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
@@ -253,7 +254,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
                 <div>
                   <div className="text-[13px] font-medium text-[var(--text-primary)]">分辨率倍率</div>
                   <div className="text-[11.5px] text-[var(--text-secondary)]">
-                    推荐使用 2× Retina 高清倍率，放大审稿不模糊
+                    推荐使用 2× 高清倍率导出
                   </div>
                 </div>
                 <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
@@ -344,10 +345,10 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
                 </div>
                 <div>
                   <div className="text-[13.5px] font-semibold text-[var(--text-primary)]">
-                    离线无损 `.charkleboard` 迁移包 (Bridge v1)
+                    Figma / FigJam 迁移包 (.charkleboard)
                   </div>
                   <p className="text-[12px] text-[var(--text-secondary)] mt-0.5 leading-relaxed">
-                    完整保留独立图层、4096px 无损 PNG 切片（含 SHA-256 校验）、原始动态 GIF、可编辑便签、分组框、箭头连线与手绘笔迹，100% 离线导入 Figma / FigJam。
+                    保留独立图片图层、动态 GIF、可编辑便签、分组框、箭头连线与手绘笔迹，支持离线导入 Figma / FigJam。
                   </p>
                 </div>
               </div>
@@ -404,8 +405,20 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
 
             {/* 3-Step Figma Plugin Guide */}
             <div className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] p-4">
-              <div className="text-[12.5px] font-semibold text-[var(--text-primary)] mb-3">
-                3 步导入 Figma / FigJam（随仓库内置插件 <code className="font-mono text-[11.5px] px-1.5 py-0.5 rounded bg-[var(--bg-subtle)]">figma-plugin/</code>）
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                  3 步导入 Figma / FigJam（随仓库内置插件 <code className="font-mono text-[11.5px] px-1.5 py-0.5 rounded bg-[var(--bg-subtle)]">figma-plugin/</code>）
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    openSettings('extensions');
+                  }}
+                  className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--accent)] hover:border-[var(--accent-ring)] cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]"
+                >
+                  打开插件与扩展设置 →
+                </button>
               </div>
               <ol className="space-y-2.5 text-[12px] text-[var(--text-secondary)]">
                 <li className="flex items-start gap-2.5">

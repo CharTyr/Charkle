@@ -364,7 +364,7 @@ export const ConnectorLayer: React.FC<ConnectorLayerProps> = ({
                     type="button"
                     title={s.name}
                     onClick={() => onUpdateConnector(editingConnector.id, { colorHex: s.hex })}
-                    className="w-4 h-4 rounded-full cursor-pointer transition-transform duration-120 hover:scale-110"
+                    className="w-4 h-4 rounded-full cursor-pointer transition-transform duration-[var(--duration-press,120ms)] ease-[var(--ease-out)] [@media(hover:hover)_and_(pointer:fine)]:hover:scale-110"
                     style={{
                       backgroundColor: s.hex,
                       boxShadow:

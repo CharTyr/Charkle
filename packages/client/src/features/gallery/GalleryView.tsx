@@ -38,7 +38,6 @@ export const GalleryView: React.FC = () => {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [dragOverCanvas, setDragOverCanvas] = useState(false);
   const [creatingSubfolder, setCreatingSubfolder] = useState(false);
   const [subfolderDraft, setSubfolderDraft] = useState('');
   const [seedingDemo, setSeedingDemo] = useState(false);
@@ -119,27 +118,8 @@ export const GalleryView: React.FC = () => {
     navigate({ type: 'folder', id: created.id });
   };
 
-  const handleDropFiles = async (e: React.DragEvent) => {
-    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
-    e.preventDefault();
-    setDragOverCanvas(false);
-    await handleFilesSelected(e.dataTransfer.files);
-  };
-
   return (
-    <div
-      className="relative flex-1 min-w-0 h-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
-      onDragOver={(e) => {
-        if (e.dataTransfer.types.includes('Files')) {
-          e.preventDefault();
-          setDragOverCanvas(true);
-        }
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOverCanvas(false);
-      }}
-      onDrop={(e) => void handleDropFiles(e)}
-    >
+    <div className="relative flex-1 min-w-0 h-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden">
       <input
         ref={fileInputRef}
         type="file"
@@ -294,11 +274,11 @@ export const GalleryView: React.FC = () => {
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
               <CharkleIcon name="library" style="layered" size={76} className="mb-3" />
-              <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
-                暂无符合条件的素材
+              <h2 className="text-[15.5px] font-semibold text-[var(--text-primary)]">
+                暂无素材
               </h2>
-              <p className="text-[13px] text-[var(--text-secondary)] mt-1 max-w-[360px]">
-                直接拖放图片、视频、音频、3D 模型或文档到此处，或粘贴任意网页 / GitHub / X 推文链接。
+              <p className="text-[12.5px] text-[var(--text-secondary)] mt-1">
+                拖入文件或粘贴链接即可添加
               </p>
               <div className="flex items-center gap-2.5 mt-5">
                 <Button variant="primary" size="sm" onClick={() => fileInputRef.current?.click()}>
@@ -335,20 +315,6 @@ export const GalleryView: React.FC = () => {
           <GalleryFilmstripView assets={assets} />
         )}
       </div>
-
-      {/* Drag-over Drop Veil */}
-      {dragOverCanvas && (
-        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-black/25 backdrop-blur-[2px]">
-          <div className="charkle-glass px-7 py-5 rounded-[var(--radius-dock-outer)] border-2 border-dashed border-[var(--accent)] text-center">
-            <div className="text-[15px] font-semibold text-[var(--text-primary)]">
-              松开即可导入至「{destinationTitle}」
-            </div>
-            <div className="text-[12.5px] text-[var(--text-secondary)] mt-1">
-              支持图片、GIF、视频、音频、PDF、Markdown、设计文件与 3D 模型
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Multi-Select Floating Liquid Glass Batch Action Pill */}
       <BatchActionPill />

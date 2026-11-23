@@ -11,9 +11,14 @@ import type {
   ScoredAsset,
   UUID,
 } from '@charkle/shared';
-import { getBoardReferencedAssetIDs } from '@charkle/shared';
+import {
+  freezeIntoFreeform,
+  getBoardReferencedAssetIDs,
+  isAutoEditorialMode,
+} from '@charkle/shared';
 import { apiClient } from '../api/client';
 import { useCoordinatorStore } from './coordinatorStore';
+import { useLibraryStore } from './libraryStore';
 
 const MAX_HISTORY = 50;
 
@@ -87,6 +92,27 @@ function summarizeDocument(doc: MoodboardDocument): MoodboardSummary {
   };
 }
 
+function ensureFreeformDocument(
+  doc: MoodboardDocument,
+  containerWidth?: number,
+): { document: MoodboardDocument; upgraded: boolean } {
+  if (!isAutoEditorialMode(doc.mode)) {
+    return { document: doc, upgraded: false };
+  }
+  const width =
+    containerWidth ??
+    (typeof window !== 'undefined' ? Math.max(720, window.innerWidth - 340) : 1080);
+  const assetsByID = useLibraryStore.getState().assetsByID;
+  const frozen = freezeIntoFreeform(doc, width, assetsByID);
+  return {
+    document: {
+      ...frozen,
+      updatedAt: new Date().toISOString(),
+    },
+    upgraded: true,
+  };
+}
+
 export const useMoodboardStore = create<MoodboardState>((set, get) => ({
   boards: [],
   activeDocument: null,
@@ -117,15 +143,23 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
     set({ loadingBoard: true });
     try {
       const res = await apiClient.getBoard(id);
-      set({
-        activeDocument: res.board,
+      const { document: board, upgraded } = ensureFreeformDocument(res.board);
+      const summary = summarizeDocument(board);
+      set((s) => ({
+        activeDocument: board,
+        boards: upgraded
+          ? s.boards.map((b) => (b.id === summary.id ? summary : b))
+          : s.boards,
         loadingBoard: false,
         past: [],
         future: [],
         selectedNodeIDs: new Set<UUID>(),
         swappingNodeID: null,
-      });
-      return res.board;
+      }));
+      if (upgraded) {
+        void apiClient.saveBoard(board.id, board).catch(() => {});
+      }
+      return board;
     } catch (err) {
       set({ loadingBoard: false });
       useCoordinatorStore.getState().pushToast({
@@ -138,19 +172,23 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
 
   createBoard: async (title, subtitle = '', seedAssetIDs = []) => {
     const res = await apiClient.createBoard({ title, subtitle, seedAssetIDs });
-    const summary = summarizeDocument(res.board);
+    const { document: board, upgraded } = ensureFreeformDocument(res.board, 1080);
+    if (upgraded) {
+      void apiClient.saveBoard(board.id, board).catch(() => {});
+    }
+    const summary = summarizeDocument(board);
     set((s) => ({
       boards: [summary, ...s.boards.filter((b) => b.id !== summary.id)],
-      activeDocument: res.board,
+      activeDocument: board,
       past: [],
       future: [],
       selectedNodeIDs: new Set<UUID>(),
     }));
     const coord = useCoordinatorStore.getState();
     if (!coord.activeBoardID) {
-      coord.setActiveBoardID(res.board.id);
+      coord.setActiveBoardID(board.id);
     }
-    return res.board;
+    return board;
   },
 
   deleteBoard: async (id) => {
@@ -388,13 +426,18 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
     set({ isCurating: true, curationError: null, agentSteps: [] });
     try {
       const res = await apiClient.proposeMoodboard({ seed, primaryCount, candidateCount });
+      const { document: normalizedDraft } = ensureFreeformDocument(res.proposal.draftDocument, 1080);
+      const proposal: MoodboardProposal = {
+        ...res.proposal,
+        draftDocument: normalizedDraft,
+      };
       set({
-        proposal: res.proposal,
-        agentSteps: res.proposal.agentTrace ?? [],
-        candidatePool: res.proposal.candidatePool ?? [],
+        proposal,
+        agentSteps: proposal.agentTrace ?? [],
+        candidatePool: proposal.candidatePool ?? [],
         isCurating: false,
       });
-      return res.proposal;
+      return proposal;
     } catch (err) {
       const message = err instanceof Error ? err.message : '生成情绪板提案失败';
       set({ isCurating: false, curationError: message });
@@ -409,11 +452,16 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
 
     set({ isCurating: true, curationError: null, agentSteps: [] });
     try {
-      const proposal = await apiClient.curateMoodboard(
-        req,
+      const rawProposal = await apiClient.curateMoodboard(
+        { ...req, useFreeformLayout: true },
         (step) => get().pushAgentStep(step),
         controller.signal,
       );
+      const { document: normalizedDraft } = ensureFreeformDocument(rawProposal.draftDocument, 1080);
+      const proposal: MoodboardProposal = {
+        ...rawProposal,
+        draftDocument: normalizedDraft,
+      };
       set({
         proposal,
         agentSteps: proposal.agentTrace.length > 0 ? proposal.agentTrace : get().agentSteps,
@@ -441,7 +489,7 @@ export const useMoodboardStore = create<MoodboardState>((set, get) => ({
   applyProposal: async (proposalOverride) => {
     const target = proposalOverride ?? get().proposal;
     if (!target) return null;
-    const draft = target.draftDocument;
+    const { document: draft } = ensureFreeformDocument(target.draftDocument, 1080);
     const exists = get().boards.some((b) => b.id === draft.id);
     const saved = exists
       ? (await apiClient.saveBoard(draft.id, draft)).board

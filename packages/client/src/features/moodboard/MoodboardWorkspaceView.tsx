@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  ChevronDown,
   CloudDownload,
   Download,
   LayoutGrid,
   Maximize2,
-  Palette,
   PanelRight,
   Redo2,
   Star,
@@ -13,13 +13,10 @@ import {
 } from 'lucide-react';
 import {
   EDITORIAL_STYLES,
-  createDefaultAutoLayoutConfig,
   cropCenterPoint,
   editorialStyleLocalizedLabel,
   getBoardReferencedAssetIDs,
-  isAutoEditorialMode,
   mapImagePointToVisibleCrop,
-  tidyNodesInFreeform,
 } from '@charkle/shared';
 import type {
   BoardConnector,
@@ -32,14 +29,54 @@ import { apiClient, thumbnailURL } from '../../api/client';
 import { Button } from '../../design-system/Button';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { ModalShell } from '../../design-system/ModalShell';
+import { Popover } from '../../design-system/Popover';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { useMoodboardStore } from '../../stores/moodboardStore';
 import { CandidatePoolPanel } from './CandidatePoolPanel';
 import { ExportBoardModal } from './ExportBoardModal';
 import { MoodboardCanvasView } from './MoodboardCanvasView';
-import { computeFitCamera } from './geometry';
+import { computeFitCamera, tidyNodesWithStyle } from './geometry';
 import type { CameraState } from './geometry';
+
+const TIDY_STYLE_HINTS: Record<EditorialStyle, string> = {
+  balanced: '多列均衡留白，适合日常视觉整理',
+  magazine: '2× 主图跨列强调，突出画板视觉重心',
+  compact: '高密度紧凑网格，一屏容纳更多参考图',
+};
+
+const BOARD_FIT_MARGIN = 64;
+const BOARD_TOP_CLEARANCE = 76;
+const BOARD_BOTTOM_CLEARANCE = 108;
+
+function cameraClipsIntoCanvasHUD(
+  nodes: readonly BoardNode[],
+  cam: CameraState,
+  viewportW: number,
+  viewportH: number,
+): boolean {
+  if (nodes.length === 0 || viewportW < 200 || viewportH < 200) return false;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.frame.x);
+    minY = Math.min(minY, node.frame.y);
+    maxX = Math.max(maxX, node.frame.x + node.frame.width);
+    maxY = Math.max(maxY, node.frame.y + node.frame.height);
+  }
+  const screenMinY = (minY - cam.centerY) * cam.zoom + viewportH * 0.5;
+  const screenMaxY = (maxY - cam.centerY) * cam.zoom + viewportH * 0.5;
+  const screenMinX = (minX - cam.centerX) * cam.zoom + viewportW * 0.5;
+  const screenMaxX = (maxX - cam.centerX) * cam.zoom + viewportW * 0.5;
+  return (
+    screenMinY < BOARD_TOP_CLEARANCE ||
+    screenMaxY > viewportH - BOARD_BOTTOM_CLEARANCE ||
+    screenMinX < 24 ||
+    screenMaxX > viewportW - 24
+  );
+}
 
 export interface MoodboardWorkspaceViewProps {
   boardID?: UUID;
@@ -87,8 +124,21 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
 
   const [candidateDrawerOpen, setCandidateDrawerOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState(1120);
+  const [viewportSize, setViewportSize] = useState({ width: 1120, height: 720 });
+  const [viewportMeasured, setViewportMeasured] = useState(false);
   const [camera, setCamera] = useState<CameraState>({ centerX: 560, centerY: 380, zoom: 1.0 });
+  const [tidyAnimating, setTidyAnimating] = useState(false);
+  const [tidyMenuOpen, setTidyMenuOpen] = useState(false);
+  const tidyTimerRef = useRef<number | null>(null);
+  const tidyMenuAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const fittedBoardIDRef = useRef<UUID | null>(null);
+
+  const handleViewportChange = useCallback((size: { width: number; height: number }) => {
+    setViewportSize((prev) =>
+      prev.width === size.width && prev.height === size.height ? prev : size,
+    );
+    setViewportMeasured(true);
+  }, []);
 
   // Experimental Jev Box dialogs
   const [semanticCropTarget, setSemanticCropTarget] = useState<{ nodeID: UUID; assetID: UUID } | null>(null);
@@ -110,23 +160,117 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
     void openBoard(resolvedBoardID);
   }, [resolvedBoardID, activeDocument?.id, loadingBoard, openBoard]);
 
-  // Sync camera from newly opened board document (leaving ~56px top clearance below palette strip)
+  // Frame newly opened board cleanly between the top palette strip (76px) and bottom dock (108px)
   useEffect(() => {
-    if (!activeDocument) return;
+    if (!activeDocument || !viewportMeasured) return;
+    if (fittedBoardIDRef.current === activeDocument.id) return;
+    fittedBoardIDRef.current = activeDocument.id;
+
+    const savedCam: CameraState = {
+      centerX: activeDocument.viewportCenter.x,
+      centerY: activeDocument.viewportCenter.y,
+      zoom: activeDocument.viewportZoom || 1.0,
+    };
     const hasSavedCenter =
-      Math.abs(activeDocument.viewportCenter.x) > 1 || Math.abs(activeDocument.viewportCenter.y) > 1;
-    if (hasSavedCenter) {
+      Math.abs(savedCam.centerX) > 1 || Math.abs(savedCam.centerY) > 1;
+
+    if (activeDocument.nodes.length === 0) {
       setCamera({
-        centerX: activeDocument.viewportCenter.x,
-        centerY: activeDocument.viewportCenter.y,
-        zoom: activeDocument.viewportZoom || 1.0,
+        centerX: viewportSize.width * 0.5,
+        centerY: viewportSize.height * 0.5,
+        zoom: savedCam.zoom,
       });
-    } else if (!isAutoEditorialMode(activeDocument.mode) && activeDocument.nodes.length > 0) {
-      setCamera(computeFitCamera(activeDocument.nodes, viewportWidth, 720, 72, 64, 96));
-    } else {
-      setCamera({ centerX: 560, centerY: 324, zoom: activeDocument.viewportZoom || 1.0 });
+      return;
     }
-  }, [activeDocument?.id]);
+
+    if (
+      !hasSavedCenter ||
+      cameraClipsIntoCanvasHUD(activeDocument.nodes, savedCam, viewportSize.width, viewportSize.height)
+    ) {
+      setCamera(
+        computeFitCamera(
+          activeDocument.nodes,
+          viewportSize.width,
+          viewportSize.height,
+          BOARD_FIT_MARGIN,
+          BOARD_TOP_CLEARANCE,
+          BOARD_BOTTOM_CLEARANCE,
+        ),
+      );
+    } else {
+      setCamera(savedCam);
+    }
+  }, [activeDocument, viewportMeasured, viewportSize.width, viewportSize.height]);
+
+  useEffect(() => {
+    return () => {
+      if (tidyTimerRef.current !== null) {
+        window.clearTimeout(tidyTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleTidyBoard = useCallback(
+    (style: EditorialStyle = 'balanced') => {
+      if (!activeDocument || activeDocument.nodes.length === 0) return;
+      setTidyMenuOpen(false);
+      setTidyAnimating(true);
+      if (tidyTimerRef.current !== null) {
+        window.clearTimeout(tidyTimerRef.current);
+      }
+      tidyTimerRef.current = window.setTimeout(() => {
+        tidyTimerRef.current = null;
+        setTidyAnimating(false);
+      }, 280);
+
+      const isWholeBoardTidy = selectedNodeIDs.size < 2;
+      const tidiedDoc = tidyNodesWithStyle(activeDocument, selectedNodeIDs, assetsByID, style);
+      const fitCam = isWholeBoardTidy
+        ? computeFitCamera(
+            tidiedDoc.nodes,
+            viewportSize.width,
+            viewportSize.height,
+            BOARD_FIT_MARGIN,
+            BOARD_TOP_CLEARANCE,
+            BOARD_BOTTOM_CLEARANCE,
+          )
+        : null;
+
+      if (fitCam) {
+        setCamera(fitCam);
+      }
+
+      mutateDocument(
+        (doc) => {
+          const next = tidyNodesWithStyle(doc, selectedNodeIDs, assetsByID, style);
+          return fitCam
+            ? {
+                ...next,
+                viewportCenter: { x: fitCam.centerX, y: fitCam.centerY },
+                viewportZoom: fitCam.zoom,
+              }
+            : next;
+        },
+        { recordHistory: true, immediateSave: true },
+      );
+      pushToast({
+        tone: 'success',
+        message:
+          selectedNodeIDs.size >= 2
+            ? `已按「${editorialStyleLocalizedLabel(style)}」整齐排布选中的 ${selectedNodeIDs.size} 个元素`
+            : `已按「${editorialStyleLocalizedLabel(style)}」重新整齐排版`,
+      });
+    },
+    [
+      activeDocument,
+      selectedNodeIDs,
+      assetsByID,
+      viewportSize.width,
+      viewportSize.height,
+      mutateDocument,
+      pushToast,
+    ],
+  );
 
   // Stable modal close handlers so ModalShell never drops Escape listeners on parent re-renders
   const handleCloseExportModal = useCallback(() => setExportModalOpen(false), []);
@@ -428,25 +572,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
     );
   }
 
-  const isAuto = isAutoEditorialMode(activeDocument.mode);
-  const autoConfig =
-    activeDocument.mode.type === 'autoEditorial'
-      ? activeDocument.mode.config
-      : createDefaultAutoLayoutConfig();
   const isActiveTarget = activeBoardID === activeDocument.id;
-
-  const updateAutoConfig = (patch: Partial<typeof autoConfig>) => {
-    mutateDocument((doc) => ({
-      ...doc,
-      mode: {
-        type: 'autoEditorial',
-        config: {
-          ...(doc.mode.type === 'autoEditorial' ? doc.mode.config : createDefaultAutoLayoutConfig()),
-          ...patch,
-        },
-      },
-    }));
-  };
 
   return (
     <div className="h-full w-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden">
@@ -482,7 +608,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
               )}
               {jevBusy && (
                 <span className="text-[10.5px] text-[var(--accent)] font-medium shrink-0">
-                  Jev Box 分析中…
+                  分析中…
                 </span>
               )}
             </div>
@@ -501,93 +627,107 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
           </div>
         </div>
 
-        {/* Center: Mode-specific controls */}
+        {/* Center: Unified Freeform Controls */}
         <div className="hidden lg:flex items-center gap-2 shrink-0">
-          {isAuto ? (
-            <>
-              <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                {EDITORIAL_STYLES.map((style: EditorialStyle) => (
-                  <button
-                    key={style}
-                    type="button"
-                    onClick={() => updateAutoConfig({ style })}
-                    className={[
-                      'px-2.5 py-1 rounded-[6px] text-[11.5px] font-medium cursor-pointer',
-                      autoConfig.style === style
-                        ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                    ].join(' ')}
-                  >
+          <span className="text-[11.5px] font-mono text-[var(--text-secondary)] px-2 tabular-nums">
+            {Math.round(camera.zoom * 100)}%
+          </span>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={() =>
+              handleCameraChange(
+                computeFitCamera(
+                  activeDocument.nodes,
+                  viewportSize.width,
+                  viewportSize.height,
+                  BOARD_FIT_MARGIN,
+                  BOARD_TOP_CLEARANCE,
+                  BOARD_BOTTOM_CLEARANCE,
+                ),
+                true,
+              )
+            }
+            title="适配全部画布内容"
+          >
+            <Maximize2 size={13} />
+            适配
+          </Button>
+
+          {/* One-Click Tidy + Editorial Rhythm Presets */}
+          <div className="inline-flex items-center rounded-[var(--radius-chip)] border border-[var(--border-hairline)] bg-[var(--bg-subtle)]/75 overflow-hidden">
+            <button
+              type="button"
+              disabled={activeDocument.nodes.length === 0}
+              onClick={() => handleTidyBoard('balanced')}
+              title="重新整齐排版（整理选中项或整板）"
+              className="charkle-pressable inline-flex items-center gap-1.5 h-7 px-2.5 text-[11.5px] font-medium text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]"
+            >
+              <LayoutGrid size={13} />
+              重新排版
+            </button>
+            <span className="w-px h-4 bg-[var(--border-hairline)]" />
+            <button
+              ref={tidyMenuAnchorRef}
+              type="button"
+              disabled={activeDocument.nodes.length === 0}
+              onClick={() => setTidyMenuOpen((v) => !v)}
+              aria-label="选择重新排版节奏预设"
+              aria-expanded={tidyMenuOpen}
+              title="选择排版节奏预设（呼吸均衡 / 杂志主次 / 紧凑拼贴）"
+              className="charkle-pressable inline-flex items-center justify-center h-7 w-6 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]"
+            >
+              <ChevronDown size={12} />
+            </button>
+          </div>
+
+          <Popover
+            open={tidyMenuOpen}
+            onOpenChange={setTidyMenuOpen}
+            anchorEl={tidyMenuAnchorRef.current}
+            placement="bottom-end"
+            className="w-56 p-1.5"
+          >
+            <div className="px-2 py-1 text-[10.5px] font-semibold text-[var(--text-tertiary)]">
+              排版预设
+            </div>
+            <div className="flex flex-col gap-0.5">
+              {EDITORIAL_STYLES.map((style: EditorialStyle) => (
+                <button
+                  key={style}
+                  type="button"
+                  onClick={() => handleTidyBoard(style)}
+                  className="charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-left hover:bg-[var(--bg-subtle)] cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]"
+                >
+                  <div className="text-[12px] font-medium text-[var(--text-primary)]">
                     {editorialStyleLocalizedLabel(style)}
-                  </button>
-                ))}
-              </div>
+                  </div>
+                  <div className="text-[10.5px] text-[var(--text-tertiary)] mt-0.5">
+                    {TIDY_STYLE_HINTS[style]}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </Popover>
 
-              <label className="inline-flex items-center gap-1.5 text-[11.5px] text-[var(--text-secondary)] px-2">
-                <span>间距</span>
-                <input
-                  type="range"
-                  min={6}
-                  max={32}
-                  step={2}
-                  value={autoConfig.spacing}
-                  onChange={(e) => updateAutoConfig({ spacing: Number(e.target.value) })}
-                  className="w-16 accent-[var(--accent)] cursor-pointer"
-                />
-              </label>
-
-              <Button
-                variant="ghost"
-                size="xs"
-                active={autoConfig.showPaletteStrip}
-                onClick={() => updateAutoConfig({ showPaletteStrip: !autoConfig.showPaletteStrip })}
-                title="显示 / 隐藏顶部板内色卡条"
-              >
-                <Palette size={13} />
-                色卡条
-              </Button>
-            </>
-          ) : (
-            <>
-              <span className="text-[11.5px] font-mono text-[var(--text-secondary)] px-2 tabular-nums">
-                {Math.round(camera.zoom * 100)}%
-              </span>
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  handleCameraChange(
-                    computeFitCamera(activeDocument.nodes, viewportWidth, 720),
-                    true,
-                  )
-                }
-                title="适配全部画布内容"
-              >
-                <Maximize2 size={13} />
-                适配
-              </Button>
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() =>
-                  mutateDocument(
-                    (doc) => tidyNodesInFreeform(doc, selectedNodeIDs, assetsByID),
-                    { recordHistory: true, immediateSave: true },
-                  )
-                }
-                title="一键整理选中项或整板对齐"
-              >
-                <LayoutGrid size={13} />
-                一键整理
-              </Button>
-              <Button variant="ghost" size="icon" disabled={past.length === 0} onClick={undo} title="撤销 (⌘Z)">
-                <Undo2 size={14} />
-              </Button>
-              <Button variant="ghost" size="icon" disabled={future.length === 0} onClick={redo} title="重做 (⇧⌘Z)">
-                <Redo2 size={14} />
-              </Button>
-            </>
-          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={past.length === 0}
+            onClick={undo}
+            title="撤销 (⌘Z)"
+          >
+            <Undo2 size={14} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={future.length === 0}
+            onClick={redo}
+            title="重做 (⇧⌘Z)"
+          >
+            <Redo2 size={14} />
+          </Button>
         </div>
 
         {/* Right: Active Board + Offline Pin + Candidate Pool + Export */}
@@ -605,7 +745,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
                   : `已将「${activeDocument.title}」设为快速采集目标情绪板`,
               });
             }}
-            title="设为顶部快速采集浮窗的默认活跃情绪板"
+            title="设为默认采集目标情绪板（供全局粘贴与浏览器扩展使用）"
           >
             <Star size={13} fill={isActiveTarget ? 'currentColor' : 'none'} />
             <span className="hidden sm:inline">{isActiveTarget ? '活跃情绪板' : '设为活跃'}</span>
@@ -626,7 +766,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
                 message: nextPinned ? '已为当前情绪板开启离线保留' : '已取消离线保留',
               });
             }}
-            title="开启离线保留，防止缓存 LRU 自动清理本板原图"
+            title="离线保留本板原图，避免自动清理缓存"
           >
             <CloudDownload size={13} />
             <span className="hidden md:inline">离线</span>
@@ -649,7 +789,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         </div>
       </header>
 
-      {/* Main Split: Dual-Mode Canvas + Collapsible Candidate Pool Drawer */}
+      {/* Main Split: Unified Freeform Canvas + Slide-Out Candidate Pool Drawer */}
       <div className="flex-1 min-h-0 flex overflow-hidden relative">
         <MoodboardCanvasView
           document={activeDocument}
@@ -660,12 +800,15 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
           canUndo={past.length > 0}
           canRedo={future.length > 0}
           camera={camera}
+          tidyAnimating={tidyAnimating}
+          drawerOpen={candidateDrawerOpen}
           onCameraChange={handleCameraChange}
-          onViewportWidthChange={setViewportWidth}
+          onViewportChange={handleViewportChange}
           onSelectNodes={setSelectedNodeIDs}
           onToggleSelectNode={toggleSelectNode}
           onClearSelection={clearNodeSelection}
           onCommitDocument={mutateDocument}
+          onTidyBoard={() => handleTidyBoard('balanced')}
           onUndo={undo}
           onRedo={redo}
           onTriggerSwap={(nodeID) => {
@@ -714,7 +857,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         open={exportModalOpen}
         onClose={handleCloseExportModal}
         document={activeDocument}
-        containerWidth={viewportWidth}
+        containerWidth={viewportSize.width}
       />
 
       {/* Jev Box Dialog 1: Semantic Crop Prompt */}
@@ -722,8 +865,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         open={Boolean(semanticCropTarget)}
         onClose={handleCloseSemanticCrop}
         width="sm"
-        title="一句话语义裁切 (Jev Box)"
-        subtitle="描述画面中想要聚焦的局部细节，自动写入非破坏性裁切框"
+        title="语义裁切"
+        subtitle="输入想聚焦的画面局部"
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={handleCloseSemanticCrop}>
@@ -769,8 +912,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         open={Boolean(visualMatchTarget)}
         onClose={handleCloseVisualMatch}
         width="md"
-        title="按参考图匹配区域 (Jev Box)"
-        subtitle="选择一张参考素材，在当前卡片中定位相似局部并自动裁切"
+        title="按参考图匹配区域"
+        subtitle="选择一张参考图进行局部匹配裁切"
       >
         <div className="grid grid-cols-4 gap-2 max-h-[340px] overflow-y-auto charkle-scroll">
           {allLibraryAssets
@@ -801,8 +944,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         open={Boolean(pinpointTarget)}
         onClose={handleClosePinpoint}
         width="sm"
-        title="指物精准批注 (Pinpoint Callout)"
-        subtitle="自动定位画面中的目标点，并生成便签与锚点连线"
+        title="指物批注"
+        subtitle="定位画面局部并添加连线便签"
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={handleClosePinpoint}>

@@ -1,11 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ChevronLeft,
   ChevronRight,
-  Copy,
   Download,
-  ExternalLink,
   FlipHorizontal2,
   FlipVertical2,
   Info,
@@ -19,11 +17,10 @@ import {
 import {
   createDefaultAssetBatchPatch,
   getAssetDisplayTypeLabel,
-  labFromHex,
-  parseHex,
 } from '@charkle/shared';
 import type { AssetRecord } from '@charkle/shared';
 import { apiClient } from '../../api/client';
+import { stopAllHoverPreviews } from '../../components/HoverMediaPreview';
 import {
   computeAmbientTintStyle,
   formatBytes,
@@ -31,58 +28,22 @@ import {
 } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
-import { getCardEffectiveAspectRatio, isColorSwatchAsset } from '../gallery/assetCardUtils';
+import { isEditableElement } from '../capture/captureUtils';
+import { getCardEffectiveAspectRatio } from '../gallery/assetCardUtils';
 import { AudioStudioViewer } from './AudioStudioViewer';
 import { DocumentMarkdownViewer } from './DocumentMarkdownViewer';
 import { GitHubRepoViewer } from './GitHubRepoViewer';
+import {
+  classifyAssetViewerKind,
+  ColorSwatchViewer,
+  computeQuarterTurnFitScale,
+  computeWheelZoomFactor,
+  LazyModel3DViewer,
+  supportsVisualTransform,
+  useHorizontalWheelRedirect,
+  WebBookmarkViewer,
+} from './MediaStageHelpers';
 import { SocialPostViewer } from './SocialPostViewer';
-
-const LazyModel3DViewer = React.lazy(() =>
-  import('./Model3DViewer').then((m) => ({ default: m.Model3DViewer })),
-);
-
-function ColorSwatchViewer({ asset }: { asset: AssetRecord }) {
-  const pushToast = useCoordinatorStore((s) => s.pushToast);
-  const hex = asset.dominantColors[0]?.hex || '#4E7D96';
-  const rgb = parseHex(hex);
-  const lab = asset.dominantColors[0] ?? labFromHex(hex);
-  const rgbStr = rgb
-    ? `rgb(${Math.round(rgb.r * 255)}, ${Math.round(rgb.g * 255)}, ${Math.round(rgb.b * 255)})`
-    : '—';
-  const labStr = `L ${lab.l.toFixed(1)} · a ${lab.a.toFixed(1)} · b ${lab.b.toFixed(1)}`;
-
-  const copy = async (val: string) => {
-    await navigator.clipboard.writeText(val).catch(() => {});
-    pushToast({ tone: 'info', message: `已复制 ${val}` });
-  };
-
-  return (
-    <div className="w-[min(420px,88vw)] rounded-[var(--radius-dock-outer)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-2xl">
-      <div className="h-[240px] w-full" style={{ backgroundColor: hex }} />
-      <div className="p-5 flex flex-col gap-2.5">
-        <div className="text-[15px] font-semibold text-[var(--text-primary)]">{asset.title}</div>
-        {[
-          { label: 'HEX', val: hex },
-          { label: 'RGB', val: rgbStr },
-          { label: 'CIELAB', val: labStr },
-        ].map((row) => (
-          <button
-            key={row.label}
-            type="button"
-            onClick={() => void copy(row.val)}
-            className="charkle-pressable flex items-center justify-between px-3 py-2 rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] hover:bg-[var(--bg-subtle)] text-[12.5px] cursor-pointer"
-          >
-            <span className="text-[var(--text-tertiary)] font-semibold">{row.label}</span>
-            <span className="font-mono text-[var(--text-primary)] inline-flex items-center gap-1.5">
-              {row.val}
-              <Copy size={12} className="opacity-60" />
-            </span>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 export const QuickLookOverlay: React.FC = () => {
   const quickLookAssetID = useCoordinatorStore((s) => s.quickLookAssetID);
@@ -107,7 +68,12 @@ export const QuickLookOverlay: React.FC = () => {
   const [flipH, setFlipH] = useState(false);
   const [flipV, setFlipV] = useState(false);
   const [draggingPan, setDraggingPan] = useState(false);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+
   const panOriginRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const filmstripRef = useRef<HTMLDivElement | null>(null);
 
   const currentIndex = useMemo(() => {
     if (!quickLookAssetID) return -1;
@@ -120,57 +86,117 @@ export const QuickLookOverlay: React.FC = () => {
     return assetsByID[quickLookAssetID] ?? null;
   }, [quickLookAssetID, currentIndex, assets, assetsByID]);
 
-  // Reset transform + 110ms staggered HUD choreography (`PARITY_SPEC.md` §7.1)
+  const isVisualImage = asset ? supportsVisualTransform(asset) : false;
+
+  const resetTransforms = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setRotation(0);
+    setFlipH(false);
+    setFlipV(false);
+  }, []);
+
+  const applyZoomMultiplier = useCallback((factor: number) => {
+    setZoom((z) => {
+      const next = Math.max(0.5, Math.min(5, Number((z * factor).toFixed(3))));
+      if (next <= 1.01) {
+        setPan({ x: 0, y: 0 });
+      }
+      return next;
+    });
+  }, []);
+
+  const stepTo = useCallback(
+    (delta: number) => {
+      if (assets.length === 0 || currentIndex < 0) return;
+      const nextIdx = Math.max(0, Math.min(assets.length - 1, currentIndex + delta));
+      if (nextIdx === currentIndex) return;
+      const next = assets[nextIdx];
+      selectAsset(next.id, 'replace');
+      openQuickLook(next.id);
+    },
+    [assets, currentIndex, selectAsset, openQuickLook],
+  );
+
+  // Stop any hover preview, reset transforms, and run 40ms staggered HUD reveal
   useEffect(() => {
     if (!quickLookAssetID) {
       setChromeVisible(false);
       return;
     }
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-    setRotation(0);
-    setFlipH(false);
-    setFlipV(false);
+    stopAllHoverPreviews();
+    resetTransforms();
+    setNaturalSize(null);
     void markOpened(quickLookAssetID);
 
-    const timer = window.setTimeout(() => setChromeVisible(true), 110);
+    const timer = window.setTimeout(() => setChromeVisible(true), 40);
     return () => window.clearTimeout(timer);
-  }, [quickLookAssetID, markOpened]);
+  }, [quickLookAssetID, markOpened, resetTransforms]);
 
-  const stepTo = (delta: number) => {
-    if (assets.length === 0 || currentIndex < 0) return;
-    const nextIdx = Math.max(0, Math.min(assets.length - 1, currentIndex + delta));
-    if (nextIdx === currentIndex) return;
-    const next = assets[nextIdx];
-    selectAsset(next.id, 'replace');
-    openQuickLook(next.id);
-  };
+  // Measure live stage dimensions for exact quarter-turn fit scaling
+  useEffect(() => {
+    if (!quickLookAssetID) return;
+    const el = stageRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      setStageSize({ width: el.clientWidth, height: el.clientHeight });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [quickLookAssetID, sidePanelOpen]);
 
-  const resetTransforms = () => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-    setRotation(0);
-    setFlipH(false);
-    setFlipV(false);
-  };
+  // Smooth exponential wheel zoom on the visual stage
+  useEffect(() => {
+    if (!quickLookAssetID || !isVisualImage) return;
+    const el = stageRef.current;
+    if (!el) return;
 
-  // Keyboard shortcuts (`PARITY_SPEC.md` §7.1)
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY === 0) return;
+      e.preventDefault();
+      const factor = computeWheelZoomFactor(e);
+      setZoom((z) => {
+        const next = Math.max(0.5, Math.min(5, Number((z * factor).toFixed(3))));
+        if (next <= 1.01) setPan({ x: 0, y: 0 });
+        return next;
+      });
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [quickLookAssetID, isVisualImage]);
+
+  // Vertical mouse wheel -> horizontal scroll on Quick Look bottom filmstrip
+  useHorizontalWheelRedirect(filmstripRef, Boolean(quickLookAssetID) && assets.length > 1);
+
+  // Keyboard shortcuts (Space/Esc, Arrows, R/⇧R, ⇧H/⇧V, +/=/-, 0)
   useEffect(() => {
     if (!quickLookAssetID) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' || e.key === ' ') {
+      if (e.key === 'Escape' || (e.key === ' ' && !isEditableElement(e.target))) {
         e.preventDefault();
         e.stopPropagation();
         closeQuickLook();
         return;
       }
+      if (isEditableElement(e.target)) return;
+
       if (e.key === 'ArrowRight') {
         e.preventDefault();
         stepTo(1);
-      } else if (e.key === 'ArrowLeft') {
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
         e.preventDefault();
         stepTo(-1);
-      } else if (e.key === 'r' || e.key === 'R') {
+        return;
+      }
+
+      if (!isVisualImage || e.metaKey || e.ctrlKey || e.altKey) return;
+
+      if (e.key === 'r' || e.key === 'R') {
         e.preventDefault();
         const parity = flipH !== flipV ? -1 : 1;
         const delta = (e.shiftKey ? -90 : 90) * parity;
@@ -181,6 +207,12 @@ export const QuickLookOverlay: React.FC = () => {
       } else if ((e.key === 'v' || e.key === 'V') && e.shiftKey) {
         e.preventDefault();
         setFlipV((v) => !v);
+      } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        applyZoomMultiplier(1.25);
+      } else if (e.key === '-') {
+        e.preventDefault();
+        applyZoomMultiplier(0.8);
       } else if (e.key === '0') {
         e.preventDefault();
         resetTransforms();
@@ -188,28 +220,23 @@ export const QuickLookOverlay: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [quickLookAssetID, currentIndex, assets, flipH, flipV, closeQuickLook]);
+  }, [
+    quickLookAssetID,
+    isVisualImage,
+    flipH,
+    flipV,
+    closeQuickLook,
+    stepTo,
+    applyZoomMultiplier,
+    resetTransforms,
+  ]);
 
   if (!quickLookAssetID || !asset || typeof document === 'undefined') return null;
 
-  const isVisualImage =
-    asset.mediaKind === 'image' ||
-    asset.mediaKind === 'animatedImage' ||
-    asset.mediaKind === 'designFile';
-  const isVideo = asset.mediaKind === 'video';
-  const isAudio = asset.mediaKind === 'audio';
-  const isModel3D = asset.mediaKind === 'model3D';
-  const githubRepo = asset.richMetadata?.githubRepo ?? null;
-  const socialPost = asset.richMetadata?.socialPost ?? null;
-  const isSwatch = isColorSwatchAsset(asset);
-  const isWebBookmark = asset.mediaKind === 'webBookmark' && !githubRepo && !socialPost;
-  const isDocument = asset.mediaKind === 'document' && !isSwatch;
-
-  const quarterTurn = Math.abs(rotation % 180) === 90;
-  const quarterFitScale =
-    quarterTurn && asset.pixelWidth > 0 && asset.pixelHeight > 0
-      ? Math.min(1, Math.min(asset.pixelWidth, asset.pixelHeight) / Math.max(asset.pixelWidth, asset.pixelHeight))
-      : 1;
+  const viewerKind = classifyAssetViewerKind(asset);
+  const quarterFitScale = isVisualImage
+    ? computeQuarterTurnFitScale(stageSize, asset, rotation, naturalSize)
+    : 1;
 
   const primaryHex = asset.dominantColors[0]?.hex;
   const ambientStyle = computeAmbientTintStyle(primaryHex, isDark, 'quicklook');
@@ -233,9 +260,9 @@ export const QuickLookOverlay: React.FC = () => {
         style={ambientStyle}
       />
 
-      {/* Top Floating Liquid Glass HUD (staggered 110ms) */}
+      {/* Top Floating Liquid Glass HUD (40ms stagger) */}
       <div
-        className="relative z-20 flex items-center justify-between gap-3 px-5 pt-4 pb-2 transition-opacity duration-[180ms] ease-[var(--ease-out)]"
+        className="relative z-20 flex items-center justify-between gap-3 px-5 pt-4 pb-2 transition-opacity duration-[var(--duration-sm)] ease-[var(--ease-out)]"
         style={{ opacity: chromeVisible ? 1 : 0 }}
       >
         <div className="charkle-glass-dark px-3.5 py-1.5 rounded-full flex items-center gap-2.5 max-w-[52vw]">
@@ -251,19 +278,24 @@ export const QuickLookOverlay: React.FC = () => {
             <>
               <button
                 type="button"
-                title="缩小"
-                onClick={() => setZoom((z) => Math.max(0.5, Number((z * 0.8).toFixed(2))))}
+                title="缩小 (-)"
+                onClick={() => applyZoomMultiplier(0.8)}
                 className="charkle-pressable h-7.5 w-7.5 rounded-full hover:bg-white/12 text-white/85 flex items-center justify-center cursor-pointer"
               >
                 <ZoomOut size={14} />
               </button>
-              <span className="text-[11px] font-mono text-white/75 w-10 text-center tabular-nums">
-                {Math.round(zoom * 100)}%
-              </span>
               <button
                 type="button"
-                title="放大"
-                onClick={() => setZoom((z) => Math.min(5, Number((z * 1.25).toFixed(2))))}
+                title="重置缩放与变换 (0)"
+                onClick={resetTransforms}
+                className="charkle-pressable text-[11px] font-mono text-white/80 hover:text-white w-11 h-7.5 rounded-full hover:bg-white/10 text-center tabular-nums cursor-pointer"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <button
+                type="button"
+                title="放大 (+)"
+                onClick={() => applyZoomMultiplier(1.25)}
                 className="charkle-pressable h-7.5 w-7.5 rounded-full hover:bg-white/12 text-white/85 flex items-center justify-center cursor-pointer"
               >
                 <ZoomIn size={14} />
@@ -280,7 +312,10 @@ export const QuickLookOverlay: React.FC = () => {
                 type="button"
                 title="水平翻转 (⇧H)"
                 onClick={() => setFlipH((v) => !v)}
-                className="charkle-pressable h-7.5 w-7.5 rounded-full hover:bg-white/12 text-white/85 flex items-center justify-center cursor-pointer"
+                className={[
+                  'charkle-pressable h-7.5 w-7.5 rounded-full flex items-center justify-center cursor-pointer',
+                  flipH ? 'bg-white/22 text-white' : 'hover:bg-white/12 text-white/85',
+                ].join(' ')}
               >
                 <FlipHorizontal2 size={14} />
               </button>
@@ -288,7 +323,10 @@ export const QuickLookOverlay: React.FC = () => {
                 type="button"
                 title="垂直翻转 (⇧V)"
                 onClick={() => setFlipV((v) => !v)}
-                className="charkle-pressable h-7.5 w-7.5 rounded-full hover:bg-white/12 text-white/85 flex items-center justify-center cursor-pointer"
+                className={[
+                  'charkle-pressable h-7.5 w-7.5 rounded-full flex items-center justify-center cursor-pointer',
+                  flipV ? 'bg-white/22 text-white' : 'hover:bg-white/12 text-white/85',
+                ].join(' ')}
               >
                 <FlipVertical2 size={14} />
               </button>
@@ -305,7 +343,7 @@ export const QuickLookOverlay: React.FC = () => {
           )}
 
           <a
-            href={apiClient.originalMediaURL(asset.id, true)}
+            href={apiClient.originalMediaURL(asset.id, { download: true })}
             download={asset.fileName}
             title="下载原文件"
             className="charkle-pressable h-7.5 w-7.5 rounded-full hover:bg-white/12 text-white/85 flex items-center justify-center"
@@ -336,8 +374,8 @@ export const QuickLookOverlay: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Media Stage + Optional Side Panel */}
-      <div className="relative z-10 flex-1 min-h-0 flex items-center justify-center px-14 py-3 gap-4 overflow-hidden">
+      {/* Main Media Stage + Collapsible Info Rail (--ease-drawer) */}
+      <div className="relative z-10 flex-1 min-h-0 flex items-center justify-center px-14 py-3 overflow-hidden">
         {/* Left/Right Navigation Chevrons */}
         {currentIndex > 0 && (
           <button
@@ -345,7 +383,7 @@ export const QuickLookOverlay: React.FC = () => {
             onClick={() => stepTo(-1)}
             aria-label="上一项"
             style={{ opacity: chromeVisible ? 1 : 0 }}
-            className="charkle-pressable charkle-glass-dark absolute left-4 top-1/2 -translate-y-1/2 z-20 h-10 w-10 rounded-full flex items-center justify-center text-white cursor-pointer transition-opacity duration-[180ms]"
+            className="charkle-pressable charkle-glass-dark absolute left-4 top-1/2 -translate-y-1/2 z-20 h-10 w-10 rounded-full flex items-center justify-center text-white cursor-pointer transition-opacity duration-[var(--duration-sm)] ease-[var(--ease-out)]"
           >
             <ChevronLeft size={20} />
           </button>
@@ -356,7 +394,7 @@ export const QuickLookOverlay: React.FC = () => {
             onClick={() => stepTo(1)}
             aria-label="下一项"
             style={{ opacity: chromeVisible ? 1 : 0 }}
-            className="charkle-pressable charkle-glass-dark absolute right-4 top-1/2 -translate-y-1/2 z-20 h-10 w-10 rounded-full flex items-center justify-center text-white cursor-pointer transition-opacity duration-[180ms]"
+            className="charkle-pressable charkle-glass-dark absolute right-4 top-1/2 -translate-y-1/2 z-20 h-10 w-10 rounded-full flex items-center justify-center text-white cursor-pointer transition-opacity duration-[var(--duration-sm)] ease-[var(--ease-out)]"
           >
             <ChevronRight size={20} />
           </button>
@@ -364,33 +402,21 @@ export const QuickLookOverlay: React.FC = () => {
 
         {/* Dedicated 8-Media-Type Viewer Switch */}
         <div
+          ref={stageRef}
           className="flex-1 min-w-0 h-full flex items-center justify-center overflow-hidden"
-          onWheel={
-            isVisualImage
-              ? (e) => {
-                  e.preventDefault();
-                  const factor = e.deltaY < 0 ? 1.12 : 0.9;
-                  setZoom((z) => {
-                    const next = Math.max(0.5, Math.min(5, Number((z * factor).toFixed(2))));
-                    if (next <= 1.01) setPan({ x: 0, y: 0 });
-                    return next;
-                  });
-                }
-              : undefined
-          }
           onClick={(e) => {
             if (e.target === e.currentTarget) closeQuickLook();
           }}
         >
-          {githubRepo ? (
-            <GitHubRepoViewer asset={asset} repo={githubRepo} />
-          ) : socialPost ? (
-            <SocialPostViewer asset={asset} post={socialPost} />
-          ) : isSwatch ? (
+          {viewerKind === 'githubRepo' && asset.richMetadata?.githubRepo ? (
+            <GitHubRepoViewer asset={asset} repo={asset.richMetadata.githubRepo} />
+          ) : viewerKind === 'socialPost' && asset.richMetadata?.socialPost ? (
+            <SocialPostViewer asset={asset} post={asset.richMetadata.socialPost} />
+          ) : viewerKind === 'swatch' ? (
             <ColorSwatchViewer asset={asset} />
-          ) : isAudio ? (
+          ) : viewerKind === 'audio' ? (
             <AudioStudioViewer asset={asset} />
-          ) : isModel3D ? (
+          ) : viewerKind === 'model3D' ? (
             <React.Suspense
               fallback={
                 <div className="w-[min(960px,92vw)] h-[min(640px,76vh)] rounded-[var(--radius-dock-outer)] bg-[#181A20] flex items-center justify-center text-white text-[13px] gap-2">
@@ -401,54 +427,22 @@ export const QuickLookOverlay: React.FC = () => {
             >
               <LazyModel3DViewer asset={asset} />
             </React.Suspense>
-          ) : isDocument ? (
+          ) : viewerKind === 'document' ? (
             <DocumentMarkdownViewer asset={asset} />
-          ) : isVideo ? (
+          ) : viewerKind === 'video' ? (
             <video
               key={asset.id}
               src={apiClient.originalMediaURL(asset.id)}
-              poster={apiClient.thumbnailURL(asset.id, 'preview1400', cacheBust)}
+              poster={apiClient.thumbnailURL(asset.id, 'preview1400', `${asset.updatedAt}-${cacheBust}`)}
               controls
               autoPlay
               playsInline
               className="max-w-full max-h-full rounded-[var(--radius-card-outer)] shadow-2xl"
             />
-          ) : isWebBookmark ? (
-            <div className="w-[min(620px,90vw)] rounded-[var(--radius-dock-outer)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-2xl flex flex-col">
-              <img
-                src={apiClient.thumbnailURL(asset.id, 'preview1400', cacheBust)}
-                alt={asset.title}
-                className="w-full max-h-[360px] object-cover bg-[var(--bg-subtle)]"
-              />
-              <div className="p-5 flex flex-col gap-2">
-                <span className="text-[11px] font-mono text-[var(--text-tertiary)]">
-                  {asset.sourceDomain || 'WEB BOOKMARK'}
-                </span>
-                <h3 className="text-[16px] font-semibold text-[var(--text-primary)]">
-                  {asset.title}
-                </h3>
-                {asset.notes && (
-                  <p className="text-[13px] text-[var(--text-secondary)] leading-relaxed">
-                    {asset.notes}
-                  </p>
-                )}
-                {asset.sourceURL && (
-                  <div className="pt-2">
-                    <a
-                      href={asset.sourceURL}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="charkle-pressable h-9 px-4 inline-flex items-center gap-1.5 rounded-[var(--radius-dock-inner)] bg-[var(--accent)] text-white text-[13px] font-medium"
-                    >
-                      <ExternalLink size={14} />
-                      在浏览器打开
-                    </a>
-                  </div>
-                )}
-              </div>
-            </div>
+          ) : viewerKind === 'webBookmark' ? (
+            <WebBookmarkViewer asset={asset} cacheBust={cacheBust} />
           ) : (
-            /* Image / Animated GIF / Design File with smooth zoom, pan, rotate & flip */
+            /* Image / Animated GIF / Design File with exact flip-wraps-rotate transform order */
             <img
               key={asset.id}
               src={
@@ -458,6 +452,12 @@ export const QuickLookOverlay: React.FC = () => {
               }
               alt={asset.title}
               draggable={false}
+              onLoad={(e) => {
+                const img = e.currentTarget;
+                if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                  setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+                }
+              }}
               onDoubleClick={() => {
                 setZoom((z) => {
                   const next = z > 1.1 ? 1 : 2;
@@ -466,7 +466,7 @@ export const QuickLookOverlay: React.FC = () => {
                 });
               }}
               onMouseDown={(e) => {
-                if (zoom <= 1.01) return;
+                if (e.button !== 0 || zoom <= 1.01) return;
                 e.preventDefault();
                 setDraggingPan(true);
                 panOriginRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
@@ -485,10 +485,10 @@ export const QuickLookOverlay: React.FC = () => {
                 window.addEventListener('mouseup', onUp);
               }}
               style={{
-                transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom * quarterFitScale}) rotate(${rotation}deg) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1})`,
+                transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom * quarterFitScale}) scaleX(${flipH ? -1 : 1}) scaleY(${flipV ? -1 : 1}) rotate(${rotation}deg)`,
                 transition: draggingPan
                   ? 'none'
-                  : 'transform 220ms var(--ease-out-strong)',
+                  : 'transform var(--duration-settle) var(--ease-out-strong)',
                 cursor: zoom > 1.01 ? (draggingPan ? 'grabbing' : 'grab') : 'zoom-in',
               }}
               className="max-w-full max-h-full object-contain rounded-[var(--radius-card-outer)] shadow-2xl"
@@ -496,9 +496,18 @@ export const QuickLookOverlay: React.FC = () => {
           )}
         </div>
 
-        {/* Collapsible Quick Look Info Rail (292px) */}
-        {sidePanelOpen && (
-          <div className="charkle-glass-dark w-[288px] max-h-full rounded-[var(--radius-dock-outer)] p-4 overflow-y-auto charkle-scroll flex flex-col gap-3 shrink-0">
+        {/* Collapsible Quick Look Info Rail (288px, --ease-drawer 300ms) */}
+        <div
+          aria-hidden={!sidePanelOpen}
+          className={[
+            'shrink-0 max-h-full overflow-hidden',
+            'transition-[width,margin,opacity,transform] duration-[var(--duration-drawer)] ease-[var(--ease-drawer)]',
+            sidePanelOpen
+              ? 'w-[288px] ml-4 opacity-100 translate-x-0 pointer-events-auto'
+              : 'w-0 ml-0 opacity-0 translate-x-3 pointer-events-none',
+          ].join(' ')}
+        >
+          <div className="charkle-glass-dark w-[288px] max-h-full rounded-[var(--radius-dock-outer)] p-4 overflow-y-auto charkle-scroll flex flex-col gap-3">
             <div className="text-[13.5px] font-semibold text-white">{asset.title}</div>
             <div className="flex items-center gap-1">
               {[1, 2, 3, 4, 5].map((star) => (
@@ -517,7 +526,9 @@ export const QuickLookOverlay: React.FC = () => {
                   <Star
                     size={15}
                     className={
-                      asset.rating >= star ? 'fill-[#F2C14E] text-[#F2C14E]' : 'text-white/30'
+                      asset.rating >= star
+                        ? 'fill-[#F2C14E] text-[#F2C14E] charkle-micro-pop'
+                        : 'text-white/30'
                     }
                   />
                 </button>
@@ -568,41 +579,46 @@ export const QuickLookOverlay: React.FC = () => {
               )}
             </div>
           </div>
-        )}
+        </div>
       </div>
 
-      {/* Bottom Floating Liquid Glass Filmstrip */}
+      {/* Bottom Floating Liquid Glass Filmstrip (with vertical->horizontal wheel redirect) */}
       {assets.length > 1 && (
         <div
-          className="relative z-20 pb-4 px-6 flex justify-center transition-opacity duration-[180ms] ease-[var(--ease-out)]"
+          className="relative z-20 pb-4 px-6 flex justify-center transition-opacity duration-[var(--duration-sm)] ease-[var(--ease-out)]"
           style={{ opacity: chromeVisible ? 1 : 0 }}
         >
-          <div className="charkle-glass-dark max-w-[min(780px,92vw)] px-2.5 py-2 rounded-[var(--radius-dock-outer)] flex items-center gap-1.5 overflow-x-auto charkle-scroll">
-            {assets.slice(Math.max(0, currentIndex - 15), Math.min(assets.length, currentIndex + 16)).map((item) => {
-              const active = item.id === asset.id;
-              const ratio = Math.max(0.65, Math.min(1.65, getCardEffectiveAspectRatio(item)));
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    selectAsset(item.id, 'replace');
-                    openQuickLook(item.id);
-                  }}
-                  style={{ width: Math.round(44 * ratio), height: 44 }}
-                  className={[
-                    'shrink-0 overflow-hidden rounded-[8px] cursor-pointer transition-opacity',
-                    active ? 'ring-2 ring-white opacity-100' : 'opacity-50 hover:opacity-85',
-                  ].join(' ')}
-                >
-                  <img
-                    src={apiClient.thumbnailURL(item.id, 'grid520', cacheBust)}
-                    alt={item.title}
-                    className="w-full h-full object-cover"
-                  />
-                </button>
-              );
-            })}
+          <div
+            ref={filmstripRef}
+            className="charkle-glass-dark max-w-[min(780px,92vw)] px-2.5 py-2 rounded-[var(--radius-dock-outer)] flex items-center gap-1.5 overflow-x-auto charkle-scroll"
+          >
+            {assets
+              .slice(Math.max(0, currentIndex - 15), Math.min(assets.length, currentIndex + 16))
+              .map((item) => {
+                const active = item.id === asset.id;
+                const ratio = Math.max(0.65, Math.min(1.65, getCardEffectiveAspectRatio(item)));
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      selectAsset(item.id, 'replace');
+                      openQuickLook(item.id);
+                    }}
+                    style={{ width: Math.round(44 * ratio), height: 44 }}
+                    className={[
+                      'shrink-0 overflow-hidden rounded-[8px] cursor-pointer transition-opacity duration-[var(--duration-sm)] ease-[var(--ease-out)]',
+                      active ? 'ring-2 ring-white opacity-100' : 'opacity-50 hover:opacity-85',
+                    ].join(' ')}
+                  >
+                    <img
+                      src={apiClient.thumbnailURL(item.id, 'grid520', cacheBust)}
+                      alt={item.title}
+                      className="w-full h-full object-cover"
+                    />
+                  </button>
+                );
+              })}
           </div>
         </div>
       )}

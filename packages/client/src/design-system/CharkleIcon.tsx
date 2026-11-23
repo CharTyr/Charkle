@@ -11,6 +11,7 @@ import {
   Box,
   Briefcase,
   Camera,
+  CheckCircle2,
   CloudUpload,
   Code2,
   Cpu,
@@ -179,6 +180,9 @@ const LUCIDE_FALLBACK_MAP: Record<string, LucideIcon> = {
   settings: Settings,
   quicklook: Eye,
   drive: CloudUpload,
+  'ai-spark': Sparkles,
+  gallery: LayoutGrid,
+  ready: CheckCircle2,
 };
 
 /**

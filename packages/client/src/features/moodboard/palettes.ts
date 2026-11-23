@@ -156,12 +156,12 @@ export const AGENT_PHASE_META: Record<
   MoodboardAgentPhase,
   { label: string; shortLabel: string; order: number }
 > = {
-  planning: { label: '规划检索策略', shortLabel: '规划', order: 0 },
-  retrieving: { label: '多路召回候选', shortLabel: '召回', order: 1 },
-  inspectingVisuals: { label: '视觉联系表审片', shortLabel: '审片', order: 2 },
-  composing: { label: '分区编排与聚焦裁切', shortLabel: '编排', order: 3 },
-  verifying: { label: '校验槽位与约束', shortLabel: '校验', order: 4 },
-  repairing: { label: '确定性修复', shortLabel: '修复', order: 5 },
-  completed: { label: '策展完成', shortLabel: '完成', order: 6 },
-  fallbackOffline: { label: '离线策展完成', shortLabel: '离线完成', order: 6 },
+  planning: { label: '分析需求', shortLabel: '规划', order: 0 },
+  retrieving: { label: '筛选候选素材', shortLabel: '筛选', order: 1 },
+  inspectingVisuals: { label: '挑选与评估图片', shortLabel: '评估', order: 2 },
+  composing: { label: '分组与排版', shortLabel: '排版', order: 3 },
+  verifying: { label: '检查构图', shortLabel: '检查', order: 4 },
+  repairing: { label: '微调布局', shortLabel: '微调', order: 5 },
+  completed: { label: '生成完成', shortLabel: '完成', order: 6 },
+  fallbackOffline: { label: '本地生成完成', shortLabel: '完成', order: 6 },
 };

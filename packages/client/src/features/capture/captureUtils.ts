@@ -121,7 +121,7 @@ export function textToCaptureInput(rawText: string): CaptureInput | null {
  */
 export async function captureScreenFrame(): Promise<CaptureInput> {
   if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-    throw new Error('当前浏览器不支持屏幕截屏 API (getDisplayMedia)');
+    throw new Error('当前浏览器不支持屏幕截屏');
   }
 
   const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -142,7 +142,6 @@ export async function captureScreenFrame(): Promise<CaptureInput> {
       video.onerror = () => reject(new Error('无法读取屏幕视频帧'));
     });
 
-    // Wait one animation frame for the compositor to decode the first image
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
     const width = Math.max(1, video.videoWidth);

@@ -204,7 +204,6 @@ export const InboxTriageBar: React.FC = () => {
         onClose={() => setTriageModalOpen(false)}
         width="lg"
         title="收件箱批量智能分拣"
-        subtitle="基于 TypeSafe Jev 视觉分类与本地特征推荐目标文件夹，置信度 ≥ 65% 已默认勾选"
         footer={
           <>
             <div className="mr-auto flex items-center gap-2">

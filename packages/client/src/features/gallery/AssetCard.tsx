@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ArrowDownCircle, Check, Eye, Star } from 'lucide-react';
 import type { AssetRecord, UUID } from '@charkle/shared';
 import { apiClient } from '../../api/client';
+import { HoverMediaPreview, stopAllHoverPreviews } from '../../components/HoverMediaPreview';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { getCardMediaBadge, isColorSwatchAsset } from './assetCardUtils';
@@ -20,6 +21,8 @@ export interface AssetCardProps {
 export const AssetCard: React.FC<AssetCardProps> = React.memo(
   ({ asset, selected, isCut = false, cacheBust, style, className = '', onSelect, onDoubleClick }) => {
     const [imgError, setImgError] = useState(false);
+    const [hovered, setHovered] = useState(false);
+    const [hoverPlaying, setHoverPlaying] = useState(false);
     const openQuickLook = useCoordinatorStore((s) => s.openQuickLook);
     const selectedAssetIDs = useLibraryStore((s) => s.selectedAssetIDs);
 
@@ -32,6 +35,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     const primaryHex = asset.dominantColors[0]?.hex;
 
     const handleOpenQL = (e: React.MouseEvent) => {
+      stopAllHoverPreviews();
       const cardEl = (e.currentTarget as HTMLElement).closest(
         '[data-asset-card-id]',
       ) as HTMLElement | null;
@@ -49,6 +53,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
     };
 
     const handleDragStart = (e: React.DragEvent) => {
+      stopAllHoverPreviews();
       const dragIDs =
         selected && selectedAssetIDs.size > 0 ? Array.from(selectedAssetIDs) : [asset.id];
       e.dataTransfer.setData('application/x-charkle-assets', JSON.stringify(dragIDs));
@@ -59,6 +64,12 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
       <div
         data-asset-card-id={asset.id}
         draggable
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => {
+          setHovered(false);
+          setHoverPlaying(false);
+        }}
+        onMouseDown={() => stopAllHoverPreviews()}
         onDragStart={handleDragStart}
         onClick={(e) => {
           e.stopPropagation();
@@ -87,15 +98,25 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
             </span>
           </div>
         ) : !imgError ? (
-          <img
-            src={apiClient.thumbnailURL(asset.id, 'grid520', `${asset.updatedAt}-${cacheBust}`)}
-            alt={asset.title}
-            loading="lazy"
-            decoding="async"
-            draggable={false}
-            onError={() => setImgError(true)}
-            className="charkle-media-zoom w-full h-full object-cover block"
-          />
+          <>
+            <img
+              src={apiClient.thumbnailURL(asset.id, 'grid520', `${asset.updatedAt}-${cacheBust}`)}
+              alt={asset.title}
+              loading="lazy"
+              decoding="async"
+              draggable={false}
+              onError={() => setImgError(true)}
+              className="charkle-media-zoom w-full h-full object-cover block"
+            />
+            <HoverMediaPreview
+              asset={asset}
+              active={hovered}
+              fit="cover"
+              roundedClass="rounded-[var(--radius-card-outer)]"
+              badgePosition="top-right"
+              onRevealChange={setHoverPlaying}
+            />
+          </>
         ) : (
           <div
             className="w-full h-full flex flex-col items-center justify-center p-4 text-center gap-2"
@@ -153,8 +174,13 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(
           </span>
         </button>
 
-        {/* Top-right Badges (Media pill + Offline Pin) */}
-        <div className="absolute top-1.5 right-1.5 flex items-center gap-1 z-10 pointer-events-none">
+        {/* Top-right Badges (Media pill swaps cleanly with muted hover video badge) */}
+        <div
+          className={[
+            'absolute top-1.5 right-1.5 flex items-center gap-1 z-10 pointer-events-none transition-opacity duration-[150ms] ease-[var(--ease-out)]',
+            hoverPlaying && asset.mediaKind === 'video' ? 'opacity-0' : 'opacity-100',
+          ].join(' ')}
+        >
           {asset.pinnedOffline && (
             <span
               title="已保留离线副本"

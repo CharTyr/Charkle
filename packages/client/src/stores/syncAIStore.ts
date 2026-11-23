@@ -11,6 +11,7 @@ import type {
   AIProviderConfig,
   CacheStats,
   ChatGPTAccountSession,
+  ChatGPTModelInfo,
   CloudAIProviderKind,
   CloudAIUsageCategory,
   CloudAIUsageSummary,
@@ -21,6 +22,7 @@ import type {
   SyncStatus,
   TypeSafeExperimentalConfig,
   TypeSafeModelInfo,
+  UUID,
 } from '@charkle/shared';
 import { apiClient } from '../api/client';
 
@@ -39,6 +41,11 @@ interface SyncAIState {
   hasStoredAIKeys: Record<CloudAIProviderKind, boolean>;
   aiUsage: CloudAIUsageSummary;
   chatGPTSession: ChatGPTAccountSession | null;
+  chatGPTModels: ChatGPTModelInfo[];
+  isLoadingChatGPTModels: boolean;
+  isTestingAI: boolean;
+  isRebuildingVisualIndex: boolean;
+  rebuildVisualIndexProgress: { completed: number; total: number } | null;
 
   typeSafeConfig: TypeSafeExperimentalConfig;
   hasStoredTypeSafeKey: boolean;
@@ -63,6 +70,15 @@ interface SyncAIState {
   loadAIConfig: () => Promise<void>;
   saveAIConfig: (config: AIProviderConfig, apiKey?: string | null) => Promise<void>;
   resetAIUsage: (category?: CloudAIUsageCategory | null) => Promise<void>;
+  testAIConnection: (config: AIProviderConfig, apiKey?: string | null) => Promise<string>;
+  connectChatGPT: (req: {
+    accessToken: string;
+    email?: string | null;
+    name?: string | null;
+  }) => Promise<void>;
+  disconnectChatGPT: () => Promise<void>;
+  refreshChatGPTModels: () => Promise<ChatGPTModelInfo[]>;
+  rebuildLocalVisualIndex: (assetIDs: UUID[]) => Promise<number>;
 
   loadTypeSafeConfig: () => Promise<void>;
   saveTypeSafeConfig: (config: TypeSafeExperimentalConfig, apiKey?: string | null) => Promise<void>;
@@ -79,7 +95,7 @@ interface SyncAIState {
   saveExternalAgentConfig: (config: ExternalAgentConfig) => Promise<void>;
 }
 
-export const useSyncAIStore = create<SyncAIState>((set) => ({
+export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   sseConnected: false,
 
   syncStatus: createDefaultSyncStatus(),
@@ -99,6 +115,11 @@ export const useSyncAIStore = create<SyncAIState>((set) => ({
   },
   aiUsage: createDefaultCloudAIUsageSummary(),
   chatGPTSession: null,
+  chatGPTModels: [],
+  isLoadingChatGPTModels: false,
+  isTestingAI: false,
+  isRebuildingVisualIndex: false,
+  rebuildVisualIndexProgress: null,
 
   typeSafeConfig: createDefaultTypeSafeExperimentalConfig(),
   hasStoredTypeSafeKey: false,
@@ -192,6 +213,68 @@ export const useSyncAIStore = create<SyncAIState>((set) => ({
       aiUsage: res.usage,
       chatGPTSession: res.chatGPTSession,
     });
+  },
+
+  testAIConnection: async (config, apiKey = null) => {
+    set({ isTestingAI: true });
+    try {
+      const res = await apiClient.testAIConnection({ config, apiKey });
+      if (res.models) {
+        set({ chatGPTModels: res.models });
+      }
+      return res.summary;
+    } finally {
+      set({ isTestingAI: false });
+    }
+  },
+
+  connectChatGPT: async (req) => {
+    await apiClient.connectChatGPT(req);
+    await get().loadAIConfig();
+  },
+
+  disconnectChatGPT: async () => {
+    await apiClient.disconnectChatGPT();
+    set({ chatGPTModels: [] });
+    await get().loadAIConfig();
+  },
+
+  refreshChatGPTModels: async () => {
+    set({ isLoadingChatGPTModels: true });
+    try {
+      const res = await apiClient.listChatGPTModels();
+      set({ chatGPTModels: res.models });
+      return res.models;
+    } finally {
+      set({ isLoadingChatGPTModels: false });
+    }
+  },
+
+  rebuildLocalVisualIndex: async (assetIDs) => {
+    const uniqueIDs = Array.from(new Set(assetIDs));
+    if (uniqueIDs.length === 0) return 0;
+    const chunkSize = 16;
+    let processed = 0;
+    set({
+      isRebuildingVisualIndex: true,
+      rebuildVisualIndexProgress: { completed: 0, total: uniqueIDs.length },
+    });
+    try {
+      for (let i = 0; i < uniqueIDs.length; i += chunkSize) {
+        const slice = uniqueIDs.slice(i, i + chunkSize);
+        await apiClient.analyzeAssets({ ids: slice, localOnly: true });
+        processed = Math.min(uniqueIDs.length, i + slice.length);
+        set({
+          rebuildVisualIndexProgress: { completed: processed, total: uniqueIDs.length },
+        });
+      }
+      return processed;
+    } finally {
+      set({
+        isRebuildingVisualIndex: false,
+        rebuildVisualIndexProgress: null,
+      });
+    }
   },
 
   loadTypeSafeConfig: async () => {

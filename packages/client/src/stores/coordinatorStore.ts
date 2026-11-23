@@ -2,20 +2,33 @@ import { create } from 'zustand';
 import type { GalleryLayoutMode, SidebarDestination, UUID } from '@charkle/shared';
 import { applyThemeToDocument } from '../design-system/theme';
 import type { ThemeMode } from '../design-system/theme';
+import { stopAllHoverPreviews } from '../components/hoverMediaCoordinator';
 
 export type SettingsTabID =
+  | 'general'
   | 'accountSecurity'
-  | 'cloudSync'
-  | 'intelligence'
-  | 'appearance'
-  | 'externalAgent'
-  | 'storage'
-  | 'captureShortcuts';
+  | 'library'
+  | 'sync'
+  | 'captureShortcuts'
+  | 'ai'
+  | 'externalAgents'
+  | 'extensions'
+  | 'advancedAbout';
 
-export type QuickDropTarget =
+export type CaptureTarget =
   | { type: 'inbox' }
   | { type: 'folder'; folderID: UUID }
   | { type: 'activeMoodboard' };
+
+export type QuickCaptureTab = 'upload' | 'url' | 'note' | 'color' | 'screen';
+
+export interface QuickCapturePrefill {
+  tab?: QuickCaptureTab;
+  url?: string;
+  title?: string;
+  text?: string;
+  hex?: string;
+}
 
 export interface SourceRect {
   left: number;
@@ -38,9 +51,11 @@ const STORAGE_KEYS = {
   iconVariant: 'charkle.brandIconVariant',
   layoutMode: 'charkle.layoutMode',
   colWidth: 'charkle.targetColumnWidth',
+  sidebarCollapsed: 'charkle.sidebarCollapsed',
   inspectorOpen: 'charkle.inspectorOpen',
-  shelfEnabled: 'charkle.quickDropShelfEnabled',
   activeBoardID: 'charkle.activeBoardID',
+  captureTarget: 'charkle.captureTarget',
+  hasCompletedOnboarding: 'charkle.hasCompletedOnboarding',
 } as const;
 
 function readLS<T>(key: string, fallback: T): T {
@@ -77,14 +92,16 @@ interface CoordinatorState {
   settingsOpen: boolean;
   settingsTab: SettingsTabID;
 
+  hasCompletedOnboarding: boolean;
+  onboardingOpen: boolean;
+  onboardingRunID: number;
+
   generatorModalOpen: boolean;
   generatorInitialSeedAssetIDs: UUID[];
 
-  quickDropShelfEnabled: boolean;
-  quickDropShelfOpen: boolean;
-  quickDropShelfExpanded: boolean;
-  quickDropShelfPinned: boolean;
-  quickDropTarget: QuickDropTarget;
+  showQuickCapture: boolean;
+  quickCapturePrefill: QuickCapturePrefill | null;
+  captureTarget: CaptureTarget;
 
   activeBoardID: UUID | null;
 
@@ -114,14 +131,16 @@ interface CoordinatorState {
   closeSettings: () => void;
   setSettingsTab: (tab: SettingsTabID) => void;
 
+  presentOnboardingIfFirstLaunch: () => void;
+  presentOnboarding: () => void;
+  completeOnboarding: () => void;
+
   openGeneratorModal: (seedAssetIDs?: UUID[]) => void;
   closeGeneratorModal: () => void;
 
-  setQuickDropShelfEnabled: (enabled: boolean) => void;
-  setQuickDropShelfOpen: (open: boolean) => void;
-  setQuickDropShelfExpanded: (expanded: boolean) => void;
-  setQuickDropShelfPinned: (pinned: boolean) => void;
-  setQuickDropTarget: (target: QuickDropTarget) => void;
+  openQuickCapture: (prefill?: QuickCapturePrefill | null) => void;
+  closeQuickCapture: () => void;
+  setCaptureTarget: (target: CaptureTarget) => void;
 
   setThemeMode: (mode: ThemeMode) => void;
   setBrandIconVariant: (variant: 'auto' | 'light' | 'dark') => void;
@@ -141,7 +160,7 @@ const toastTimers = new Map<string, number>();
 
 export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   destination: { type: 'allItems' },
-  sidebarCollapsed: false,
+  sidebarCollapsed: readLS<boolean>(STORAGE_KEYS.sidebarCollapsed, false),
   layoutMode: readLS<GalleryLayoutMode>(STORAGE_KEYS.layoutMode, 'verticalMasonry'),
   targetColumnWidth: Math.max(130, Math.min(420, readLS<number>(STORAGE_KEYS.colWidth, 236))),
   inspectorOpen: readLS<boolean>(STORAGE_KEYS.inspectorOpen, true),
@@ -151,16 +170,18 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   jumpAnywhereOpen: false,
 
   settingsOpen: false,
-  settingsTab: 'accountSecurity',
+  settingsTab: 'general',
+
+  hasCompletedOnboarding: readLS<boolean>(STORAGE_KEYS.hasCompletedOnboarding, false),
+  onboardingOpen: false,
+  onboardingRunID: 0,
 
   generatorModalOpen: false,
   generatorInitialSeedAssetIDs: [],
 
-  quickDropShelfEnabled: readLS<boolean>(STORAGE_KEYS.shelfEnabled, true),
-  quickDropShelfOpen: false,
-  quickDropShelfExpanded: false,
-  quickDropShelfPinned: false,
-  quickDropTarget: { type: 'inbox' },
+  showQuickCapture: false,
+  quickCapturePrefill: null,
+  captureTarget: readLS<CaptureTarget>(STORAGE_KEYS.captureTarget, { type: 'inbox' }),
 
   activeBoardID: readLS<UUID | null>(STORAGE_KEYS.activeBoardID, null),
 
@@ -180,8 +201,15 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
     set({ activeBoardID: boardID });
   },
 
-  setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
-  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  setSidebarCollapsed: (collapsed) => {
+    writeLS(STORAGE_KEYS.sidebarCollapsed, collapsed);
+    set({ sidebarCollapsed: collapsed });
+  },
+  toggleSidebar: () => {
+    const next = !get().sidebarCollapsed;
+    writeLS(STORAGE_KEYS.sidebarCollapsed, next);
+    set({ sidebarCollapsed: next });
+  },
 
   setLayoutMode: (mode) => {
     writeLS(STORAGE_KEYS.layoutMode, mode);
@@ -205,8 +233,10 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
     set({ inspectorOpen: next });
   },
 
-  openQuickLook: (assetID, sourceRect = null) =>
-    set({ quickLookAssetID: assetID, quickLookSourceRect: sourceRect }),
+  openQuickLook: (assetID, sourceRect = null) => {
+    stopAllHoverPreviews();
+    set({ quickLookAssetID: assetID, quickLookSourceRect: sourceRect });
+  },
 
   closeQuickLook: () => set({ quickLookAssetID: null, quickLookSourceRect: null }),
 
@@ -216,11 +246,41 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   openSettings: (tab) =>
     set((s) => ({
       settingsOpen: true,
+      jumpAnywhereOpen: false,
       settingsTab: tab ?? s.settingsTab,
     })),
 
   closeSettings: () => set({ settingsOpen: false }),
   setSettingsTab: (tab) => set({ settingsTab: tab }),
+
+  presentOnboardingIfFirstLaunch: () => {
+    const s = get();
+    if (!s.hasCompletedOnboarding && !s.onboardingOpen) {
+      stopAllHoverPreviews();
+      set({
+        onboardingOpen: true,
+        onboardingRunID: s.onboardingRunID + 1,
+      });
+    }
+  },
+
+  presentOnboarding: () => {
+    stopAllHoverPreviews();
+    set((s) => ({
+      onboardingOpen: true,
+      settingsOpen: false,
+      jumpAnywhereOpen: false,
+      onboardingRunID: s.onboardingRunID + 1,
+    }));
+  },
+
+  completeOnboarding: () => {
+    writeLS(STORAGE_KEYS.hasCompletedOnboarding, true);
+    set({
+      hasCompletedOnboarding: true,
+      onboardingOpen: false,
+    });
+  },
 
   openGeneratorModal: (seedAssetIDs = []) =>
     set({ generatorModalOpen: true, generatorInitialSeedAssetIDs: seedAssetIDs }),
@@ -228,15 +288,18 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   closeGeneratorModal: () =>
     set({ generatorModalOpen: false, generatorInitialSeedAssetIDs: [] }),
 
-  setQuickDropShelfEnabled: (enabled) => {
-    writeLS(STORAGE_KEYS.shelfEnabled, enabled);
-    set({ quickDropShelfEnabled: enabled, quickDropShelfOpen: enabled ? get().quickDropShelfOpen : false });
+  openQuickCapture: (prefill = null) => {
+    stopAllHoverPreviews();
+    set({ showQuickCapture: true, quickCapturePrefill: prefill });
   },
 
-  setQuickDropShelfOpen: (open) => set({ quickDropShelfOpen: open }),
-  setQuickDropShelfExpanded: (expanded) => set({ quickDropShelfExpanded: expanded }),
-  setQuickDropShelfPinned: (pinned) => set({ quickDropShelfPinned: pinned }),
-  setQuickDropTarget: (target) => set({ quickDropTarget: target }),
+  closeQuickCapture: () =>
+    set({ showQuickCapture: false, quickCapturePrefill: null }),
+
+  setCaptureTarget: (target) => {
+    writeLS(STORAGE_KEYS.captureTarget, target);
+    set({ captureTarget: target });
+  },
 
   setThemeMode: (mode) => {
     writeLS(STORAGE_KEYS.theme, mode);

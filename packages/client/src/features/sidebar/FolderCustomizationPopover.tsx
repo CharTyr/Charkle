@@ -124,11 +124,16 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
     <div className="w-[292px] flex flex-col select-none">
       {/* Live Large Folder Preview */}
       <div className="flex flex-col items-center gap-1.5 pt-4 pb-3 px-4">
-        <CharkleFolderIcon
-          colorHex={selectedColor}
-          customSymbol={selectedSymbol}
-          size={56}
-        />
+        <div
+          key={`${selectedColor ?? 'default'}-${selectedSymbol ?? 'none'}`}
+          className="charkle-popover-enter transition-[transform,opacity] duration-[var(--duration-sm)] ease-[var(--ease-out)]"
+        >
+          <CharkleFolderIcon
+            colorHex={selectedColor}
+            customSymbol={selectedSymbol}
+            size={56}
+          />
+        </div>
         <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate max-w-full">
           {folder.name}
         </span>

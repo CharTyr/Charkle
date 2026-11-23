@@ -1,6 +1,13 @@
 import React from 'react';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'glass';
+export type ButtonVariant =
+  | 'primary'
+  | 'secondary'
+  | 'ghost'
+  | 'danger'
+  | 'glass'
+  | 'skeuoPrimary'
+  | 'skeuoSecondary';
 export type ButtonSize = 'xs' | 'sm' | 'md' | 'icon';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -22,6 +29,8 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
     'bg-[var(--danger-soft)] text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white border border-transparent',
   glass:
     'charkle-glass text-[var(--text-primary)] hover:bg-[var(--glass-bg-hover)] border border-transparent',
+  skeuoPrimary: 'charkle-skeuo-primary font-semibold',
+  skeuoSecondary: 'charkle-skeuo-secondary font-semibold',
 };
 
 const SIZE_CLASSES: Record<ButtonSize, string> = {
@@ -51,6 +60,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       ? 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-ring)]'
       : '';
 
+    const isSkeuo = variant === 'skeuoPrimary' || variant === 'skeuoSecondary';
+
     return (
       <button
         ref={ref}
@@ -58,7 +69,9 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         disabled={disabled || loading}
         data-pill={pill ? 'true' : undefined}
         className={[
-          'charkle-pressable inline-flex items-center font-medium select-none cursor-pointer whitespace-nowrap',
+          isSkeuo
+            ? 'inline-flex items-center font-semibold select-none cursor-pointer whitespace-nowrap'
+            : 'charkle-pressable inline-flex items-center font-medium select-none cursor-pointer whitespace-nowrap',
           'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
           'disabled:opacity-45 disabled:cursor-not-allowed',
           VARIANT_CLASSES[variant],

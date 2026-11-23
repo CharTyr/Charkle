@@ -1,5 +1,6 @@
 import type {
   AIConfigResponse,
+  AIProviderConfig,
   AnalyzeAssetsRequest,
   AnalyzeAssetsResponse,
   ApiTokensResponse,
@@ -19,6 +20,7 @@ import type {
   BoardDetailResponse,
   BoardsListResponse,
   CacheStatsResponse,
+  ChatGPTAccountSession,
   ChatGPTModelsResponse,
   CleanBoundsResponse,
   CreateApiTokenRequest,
@@ -76,6 +78,8 @@ import type {
   SyncConfigResponse,
   SyncNowResponse,
   TagCountsResponse,
+  TestAIConnectionRequest,
+  TestAIConnectionResponse,
   TestTypeSafeConnectionRequest,
   TestWebDAVRequest,
   TestWebDAVResponse,
@@ -184,9 +188,30 @@ export function thumbnailURL(
   return `${API_BASE}/media/${encodeURIComponent(id)}/thumbnail/${tier}${suffix}`;
 }
 
-export function originalMediaURL(id: UUID, download = false): string {
-  const query = download ? '?download=1' : '';
-  return `${API_BASE}/media/${encodeURIComponent(id)}/original${query}`;
+export interface OriginalMediaURLOptions {
+  download?: boolean;
+  cachedOnly?: boolean;
+}
+
+export function originalMediaURL(
+  id: UUID,
+  options: boolean | OriginalMediaURLOptions = false,
+): string {
+  const opts: OriginalMediaURLOptions =
+    typeof options === 'boolean' ? { download: options } : options;
+  const params = new URLSearchParams();
+  if (opts.download) params.set('download', '1');
+  if (opts.cachedOnly) params.set('cachedOnly', '1');
+  const query = params.toString();
+  return `${API_BASE}/media/${encodeURIComponent(id)}/original${query ? `?${query}` : ''}`;
+}
+
+export function extensionDownloadURL(): string {
+  return `${API_BASE}/extension/download`;
+}
+
+export function figmaPluginDownloadURL(): string {
+  return `${API_BASE}/figma-plugin/download`;
 }
 
 export const apiClient = {
@@ -596,6 +621,23 @@ export const apiClient = {
 
   listChatGPTModels: () => requestJson<ChatGPTModelsResponse>('/ai/chatgpt/models'),
 
+  connectChatGPT: (req: { accessToken: string; email?: string | null; name?: string | null }) =>
+    requestJson<{ session: ChatGPTAccountSession; config: AIProviderConfig }>('/ai/chatgpt/connect', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  disconnectChatGPT: () =>
+    requestJson<{ session: ChatGPTAccountSession }>('/ai/chatgpt/disconnect', {
+      method: 'POST',
+    }),
+
+  testAIConnection: (req: TestAIConnectionRequest) =>
+    requestJson<TestAIConnectionResponse>('/ai/test', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
   analyzeAssets: (req: AnalyzeAssetsRequest) =>
     requestJson<AnalyzeAssetsResponse>('/ai/analyze', {
       method: 'POST',
@@ -720,6 +762,8 @@ export const apiClient = {
   // URL helpers
   thumbnailURL,
   originalMediaURL,
+  extensionDownloadURL,
+  figmaPluginDownloadURL,
 };
 
 export type CharkleApiClient = typeof apiClient;
