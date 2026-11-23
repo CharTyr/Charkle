@@ -176,15 +176,32 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
   const [clientID, setClientID] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [saving, setSaving] = useState(false);
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const oauthRedirectURI =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/api/v1/sync/google/oauth/callback`
+      : '/api/v1/sync/google/oauth/callback';
 
   useEffect(() => {
     if (!open) return;
     setErrorMsg(null);
+    setCopiedRedirect(false);
   }, [open]);
 
   if (!open) return null;
+
+  const handleCopyRedirectURI = async () => {
+    try {
+      await navigator.clipboard.writeText(oauthRedirectURI);
+      setCopiedRedirect(true);
+      window.setTimeout(() => setCopiedRedirect(false), 1800);
+    } catch {
+      // Clipboard API unavailable
+    }
+  };
 
   const handleImportJSON = async (file: File) => {
     try {
@@ -242,7 +259,7 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="charkle-modal-panel w-full max-w-[440px] rounded-[16px] bg-[var(--settings-card)] border border-[var(--settings-border)] shadow-2xl overflow-hidden flex flex-col">
+      <div className="charkle-modal-panel w-full max-w-[500px] rounded-[16px] bg-[var(--settings-card)] border border-[var(--settings-border)] shadow-2xl overflow-hidden flex flex-col">
         <div className="px-5 py-3.5 border-b border-[var(--settings-divider)] flex items-center justify-between">
           <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">
             配置 Google OAuth 凭据
@@ -258,6 +275,27 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
         </div>
 
         <div className="p-5 flex flex-col gap-3.5">
+          {/* Live OAuth Redirect URI */}
+          <div className="p-3 rounded-[10px] bg-[var(--settings-content)] border border-[var(--settings-border)] flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11.5px] font-medium text-[var(--text-primary)]">
+                授权回调地址（已授权的重定向 URI）
+              </div>
+              <Button
+                variant="secondary"
+                size="xs"
+                onClick={() => void handleCopyRedirectURI()}
+                className="shrink-0"
+              >
+                {copiedRedirect ? <Check size={11.5} /> : <Copy size={11.5} />}
+                {copiedRedirect ? '已复制' : '复制回调地址'}
+              </Button>
+            </div>
+            <code className="block w-full px-2.5 py-1.5 rounded-[7px] bg-[var(--settings-card)] border border-[var(--settings-border)] text-[11px] font-mono leading-relaxed text-[var(--text-primary)] break-all select-all">
+              {oauthRedirectURI}
+            </code>
+          </div>
+
           <input
             ref={fileInputRef}
             type="file"
@@ -361,6 +399,8 @@ export const OnboardingModal: React.FC = () => {
   const folders = useLibraryStore((s) => s.folders);
   const boards = useMoodboardStore((s) => s.boards);
 
+  const runtimeMode = useSyncAIStore((s) => s.runtimeMode);
+  const runtimeFeatures = useSyncAIStore((s) => s.runtimeFeatures);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
   const hasGoogleOAuthConfig = useSyncAIStore((s) => s.hasGoogleOAuthConfig);
@@ -368,6 +408,8 @@ export const OnboardingModal: React.FC = () => {
   const activeStorageSummary = useSyncAIStore((s) => s.activeStorageSummary);
   const loadSyncConfig = useSyncAIStore((s) => s.loadSyncConfig);
   const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
+
+  const isBuiltInCloud = runtimeMode === 'cloudflare' || !runtimeFeatures.localFolder;
 
   const aiConfig = useSyncAIStore((s) => s.aiConfig);
   const hasStoredAIKeys = useSyncAIStore((s) => s.hasStoredAIKeys);
@@ -508,7 +550,8 @@ export const OnboardingModal: React.FC = () => {
   const googleAccount =
     syncStatus.account &&
     syncStatus.account.source !== 'WebDAV' &&
-    syncStatus.account.source !== '本地文件夹'
+    syncStatus.account.source !== '本地文件夹' &&
+    syncStatus.account.source !== '内置云存储'
       ? syncStatus.account
       : null;
 
@@ -723,7 +766,9 @@ export const OnboardingModal: React.FC = () => {
   const serviceOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
   const summaryStorageText = isLocal
-    ? `本地目录（${activeStorageSummary || '默认目录'}）`
+    ? isBuiltInCloud
+      ? '内置云存储'
+      : `本地目录（${activeStorageSummary || '默认目录'}）`
     : isGoogle
       ? googleAccount
         ? `Google Drive · ${googleAccount.email}`
@@ -873,8 +918,10 @@ export const OnboardingModal: React.FC = () => {
                     {
                       icon: 'library',
                       accent: '#D96B43',
-                      title: '本地与云盘灵活切换',
-                      desc: '支持本地目录、Google Drive 与 WebDAV 同步',
+                      title: isBuiltInCloud ? '内置云存储与多端同步' : '本地与云盘灵活切换',
+                      desc: isBuiltInCloud
+                        ? '开箱即用的云端实例存储，支持 Google Drive 与 WebDAV 同步'
+                        : '支持本地目录、Google Drive 与 WebDAV 同步',
                       target: 'storage' as StepID,
                     },
                     {
@@ -927,17 +974,32 @@ export const OnboardingModal: React.FC = () => {
                   <div
                     className="h-[84px] w-[84px] rounded-[22px] flex items-center justify-center"
                     style={{
-                      backgroundColor: isLocal ? 'rgba(217,107,67,0.12)' : 'rgba(59,116,232,0.12)',
+                      backgroundColor:
+                        isLocal && !isBuiltInCloud
+                          ? 'rgba(217,107,67,0.12)'
+                          : 'rgba(59,116,232,0.12)',
                     }}
                   >
-                    <CharkleIcon name={isLocal ? 'folder' : 'drive'} style="layered" size={56} />
+                    <CharkleIcon
+                      name={isLocal && !isBuiltInCloud ? 'folder' : 'drive'}
+                      style="layered"
+                      size={56}
+                    />
                   </div>
                   <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--settings-card)] border border-[var(--settings-border)] text-[var(--text-secondary)]">
-                    {isLocal ? '本地目录保存' : googleAccount ? '已连接云端' : '多设备自动同步'}
+                    {isLocal
+                      ? isBuiltInCloud
+                        ? '内置云存储'
+                        : '本地目录保存'
+                      : googleAccount
+                        ? '已连接云端'
+                        : '多设备自动同步'}
                   </span>
                   <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
                     {isLocal
-                      ? '素材原件与索引直接留在服务端本地目录，开箱即用。'
+                      ? isBuiltInCloud
+                        ? '素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。'
+                        : '素材原件与索引直接留在服务端本地目录，开箱即用。'
                       : '文件夹、素材与情绪板增量同步，随时可在设置中无损迁移。'}
                   </p>
                 </div>
@@ -950,7 +1012,9 @@ export const OnboardingModal: React.FC = () => {
                         素材库保存在哪里？
                       </h3>
                       <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-                        默认使用本地目录，也可现在或稍后再接入云盘。
+                        {isBuiltInCloud
+                          ? '默认使用内置云存储，也可现在或稍后再接入 Google Drive 或 WebDAV 同步到桌面端。'
+                          : '默认使用本地目录，也可现在或稍后再接入云盘。'}
                       </p>
                     </div>
                     <span className="px-2 py-0.5 rounded-full text-[10.5px] bg-[var(--settings-subtle)] text-[var(--text-tertiary)] shrink-0">
@@ -958,7 +1022,7 @@ export const OnboardingModal: React.FC = () => {
                     </span>
                   </div>
 
-                  {/* Option 1: Local Folder */}
+                  {/* Option 1: Built-in Cloud Storage or Local Folder */}
                   <div
                     onClick={() => void handleSelectStorageMode('localOnly')}
                     className={[
@@ -972,7 +1036,7 @@ export const OnboardingModal: React.FC = () => {
                       <div className="flex items-center gap-2">
                         <CharkleIcon name="library" size={16} isActive={isLocal} />
                         <span className="text-[13px] font-semibold text-[var(--text-primary)]">
-                          本地文件夹
+                          {isBuiltInCloud ? '内置云存储' : '本地文件夹'}
                         </span>
                         <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-[var(--success-soft)] text-[var(--settings-positive)]">
                           默认推荐
@@ -989,30 +1053,35 @@ export const OnboardingModal: React.FC = () => {
                         {isLocal && <Check size={10} strokeWidth={3} />}
                       </span>
                     </div>
-                    {isLocal && (
-                      <div
-                        className="flex items-center gap-2 pt-1"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <input
-                          type="text"
-                          value={draftSync.localLibraryPath}
-                          onChange={(e) =>
-                            setDraftSync((prev) => ({ ...prev, localLibraryPath: e.target.value }))
-                          }
-                          placeholder={activeStorageSummary || '.charkle-data/library'}
-                          className="flex-1 min-w-0 h-8 px-2.5 text-[12px] font-mono rounded-[8px] bg-[var(--settings-content)] border border-[var(--settings-border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
-                        />
-                        <Button
-                          variant="secondary"
-                          size="xs"
-                          loading={savingStorage}
-                          onClick={() => void handleSaveLocalPath()}
+                    {isLocal &&
+                      (isBuiltInCloud ? (
+                        <p className="text-[11.5px] text-[var(--text-secondary)] leading-relaxed">
+                          素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。
+                        </p>
+                      ) : (
+                        <div
+                          className="flex items-center gap-2 pt-1"
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          保存路径
-                        </Button>
-                      </div>
-                    )}
+                          <input
+                            type="text"
+                            value={draftSync.localLibraryPath}
+                            onChange={(e) =>
+                              setDraftSync((prev) => ({ ...prev, localLibraryPath: e.target.value }))
+                            }
+                            placeholder={activeStorageSummary || '.charkle-data/library'}
+                            className="flex-1 min-w-0 h-8 px-2.5 text-[12px] font-mono rounded-[8px] bg-[var(--settings-content)] border border-[var(--settings-border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                          />
+                          <Button
+                            variant="secondary"
+                            size="xs"
+                            loading={savingStorage}
+                            onClick={() => void handleSaveLocalPath()}
+                          >
+                            保存路径
+                          </Button>
+                        </div>
+                      ))}
                   </div>
 
                   {/* Option 2: Google Drive */}

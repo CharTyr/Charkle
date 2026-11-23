@@ -20,9 +20,11 @@ import type {
   BoardDetailResponse,
   BoardsListResponse,
   CacheStatsResponse,
+  CaptureInput,
   ChatGPTAccountSession,
   ChatGPTModelsResponse,
   CleanBoundsResponse,
+  ClientPreprocessedMedia,
   CreateApiTokenRequest,
   CreateApiTokenResponse,
   CreateBoardRequest,
@@ -89,8 +91,29 @@ import type {
   UpdateFolderAppearanceRequest,
   UUID,
 } from '@charkle/shared';
+import { preprocessBase64Image, preprocessFileForUpload } from '../lib/client-media';
 
 export const API_BASE = '/api/v1';
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  const count = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(
+    Array.from({ length: count }, async () => {
+      while (true) {
+        const idx = nextIdx++;
+        if (idx >= items.length) break;
+        results[idx] = await worker(items[idx], idx);
+      }
+    }),
+  );
+  return results;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -294,19 +317,47 @@ export const apiClient = {
   getAsset: (id: UUID) =>
     requestJson<AssetDetailResponse>(`/assets/${encodeURIComponent(id)}`),
 
-  ingestAssets: (req: IngestRequest) =>
-    requestJson<IngestResponse>('/assets/ingest', {
-      method: 'POST',
-      body: JSON.stringify(req),
-    }),
+  ingestAssets: async (req: IngestRequest) => {
+    const needsPreprocess = req.inputs.some(
+      (input) => input.type === 'imageData' && input.preprocessed === undefined,
+    );
+    const enrichedInputs: CaptureInput[] = needsPreprocess
+      ? await mapWithConcurrency(req.inputs, 3, async (input): Promise<CaptureInput> => {
+          if (input.type === 'imageData' && input.preprocessed === undefined) {
+            const preprocessed = await preprocessBase64Image(
+              input.base64Data,
+              input.suggestedName,
+            ).catch(() => undefined);
+            if (preprocessed) {
+              return { ...input, preprocessed };
+            }
+          }
+          return input;
+        })
+      : req.inputs;
 
-  uploadFiles: (
+    return requestJson<IngestResponse>('/assets/ingest', {
+      method: 'POST',
+      body: JSON.stringify({ ...req, inputs: enrichedInputs }),
+    });
+  },
+
+  uploadFiles: async (
     files: File[],
     opts?: { targetFolderID?: UUID | null; targetBoardID?: UUID | null },
   ) => {
+    const preprocessedList = await mapWithConcurrency<File, ClientPreprocessedMedia | null>(
+      files,
+      3,
+      async (file) => (await preprocessFileForUpload(file).catch(() => undefined)) ?? null,
+    );
+
     const form = new FormData();
     for (const file of files) {
       form.append('files', file, file.name);
+    }
+    if (preprocessedList.some((entry) => entry !== null)) {
+      form.append('preprocessed', JSON.stringify(preprocessedList));
     }
     if (opts?.targetFolderID) {
       form.append('targetFolderID', opts.targetFolderID);

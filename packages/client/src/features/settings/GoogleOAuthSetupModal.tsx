@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { ExternalLink, FileUp, KeyRound } from 'lucide-react';
+import { Check, Copy, ExternalLink, FileUp, KeyRound } from 'lucide-react';
 import { apiClient } from '../../api/client';
 import { ModalShell } from '../../design-system/ModalShell';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
@@ -33,6 +33,23 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
   const [clientID, setClientID] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [saving, setSaving] = useState(false);
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
+
+  const oauthRedirectURI =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/api/v1/sync/google/oauth/callback`
+      : '/api/v1/sync/google/oauth/callback';
+
+  const handleCopyRedirectURI = async () => {
+    try {
+      await navigator.clipboard.writeText(oauthRedirectURI);
+      setCopiedRedirect(true);
+      window.setTimeout(() => setCopiedRedirect(false), 1800);
+      pushToast({ tone: 'success', message: '已复制授权回调地址' });
+    } catch {
+      pushToast({ tone: 'info', message: '请手动选中并复制上方回调地址' });
+    }
+  };
 
   const saveAndOptionallySignIn = async (cid: string, secret: string) => {
     setSaving(true);
@@ -114,7 +131,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
       onClose={() => {
         if (!saving) onClose();
       }}
-      width="sm"
+      width="md"
       title={
         <span className="inline-flex items-center gap-2">
           <KeyRound size={16} />
@@ -139,6 +156,29 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
       }
     >
       <div className="flex flex-col gap-4">
+        {/* Live OAuth Redirect URI */}
+        <div className="p-3 rounded-[10px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11.5px] font-medium text-[var(--text-primary)]">
+              授权回调地址（已授权的重定向 URI）
+            </div>
+            <SettingsButton
+              variant="secondary"
+              onClick={() => void handleCopyRedirectURI()}
+              className="shrink-0"
+            >
+              {copiedRedirect ? <Check size={12} /> : <Copy size={12} />}
+              {copiedRedirect ? '已复制' : '复制回调地址'}
+            </SettingsButton>
+          </div>
+          <div className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+            在 Google Cloud 创建 Web 应用凭据时，请将下方地址添加到「已授权的重定向 URI」：
+          </div>
+          <code className="block w-full px-2.5 py-2 rounded-[7px] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11.5px] leading-relaxed text-[var(--text-primary)] break-all select-all">
+            {oauthRedirectURI}
+          </code>
+        </div>
+
         {/* Tutorial link + client_secret.json importer */}
         <div className="p-3 rounded-[10px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2.5">
           <a

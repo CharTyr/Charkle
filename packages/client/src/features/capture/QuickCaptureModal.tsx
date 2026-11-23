@@ -492,8 +492,9 @@ export const QuickCaptureModal: React.FC = () => {
               multiple
               className="hidden"
               onChange={(e) => {
-                if (e.target.files?.length) {
-                  setQueuedFiles((prev) => [...prev, ...Array.from(e.target.files!)]);
+                const picked = Array.from(e.target.files ?? []);
+                if (picked.length > 0) {
+                  setQueuedFiles((prev) => [...prev, ...picked]);
                 }
                 e.target.value = '';
               }}
@@ -508,8 +509,9 @@ export const QuickCaptureModal: React.FC = () => {
               onDrop={(e) => {
                 e.preventDefault();
                 setFileDragOver(false);
-                if (e.dataTransfer.files?.length) {
-                  setQueuedFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
+                const dropped = Array.from(e.dataTransfer.files ?? []);
+                if (dropped.length > 0) {
+                  setQueuedFiles((prev) => [...prev, ...dropped]);
                 }
               }}
               onClick={() => fileInputRef.current?.click()}

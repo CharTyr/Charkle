@@ -14,6 +14,7 @@ import {
 import type {
   DriveSyncConfig,
   DriveTransportMode,
+  RuntimeMode,
   StorageMigrationReport,
 } from '@charkle/shared';
 import { ModalShell } from '../../design-system/ModalShell';
@@ -34,19 +35,13 @@ import { formatBytes } from './shortcuts';
 type TargetStorageOption = 'directAPIWithGDirect' | 'webDAV' | 'localOnly';
 type TransferActionMode = 'migrate' | 'switchOnly';
 
-const TARGET_STORAGE_OPTIONS: ReadonlyArray<{ id: TargetStorageOption; label: string }> = [
-  { id: 'directAPIWithGDirect', label: 'Google Drive' },
-  { id: 'webDAV', label: 'WebDAV 云盘' },
-  { id: 'localOnly', label: '本地文件夹' },
-];
-
 const TRANSFER_ACTION_OPTIONS: ReadonlyArray<{ id: TransferActionMode; label: string }> = [
   { id: 'migrate', label: '完整无损迁移（推荐）' },
   { id: 'switchOnly', label: '仅切换指向位置' },
 ];
 
-function storageHeadline(mode: DriveTransportMode): string {
-  if (mode === 'localOnly') return '本地文件夹';
+function storageHeadline(mode: DriveTransportMode, isBuiltInCloud: boolean): string {
+  if (mode === 'localOnly') return isBuiltInCloud ? '内置云存储' : '本地文件夹';
   if (mode === 'webDAV') return 'WebDAV 云盘';
   return 'Google Drive 云端直连';
 }
@@ -58,10 +53,14 @@ function normalizeTargetOption(mode: DriveTransportMode): TargetStorageOption {
 }
 
 export const LibrarySettingsPane: React.FC = () => {
+  const runtimeMode = useSyncAIStore((s) => s.runtimeMode);
+  const runtimeFeatures = useSyncAIStore((s) => s.runtimeFeatures);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const activeStorageSummary = useSyncAIStore((s) => s.activeStorageSummary);
   const isSyncingNow = useSyncAIStore((s) => s.isSyncingNow);
   const cacheStats = useSyncAIStore((s) => s.cacheStats);
+
+  const isBuiltInCloud = runtimeMode === 'cloudflare' || !runtimeFeatures.localFolder;
 
   const loadSyncConfig = useSyncAIStore((s) => s.loadSyncConfig);
   const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
@@ -151,9 +150,13 @@ export const LibrarySettingsPane: React.FC = () => {
       {/* 当前存储位置 */}
       <SettingsSection title="当前存储位置">
         <SettingsRow
-          title={storageHeadline(currentConfig.mode)}
+          title={storageHeadline(currentConfig.mode, isBuiltInCloud)}
           subtitle={
-            <span className="font-mono text-[11px] break-all">{activeStorageSummary}</span>
+            !isCloudMode && isBuiltInCloud ? (
+              '素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。'
+            ) : (
+              <span className="font-mono text-[11px] break-all">{activeStorageSummary}</span>
+            )
           }
         >
           {isCloudMode && (
@@ -166,7 +169,7 @@ export const LibrarySettingsPane: React.FC = () => {
           </SettingsButton>
         </SettingsRow>
 
-        {!isCloudMode && (
+        {!isCloudMode && !isBuiltInCloud && (
           <>
             <SettingsCardDivider />
             <SettingsRow
@@ -279,7 +282,7 @@ export const LibrarySettingsPane: React.FC = () => {
           <div className="flex items-center justify-between text-[12.5px]">
             <span className="font-medium text-[var(--text-primary)] inline-flex items-center gap-1.5">
               <HardDrive size={13} className="text-[var(--text-secondary)]" />
-              本地缓存空间上限
+              {isBuiltInCloud ? '缓存空间上限' : '本地缓存空间上限'}
             </span>
             <span className="font-mono text-[12px] font-semibold text-[var(--text-primary)] tabular-nums">
               {budgetGB} GB
@@ -287,7 +290,7 @@ export const LibrarySettingsPane: React.FC = () => {
           </div>
           <input
             type="range"
-            aria-label="本地缓存空间上限"
+            aria-label={isBuiltInCloud ? '缓存空间上限' : '本地缓存空间上限'}
             min={2}
             max={100}
             step={2}
@@ -328,6 +331,8 @@ export const LibrarySettingsPane: React.FC = () => {
         open={wizardOpen}
         onClose={() => setWizardOpen(false)}
         currentConfig={currentConfig}
+        runtimeMode={runtimeMode}
+        isBuiltInCloud={isBuiltInCloud}
         onMigrate={migrateStorage}
         onSwitchOnly={saveSyncConfig}
       />
@@ -341,6 +346,8 @@ interface LocationTransferWizardModalProps {
   open: boolean;
   onClose: () => void;
   currentConfig: DriveSyncConfig;
+  runtimeMode: RuntimeMode;
+  isBuiltInCloud: boolean;
   onMigrate: (
     targetConfig: DriveSyncConfig,
     webDAVPassword?: string | null,
@@ -355,10 +362,18 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
   open,
   onClose,
   currentConfig,
+  runtimeMode,
+  isBuiltInCloud,
   onMigrate,
   onSwitchOnly,
 }) => {
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+
+  const targetStorageOptions: ReadonlyArray<{ id: TargetStorageOption; label: string }> = [
+    { id: 'directAPIWithGDirect', label: 'Google Drive' },
+    { id: 'webDAV', label: 'WebDAV 云盘' },
+    { id: 'localOnly', label: isBuiltInCloud ? '内置云存储' : '本地文件夹' },
+  ];
 
   const [actionMode, setActionMode] = useState<TransferActionMode>('migrate');
   const [draft, setDraft] = useState<DriveSyncConfig>(currentConfig);
@@ -420,7 +435,11 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
       }}
       width="md"
       title="更改或转移素材库位置"
-      subtitle="在本地文件夹、Google Drive 与 WebDAV 云盘之间安全切换或无损搬家"
+      subtitle={
+        isBuiltInCloud
+          ? '在内置云存储、Google Drive 与 WebDAV 云盘之间安全切换或无损搬家'
+          : '在本地文件夹、Google Drive 与 WebDAV 云盘之间安全切换或无损搬家'
+      }
       footer={
         report ? (
           <SettingsButton variant="primary" onClick={onClose}>
@@ -451,7 +470,9 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
             <p className="text-[11.5px] text-[var(--text-secondary)] leading-relaxed">
               {actionMode === 'migrate'
                 ? '完整无损迁移会先拉取尚未缓存的原件，再将全部原文件、目录结构、标签与情绪板复制到新位置，原位置文件不会被删除。'
-                : '仅切换指向位置不会复制现有文件，适合直接连接到另一个已有的本地或云端素材库目录。'}
+                : isBuiltInCloud
+                  ? '仅切换指向位置不会复制现有文件，适合直接连接到另一个已有的云端素材库目录。'
+                  : '仅切换指向位置不会复制现有文件，适合直接连接到另一个已有的本地或云端素材库目录。'}
             </p>
           </div>
         )}
@@ -461,14 +482,14 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
           <div className="min-w-0 flex-1">
             <div className="text-[10.5px] text-[var(--text-tertiary)]">当前位置</div>
             <div className="font-medium text-[var(--text-primary)] truncate mt-0.5">
-              {activeStorageLocationSummary(currentConfig)}
+              {activeStorageLocationSummary(currentConfig, runtimeMode)}
             </div>
           </div>
           <ArrowRight size={15} className="text-[var(--text-tertiary)] shrink-0" />
           <div className="min-w-0 flex-1 text-right">
             <div className="text-[10.5px] text-[var(--text-tertiary)]">目标位置</div>
             <div className="font-medium text-[var(--accent)] truncate mt-0.5">
-              {activeStorageLocationSummary(draft)}
+              {activeStorageLocationSummary(draft, runtimeMode)}
             </div>
           </div>
         </div>
@@ -516,7 +537,7 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
               </label>
               <SettingsSegmented
                 ariaLabel="目标存储方式"
-                options={TARGET_STORAGE_OPTIONS}
+                options={targetStorageOptions}
                 value={activeTarget}
                 onChange={(m) => setDraft((d) => ({ ...d, mode: m }))}
                 className="w-full grid grid-cols-3"
@@ -608,20 +629,25 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
               </div>
             )}
 
-            {activeTarget === 'localOnly' && (
-              <div className="flex flex-col gap-1">
-                <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                  本地素材库目录路径（服务端文件系统路径）
-                </label>
-                <SettingsInput
-                  type="text"
-                  value={draft.localLibraryPath}
-                  onChange={(e) => setDraft((d) => ({ ...d, localLibraryPath: e.target.value }))}
-                  placeholder=".charkle-data/library"
-                  className="w-full font-mono"
-                />
-              </div>
-            )}
+            {activeTarget === 'localOnly' &&
+              (isBuiltInCloud ? (
+                <div className="rounded-[9px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] p-3 text-[12px] text-[var(--text-secondary)] leading-relaxed">
+                  素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                    本地素材库目录路径（服务端文件系统路径）
+                  </label>
+                  <SettingsInput
+                    type="text"
+                    value={draft.localLibraryPath}
+                    onChange={(e) => setDraft((d) => ({ ...d, localLibraryPath: e.target.value }))}
+                    placeholder=".charkle-data/library"
+                    className="w-full font-mono"
+                  />
+                </div>
+              ))}
           </div>
         )}
       </div>

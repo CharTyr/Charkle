@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import {
+  activeStorageLocationSummary,
   createDefaultAIProviderConfig,
   createDefaultCacheStats,
   createDefaultCloudAIUsageSummary,
@@ -17,6 +18,8 @@ import type {
   CloudAIUsageSummary,
   DriveSyncConfig,
   ExternalAgentConfig,
+  RuntimeFeatures,
+  RuntimeMode,
   StorageMigrationReport,
   SyncReport,
   SyncStatus,
@@ -26,8 +29,19 @@ import type {
 } from '@charkle/shared';
 import { apiClient } from '../api/client';
 
+const DEFAULT_RUNTIME_FEATURES: RuntimeFeatures = {
+  localFolder: true,
+  clientExportPreferred: false,
+  googleDrive: true,
+  webdav: true,
+};
+
 interface SyncAIState {
   sseConnected: boolean;
+
+  runtimeMode: RuntimeMode;
+  runtimeFeatures: RuntimeFeatures;
+  runtimeLoaded: boolean;
 
   syncStatus: SyncStatus;
   syncConfig: DriveSyncConfig | null;
@@ -58,6 +72,7 @@ interface SyncAIState {
   setSyncStatus: (status: SyncStatus) => void;
   setSyncCompleted: (report: SyncReport, status: SyncStatus) => void;
   setAIConfigSnapshot: (config: AIProviderConfig) => void;
+  loadRuntimeInfo: () => Promise<void>;
 
   loadSyncConfig: () => Promise<void>;
   saveSyncConfig: (config: DriveSyncConfig, webDAVPassword?: string | null) => Promise<void>;
@@ -98,6 +113,10 @@ interface SyncAIState {
 export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   sseConnected: false,
 
+  runtimeMode: 'node',
+  runtimeFeatures: DEFAULT_RUNTIME_FEATURES,
+  runtimeLoaded: false,
+
   syncStatus: createDefaultSyncStatus(),
   syncConfig: null,
   hasGoogleOAuthConfig: false,
@@ -134,25 +153,64 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
     set({ lastSyncReport: report, syncStatus: status, isSyncingNow: false }),
   setAIConfigSnapshot: (config) => set({ aiConfig: config }),
 
+  loadRuntimeInfo: async () => {
+    try {
+      const health = await apiClient.health();
+      const nextMode: RuntimeMode = health.runtimeMode === 'cloudflare' ? 'cloudflare' : 'node';
+      const nextFeatures: RuntimeFeatures = {
+        localFolder: health.features?.localFolder ?? nextMode !== 'cloudflare',
+        clientExportPreferred:
+          health.features?.clientExportPreferred ?? nextMode === 'cloudflare',
+        googleDrive: health.features?.googleDrive ?? true,
+        webdav: health.features?.webdav ?? true,
+      };
+      set((state) => {
+        const nextSummary = state.syncConfig
+          ? activeStorageLocationSummary(state.syncConfig, nextMode)
+          : nextMode === 'cloudflare'
+            ? '内置云存储'
+            : state.activeStorageSummary;
+        return {
+          runtimeMode: nextMode,
+          runtimeFeatures: nextFeatures,
+          runtimeLoaded: true,
+          activeStorageSummary: nextSummary,
+        };
+      });
+    } catch {
+      set({ runtimeLoaded: true });
+    }
+  },
+
   loadSyncConfig: async () => {
     const res = await apiClient.getSyncConfig();
+    const mode = get().runtimeMode;
+    const summary =
+      res.config.mode === 'localOnly' && mode === 'cloudflare'
+        ? '内置云存储'
+        : res.activeLocationSummary || activeStorageLocationSummary(res.config, mode);
     set({
       syncConfig: res.config,
       syncStatus: res.status,
       hasGoogleOAuthConfig: res.hasGoogleOAuthConfig,
       hasWebDAVPassword: res.hasWebDAVPassword,
-      activeStorageSummary: res.activeLocationSummary,
+      activeStorageSummary: summary,
     });
   },
 
   saveSyncConfig: async (config, webDAVPassword) => {
     const res = await apiClient.saveSyncConfig({ config, webDAVPassword });
+    const mode = get().runtimeMode;
+    const summary =
+      res.config.mode === 'localOnly' && mode === 'cloudflare'
+        ? '内置云存储'
+        : res.activeLocationSummary || activeStorageLocationSummary(res.config, mode);
     set({
       syncConfig: res.config,
       syncStatus: res.status,
       hasGoogleOAuthConfig: res.hasGoogleOAuthConfig,
       hasWebDAVPassword: res.hasWebDAVPassword,
-      activeStorageSummary: res.activeLocationSummary,
+      activeStorageSummary: summary,
     });
   },
 
@@ -175,12 +233,17 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   migrateStorage: async (targetConfig, webDAVPassword) => {
     const res = await apiClient.migrateStorage({ targetConfig, webDAVPassword });
     const refreshed = await apiClient.getSyncConfig();
+    const mode = get().runtimeMode;
+    const summary =
+      refreshed.config.mode === 'localOnly' && mode === 'cloudflare'
+        ? '内置云存储'
+        : refreshed.activeLocationSummary || activeStorageLocationSummary(refreshed.config, mode);
     set({
       syncConfig: refreshed.config,
       syncStatus: refreshed.status,
       hasGoogleOAuthConfig: refreshed.hasGoogleOAuthConfig,
       hasWebDAVPassword: refreshed.hasWebDAVPassword,
-      activeStorageSummary: refreshed.activeLocationSummary,
+      activeStorageSummary: summary,
     });
     return res.report;
   },

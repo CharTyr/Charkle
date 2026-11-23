@@ -358,6 +358,10 @@ const CharkleWorkspace: React.FC = () => {
 };
 
 export const App: React.FC = () => {
+  useEffect(() => {
+    void useSyncAIStore.getState().loadRuntimeInfo();
+  }, []);
+
   return (
     <AuthGate>
       <CharkleWorkspace />

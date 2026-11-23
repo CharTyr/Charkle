@@ -35,6 +35,8 @@ import {
 import { formatBytes, formatRelativeDate } from './shortcuts';
 
 export const SyncSettingsPane: React.FC = () => {
+  const runtimeMode = useSyncAIStore((s) => s.runtimeMode);
+  const runtimeFeatures = useSyncAIStore((s) => s.runtimeFeatures);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
   const hasGoogleOAuthConfig = useSyncAIStore((s) => s.hasGoogleOAuthConfig);
@@ -42,6 +44,8 @@ export const SyncSettingsPane: React.FC = () => {
   const activeStorageSummary = useSyncAIStore((s) => s.activeStorageSummary);
   const isSyncingNow = useSyncAIStore((s) => s.isSyncingNow);
   const lastSyncReport = useSyncAIStore((s) => s.lastSyncReport);
+
+  const isBuiltInCloud = runtimeMode === 'cloudflare' || !runtimeFeatures.localFolder;
 
   const loadSyncConfig = useSyncAIStore((s) => s.loadSyncConfig);
   const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
@@ -201,12 +205,16 @@ export const SyncSettingsPane: React.FC = () => {
   return (
     <div className="flex flex-col gap-[22px]">
       {isLocalOnly ? (
-        /* Local-only onboarding state */
+        /* Built-in cloud or local-only onboarding state */
         <SettingsSection title="云端同步服务">
           <SettingsRow
-            title="当前使用本地文件夹存储"
+            title={isBuiltInCloud ? '当前使用内置云存储' : '当前使用本地文件夹存储'}
             subtitle={
-              <span className="font-mono text-[11px] break-all">{activeStorageSummary}</span>
+              isBuiltInCloud ? (
+                '素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。'
+              ) : (
+                <span className="font-mono text-[11px] break-all">{activeStorageSummary}</span>
+              )
             }
           >
             <SettingsButton variant="secondary" onClick={() => setSettingsTab('library')}>
@@ -242,8 +250,12 @@ export const SyncSettingsPane: React.FC = () => {
             />
             <SettingsGuideStep
               number={3}
-              title="随时可无损搬回本地"
-              detail="如需将已有本地素材完整同步到云端，可前往「素材库 → 更改或转移…」选择完整无损迁移。"
+              title={isBuiltInCloud ? '随时可无损切回内置云存储' : '随时可无损搬回本地'}
+              detail={
+                isBuiltInCloud
+                  ? '如需将当前素材完整同步到云盘或切回内置云存储，可前往「素材库 → 更改或转移…」选择完整无损迁移。'
+                  : '如需将已有本地素材完整同步到云端，可前往「素材库 → 更改或转移…」选择完整无损迁移。'
+              }
             />
           </InlineGuideDisclosure>
 

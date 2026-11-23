@@ -18,7 +18,13 @@ import { apiClient } from '../../api/client';
 import { Button } from '../../design-system/Button';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { ModalShell } from '../../design-system/ModalShell';
+import type {
+  ExportBackgroundMode,
+  ExportProgressInfo,
+} from '../../lib/client-board-export';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
+import { useLibraryStore } from '../../stores/libraryStore';
+import { useSyncAIStore } from '../../stores/syncAIStore';
 
 export interface ExportBoardModalProps {
   open: boolean;
@@ -48,18 +54,28 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
 }) => {
   const pushToast = useCoordinatorStore((s) => s.pushToast);
   const openSettings = useCoordinatorStore((s) => s.openSettings);
+  const assetsByID = useLibraryStore((s) => s.assetsByID);
+  const runtimeMode = useSyncAIStore((s) => s.runtimeMode);
+  const runtimeFeatures = useSyncAIStore((s) => s.runtimeFeatures);
 
   const [tab, setTab] = useState<ExportTab>('image');
   const [format, setFormat] = useState<MoodboardExportFormat>('png');
   const [scale, setScale] = useState<1 | 2>(2);
   const [includeAnnotations, setIncludeAnnotations] = useState(true);
   const [includePaletteStrip, setIncludePaletteStrip] = useState(true);
-  const [darkAppearance, setDarkAppearance] = useState(false);
+  const [backgroundMode, setBackgroundMode] = useState<ExportBackgroundMode>('light');
 
   const [busyAction, setBusyAction] = useState<'download-img' | 'copy-img' | 'figma' | null>(null);
+  const [exportProgress, setExportProgress] = useState<ExportProgressInfo | null>(null);
   const [copiedImage, setCopiedImage] = useState(false);
   const [figmaReport, setFigmaReport] = useState<FigmaBridgeReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const preferClientExport =
+    runtimeMode === 'cloudflare' || runtimeFeatures.clientExportPreferred;
+  const darkAppearance = backgroundMode === 'dark';
+  const effectiveImageBackground: ExportBackgroundMode =
+    format === 'jpeg' && backgroundMode === 'transparent' ? 'light' : backgroundMode;
 
   const options: MoodboardExportOptions = {
     scale,
@@ -74,35 +90,74 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
     .trim()
     .slice(0, 64);
 
-  const handleDownloadImage = async () => {
-    setBusyAction('download-img');
-    setError(null);
+  const produceImageBlob = async (
+    targetFormat: MoodboardExportFormat,
+    bgMode: ExportBackgroundMode,
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const useBrowser = preferClientExport || bgMode === 'transparent';
+    if (useBrowser) {
+      const { exportMoodboardImageInBrowser } = await import('../../lib/client-board-export');
+      const res = await exportMoodboardImageInBrowser({
+        document,
+        assetsByID,
+        format: targetFormat,
+        backgroundMode: bgMode,
+        containerWidth,
+        options,
+        onProgress: setExportProgress,
+      });
+      return { blob: res.blob, filename: res.filename };
+    }
+
     try {
       const blob = await apiClient.exportBoardImage(document.id, {
-        format,
+        format: targetFormat,
         containerWidth,
         options,
       });
-      triggerDownloadBlob(blob, `${safeSlug}-${scale}x.${format === 'jpeg' ? 'jpg' : 'png'}`);
+      return {
+        blob,
+        filename: `${safeSlug}-${scale}x.${targetFormat === 'jpeg' ? 'jpg' : 'png'}`,
+      };
+    } catch {
+      const { exportMoodboardImageInBrowser } = await import('../../lib/client-board-export');
+      const res = await exportMoodboardImageInBrowser({
+        document,
+        assetsByID,
+        format: targetFormat,
+        backgroundMode: bgMode,
+        containerWidth,
+        options,
+        onProgress: setExportProgress,
+      });
+      return { blob: res.blob, filename: res.filename };
+    }
+  };
+
+  const handleDownloadImage = async () => {
+    setBusyAction('download-img');
+    setExportProgress(null);
+    setError(null);
+    try {
+      const { blob, filename } = await produceImageBlob(format, effectiveImageBackground);
+      triggerDownloadBlob(blob, filename);
       pushToast({ tone: 'success', message: `已导出 ${scale}× 高清 ${format.toUpperCase()} 图像` });
     } catch (err) {
       setError(err instanceof Error ? err.message : '导出高清图像失败');
     } finally {
       setBusyAction(null);
+      setExportProgress(null);
     }
   };
 
   const handleCopyImage = async () => {
     setBusyAction('copy-img');
+    setExportProgress(null);
     setError(null);
     try {
-      const blob = await apiClient.exportBoardImage(document.id, {
-        format: 'png',
-        containerWidth,
-        options,
-      });
+      const { blob, filename } = await produceImageBlob('png', backgroundMode);
       if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
-        triggerDownloadBlob(blob, `${safeSlug}-${scale}x.png`);
+        triggerDownloadBlob(blob, filename);
         pushToast({
           tone: 'info',
           message: '当前浏览器不支持直接写入剪贴板图像，已改为下载 PNG',
@@ -117,19 +172,43 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
       setError(err instanceof Error ? err.message : '复制图像失败');
     } finally {
       setBusyAction(null);
+      setExportProgress(null);
     }
   };
 
   const handleExportFigma = async () => {
     setBusyAction('figma');
+    setExportProgress(null);
     setError(null);
     try {
-      const result = await apiClient.exportBoardFigma(document.id, options);
+      let result: { blob: Blob; filename: string; report?: FigmaBridgeReport };
+      if (preferClientExport) {
+        const { exportFigmaBridgeInBrowser } = await import('../../lib/client-board-export');
+        result = await exportFigmaBridgeInBrowser({
+          document,
+          assetsByID,
+          containerWidth,
+          options,
+          onProgress: setExportProgress,
+        });
+      } else {
+        try {
+          result = await apiClient.exportBoardFigma(document.id, options);
+        } catch {
+          const { exportFigmaBridgeInBrowser } = await import('../../lib/client-board-export');
+          result = await exportFigmaBridgeInBrowser({
+            document,
+            assetsByID,
+            containerWidth,
+            options,
+            onProgress: setExportProgress,
+          });
+        }
+      }
       triggerDownloadBlob(result.blob, result.filename || `${safeSlug}.charkleboard`);
       if (result.report) {
         setFigmaReport(result.report);
       } else {
-        // Synthesize accurate preview summary if server header omitted
         const imgCount = document.nodes.filter((n) => n.kind.type === 'assetRef').length;
         const noteCount = document.nodes.filter((n) => n.kind.type === 'note').length;
         const groupCount = document.nodes.filter((n) => n.kind.type === 'groupFrame').length;
@@ -153,6 +232,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
       setError(err instanceof Error ? err.message : '生成 Figma 迁移包失败');
     } finally {
       setBusyAction(null);
+      setExportProgress(null);
     }
   };
 
@@ -277,6 +357,45 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
               </div>
 
               <div className="border-t border-[var(--border-hairline)]" />
+
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-[13px] font-medium text-[var(--text-primary)]">画布背景</div>
+                  <div className="text-[11.5px] text-[var(--text-secondary)]">
+                    PNG 支持透明背景，方便直接嵌入设计稿
+                  </div>
+                </div>
+                <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
+                  {(
+                    [
+                      { id: 'light', label: '浅色' },
+                      { id: 'dark', label: '深色' },
+                      { id: 'transparent', label: '透明' },
+                    ] as const
+                  ).map((bg) => {
+                    const disabled = bg.id === 'transparent' && format === 'jpeg';
+                    const active = effectiveImageBackground === bg.id;
+                    return (
+                      <button
+                        key={bg.id}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setBackgroundMode(bg.id)}
+                        className={[
+                          'px-3 py-1 rounded-[6px] text-[12px] font-medium cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed',
+                          active
+                            ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
+                            : 'text-[var(--text-secondary)]',
+                        ].join(' ')}
+                      >
+                        {bg.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="border-t border-[var(--border-hairline)]" />
             </>
           )}
 
@@ -302,17 +421,47 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
               包含顶部板内色卡条
             </label>
 
-            <label className="inline-flex items-center gap-2 text-[12.5px] text-[var(--text-primary)] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={darkAppearance}
-                onChange={(e) => setDarkAppearance(e.target.checked)}
-                className="accent-[var(--accent)] rounded"
-              />
-              深色画布背景
-            </label>
+            {tab === 'figma' && (
+              <label className="inline-flex items-center gap-2 text-[12.5px] text-[var(--text-primary)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={darkAppearance}
+                  onChange={(e) => setBackgroundMode(e.target.checked ? 'dark' : 'light')}
+                  className="accent-[var(--accent)] rounded"
+                />
+                深色画布背景
+              </label>
+            )}
           </div>
         </div>
+
+        {/* Live Browser Export Progress Bar */}
+        {busyAction && exportProgress && (
+          <div className="rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] px-3.5 py-2.5 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between text-[12px]">
+              <span className="text-[var(--text-primary)] font-medium truncate">
+                {exportProgress.stage}
+              </span>
+              <span className="font-mono text-[11px] text-[var(--text-secondary)] tabular-nums shrink-0">
+                {exportProgress.total > 0
+                  ? `${Math.min(100, Math.round((exportProgress.completed / exportProgress.total) * 100))}%`
+                  : ''}
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-[var(--bg-subtle)] overflow-hidden">
+              <div
+                className="h-full bg-[var(--accent)] transition-[width] duration-200 ease-[var(--ease-out)]"
+                style={{
+                  width: `${
+                    exportProgress.total > 0
+                      ? Math.max(8, Math.min(100, (exportProgress.completed / exportProgress.total) * 100))
+                      : 30
+                  }%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {tab === 'image' ? (
           <div className="flex items-center justify-end gap-2.5">
