@@ -28,6 +28,7 @@ These guides help you **ask the right questions before coding**.
 
 | Layer | Index | Scope |
 |-------|-------|-------|
+| **Visual & Motion Design** | [DESIGN.md](../../../DESIGN.md) | Unified Light/Dark tokens, concentric radii, typography, icons/empty states, motion physics, UI patterns & polish roadmap across macOS / Web / Windows |
 | **Cross-Platform Contracts** | [Cross-Platform Index](../cross-platform/index.md) | `/.charkle/` sync wire format, `.charkleboard` Figma ZIP, 14-tool MCP policy, repo purity |
 | **macOS Backend** | [Backend Index](../backend/index.md) | `Sources/CharkleCore/`, `Sources/CharkleCLI/` |
 | **macOS Frontend** | [Frontend Index](../frontend/index.md) | `Sources/CharkleApp/`, `Sources/CharkleCanvas/` |

@@ -1,6 +1,8 @@
 # Charkle Motion, Visual Material & Icon Specification
 
-This spec defines Charkle's motion curves, continuous concentric radii, restrained glass materials, and bundled SVG iconography for SwiftUI + AppKit (and cross-platform Web / Windows parity).
+> **Primary Design Authority**: See [`DESIGN.md`](../DESIGN.md) at the repository root for the unified macOS / Web / Windows visual, typography, component, motion, and frontend polish specification.
+
+This spec summarizes Charkle's motion curves, continuous concentric radii, restrained glass materials, and bundled SVG iconography for SwiftUI + AppKit (and cross-platform Web / Windows parity).
 
 ---
 

@@ -1,6 +1,6 @@
 # Cross-Platform Shared Contracts (macOS · Web · Windows)
 
-> Single source of truth for wire protocols, file formats, safety boundaries, and repository hygiene shared across macOS (`Sources/`), Web (`./web/`), and Windows (`./windows/`).
+> Single source of truth for wire protocols, file formats, safety boundaries, visual design authority ([`DESIGN.md`](../../../DESIGN.md)), and repository hygiene shared across macOS (`Sources/`), Web (`./web/`), and Windows (`./windows/`).
 
 ---
 
