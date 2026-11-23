@@ -7,11 +7,12 @@
 ## 1. Lossless `/.charkle/` Bidirectional Sync Wire Contract
 
 ### 1. Scope / Trigger
-- Trigger: Any modification to `AssetRecord`, `FolderRecord`, `MoodboardDocument`, `SyncOperation`, `SyncManifest`, or `DriveSyncEngine` on any platform (`Sources/CharkleCore/Sync/`, `web/packages/shared/src/sync/swift-codec.ts`, or future `windows/crates/charkle-core/src/sync/`).
+- Trigger: Any modification to `AssetRecord`, `FolderRecord`, `MoodboardDocument`, `SyncOperation`, `SyncManifest`, or `DriveSyncEngine` on any platform (`Sources/CharkleCore/Sync/`, `web/packages/shared/src/sync/swift-codec.ts`, or `windows/crates/charkle-core/src/sync/`).
 
 ### 2. Signatures & Canonical Anchors
 - macOS reference: `Sources/CharkleCore/Sync/SyncOperations.swift`, `Sources/CharkleCore/Sync/DriveSyncEngine.swift`, `Sources/CharkleCore/Contracts/*.swift`
 - Web codec: `web/packages/shared/src/sync/swift-codec.ts` (`COCOA_REFERENCE_EPOCH_UNIX_SECONDS`, `isoToCocoaSeconds`, `cocoaSecondsToIso`, `toSwiftUUID`, `ASSET_SYNC_EXCLUDED_FIELDS`, `BOARD_SYNC_EXCLUDED_FIELDS`)
+- Windows codec & engine: `windows/crates/charkle-core/src/wire/swift_codec.rs`, `windows/crates/charkle-core/src/sync/engine.rs` (see also [Windows Client Guidelines](../windows/index.md))
 
 ### 3. Contracts
 1. **Timestamps (Cocoa Reference Epoch)**:
@@ -50,6 +51,7 @@
 ### 6. Tests Required
 - macOS: `Tests/CharkleTests/DriveSyncTests.swift`
 - Web: `web/packages/shared/tests/swift-codec.test.ts` (`swift-codec` round-trip verification)
+- Windows: `windows/crates/charkle-core/tests/wire_codec_tests.rs` and `windows/crates/charkle-core/tests/sync_engine_tests.rs`
 
 ### 7. Wrong vs Correct
 ```ts
@@ -66,10 +68,10 @@
 
 - **Format**: Standard ZIP archive with `.charkleboard` extension (`format: "charkle-figma-bridge"`, `version: 1`).
 - **Required Entries**:
-  - `manifest.json`: board metadata, `objects[]` (`image`, `note`, `groupFrame`, `paletteStrip`, `connector`, `inkStroke`, `unsupported` with `geometry: { x, y, width, height, angle, flipX, flipY }`), `originals[]`, `warnings[]`.
-  - `tiles/<hash>_r<row>_c<col>.png`: lossless PNG tiles strictly `<= 4096×4096 px` with 64-char hex SHA-256 checksums.
+  - `board.json` + `migration-report.json`: board metadata, `objects[]` (`image`, `note`, `groupFrame`, `paletteStrip`, `unsupported` with `geometry: { x, y, width, height, angle, flipX, flipY }`), `connectors[]`, `inkStrokes[]`, `originals[]`, `report`.
+  - `tiles/<assetUUID>-<x>-<y>.png`: lossless PNG tiles strictly aligned to the `4096×4096 px` pixel grid with 64-char lowercase hex SHA-256 checksums.
   - `originals/<assetUUID>.<ext>`: raw files required for native `figma.createGif` animated GIFs in FigJam.
-- **Plugin Parity**: `Resources/FigmaPlugin/` and `web/figma-plugin/` MUST stay byte-identical and pass `node scripts/test-figma-plugin.cjs`.
+- **Plugin Parity**: `Resources/FigmaPlugin/` and `web/figma-plugin/` MUST stay byte-identical and pass `node scripts/test-figma-plugin.cjs` (Windows exporter in `windows/crates/charkle-core/src/export/figma_bridge.rs` also verifies directly against `Resources/FigmaPlugin/code.js`).
 
 ---
 

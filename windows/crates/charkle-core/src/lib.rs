@@ -2,6 +2,7 @@
 //!
 //! Mirrors macOS `Sources/CharkleCore` with lossless `/.charkle/` sync parity.
 
+pub mod agent;
 pub mod db;
 pub mod engine;
 pub mod error;

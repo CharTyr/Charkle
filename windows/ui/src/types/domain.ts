@@ -874,3 +874,196 @@ function hexDistanceApprox(hexA: string, hexB: string): number {
   const db = parseInt(a.slice(4, 6), 16) - parseInt(b.slice(4, 6), 16);
   return Math.sqrt(dr * dr + dg * dg + db * db);
 }
+
+// =========================================================================
+// M5 Hybrid Cloud AI, Usage Telemetry, TypeSafe Jev, External Agent & Settings
+// =========================================================================
+
+export type SettingsTabId =
+  | 'general'
+  | 'library'
+  | 'sync'
+  | 'dropShelf'
+  | 'captureShortcuts'
+  | 'ai'
+  | 'externalAgents'
+  | 'extensions'
+  | 'advancedAbout';
+
+export type CloudAIProviderKind =
+  | 'disabled'
+  | 'chatGPTSubscription'
+  | 'gemini'
+  | 'openAICompatible';
+
+export type CustomAIEndpointFormat =
+  | 'openAIChatCompletions'
+  | 'anthropicMessages'
+  | 'openAIResponses';
+
+export interface AIProviderConfig {
+  provider: CloudAIProviderKind;
+  customEndpointFormat: CustomAIEndpointFormat;
+  baseURL: string;
+  chatModel: string;
+  embeddingModel: string;
+  autoAnalyzeOnImport: boolean;
+  sendThumbnailsToCloud: boolean;
+}
+
+export interface ChatGPTAccountSession {
+  status: 'disconnected' | 'connected' | 'reauthRequired';
+  sharingEnabled: boolean;
+  email?: string | null;
+  name?: string | null;
+  subject?: string | null;
+  lastUpdatedAt?: WireDate | null;
+}
+
+export type CloudAIUsageCategory = 'standard' | 'jev';
+
+export interface CloudAIUsageBucket {
+  dayKey: string;
+  todayRequests: number;
+  todayInputTokens: number;
+  todayOutputTokens: number;
+  todayTotalTokens: number;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  lastProviderLabel?: string | null;
+  lastModel?: string | null;
+  lastUsedAt?: WireDate | null;
+  lastCallTokens: number;
+}
+
+export interface CloudAIUsageSummary {
+  dayKey: string;
+  todayRequests: number;
+  todayInputTokens: number;
+  todayOutputTokens: number;
+  todayTotalTokens: number;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  lastProviderLabel?: string | null;
+  lastModel?: string | null;
+  lastUsedAt?: WireDate | null;
+  lastCallTokens: number;
+  standard: CloudAIUsageBucket;
+  jev: CloudAIUsageBucket;
+}
+
+export interface AIProviderStateDto {
+  config: AIProviderConfig;
+  hasApiKey: boolean;
+  chatgptSession: ChatGPTAccountSession;
+  usage: CloudAIUsageSummary;
+}
+
+export interface AIConnectionTestResult {
+  ok: boolean;
+  providerLabel: string;
+  model: string;
+  message: string;
+  latencyMs: number;
+}
+
+export interface TypeSafeExperimentalConfig {
+  enabled: boolean;
+  baseURL: string;
+  model: string;
+  minConfidence: number;
+  lowConfidencePadding: number;
+  minPresenceProbability: number;
+  enableMoodboardFocusCrop: boolean;
+  enableAutoCleanCrop: boolean;
+  enableSubjectPalette: boolean;
+  enablePinpointAnnotations: boolean;
+  enableSemanticSearch: boolean;
+  enableInboxSmartTriage: boolean;
+  enableCuratorVisualRerank: boolean;
+}
+
+export interface TypeSafeModelInfo {
+  name: string;
+  description: string;
+  release_date: string;
+}
+
+export interface TypeSafeStateDto {
+  config: TypeSafeExperimentalConfig;
+  hasApiKey: boolean;
+}
+
+export interface TypeSafeTestResultDto {
+  ok: boolean;
+  message: string;
+  models: TypeSafeModelInfo[];
+}
+
+export interface InboxTriageRecommendation {
+  assetID: string;
+  assetTitle: string;
+  recommendedFolderID?: string | null;
+  recommendedFolderName?: string | null;
+  confidence: number;
+  fitProbability: number;
+  reason: string;
+  source: 'typeSafeJev' | 'appleVisionSaliency';
+}
+
+export type ExternalAgentAccessLevel = 'readOnly' | 'readWriteOrganize';
+
+export interface ExternalAgentConfig {
+  enabled?: boolean;
+  mcpEnabled: boolean;
+  cliEnabled: boolean;
+  accessLevel: ExternalAgentAccessLevel;
+}
+
+export interface ExternalAgentStateDto {
+  config: ExternalAgentConfig;
+  cliBinaryPath: string;
+  libraryDir: string;
+  mcpConfigJson: string;
+  readToolCount: number;
+  writeToolCount: number;
+  resourceCount: number;
+}
+
+export interface StorageMigrationReport {
+  sourceMode: DriveTransportMode;
+  targetMode: DriveTransportMode;
+  targetLocation: string;
+  downloadedOriginals: number;
+  migratedAssets: number;
+  migratedFolders: number;
+  migratedBoards: number;
+  durationSeconds: number;
+}
+
+export interface GDirectEnvironmentSnapshot {
+  cliPath?: string | null;
+  cliVersion?: string | null;
+  appVersion?: string | null;
+  hasVersionMismatch: boolean;
+  rclonePath?: string | null;
+  accounts: string[];
+  defaultAccount?: string | null;
+  endpoints: Array<{ ip: string; latencyMs: number; healthy: boolean }>;
+  mountPath: string;
+  isMountActive: boolean;
+  bypassTunEnabled: boolean;
+}
+
+export interface SystemDiagnosticsDto {
+  appVersion: string;
+  schemaVersion: number;
+  dataDir: string;
+  databasePath: string;
+  gdirect: GDirectEnvironmentSnapshot;
+  ocr: OcrDiagnostics;
+}

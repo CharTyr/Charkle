@@ -141,6 +141,14 @@ impl LiveCharkleEngine {
         &self.oauth
     }
 
+    pub fn vault(&self) -> &Arc<dyn SecretVault> {
+        &self.vault
+    }
+
+    pub fn notify_external_change(&self) {
+        self.emit(EngineEvent::LibraryChanged);
+    }
+
     pub fn subscribe_events(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
     }

@@ -1,0 +1,2 @@
+# Staged release sidecars built by windows/scripts/build-release-nsis.ps1
+src-tauri/binaries/

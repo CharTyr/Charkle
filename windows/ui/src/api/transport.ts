@@ -8,22 +8,31 @@ import {
   matchesSmartFolderRule,
   msToCocoaSeconds,
   wireDateToMs,
+  type AIConnectionTestResult,
+  type AIProviderConfig,
+  type AIProviderStateDto,
   type AssetBatchPatch,
   type AssetRecord,
   type CacheStats,
   type CaptureSessionInfo,
+  type ChatGPTAccountSession,
   type ClientRect,
   type ClipboardPreview,
+  type CloudAIUsageCategory,
+  type CloudAIUsageSummary,
   type DeepLinkPayload,
   type DesktopIntegrationStatus,
   type DragOutOutcome,
   type DriveSyncConfig,
   type EditorialLayoutResult,
+  type ExternalAgentConfig,
+  type ExternalAgentStateDto,
   type FigmaBridgeExportReport,
   type FilterCriteria,
   type FolderRecord,
   type FolderSuggestion,
   type HotkeyConfig,
+  type InboxTriageRecommendation,
   type MoodboardAgentStep,
   type MoodboardCurationRequest,
   type MoodboardDocument,
@@ -34,10 +43,15 @@ import {
   type QuickJumpMatch,
   type ScoredAsset,
   type SmartFolderRecord,
+  type StorageMigrationReport,
   type SyncReport,
   type SyncStatus,
+  type SystemDiagnosticsDto,
   type TagCount,
   type ThumbnailTier,
+  type TypeSafeExperimentalConfig,
+  type TypeSafeStateDto,
+  type TypeSafeTestResultDto,
   type WindowSurfaceState,
 } from '../types/domain';
 
@@ -171,6 +185,33 @@ export interface CharkleTransport {
     defaultPath: string,
     filters: Array<{ name: string; extensions: string[] }>,
   ): Promise<string | null>;
+  pickDirectoryDialog(title?: string): Promise<string | null>;
+
+  // M5 Hybrid Cloud AI, TypeSafe Jev, External Agent, Storage Migration & Diagnostics
+  getAiProviderState(): Promise<AIProviderStateDto>;
+  saveAiProviderConfig(
+    config: AIProviderConfig,
+    opts?: { apiKey?: string | null; clearApiKey?: boolean },
+  ): Promise<AIProviderStateDto>;
+  testAiProviderConnection(): Promise<AIConnectionTestResult>;
+  resetAiUsage(category?: CloudAIUsageCategory | null): Promise<CloudAIUsageSummary>;
+  disconnectChatgptAccount(): Promise<ChatGPTAccountSession>;
+  getTypesafeState(): Promise<TypeSafeStateDto>;
+  saveTypesafeConfig(
+    config: TypeSafeExperimentalConfig,
+    opts?: { apiKey?: string | null; clearApiKey?: boolean },
+  ): Promise<TypeSafeStateDto>;
+  testTypesafeConnection(): Promise<TypeSafeTestResultDto>;
+  runInboxSmartTriage(): Promise<InboxTriageRecommendation[]>;
+  getExternalAgentState(): Promise<ExternalAgentStateDto>;
+  saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto>;
+  saveWebdavPassword(password: string): Promise<void>;
+  runStorageMigration(
+    targetConfig: DriveSyncConfig,
+    webdavPassword?: string | null,
+  ): Promise<StorageMigrationReport>;
+  getSystemDiagnostics(): Promise<SystemDiagnosticsDto>;
+  exportFigmaPluginBundle(destinationDir: string): Promise<string>;
 
   // Live Events
   subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void>;
@@ -528,6 +569,95 @@ export class TauriTransport implements CharkleTransport {
   ): Promise<string | null> {
     const selected = await saveDialog({ defaultPath, filters });
     return typeof selected === 'string' && selected.length > 0 ? selected : null;
+  }
+
+  async pickDirectoryDialog(title = '选择目录'): Promise<string | null> {
+    const selected = await openDialog({ directory: true, multiple: false, title });
+    return typeof selected === 'string' && selected.length > 0 ? selected : null;
+  }
+
+  getAiProviderState(): Promise<AIProviderStateDto> {
+    return invoke('get_ai_provider_state');
+  }
+
+  saveAiProviderConfig(
+    config: AIProviderConfig,
+    opts?: { apiKey?: string | null; clearApiKey?: boolean },
+  ): Promise<AIProviderStateDto> {
+    return invoke('save_ai_provider_config', {
+      payload: {
+        config,
+        apiKey: opts?.apiKey ?? null,
+        clearApiKey: opts?.clearApiKey ?? false,
+      },
+    });
+  }
+
+  testAiProviderConnection(): Promise<AIConnectionTestResult> {
+    return invoke('test_ai_provider_connection');
+  }
+
+  resetAiUsage(category?: CloudAIUsageCategory | null): Promise<CloudAIUsageSummary> {
+    return invoke('reset_ai_usage', { category: category ?? null });
+  }
+
+  disconnectChatgptAccount(): Promise<ChatGPTAccountSession> {
+    return invoke('disconnect_chatgpt_account');
+  }
+
+  getTypesafeState(): Promise<TypeSafeStateDto> {
+    return invoke('get_typesafe_state');
+  }
+
+  saveTypesafeConfig(
+    config: TypeSafeExperimentalConfig,
+    opts?: { apiKey?: string | null; clearApiKey?: boolean },
+  ): Promise<TypeSafeStateDto> {
+    return invoke('save_typesafe_config', {
+      payload: {
+        config,
+        apiKey: opts?.apiKey ?? null,
+        clearApiKey: opts?.clearApiKey ?? false,
+      },
+    });
+  }
+
+  testTypesafeConnection(): Promise<TypeSafeTestResultDto> {
+    return invoke('test_typesafe_connection');
+  }
+
+  runInboxSmartTriage(): Promise<InboxTriageRecommendation[]> {
+    return invoke('run_inbox_smart_triage');
+  }
+
+  getExternalAgentState(): Promise<ExternalAgentStateDto> {
+    return invoke('get_external_agent_state');
+  }
+
+  saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto> {
+    return invoke('save_external_agent_config', { config });
+  }
+
+  saveWebdavPassword(password: string): Promise<void> {
+    return invoke('save_webdav_password', { password });
+  }
+
+  runStorageMigration(
+    targetConfig: DriveSyncConfig,
+    webdavPassword?: string | null,
+  ): Promise<StorageMigrationReport> {
+    return invoke('run_storage_migration', {
+      targetConfig,
+      webdavPassword: webdavPassword ?? null,
+    });
+  }
+
+  getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
+    return invoke('get_system_diagnostics');
+  }
+
+  exportFigmaPluginBundle(destinationDir: string): Promise<string> {
+    return invoke('export_figma_plugin_bundle', { destinationDir });
   }
 
   async subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void> {
@@ -1667,6 +1797,271 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async saveFileDialog(defaultPath: string): Promise<string | null> {
     return `mock-exports/${defaultPath}`;
+  }
+
+  async pickDirectoryDialog(): Promise<string | null> {
+    return 'mock-exports/selected-folder';
+  }
+
+  private mockAiState: AIProviderStateDto = {
+    config: {
+      provider: 'disabled',
+      customEndpointFormat: 'openAIChatCompletions',
+      baseURL: 'https://generativelanguage.googleapis.com',
+      chatModel: 'gemini-2.5-flash',
+      embeddingModel: 'gemini-embedding-001',
+      autoAnalyzeOnImport: false,
+      sendThumbnailsToCloud: true,
+    },
+    hasApiKey: false,
+    chatgptSession: { status: 'disconnected', sharingEnabled: false },
+    usage: {
+      dayKey: '2026-11-23',
+      todayRequests: 3,
+      todayInputTokens: 420,
+      todayOutputTokens: 110,
+      todayTotalTokens: 530,
+      totalRequests: 12,
+      totalInputTokens: 1800,
+      totalOutputTokens: 480,
+      totalTokens: 2280,
+      lastProviderLabel: 'Google Gemini',
+      lastModel: 'gemini-2.5-flash',
+      lastCallTokens: 180,
+      standard: {
+        dayKey: '2026-11-23',
+        todayRequests: 2,
+        todayInputTokens: 240,
+        todayOutputTokens: 80,
+        todayTotalTokens: 320,
+        totalRequests: 10,
+        totalInputTokens: 1400,
+        totalOutputTokens: 400,
+        totalTokens: 1800,
+        lastProviderLabel: 'Google Gemini',
+        lastModel: 'gemini-2.5-flash',
+        lastCallTokens: 180,
+      },
+      jev: {
+        dayKey: '2026-11-23',
+        todayRequests: 1,
+        todayInputTokens: 180,
+        todayOutputTokens: 30,
+        todayTotalTokens: 210,
+        totalRequests: 2,
+        totalInputTokens: 400,
+        totalOutputTokens: 80,
+        totalTokens: 480,
+        lastProviderLabel: 'TypeSafe (Jev)',
+        lastModel: 'jev-latest',
+        lastCallTokens: 210,
+      },
+    },
+  };
+
+  private mockTypesafeState: TypeSafeStateDto = {
+    config: {
+      enabled: false,
+      baseURL: 'https://api.typesafe.ai',
+      model: 'jev-latest',
+      minConfidence: 0.6,
+      lowConfidencePadding: 0.05,
+      minPresenceProbability: 0.45,
+      enableMoodboardFocusCrop: true,
+      enableAutoCleanCrop: true,
+      enableSubjectPalette: true,
+      enablePinpointAnnotations: true,
+      enableSemanticSearch: true,
+      enableInboxSmartTriage: true,
+      enableCuratorVisualRerank: true,
+    },
+    hasApiKey: false,
+  };
+
+  private mockAgentConfig: ExternalAgentConfig = {
+    mcpEnabled: true,
+    cliEnabled: true,
+    accessLevel: 'readOnly',
+  };
+
+  async getAiProviderState(): Promise<AIProviderStateDto> {
+    return structuredClone(this.mockAiState);
+  }
+
+  async saveAiProviderConfig(
+    config: AIProviderConfig,
+    opts?: { apiKey?: string | null; clearApiKey?: boolean },
+  ): Promise<AIProviderStateDto> {
+    this.mockAiState.config = { ...config };
+    if (opts?.clearApiKey) this.mockAiState.hasApiKey = false;
+    else if (opts?.apiKey && opts.apiKey.trim()) this.mockAiState.hasApiKey = true;
+    return structuredClone(this.mockAiState);
+  }
+
+  async testAiProviderConnection(): Promise<AIConnectionTestResult> {
+    const p = this.mockAiState.config.provider;
+    return {
+      ok: true,
+      providerLabel: p === 'disabled' ? '纯本机离线模式' : p,
+      model: this.mockAiState.config.chatModel,
+      message: p === 'disabled' ? '纯本机离线模式已就绪' : '模拟连接校验成功',
+      latencyMs: 42,
+    };
+  }
+
+  async resetAiUsage(category?: CloudAIUsageCategory | null): Promise<CloudAIUsageSummary> {
+    const empty = {
+      dayKey: '2026-11-23',
+      todayRequests: 0,
+      todayInputTokens: 0,
+      todayOutputTokens: 0,
+      todayTotalTokens: 0,
+      totalRequests: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      lastCallTokens: 0,
+    };
+    if (!category || category === 'standard') this.mockAiState.usage.standard = { ...empty };
+    if (!category || category === 'jev') this.mockAiState.usage.jev = { ...empty };
+    this.mockAiState.usage.todayRequests =
+      this.mockAiState.usage.standard.todayRequests + this.mockAiState.usage.jev.todayRequests;
+    this.mockAiState.usage.todayTotalTokens =
+      this.mockAiState.usage.standard.todayTotalTokens + this.mockAiState.usage.jev.todayTotalTokens;
+    this.mockAiState.usage.totalRequests =
+      this.mockAiState.usage.standard.totalRequests + this.mockAiState.usage.jev.totalRequests;
+    this.mockAiState.usage.totalTokens =
+      this.mockAiState.usage.standard.totalTokens + this.mockAiState.usage.jev.totalTokens;
+    return structuredClone(this.mockAiState.usage);
+  }
+
+  async disconnectChatgptAccount(): Promise<ChatGPTAccountSession> {
+    this.mockAiState.chatgptSession = { status: 'disconnected', sharingEnabled: false };
+    return { ...this.mockAiState.chatgptSession };
+  }
+
+  async getTypesafeState(): Promise<TypeSafeStateDto> {
+    return structuredClone(this.mockTypesafeState);
+  }
+
+  async saveTypesafeConfig(
+    config: TypeSafeExperimentalConfig,
+    opts?: { apiKey?: string | null; clearApiKey?: boolean },
+  ): Promise<TypeSafeStateDto> {
+    this.mockTypesafeState.config = { ...config };
+    if (opts?.clearApiKey) this.mockTypesafeState.hasApiKey = false;
+    else if (opts?.apiKey && opts.apiKey.trim()) this.mockTypesafeState.hasApiKey = true;
+    return structuredClone(this.mockTypesafeState);
+  }
+
+  async testTypesafeConnection(): Promise<TypeSafeTestResultDto> {
+    return {
+      ok: this.mockTypesafeState.hasApiKey,
+      message: this.mockTypesafeState.hasApiKey
+        ? '已连接 TypeSafe System One，可用模型 2 个。'
+        : '尚未配置 TypeSafe API 密钥（离线显著性兜底仍可用）。',
+      models: this.mockTypesafeState.hasApiKey
+        ? [
+            { name: 'jev-latest', description: 'System One 视觉定位', release_date: '2026-09' },
+            { name: 'jev-fast', description: '低延迟视觉定位', release_date: '2026-08' },
+          ]
+        : [],
+    };
+  }
+
+  async runInboxSmartTriage(): Promise<InboxTriageRecommendation[]> {
+    const inbox = this.assets.filter((a) => !a.isTrashed && !a.folderID);
+    const firstFolder = this.folders[0];
+    return inbox.map((a) => ({
+      assetID: a.id,
+      assetTitle: a.title,
+      recommendedFolderID: firstFolder?.id ?? null,
+      recommendedFolderName: firstFolder?.name ?? null,
+      confidence: 0.86,
+      fitProbability: 0.86,
+      reason: firstFolder ? `与「${firstFolder.name}」主题吻合` : '待建立分类文件夹',
+      source: 'appleVisionSaliency',
+    }));
+  }
+
+  async getExternalAgentState(): Promise<ExternalAgentStateDto> {
+    const cliBinaryPath = 'C:\\Program Files\\Charkle\\charkle-cli.exe';
+    const libraryDir = '%LOCALAPPDATA%\\Charkle';
+    return {
+      config: { ...this.mockAgentConfig },
+      cliBinaryPath,
+      libraryDir,
+      mcpConfigJson: JSON.stringify(
+        {
+          mcpServers: {
+            charkle: {
+              command: cliBinaryPath,
+              args: ['--library-dir', libraryDir, 'mcp'],
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      readToolCount: 8,
+      writeToolCount: 6,
+      resourceCount: 2,
+    };
+  }
+
+  async saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto> {
+    this.mockAgentConfig = { ...config };
+    return this.getExternalAgentState();
+  }
+
+  async saveWebdavPassword(): Promise<void> {}
+
+  async runStorageMigration(targetConfig: DriveSyncConfig): Promise<StorageMigrationReport> {
+    const sourceMode = this.syncCfg.mode;
+    this.syncCfg = { ...targetConfig };
+    return {
+      sourceMode,
+      targetMode: targetConfig.mode,
+      targetLocation: targetConfig.localLibraryPath || targetConfig.rootFolderName,
+      downloadedOriginals: this.assets.length,
+      migratedAssets: this.assets.length,
+      migratedFolders: this.folders.length,
+      migratedBoards: this.boards.length,
+      durationSeconds: 0.84,
+    };
+  }
+
+  async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
+    return {
+      appVersion: '1.0.1',
+      schemaVersion: 2,
+      dataDir: '%LOCALAPPDATA%\\Charkle',
+      databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
+      gdirect: {
+        cliPath: null,
+        cliVersion: null,
+        appVersion: null,
+        hasVersionMismatch: false,
+        rclonePath: null,
+        accounts: [],
+        defaultAccount: null,
+        endpoints: [],
+        mountPath: 'G:\\',
+        isMountActive: false,
+        bypassTunEnabled: true,
+      },
+      ocr: {
+        availableLanguages: ['zh-Hans-CN', 'en-US'],
+        selectedLanguage: 'zh-Hans-CN',
+        hasChinese: true,
+        hasEnglish: true,
+        diagnosticMessage: null,
+      },
+    };
+  }
+
+  async exportFigmaPluginBundle(destinationDir: string): Promise<string> {
+    return `${destinationDir}/Charkle-Figma-Plugin`;
   }
 
   async subscribeEvents(): Promise<() => void> {

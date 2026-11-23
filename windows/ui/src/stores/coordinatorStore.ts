@@ -3,6 +3,7 @@ import { getTransport } from '../api/transport';
 import { applyThemeToDocument, type ThemeMode } from '../design-system/theme';
 import type {
   GalleryLayoutMode,
+  SettingsTabId,
   SidebarDestination,
   WindowSurfaceState,
 } from '../types/domain';
@@ -26,6 +27,12 @@ export interface QuickLookOriginRect {
 const THEME_STORAGE_KEY = 'charkle.win.theme';
 const LAYOUT_STORAGE_KEY = 'charkle.win.layout';
 const SCALE_STORAGE_KEY = 'charkle.win.cardScale';
+const ONBOARDING_DONE_KEY = 'charkle.win.onboardingDone';
+
+function readOnboardingDone(): boolean {
+  if (typeof localStorage === 'undefined') return true;
+  return localStorage.getItem(ONBOARDING_DONE_KEY) === '1';
+}
 
 function readStoredTheme(): ThemeMode {
   if (typeof localStorage === 'undefined') return 'system';
@@ -64,6 +71,10 @@ export interface CoordinatorState {
   quickLookOriginRect: QuickLookOriginRect | null;
   jumpOpen: boolean;
   captureOpen: boolean;
+  settingsOpen: boolean;
+  settingsTab: SettingsTabId;
+  onboardingOpen: boolean;
+  onboardingDone: boolean;
   activeMoodboardId: string | null;
   toasts: ToastItem[];
 
@@ -87,6 +98,11 @@ export interface CoordinatorState {
   closeQuickLook: () => void;
   setJumpOpen: (open: boolean) => void;
   setCaptureOpen: (open: boolean) => void;
+  openSettings: (tab?: SettingsTabId) => void;
+  closeSettings: () => void;
+  setSettingsTab: (tab: SettingsTabId) => void;
+  setOnboardingOpen: (open: boolean) => void;
+  completeOnboarding: () => void;
   setActiveMoodboardId: (id: string | null) => void;
   pushToast: (toast: Omit<ToastItem, 'id'>) => string;
   dismissToast: (id: string) => void;
@@ -108,6 +124,10 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   quickLookOriginRect: null,
   jumpOpen: false,
   captureOpen: false,
+  settingsOpen: false,
+  settingsTab: 'general',
+  onboardingOpen: false,
+  onboardingDone: readOnboardingDone(),
   activeMoodboardId: null,
   toasts: [],
 
@@ -240,6 +260,32 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
 
   setCaptureOpen(open) {
     set({ captureOpen: open });
+  },
+
+  openSettings(tab) {
+    set((s) => ({
+      settingsOpen: true,
+      settingsTab: tab ?? s.settingsTab,
+    }));
+  },
+
+  closeSettings() {
+    set({ settingsOpen: false });
+  },
+
+  setSettingsTab(tab) {
+    set({ settingsTab: tab });
+  },
+
+  setOnboardingOpen(open) {
+    set({ onboardingOpen: open });
+  },
+
+  completeOnboarding() {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(ONBOARDING_DONE_KEY, '1');
+    }
+    set({ onboardingOpen: false, onboardingDone: true });
   },
 
   setActiveMoodboardId(id) {

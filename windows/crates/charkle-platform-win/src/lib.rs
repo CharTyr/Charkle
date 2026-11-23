@@ -20,6 +20,7 @@ pub mod ocr;
 pub mod shelf_win;
 pub mod shell_thumb;
 pub mod vault;
+pub mod wake;
 pub mod windowing;
 
 pub use mount::WinVolumeMountInspector;

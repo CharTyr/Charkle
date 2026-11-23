@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { getTransport } from './api/transport';
+import { getTransport, isTauriRuntime } from './api/transport';
 import { ToastHost } from './design-system';
 import { QuickCaptureModal } from './features/capture/QuickCaptureModal';
 import { Titlebar } from './features/chrome/Titlebar';
@@ -7,7 +7,9 @@ import { GalleryView } from './features/gallery/GalleryView';
 import { InspectorView } from './features/inspector/InspectorView';
 import { JumpAnywhereModal } from './features/jump/JumpAnywhereModal';
 import { MoodboardsHome } from './features/moodboard/MoodboardsHome';
+import { OnboardingStudio } from './features/onboarding/OnboardingStudio';
 import { QuickLookOverlay } from './features/quicklook/QuickLookOverlay';
+import { SettingsOverlay } from './features/settings/SettingsOverlay';
 import { SidebarView } from './features/sidebar/SidebarView';
 import {
   useCoordinatorStore,
@@ -51,6 +53,11 @@ export const App: React.FC = () => {
     void bootstrap(useCoordinatorStore.getState().destination);
     void fetchBoards();
     void refreshSyncAndCache();
+
+    // Auto-show skippable Onboarding Studio on first launch in desktop runtime
+    if (isTauriRuntime() && !useCoordinatorStore.getState().onboardingDone) {
+      useCoordinatorStore.getState().setOnboardingOpen(true);
+    }
 
     let unlisten: (() => void) | null = null;
     void getTransport()
@@ -139,6 +146,14 @@ export const App: React.FC = () => {
       const coord = useCoordinatorStore.getState();
       const lib = useLibraryStore.getState();
 
+      // Ctrl+, opens centered 9-pane Settings Overlay
+      if (mod && e.key === ',') {
+        e.preventDefault();
+        if (coord.settingsOpen) coord.closeSettings();
+        else coord.openSettings();
+        return;
+      }
+
       // Ctrl+J works everywhere (0ms instant Jump Anywhere)
       if (mod && e.key.toLowerCase() === 'j') {
         e.preventDefault();
@@ -180,7 +195,13 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (isTypingTarget(e.target) || coord.jumpOpen || coord.captureOpen) {
+      if (
+        isTypingTarget(e.target) ||
+        coord.jumpOpen ||
+        coord.captureOpen ||
+        coord.settingsOpen ||
+        coord.onboardingOpen
+      ) {
         return;
       }
 
@@ -323,6 +344,8 @@ export const App: React.FC = () => {
       <QuickLookOverlay />
       <JumpAnywhereModal />
       <QuickCaptureModal />
+      <SettingsOverlay />
+      <OnboardingStudio />
       <ToastHost />
     </div>
   );

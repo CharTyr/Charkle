@@ -14,6 +14,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings,
   Square,
   Sun,
   X,
@@ -48,6 +49,7 @@ export const Titlebar: React.FC = () => {
   const toggleInspector = useCoordinatorStore((s) => s.toggleInspector);
   const setJumpOpen = useCoordinatorStore((s) => s.setJumpOpen);
   const setCaptureOpen = useCoordinatorStore((s) => s.setCaptureOpen);
+  const openSettings = useCoordinatorStore((s) => s.openSettings);
 
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
   const syncing = useSyncAIStore((s) => s.syncing);
@@ -269,6 +271,16 @@ export const Titlebar: React.FC = () => {
             {themeMode === 'light' && <Sun size={14.5} />}
             {themeMode === 'dark' && <Moon size={14.5} />}
             {themeMode === 'system' && <Monitor size={14.5} />}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => openSettings()}
+            aria-label="打开设置中心"
+            title="打开设置中心 (Ctrl+,)"
+            className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+          >
+            <Settings size={14.5} />
           </button>
 
           <button

@@ -17,9 +17,11 @@ use std::sync::{Arc, Mutex};
 
 use charkle_core::db::LibraryDatabase;
 use charkle_core::engine::LiveCharkleEngine;
+use charkle_core::intelligence::CloudAIUsageStore;
 use charkle_core::media::MediaPipeline;
 use charkle_platform_win::clipboard::start_clipboard_listener;
 use charkle_platform_win::shelf_win::start_top_edge_drag_monitor;
+use charkle_platform_win::wake::start_library_wake_listener;
 use charkle_platform_win::windowing::{apply_window_chrome, install_snap_layout_subclass};
 use charkle_platform_win::{
     WinCredentialVault, WinRtOcrProvider, WinShellThumbnailProvider, WinVolumeMountInspector,
@@ -117,15 +119,25 @@ pub fn run() {
                 });
             });
 
+            let usage_store = Arc::new(CloudAIUsageStore::open(&data_dir));
+            let engine_for_wake = Arc::clone(&engine);
+            let app_for_wake = app.handle().clone();
+            let wake_listener = start_library_wake_listener(data_dir.clone(), move || {
+                engine_for_wake.notify_external_change();
+                let _ = app_for_wake.emit("board:updated", "external-cli");
+            });
+
             app.manage(AppState {
                 engine: Arc::clone(&engine),
                 data_dir,
+                usage_store,
                 capture_frames: Arc::new(CaptureFrameStore::default()),
                 hotkeys: Arc::new(Mutex::new(hotkey_cfg.clone())),
                 shelf_pinned: Arc::new(AtomicBool::new(false)),
                 latest_clipboard,
                 _clipboard_listener: Some(clipboard_listener),
                 _top_edge_monitor: Some(top_edge_monitor),
+                _wake_listener: Some(wake_listener),
             });
 
             events::spawn_event_bridge(app.handle().clone(), Arc::clone(&engine));
@@ -257,6 +269,22 @@ pub fn run() {
             commands::moodboard::export_board_image_file,
             commands::moodboard::copy_board_image_to_clipboard,
             commands::moodboard::export_board_figma_bridge,
+            // M5 Hybrid Cloud AI, TypeSafe Jev, External Agent, Migration & Diagnostics
+            commands::settings::get_ai_provider_state,
+            commands::settings::save_ai_provider_config,
+            commands::settings::test_ai_provider_connection,
+            commands::settings::reset_ai_usage,
+            commands::settings::disconnect_chatgpt_account,
+            commands::settings::get_typesafe_state,
+            commands::settings::save_typesafe_config,
+            commands::settings::test_typesafe_connection,
+            commands::settings::run_inbox_smart_triage,
+            commands::settings::get_external_agent_state,
+            commands::settings::save_external_agent_config,
+            commands::settings::save_webdav_password,
+            commands::settings::run_storage_migration,
+            commands::settings::get_system_diagnostics,
+            commands::settings::export_figma_plugin_bundle,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Charkle desktop application");
