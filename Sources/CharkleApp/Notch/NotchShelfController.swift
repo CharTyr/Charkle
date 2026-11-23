@@ -349,7 +349,7 @@ public final class NotchShelfController {
             guard let self, self.shelfState.isExpanded, self.panel?.isKeyWindow == true else {
                 return event
             }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "v" {
                 self.onCollectClipboard()
                 return nil
@@ -359,6 +359,14 @@ public final class NotchShelfController {
                 return nil
             }
             return event
+        }
+    }
+
+    public func setMinimalCaptureMode(_ enabled: Bool) {
+        shelfState.isMinimalCaptureOnly = enabled
+        if enabled {
+            shelfState.isFullGalleryExpanded = false
+            shelfState.isPinnedOpen = false
         }
     }
 
@@ -374,7 +382,7 @@ public final class NotchShelfController {
 
     public func expand(forDrag: Bool = false, pinOpen: Bool = false) {
         guard coordinator.notchShelfEnabled else { return }
-        hideWorkItem?.cancel()
+        cancelAutoCollapse()
         cancelHoverExpand()
         anchorFixedPanelIfScreenChanged()
         refreshClipboardHint(force: true)
@@ -393,7 +401,7 @@ public final class NotchShelfController {
     public func collapse() {
         guard shelfState.isExpanded else { return }
         if shelfState.isDropTargeted || shelfState.processingMessage != nil { return }
-        hideWorkItem?.cancel()
+        cancelAutoCollapse()
         cancelHoverExpand()
         shelfState.isExpanded = false
         shelfState.isFullGalleryExpanded = false
@@ -444,6 +452,9 @@ public final class NotchShelfController {
     }
 
     public func toggleFullGallery(_ expanded: Bool) {
+        if expanded && shelfState.isMinimalCaptureOnly {
+            return
+        }
         shelfState.isFullGalleryExpanded = expanded
         if expanded {
             shelfState.isPinnedOpen = true
@@ -454,7 +465,7 @@ public final class NotchShelfController {
     public func showProcessing(_ message: String) {
         expand(forDrag: false)
         bannerResetTask?.cancel()
-        hideWorkItem?.cancel()
+        cancelAutoCollapse()
         shelfState.statusBanner = nil
         shelfState.processingMessage = message
     }
@@ -466,7 +477,7 @@ public final class NotchShelfController {
         shelfState.processingMessage = nil
         shelfState.statusBanner = message
         shelfState.lastDropTimestamp = Date()
-        hideWorkItem?.cancel()
+        cancelAutoCollapse()
         bannerResetTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.8))
             guard !Task.isCancelled, let self else { return }
@@ -531,7 +542,7 @@ public final class NotchShelfController {
 
         hosting.onDragEntered = { [weak self] count in
             guard let self else { return }
-            self.hideWorkItem?.cancel()
+            self.cancelAutoCollapse()
             if self.shelfState.dragItemCount != count {
                 self.shelfState.dragItemCount = count
             }
@@ -868,8 +879,13 @@ public final class NotchShelfController {
         )
         let insideActiveArea = strictCardRect.contains(loc) || (isMouseButtonDown ? inDragTrigger : inHoverTrigger)
 
-        if !insideActiveArea && isPanelDragging {
-            isPanelDragging = false
+        if (!insideActiveArea || !isMouseButtonDown) && (isPanelDragging || isSensorDragging) {
+            if !isMouseButtonDown {
+                isSensorDragging = false
+                isPanelDragging = false
+            } else if !insideActiveArea {
+                isPanelDragging = false
+            }
             syncDropTargetedState()
         }
 
@@ -884,12 +900,12 @@ public final class NotchShelfController {
         }
 
         if shelfState.statusBanner != nil || shelfState.processingMessage != nil || isSensorDragging || shelfState.isPinnedOpen {
-            hideWorkItem?.cancel()
+            cancelAutoCollapse()
             return
         }
 
         if insideActiveArea {
-            hideWorkItem?.cancel()
+            cancelAutoCollapse()
         } else if hideWorkItem == nil {
             scheduleAutoCollapse(delay: isMouseButtonDown ? 0.14 : 0.45)
         }
@@ -902,8 +918,13 @@ public final class NotchShelfController {
             ?? NSScreen.screens[0]
     }
 
-    private func scheduleAutoCollapse(delay: TimeInterval = 0.55) {
+    private func cancelAutoCollapse() {
         hideWorkItem?.cancel()
+        hideWorkItem = nil
+    }
+
+    private func scheduleAutoCollapse(delay: TimeInterval = 0.55) {
+        cancelAutoCollapse()
         let item = DispatchWorkItem { [weak self] in
             self?.hideWorkItem = nil
             self?.collapse()

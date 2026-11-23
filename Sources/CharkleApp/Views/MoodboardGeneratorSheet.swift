@@ -256,11 +256,11 @@ public struct MoodboardGeneratorSheet: View {
                                             asset: asset,
                                             loader: library.thumbnailLoader,
                                             tier: .grid520,
-                                            cornerRadius: 7
+                                            cornerRadius: 8
                                         )
                                         .frame(height: 64)
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                                 .strokeBorder(isPicked ? Color.accentColor : Color.clear, lineWidth: 2)
                                         )
                                         if isPicked {
@@ -269,7 +269,7 @@ public struct MoodboardGeneratorSheet: View {
                                                 .foregroundStyle(Color.accentColor)
                                                 .background(Circle().fill(Color.white).padding(1))
                                                 .padding(4)
-                                                .transition(.scale(scale: reduceMotion ? 1.0 : 0.7).combined(with: .opacity))
+                                                .transition(CharkleMotion.originTransition(anchor: .topTrailing, scale: 0.92, reduced: reduceMotion))
                                         }
                                     }
                                     .animation(CharkleMotion.accessible(CharkleMotion.microOvershoot, reduced: reduceMotion), value: isPicked)
@@ -306,11 +306,11 @@ public struct MoodboardGeneratorSheet: View {
                                         selectedPaletteHexes.append(hex)
                                     }
                                 } label: {
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                                         .fill(Color(charkleHex: hex))
                                         .frame(width: 28, height: 28)
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
                                                 .strokeBorder(active ? Color.accentColor : Color.primary.opacity(0.14), lineWidth: active ? 2.2 : 0.75)
                                         )
                                 }
@@ -399,13 +399,13 @@ public struct MoodboardGeneratorSheet: View {
 
                     Toggle(isOn: $autoFocusDetailCrop) {
                         HStack(spacing: 4) {
-                            Text("细节特写模式（Jev Box 按灵感词自动局部裁切）")
+                            Text("细节特写模式（按灵感词自动局部裁切）")
                                 .font(.system(size: 11.5))
                         }
                     }
                     .toggleStyle(.checkbox)
                     .disabled(!isTypeSafeReady)
-                    .help(isTypeSafeReady ? "入选主图会自动按灵感词定位局部细节并写入非破坏性裁切框" : "需在「设置 → 智能与搜索」中开启 TypeSafe (Jev) 实验档")
+                    .help(isTypeSafeReady ? "入选主图会自动按灵感词定位局部细节并写入非破坏性裁切框" : "需在「设置 → 智能与搜索」中开启视觉定位增强")
                 }
 
                 // 6. Primary Curation Trigger
@@ -534,11 +534,11 @@ public struct MoodboardGeneratorSheet: View {
                             case .done:
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.green)
-                                    .transition(.scale(scale: reduceMotion ? 1.0 : 0.72).combined(with: .opacity))
+                                    .transition(CharkleMotion.originTransition(anchor: .center, scale: 0.92, reduced: reduceMotion))
                             case .warning:
                                 Image(systemName: "exclamationmark.circle.fill")
                                     .foregroundStyle(.orange)
-                                    .transition(.scale(scale: reduceMotion ? 1.0 : 0.8).combined(with: .opacity))
+                                    .transition(CharkleMotion.originTransition(anchor: .center, scale: 0.92, reduced: reduceMotion))
                             }
                         }
                         .font(.system(size: 12))

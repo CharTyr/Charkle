@@ -1919,7 +1919,7 @@ public struct OnboardingView: View {
                 Circle()
                     .fill(Color.primary)
                     .frame(width: 7.5, height: 7.5)
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+                    .transition(CharkleMotion.originTransition(anchor: .center, scale: 0.86, reduced: reduceMotion))
             }
         }
     }

@@ -24,6 +24,7 @@ public final class NotchShelfState {
 
     public var isExpanded: Bool = false
     public var isFullGalleryExpanded: Bool = false
+    public var isMinimalCaptureOnly: Bool = false
     public var isPinnedOpen: Bool = false
     public var isDropTargeted: Bool = false
     public var dragItemCount: Int = 0
@@ -65,7 +66,7 @@ public final class NotchShelfState {
         compactBodyWidth + Self.topEarRadius * 2
     }
 
-    /// Total height of the pure-black notch capsule in Compact mode.
+    /// Total height of the pure-black notch capsule in Compact mode (keeps quick capture + recent strip).
     public var compactCardHeight: CGFloat {
         topNotchBandHeight + 292
     }
@@ -93,12 +94,12 @@ public final class NotchShelfState {
 
     /// Fixed maximum card height for the backing transparent `NSPanel`.
     public var maxPanelCardHeight: CGFloat {
-        max(compactCardHeight, fullGalleryCardHeight)
+        max(topNotchBandHeight + 292, fullGalleryCardHeight)
     }
 
     /// Active inner capsule width between vertical side walls (excluding the two concave top ears).
     public var expandedBodyWidth: CGFloat {
-        isFullGalleryExpanded ? fullGalleryBodyWidth : compactBodyWidth
+        (isFullGalleryExpanded && !isMinimalCaptureOnly) ? fullGalleryBodyWidth : compactBodyWidth
     }
 
     /// Active total width of `NotchShellShape` including both concave top bezel ears.
@@ -108,6 +109,6 @@ public final class NotchShelfState {
 
     /// Active total height of the expanded pure-black notch capsule.
     public var expandedCardHeight: CGFloat {
-        isFullGalleryExpanded ? fullGalleryCardHeight : compactCardHeight
+        (isFullGalleryExpanded && !isMinimalCaptureOnly) ? fullGalleryCardHeight : compactCardHeight
     }
 }

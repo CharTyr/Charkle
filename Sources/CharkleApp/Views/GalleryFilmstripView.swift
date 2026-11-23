@@ -581,11 +581,11 @@ public struct GalleryFilmstripView: View {
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 7)
                                     .padding(.vertical, 4)
-                                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                                 }
                                 .buttonStyle(CharkleTactileButtonStyle())
                                 .help("还原全部视图变换 (0)")
-                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                                .transition(CharkleMotion.originTransition(anchor: .trailing, scale: 0.94, reduced: reduceMotion))
                             }
                         }
                         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: hasAnyTransformOrZoom)

@@ -431,4 +431,28 @@ struct UpgradeFeaturesTests {
         #expect(attachments[0].kind == .video)
         #expect(attachments[1].kind == .photo)
     }
+
+    @Test("ThumbnailImageLoader low-resource mode purges decoded buffers and restores full budget on exit")
+    @MainActor
+    func thumbnailLoaderLowResourceModeBudget() {
+        let loader = ThumbnailImageLoader(engine: PlaceholderCharkleEngine())
+        #expect(loader.isLowResourceMode == false)
+        #expect(loader.currentCacheCountLimit == 1_500)
+        #expect(loader.currentCacheCostLimit == 320 * 1024 * 1024)
+        #expect(loader.currentOriginalCacheCountLimit == 4)
+
+        let versionBefore = loader.invalidationVersion
+        loader.setLowResourceMode(true)
+        #expect(loader.isLowResourceMode == true)
+        #expect(loader.invalidationVersion == versionBefore &+ 1)
+        #expect(loader.currentCacheCountLimit == 20)
+        #expect(loader.currentCacheCostLimit == 12 * 1024 * 1024)
+        #expect(loader.currentOriginalCacheCountLimit == 0)
+
+        loader.setLowResourceMode(false)
+        #expect(loader.isLowResourceMode == false)
+        #expect(loader.currentCacheCountLimit == 1_500)
+        #expect(loader.currentCacheCostLimit == 320 * 1024 * 1024)
+        #expect(loader.currentOriginalCacheCountLimit == 4)
+    }
 }

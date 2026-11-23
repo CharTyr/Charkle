@@ -496,7 +496,7 @@ struct QuickLookSocialPostCard: View {
                             contentMode: .fit,
                             maxHeight: attachments.count == 1 ? 420 : 240
                         ) {
-                            ProgressView().frame(height: 180)
+                            CharkleMediaPlaceholderSkeleton(height: 180, cornerRadius: 12)
                         } failurePlaceholder: {
                             mediaFailedPlaceholder
                         }
@@ -1015,7 +1015,7 @@ private struct MarkdownBlockRowView: View {
         case .quote(_, let alertKind, let text):
             let accent = alertAccentColor(for: alertKind)
             HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 2)
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(accent)
                     .frame(width: 3)
                 VStack(alignment: .leading, spacing: 4) {
@@ -1037,7 +1037,7 @@ private struct MarkdownBlockRowView: View {
             .padding(.vertical, alertKind == nil ? 2 : 8)
             .background(
                 alertKind == nil ? Color.clear : accent.opacity(colorScheme == .dark ? 0.12 : 0.08),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
 
         case .listItem(_, let marker, let indent, let text):

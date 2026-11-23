@@ -319,6 +319,10 @@ public struct QuickLookOverlayView: View {
             library.refreshInspectorContext(for: assetID)
         }
         .onAppear {
+            // Prevent newly mounted Inspector TextFields from stealing firstResponder and blocking Spacebar dismiss.
+            if let keyWindow = NSApp.keyWindow, isEditingText(in: keyWindow) {
+                keyWindow.makeFirstResponder(nil)
+            }
             stageAppeared = true
             if reduceMotion {
                 showSecondaryControls = true
@@ -327,19 +331,6 @@ public struct QuickLookOverlayView: View {
                     showSecondaryControls = true
                 }
             }
-        }
-        .alert("彻底删除此素材？", isPresented: $confirmPermanentDelete) {
-            Button("取消", role: .cancel) {}
-            Button("彻底删除", role: .destructive) {
-                let id = asset.id
-                onClose()
-                Task {
-                    await library.permanentlyDeleteAssets([id])
-                    coordinator.showToast("已彻底删除素材", icon: "trash.slash")
-                }
-            }
-        } message: {
-            Text("彻底删除后将无法恢复。")
         }
     }
 
@@ -679,7 +670,7 @@ public struct QuickLookOverlayView: View {
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
                             .help("还原旋转与翻转")
-                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                            .transition(CharkleMotion.originTransition(anchor: .trailing, scale: 0.94, reduced: reduceMotion))
                         }
                     }
                     .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: hasActiveVisualTransform)
@@ -733,6 +724,20 @@ public struct QuickLookOverlayView: View {
                             .padding(.vertical, 4)
                     }
                     .buttonStyle(CharkleTactileButtonStyle())
+                    .charklePopconfirm(
+                        isPresented: $confirmPermanentDelete,
+                        title: "彻底删除此素材？",
+                        message: "彻底删除后将无法从废纸篓恢复。",
+                        confirmTitle: "彻底删除",
+                        arrowEdge: .top
+                    ) {
+                        let id = asset.id
+                        onClose()
+                        Task {
+                            await library.permanentlyDeleteAssets([id])
+                            coordinator.showToast("已彻底删除素材", icon: "trash.slash")
+                        }
+                    }
                 } else {
                     hudIconButton(
                         asset.pinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle",

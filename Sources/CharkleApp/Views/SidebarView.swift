@@ -284,7 +284,7 @@ public struct SidebarView: View {
                     railDivider
                     ForEach(topFolders.prefix(8)) { folder in
                         let isSelected = coordinator.selectedDestination == .folder(folder.id)
-                        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
                         Button {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
                                 onSelectDestination(.folder(folder.id))
@@ -368,9 +368,9 @@ public struct SidebarView: View {
                         coordinator.isSettingsPresented
                             ? Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
                             : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                     )
-                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("设置 (⌘,)")
@@ -393,7 +393,7 @@ public struct SidebarView: View {
         isDropHighlighted: Bool = false
     ) -> some View {
         let isSelected = coordinator.selectedDestination == destination
-        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
         return Button {
             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
                 onSelectDestination(destination)
@@ -753,9 +753,27 @@ public struct SidebarView: View {
                                 handleFolderHeaderDrop(providers: providers)
                             }
                     } else {
+                        let tree = visibleFolderTree
                         let rootFolderCount = library.childFolders(of: nil).count
-                        ForEach(visibleFolderTree) { node in
+                        let activeSlotRowIdx = activeFolderDropSlotRowIndex(in: tree)
+                        ForEach(Array(tree.enumerated()), id: \.element.id) { rowIndex, node in
                             let folder = node.folder
+                            let ripple: (offset: CGFloat, delay: Double) = {
+                                guard let slotIdx = activeSlotRowIdx, !reduceMotion else { return (0, 0) }
+                                if rowIndex < slotIdx {
+                                    let dist = (slotIdx - 1) - rowIndex
+                                    return (
+                                        -CharkleMotion.rippleOffset(distance: dist, amplitude: 4.5),
+                                        CharkleMotion.rippleDelay(distance: dist)
+                                    )
+                                } else {
+                                    let dist = rowIndex - slotIdx
+                                    return (
+                                        CharkleMotion.rippleOffset(distance: dist, amplitude: 4.5),
+                                        CharkleMotion.rippleDelay(distance: dist)
+                                    )
+                                }
+                            }()
                             // Top insertion slot for reordering / dropping an external folder right before this row
                             folderDropInsertionSlot(
                                 parentID: folder.parentID,
@@ -767,6 +785,12 @@ public struct SidebarView: View {
                                 inlineFolderRenameRow(folder: folder, depth: node.depth)
                             } else {
                                 folderTreeRow(node)
+                                    .offset(y: ripple.offset)
+                                    .animation(
+                                        CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)
+                                            .delay(ripple.delay),
+                                        value: dropTargetedSlot
+                                    )
                             }
 
                             if creationTarget == .subfolder(folder.id) {
@@ -980,7 +1004,7 @@ public struct SidebarView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 10)
                         .frame(height: 26)
-                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal, 8)
@@ -1058,7 +1082,7 @@ public struct SidebarView: View {
                             .frame(height: 28)
                             .background(
                                 selected ? Color.accentColor.opacity(0.12) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                             )
                             .contentShape(Rectangle())
                         }
@@ -1073,6 +1097,19 @@ public struct SidebarView: View {
     }
 
     // MARK: - Folder Insertion Drop Slot (Drag-to-Reorder + External Folder Drop at Position)
+
+    private func activeFolderDropSlotRowIndex(in tree: [FolderTreeNode]) -> Int? {
+        guard let slot = dropTargetedSlot else { return nil }
+        if let matchIdx = tree.firstIndex(where: {
+            $0.folder.parentID == slot.parentID && $0.siblingIndex == slot.index
+        }) {
+            return matchIdx
+        }
+        if let lastSiblingIdx = tree.lastIndex(where: { $0.folder.parentID == slot.parentID }) {
+            return lastSiblingIdx + 1
+        }
+        return tree.count
+    }
 
     private func folderDropInsertionSlot(
         parentID: UUID?,
