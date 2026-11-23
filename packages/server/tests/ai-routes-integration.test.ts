@@ -56,7 +56,7 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     const ctx = createServerContext({ dataDir: dir });
     const app = createApp(ctx, { staticClientDir: null });
 
-    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
     const pat = ctx.auth.createApiToken(user.id, 'routes-pat', ['read', 'write', 'mcp']);
     const authHeaders = {
       Authorization: `Bearer ${pat.token}`,
@@ -454,7 +454,7 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     };
 
     const app = createApp(ctx, { staticClientDir: null, aiOptions: { fetchFn: mockFetch } });
-    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
     const pat = ctx.auth.createApiToken(user.id, 'ai-test-pat', ['read', 'write']);
     const authHeaders = {
       Authorization: `Bearer ${pat.token}`,
@@ -627,7 +627,7 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     };
 
     const app = createApp(ctx, { staticClientDir: null, aiOptions: { fetchFn: spyFetch } });
-    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
     const pat = ctx.auth.createApiToken(user.id, 'local-only-pat', ['read', 'write']);
     const authHeaders = {
       Authorization: `Bearer ${pat.token}`,

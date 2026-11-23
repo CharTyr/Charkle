@@ -1,10 +1,10 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { EventBus } from './api/events.js';
 import { ExternalAgentService } from './agent/external-agent-service.js';
-import { LibraryDatabase } from './db/library-database.js';
 import {
   ChatGPTSubscriptionClient,
   createCloudAIProvider,
@@ -12,8 +12,11 @@ import {
 import { CloudAIUsageTracker } from './intelligence/cloud-ai-usage-tracker.js';
 import { VisualGroundingEngine } from './intelligence/visual-grounding-engine.js';
 import { MediaPipeline } from './media/media-pipeline.js';
-import { ConfigStore } from './storage/config-store.js';
-import { SECRET_KEYS, SecretVault } from './storage/secret-vault.js';
+import { NodeBlobStore } from './runtime/node-blob.js';
+import { NodeImageProcessor } from './runtime/node-image.js';
+import { openNodeLibraryDatabase } from './runtime/node-sql.js';
+import { createNodeConfigStore, createNodeSecretVault } from './runtime/node-storage.js';
+import { SECRET_KEYS } from './storage/secret-vault.js';
 
 export interface StdioMCPOptions {
   dataDir?: string;
@@ -45,10 +48,17 @@ export function createStdioMCPService(dataDir: string): {
   const resolvedDir = path.resolve(dataDir);
   fs.mkdirSync(resolvedDir, { recursive: true });
 
-  const configStore = new ConfigStore(resolvedDir);
-  const secretVault = new SecretVault(resolvedDir);
-  const db = new LibraryDatabase(resolveDatabasePath(resolvedDir));
-  const media = new MediaPipeline(path.join(resolvedDir, 'media'), configStore.getCacheBudgetBytes());
+  const db = openNodeLibraryDatabase(resolveDatabasePath(resolvedDir));
+  const configStore = createNodeConfigStore(db.sql, resolvedDir);
+  const secretVault = createNodeSecretVault(db.sql, resolvedDir);
+  const blobs = new NodeBlobStore(path.join(resolvedDir, 'media'));
+  const images = new NodeImageProcessor();
+  const media = new MediaPipeline({
+    blobs,
+    images,
+    cacheBudgetBytes: configStore.getCacheBudgetBytes(),
+    readLocalFile: async (filePath: string) => new Uint8Array(await fsp.readFile(filePath)),
+  });
   const events = new EventBus();
   const usage = new CloudAIUsageTracker(db);
   const chatGPT = new ChatGPTSubscriptionClient({
@@ -57,7 +67,7 @@ export function createStdioMCPService(dataDir: string): {
     configStore,
     usage,
   });
-  const grounding = new VisualGroundingEngine({ usage });
+  const grounding = new VisualGroundingEngine({ usage, images });
 
   const service = new ExternalAgentService({
     db,
@@ -73,6 +83,11 @@ export function createStdioMCPService(dataDir: string): {
     getTypeSafeAPIKey: () =>
       secretVault.get(SECRET_KEYS.TYPESAFE_API_KEY) ?? (process.env.TYPESAFE_API_KEY?.trim() || null),
     grounding,
+    localFs: {
+      existsSync: (filePath: string) => fs.existsSync(filePath),
+      resolvePath: (filePath: string) => path.resolve(filePath),
+      writeFileSync: (filePath: string, data: Uint8Array) => fs.writeFileSync(filePath, data),
+    },
   });
 
   return {

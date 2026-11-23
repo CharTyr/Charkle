@@ -36,7 +36,7 @@ describe('ExternalAgentService & 14-Tool MCP Server (HTTP + stdio)', () => {
     const ctx = createServerContext({ dataDir: dir });
     const app = createApp(ctx, { staticClientDir: null });
 
-    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
     const pat = ctx.auth.createApiToken(user.id, 'mcp-pat', ['read', 'write', 'mcp']);
 
     const capturedEvents: CharkleSSEEvent[] = [];

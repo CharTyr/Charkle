@@ -173,7 +173,7 @@ describe('Auth, Security Middleware, Sessions, PATs, Rate Limiter & Core REST AP
   it('enforces sliding-window login rate limiting (10 failures -> HTTP 429 with Retry-After)', async () => {
     const { ctx, app } = createTestServer();
     try {
-      ctx.auth.setupAdmin('admin', 'correct-horse-battery');
+      await ctx.auth.setupAdmin('admin', 'correct-horse-battery');
 
       for (let i = 1; i <= 9; i++) {
         const res = await app.request('/api/v1/auth/login', {

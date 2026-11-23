@@ -1,5 +1,11 @@
-import crypto from 'node:crypto';
 import type { DriveAccountInfo } from '@charkle/shared';
+import type { RuntimeEnv } from '../runtime/types.js';
+import {
+  bytesToBase64Url,
+  randomBytes,
+  readEnv,
+  sha256BytesSync,
+} from '../runtime/web-crypto-utils.js';
 import { SECRET_KEYS, type SecretVault } from '../storage/secret-vault.js';
 import { DriveTransportError } from './drive-transport.js';
 
@@ -16,20 +22,31 @@ interface PendingPkceState {
   createdAtMs: number;
 }
 
+export interface OAuthStateStoreLike {
+  getState<T>(key: string): T | null;
+  setState<T>(key: string, value: T | null): void;
+}
+
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+const PKCE_STATE_PREFIX = 'oauth.google.pkce.';
+const PKCE_TTL_MS = 15 * 60 * 1000;
 
 /**
- * PKCE OAuth 2.0 client for Google Drive API v3 storing credentials & refresh tokens
- * inside `SecretVault`.
+ * Runtime-agnostic PKCE OAuth 2.0 client for Google Drive API v3 storing credentials,
+ * refresh tokens inside `SecretVault`, and PKCE state durably inside SQLite (survives DO eviction!).
  */
 export class GoogleOAuthClient {
   private readonly vault: SecretVault;
+  private readonly stateStore?: OAuthStateStoreLike;
+  private readonly env?: RuntimeEnv;
   private readonly pendingStates = new Map<string, PendingPkceState>();
 
-  constructor(vault: SecretVault) {
+  constructor(vault: SecretVault, options: { stateStore?: OAuthStateStoreLike; env?: RuntimeEnv } = {}) {
     this.vault = vault;
+    this.stateStore = options.stateStore;
+    this.env = options.env;
   }
 
   hasClientConfig(): boolean {
@@ -39,11 +56,11 @@ export class GoogleOAuthClient {
   getClientCredentials(): { clientID: string; clientSecret: string } | null {
     const clientID =
       this.vault.get(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_ID) ??
-      process.env.CHARKLE_GOOGLE_CLIENT_ID?.trim() ??
+      readEnv('CHARKLE_GOOGLE_CLIENT_ID', this.env)?.trim() ??
       null;
     const clientSecret =
       this.vault.get(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_SECRET) ??
-      process.env.CHARKLE_GOOGLE_CLIENT_SECRET?.trim() ??
+      readEnv('CHARKLE_GOOGLE_CLIENT_SECRET', this.env)?.trim() ??
       '';
     if (!clientID) return null;
     return { clientID, clientSecret };
@@ -88,20 +105,18 @@ export class GoogleOAuthClient {
       );
     }
 
-    // Prune stale states older than 15 min
     const now = Date.now();
     for (const [k, v] of this.pendingStates.entries()) {
-      if (now - v.createdAtMs > 15 * 60 * 1000) this.pendingStates.delete(k);
+      if (now - v.createdAtMs > PKCE_TTL_MS) this.pendingStates.delete(k);
     }
 
-    const state = crypto.randomBytes(24).toString('base64url');
-    const codeVerifier = crypto.randomBytes(32).toString('base64url');
-    const codeChallenge = crypto
-      .createHash('sha256')
-      .update(codeVerifier, 'ascii')
-      .digest('base64url');
+    const state = bytesToBase64Url(randomBytes(24));
+    const codeVerifier = bytesToBase64Url(randomBytes(32));
+    const codeChallenge = bytesToBase64Url(sha256BytesSync(codeVerifier));
 
-    this.pendingStates.set(state, { codeVerifier, redirectUri, createdAtMs: now });
+    const entry: PendingPkceState = { codeVerifier, redirectUri, createdAtMs: now };
+    this.pendingStates.set(state, entry);
+    this.stateStore?.setState(`${PKCE_STATE_PREFIX}${state}`, entry);
 
     const params = new URLSearchParams({
       client_id: creds.clientID,
@@ -121,16 +136,26 @@ export class GoogleOAuthClient {
     };
   }
 
-  async exchangeCode(code: string, state: string, redirectUri?: string): Promise<DriveAccountInfo> {
+  async exchangeCode(
+    code: string,
+    state: string,
+    redirectUri?: string,
+  ): Promise<DriveAccountInfo> {
     const creds = this.getClientCredentials();
     if (!creds) {
       throw new DriveTransportError('未配置 Google OAuth 凭据。', 'NOT_CONFIGURED');
     }
-    const pending = this.pendingStates.get(state);
-    if (!pending) {
+    const persistedKey = `${PKCE_STATE_PREFIX}${state}`;
+    const pending =
+      this.pendingStates.get(state) ??
+      this.stateStore?.getState<PendingPkceState>(persistedKey) ??
+      null;
+    this.pendingStates.delete(state);
+    this.stateStore?.setState(persistedKey, null);
+
+    if (!pending || Date.now() - pending.createdAtMs > PKCE_TTL_MS) {
       throw new DriveTransportError('OAuth state 无效或已过期，请重新发起授权。', 'INVALID_STATE');
     }
-    this.pendingStates.delete(state);
 
     const body = new URLSearchParams({
       code,
@@ -221,7 +246,10 @@ export class GoogleOAuthClient {
       { headers: { Authorization: `Bearer ${token}` } },
     );
     if (!res.ok) {
-      throw new DriveTransportError(`无法读取 Google Drive 账号信息（HTTP ${res.status}）。`, 'API_ERROR');
+      throw new DriveTransportError(
+        `无法读取 Google Drive 账号信息（HTTP ${res.status}）。`,
+        'API_ERROR',
+      );
     }
     const json = (await res.json()) as {
       user?: { emailAddress?: string; displayName?: string };

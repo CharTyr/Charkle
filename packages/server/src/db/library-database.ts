@@ -1,7 +1,3 @@
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import {
   buildFtsQuery,
   classifyAspectShape,
@@ -39,6 +35,8 @@ import {
   type TagCount,
   type UUID,
 } from '@charkle/shared';
+import type { ISqlDatabase, SqlParam } from '../runtime/types.js';
+import { bytesToHex, randomBytes, randomUUID } from '../runtime/web-crypto-utils.js';
 import {
   applySyncOperation,
   diffAssetChanges,
@@ -51,6 +49,7 @@ import {
 } from './sync-operations.js';
 
 const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION_STATE_KEY = 'schema.version';
 const SMART_FOLDERS_STATE_KEY = 'smart_folders.v1';
 
 // MARK: - Float16 / Float32 Embedding & Vector Helpers
@@ -96,9 +95,16 @@ export function encodeEmbeddingBlob(values: readonly number[], precision: Embedd
   return new Uint8Array(u16.buffer, u16.byteOffset, u16.byteLength);
 }
 
-export function decodeEmbeddingBlob(blob: Uint8Array, precision: EmbeddingPrecision): number[] {
-  const copy = new Uint8Array(blob.byteLength);
-  copy.set(blob);
+export function decodeEmbeddingBlob(
+  blob: Uint8Array | ArrayBuffer,
+  precision: EmbeddingPrecision,
+): number[] {
+  const bytes =
+    blob instanceof ArrayBuffer
+      ? new Uint8Array(blob)
+      : new Uint8Array(blob.buffer, blob.byteOffset, blob.byteLength);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
   if (precision === 32) {
     const f32 = new Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4));
     return Array.from(f32);
@@ -147,34 +153,149 @@ export function cosineSimilarity(a: readonly number[], b: readonly number[]): nu
 
 // MARK: - LibraryDatabase
 
+const INITIAL_SCHEMA_STATEMENTS: readonly string[] = [
+  `CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY,
+    drive_id TEXT UNIQUE,
+    content_hash TEXT NOT NULL,
+    folder_id TEXT,
+    kind TEXT NOT NULL,
+    shape TEXT NOT NULL,
+    title TEXT NOT NULL,
+    rating INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    created REAL NOT NULL,
+    last_opened REAL,
+    pinned INTEGER NOT NULL,
+    trashed INTEGER NOT NULL,
+    payload TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS assets_folder ON assets(folder_id, trashed)`,
+  `CREATE INDEX IF NOT EXISTS assets_recency ON assets(trashed, created DESC)`,
+  `CREATE INDEX IF NOT EXISTS assets_hash ON assets(content_hash) WHERE content_hash <> ''`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
+    title, fileName, notes, tags, ocrText, aiDescription, sourceDomain, pinyin, initials,
+    tokenize='unicode61 remove_diacritics 2', prefix='2 3 4'
+  )`,
+  `CREATE TABLE IF NOT EXISTS asset_tags (
+    asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL COLLATE NOCASE,
+    PRIMARY KEY(asset_id, tag)
+  )`,
+  `CREATE INDEX IF NOT EXISTS asset_tags_lookup ON asset_tags(tag, asset_id)`,
+  `CREATE TABLE IF NOT EXISTS asset_colors (
+    asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
+    hex TEXT NOT NULL,
+    l REAL NOT NULL,
+    a REAL NOT NULL,
+    b REAL NOT NULL,
+    proportion REAL NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS asset_colors_asset ON asset_colors(asset_id)`,
+  `CREATE TABLE IF NOT EXISTS asset_vectors (
+    asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    feature_print TEXT,
+    embedding BLOB,
+    precision INTEGER NOT NULL DEFAULT 16,
+    embedding_model TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS folders (
+    id TEXT PRIMARY KEY,
+    parent_id TEXT,
+    drive_id TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id, sort_order)`,
+  `CREATE TABLE IF NOT EXISTS boards (
+    id TEXT PRIMARY KEY,
+    pinned INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    payload TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS board_assets (
+    board_id TEXT REFERENCES boards(id) ON DELETE CASCADE,
+    asset_id TEXT NOT NULL,
+    PRIMARY KEY(board_id, asset_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_ops (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sync_state (
+    key TEXT PRIMARY KEY,
+    payload TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS original_cache (
+    asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    accessed_at REAL NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS auth_users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    display_name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'owner',
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS auth_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_agent TEXT,
+    ip_address TEXT,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions(user_id)`,
+  `CREATE TABLE IF NOT EXISTS auth_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scopes TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    expires_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS auth_tokens_user ON auth_tokens(user_id)`,
+];
+
 export class LibraryDatabase implements SyncOperationStore {
   public readonly dbPath: string;
-  public readonly sqlite: DatabaseSync;
-  private inTransaction = false;
+  public readonly sql: ISqlDatabase;
 
-  constructor(dbPath: string = ':memory:') {
+  constructor(sql: ISqlDatabase, dbPath: string = ':memory:') {
+    this.sql = sql;
     this.dbPath = dbPath;
-    if (dbPath !== ':memory:') {
-      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    }
-    this.sqlite = new DatabaseSync(dbPath, {
-      enableForeignKeyConstraints: true,
-      timeout: 10_000,
-    });
-    if (dbPath !== ':memory:') {
-      this.sqlite.exec('PRAGMA journal_mode = WAL;');
-    }
-    this.sqlite.exec('PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;');
     this.migrate();
   }
 
   close(): void {
-    this.sqlite.close();
+    this.sql.close?.();
   }
 
   private migrate(): void {
-    const row = this.sqlite.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
-    const version = Number(row?.user_version ?? 0);
+    this.sql.exec('CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, payload TEXT NOT NULL);');
+    const storedVersion = this.getState<number>(SCHEMA_VERSION_STATE_KEY);
+    let version = typeof storedVersion === 'number' && Number.isFinite(storedVersion) ? storedVersion : 0;
+
+    if (version === 0) {
+      // Detect existing pre-refactor Node SQLite databases that already have all tables created
+      const existingAssetsTable = this.sql.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'assets'",
+      );
+      if (existingAssetsTable) {
+        version = SCHEMA_VERSION;
+        this.setState(SCHEMA_VERSION_STATE_KEY, SCHEMA_VERSION);
+        return;
+      }
+    }
+
     if (version > SCHEMA_VERSION) {
       throw new Error(`Library schema ${version} requires a newer version of Charkle Web.`);
     }
@@ -182,158 +303,16 @@ export class LibraryDatabase implements SyncOperationStore {
 
     this.transaction(() => {
       if (version === 0) {
-        this.sqlite.exec(`
-          CREATE TABLE IF NOT EXISTS assets (
-            id TEXT PRIMARY KEY,
-            drive_id TEXT UNIQUE,
-            content_hash TEXT NOT NULL,
-            folder_id TEXT,
-            kind TEXT NOT NULL,
-            shape TEXT NOT NULL,
-            title TEXT NOT NULL,
-            rating INTEGER NOT NULL,
-            size INTEGER NOT NULL,
-            created REAL NOT NULL,
-            last_opened REAL,
-            pinned INTEGER NOT NULL,
-            trashed INTEGER NOT NULL,
-            payload TEXT NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS assets_folder ON assets(folder_id, trashed);
-          CREATE INDEX IF NOT EXISTS assets_recency ON assets(trashed, created DESC);
-          CREATE INDEX IF NOT EXISTS assets_hash ON assets(content_hash) WHERE content_hash <> '';
-
-          CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
-            title, fileName, notes, tags, ocrText, aiDescription, sourceDomain, pinyin, initials,
-            tokenize='unicode61 remove_diacritics 2', prefix='2 3 4'
-          );
-
-          CREATE TABLE IF NOT EXISTS asset_tags (
-            asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
-            tag TEXT NOT NULL COLLATE NOCASE,
-            PRIMARY KEY(asset_id, tag)
-          );
-          CREATE INDEX IF NOT EXISTS asset_tags_lookup ON asset_tags(tag, asset_id);
-
-          CREATE TABLE IF NOT EXISTS asset_colors (
-            asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
-            hex TEXT NOT NULL,
-            l REAL NOT NULL,
-            a REAL NOT NULL,
-            b REAL NOT NULL,
-            proportion REAL NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS asset_colors_asset ON asset_colors(asset_id);
-
-          CREATE TABLE IF NOT EXISTS asset_vectors (
-            asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
-            feature_print TEXT,
-            embedding BLOB,
-            precision INTEGER NOT NULL DEFAULT 16,
-            embedding_model TEXT
-          );
-
-          CREATE TABLE IF NOT EXISTS folders (
-            id TEXT PRIMARY KEY,
-            parent_id TEXT,
-            drive_id TEXT,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            payload TEXT NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id, sort_order);
-
-          CREATE TABLE IF NOT EXISTS boards (
-            id TEXT PRIMARY KEY,
-            pinned INTEGER NOT NULL,
-            updated_at REAL NOT NULL,
-            payload TEXT NOT NULL
-          );
-
-          CREATE TABLE IF NOT EXISTS board_assets (
-            board_id TEXT REFERENCES boards(id) ON DELETE CASCADE,
-            asset_id TEXT NOT NULL,
-            PRIMARY KEY(board_id, asset_id)
-          );
-
-          CREATE TABLE IF NOT EXISTS sync_ops (
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            payload TEXT NOT NULL
-          );
-
-          CREATE TABLE IF NOT EXISTS sync_state (
-            key TEXT PRIMARY KEY,
-            payload TEXT NOT NULL
-          );
-
-          CREATE TABLE IF NOT EXISTS original_cache (
-            asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
-            accessed_at REAL NOT NULL
-          );
-
-          CREATE TABLE IF NOT EXISTS auth_users (
-            id TEXT PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            display_name TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'owner',
-            password_hash TEXT NOT NULL,
-            password_salt TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            last_login_at TEXT
-          );
-
-          CREATE TABLE IF NOT EXISTS auth_sessions (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-            token_hash TEXT NOT NULL UNIQUE,
-            user_agent TEXT,
-            ip_address TEXT,
-            created_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL
-          );
-          CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions(user_id);
-
-          CREATE TABLE IF NOT EXISTS auth_tokens (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            prefix TEXT NOT NULL,
-            token_hash TEXT NOT NULL UNIQUE,
-            scopes TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            last_used_at TEXT,
-            expires_at TEXT
-          );
-          CREATE INDEX IF NOT EXISTS auth_tokens_user ON auth_tokens(user_id);
-
-          PRAGMA user_version = ${SCHEMA_VERSION};
-        `);
-      } else {
-        this.sqlite.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
+        for (const stmt of INITIAL_SCHEMA_STATEMENTS) {
+          this.sql.exec(stmt);
+        }
       }
+      this.setState(SCHEMA_VERSION_STATE_KEY, SCHEMA_VERSION);
     });
   }
 
   transaction<T>(work: () => T): T {
-    if (this.inTransaction) {
-      return work();
-    }
-    this.inTransaction = true;
-    this.sqlite.exec('BEGIN IMMEDIATE');
-    try {
-      const result = work();
-      this.sqlite.exec('COMMIT');
-      return result;
-    } catch (err) {
-      try {
-        this.sqlite.exec('ROLLBACK');
-      } catch {
-        // Ignore rollback failure
-      }
-      throw err;
-    } finally {
-      this.inTransaction = false;
-    }
+    return this.sql.transaction(work);
   }
 
   // MARK: - Assets
@@ -357,9 +336,8 @@ export class LibraryDatabase implements SyncOperationStore {
     const lastOpenedSec = asset.lastOpenedAt ? Date.parse(asset.lastOpenedAt) / 1000 : null;
     const shape = classifyAspectShape(asset.pixelWidth, asset.pixelHeight);
 
-    this.sqlite
-      .prepare(
-        `INSERT INTO assets (
+    this.sql.run(
+      `INSERT INTO assets (
           id, drive_id, content_hash, folder_id, kind, shape, title, rating, size,
           created, last_opened, pinned, trashed, payload
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -377,8 +355,7 @@ export class LibraryDatabase implements SyncOperationStore {
           pinned=excluded.pinned,
           trashed=excluded.trashed,
           payload=excluded.payload`,
-      )
-      .run(
+      [
         asset.id,
         asset.driveFileID ?? null,
         asset.contentHash ?? '',
@@ -393,25 +370,30 @@ export class LibraryDatabase implements SyncOperationStore {
         asset.pinnedOffline ? 1 : 0,
         asset.isTrashed ? 1 : 0,
         JSON.stringify(asset),
-      );
+      ],
+    );
 
     if (!old || JSON.stringify(old.tags) !== JSON.stringify(asset.tags)) {
-      this.sqlite.prepare('DELETE FROM asset_tags WHERE asset_id = ?').run(asset.id);
-      const insertTag = this.sqlite.prepare('INSERT OR IGNORE INTO asset_tags(asset_id, tag) VALUES (?, ?)');
+      this.sql.run('DELETE FROM asset_tags WHERE asset_id = ?', [asset.id]);
       for (const tag of asset.tags) {
         const clean = tag.trim();
-        if (clean.length > 0) insertTag.run(asset.id, clean);
+        if (clean.length > 0) {
+          this.sql.run('INSERT OR IGNORE INTO asset_tags(asset_id, tag) VALUES (?, ?)', [
+            asset.id,
+            clean,
+          ]);
+        }
       }
     }
 
     if (!old || JSON.stringify(old.dominantColors) !== JSON.stringify(asset.dominantColors)) {
-      this.sqlite.prepare('DELETE FROM asset_colors WHERE asset_id = ?').run(asset.id);
-      const insertColor = this.sqlite.prepare(
-        'INSERT INTO asset_colors(asset_id, hex, l, a, b, proportion) VALUES (?, ?, ?, ?, ?, ?)',
-      );
+      this.sql.run('DELETE FROM asset_colors WHERE asset_id = ?', [asset.id]);
       for (const c of asset.dominantColors) {
         if (Number.isFinite(c.l) && Number.isFinite(c.a) && Number.isFinite(c.b)) {
-          insertColor.run(asset.id, c.hex, c.l, c.a, c.b, c.proportion ?? 0);
+          this.sql.run(
+            'INSERT INTO asset_colors(asset_id, hex, l, a, b, proportion) VALUES (?, ?, ?, ?, ?, ?)',
+            [asset.id, c.hex, c.l, c.a, c.b, c.proportion ?? 0],
+          );
         }
       }
     }
@@ -419,12 +401,12 @@ export class LibraryDatabase implements SyncOperationStore {
     const fields = LibraryDatabase.searchFields(asset);
     const oldFields = old ? LibraryDatabase.searchFields(old) : null;
     if (!oldFields || JSON.stringify(oldFields) !== JSON.stringify(fields)) {
-      const rowidRow = this.sqlite
-        .prepare('SELECT rowid FROM assets WHERE id = ?')
-        .get(asset.id) as { rowid: number } | undefined;
+      const rowidRow = this.sql.get<{ rowid: number }>('SELECT rowid FROM assets WHERE id = ?', [
+        asset.id,
+      ]);
       if (rowidRow) {
         if (old) {
-          this.sqlite.prepare('DELETE FROM assets_fts WHERE rowid = ?').run(rowidRow.rowid);
+          this.sql.run('DELETE FROM assets_fts WHERE rowid = ?', [rowidRow.rowid]);
         }
         const phonetics = fields.map((f) => extractPinyin(f));
         const indexedTokens = fields.map((f) => indexSearchText(f));
@@ -437,13 +419,11 @@ export class LibraryDatabase implements SyncOperationStore {
           .filter(Boolean)
           .join(' ');
 
-        this.sqlite
-          .prepare(
-            `INSERT INTO assets_fts(
+        this.sql.run(
+          `INSERT INTO assets_fts(
               rowid, title, fileName, notes, tags, ocrText, aiDescription, sourceDomain, pinyin, initials
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
+          [
             rowidRow.rowid,
             indexedTokens[0],
             indexedTokens[1],
@@ -454,7 +434,8 @@ export class LibraryDatabase implements SyncOperationStore {
             indexedTokens[6],
             fullPinyin,
             initialsPinyin,
-          );
+          ],
+        );
       }
     }
   }
@@ -541,40 +522,41 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   getAsset(id: UUID): AssetRecord | null {
-    const row = this.sqlite
-      .prepare('SELECT payload FROM assets WHERE id = ?')
-      .get(toSwiftUUID(id)) as { payload: string } | undefined;
+    const row = this.sql.get<{ payload: string }>('SELECT payload FROM assets WHERE id = ?', [
+      toSwiftUUID(id),
+    ]);
     return row ? (JSON.parse(row.payload) as AssetRecord) : null;
   }
 
   getAssetByDriveID(driveID: string): AssetRecord | null {
-    const row = this.sqlite
-      .prepare('SELECT payload FROM assets WHERE drive_id = ?')
-      .get(driveID) as { payload: string } | undefined;
+    const row = this.sql.get<{ payload: string }>('SELECT payload FROM assets WHERE drive_id = ?', [
+      driveID,
+    ]);
     return row ? (JSON.parse(row.payload) as AssetRecord) : null;
   }
 
   getAssetsByContentHash(contentHash: string): AssetRecord[] {
     if (!contentHash) return [];
-    const rows = this.sqlite
-      .prepare('SELECT payload FROM assets WHERE content_hash = ?')
-      .all(contentHash) as Array<{ payload: string }>;
+    const rows = this.sql.all<{ payload: string }>(
+      'SELECT payload FROM assets WHERE content_hash = ?',
+      [contentHash],
+    );
     return rows.map((r) => JSON.parse(r.payload) as AssetRecord);
   }
 
   getAssetDriveBindings(): Array<{ driveID: string; assetID: UUID }> {
-    const rows = this.sqlite
-      .prepare('SELECT drive_id, id FROM assets WHERE drive_id IS NOT NULL')
-      .all() as Array<{ drive_id: string; id: string }>;
+    const rows = this.sql.all<{ drive_id: string; id: string }>(
+      'SELECT drive_id, id FROM assets WHERE drive_id IS NOT NULL',
+    );
     return rows.map((r) => ({ driveID: r.drive_id, assetID: r.id }));
   }
 
   removeAsset(id: UUID): void {
     const uid = toSwiftUUID(id);
-    this.sqlite
-      .prepare('DELETE FROM assets_fts WHERE rowid IN (SELECT rowid FROM assets WHERE id = ?)')
-      .run(uid);
-    this.sqlite.prepare('DELETE FROM assets WHERE id = ?').run(uid);
+    this.sql.run('DELETE FROM assets_fts WHERE rowid IN (SELECT rowid FROM assets WHERE id = ?)', [
+      uid,
+    ]);
+    this.sql.run('DELETE FROM assets WHERE id = ?', [uid]);
   }
 
   /**
@@ -592,14 +574,13 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   recentActivityAssets(limit = 40): AssetRecord[] {
-    const rows = this.sqlite
-      .prepare(
-        `SELECT payload FROM assets
+    const rows = this.sql.all<{ payload: string }>(
+      `SELECT payload FROM assets
          WHERE trashed = 0
          ORDER BY MAX(created, COALESCE(last_opened, -1e18)) DESC, id ASC
          LIMIT ?`,
-      )
-      .all(Math.max(0, limit)) as Array<{ payload: string }>;
+      [Math.max(0, limit)],
+    );
     return rows.map((r) => JSON.parse(r.payload) as AssetRecord);
   }
 
@@ -692,9 +673,9 @@ export class LibraryDatabase implements SyncOperationStore {
 
   private buildAssetWhere(
     filters: FilterCriteria,
-  ): { cte: string; source: string; where: string; order: string; args: SQLInputValue[]; ftsQuery: string } {
+  ): { cte: string; source: string; where: string; order: string; args: SqlParam[]; ftsQuery: string } {
     const clauses: string[] = [];
-    const args: SQLInputValue[] = [];
+    const args: SqlParam[] = [];
     let cte = '';
 
     if (filters.onlyTrashed) {
@@ -829,7 +810,7 @@ export class LibraryDatabase implements SyncOperationStore {
       }
     }
     const sql = `${cte}SELECT a.payload FROM ${source}${where} ORDER BY ${order}, a.id ASC${pageSql}`;
-    const rows = this.sqlite.prepare(sql).all(...pageArgs) as Array<{ payload: string }>;
+    const rows = this.sql.all<{ payload: string }>(sql, pageArgs);
     return rows.map((r) => JSON.parse(r.payload) as AssetRecord);
   }
 
@@ -837,7 +818,7 @@ export class LibraryDatabase implements SyncOperationStore {
     const filters = createDefaultFilterCriteria(partialCriteria ?? {});
     const { cte, source, where, args } = this.buildAssetWhere(filters);
     const sql = `${cte}SELECT COUNT(*) AS cnt FROM ${source}${where}`;
-    const row = this.sqlite.prepare(sql).get(...args) as { cnt: number } | undefined;
+    const row = this.sql.get<{ cnt: number }>(sql, args);
     return Number(row?.cnt ?? 0);
   }
 
@@ -847,7 +828,7 @@ export class LibraryDatabase implements SyncOperationStore {
     const filters = createDefaultFilterCriteria({ searchQuery: query, sortBy: 'relevance' });
     const { cte, source, where, order, args } = this.buildAssetWhere(filters);
     const sql = `${cte}SELECT a.id FROM ${source}${where} ORDER BY ${order}, a.id ASC`;
-    const rows = this.sqlite.prepare(sql).all(...args) as Array<{ id: string }>;
+    const rows = this.sql.all<{ id: string }>(sql, args);
     const denomBase = Math.max(8, Math.floor(rows.length / 4));
     const ranks = new Map<UUID, number>();
     for (let i = 0; i < rows.length; i++) {
@@ -859,27 +840,24 @@ export class LibraryDatabase implements SyncOperationStore {
   // MARK: - Folders
 
   getFolderSubtreeIDs(rootID: UUID): UUID[] {
-    const rows = this.sqlite
-      .prepare(
-        `WITH RECURSIVE sub(id) AS (
+    const rows = this.sql.all<{ id: string }>(
+      `WITH RECURSIVE sub(id) AS (
           SELECT ?
           UNION
           SELECT f.id FROM folders f JOIN sub s ON f.parent_id = s.id
         )
         SELECT id FROM sub`,
-      )
-      .all(toSwiftUUID(rootID)) as Array<{ id: string }>;
+      [toSwiftUUID(rootID)],
+    );
     return rows.map((r) => r.id);
   }
 
   fetchFolders(): FolderRecord[] {
-    const rows = this.sqlite
-      .prepare(
-        `SELECT f.payload,
+    const rows = this.sql.all<{ payload: string; cnt: number }>(
+      `SELECT f.payload,
           (SELECT COUNT(*) FROM assets a WHERE a.folder_id = f.id AND a.trashed = 0) AS cnt
          FROM folders f`,
-      )
-      .all() as Array<{ payload: string; cnt: number }>;
+    );
 
     const folders = rows.map((r) => {
       const folder = JSON.parse(r.payload) as FolderRecord;
@@ -896,13 +874,12 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   getFolder(id: UUID): FolderRecord | null {
-    const row = this.sqlite
-      .prepare(
-        `SELECT f.payload,
+    const row = this.sql.get<{ payload: string; cnt: number }>(
+      `SELECT f.payload,
           (SELECT COUNT(*) FROM assets a WHERE a.folder_id = f.id AND a.trashed = 0) AS cnt
          FROM folders f WHERE f.id = ?`,
-      )
-      .get(toSwiftUUID(id)) as { payload: string; cnt: number } | undefined;
+      [toSwiftUUID(id)],
+    );
     if (!row) return null;
     const folder = JSON.parse(row.payload) as FolderRecord;
     folder.assetCount = Number(row.cnt ?? 0);
@@ -919,27 +896,26 @@ export class LibraryDatabase implements SyncOperationStore {
       id: toSwiftUUID(rawFolder.id),
       parentID: rawFolder.parentID ? toSwiftUUID(rawFolder.parentID) : null,
     };
-    this.sqlite
-      .prepare(
-        `INSERT INTO folders (id, parent_id, drive_id, sort_order, payload)
+    this.sql.run(
+      `INSERT INTO folders (id, parent_id, drive_id, sort_order, payload)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            parent_id=excluded.parent_id,
            drive_id=excluded.drive_id,
            sort_order=excluded.sort_order,
            payload=excluded.payload`,
-      )
-      .run(
+      [
         folder.id,
         folder.parentID ?? null,
         folder.driveFolderID ?? null,
         folder.sortOrder,
         JSON.stringify(folder),
-      );
+      ],
+    );
   }
 
   removeFolder(id: UUID): void {
-    this.sqlite.prepare('DELETE FROM folders WHERE id = ?').run(toSwiftUUID(id));
+    this.sql.run('DELETE FROM folders WHERE id = ?', [toSwiftUUID(id)]);
   }
 
   private uniqueSiblingFolderName(
@@ -970,7 +946,7 @@ export class LibraryDatabase implements SyncOperationStore {
       const uniqueName = this.uniqueSiblingFolderName(name, parent);
       const now = new Date().toISOString();
       const folder: FolderRecord = {
-        id: toSwiftUUID(crypto.randomUUID()),
+        id: toSwiftUUID(randomUUID()),
         name: uniqueName,
         parentID: parent,
         driveFolderID: null,
@@ -1233,65 +1209,55 @@ export class LibraryDatabase implements SyncOperationStore {
   // MARK: - Tags & Counts
 
   fetchTagCounts(): TagCount[] {
-    const rows = this.sqlite
-      .prepare(
-        `SELECT t.tag AS name, COUNT(*) AS cnt
+    const rows = this.sql.all<{ name: string; cnt: number }>(
+      `SELECT t.tag AS name, COUNT(*) AS cnt
          FROM asset_tags t
          JOIN assets a ON t.asset_id = a.id
          WHERE a.trashed = 0
          GROUP BY t.tag
          ORDER BY cnt DESC, t.tag COLLATE NOCASE ASC`,
-      )
-      .all() as Array<{ name: string; cnt: number }>;
+    );
     return rows.map((r) => ({ name: r.name, count: Number(r.cnt) }));
   }
 
   inboxCount(): number {
-    const row = this.sqlite
-      .prepare('SELECT COUNT(*) AS cnt FROM assets WHERE folder_id IS NULL AND trashed = 0')
-      .get() as { cnt: number };
+    const row = this.sql.get<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM assets WHERE folder_id IS NULL AND trashed = 0',
+    );
     return Number(row?.cnt ?? 0);
   }
 
   untaggedCount(): number {
-    const row = this.sqlite
-      .prepare(
-        `SELECT COUNT(*) AS cnt FROM assets a
+    const row = this.sql.get<{ cnt: number }>(
+      `SELECT COUNT(*) AS cnt FROM assets a
          WHERE a.trashed = 0 AND NOT EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id = a.id)`,
-      )
-      .get() as { cnt: number };
+    );
     return Number(row?.cnt ?? 0);
   }
 
   trashCount(): number {
-    const row = this.sqlite
-      .prepare('SELECT COUNT(*) AS cnt FROM assets WHERE trashed = 1')
-      .get() as { cnt: number };
+    const row = this.sql.get<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM assets WHERE trashed = 1');
     return Number(row?.cnt ?? 0);
   }
 
   totalAssetCount(): number {
-    const row = this.sqlite
-      .prepare('SELECT COUNT(*) AS cnt FROM assets WHERE trashed = 0')
-      .get() as { cnt: number };
+    const row = this.sql.get<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM assets WHERE trashed = 0');
     return Number(row?.cnt ?? 0);
   }
 
   isEmpty(): boolean {
-    const row = this.sqlite
-      .prepare(
-        'SELECT 1 AS x FROM assets UNION ALL SELECT 1 FROM boards UNION ALL SELECT 1 FROM folders LIMIT 1',
-      )
-      .get();
+    const row = this.sql.get<{ x: number }>(
+      'SELECT 1 AS x FROM assets UNION ALL SELECT 1 FROM boards UNION ALL SELECT 1 FROM folders LIMIT 1',
+    );
     return row === undefined;
   }
 
   // MARK: - Moodboards
 
   fetchBoards(): MoodboardDocument[] {
-    const rows = this.sqlite
-      .prepare('SELECT payload FROM boards ORDER BY updated_at DESC, id DESC')
-      .all() as Array<{ payload: string }>;
+    const rows = this.sql.all<{ payload: string }>(
+      'SELECT payload FROM boards ORDER BY updated_at DESC, id DESC',
+    );
     return rows.map((r) => JSON.parse(r.payload) as MoodboardDocument);
   }
 
@@ -1313,9 +1279,9 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   getBoard(id: UUID): MoodboardDocument | null {
-    const row = this.sqlite
-      .prepare('SELECT payload FROM boards WHERE id = ?')
-      .get(toSwiftUUID(id)) as { payload: string } | undefined;
+    const row = this.sql.get<{ payload: string }>('SELECT payload FROM boards WHERE id = ?', [
+      toSwiftUUID(id),
+    ]);
     return row ? (JSON.parse(row.payload) as MoodboardDocument) : null;
   }
 
@@ -1340,22 +1306,23 @@ export class LibraryDatabase implements SyncOperationStore {
       id: toSwiftUUID(rawBoard.id),
     };
     const updatedSec = Date.parse(board.updatedAt) / 1000 || Date.now() / 1000;
-    this.sqlite
-      .prepare(
-        `INSERT INTO boards (id, pinned, updated_at, payload)
+    this.sql.run(
+      `INSERT INTO boards (id, pinned, updated_at, payload)
          VALUES (?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            pinned=excluded.pinned,
            updated_at=excluded.updated_at,
            payload=excluded.payload`,
-      )
-      .run(board.id, board.pinnedOffline ? 1 : 0, updatedSec, JSON.stringify(board));
+      [board.id, board.pinnedOffline ? 1 : 0, updatedSec, JSON.stringify(board)],
+    );
 
-    this.sqlite.prepare('DELETE FROM board_assets WHERE board_id = ?').run(board.id);
+    this.sql.run('DELETE FROM board_assets WHERE board_id = ?', [board.id]);
     const refSet = new Set(getBoardReferencedAssetIDs(board).map(toSwiftUUID));
-    const insertRef = this.sqlite.prepare('INSERT INTO board_assets(board_id, asset_id) VALUES (?, ?)');
     for (const assetID of refSet) {
-      insertRef.run(board.id, assetID);
+      this.sql.run('INSERT INTO board_assets(board_id, asset_id) VALUES (?, ?)', [
+        board.id,
+        assetID,
+      ]);
     }
   }
 
@@ -1381,19 +1348,17 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   removeBoard(id: UUID): void {
-    this.sqlite.prepare('DELETE FROM boards WHERE id = ?').run(toSwiftUUID(id));
+    this.sql.run('DELETE FROM boards WHERE id = ?', [toSwiftUUID(id)]);
   }
 
   protectedAssetIDs(): Set<UUID> {
-    const rows = this.sqlite
-      .prepare(
-        `SELECT id FROM assets WHERE pinned = 1
+    const rows = this.sql.all<{ id: string }>(
+      `SELECT id FROM assets WHERE pinned = 1
          UNION
          SELECT ba.asset_id AS id FROM board_assets ba
          JOIN boards b ON ba.board_id = b.id
          WHERE b.pinned = 1`,
-      )
-      .all() as Array<{ id: string }>;
+    );
     return new Set(rows.map((r) => toSwiftUUID(r.id)));
   }
 
@@ -1614,27 +1579,23 @@ export class LibraryDatabase implements SyncOperationStore {
         : vector.precision;
 
     const blob = embedding ? encodeEmbeddingBlob(embedding, precision) : null;
-    this.sqlite
-      .prepare(
-        `INSERT OR REPLACE INTO asset_vectors (asset_id, feature_print, embedding, precision, embedding_model)
+    this.sql.run(
+      `INSERT OR REPLACE INTO asset_vectors (asset_id, feature_print, embedding, precision, embedding_model)
          VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(uid, featurePrint, blob, precision, embeddingModel);
+      [uid, featurePrint, blob, precision, embeddingModel],
+    );
   }
 
   getVector(id: UUID): AssetVector | null {
-    const row = this.sqlite
-      .prepare(
-        'SELECT feature_print, embedding, precision, embedding_model FROM asset_vectors WHERE asset_id = ?',
-      )
-      .get(toSwiftUUID(id)) as
-      | {
-          feature_print: string | null;
-          embedding: Uint8Array | null;
-          precision: number;
-          embedding_model: string | null;
-        }
-      | undefined;
+    const row = this.sql.get<{
+      feature_print: string | null;
+      embedding: Uint8Array | ArrayBuffer | null;
+      precision: number;
+      embedding_model: string | null;
+    }>(
+      'SELECT feature_print, embedding, precision, embedding_model FROM asset_vectors WHERE asset_id = ?',
+      [toSwiftUUID(id)],
+    );
     if (!row) return null;
     const precision: EmbeddingPrecision = row.precision === 32 ? 32 : 16;
     return {
@@ -1646,15 +1607,13 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   getAllVectors(): Map<UUID, AssetVector> {
-    const rows = this.sqlite
-      .prepare('SELECT asset_id, feature_print, embedding, precision, embedding_model FROM asset_vectors')
-      .all() as Array<{
+    const rows = this.sql.all<{
       asset_id: string;
       feature_print: string | null;
-      embedding: Uint8Array | null;
+      embedding: Uint8Array | ArrayBuffer | null;
       precision: number;
       embedding_model: string | null;
-    }>;
+    }>('SELECT asset_id, feature_print, embedding, precision, embedding_model FROM asset_vectors');
     const map = new Map<UUID, AssetVector>();
     for (const row of rows) {
       const precision: EmbeddingPrecision = row.precision === 32 ? 32 : 16;
@@ -1671,34 +1630,37 @@ export class LibraryDatabase implements SyncOperationStore {
   // MARK: - Sync State, HLC, Ops Queue & CRDT Apply
 
   getState<T = unknown>(key: string): T | null {
-    const row = this.sqlite
-      .prepare('SELECT payload FROM sync_state WHERE key = ?')
-      .get(key) as { payload: string } | undefined;
+    const row = this.sql.get<{ payload: string }>(
+      'SELECT payload FROM sync_state WHERE key = ?',
+      [key],
+    );
     if (!row) return null;
     return JSON.parse(row.payload) as T;
   }
 
   getStatesWithPrefix<T = unknown>(prefix: string): Array<{ key: string; value: T }> {
-    const rows = this.sqlite
-      .prepare('SELECT key, payload FROM sync_state WHERE substr(key, 1, length(?)) = ?')
-      .all(prefix, prefix) as Array<{ key: string; payload: string }>;
+    const rows = this.sql.all<{ key: string; payload: string }>(
+      'SELECT key, payload FROM sync_state WHERE substr(key, 1, length(?)) = ?',
+      [prefix, prefix],
+    );
     return rows.map((r) => ({ key: r.key, value: JSON.parse(r.payload) as T }));
   }
 
   setState<T = unknown>(key: string, value: T | null): void {
     if (value === null || value === undefined) {
-      this.sqlite.prepare('DELETE FROM sync_state WHERE key = ?').run(key);
+      this.sql.run('DELETE FROM sync_state WHERE key = ?', [key]);
     } else {
-      this.sqlite
-        .prepare('INSERT OR REPLACE INTO sync_state (key, payload) VALUES (?, ?)')
-        .run(key, JSON.stringify(value));
+      this.sql.run('INSERT OR REPLACE INTO sync_state (key, payload) VALUES (?, ?)', [
+        key,
+        JSON.stringify(value),
+      ]);
     }
   }
 
   deviceID(): string {
     const existing = this.getState<string>('deviceID');
     if (existing) return existing;
-    const generated = crypto.randomBytes(16).toString('hex'); // 32 lowercase hex chars matching Swift
+    const generated = bytesToHex(randomBytes(16)); // 32 lowercase hex chars matching Swift
     this.setState('deviceID', generated);
     return generated;
   }
@@ -1727,16 +1689,18 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   appendOp(op: SyncOperation): number {
-    const res = this.sqlite
-      .prepare('INSERT INTO sync_ops (payload) VALUES (?)')
-      .run(JSON.stringify(op));
-    return Number(res.lastInsertRowid);
+    const row = this.sql.get<{ seq: number }>(
+      'INSERT INTO sync_ops (payload) VALUES (?) RETURNING seq',
+      [JSON.stringify(op)],
+    );
+    return Number(row?.seq ?? 0);
   }
 
   pendingOps(limit = 500): SyncLogLine[] {
-    const rows = this.sqlite
-      .prepare('SELECT seq, payload FROM sync_ops ORDER BY seq ASC LIMIT ?')
-      .all(Math.max(1, Math.trunc(limit))) as Array<{ seq: number; payload: string }>;
+    const rows = this.sql.all<{ seq: number; payload: string }>(
+      'SELECT seq, payload FROM sync_ops ORDER BY seq ASC LIMIT ?',
+      [Math.max(1, Math.trunc(limit))],
+    );
     return rows.map((r) => ({
       seq: Number(r.seq),
       operation: JSON.parse(r.payload) as SyncOperation,
@@ -1744,17 +1708,17 @@ export class LibraryDatabase implements SyncOperationStore {
   }
 
   acknowledgeOps(throughSeq: number): void {
-    this.sqlite.prepare('DELETE FROM sync_ops WHERE seq <= ?').run(Math.trunc(throughSeq));
+    this.sql.run('DELETE FROM sync_ops WHERE seq <= ?', [Math.trunc(throughSeq)]);
   }
 
   pendingOpCount(): number {
-    const row = this.sqlite.prepare('SELECT COUNT(*) AS cnt FROM sync_ops').get() as { cnt: number };
+    const row = this.sql.get<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM sync_ops');
     return Number(row?.cnt ?? 0);
   }
 
   clearMigrationSyncState(): void {
-    this.sqlite.exec('DELETE FROM sync_ops;');
-    this.sqlite.exec(`
+    this.sql.exec('DELETE FROM sync_ops;');
+    this.sql.exec(`
       DELETE FROM sync_state
       WHERE key LIKE 'remote.%'
          OR key LIKE 'local.delete.%'
@@ -1767,7 +1731,7 @@ export class LibraryDatabase implements SyncOperationStore {
   markProjection(name: string, id: UUID): void {
     const key = `projection.${name}`;
     const dirty = this.getState<Record<string, string>>(key) ?? {};
-    dirty[toSwiftUUID(id)] = crypto.randomUUID().toUpperCase();
+    dirty[toSwiftUUID(id)] = randomUUID().toUpperCase();
     this.setState(key, dirty);
   }
 
@@ -1855,15 +1819,16 @@ export class LibraryDatabase implements SyncOperationStore {
   // MARK: - Original Cache LRU Access Timestamps
 
   touchOriginal(id: UUID, now: Date = new Date()): void {
-    this.sqlite
-      .prepare('INSERT OR REPLACE INTO original_cache (asset_id, accessed_at) VALUES (?, ?)')
-      .run(toSwiftUUID(id), now.getTime() / 1000);
+    this.sql.run('INSERT OR REPLACE INTO original_cache (asset_id, accessed_at) VALUES (?, ?)', [
+      toSwiftUUID(id),
+      now.getTime() / 1000,
+    ]);
   }
 
   originalAccessTimes(): Map<UUID, number> {
-    const rows = this.sqlite
-      .prepare('SELECT asset_id, accessed_at FROM original_cache')
-      .all() as Array<{ asset_id: string; accessed_at: number }>;
+    const rows = this.sql.all<{ asset_id: string; accessed_at: number }>(
+      'SELECT asset_id, accessed_at FROM original_cache',
+    );
     const map = new Map<UUID, number>();
     for (const r of rows) {
       map.set(r.asset_id, Number(r.accessed_at));

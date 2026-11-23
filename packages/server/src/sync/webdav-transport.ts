@@ -4,10 +4,12 @@ import {
   type RemoteDriveFile,
 } from '@charkle/shared';
 import { guessMimeType } from '../media/media-pipeline.js';
+import { bytesToBase64, toArrayBuffer, utf8Encode } from '../runtime/web-crypto-utils.js';
 import {
   DRIVE_ROOT_ID,
   DriveTransportError,
   validateDriveName,
+  type DriveDownloadStreamResult,
   type DriveTransport,
 } from './drive-transport.js';
 
@@ -39,7 +41,10 @@ function encodeDavPath(davPath: string): string {
 }
 
 function decodeXmlTag(block: string, tagName: string): string | null {
-  const re = new RegExp(`<(?:[a-zA-Z0-9_-]+:)?${tagName}[^>]*>([\\s\\S]*?)<\\/(?:[a-zA-Z0-9_-]+:)?${tagName}>`, 'i');
+  const re = new RegExp(
+    `<(?:[a-zA-Z0-9_-]+:)?${tagName}[^>]*>([\\s\\S]*?)<\\/(?:[a-zA-Z0-9_-]+:)?${tagName}>`,
+    'i',
+  );
   const m = re.exec(block);
   if (!m) return null;
   return m[1]
@@ -51,7 +56,8 @@ function decodeXmlTag(block: string, tagName: string): string | null {
 }
 
 /**
- * Full WebDAV transport implementing PROPFIND, GET, PUT, MKCOL, MOVE, DELETE with Basic Auth.
+ * Runtime-agnostic streaming WebDAV transport implementing PROPFIND, GET (streaming),
+ * PUT (streaming), MKCOL, MOVE, DELETE with Basic Auth.
  */
 export class WebDAVTransport implements DriveTransport {
   public readonly displayName = 'WebDAV';
@@ -73,7 +79,7 @@ export class WebDAVTransport implements DriveTransport {
     this.baseOrigin = parsed.origin;
     this.basePath = parsed.pathname.replace(/\/+$/, '');
     this.username = opts.username.trim();
-    const token = Buffer.from(`${this.username}:${opts.password ?? ''}`, 'utf8').toString('base64');
+    const token = bytesToBase64(utf8Encode(`${this.username}:${opts.password ?? ''}`));
     this.authHeader = `Basic ${token}`;
   }
 
@@ -90,21 +96,36 @@ export class WebDAVTransport implements DriveTransport {
     id: string,
     opts: {
       headers?: Record<string, string>;
-      body?: Buffer | string;
+      body?: Uint8Array | ReadableStream<Uint8Array> | string;
       trailingSlash?: boolean;
     } = {},
   ): Promise<Response> {
     const url = this.fullURL(id, opts.trailingSlash);
-    const res = await fetch(url, {
+    const isStream =
+      opts.body !== undefined &&
+      typeof opts.body !== 'string' &&
+      !(opts.body instanceof Uint8Array);
+
+    let body: RequestInit['body'];
+    if (typeof opts.body === 'string') {
+      body = opts.body;
+    } else if (opts.body instanceof Uint8Array) {
+      body = toArrayBuffer(opts.body);
+    } else if (opts.body) {
+      body = opts.body;
+    }
+
+    const init: RequestInit & { duplex?: 'half' } = {
       method,
       headers: {
         Authorization: this.authHeader,
         'User-Agent': 'CharkleWeb/1.0',
         ...(opts.headers ?? {}),
       },
-      body: opts.body ? (typeof opts.body === 'string' ? opts.body : new Uint8Array(opts.body)) : undefined,
-    });
-    return res;
+      body,
+      ...(isStream ? { duplex: 'half' } : {}),
+    };
+    return fetch(url, init);
   }
 
   async accountInfo(): Promise<DriveAccountInfo> {
@@ -155,9 +176,11 @@ export class WebDAVTransport implements DriveTransport {
     validateDriveName(name);
     const childID = parentID === DRIVE_ROOT_ID ? name : `${parentID}/${name}`;
     const mk = await this.request('MKCOL', childID, { trailingSlash: true });
-    // 201 Created, 405 Method Not Allowed (already exists), 301/200 OK
     if (!mk.ok && mk.status !== 405 && mk.status !== 301) {
-      throw new DriveTransportError(`无法创建 WebDAV 目录 ${childID}（HTTP ${mk.status}）。`, 'MKCOL_FAILED');
+      throw new DriveTransportError(
+        `无法创建 WebDAV 目录 ${childID}（HTTP ${mk.status}）。`,
+        'MKCOL_FAILED',
+      );
     }
     return {
       id: childID,
@@ -183,8 +206,12 @@ export class WebDAVTransport implements DriveTransport {
       throw new DriveTransportError(`WebDAV 目录列表失败（HTTP ${res.status}）。`, 'PROPFIND_FAILED');
     }
     const xml = await res.text();
-    const responses = xml.match(/<(?:[a-zA-Z0-9_-]+:)?response[\s\S]*?<\/(?:[a-zA-Z0-9_-]+:)?response>/gi) ?? [];
-    const expectedParentPath = joinDavPath(this.basePath, parentID === DRIVE_ROOT_ID ? '' : parentID).replace(/\/+$/, '');
+    const responses =
+      xml.match(/<(?:[a-zA-Z0-9_-]+:)?response[\s\S]*?<\/(?:[a-zA-Z0-9_-]+:)?response>/gi) ?? [];
+    const expectedParentPath = joinDavPath(
+      this.basePath,
+      parentID === DRIVE_ROOT_ID ? '' : parentID,
+    ).replace(/\/+$/, '');
     const items: RemoteDriveFile[] = [];
 
     for (const block of responses) {
@@ -197,7 +224,7 @@ export class WebDAVTransport implements DriveTransport {
         hrefPath = rawHref;
       }
       const decodedPath = decodeURIComponent(hrefPath).replace(/\/+$/, '');
-      if (decodedPath === expectedParentPath) continue; // skip self
+      if (decodedPath === expectedParentPath) continue;
 
       const relFromBase =
         this.basePath && decodedPath.startsWith(this.basePath)
@@ -223,9 +250,7 @@ export class WebDAVTransport implements DriveTransport {
       items.push({
         id: relFromBase,
         name,
-        mimeType: isCollection
-          ? GOOGLE_DRIVE_FOLDER_MIME_TYPE
-          : contentType || guessMimeType(name),
+        mimeType: isCollection ? GOOGLE_DRIVE_FOLDER_MIME_TYPE : contentType || guessMimeType(name),
         size: sizeStr ? Number.parseInt(sizeStr, 10) || 0 : 0,
         modifiedTime: modifiedIso,
         md5Checksum: etag,
@@ -238,7 +263,8 @@ export class WebDAVTransport implements DriveTransport {
   }
 
   async uploadFile(opts: {
-    data: Buffer;
+    data: Uint8Array | ReadableStream<Uint8Array>;
+    size?: number;
     name: string;
     mimeType: string;
     parentID: string;
@@ -246,8 +272,16 @@ export class WebDAVTransport implements DriveTransport {
   }): Promise<RemoteDriveFile> {
     validateDriveName(opts.name);
     const id = opts.parentID === DRIVE_ROOT_ID ? opts.name : `${opts.parentID}/${opts.name}`;
+    const size = opts.data instanceof Uint8Array ? opts.data.byteLength : opts.size;
+    const headers: Record<string, string> = {
+      'Content-Type': opts.mimeType || 'application/octet-stream',
+    };
+    if (size !== undefined && Number.isFinite(size)) {
+      headers['Content-Length'] = String(size);
+    }
+
     const res = await this.request('PUT', id, {
-      headers: { 'Content-Type': opts.mimeType || 'application/octet-stream' },
+      headers,
       body: opts.data,
     });
     if (!res.ok) {
@@ -260,7 +294,7 @@ export class WebDAVTransport implements DriveTransport {
       id,
       name: opts.name,
       mimeType: opts.mimeType,
-      size: opts.data.length,
+      size: size ?? null,
       modifiedTime: new Date().toISOString(),
       md5Checksum: null,
       parents: [opts.parentID],
@@ -269,12 +303,41 @@ export class WebDAVTransport implements DriveTransport {
     };
   }
 
-  async downloadFile(fileID: string): Promise<Buffer> {
+  async downloadFileStream(fileID: string): Promise<DriveDownloadStreamResult> {
     const res = await this.request('GET', fileID);
     if (!res.ok) {
-      throw new DriveTransportError(`WebDAV 下载失败 ${fileID}（HTTP ${res.status}）。`, 'GET_FAILED');
+      throw new DriveTransportError(
+        `WebDAV 下载失败 ${fileID}（HTTP ${res.status}）。`,
+        'GET_FAILED',
+      );
     }
-    return Buffer.from(await res.arrayBuffer());
+    const sizeHeader = res.headers.get('content-length');
+    const size = sizeHeader ? Number.parseInt(sizeHeader, 10) : null;
+    const stream =
+      res.body ??
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          if (bytes.byteLength > 0) controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+    return {
+      stream,
+      size: Number.isFinite(size) ? size : null,
+      contentType: res.headers.get('content-type'),
+    };
+  }
+
+  async downloadFile(fileID: string): Promise<Uint8Array> {
+    const res = await this.request('GET', fileID);
+    if (!res.ok) {
+      throw new DriveTransportError(
+        `WebDAV 下载失败 ${fileID}（HTTP ${res.status}）。`,
+        'GET_FAILED',
+      );
+    }
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   async moveOrRenameFile(opts: {
@@ -296,7 +359,10 @@ export class WebDAVTransport implements DriveTransport {
         headers: { Destination: destURL, Overwrite: 'T' },
       });
       if (!res.ok) {
-        throw new DriveTransportError(`WebDAV 移动/重命名失败（HTTP ${res.status}）。`, 'MOVE_FAILED');
+        throw new DriveTransportError(
+          `WebDAV 移动/重命名失败（HTTP ${res.status}）。`,
+          'MOVE_FAILED',
+        );
       }
     }
     return {

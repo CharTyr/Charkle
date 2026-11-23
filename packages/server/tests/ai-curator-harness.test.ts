@@ -12,13 +12,16 @@ import {
   type MoodboardAgentStep,
 } from '@charkle/shared';
 import { createApp, createServerContext } from '../src/app.js';
-import { encodeFeaturePrintFloat32, LibraryDatabase } from '../src/db/library-database.js';
+import { encodeFeaturePrintFloat32 } from '../src/db/library-database.js';
 import { FakeCloudAIProvider, type FetchLike } from '../src/intelligence/cloud-ai-provider.js';
 import { ContactSheetRenderer } from '../src/intelligence/contact-sheet-renderer.js';
 import { MoodboardAgentHarness } from '../src/intelligence/moodboard-agent-harness.js';
 import { MoodboardCurator } from '../src/intelligence/moodboard-curator.js';
 import { VisualGroundingEngine } from '../src/intelligence/visual-grounding-engine.js';
 import { MediaPipeline } from '../src/media/media-pipeline.js';
+import { NodeBlobStore } from '../src/runtime/node-blob.js';
+import { NodeImageProcessor } from '../src/runtime/node-image.js';
+import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
 
 const tempDirs: string[] = [];
 
@@ -76,7 +79,7 @@ describe('ContactSheetRenderer, MoodboardCurator & MoodboardAgentHarness', () =>
 
   it('scores with multi-signal fusion, deduplicates via Greedy MMR, extracts board palette, and finds replacements', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'curator.sqlite'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'curator.sqlite'));
 
     const idSeed = toSwiftUUID('44444444-4444-4444-8444-444444444401');
     const idDup = toSwiftUUID('44444444-4444-4444-8444-444444444402');
@@ -171,8 +174,12 @@ describe('ContactSheetRenderer, MoodboardCurator & MoodboardAgentHarness', () =>
 
   it('streams full MoodboardAgentHarness phases with 1-turn auto-repair, Stage 2.5 Jev rerank, Stage 3.5 detail crop & visual insight caching', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'harness.sqlite'));
-    const media = new MediaPipeline(path.join(dir, 'media'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'harness.sqlite'));
+    const images = new NodeImageProcessor();
+    const media = new MediaPipeline({
+      blobs: new NodeBlobStore(path.join(dir, 'media')),
+      images,
+    });
 
     const id1 = toSwiftUUID('55555555-5555-4555-8555-555555555501');
     const id2 = toSwiftUUID('55555555-5555-4555-8555-555555555502');
@@ -282,7 +289,7 @@ describe('ContactSheetRenderer, MoodboardCurator & MoodboardAgentHarness', () =>
         enableCuratorVisualRerank: true,
       }),
       typeSafeAPIKey: 'ts-key',
-      grounding: new VisualGroundingEngine({ fetchFn: jevFetch }),
+      grounding: new VisualGroundingEngine({ fetchFn: jevFetch, images }),
       onStep: (s) => {
         steps.push(s);
       },
@@ -323,7 +330,7 @@ describe('ContactSheetRenderer, MoodboardCurator & MoodboardAgentHarness', () =>
     const ctx = createServerContext({ dataDir: dir });
     const app = createApp(ctx, { staticClientDir: null });
 
-    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
     const token = ctx.auth.createApiToken(user.id, 'test-pat', ['read', 'write', 'mcp']);
 
     const img = await makeSolidPNG(120, 140, 160);

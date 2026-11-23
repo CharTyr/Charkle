@@ -1,4 +1,5 @@
 import type { GitHubRepoMetadata } from '@charkle/shared';
+import { base64ToBytes, readEnv, utf8Decode } from '../../runtime/web-crypto-utils.js';
 
 const GITHUB_HOSTS = new Set(['github.com', 'www.github.com']);
 
@@ -105,8 +106,9 @@ export async function resolveGitHubRepo(rawUrl: string): Promise<GitHubRepoMetad
     Accept: 'application/vnd.github+json',
     'User-Agent': 'CharkleWeb/1.0',
   };
-  if (process.env.GITHUB_TOKEN) {
-    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const githubToken = readEnv('GITHUB_TOKEN');
+  if (githubToken) {
+    headers.Authorization = `Bearer ${githubToken}`;
   }
 
   const repoUrl = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`;
@@ -137,8 +139,7 @@ export async function resolveGitHubRepo(rawUrl: string): Promise<GitHubRepoMetad
     try {
       const rj = (await readmeRes.json()) as Record<string, unknown>;
       if (typeof rj.content === 'string') {
-        readmeMarkdown = Buffer.from(rj.content.replace(/\s+/g, ''), 'base64')
-          .toString('utf8')
+        readmeMarkdown = utf8Decode(base64ToBytes(rj.content.replace(/\s+/g, '')))
           .slice(0, MAX_README_CHARS);
       }
     } catch {

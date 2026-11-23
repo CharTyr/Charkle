@@ -12,15 +12,16 @@ import {
 } from '@charkle/shared';
 import {
   encodeFeaturePrintFloat32,
-  LibraryDatabase,
+  type LibraryDatabase,
 } from '../src/db/library-database.js';
+import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
 
 const tempDirs: string[] = [];
 
 function makeTempDB(): LibraryDatabase {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'charkle-db-test-'));
   tempDirs.push(dir);
-  return new LibraryDatabase(path.join(dir, 'library.sqlite'));
+  return openNodeLibraryDatabase(path.join(dir, 'library.sqlite'));
 }
 
 afterEach(() => {
@@ -34,7 +35,7 @@ describe('LibraryDatabase (SQLite WAL + FTS5 + Pinyin + CIELAB + Folders)', () =
   it('opens in WAL mode and indexes FTS5 with Chinese Pinyin full & initials + rich metadata', () => {
     const db = makeTempDB();
     try {
-      const modeRow = db.sqlite.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+      const modeRow = db.sql.get<{ journal_mode: string }>('PRAGMA journal_mode')!;
       expect(modeRow.journal_mode.toLowerCase()).toBe('wal');
 
       const a1 = createDefaultAssetRecord({

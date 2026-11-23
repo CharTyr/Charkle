@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { Context, Env, Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import {
@@ -32,13 +31,9 @@ import {
 } from '@charkle/shared';
 import type { ServerContext } from '../context.js';
 import { encodeFeaturePrintFloat32 } from '../db/library-database.js';
+import { randomUUID, readEnv, toArrayBuffer } from '../runtime/web-crypto-utils.js';
 import { SECRET_KEYS } from '../storage/secret-vault.js';
 import { ExternalAgentService } from '../agent/external-agent-service.js';
-import { FigmaBridgeExporter, FigmaBridgeExportError } from '../export/figma-bridge-exporter.js';
-import {
-  MoodboardExporter,
-  type ExtendedMoodboardExportOptions,
-} from '../export/moodboard-exporter.js';
 import {
   aiProviderSecretKey,
   buildAssetEnrichmentText,
@@ -63,6 +58,10 @@ import {
   VisualGroundingService,
 } from '../intelligence/visual-grounding-engine.js';
 
+type ExtendedMoodboardExportOptions = MoodboardExportOptions & {
+  backgroundMode?: 'light' | 'dark' | 'transparent';
+};
+
 export interface AIRouteOptions {
   fetchFn?: FetchLike;
   usageTracker?: CloudAIUsageTracker;
@@ -76,7 +75,7 @@ function errorStatusFor(err: unknown): 400 | 401 | 403 | 404 | 429 | 500 | 502 {
     if (err.status && err.status >= 500) return 502;
     return 400;
   }
-  if (err instanceof FigmaBridgeExportError) return 400;
+  if (err instanceof Error && err.name === 'FigmaBridgeExportError') return 400;
   return 500;
 }
 
@@ -113,30 +112,34 @@ export function createAIRuntime(ctx: ServerContext, options: AIRouteOptions = {}
     fetchFn,
   });
 
-  const groundingEngine = new VisualGroundingEngine({ usage, fetchFn });
+  const groundingEngine = new VisualGroundingEngine({ usage, fetchFn, images: ctx.images });
   const curator = new MoodboardCurator(ctx.db);
   const harness = new MoodboardAgentHarness(ctx.db, ctx.media);
 
   const getTypeSafeKey = (): string | null =>
     ctx.secretVault.get(SECRET_KEYS.TYPESAFE_API_KEY) ??
-    (process.env.TYPESAFE_API_KEY?.trim() || null);
+    (readEnv('TYPESAFE_API_KEY', ctx.env)?.trim() || null);
 
   const vaultWithEnvFallback = {
     get(key: string): string | null {
       const stored = ctx.secretVault.get(key);
       if (stored) return stored;
       if (key === SECRET_KEYS.GEMINI_API_KEY) {
-        return process.env.GEMINI_API_KEY?.trim() || null;
+        return readEnv('GEMINI_API_KEY', ctx.env)?.trim() || null;
       }
       if (key === SECRET_KEYS.OPENAI_API_KEY) {
         const cfg = ctx.configStore.getAIConfig();
         if (cfg.customEndpointFormat === 'anthropicMessages') {
-          return process.env.ANTHROPIC_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || null;
+          return (
+            readEnv('ANTHROPIC_API_KEY', ctx.env)?.trim() ||
+            readEnv('OPENAI_API_KEY', ctx.env)?.trim() ||
+            null
+          );
         }
-        return process.env.OPENAI_API_KEY?.trim() || null;
+        return readEnv('OPENAI_API_KEY', ctx.env)?.trim() || null;
       }
       if (key === SECRET_KEYS.TYPESAFE_API_KEY) {
-        return process.env.TYPESAFE_API_KEY?.trim() || null;
+        return readEnv('TYPESAFE_API_KEY', ctx.env)?.trim() || null;
       }
       return null;
     },
@@ -178,6 +181,7 @@ export function createAIRuntime(ctx: ServerContext, options: AIRouteOptions = {}
     getCloudAIProvider: resolveProvider,
     getTypeSafeAPIKey: getTypeSafeKey,
     grounding: groundingEngine,
+    localFs: ctx.localFs,
   });
 
   const buildAIConfigResponse = async (): Promise<AIConfigResponse> => {
@@ -270,17 +274,17 @@ export function registerAIRoutes<E extends Env = Env>(
           const stored = ctx.secretVault.get(key);
           if (stored) return stored;
           if (key === SECRET_KEYS.GEMINI_API_KEY) {
-            return process.env.GEMINI_API_KEY?.trim() || null;
+            return readEnv('GEMINI_API_KEY', ctx.env)?.trim() || null;
           }
           if (key === SECRET_KEYS.OPENAI_API_KEY) {
             if (config.customEndpointFormat === 'anthropicMessages') {
               return (
-                process.env.ANTHROPIC_API_KEY?.trim() ||
-                process.env.OPENAI_API_KEY?.trim() ||
+                readEnv('ANTHROPIC_API_KEY', ctx.env)?.trim() ||
+                readEnv('OPENAI_API_KEY', ctx.env)?.trim() ||
                 null
               );
             }
-            return process.env.OPENAI_API_KEY?.trim() || null;
+            return readEnv('OPENAI_API_KEY', ctx.env)?.trim() || null;
           }
           return rt.vaultWithEnvFallback.get(key);
         },
@@ -776,10 +780,17 @@ export function registerAIRoutes<E extends Env = Env>(
         if (asset) assetsByID.set(aid, asset);
       }
 
-      const rendered = await MoodboardExporter.exportImage({
+      if (!ctx.images.exportMoodboardImage) {
+        return c.json(
+          { error: '当前运行环境不支持服务端图片导出，请在浏览器端导出。', code: 'NOT_SUPPORTED' },
+          501,
+        );
+      }
+
+      const rendered = await ctx.images.exportMoodboardImage({
         document: doc,
         assetsByID,
-        loadAssetBuffer: async (assetID, tier) => {
+        loadAssetBytes: async (assetID, tier) => {
           const asset = assetsByID.get(assetID);
           if (asset && (asset.mediaKind === 'image' || asset.mediaKind === 'animatedImage')) {
             const orig = await ctx.media.readOriginalBuffer(asset);
@@ -795,15 +806,16 @@ export function registerAIRoutes<E extends Env = Env>(
         options: body.options,
       });
 
-      const ext = format === 'jpeg' ? 'jpg' : 'png';
+      const ext =
+        rendered.mimeType === 'image/svg+xml' ? 'svg' : format === 'jpeg' ? 'jpg' : 'png';
       const slug = safeFileSlug(doc.title, `moodboard-${doc.id.slice(0, 8)}`);
       const encodedName = encodeURIComponent(`${slug}.${ext}`);
 
-      return new Response(new Uint8Array(rendered.buffer), {
+      return new Response(toArrayBuffer(rendered.data), {
         status: 200,
         headers: {
           'Content-Type': rendered.mimeType,
-          'Content-Length': String(rendered.buffer.length),
+          'Content-Length': String(rendered.data.byteLength),
           'Content-Disposition': `attachment; filename="moodboard.${ext}"; filename*=UTF-8''${encodedName}`,
         },
       });
@@ -831,29 +843,36 @@ export function registerAIRoutes<E extends Env = Env>(
         if (asset) assetsByID.set(aid, asset);
       }
 
-      const exported = await FigmaBridgeExporter.exportBundle({
+      if (!ctx.images.exportFigmaBridgeZip) {
+        return c.json(
+          { error: '当前运行环境不支持服务端离线打包导出，请在浏览器端导出。', code: 'NOT_SUPPORTED' },
+          501,
+        );
+      }
+
+      const exported = await ctx.images.exportFigmaBridgeZip({
         document: doc,
         assetsByID,
         containerWidth: body.containerWidth ?? 1120,
         options: body.options,
-        loadOriginalBuffer: async (assetID) => {
+        loadOriginalBytes: async (assetID) => {
           const asset = assetsByID.get(assetID);
           if (!asset) return null;
           const buf = await ctx.media.readOriginalBuffer(asset);
           if (!buf || buf.length === 0) return null;
-          return { buffer: buf, fileName: asset.fileName };
+          return { bytes: buf, fileName: asset.fileName };
         },
-        loadThumbnailBuffer: async (assetID, tier) => ctx.media.readThumbnailBuffer(assetID, tier),
+        loadThumbnailBytes: async (assetID, tier) => ctx.media.readThumbnailBuffer(assetID, tier),
       });
 
       const slug = safeFileSlug(doc.title, `moodboard-${doc.id.slice(0, 8)}`);
       const encodedName = encodeURIComponent(`${slug}.charkleboard`);
 
-      return new Response(new Uint8Array(exported.zipBuffer), {
+      return new Response(toArrayBuffer(exported.zipBytes), {
         status: 200,
         headers: {
           'Content-Type': 'application/zip',
-          'Content-Length': String(exported.zipBuffer.length),
+          'Content-Length': String(exported.zipBytes.byteLength),
           'Content-Disposition': `attachment; filename="moodboard.charkleboard"; filename*=UTF-8''${encodedName}`,
           'X-Charkle-Bridge-Report': encodeURIComponent(JSON.stringify(exported.report)),
         },

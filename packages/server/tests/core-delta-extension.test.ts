@@ -23,11 +23,11 @@ function makeTempDir(prefix = 'charkle-delta-ext-'): string {
   return dir;
 }
 
-function createRig() {
+async function createRig() {
   const dir = makeTempDir();
   const ctx = createServerContext({ dataDir: dir, vaultSecret: 'delta-test-secret' });
   const app = createApp(ctx, { staticClientDir: null });
-  const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+  const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
   const pat = ctx.auth.createApiToken(user.id, 'clipper-pat', ['read', 'write', 'mcp']);
   return { dir, ctx, app, user, pat };
 }
@@ -80,7 +80,7 @@ afterEach(() => {
 
 describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
   it('serves GET /api/v1/media/:id/original?cachedOnly=1 with 200/206 when cached and 404 without remote download or LRU touch when uncached', async () => {
-    const { ctx, app, pat } = createRig();
+    const { ctx, app, pat } = await createRig();
     try {
       const payload = Buffer.from('0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
       const ing = await ctx.media.ingestUploadedFile(payload, 'hover-demo.mp4', 'video/mp4');
@@ -141,7 +141,7 @@ describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
   });
 
   it('seeds starter moodboard pre-frozen into freeform with non-overlapping editorial frames', async () => {
-    const { ctx } = createRig();
+    const { ctx } = await createRig();
     try {
       const seeded = await seedSampleLibrary(ctx.db, ctx.media);
       expect(seeded).toBe(true);
@@ -157,7 +157,7 @@ describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
   });
 
   it('defaults POST /api/v1/boards, MoodboardCurator, MoodboardAgentHarness, and MCP compose_moodboard to freeform-first', async () => {
-    const { ctx, app, pat } = createRig();
+    const { ctx, app, pat } = await createRig();
     try {
       // Add two distinct-aspect assets for API/curator/MCP checks
       const idA = toSwiftUUID('77777777-7777-4777-8777-777777777701');
@@ -263,7 +263,7 @@ describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
   });
 
   it('enforces safe extension CORS for chrome-extension:// & moz-extension:// with Bearer PAT auth and rejects web origins', async () => {
-    const { ctx, app, pat } = createRig();
+    const { ctx, app, pat } = await createRig();
     try {
       const chromeOrigin = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
       const mozOrigin = 'moz-extension://550e8400-e29b-41d4-a716-446655440000';
@@ -355,7 +355,7 @@ describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
   });
 
   it('serves authenticated GET /api/v1/extension/download as valid ZIP containing manifest.json and excluding tests/node_modules/.DS_Store', async () => {
-    const { ctx, app, pat } = createRig();
+    const { ctx, app, pat } = await createRig();
     try {
       // 1. Unauthenticated request strictly rejected with 401
       const unauth = await app.request('/api/v1/extension/download');
@@ -419,7 +419,7 @@ describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
   });
 
   it('serves authenticated GET /api/v1/figma-plugin/download as valid ZIP containing manifest.json, code.js, and ui.html while excluding ui-template.html and dotfiles', async () => {
-    const { ctx, app, pat } = createRig();
+    const { ctx, app, pat } = await createRig();
     try {
       // 1. Unauthenticated request strictly rejected with 401
       const unauth = await app.request('/api/v1/figma-plugin/download');

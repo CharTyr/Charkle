@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import {
   ASSET_SYNC_EXCLUDED_FIELDS,
   BOARD_SYNC_EXCLUDED_FIELDS,
@@ -22,16 +21,17 @@ import {
   type SyncStamp,
   type UUID,
 } from '@charkle/shared';
+import { bytesToHex, sha256BytesSync } from '../runtime/web-crypto-utils.js';
 
 /**
  * Deterministic UUID v5-shaped derivation matching macOS `DriveFiles.stableUUID(_:)`.
  */
 export function stableUUID(key: string): UUID {
-  const digest = crypto.createHash('sha256').update(key, 'utf8').digest();
-  const b = Buffer.from(digest.subarray(0, 16));
+  const digest = sha256BytesSync(key);
+  const b = new Uint8Array(digest.subarray(0, 16));
   b[6] = (b[6] & 0x0f) | 0x50;
   b[8] = (b[8] & 0x3f) | 0x80;
-  const hex = b.toString('hex').toUpperCase();
+  const hex = bytesToHex(b).toUpperCase();
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 

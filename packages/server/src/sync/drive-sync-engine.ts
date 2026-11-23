@@ -1,12 +1,9 @@
-import crypto from 'node:crypto';
-import path from 'node:path';
 import {
   activeStorageLocationSummary,
   canonicalSwiftJsonStringify,
   createDefaultSyncStatus,
   driveTransportModeLocalizedLabel,
   formatOpsShardFileName,
-  GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   isRemoteDriveFolder,
   parseOpsShardFileName,
   resolvedSharedFolderID,
@@ -17,6 +14,7 @@ import {
   type DriveSyncConfig,
   type FolderRecord,
   type RemoteDriveFile,
+  type RuntimeMode,
   type StorageMigrationReport,
   type SyncLogLine,
   type SyncManifest,
@@ -29,6 +27,14 @@ import type { EventBus } from '../api/events.js';
 import type { IDriveSyncEngine, IMediaPipeline } from '../context.js';
 import type { LibraryDatabase } from '../db/library-database.js';
 import { assetChangesTouchesLocation, stableUUID } from '../db/sync-operations.js';
+import type { LocalTransportFactory, RuntimeEnv } from '../runtime/types.js';
+import {
+  posixBasename,
+  posixStripExt,
+  sha256HexSync,
+  utf8Decode,
+  utf8Encode,
+} from '../runtime/web-crypto-utils.js';
 import type { ConfigStore } from '../storage/config-store.js';
 import { SECRET_KEYS, type SecretVault } from '../storage/secret-vault.js';
 import { DirectAPITransport } from './direct-api-transport.js';
@@ -39,7 +45,6 @@ import {
   type DriveTransport,
 } from './drive-transport.js';
 import { GoogleOAuthClient } from './google-oauth.js';
-import { LocalFolderTransport } from './local-folder-transport.js';
 import { WebDAVTransport } from './webdav-transport.js';
 
 interface SyncLayout {
@@ -65,6 +70,8 @@ export class DriveSyncEngine implements IDriveSyncEngine {
   private readonly configStore: ConfigStore;
   private readonly secretVault: SecretVault;
   private readonly events: EventBus;
+  private readonly runtimeMode: RuntimeMode;
+  private readonly localTransportFactory?: LocalTransportFactory;
   public readonly googleOAuth: GoogleOAuthClient;
 
   private status: SyncStatus;
@@ -79,13 +86,21 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     secretVault: SecretVault;
     events: EventBus;
     transportOverride?: DriveTransport;
+    localTransportFactory?: LocalTransportFactory;
+    runtimeMode?: RuntimeMode;
+    env?: RuntimeEnv;
   }) {
     this.db = deps.db;
     this.media = deps.media;
     this.configStore = deps.configStore;
     this.secretVault = deps.secretVault;
     this.events = deps.events;
-    this.googleOAuth = new GoogleOAuthClient(deps.secretVault);
+    this.runtimeMode = deps.runtimeMode ?? 'node';
+    this.localTransportFactory = deps.localTransportFactory;
+    this.googleOAuth = new GoogleOAuthClient(deps.secretVault, {
+      stateStore: deps.db,
+      env: deps.env,
+    });
     this.customTransportOverride = deps.transportOverride ?? null;
 
     const saved = this.db.getState<SyncStatus>('lastSyncStatus');
@@ -162,13 +177,18 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       case 'gdirectMount': {
         const mountBase = config.mountPath.trim();
         if (!mountBase) {
-          throw new DriveTransportError('请先配置 gdirect 本地挂载路径。', 'NOT_CONFIGURED');
+          throw new DriveTransportError('请先配置本地挂载路径。', 'NOT_CONFIGURED');
         }
-        return new LocalFolderTransport(mountBase, 'gdirectMount');
+        if (!this.localTransportFactory) {
+          throw new DriveTransportError('当前云端运行环境不支持本地磁盘挂载。', 'UNSUPPORTED_MODE');
+        }
+        return this.localTransportFactory(config);
       }
       case 'localOnly': {
-        const base = path.dirname(path.resolve(config.localLibraryPath));
-        return new LocalFolderTransport(base, 'LocalFolder');
+        if (!this.localTransportFactory) {
+          throw new DriveTransportError('当前使用内置云存储，无需同步外部本地文件夹。', 'LOCAL_ONLY');
+        }
+        return this.localTransportFactory(config);
       }
     }
   }
@@ -178,7 +198,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       case 'webDAV':
         return config.webDAVRemotePath || '/Charkle';
       case 'localOnly':
-        return path.basename(path.resolve(config.localLibraryPath)) || 'Charkle';
+        return posixBasename(config.localLibraryPath) || 'Charkle';
       case 'directAPIWithGDirect':
       case 'gdirectMount':
         return config.rootFolderName || 'Charkle';
@@ -187,6 +207,20 @@ export class DriveSyncEngine implements IDriveSyncEngine {
 
   async syncNow(): Promise<{ report: SyncReport; status: SyncStatus }> {
     const config = this.configStore.getSyncConfig();
+    if (config.mode === 'localOnly' && !this.customTransportOverride && !this.localTransportFactory) {
+      return {
+        report: {
+          uploadedOps: 0,
+          downloadedOps: 0,
+          discoveredRemoteAssets: 0,
+          discoveredAssetIDs: [],
+          updatedBoards: 0,
+          reconciledRenames: 0,
+          durationSeconds: 0,
+        },
+        status: this.getStatus(),
+      };
+    }
     const transport = this.createTransportForConfig(config);
     const report = await this.syncWithTransport(transport, config, {
       allowLocalFolderSync: config.mode === 'localOnly',
@@ -220,7 +254,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     this.status.lastError = null;
     this.updateProgress(
       { type: 'scanning' },
-      `正在连接 ${driveTransportModeLocalizedLabel(config.mode)}…`,
+      `正在连接 ${driveTransportModeLocalizedLabel(config.mode, this.runtimeMode)}…`,
       0.05,
     );
 
@@ -409,7 +443,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     const manifestJson = SwiftWireCodec.encodeManifest(manifest);
     if (!existingManifest) {
       await transport.uploadFile({
-        data: Buffer.from(manifestJson, 'utf8'),
+        data: utf8Encode(manifestJson),
         name: 'manifest.json',
         mimeType: 'application/json',
         parentID: metadata.id,
@@ -446,7 +480,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       if (shard.endSeq <= seenSeq) continue;
 
       const raw = await transport.downloadFile(shard.file.id);
-      const lines = SwiftWireCodec.decodeOpsJsonl(raw.toString('utf8'));
+      const lines = SwiftWireCodec.decodeOpsJsonl(utf8Decode(raw));
       let maxApplied = seenSeq;
 
       for (const line of lines) {
@@ -600,8 +634,8 @@ export class DriveSyncEngine implements IDriveSyncEngine {
         const nameChanged = existingByDrive.fileName !== rf.name;
         const folderChanged = (existingByDrive.folderID ?? null) !== targetFolderID;
         if (nameChanged || folderChanged) {
-          const oldStem = path.basename(existingByDrive.fileName, path.extname(existingByDrive.fileName));
-          const newStem = path.basename(rf.name, path.extname(rf.name));
+          const oldStem = posixStripExt(posixBasename(existingByDrive.fileName));
+          const newStem = posixStripExt(posixBasename(rf.name));
           const updatedTitle =
             nameChanged && existingByDrive.title === oldStem ? newStem : existingByDrive.title;
           this.db.saveAssetLocally(
@@ -620,13 +654,13 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       }
 
       // Case B / C: Download bytes to verify SHA-256 contentHash for rename reconciliation or discovery
-      let bytes: Buffer;
+      let bytes: Uint8Array;
       try {
         bytes = await transport.downloadFile(remoteID);
       } catch {
         continue;
       }
-      const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+      const sha256 = sha256HexSync(bytes);
 
       if (this.db.getState(`deleted.content.${sha256}`)) {
         continue;
@@ -640,8 +674,8 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       if (reconcilable) {
         const nameChanged = reconcilable.fileName !== rf.name;
         const folderChanged = (reconcilable.folderID ?? null) !== targetFolderID;
-        const oldStem = path.basename(reconcilable.fileName, path.extname(reconcilable.fileName));
-        const newStem = path.basename(rf.name, path.extname(rf.name));
+        const oldStem = posixStripExt(posixBasename(reconcilable.fileName));
+        const newStem = posixStripExt(posixBasename(rf.name));
         const updatedTitle =
           nameChanged && reconcilable.title === oldStem ? newStem : reconcilable.title;
         this.db.saveAssetLocally(
@@ -751,10 +785,11 @@ export class DriveSyncEngine implements IDriveSyncEngine {
             asset.folderID,
           );
           if (!asset.driveFileID) {
-            const buf = await this.media.readOriginalBuffer(asset);
-            if (buf) {
+            const streamRes = await this.media.getOriginalStream(asset);
+            if (streamRes) {
               const uploaded = await transport.uploadFile({
-                data: buf,
+                data: streamRes.stream,
+                size: streamRes.size,
                 name: asset.fileName,
                 mimeType: asset.mimeType,
                 parentID: targetParentID,
@@ -775,11 +810,12 @@ export class DriveSyncEngine implements IDriveSyncEngine {
                 this.db.saveAssetLocally({ ...asset, driveFileID: moved.id }, false);
               }
             } catch {
-              // If remote file disappeared, re-upload if local original exists
-              const buf = await this.media.readOriginalBuffer(asset);
-              if (buf) {
+              // If remote file disappeared, stream re-upload if local/R2 original exists
+              const streamRes = await this.media.getOriginalStream(asset);
+              if (streamRes) {
                 const uploaded = await transport.uploadFile({
-                  data: buf,
+                  data: streamRes.stream,
+                  size: streamRes.size,
                   name: asset.fileName,
                   mimeType: asset.mimeType,
                   parentID: targetParentID,
@@ -833,7 +869,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       const shardName = formatOpsShardFileName(device, maxSeq);
       const jsonl = SwiftWireCodec.encodeOpsJsonl(filtered);
       await transport.uploadFile({
-        data: Buffer.from(jsonl, 'utf8'),
+        data: utf8Encode(jsonl),
         name: shardName,
         mimeType: 'application/x-ndjson',
         parentID: layout.ops,
@@ -864,7 +900,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       if (board) {
         const json = SwiftWireCodec.stringifyMoodboardDocument(board);
         await transport.uploadFile({
-          data: Buffer.from(json, 'utf8'),
+          data: utf8Encode(json),
           name: fileName,
           mimeType: 'application/json',
           parentID: layout.boards,
@@ -913,7 +949,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
 
     // Download thumbnails for assets missing a local thumbnail
     for (const asset of this.db.fetchAssets({ includeTrashed: false })) {
-      if (this.media.getThumbnailPath(asset.id, 'grid520')) continue;
+      if (await this.media.hasThumbnail(asset.id, 'grid520')) continue;
       const remote = byName.get(`${asset.id}.jpg`);
       if (!remote) continue;
       try {
@@ -942,7 +978,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       if (vec && this.db.getAsset(assetID)) {
         const wire = canonicalSwiftJsonStringify(SwiftWireCodec.encodeAssetVector(vec));
         await transport.uploadFile({
-          data: Buffer.from(wire, 'utf8'),
+          data: utf8Encode(wire),
           name: fileName,
           mimeType: 'application/json',
           parentID: layout.embeddings,
@@ -955,15 +991,29 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     }
   }
 
+  private async downloadOriginalViaStream(
+    transport: DriveTransport,
+    asset: AssetRecord,
+  ): Promise<string> {
+    if (!asset.driveFileID) {
+      throw new DriveTransportError('素材缺少云端文件 ID。', 'NOT_FOUND');
+    }
+    if (typeof transport.downloadFileStream === 'function') {
+      const dl = await transport.downloadFileStream(asset.driveFileID);
+      return this.media.installOriginal(dl.stream, asset);
+    }
+    const bytes = await transport.downloadFile(asset.driveFileID);
+    return this.media.installOriginal(bytes, asset);
+  }
+
   private async fetchPinnedOriginals(transport: DriveTransport): Promise<void> {
     const protectedIDs = this.db.protectedAssetIDs();
     for (const id of protectedIDs) {
       const asset = this.db.getAsset(id);
       if (!asset || !asset.driveFileID) continue;
-      if (this.media.getOriginalPath(asset)) continue;
+      if (await this.media.hasOriginal(asset)) continue;
       try {
-        const bytes = await transport.downloadFile(asset.driveFileID);
-        await this.media.installOriginal(bytes, asset);
+        await this.downloadOriginalViaStream(transport, asset);
         this.db.putAsset({ ...asset, isLocalOriginalCached: true });
         this.db.touchOriginal(asset.id);
       } catch {
@@ -983,16 +1033,15 @@ export class DriveSyncEngine implements IDriveSyncEngine {
   }
 
   async downloadOriginal(asset: AssetRecord): Promise<string | null> {
-    const cached = this.media.getOriginalPath(asset);
-    if (cached) {
+    const existingKey = await this.media.findOriginalBlobKey(asset);
+    if (existingKey) {
       this.db.touchOriginal(asset.id);
-      return cached;
+      return this.media.blobs.localFilePath?.(existingKey) ?? existingKey;
     }
     if (!asset.driveFileID) return null;
     const config = this.configStore.getSyncConfig();
     const transport = this.createTransportForConfig(config);
-    const bytes = await transport.downloadFile(asset.driveFileID);
-    const installed = await this.media.installOriginal(bytes, asset);
+    const installed = await this.downloadOriginalViaStream(transport, asset);
     this.db.putAsset({ ...asset, isLocalOriginalCached: true });
     this.db.touchOriginal(asset.id);
     return installed;
@@ -1060,15 +1109,17 @@ export class DriveSyncEngine implements IDriveSyncEngine {
 
     // 1. Ensure all non-trashed originals are locally cached before leaving the source backend
     const allAssets = this.db.fetchAssets({ includeTrashed: false });
-    const missingOriginals = allAssets.filter(
-      (a) => a.driveFileID && !this.media.getOriginalPath(a),
-    );
+    const missingOriginals: AssetRecord[] = [];
+    for (const a of allAssets) {
+      if (a.driveFileID && !(await this.media.hasOriginal(a))) {
+        missingOriginals.push(a);
+      }
+    }
     if (missingOriginals.length > 0) {
       const sourceTransport = this.createTransportForConfig(sourceConfig);
       for (const asset of missingOriginals) {
         if (!asset.driveFileID) continue;
-        const bytes = await sourceTransport.downloadFile(asset.driveFileID);
-        await this.media.installOriginal(bytes, asset);
+        await this.downloadOriginalViaStream(sourceTransport, asset);
         this.db.putAsset({ ...asset, isLocalOriginalCached: true });
         this.db.touchOriginal(asset.id);
         downloadedOriginals++;
@@ -1087,18 +1138,31 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       this.secretVault.set(SECRET_KEYS.WEBDAV_PASSWORD, webDAVPassword);
     }
 
-    // 4. Push complete library to target backend
-    const targetTransport =
-      targetTransportOverride ??
-      this.createTransportForConfig(savedTarget, webDAVPassword);
-    await this.syncWithTransport(targetTransport, savedTarget, {
-      allowLocalFolderSync: true,
-    });
+    // 4. Push complete library to target backend (skip remote push when switching to built-in cloud storage on Cloudflare)
+    if (
+      savedTarget.mode !== 'localOnly' ||
+      targetTransportOverride ||
+      this.customTransportOverride ||
+      this.localTransportFactory
+    ) {
+      const targetTransport =
+        targetTransportOverride ??
+        this.createTransportForConfig(savedTarget, webDAVPassword);
+      await this.syncWithTransport(targetTransport, savedTarget, {
+        allowLocalFolderSync: true,
+      });
+    } else {
+      this.status.activeMode = savedTarget.mode;
+      this.status.lastError = null;
+      this.status.phase = { type: 'idle' };
+      this.db.setState('lastSyncStatus', this.status);
+      this.broadcastStatus();
+    }
 
     return {
       sourceMode: sourceConfig.mode,
       targetMode: savedTarget.mode,
-      targetLocation: activeStorageLocationSummary(savedTarget),
+      targetLocation: activeStorageLocationSummary(savedTarget, this.runtimeMode),
       downloadedOriginals,
       migratedAssets: requeued.assets,
       migratedFolders: requeued.folders,
@@ -1119,7 +1183,9 @@ export class DriveSyncEngine implements IDriveSyncEngine {
         this.syncNow().catch(() => undefined);
       }
     }, intervalMs);
-    this.autoSyncTimer.unref();
+    if (typeof (this.autoSyncTimer as { unref?: () => void }).unref === 'function') {
+      (this.autoSyncTimer as { unref: () => void }).unref();
+    }
   }
 
   stopAutoSync(): void {

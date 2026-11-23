@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -11,19 +12,26 @@ import {
 import {
   cosineSimilarity,
   decodeFeaturePrintFloat32,
-  LibraryDatabase,
+  type LibraryDatabase,
 } from '../src/db/library-database.js';
 import { wrapLines } from '../src/media/artwork-renderer.js';
 import { MediaPipeline } from '../src/media/media-pipeline.js';
 import { seedSampleLibrary } from '../src/media/sample-seeder.js';
+import { NodeBlobStore } from '../src/runtime/node-blob.js';
+import { NodeImageProcessor } from '../src/runtime/node-image.js';
+import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
 
 const tempDirs: string[] = [];
 
 function makeTempEnv(): { dir: string; db: LibraryDatabase; media: MediaPipeline } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'charkle-media-test-'));
   tempDirs.push(dir);
-  const db = new LibraryDatabase(path.join(dir, 'library.sqlite'));
-  const media = new MediaPipeline(path.join(dir, 'media'));
+  const db = openNodeLibraryDatabase(path.join(dir, 'library.sqlite'));
+  const media = new MediaPipeline({
+    blobs: new NodeBlobStore(path.join(dir, 'media')),
+    images: new NodeImageProcessor(),
+    readLocalFile: async (filePath) => new Uint8Array(await fsp.readFile(filePath)),
+  });
   return { dir, db, media };
 }
 

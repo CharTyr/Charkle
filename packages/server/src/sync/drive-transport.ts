@@ -28,9 +28,15 @@ export function validateDriveName(name: string): void {
   }
 }
 
+export interface DriveDownloadStreamResult {
+  stream: ReadableStream<Uint8Array>;
+  size?: number | null;
+  contentType?: string | null;
+}
+
 /**
- * Backend-agnostic remote storage transport implemented by Google Drive API v3,
- * WebDAV, Local Folder / gdirect mount, and InMemory test transport.
+ * Backend-agnostic streaming remote storage transport implemented by Google Drive API v3,
+ * WebDAV, Local Folder / gdirect mount (Node-only), and InMemory test transport.
  */
 export interface DriveTransport {
   readonly displayName: string;
@@ -41,13 +47,15 @@ export interface DriveTransport {
   findOrCreateFolder(name: string, parentID: string): Promise<RemoteDriveFile>;
   listFiles(parentID: string): Promise<RemoteDriveFile[]>;
   uploadFile(opts: {
-    data: Buffer;
+    data: Uint8Array | ReadableStream<Uint8Array>;
+    size?: number;
     name: string;
     mimeType: string;
     parentID: string;
     existingFileID?: string | null;
   }): Promise<RemoteDriveFile>;
-  downloadFile(fileID: string): Promise<Buffer>;
+  downloadFile(fileID: string): Promise<Uint8Array>;
+  downloadFileStream?(fileID: string): Promise<DriveDownloadStreamResult>;
   moveOrRenameFile(opts: {
     fileID: string;
     newName?: string;

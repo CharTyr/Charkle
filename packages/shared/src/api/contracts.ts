@@ -28,6 +28,7 @@ import type {
   ChatGPTAccountSession,
   ChatGPTModelInfo,
   CleanBoundsResult,
+  ClientPreprocessedMedia,
   CloudAIProviderKind,
   CloudAIUsageCategory,
   CloudAIUsageSummary,
@@ -57,10 +58,13 @@ import type {
   DriveSyncConfig,
   ExternalAgentConfig,
   RemoteDriveFile,
+  RuntimeMode,
   StorageMigrationReport,
   SyncReport,
   SyncStatus,
 } from '../models/sync.js';
+
+export type { ClientPreprocessedMedia, RuntimeMode };
 
 // MARK: - Common Envelopes
 
@@ -74,10 +78,19 @@ export interface OkResponse {
   ok: true;
 }
 
+export interface RuntimeFeatures {
+  localFolder: boolean;
+  clientExportPreferred: boolean;
+  googleDrive: boolean;
+  webdav: boolean;
+}
+
 export interface HealthResponse {
   ok: boolean;
   version: string;
   timestamp: ISODateString;
+  runtimeMode: RuntimeMode;
+  features: RuntimeFeatures;
 }
 
 // MARK: - Auth API (/api/auth/*)

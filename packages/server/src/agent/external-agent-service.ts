@@ -1,7 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import {
   createDefaultAssetBatchPatch,
   createDefaultFilterCriteria,
@@ -28,10 +24,10 @@ import {
   type UUID,
 } from '@charkle/shared';
 import type { EventBus } from '../api/events.js';
-import type { IMediaPipeline } from '../context.js';
+import type { IMediaPipeline, ServerContext } from '../context.js';
 import type { LibraryDatabase } from '../db/library-database.js';
+import { bytesToBase64, randomUUID } from '../runtime/web-crypto-utils.js';
 import type { ConfigStore } from '../storage/config-store.js';
-import { MoodboardExporter } from '../export/moodboard-exporter.js';
 import type { CloudAIProvider } from '../intelligence/cloud-ai-provider.js';
 import {
   buildFolderPathsMap,
@@ -59,6 +55,7 @@ export interface ExternalAgentServiceDeps {
   media: IMediaPipeline;
   configStore: ConfigStore;
   events: EventBus;
+  localFs?: ServerContext['localFs'];
   getCloudAIProvider?: () => CloudAIProvider | null;
   getTypeSafeAPIKey?: () => string | null;
   grounding?: VisualGroundingEngine | null;
@@ -74,13 +71,6 @@ const WRITE_TOOL_NAMES = new Set([
   'patch_moodboard',
   'trash_assets',
 ]);
-
-function expandTilde(filePath: string): string {
-  if (filePath.startsWith('~/')) {
-    return path.join(os.homedir(), filePath.slice(2));
-  }
-  return filePath;
-}
 
 function asString(v: unknown): string | null {
   return typeof v === 'string' ? v : null;
@@ -474,9 +464,11 @@ export class ExternalAgentService {
     let savedPath: string | undefined;
     const outPath = asTrimmedString(args.output_path);
     if (outPath) {
-      const resolved = path.resolve(expandTilde(outPath));
-      fs.mkdirSync(path.dirname(resolved), { recursive: true });
-      fs.writeFileSync(resolved, sheet.jpegData);
+      if (!this.deps.localFs) {
+        return errorToolOutput('`output_path` local disk writing is not supported in cloud runtime.');
+      }
+      const resolved = this.deps.localFs.resolvePath(outPath);
+      this.deps.localFs.writeFileSync(resolved, sheet.jpegData);
       savedPath = resolved;
     }
 
@@ -507,7 +499,7 @@ export class ExternalAgentService {
 
     return {
       content: [
-        { type: 'image', mimeType: 'image/jpeg', data: sheet.jpegData.toString('base64') },
+        { type: 'image', mimeType: sheet.mimeType, data: bytesToBase64(sheet.jpegData) },
         { type: 'text', text: JSON.stringify(metadata, null, 2) },
       ],
       isError: false,
@@ -613,10 +605,13 @@ export class ExternalAgentService {
 
     const dark = asBool(args.dark_appearance) ?? false;
     const width = Math.max(640, Math.min(2800, asInt(args.width) ?? 1440));
-    const rendered = await MoodboardExporter.exportImage({
+    if (!this.deps.media.images.exportMoodboardImage) {
+      return errorToolOutput('Moodboard image export is not available on this runtime.');
+    }
+    const rendered = await this.deps.media.images.exportMoodboardImage({
       document: doc,
       assetsByID,
-      loadAssetBuffer: async (assetID, tier) =>
+      loadAssetBytes: async (assetID, tier) =>
         (await this.deps.media.readThumbnailBuffer(assetID, tier)) ??
         (await this.deps.media.readThumbnailBuffer(assetID, 'grid520')),
       format: 'png',
@@ -634,21 +629,23 @@ export class ExternalAgentService {
       boardID: doc.id,
       title: doc.title,
       itemCount: refIDs.length,
-      bytes: rendered.buffer.length,
-      mimeType: 'image/png',
+      bytes: rendered.data.byteLength,
+      mimeType: rendered.mimeType,
     };
 
     const outPath = asTrimmedString(args.output_path);
     if (outPath) {
-      const resolved = path.resolve(expandTilde(outPath));
-      fs.mkdirSync(path.dirname(resolved), { recursive: true });
-      fs.writeFileSync(resolved, rendered.buffer);
+      if (!this.deps.localFs) {
+        return errorToolOutput('`output_path` local disk writing is not supported in cloud runtime.');
+      }
+      const resolved = this.deps.localFs.resolvePath(outPath);
+      this.deps.localFs.writeFileSync(resolved, rendered.data);
       metadata.savedPath = resolved;
     }
 
     return {
       content: [
-        { type: 'image', mimeType: 'image/png', data: rendered.buffer.toString('base64') },
+        { type: 'image', mimeType: rendered.mimeType, data: bytesToBase64(rendered.data) },
         { type: 'text', text: JSON.stringify(metadata, null, 2) },
       ],
       isError: false,
@@ -740,8 +737,11 @@ export class ExternalAgentService {
     const title = asTrimmedString(args.title);
 
     if (filePath) {
-      const resolved = path.resolve(expandTilde(filePath));
-      if (!fs.existsSync(resolved)) {
+      if (!this.deps.localFs) {
+        return errorToolOutput('`file_path` local filesystem ingest is not supported in cloud runtime.');
+      }
+      const resolved = this.deps.localFs.resolvePath(filePath);
+      if (!this.deps.localFs.existsSync(resolved)) {
         return errorToolOutput(`File not found at path: ${resolved}`);
       }
       input = { type: 'fileURL', url: resolved };

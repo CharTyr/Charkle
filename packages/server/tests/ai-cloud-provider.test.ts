@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createDefaultAIProviderConfig } from '@charkle/shared';
-import { LibraryDatabase } from '../src/db/library-database.js';
 import {
   AnthropicMessagesProvider,
   ChatGPTSubscriptionClient,
@@ -15,8 +14,9 @@ import {
   type FetchLike,
 } from '../src/intelligence/cloud-ai-provider.js';
 import { CloudAIUsageTracker } from '../src/intelligence/cloud-ai-usage-tracker.js';
-import { ConfigStore } from '../src/storage/config-store.js';
-import { SECRET_KEYS, SecretVault } from '../src/storage/secret-vault.js';
+import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
+import { createNodeConfigStore, createNodeSecretVault } from '../src/runtime/node-storage.js';
+import { SECRET_KEYS } from '../src/storage/secret-vault.js';
 
 const tempDirs: string[] = [];
 
@@ -36,16 +36,18 @@ afterEach(() => {
 describe('CloudAIProvider & CloudAIUsageTracker', () => {
   it('returns null provider when mode is disabled', () => {
     const dir = createTempDir();
-    const vault = new SecretVault(dir);
+    const db = openNodeLibraryDatabase(path.join(dir, 'disabled.sqlite'));
+    const vault = createNodeSecretVault(db.sql, dir);
     const provider = createCloudAIProvider(createDefaultAIProviderConfig({ provider: 'disabled' }), {
       vault,
     });
     expect(provider).toBeNull();
+    db.close();
   });
 
   it('invokes Google Gemini vision/text + gemini-embedding-001 and honors sendThumbnailsToCloud', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'test.sqlite'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'test.sqlite'));
     const usage = new CloudAIUsageTracker(db);
 
     const calls: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
@@ -137,7 +139,7 @@ describe('CloudAIProvider & CloudAIUsageTracker', () => {
 
   it('supports all 3 openAICompatible endpoint formats (Chat Completions, Anthropic Messages, OpenAI Responses)', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'test.sqlite'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'test.sqlite'));
     const usage = new CloudAIUsageTracker(db);
     const seenUrls: string[] = [];
     const seenHeaders: Array<Record<string, string>> = [];
@@ -252,9 +254,9 @@ describe('CloudAIProvider & CloudAIUsageTracker', () => {
 
   it('manages ChatGPT subscription session lifecycle, model listing, and reauth detection', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'test.sqlite'));
-    const vault = new SecretVault(dir);
-    const configStore = new ConfigStore(dir);
+    const db = openNodeLibraryDatabase(path.join(dir, 'test.sqlite'));
+    const vault = createNodeSecretVault(db.sql, dir);
+    const configStore = createNodeConfigStore(db.sql, dir);
     const usage = new CloudAIUsageTracker(db);
 
     let failAuth = false;
@@ -328,7 +330,7 @@ describe('CloudAIProvider & CloudAIUsageTracker', () => {
 
   it('persists separated standard vs jev usage buckets across restarts, rolls over daily, and resets per bucket', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'usage.sqlite'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'usage.sqlite'));
     const day1 = new Date('2026-11-20T10:00:00Z');
     const day2 = new Date('2026-11-21T10:00:00Z');
 

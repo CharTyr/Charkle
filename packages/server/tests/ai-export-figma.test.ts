@@ -504,7 +504,7 @@ describe('MoodboardExporter & FigmaBridgeExporter (.charkleboard)', () => {
     const ctx = createServerContext({ dataDir: dir });
     const app = createApp(ctx, { staticClientDir: null });
 
-    const user = ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
     const pat = ctx.auth.createApiToken(user.id, 'export-pat', ['read', 'write']);
 
     const imgBuf = await sharp({

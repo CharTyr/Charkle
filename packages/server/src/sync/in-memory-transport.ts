@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import {
   GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   type DriveAccountInfo,
@@ -7,20 +6,29 @@ import {
   type RemoteDriveFile,
 } from '@charkle/shared';
 import {
+  bytesToHex,
+  bytesToStream,
+  randomBytes,
+  sha256HexSync,
+  streamToBytes,
+  utf8Decode,
+} from '../runtime/web-crypto-utils.js';
+import {
   DRIVE_ROOT_ID,
   DriveTransportError,
   validateDriveName,
+  type DriveDownloadStreamResult,
   type DriveTransport,
 } from './drive-transport.js';
 
 interface StoredNode {
   meta: RemoteDriveFile;
-  data?: Buffer;
+  data?: Uint8Array;
 }
 
 /**
- * Full-fidelity in-memory Drive transport with change feed for deterministic multi-device
- * sync, rename reconciliation, and storage migration tests.
+ * Full-fidelity in-memory streaming Drive transport with change feed for deterministic
+ * multi-device sync, rename reconciliation, and storage migration tests (ZERO `node:*`).
  */
 export class InMemoryDriveTransport implements DriveTransport {
   public readonly displayName: string;
@@ -50,7 +58,7 @@ export class InMemoryDriveTransport implements DriveTransport {
   }
 
   private nextID(prefix: string): string {
-    return `${prefix}-${this.idCounter++}-${crypto.randomBytes(3).toString('hex')}`;
+    return `${prefix}-${this.idCounter++}-${bytesToHex(randomBytes(3))}`;
   }
 
   private recordChange(change: DriveChange): void {
@@ -64,7 +72,7 @@ export class InMemoryDriveTransport implements DriveTransport {
   async accountInfo(): Promise<DriveAccountInfo> {
     let used = 0;
     for (const node of this.nodes.values()) {
-      if (!node.meta.trashed && node.data) used += node.data.length;
+      if (!node.meta.trashed && node.data) used += node.data.byteLength;
     }
     return {
       email: this.email,
@@ -127,26 +135,29 @@ export class InMemoryDriveTransport implements DriveTransport {
   }
 
   async uploadFile(opts: {
-    data: Buffer;
+    data: Uint8Array | ReadableStream<Uint8Array>;
+    size?: number;
     name: string;
     mimeType: string;
     parentID: string;
     existingFileID?: string | null;
   }): Promise<RemoteDriveFile> {
     validateDriveName(opts.name);
-    const md5 = crypto.createHash('md5').update(opts.data).digest('hex');
+    const bytes =
+      opts.data instanceof Uint8Array ? new Uint8Array(opts.data) : await streamToBytes(opts.data);
+    const checksum = sha256HexSync(bytes).slice(0, 32);
     const now = new Date().toISOString();
 
     if (opts.existingFileID && this.nodes.has(opts.existingFileID)) {
       const node = this.nodes.get(opts.existingFileID)!;
-      node.data = Buffer.from(opts.data);
+      node.data = bytes;
       node.meta = {
         ...node.meta,
         name: opts.name,
         mimeType: opts.mimeType,
-        size: opts.data.length,
+        size: bytes.byteLength,
         modifiedTime: now,
-        md5Checksum: md5,
+        md5Checksum: checksum,
         parents: [opts.parentID],
         trashed: false,
       };
@@ -154,7 +165,6 @@ export class InMemoryDriveTransport implements DriveTransport {
       return { ...node.meta, parents: [...node.meta.parents] };
     }
 
-    // Overwrite same-name non-folder in same parent if exists (prevents duplicates on ops/boards/thumbs)
     for (const node of this.nodes.values()) {
       if (
         !node.meta.trashed &&
@@ -162,13 +172,13 @@ export class InMemoryDriveTransport implements DriveTransport {
         node.meta.name === opts.name &&
         node.meta.parents.includes(opts.parentID)
       ) {
-        node.data = Buffer.from(opts.data);
+        node.data = bytes;
         node.meta = {
           ...node.meta,
           mimeType: opts.mimeType,
-          size: opts.data.length,
+          size: bytes.byteLength,
           modifiedTime: now,
-          md5Checksum: md5,
+          md5Checksum: checksum,
         };
         this.recordChange({ fileID: node.meta.id, removed: false, file: node.meta });
         return { ...node.meta, parents: [...node.meta.parents] };
@@ -180,24 +190,36 @@ export class InMemoryDriveTransport implements DriveTransport {
       id,
       name: opts.name,
       mimeType: opts.mimeType,
-      size: opts.data.length,
+      size: bytes.byteLength,
       modifiedTime: now,
-      md5Checksum: md5,
+      md5Checksum: checksum,
       parents: [opts.parentID],
       trashed: false,
       webViewLink: null,
     };
-    this.nodes.set(id, { meta, data: Buffer.from(opts.data) });
+    this.nodes.set(id, { meta, data: bytes });
     this.recordChange({ fileID: id, removed: false, file: meta });
     return { ...meta, parents: [...meta.parents] };
   }
 
-  async downloadFile(fileID: string): Promise<Buffer> {
+  async downloadFile(fileID: string): Promise<Uint8Array> {
     const node = this.nodes.get(fileID);
     if (!node || node.meta.trashed || !node.data) {
       throw new DriveTransportError(`File not found: ${fileID}`, 'NOT_FOUND');
     }
-    return Buffer.from(node.data);
+    return new Uint8Array(node.data);
+  }
+
+  async downloadFileStream(fileID: string): Promise<DriveDownloadStreamResult> {
+    const node = this.nodes.get(fileID);
+    if (!node || node.meta.trashed || !node.data) {
+      throw new DriveTransportError(`File not found: ${fileID}`, 'NOT_FOUND');
+    }
+    return {
+      stream: bytesToStream(new Uint8Array(node.data)),
+      size: node.data.byteLength,
+      contentType: node.meta.mimeType,
+    };
   }
 
   async moveOrRenameFile(opts: {
@@ -242,12 +264,11 @@ export class InMemoryDriveTransport implements DriveTransport {
     };
   }
 
-  /** Helper for tests: read raw UTF-8 text of a file by path from root (e.g. `Charkle/.charkle/manifest.json`). */
   readTextByPath(relPath: string): string | null {
     const file = this.findByPath(relPath);
     if (!file) return null;
     const node = this.nodes.get(file.id);
-    return node?.data ? node.data.toString('utf8') : null;
+    return node?.data ? utf8Decode(node.data) : null;
   }
 
   findByPath(relPath: string): RemoteDriveFile | null {

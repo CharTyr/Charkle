@@ -8,11 +8,14 @@ import type {
   AuthUser,
   CacheStats,
   CaptureInput,
+  ClientPreprocessedMedia,
   CreateApiTokenResult,
   DriveAccountInfo,
   DriveSyncConfig,
   LabColor,
   RemoteDriveFile,
+  RuntimeFeatures,
+  RuntimeMode,
   StorageMigrationReport,
   SyncReport,
   SyncStatus,
@@ -21,49 +24,96 @@ import type {
 } from '@charkle/shared';
 import type { EventBus } from './api/events.js';
 import type { LibraryDatabase } from './db/library-database.js';
+import type {
+  BlobHeadResult,
+  BlobRangeRequest,
+  BlobStreamResult,
+  IBlobStore,
+  IBundleAssets,
+  IImageProcessor,
+  RuntimeEnv,
+} from './runtime/types.js';
 import type { ConfigStore } from './storage/config-store.js';
 import type { SecretVault } from './storage/secret-vault.js';
 
 export interface MediaIngestResult {
   asset: AssetRecord;
+  /** Blob key (or absolute local file path on Node when available). */
   originalPath: string;
   vector?: AssetVector | null;
 }
 
 /**
  * Contract for the server-side media pipeline (thumbnails, originals, CIELAB, fingerprints, resolvers, LRU cache).
+ * Backed by runtime-agnostic `IBlobStore` + `IImageProcessor` (zero direct `node:fs` or `sharp`).
  */
 export interface IMediaPipeline {
-  readonly directory: string;
-  readonly originalsDir: string;
-  readonly thumbnailsDir: string;
-  readonly previewsDir: string;
-  readonly stagingDir: string;
+  readonly blobs: IBlobStore;
+  readonly images: IImageProcessor;
 
+  /** Optional Node-only local path helpers (return `null` on remote/R2 blob stores). */
   getThumbnailPath(id: UUID, tier?: ThumbnailTier): string | null;
   thumbnailTargetPath(id: UUID, tier?: ThumbnailTier): string;
   getOriginalPath(asset: AssetRecord): string | null;
   cachedOriginalPath(asset: AssetRecord): string | null;
   originalTargetPath(asset: AssetRecord): string;
+
+  /** Runtime-agnostic blob-store key & streaming accessors (work on both Node FS and Cloudflare R2). */
+  originalBlobKey(asset: AssetRecord): string;
+  findOriginalBlobKey(asset: AssetRecord): Promise<string | null>;
+  findThumbnailBlobKey(
+    id: UUID,
+    tier?: ThumbnailTier,
+  ): Promise<{ key: string; contentType: string } | null>;
+  hasOriginal(asset: AssetRecord): Promise<boolean>;
+  hasThumbnail(id: UUID, tier?: ThumbnailTier): Promise<boolean>;
+  getThumbnailHead(
+    id: UUID,
+    tier?: ThumbnailTier,
+  ): Promise<(BlobHeadResult & { key: string; contentType: string }) | null>;
+  getThumbnailStream(
+    id: UUID,
+    tier?: ThumbnailTier,
+  ): Promise<(BlobStreamResult & { key: string; contentType: string }) | null>;
+  getOriginalHead(asset: AssetRecord): Promise<(BlobHeadResult & { key: string }) | null>;
+  getOriginalStream(asset: AssetRecord, range?: BlobRangeRequest): Promise<BlobStreamResult | null>;
+
   readThumbnailBuffer(id: UUID, tier?: ThumbnailTier): Promise<Buffer | null>;
   readOriginalBuffer(asset: AssetRecord): Promise<Buffer | null>;
-  installOriginal(sourcePathOrBuffer: string | Buffer, asset: AssetRecord, moveSource?: boolean): Promise<string>;
-  writeThumbnail(id: UUID, tier: ThumbnailTier, jpegBuffer: Buffer): Promise<string>;
+  installOriginal(
+    data: Uint8Array | ReadableStream<Uint8Array> | string,
+    asset: AssetRecord,
+    moveSource?: boolean,
+  ): Promise<string>;
+  writeThumbnail(
+    id: UUID,
+    tier: ThumbnailTier,
+    bytes: Uint8Array,
+    mimeType?: string,
+  ): Promise<string>;
 
   ingest(input: CaptureInput, folderID?: UUID | null, id?: UUID): Promise<MediaIngestResult>;
   ingestUploadedFile(
-    buffer: Buffer,
+    data: Uint8Array,
     fileName: string,
     mimeType: string | null,
     folderID?: UUID | null,
     id?: UUID,
+    preprocessed?: ClientPreprocessedMedia | null,
   ): Promise<MediaIngestResult>;
   refreshRichAsset(asset: AssetRecord): Promise<MediaIngestResult>;
-  extractSocialMedia(postAsset: AssetRecord, attachmentIndex?: number | null): Promise<MediaIngestResult[]>;
+  extractSocialMedia(
+    postAsset: AssetRecord,
+    attachmentIndex?: number | null,
+  ): Promise<MediaIngestResult[]>;
 
-  extractDominantColors(imageBuffer: Buffer, count?: number): Promise<LabColor[]>;
-  computeVisualFingerprint(imageBuffer: Buffer): Promise<number[]>;
-  generateThumbnailsFromBuffer(id: UUID, imageBuffer: Buffer): Promise<{ width: number; height: number }>;
+  extractDominantColors(imageBuffer: Uint8Array, count?: number): Promise<LabColor[]>;
+  computeVisualFingerprint(imageBuffer: Uint8Array): Promise<number[]>;
+  generateThumbnailsFromBuffer(
+    id: UUID,
+    imageBuffer: Uint8Array,
+    mimeType?: string,
+  ): Promise<{ width: number; height: number }>;
 
   removeFiles(asset: AssetRecord): Promise<void>;
   removeFilesByIDs(ids: Iterable<UUID>): Promise<void>;
@@ -105,18 +155,19 @@ export interface AuthenticatedPrincipal {
 }
 
 /**
- * Contract for authentication, session management, PATs, and rate limiting.
+ * Contract for authentication, session management, PATs, and password hashing.
  */
 export interface IAuthService {
   readonly sessionCookieName: string;
   isInitialized(): boolean;
-  bootstrapFromEnv(): AuthUser | null;
-  setupAdmin(username: string, password: string, displayName?: string): AuthUser;
+  bootstrapFromEnv(env?: RuntimeEnv): Promise<AuthUser | null>;
+  bootstrapFromEnvSync?(env?: RuntimeEnv): AuthUser | null;
+  setupAdmin(username: string, password: string, displayName?: string): Promise<AuthUser>;
   login(
     username: string,
     password: string,
     opts: { rememberMe?: boolean; userAgent?: string | null; ipAddress?: string | null },
-  ): { user: AuthUser; rawSessionToken: string; expiresAt: string; sessionID: UUID };
+  ): Promise<{ user: AuthUser; rawSessionToken: string; expiresAt: string; sessionID: UUID }>;
   verifySessionToken(rawToken: string): AuthenticatedPrincipal | null;
   verifyApiToken(rawToken: string): AuthenticatedPrincipal | null;
   getAuthStatus(principal: AuthenticatedPrincipal | null): AuthStatus;
@@ -129,7 +180,7 @@ export interface IAuthService {
     currentPassword: string,
     newPassword: string,
     currentSessionID?: UUID,
-  ): void;
+  ): Promise<void>;
   listApiTokens(userID: UUID): ApiTokenInfo[];
   createApiToken(
     userID: UUID,
@@ -144,7 +195,12 @@ export interface IAuthService {
  * Shared dependency container passed to all route registrars (`routes-core.ts`, `routes-ai.ts`, MCP server).
  */
 export interface ServerContext {
+  runtimeMode: RuntimeMode;
+  features: RuntimeFeatures;
   db: LibraryDatabase;
+  blobs: IBlobStore;
+  images: IImageProcessor;
+  bundles: IBundleAssets;
   media: IMediaPipeline;
   sync: IDriveSyncEngine;
   configStore: ConfigStore;
@@ -152,4 +208,11 @@ export interface ServerContext {
   auth: IAuthService;
   events: EventBus;
   dataDir: string;
+  env?: RuntimeEnv;
+  /** Optional Node-only local file helpers for MCP stdio / `fileURL` ingest. */
+  localFs?: {
+    existsSync(filePath: string): boolean;
+    resolvePath(filePath: string): string;
+    writeFileSync(filePath: string, data: Uint8Array): void;
+  };
 }

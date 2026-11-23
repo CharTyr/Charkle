@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import {
   GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   type DriveAccountInfo,
@@ -7,8 +6,16 @@ import {
   type RemoteDriveFile,
 } from '@charkle/shared';
 import {
+  bytesToHex,
+  concatBytes,
+  randomBytes,
+  toArrayBuffer,
+  utf8Encode,
+} from '../runtime/web-crypto-utils.js';
+import {
   DriveTransportError,
   validateDriveName,
+  type DriveDownloadStreamResult,
   type DriveTransport,
 } from './drive-transport.js';
 import type { GoogleOAuthClient } from './google-oauth.js';
@@ -16,6 +23,7 @@ import type { GoogleOAuthClient } from './google-oauth.js';
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
 const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink';
+const MULTIPART_MAX_BYTES = 5 * 1024 * 1024; // Stream via resumable upload above 5 MiB
 
 interface RawDriveFile {
   id: string;
@@ -48,8 +56,10 @@ function escapeDriveQueryLiteral(value: string): string {
 }
 
 /**
- * Google Drive API v3 transport supporting My Drive + Shared Folders/Shared Drives
- * (`supportsAllDrives=true&includeItemsFromAllDrives=true`) and incremental Changes feed.
+ * Runtime-agnostic Google Drive API v3 transport supporting:
+ * - My Drive + Shared Folders / Shared Drives (`supportsAllDrives=true&includeItemsFromAllDrives=true`)
+ * - Streaming resumable uploads (`uploadType=resumable`) & streaming downloads (ZERO full-file buffering!)
+ * - Incremental Changes feed
  */
 export class DirectAPITransport implements DriveTransport {
   public readonly displayName = 'Google Drive API v3';
@@ -76,7 +86,10 @@ export class DirectAPITransport implements DriveTransport {
     const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(id)}?supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`;
     const res = await fetch(url, { headers: await this.authHeaders() });
     if (!res.ok) {
-      throw new DriveTransportError(`无法访问 Google Drive 目录 ${id}（HTTP ${res.status}）。`, 'NOT_FOUND');
+      throw new DriveTransportError(
+        `无法访问 Google Drive 目录 ${id}（HTTP ${res.status}）。`,
+        'NOT_FOUND',
+      );
     }
     const raw = (await res.json()) as RawDriveFile;
     if (raw.mimeType !== GOOGLE_DRIVE_FOLDER_MIME_TYPE) {
@@ -98,7 +111,10 @@ export class DirectAPITransport implements DriveTransport {
       headers: await this.authHeaders(),
     });
     if (!res.ok) {
-      throw new DriveTransportError(`无法获取共享文件夹列表（HTTP ${res.status}）。`, 'API_ERROR');
+      throw new DriveTransportError(
+        `无法获取共享文件夹列表（HTTP ${res.status}）。`,
+        'API_ERROR',
+      );
     }
     const json = (await res.json()) as { files?: RawDriveFile[] };
     return (json.files ?? []).map(mapDriveFile);
@@ -137,7 +153,10 @@ export class DirectAPITransport implements DriveTransport {
       },
     );
     if (!createRes.ok) {
-      throw new DriveTransportError(`无法创建 Google Drive 目录 ${name}（HTTP ${createRes.status}）。`, 'CREATE_FAILED');
+      throw new DriveTransportError(
+        `无法创建 Google Drive 目录 ${name}（HTTP ${createRes.status}）。`,
+        'CREATE_FAILED',
+      );
     }
     return mapDriveFile((await createRes.json()) as RawDriveFile);
   }
@@ -168,14 +187,14 @@ export class DirectAPITransport implements DriveTransport {
   }
 
   async uploadFile(opts: {
-    data: Buffer;
+    data: Uint8Array | ReadableStream<Uint8Array>;
+    size?: number;
     name: string;
     mimeType: string;
     parentID: string;
     existingFileID?: string | null;
   }): Promise<RemoteDriveFile> {
     validateDriveName(opts.name);
-    const boundary = `charkle_${crypto.randomBytes(12).toString('hex')}`;
     const metadata: Record<string, unknown> = {
       name: opts.name,
       mimeType: opts.mimeType,
@@ -184,37 +203,127 @@ export class DirectAPITransport implements DriveTransport {
       metadata.parents = [opts.parentID];
     }
 
-    const head = Buffer.from(
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${opts.mimeType || 'application/octet-stream'}\r\n\r\n`,
-      'utf8',
-    );
-    const tail = Buffer.from(`\r\n--${boundary}--`, 'utf8');
-    const body = Buffer.concat([head, opts.data, tail]);
+    // Small in-memory buffer -> fast single-request multipart/related upload
+    if (opts.data instanceof Uint8Array && opts.data.byteLength <= MULTIPART_MAX_BYTES) {
+      const boundary = `charkle_${bytesToHex(randomBytes(12))}`;
+      const head = utf8Encode(
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${opts.mimeType || 'application/octet-stream'}\r\n\r\n`,
+      );
+      const tail = utf8Encode(`\r\n--${boundary}--`);
+      const body = concatBytes([head, opts.data, tail]);
 
-    const url = opts.existingFileID
-      ? `${DRIVE_UPLOAD_BASE}/files/${encodeURIComponent(opts.existingFileID)}?uploadType=multipart&supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`
-      : `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`;
+      const url = opts.existingFileID
+        ? `${DRIVE_UPLOAD_BASE}/files/${encodeURIComponent(opts.existingFileID)}?uploadType=multipart&supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`
+        : `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`;
 
-    const res = await fetch(url, {
-      method: opts.existingFileID ? 'PATCH' : 'POST',
-      headers: await this.authHeaders({
-        'Content-Type': `multipart/related; boundary=${boundary}`,
-      }),
-      body: new Uint8Array(body),
-    });
-    if (!res.ok) {
-      throw new DriveTransportError(`上传文件到 Google Drive 失败（HTTP ${res.status}）。`, 'UPLOAD_FAILED');
+      const res = await fetch(url, {
+        method: opts.existingFileID ? 'PATCH' : 'POST',
+        headers: await this.authHeaders({
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        }),
+        body: toArrayBuffer(body),
+      });
+      if (!res.ok) {
+        throw new DriveTransportError(
+          `上传文件到 Google Drive 失败（HTTP ${res.status}）。`,
+          'UPLOAD_FAILED',
+        );
+      }
+      return mapDriveFile((await res.json()) as RawDriveFile);
     }
-    return mapDriveFile((await res.json()) as RawDriveFile);
+
+    // Streaming or large payload -> Google Drive resumable upload (zero 128 MB buffering!)
+    const contentLength =
+      opts.data instanceof Uint8Array ? opts.data.byteLength : opts.size;
+    const initUrl = opts.existingFileID
+      ? `${DRIVE_UPLOAD_BASE}/files/${encodeURIComponent(opts.existingFileID)}?uploadType=resumable&supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`
+      : `${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`;
+
+    const initHeaders: Record<string, string> = {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': opts.mimeType || 'application/octet-stream',
+    };
+    if (contentLength !== undefined && Number.isFinite(contentLength)) {
+      initHeaders['X-Upload-Content-Length'] = String(contentLength);
+    }
+
+    const initRes = await fetch(initUrl, {
+      method: opts.existingFileID ? 'PATCH' : 'POST',
+      headers: await this.authHeaders(initHeaders),
+      body: JSON.stringify(metadata),
+    });
+    if (!initRes.ok) {
+      throw new DriveTransportError(
+        `初始化 Google Drive 流式上传失败（HTTP ${initRes.status}）。`,
+        'UPLOAD_FAILED',
+      );
+    }
+    const uploadUri = initRes.headers.get('location');
+    if (!uploadUri) {
+      throw new DriveTransportError('Google Drive 未返回上传会话地址。', 'UPLOAD_FAILED');
+    }
+
+    const putHeaders: Record<string, string> = {
+      'Content-Type': opts.mimeType || 'application/octet-stream',
+    };
+    if (contentLength !== undefined && Number.isFinite(contentLength)) {
+      putHeaders['Content-Length'] = String(contentLength);
+    }
+
+    const putInit: RequestInit & { duplex?: 'half' } = {
+      method: 'PUT',
+      headers: putHeaders,
+      body: opts.data instanceof Uint8Array ? toArrayBuffer(opts.data) : opts.data,
+      ...(opts.data instanceof Uint8Array ? {} : { duplex: 'half' }),
+    };
+
+    const putRes = await fetch(uploadUri, putInit);
+    if (!putRes.ok) {
+      throw new DriveTransportError(
+        `流式上传文件到 Google Drive 失败（HTTP ${putRes.status}）。`,
+        'UPLOAD_FAILED',
+      );
+    }
+    return mapDriveFile((await putRes.json()) as RawDriveFile);
   }
 
-  async downloadFile(fileID: string): Promise<Buffer> {
+  async downloadFileStream(fileID: string): Promise<DriveDownloadStreamResult> {
     const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(fileID)}?alt=media&supportsAllDrives=true`;
     const res = await fetch(url, { headers: await this.authHeaders() });
     if (!res.ok) {
-      throw new DriveTransportError(`从 Google Drive 下载失败（HTTP ${res.status}）。`, 'DOWNLOAD_FAILED');
+      throw new DriveTransportError(
+        `从 Google Drive 下载失败（HTTP ${res.status}）。`,
+        'DOWNLOAD_FAILED',
+      );
     }
-    return Buffer.from(await res.arrayBuffer());
+    const sizeHeader = res.headers.get('content-length');
+    const size = sizeHeader ? Number.parseInt(sizeHeader, 10) : null;
+    const stream =
+      res.body ??
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          if (bytes.byteLength > 0) controller.enqueue(bytes);
+          controller.close();
+        },
+      });
+    return {
+      stream,
+      size: Number.isFinite(size) ? size : null,
+      contentType: res.headers.get('content-type'),
+    };
+  }
+
+  async downloadFile(fileID: string): Promise<Uint8Array> {
+    const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(fileID)}?alt=media&supportsAllDrives=true`;
+    const res = await fetch(url, { headers: await this.authHeaders() });
+    if (!res.ok) {
+      throw new DriveTransportError(
+        `从 Google Drive 下载失败（HTTP ${res.status}）。`,
+        'DOWNLOAD_FAILED',
+      );
+    }
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   async moveOrRenameFile(opts: {
@@ -234,13 +343,19 @@ export class DirectAPITransport implements DriveTransport {
       validateDriveName(opts.newName);
       payload.name = opts.newName;
     }
-    const res = await fetch(`${DRIVE_API_BASE}/files/${encodeURIComponent(opts.fileID)}?${params.toString()}`, {
-      method: 'PATCH',
-      headers: await this.authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(payload),
-    });
+    const res = await fetch(
+      `${DRIVE_API_BASE}/files/${encodeURIComponent(opts.fileID)}?${params.toString()}`,
+      {
+        method: 'PATCH',
+        headers: await this.authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(payload),
+      },
+    );
     if (!res.ok) {
-      throw new DriveTransportError(`移动/重命名 Drive 文件失败（HTTP ${res.status}）。`, 'MOVE_FAILED');
+      throw new DriveTransportError(
+        `移动/重命名 Drive 文件失败（HTTP ${res.status}）。`,
+        'MOVE_FAILED',
+      );
     }
     return mapDriveFile((await res.json()) as RawDriveFile);
   }
@@ -253,7 +368,10 @@ export class DirectAPITransport implements DriveTransport {
       body: JSON.stringify({ trashed: true }),
     });
     if (!res.ok && res.status !== 404) {
-      throw new DriveTransportError(`删除 Drive 文件失败（HTTP ${res.status}）。`, 'DELETE_FAILED');
+      throw new DriveTransportError(
+        `删除 Drive 文件失败（HTTP ${res.status}）。`,
+        'DELETE_FAILED',
+      );
     }
   }
 
@@ -262,7 +380,10 @@ export class DirectAPITransport implements DriveTransport {
       headers: await this.authHeaders(),
     });
     if (!res.ok) {
-      throw new DriveTransportError(`获取 Drive Changes token 失败（HTTP ${res.status}）。`, 'API_ERROR');
+      throw new DriveTransportError(
+        `获取 Drive Changes token 失败（HTTP ${res.status}）。`,
+        'API_ERROR',
+      );
     }
     const json = (await res.json()) as { startPageToken: string };
     return json.startPageToken;
@@ -280,7 +401,10 @@ export class DirectAPITransport implements DriveTransport {
       headers: await this.authHeaders(),
     });
     if (!res.ok) {
-      throw new DriveTransportError(`获取 Drive 增量变更失败（HTTP ${res.status}）。`, 'API_ERROR');
+      throw new DriveTransportError(
+        `获取 Drive 增量变更失败（HTTP ${res.status}）。`,
+        'API_ERROR',
+      );
     }
     const json = (await res.json()) as {
       nextPageToken?: string;

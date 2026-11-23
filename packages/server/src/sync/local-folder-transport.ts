@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import {
   GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   type DriveAccountInfo,
@@ -12,6 +13,7 @@ import {
   DRIVE_ROOT_ID,
   DriveTransportError,
   validateDriveName,
+  type DriveDownloadStreamResult,
   type DriveTransport,
 } from './drive-transport.js';
 
@@ -129,7 +131,8 @@ export class LocalFolderTransport implements DriveTransport {
   }
 
   async uploadFile(opts: {
-    data: Buffer;
+    data: Uint8Array | ReadableStream<Uint8Array>;
+    size?: number;
     name: string;
     mimeType: string;
     parentID: string;
@@ -140,7 +143,27 @@ export class LocalFolderTransport implements DriveTransport {
     await fsp.mkdir(parentAbs, { recursive: true });
     const targetAbs = path.join(parentAbs, opts.name);
     // Write directly without O_EXCL so NFS / rclone mounts work cleanly (matching DriveFiles.swift)
-    await fsp.writeFile(targetAbs, opts.data);
+    if (opts.data instanceof Uint8Array) {
+      await fsp.writeFile(targetAbs, opts.data);
+    } else {
+      const fh = await fsp.open(targetAbs, 'w');
+      try {
+        const reader = opts.data.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value && value.byteLength > 0) {
+              await fh.write(value);
+            }
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      } finally {
+        await fh.close();
+      }
+    }
     if (opts.existingFileID) {
       const prevAbs = this.idToAbs(opts.existingFileID);
       if (path.resolve(prevAbs) !== path.resolve(targetAbs)) {
@@ -150,13 +173,28 @@ export class LocalFolderTransport implements DriveTransport {
     return this.statToRemote(targetAbs);
   }
 
-  async downloadFile(fileID: string): Promise<Buffer> {
+  async downloadFile(fileID: string): Promise<Uint8Array> {
     const abs = this.idToAbs(fileID);
     try {
-      return await fsp.readFile(abs);
+      const buf = await fsp.readFile(abs);
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
     } catch {
       throw new DriveTransportError(`Local file not found: ${fileID}`, 'NOT_FOUND');
     }
+  }
+
+  async downloadFileStream(fileID: string): Promise<DriveDownloadStreamResult> {
+    const abs = this.idToAbs(fileID);
+    const st = await fsp.stat(abs).catch(() => null);
+    if (!st || !st.isFile()) {
+      throw new DriveTransportError(`Local file not found: ${fileID}`, 'NOT_FOUND');
+    }
+    const nodeStream = fs.createReadStream(abs);
+    return {
+      stream: Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>,
+      size: st.size,
+      contentType: guessMimeType(path.basename(abs)),
+    };
   }
 
   async moveOrRenameFile(opts: {

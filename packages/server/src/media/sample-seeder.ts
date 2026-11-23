@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import {
   createDefaultAssetRecord,
   createDefaultAutoLayoutConfig,
@@ -19,11 +18,8 @@ import {
   encodeFeaturePrintFloat32,
   type LibraryDatabase,
 } from '../db/library-database.js';
-import {
-  renderGitHubRepoCard,
-  renderSocialPostCard,
-  renderSvgToPng,
-} from './artwork-renderer.js';
+import { randomUUID, sha256HexSync, utf8Encode } from '../runtime/web-crypto-utils.js';
+import { sniffImageMimeType } from '../runtime/workers-image.js';
 
 interface StudioArtworkSpec {
   title: string;
@@ -280,26 +276,30 @@ function buildStudioArtworks(): StudioArtworkSpec[] {
  * Generates a gentle, playable 2.4-second warm ambient chord WAV clip (16-bit PCM mono 22050 Hz)
  * so the Audio Studio Waveform Quick Look player works out of the box with real audio!
  */
-function buildSampleAmbientWav(): Buffer {
+function buildSampleAmbientWav(): Uint8Array {
   const sampleRate = 22050;
   const durationSec = 2.4;
   const numSamples = Math.floor(sampleRate * durationSec);
   const dataSize = numSamples * 2;
-  const buf = Buffer.alloc(44 + dataSize);
+  const bytes = new Uint8Array(44 + dataSize);
+  const view = new DataView(bytes.buffer);
+  const writeAscii = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) bytes[offset + i] = str.charCodeAt(i);
+  };
 
-  buf.write('RIFF', 0, 'ascii');
-  buf.writeUInt32LE(36 + dataSize, 4);
-  buf.write('WAVE', 8, 'ascii');
-  buf.write('fmt ', 12, 'ascii');
-  buf.writeUInt32LE(16, 16);
-  buf.writeUInt16LE(1, 20); // PCM
-  buf.writeUInt16LE(1, 22); // mono
-  buf.writeUInt32LE(sampleRate, 24);
-  buf.writeUInt32LE(sampleRate * 2, 28);
-  buf.writeUInt16LE(2, 32);
-  buf.writeUInt16LE(16, 34);
-  buf.write('data', 36, 'ascii');
-  buf.writeUInt32LE(dataSize, 40);
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, dataSize, true);
 
   const freqs = [220, 277.18, 329.63, 440]; // A major warm ambient chord
   for (let i = 0; i < numSamples; i++) {
@@ -310,16 +310,16 @@ function buildSampleAmbientWav(): Buffer {
       sample += Math.sin(2 * Math.PI * freqs[f] * t) * (0.28 / (f * 0.35 + 1));
     }
     const int16 = Math.max(-32767, Math.min(32767, Math.round(sample * env * 26000)));
-    buf.writeInt16LE(int16, 44 + i * 2);
+    view.setInt16(44 + i * 2, int16, true);
   }
-  return buf;
+  return bytes;
 }
 
 /**
  * Generates a valid, clean architectural prism OBJ 3D model so the Three.js WebGL orbit viewer
  * works immediately out of the box.
  */
-function buildSamplePrismObj(): Buffer {
+function buildSamplePrismObj(): Uint8Array {
   const obj = `# Charkle Sample Architectural Prism
 o ArchitecturalPrism
 v -1.0 -0.8  1.0
@@ -341,7 +341,7 @@ f 6 7 9
 f 7 8 9
 f 8 5 9
 `;
-  return Buffer.from(obj, 'utf8');
+  return utf8Encode(obj);
 }
 
 /**
@@ -381,11 +381,16 @@ export async function seedSampleLibrary(
   const specs = buildStudioArtworks();
   const createdAssets: AssetRecord[] = [];
   for (const spec of specs) {
-    const png = await renderSvgToPng(spec.svg);
+    const rendered = await media.images.renderArtworkCard({ kind: 'svg', svg: spec.svg });
+    const imgBytes = rendered.fullImage;
+    const isSvg = sniffImageMimeType(imgBytes) === 'image/svg+xml';
+    const fileName = isSvg ? spec.fileName.replace(/\.png$/i, '.svg') : spec.fileName;
+    const mimeType = isSvg ? 'image/svg+xml' : 'image/png';
     const folderID = spec.folderName ? (folderByName.get(spec.folderName)?.id ?? null) : null;
-    const ingested = await media.ingestUploadedFile(png, spec.fileName, 'image/png', folderID);
+    const ingested = await media.ingestUploadedFile(imgBytes, fileName, mimeType, folderID);
     const enriched: AssetRecord = {
       ...ingested.asset,
+      mediaKind: 'image',
       title: spec.title,
       tags: spec.tags,
       rating: spec.rating,
@@ -418,22 +423,25 @@ export async function seedSampleLibrary(
     readmeMarkdown: `# Gallery Design Tokens\n\nA calm, artwork-first token system built around neutral paper/obsidian surfaces and perceptual CIELAB harmony.\n\n## Core Surfaces\n\n| Token | Light | Dark |\n|---|---|---|\n| \`galleryGround\` | \`#F6F6F5\` | \`#141517\` |\n| \`surfaceElevated\` | \`#FFFFFF\` | \`#1E2025\` |\n| \`inspectorBg\` | \`#F1F0EC\` | \`#131519\` |\n\n## Motion Curves\n\n- **Enter**: \`cubic-bezier(0, 0, 0.58, 1)\`\n- **Settle Strong**: \`cubic-bezier(0.22, 1, 0.36, 1)\`\n- **Micro Overshoot (<= 64px)**: \`cubic-bezier(0.34, 1.56, 0.64, 1)\`\n`,
     fetchedAt: new Date().toISOString(),
   };
-  const ghCardPng = await renderGitHubRepoCard(ghMeta);
-  const ghId = toSwiftUUID(crypto.randomUUID());
-  const ghDims = await media.generateThumbnailsFromBuffer(ghId, ghCardPng);
-  const ghColors = await media.extractDominantColors(ghCardPng, 5);
-  const ghFp = await media.computeVisualFingerprint(ghCardPng);
+  const ghCard = await media.images.renderArtworkCard({ kind: 'githubRepo', repo: ghMeta });
+  const ghId = toSwiftUUID(randomUUID());
+  await media.writeThumbnail(ghId, 'grid520', ghCard.grid520, ghCard.mimeType);
+  if (ghCard.preview1400) {
+    await media.writeThumbnail(ghId, 'preview1400', ghCard.preview1400, ghCard.mimeType);
+  }
+  const ghColors = await media.extractDominantColors(ghCard.fullImage, 5);
+  const ghFp = await media.computeVisualFingerprint(ghCard.fullImage);
   const ghAsset = createDefaultAssetRecord({
     id: ghId,
     title: ghMeta.fullName,
     fileName: 'charkle-studio-gallery-design-tokens.webloc',
     folderID: uiFolderID,
-    contentHash: crypto.createHash('sha256').update(ghMeta.fullName).digest('hex'),
+    contentHash: sha256HexSync(ghMeta.fullName),
     mediaKind: 'webBookmark',
     mimeType: 'application/xml',
     fileSizeBytes: 256,
-    pixelWidth: ghDims.width,
-    pixelHeight: ghDims.height,
+    pixelWidth: ghCard.width,
+    pixelHeight: ghCard.height,
     sourceURL: 'https://github.com/charkle-studio/gallery-design-tokens',
     sourceDomain: 'github.com',
     notes: ghMeta.description ?? '',
@@ -449,7 +457,7 @@ export async function seedSampleLibrary(
       model3DFormat: null,
     },
   });
-  await media.installOriginal(Buffer.from(ghMeta.readmeMarkdown ?? '', 'utf8'), ghAsset);
+  await media.installOriginal(utf8Encode(ghMeta.readmeMarkdown ?? ''), ghAsset);
   db.saveAssetLocally(ghAsset);
   db.saveVector(ghId, { featurePrint: encodeFeaturePrintFloat32(ghFp), precision: 16 });
   db.touchOriginal(ghId);
@@ -474,23 +482,31 @@ export async function seedSampleLibrary(
     originalURL: 'https://x.com/atelier_kuro/status/1860000000000000001',
     mediaFetchFailed: false,
   };
-  const socialPng = await renderSocialPostCard(socialMeta, null);
-  const socialId = toSwiftUUID(crypto.randomUUID());
-  const socialDims = await media.generateThumbnailsFromBuffer(socialId, socialPng);
-  const socialColors = await media.extractDominantColors(socialPng, 5);
-  const socialFp = await media.computeVisualFingerprint(socialPng);
+  const socialCard = await media.images.renderArtworkCard({
+    kind: 'socialPost',
+    post: socialMeta,
+    coverImageBytes: null,
+  });
+  const socialId = toSwiftUUID(randomUUID());
+  await media.writeThumbnail(socialId, 'grid520', socialCard.grid520, socialCard.mimeType);
+  if (socialCard.preview1400) {
+    await media.writeThumbnail(socialId, 'preview1400', socialCard.preview1400, socialCard.mimeType);
+  }
+  const socialColors = await media.extractDominantColors(socialCard.fullImage, 5);
+  const socialFp = await media.computeVisualFingerprint(socialCard.fullImage);
   const socialArchive = `# ${socialMeta.authorName} (@${socialMeta.authorHandle}) · X\n\n${socialMeta.bodyText}\n\n${socialMeta.originalURL}\n`;
+  const socialArchiveBytes = utf8Encode(socialArchive);
   const socialAsset = createDefaultAssetRecord({
     id: socialId,
     title: 'Atelier Kuro: 好的情绪板界面应该像美术馆的素白墙面…',
     fileName: 'atelier_kuro-post.md',
     folderID: editorialFolderID,
-    contentHash: crypto.createHash('sha256').update(socialArchive).digest('hex'),
+    contentHash: sha256HexSync(socialArchiveBytes),
     mediaKind: 'webBookmark',
     mimeType: 'text/markdown',
-    fileSizeBytes: Buffer.byteLength(socialArchive),
-    pixelWidth: socialDims.width,
-    pixelHeight: socialDims.height,
+    fileSizeBytes: socialArchiveBytes.byteLength,
+    pixelWidth: socialCard.width,
+    pixelHeight: socialCard.height,
     sourceURL: socialMeta.originalURL,
     sourceDomain: 'x.com',
     notes: 'Cohesive X post reference',
@@ -507,7 +523,7 @@ export async function seedSampleLibrary(
       model3DFormat: null,
     },
   });
-  await media.installOriginal(Buffer.from(socialArchive, 'utf8'), socialAsset);
+  await media.installOriginal(socialArchiveBytes, socialAsset);
   db.saveAssetLocally(socialAsset);
   db.saveVector(socialId, { featurePrint: encodeFeaturePrintFloat32(socialFp), precision: 16 });
   db.touchOriginal(socialId);
@@ -562,7 +578,7 @@ export async function seedSampleLibrary(
   // 6. Starter Smart Folder
   const now = new Date().toISOString();
   db.saveSmartFolder({
-    id: toSwiftUUID(crypto.randomUUID()),
+    id: toSwiftUUID(randomUUID()),
     name: '高评分精选灵感',
     colorHex: '#D4A373',
     rule: createDefaultSmartFolderRule({
@@ -582,7 +598,7 @@ export async function seedSampleLibrary(
     .filter((a): a is AssetRecord => Boolean(a));
 
   const boardNodes: BoardNode[] = boardAssets.map((a, idx) => ({
-    id: toSwiftUUID(crypto.randomUUID()),
+    id: toSwiftUUID(randomUUID()),
     kind: {
       type: 'assetRef',
       assetID: a.id,
@@ -601,7 +617,7 @@ export async function seedSampleLibrary(
   }));
 
   boardNodes.push({
-    id: toSwiftUUID(crypto.randomUUID()),
+    id: toSwiftUUID(randomUUID()),
     kind: {
       type: 'note',
       title: '策展说明',
@@ -623,7 +639,7 @@ export async function seedSampleLibrary(
   const extractedPalette = paletteHexes.map((hex, i) => labFromHex(hex, (6 - i) / 21));
 
   const starterBoardDraft = createDefaultMoodboardDocument({
-    id: toSwiftUUID(crypto.randomUUID()),
+    id: toSwiftUUID(randomUUID()),
     title: '光、纸与泥 · Light, Paper & Clay',
     subtitle: '材质、建筑阴影与暖色纸面排版参考集',
     mode: {
@@ -654,3 +670,7 @@ export async function seedSampleLibrary(
   db.saveBoardLocally(starterBoard);
   return true;
 }
+
+export const SampleLibrarySeeder = {
+  seed: seedSampleLibrary,
+} as const;

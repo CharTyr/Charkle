@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   createDefaultMoodboardDocument,
   EDITORIAL_STYLES,
@@ -34,12 +33,9 @@ import {
 } from '@charkle/shared';
 import type { IMediaPipeline } from '../context.js';
 import { cosineSimilarity, type LibraryDatabase } from '../db/library-database.js';
+import type { ContactSheetItemInput } from '../runtime/types.js';
+import { randomUUID, toBuffer } from '../runtime/web-crypto-utils.js';
 import { CloudTagNormalizer, type CloudAIProvider } from './cloud-ai-provider.js';
-import {
-  ContactSheetRenderer,
-  type ContactSheetBatch,
-  type ContactSheetEntry,
-} from './contact-sheet-renderer.js';
 import {
   featurePrintSimilarity,
   MoodboardCurator,
@@ -48,6 +44,16 @@ import {
 } from './moodboard-curator.js';
 import { TypeSafeImagePreparer } from './typesafe-client.js';
 import type { VisualCandidateInput, VisualGroundingEngine } from './visual-grounding-engine.js';
+
+export interface ContactSheetBatch {
+  data: Buffer;
+  jpegData: Buffer;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/svg+xml';
+  slotToAssetID: Map<number, UUID>;
+  orderedSlots: Array<{ slot: number; assetID: UUID }>;
+  width: number;
+  height: number;
+}
 
 export interface AgentLibraryOverview {
   totalAssets: number;
@@ -334,7 +340,12 @@ export class CharkleAgentTools {
       raw = await this.media.readOriginalBuffer(asset);
     }
     if (!raw) return null;
-    const prep = await TypeSafeImagePreparer.prepareJPEG(raw, targetLongSide);
+    const prep = await TypeSafeImagePreparer.prepareJPEG(
+      raw,
+      targetLongSide,
+      0.86,
+      this.media.images,
+    );
     return prep?.data ?? null;
   }
 
@@ -551,12 +562,25 @@ export class CharkleAgentTools {
     const manifestLines: string[] = [];
 
     let slot = 1;
-    let currentEntries: ContactSheetEntry[] = [];
+    let currentEntries: ContactSheetItemInput[] = [];
 
     const flushSheet = async () => {
       if (currentEntries.length === 0) return;
-      const batch = await ContactSheetRenderer.render(currentEntries, { format });
-      if (batch) sheets.push(batch);
+      if (this.media.images.renderContactSheet) {
+        const res = await this.media.images.renderContactSheet(currentEntries, { format });
+        if (res) {
+          const buf = toBuffer(res.data);
+          sheets.push({
+            data: buf,
+            jpegData: buf,
+            mimeType: res.mimeType,
+            slotToAssetID: res.slotToAssetID,
+            orderedSlots: res.orderedSlots,
+            width: res.width,
+            height: res.height,
+          });
+        }
+      }
       currentEntries = [];
     };
 
@@ -575,7 +599,7 @@ export class CharkleAgentTools {
         slot: currentSlot,
         asset,
         thumbnailPath: thumbPath,
-        thumbnailBuffer: thumbBuf,
+        thumbnailBytes: thumbBuf,
       });
 
       const flags: string[] = [];

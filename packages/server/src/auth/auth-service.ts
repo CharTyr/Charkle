@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import {
   toSwiftUUID,
   type ApiTokenInfo,
@@ -11,12 +10,19 @@ import {
 } from '@charkle/shared';
 import type { AuthenticatedPrincipal, IAuthService } from '../context.js';
 import type { LibraryDatabase } from '../db/library-database.js';
+import type { IPasswordHasher, RuntimeEnv } from '../runtime/types.js';
+import { WebCryptoPasswordHasher } from '../runtime/web-crypto-hash.js';
+import {
+  bytesToBase64Url,
+  randomBytes,
+  randomUUID,
+  readEnv,
+  sha256HexSync,
+} from '../runtime/web-crypto-utils.js';
 
 export const SESSION_COOKIE_NAME = 'charkle_session';
 const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const REMEMBER_ME_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const SCRYPT_KEYLEN = 64;
-const SCRYPT_PARAMS: crypto.ScryptOptions = { N: 16384, r: 8, p: 1 };
 
 export class AuthError extends Error {
   public readonly statusCode: number;
@@ -64,23 +70,6 @@ interface TokenRow {
   expires_at: string | null;
 }
 
-function sha256Hex(input: string): string {
-  return crypto.createHash('sha256').update(input, 'utf8').digest('hex');
-}
-
-function hashPassword(password: string): { hash: string; salt: string } {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, SCRYPT_KEYLEN, SCRYPT_PARAMS);
-  return { hash: derived.toString('hex'), salt };
-}
-
-function verifyPassword(password: string, expectedHashHex: string, salt: string): boolean {
-  const derived = crypto.scryptSync(password, salt, SCRYPT_KEYLEN, SCRYPT_PARAMS);
-  const expected = Buffer.from(expectedHashHex, 'hex');
-  if (derived.length !== expected.length) return false;
-  return crypto.timingSafeEqual(derived, expected);
-}
-
 function rowToUser(row: UserRow): AuthUser {
   return {
     id: row.id,
@@ -92,58 +81,77 @@ function rowToUser(row: UserRow): AuthUser {
   };
 }
 
+function validateUsernameAndPassword(username: string, password: string): string {
+  const cleanUser = username.trim();
+  if (cleanUser.length < 2) {
+    throw new AuthError('用户名至少需要 2 个字符。', 400, 'INVALID_USERNAME');
+  }
+  if (cleanUser.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(cleanUser)) {
+    throw new AuthError('用户名仅支持字母、数字、点、下划线和连字符。', 400, 'INVALID_USERNAME');
+  }
+  if (password.length < 8) {
+    throw new AuthError('密码长度至少需要 8 个字符。', 400, 'WEAK_PASSWORD');
+  }
+  return cleanUser;
+}
+
 export class AuthService implements IAuthService {
   public readonly sessionCookieName = SESSION_COOKIE_NAME;
   private readonly db: LibraryDatabase;
+  private readonly hasher: IPasswordHasher;
 
-  constructor(db: LibraryDatabase) {
+  constructor(db: LibraryDatabase, hasher?: IPasswordHasher) {
     this.db = db;
+    this.hasher = hasher ?? new WebCryptoPasswordHasher();
   }
 
   isInitialized(): boolean {
-    const row = this.db.sqlite.prepare('SELECT COUNT(*) AS cnt FROM auth_users').get() as {
-      cnt: number;
-    };
+    const row = this.db.sql.get<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM auth_users');
     return Number(row?.cnt ?? 0) > 0;
   }
 
-  bootstrapFromEnv(): AuthUser | null {
+  async bootstrapFromEnv(env?: RuntimeEnv): Promise<AuthUser | null> {
     if (this.isInitialized()) return null;
-    const username = process.env.CHARKLE_ADMIN_USERNAME?.trim();
-    const password = process.env.CHARKLE_ADMIN_PASSWORD;
-    const displayName = process.env.CHARKLE_ADMIN_DISPLAY_NAME?.trim();
+    const username = readEnv('CHARKLE_ADMIN_USERNAME', env)?.trim();
+    const password = readEnv('CHARKLE_ADMIN_PASSWORD', env);
+    const displayName = readEnv('CHARKLE_ADMIN_DISPLAY_NAME', env)?.trim();
     if (!username || !password) return null;
     return this.setupAdmin(username, password, displayName || undefined);
   }
 
-  setupAdmin(username: string, password: string, displayName?: string): AuthUser {
-    const cleanUser = username.trim();
-    if (cleanUser.length < 2) {
-      throw new AuthError('用户名至少需要 2 个字符。', 400, 'INVALID_USERNAME');
+  bootstrapFromEnvSync(env?: RuntimeEnv): AuthUser | null {
+    if (this.isInitialized()) return null;
+    const username = readEnv('CHARKLE_ADMIN_USERNAME', env)?.trim();
+    const password = readEnv('CHARKLE_ADMIN_PASSWORD', env);
+    const displayName = readEnv('CHARKLE_ADMIN_DISPLAY_NAME', env)?.trim();
+    if (!username || !password) return null;
+    if (!this.hasher.hashSync) {
+      throw new AuthError('当前密码哈希实现不支持同步初始化，请调用异步 bootstrapFromEnv()。', 500);
     }
-    if (cleanUser.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(cleanUser)) {
-      throw new AuthError('用户名仅支持字母、数字、点、下划线和连字符。', 400, 'INVALID_USERNAME');
-    }
-    if (password.length < 8) {
-      throw new AuthError('密码长度至少需要 8 个字符。', 400, 'WEAK_PASSWORD');
-    }
+    const cleanUser = validateUsernameAndPassword(username, password);
+    const encodedHash = this.hasher.hashSync(password);
+    return this.insertAdminRecord(cleanUser, encodedHash, displayName || undefined);
+  }
 
+  private insertAdminRecord(
+    cleanUser: string,
+    encodedHash: string,
+    displayName?: string,
+  ): AuthUser {
     return this.db.transaction(() => {
       if (this.isInitialized()) {
         throw new AuthError('管理员账号已初始化，请直接登录。', 409, 'ALREADY_INITIALIZED');
       }
-      const { hash, salt } = hashPassword(password);
-      const id = toSwiftUUID(crypto.randomUUID());
+      const id = toSwiftUUID(randomUUID());
       const now = new Date().toISOString();
       const name = (displayName?.trim() || cleanUser).slice(0, 80);
 
-      this.db.sqlite
-        .prepare(
-          `INSERT INTO auth_users (
-            id, username, display_name, role, password_hash, password_salt, created_at, last_login_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
-        )
-        .run(id, cleanUser, name, 'owner', hash, salt, now);
+      this.db.sql.run(
+        `INSERT INTO auth_users (
+          id, username, display_name, role, password_hash, password_salt, created_at, last_login_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+        [id, cleanUser, name, 'owner', encodedHash, '', now],
+      );
 
       return {
         id,
@@ -156,17 +164,30 @@ export class AuthService implements IAuthService {
     });
   }
 
-  login(
+  async setupAdmin(username: string, password: string, displayName?: string): Promise<AuthUser> {
+    const cleanUser = validateUsernameAndPassword(username, password);
+    if (this.isInitialized()) {
+      throw new AuthError('管理员账号已初始化，请直接登录。', 409, 'ALREADY_INITIALIZED');
+    }
+    const encodedHash = await this.hasher.hash(password);
+    return this.insertAdminRecord(cleanUser, encodedHash, displayName);
+  }
+
+  async login(
     username: string,
     password: string,
     opts: { rememberMe?: boolean; userAgent?: string | null; ipAddress?: string | null } = {},
-  ): { user: AuthUser; rawSessionToken: string; expiresAt: string; sessionID: UUID } {
+  ): Promise<{ user: AuthUser; rawSessionToken: string; expiresAt: string; sessionID: UUID }> {
     const cleanUser = username.trim();
-    const row = this.db.sqlite
-      .prepare('SELECT * FROM auth_users WHERE username = ? COLLATE NOCASE')
-      .get(cleanUser) as UserRow | undefined;
+    const row = this.db.sql.get<UserRow>(
+      'SELECT * FROM auth_users WHERE username = ? COLLATE NOCASE',
+      [cleanUser],
+    );
 
-    if (!row || !verifyPassword(password, row.password_hash, row.password_salt)) {
+    const valid = row
+      ? await this.hasher.verify(password, row.password_hash, row.password_salt)
+      : false;
+    if (!row || !valid) {
       throw new AuthError('用户名或密码错误。', 401, 'INVALID_CREDENTIALS');
     }
 
@@ -175,21 +196,17 @@ export class AuthService implements IAuthService {
     const ttlMs = opts.rememberMe ? REMEMBER_ME_SESSION_TTL_MS : DEFAULT_SESSION_TTL_MS;
     const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
 
-    const sessionID = toSwiftUUID(crypto.randomUUID());
-    const rawSessionToken = crypto.randomBytes(32).toString('base64url');
-    const tokenHash = sha256Hex(rawSessionToken);
+    const sessionID = toSwiftUUID(randomUUID());
+    const rawSessionToken = bytesToBase64Url(randomBytes(32));
+    const tokenHash = sha256HexSync(rawSessionToken);
 
     this.db.transaction(() => {
-      this.db.sqlite
-        .prepare('UPDATE auth_users SET last_login_at = ? WHERE id = ?')
-        .run(nowIso, row.id);
-      this.db.sqlite
-        .prepare(
-          `INSERT INTO auth_sessions (
-            id, user_id, token_hash, user_agent, ip_address, created_at, last_seen_at, expires_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
+      this.db.sql.run('UPDATE auth_users SET last_login_at = ? WHERE id = ?', [nowIso, row.id]);
+      this.db.sql.run(
+        `INSERT INTO auth_sessions (
+          id, user_id, token_hash, user_agent, ip_address, created_at, last_seen_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
           sessionID,
           row.id,
           tokenHash,
@@ -198,11 +215,9 @@ export class AuthService implements IAuthService {
           nowIso,
           nowIso,
           expiresAt,
-        );
-      // Prune expired sessions opportunistically
-      this.db.sqlite
-        .prepare('DELETE FROM auth_sessions WHERE expires_at <= ?')
-        .run(nowIso);
+        ],
+      );
+      this.db.sql.run('DELETE FROM auth_sessions WHERE expires_at <= ?', [nowIso]);
     });
 
     const user: AuthUser = {
@@ -214,29 +229,30 @@ export class AuthService implements IAuthService {
 
   verifySessionToken(rawToken: string): AuthenticatedPrincipal | null {
     if (!rawToken || rawToken.length < 16) return null;
-    const hash = sha256Hex(rawToken);
-    const session = this.db.sqlite
-      .prepare('SELECT * FROM auth_sessions WHERE token_hash = ?')
-      .get(hash) as SessionRow | undefined;
+    const hash = sha256HexSync(rawToken);
+    const session = this.db.sql.get<SessionRow>(
+      'SELECT * FROM auth_sessions WHERE token_hash = ?',
+      [hash],
+    );
     if (!session) return null;
 
     const now = new Date();
     const nowIso = now.toISOString();
     if (Date.parse(session.expires_at) <= now.getTime()) {
-      this.db.sqlite.prepare('DELETE FROM auth_sessions WHERE id = ?').run(session.id);
+      this.db.sql.run('DELETE FROM auth_sessions WHERE id = ?', [session.id]);
       return null;
     }
 
-    const userRow = this.db.sqlite
-      .prepare('SELECT * FROM auth_users WHERE id = ?')
-      .get(session.user_id) as UserRow | undefined;
+    const userRow = this.db.sql.get<UserRow>('SELECT * FROM auth_users WHERE id = ?', [
+      session.user_id,
+    ]);
     if (!userRow) return null;
 
-    // Throttle last_seen_at writes to once per 60 seconds
     if (now.getTime() - Date.parse(session.last_seen_at) > 60_000) {
-      this.db.sqlite
-        .prepare('UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?')
-        .run(nowIso, session.id);
+      this.db.sql.run('UPDATE auth_sessions SET last_seen_at = ? WHERE id = ?', [
+        nowIso,
+        session.id,
+      ]);
     }
 
     return {
@@ -248,10 +264,11 @@ export class AuthService implements IAuthService {
 
   verifyApiToken(rawToken: string): AuthenticatedPrincipal | null {
     if (!rawToken || !rawToken.startsWith('chk_') || rawToken.length < 20) return null;
-    const hash = sha256Hex(rawToken);
-    const tokenRow = this.db.sqlite
-      .prepare('SELECT * FROM auth_tokens WHERE token_hash = ?')
-      .get(hash) as TokenRow | undefined;
+    const hash = sha256HexSync(rawToken);
+    const tokenRow = this.db.sql.get<TokenRow>(
+      'SELECT * FROM auth_tokens WHERE token_hash = ?',
+      [hash],
+    );
     if (!tokenRow) return null;
 
     const now = new Date();
@@ -259,15 +276,16 @@ export class AuthService implements IAuthService {
       return null;
     }
 
-    const userRow = this.db.sqlite
-      .prepare('SELECT * FROM auth_users WHERE id = ?')
-      .get(tokenRow.user_id) as UserRow | undefined;
+    const userRow = this.db.sql.get<UserRow>('SELECT * FROM auth_users WHERE id = ?', [
+      tokenRow.user_id,
+    ]);
     if (!userRow) return null;
 
     const nowIso = now.toISOString();
-    this.db.sqlite
-      .prepare('UPDATE auth_tokens SET last_used_at = ? WHERE id = ?')
-      .run(nowIso, tokenRow.id);
+    this.db.sql.run('UPDATE auth_tokens SET last_used_at = ? WHERE id = ?', [
+      nowIso,
+      tokenRow.id,
+    ]);
 
     let scopes: ApiTokenScope[] = ['read', 'write', 'mcp'];
     try {
@@ -296,9 +314,10 @@ export class AuthService implements IAuthService {
       };
     }
     const nowIso = new Date().toISOString();
-    const row = this.db.sqlite
-      .prepare('SELECT COUNT(*) AS cnt FROM auth_sessions WHERE user_id = ? AND expires_at > ?')
-      .get(principal.user.id, nowIso) as { cnt: number };
+    const row = this.db.sql.get<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM auth_sessions WHERE user_id = ? AND expires_at > ?',
+      [principal.user.id, nowIso],
+    );
     return {
       initialized,
       authenticated: true,
@@ -308,21 +327,21 @@ export class AuthService implements IAuthService {
   }
 
   logoutSession(sessionID: UUID): void {
-    this.db.sqlite.prepare('DELETE FROM auth_sessions WHERE id = ?').run(toSwiftUUID(sessionID));
+    this.db.sql.run('DELETE FROM auth_sessions WHERE id = ?', [toSwiftUUID(sessionID)]);
   }
 
   listSessions(userID: UUID, currentSessionID?: UUID): AuthSessionInfo[] {
     const nowIso = new Date().toISOString();
     const uid = toSwiftUUID(userID);
     const curID = currentSessionID ? toSwiftUUID(currentSessionID) : null;
-    this.db.sqlite
-      .prepare('DELETE FROM auth_sessions WHERE user_id = ? AND expires_at <= ?')
-      .run(uid, nowIso);
-    const rows = this.db.sqlite
-      .prepare(
-        'SELECT * FROM auth_sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC',
-      )
-      .all(uid) as unknown as SessionRow[];
+    this.db.sql.run('DELETE FROM auth_sessions WHERE user_id = ? AND expires_at <= ?', [
+      uid,
+      nowIso,
+    ]);
+    const rows = this.db.sql.all<SessionRow>(
+      'SELECT * FROM auth_sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC',
+      [uid],
+    );
     return rows.map((r) => ({
       id: r.id,
       userAgent: r.user_agent,
@@ -335,56 +354,59 @@ export class AuthService implements IAuthService {
   }
 
   revokeSession(userID: UUID, sessionID: UUID): boolean {
-    const res = this.db.sqlite
-      .prepare('DELETE FROM auth_sessions WHERE id = ? AND user_id = ?')
-      .run(toSwiftUUID(sessionID), toSwiftUUID(userID));
+    const res = this.db.sql.run('DELETE FROM auth_sessions WHERE id = ? AND user_id = ?', [
+      toSwiftUUID(sessionID),
+      toSwiftUUID(userID),
+    ]);
     return Number(res.changes) > 0;
   }
 
   revokeOtherSessions(userID: UUID, currentSessionID?: UUID): number {
     const uid = toSwiftUUID(userID);
     if (currentSessionID) {
-      const res = this.db.sqlite
-        .prepare('DELETE FROM auth_sessions WHERE user_id = ? AND id <> ?')
-        .run(uid, toSwiftUUID(currentSessionID));
+      const res = this.db.sql.run('DELETE FROM auth_sessions WHERE user_id = ? AND id <> ?', [
+        uid,
+        toSwiftUUID(currentSessionID),
+      ]);
       return Number(res.changes);
     }
-    const res = this.db.sqlite.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(uid);
+    const res = this.db.sql.run('DELETE FROM auth_sessions WHERE user_id = ?', [uid]);
     return Number(res.changes);
   }
 
-  changePassword(
+  async changePassword(
     userID: UUID,
     currentPassword: string,
     newPassword: string,
     currentSessionID?: UUID,
-  ): void {
+  ): Promise<void> {
     if (newPassword.length < 8) {
       throw new AuthError('新密码长度至少需要 8 个字符。', 400, 'WEAK_PASSWORD');
     }
     const uid = toSwiftUUID(userID);
-    const row = this.db.sqlite
-      .prepare('SELECT * FROM auth_users WHERE id = ?')
-      .get(uid) as UserRow | undefined;
+    const row = this.db.sql.get<UserRow>('SELECT * FROM auth_users WHERE id = ?', [uid]);
     if (!row) {
       throw new AuthError('用户不存在。', 404, 'USER_NOT_FOUND');
     }
-    if (!verifyPassword(currentPassword, row.password_hash, row.password_salt)) {
+    const valid = await this.hasher.verify(currentPassword, row.password_hash, row.password_salt);
+    if (!valid) {
       throw new AuthError('当前密码不正确。', 401, 'INVALID_CREDENTIALS');
     }
-    const { hash, salt } = hashPassword(newPassword);
+    const nextHash = await this.hasher.hash(newPassword);
     this.db.transaction(() => {
-      this.db.sqlite
-        .prepare('UPDATE auth_users SET password_hash = ?, password_salt = ? WHERE id = ?')
-        .run(hash, salt, uid);
+      this.db.sql.run(
+        'UPDATE auth_users SET password_hash = ?, password_salt = ? WHERE id = ?',
+        [nextHash, '', uid],
+      );
       this.revokeOtherSessions(uid, currentSessionID);
     });
   }
 
   listApiTokens(userID: UUID): ApiTokenInfo[] {
-    const rows = this.db.sqlite
-      .prepare('SELECT * FROM auth_tokens WHERE user_id = ? ORDER BY created_at DESC')
-      .all(toSwiftUUID(userID)) as unknown as TokenRow[];
+    const rows = this.db.sql.all<TokenRow>(
+      'SELECT * FROM auth_tokens WHERE user_id = ? ORDER BY created_at DESC',
+      [toSwiftUUID(userID)],
+    );
     return rows.map((r) => {
       let scopes: ApiTokenScope[] = [];
       try {
@@ -415,11 +437,12 @@ export class AuthService implements IAuthService {
     if (!cleanName) {
       throw new AuthError('访问令牌名称不能为空。', 400, 'INVALID_TOKEN_NAME');
     }
-    const cleanScopes = scopes.length > 0 ? scopes : (['read', 'write', 'mcp'] as ApiTokenScope[]);
-    const rawSecret = `chk_${crypto.randomBytes(32).toString('base64url')}`;
+    const cleanScopes =
+      scopes.length > 0 ? scopes : (['read', 'write', 'mcp'] as ApiTokenScope[]);
+    const rawSecret = `chk_${bytesToBase64Url(randomBytes(32))}`;
     const prefix = rawSecret.slice(0, 12);
-    const tokenHash = sha256Hex(rawSecret);
-    const id = toSwiftUUID(crypto.randomUUID());
+    const tokenHash = sha256HexSync(rawSecret);
+    const id = toSwiftUUID(randomUUID());
     const now = new Date();
     const nowIso = now.toISOString();
     const expiresAt =
@@ -427,13 +450,11 @@ export class AuthService implements IAuthService {
         ? new Date(now.getTime() + expiresInDays * 24 * 60 * 60 * 1000).toISOString()
         : null;
 
-    this.db.sqlite
-      .prepare(
-        `INSERT INTO auth_tokens (
-          id, user_id, name, prefix, token_hash, scopes, created_at, last_used_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-      )
-      .run(
+    this.db.sql.run(
+      `INSERT INTO auth_tokens (
+        id, user_id, name, prefix, token_hash, scopes, created_at, last_used_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      [
         id,
         toSwiftUUID(userID),
         cleanName.slice(0, 80),
@@ -442,7 +463,8 @@ export class AuthService implements IAuthService {
         JSON.stringify(cleanScopes),
         nowIso,
         expiresAt,
-      );
+      ],
+    );
 
     return {
       token: rawSecret,
@@ -459,9 +481,10 @@ export class AuthService implements IAuthService {
   }
 
   revokeApiToken(userID: UUID, tokenID: UUID): boolean {
-    const res = this.db.sqlite
-      .prepare('DELETE FROM auth_tokens WHERE id = ? AND user_id = ?')
-      .run(toSwiftUUID(tokenID), toSwiftUUID(userID));
+    const res = this.db.sql.run('DELETE FROM auth_tokens WHERE id = ? AND user_id = ?', [
+      toSwiftUUID(tokenID),
+      toSwiftUUID(userID),
+    ]);
     return Number(res.changes) > 0;
   }
 }

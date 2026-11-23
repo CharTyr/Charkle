@@ -1,15 +1,9 @@
-import { randomUUID } from 'node:crypto';
-import sharp from 'sharp';
 import {
   clampCropRect,
   createDefaultFilterCriteria,
-  deltaE76,
   FULL_CROP_RECT,
   isMeaningfulCropSubregion,
-  labFromHex,
   padCropRect,
-  sRGBToHex,
-  sRGBToLab,
   type AssetRecord,
   type CleanBoundsResult,
   type FilterCriteria,
@@ -27,6 +21,8 @@ import {
 } from '@charkle/shared';
 import type { IMediaPipeline } from '../context.js';
 import { cosineSimilarity, type LibraryDatabase } from '../db/library-database.js';
+import type { IImageProcessor } from '../runtime/types.js';
+import { randomUUID } from '../runtime/web-crypto-utils.js';
 import type { CloudAIProvider, FetchLike } from './cloud-ai-provider.js';
 import type { CloudAIUsageTracker } from './cloud-ai-usage-tracker.js';
 import {
@@ -62,316 +58,23 @@ export interface FolderOptionInput {
   sampleTags: string[];
 }
 
-// MARK: - Local CIELAB K-Means Palette Extractor (Exact Port of ColorExtractor.swift)
-
-export async function extractDominantColorsFromBuffer(
-  imageBuffer: Buffer,
-  crop?: NormalizedCropRect | null,
-  count = 6,
-): Promise<LabColor[]> {
-  if (count <= 0) return [];
-  try {
-    let pipeline = sharp(imageBuffer).rotate();
-    const meta = await pipeline.metadata();
-    const imgW = meta.width ?? 0;
-    const imgH = meta.height ?? 0;
-    if (imgW <= 0 || imgH <= 0) return [];
-
-    if (
-      crop &&
-      crop.width > 0.04 &&
-      crop.height > 0.04 &&
-      !(crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1)
-    ) {
-      const clamped = clampCropRect(crop);
-      const left = Math.max(0, Math.min(imgW - 1, Math.floor(clamped.x * imgW)));
-      const top = Math.max(0, Math.min(imgH - 1, Math.floor(clamped.y * imgH)));
-      const width = Math.max(4, Math.min(imgW - left, Math.round(clamped.width * imgW)));
-      const height = Math.max(4, Math.min(imgH - top, Math.round(clamped.height * imgH)));
-      if (width >= 4 && height >= 4) {
-        pipeline = pipeline.extract({ left, top, width, height });
-      }
-    }
-
-    const { data, info } = await pipeline
-      .resize(48, 48, { fit: 'inside', withoutEnlargement: true })
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const pixels: Array<{ r: number; g: number; b: number }> = [];
-    for (let i = 0; i < data.length; i += info.channels) {
-      const alpha = data[i + 3] ?? 255;
-      if (alpha < 40) continue;
-      pixels.push({
-        r: data[i] / 255,
-        g: data[i + 1] / 255,
-        b: data[i + 2] / 255,
-      });
-    }
-    if (pixels.length === 0) return [];
-
-    const labPixels = pixels.map((p) => sRGBToLab(p.r, p.g, p.b));
-    const k = Math.min(count, 8, pixels.length);
-    const centroids: Array<{ l: number; a: number; b: number }> = [
-      labPixels[Math.floor(labPixels.length / 2)],
-    ];
-
-    // Deterministic k-means++ seeding
-    while (centroids.length < k) {
-      let farthestIndex = 0;
-      let maxMinDist = -1;
-      for (let idx = 0; idx < labPixels.length; idx++) {
-        const p = labPixels[idx];
-        let minDist = Number.POSITIVE_INFINITY;
-        for (const c of centroids) {
-          const dl = p.l - c.l;
-          const da = p.a - c.a;
-          const db = p.b - c.b;
-          const d = dl * dl + da * da + db * db;
-          if (d < minDist) minDist = d;
-        }
-        if (minDist > maxMinDist) {
-          maxMinDist = minDist;
-          farthestIndex = idx;
-        }
-      }
-      if (maxMinDist <= 1.0) break;
-      centroids.push(labPixels[farthestIndex]);
-    }
-
-    const clusterCount = centroids.length;
-    const assignments = new Int32Array(labPixels.length);
-
-    for (let iter = 0; iter < 8; iter++) {
-      const sumL = new Float64Array(clusterCount);
-      const sumA = new Float64Array(clusterCount);
-      const sumB = new Float64Array(clusterCount);
-      const counts = new Int32Array(clusterCount);
-
-      for (let i = 0; i < labPixels.length; i++) {
-        const p = labPixels[i];
-        let bestIdx = 0;
-        let bestDist = Number.POSITIVE_INFINITY;
-        for (let cIdx = 0; cIdx < clusterCount; cIdx++) {
-          const c = centroids[cIdx];
-          const dl = p.l - c.l;
-          const da = p.a - c.a;
-          const db = p.b - c.b;
-          const dist = dl * dl + da * da + db * db;
-          if (dist < bestDist) {
-            bestDist = dist;
-            bestIdx = cIdx;
-          }
-        }
-        assignments[i] = bestIdx;
-        sumL[bestIdx] += p.l;
-        sumA[bestIdx] += p.a;
-        sumB[bestIdx] += p.b;
-        counts[bestIdx] += 1;
-      }
-
-      for (let cIdx = 0; cIdx < clusterCount; cIdx++) {
-        if (counts[cIdx] > 0) {
-          centroids[cIdx] = {
-            l: sumL[cIdx] / counts[cIdx],
-            a: sumA[cIdx] / counts[cIdx],
-            b: sumB[cIdx] / counts[cIdx],
-          };
-        }
-      }
-    }
-
-    const sumR = new Float64Array(clusterCount);
-    const sumG = new Float64Array(clusterCount);
-    const sumBl = new Float64Array(clusterCount);
-    const clusterSize = new Int32Array(clusterCount);
-
-    for (let i = 0; i < pixels.length; i++) {
-      const cIdx = assignments[i];
-      sumR[cIdx] += pixels[i].r;
-      sumG[cIdx] += pixels[i].g;
-      sumBl[cIdx] += pixels[i].b;
-      clusterSize[cIdx] += 1;
-    }
-
-    const rawSwatches: LabColor[] = [];
-    for (let cIdx = 0; cIdx < clusterCount; cIdx++) {
-      if (clusterSize[cIdx] <= 0) continue;
-      const n = clusterSize[cIdx];
-      const hex = sRGBToHex(sumR[cIdx] / n, sumG[cIdx] / n, sumBl[cIdx] / n);
-      rawSwatches.push(labFromHex(hex, n / pixels.length));
-    }
-
-    rawSwatches.sort((a, b) => b.proportion - a.proportion);
-    const merged: LabColor[] = [];
-    for (const swatch of rawSwatches) {
-      if (!merged.some((m) => deltaE76(m, swatch) < 8.0)) {
-        merged.push(swatch);
-      }
-    }
-    return merged.slice(0, count);
-  } catch {
-    return [];
-  }
-}
-
-// MARK: - Local Sharp Edge + Contrast + Center Saliency Detector
-
-export async function detectLocalPrimarySubjectBox(
-  imageBuffer: Buffer,
-): Promise<NormalizedCropRect | null> {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .rotate()
-      .resize(96, 96, { fit: 'inside', withoutEnlargement: true })
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const w = info.width;
-    const h = info.height;
-    if (w < 8 || h < 8) return null;
-
-    const labL = new Float32Array(w * h);
-    const labA = new Float32Array(w * h);
-    const labB = new Float32Array(w * h);
-    const alphaArr = new Uint8Array(w * h);
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const idx = y * w + x;
-        const p = idx * info.channels;
-        alphaArr[idx] = data[p + 3] ?? 255;
-        const lab = sRGBToLab(data[p] / 255, data[p + 1] / 255, data[p + 2] / 255);
-        labL[idx] = lab.l;
-        labA[idx] = lab.a;
-        labB[idx] = lab.b;
-      }
-    }
-
-    // Estimate outer border background CIELAB color (outer 2-pixel rim)
-    let bgL = 0;
-    let bgA = 0;
-    let bgB = 0;
-    let bgCount = 0;
-    const rim = Math.max(1, Math.min(3, Math.floor(Math.min(w, h) * 0.05)));
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (x < rim || x >= w - rim || y < rim || y >= h - rim) {
-          const idx = y * w + x;
-          bgL += labL[idx];
-          bgA += labA[idx];
-          bgB += labB[idx];
-          bgCount++;
-        }
-      }
-    }
-    if (bgCount > 0) {
-      bgL /= bgCount;
-      bgA /= bgCount;
-      bgB /= bgCount;
-    }
-
-    // Compute per-pixel salience combining border color contrast + Sobel edge magnitude + subtle center prior
-    const salience = new Float32Array(w * h);
-    let maxSalience = 0;
-    let sumSalience = 0;
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const idx = y * w + x;
-        if (alphaArr[idx] < 30) {
-          salience[idx] = 0;
-          continue;
-        }
-        const dl = labL[idx] - bgL;
-        const da = labA[idx] - bgA;
-        const db = labB[idx] - bgB;
-        const borderDiff = Math.sqrt(dl * dl + da * da + db * db);
-
-        // Sobel gradient on L*
-        const xm = Math.max(0, x - 1);
-        const xp = Math.min(w - 1, x + 1);
-        const ym = Math.max(0, y - 1);
-        const yp = Math.min(h - 1, y + 1);
-        const gx =
-          -labL[ym * w + xm] + labL[ym * w + xp]
-          - 2 * labL[y * w + xm] + 2 * labL[y * w + xp]
-          - labL[yp * w + xm] + labL[yp * w + xp];
-        const gy =
-          -labL[ym * w + xm] - 2 * labL[ym * w + x] - labL[ym * w + xp]
-          + labL[yp * w + xm] + 2 * labL[yp * w + x] + labL[yp * w + xp];
-        const edgeMag = Math.hypot(gx, gy) * 0.16;
-
-        // Mild center Gaussian prior
-        const nx = (x + 0.5) / w - 0.5;
-        const ny = (y + 0.5) / h - 0.5;
-        const centerWeight = 0.72 + 0.28 * Math.exp(-(nx * nx + ny * ny) * 3.2);
-
-        const s = (borderDiff * 0.72 + edgeMag * 0.28) * centerWeight;
-        salience[idx] = s;
-        if (s > maxSalience) maxSalience = s;
-        sumSalience += s;
-      }
-    }
-
-    if (maxSalience < 6.0) return null;
-    const meanSalience = sumSalience / (w * h);
-    const threshold = Math.max(6.0, meanSalience * 1.15, maxSalience * 0.28);
-
-    let minX = w;
-    let minY = h;
-    let maxX = -1;
-    let maxY = -1;
-    let activePixels = 0;
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (salience[y * w + x] >= threshold) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-          activePixels++;
-        }
-      }
-    }
-
-    if (activePixels < Math.max(4, Math.floor(w * h * 0.005)) || maxX <= minX || maxY <= minY) {
-      return null;
-    }
-
-    const rect: NormalizedCropRect = clampCropRect({
-      x: minX / w,
-      y: minY / h,
-      width: (maxX - minX + 1) / w,
-      height: (maxY - minY + 1) / h,
-    });
-
-    if (!isMeaningfulCropSubregion(rect)) {
-      return null;
-    }
-    return rect;
-  } catch {
-    return null;
-  }
-}
-
 // MARK: - Visual Grounding Engine (Phase 1 + Phase 2)
 
 export interface VisualGroundingEngineOptions {
   usage?: CloudAIUsageTracker | null;
   fetchFn?: FetchLike;
+  images?: IImageProcessor | null;
 }
 
 export class VisualGroundingEngine {
   private readonly usage: CloudAIUsageTracker | null;
   private readonly fetchFn: FetchLike;
+  private readonly images: IImageProcessor | null;
 
   constructor(opts: VisualGroundingEngineOptions = {}) {
     this.usage = opts.usage ?? null;
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
+    this.images = opts.images ?? null;
   }
 
   private createClient(config: TypeSafeExperimentalConfig, apiKey: string): TypeSafeSystemOneClient {
@@ -395,14 +98,21 @@ export class VisualGroundingEngine {
     imageFormat?: 'jpg' | 'png';
     config: TypeSafeExperimentalConfig;
     apiKey?: string | null;
+    images?: IImageProcessor | null;
   }): Promise<VisualRegionResult> {
+    const images = params.images ?? this.images;
     const trimmedQuery = (params.query ?? '').trim();
     const isSemanticQuery = trimmedQuery.length > 0;
     const key = params.apiKey?.trim() ?? '';
 
     if (params.config.enabled && key.length > 0) {
       try {
-        const prepared = await TypeSafeImagePreparer.prepareJPEG(params.imageBuffer, 768);
+        const prepared = await TypeSafeImagePreparer.prepareJPEG(
+          params.imageBuffer,
+          768,
+          0.86,
+          images,
+        );
         const wireData = prepared?.data ?? params.imageBuffer;
         const client = this.createClient(params.config, key);
         const photoRef = `img-${randomUUID().toLowerCase()}`;
@@ -491,7 +201,9 @@ export class VisualGroundingEngine {
       );
     }
 
-    const saliency = await detectLocalPrimarySubjectBox(params.imageBuffer);
+    const saliency = images?.detectPrimarySubjectBox
+      ? await images.detectPrimarySubjectBox(params.imageBuffer)
+      : null;
     if (!saliency) {
       return {
         crop: { ...FULL_CROP_RECT },
@@ -530,15 +242,17 @@ export class VisualGroundingEngine {
     targetFormat?: 'jpg' | 'png';
     config: TypeSafeExperimentalConfig;
     apiKey?: string | null;
+    images?: IImageProcessor | null;
   }): Promise<VisualRegionResult> {
+    const images = params.images ?? this.images;
     const key = params.apiKey?.trim() ?? '';
     if (!params.config.enabled || !key) {
       throw new TypeSafeError('「以图定位」需要开启 TypeSafe (Jev) 实验档并配置 API 密钥。');
     }
 
     const [prepRef, prepTarget] = await Promise.all([
-      TypeSafeImagePreparer.prepareJPEG(params.referenceImageBuffer, 512),
-      TypeSafeImagePreparer.prepareJPEG(params.targetImageBuffer, 768),
+      TypeSafeImagePreparer.prepareJPEG(params.referenceImageBuffer, 512, 0.86, images),
+      TypeSafeImagePreparer.prepareJPEG(params.targetImageBuffer, 768, 0.86, images),
     ]);
 
     const client = this.createClient(params.config, key);
@@ -609,11 +323,18 @@ export class VisualGroundingEngine {
     imageFormat?: 'jpg' | 'png';
     config: TypeSafeExperimentalConfig;
     apiKey?: string | null;
+    images?: IImageProcessor | null;
   }): Promise<CleanBoundsResult> {
+    const images = params.images ?? this.images;
     const key = params.apiKey?.trim() ?? '';
     if (params.config.enabled && key.length > 0) {
       try {
-        const prepared = await TypeSafeImagePreparer.prepareJPEG(params.imageBuffer, 768);
+        const prepared = await TypeSafeImagePreparer.prepareJPEG(
+          params.imageBuffer,
+          768,
+          0.86,
+          images,
+        );
         const client = this.createClient(params.config, key);
         const photoRef = `capture-${randomUUID().toLowerCase()}`;
         const attachment = createTypeSafeImageAttachment({
@@ -691,7 +412,9 @@ export class VisualGroundingEngine {
       }
     }
 
-    const saliency = await detectLocalPrimarySubjectBox(params.imageBuffer);
+    const saliency = images?.detectPrimarySubjectBox
+      ? await images.detectPrimarySubjectBox(params.imageBuffer)
+      : null;
     if (!saliency) {
       return {
         hasNoise: false,
@@ -729,20 +452,26 @@ export class VisualGroundingEngine {
     colorCount?: number;
     config: TypeSafeExperimentalConfig;
     apiKey?: string | null;
+    images?: IImageProcessor | null;
   }): Promise<{ colors: LabColor[]; region: VisualRegionResult }> {
+    const images = params.images ?? this.images;
     const region = await this.locateRegion({
       query: params.query,
       imageBuffer: params.imageBuffer,
       imageFormat: params.imageFormat,
       config: params.config,
       apiKey: params.apiKey,
+      images,
     });
     const effectiveCrop = region.found ? region.crop : null;
-    const colors = await extractDominantColorsFromBuffer(
-      params.imageBuffer,
-      effectiveCrop,
-      params.colorCount ?? 6,
-    );
+    const colors = images
+      ? (
+          await images.extractColorsAndFingerprint(params.imageBuffer, undefined, {
+            crop: effectiveCrop,
+            count: params.colorCount ?? 6,
+          })
+        ).colors
+      : [];
     return { colors, region };
   }
 
@@ -1030,7 +759,12 @@ export class VisualGroundingService {
   async preparedTypeSafeJPEG(assetID: UUID, targetLongSide = 448): Promise<Buffer | null> {
     const raw = await this.loadAssetImageBuffer(assetID, targetLongSide > 520);
     if (!raw) return null;
-    const prep = await TypeSafeImagePreparer.prepareJPEG(raw, targetLongSide);
+    const prep = await TypeSafeImagePreparer.prepareJPEG(
+      raw,
+      targetLongSide,
+      0.86,
+      this.deps.media.images,
+    );
     return prep?.data ?? null;
   }
 
@@ -1044,6 +778,7 @@ export class VisualGroundingService {
       imageBuffer: buf,
       config: this.deps.getTypeSafeConfig(),
       apiKey: this.deps.getTypeSafeAPIKey(),
+      images: this.deps.media.images,
     });
   }
 
@@ -1060,6 +795,7 @@ export class VisualGroundingService {
       targetImageBuffer: targetBuf,
       config: this.deps.getTypeSafeConfig(),
       apiKey: this.deps.getTypeSafeAPIKey(),
+      images: this.deps.media.images,
     });
   }
 
@@ -1072,6 +808,7 @@ export class VisualGroundingService {
       imageBuffer: buf,
       config: this.deps.getTypeSafeConfig(),
       apiKey: this.deps.getTypeSafeAPIKey(),
+      images: this.deps.media.images,
     });
   }
 
@@ -1090,6 +827,7 @@ export class VisualGroundingService {
       colorCount: 6,
       config: this.deps.getTypeSafeConfig(),
       apiKey: this.deps.getTypeSafeAPIKey(),
+      images: this.deps.media.images,
     });
 
     const updatedAsset = this.deps.db.transaction(() => {

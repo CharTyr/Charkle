@@ -86,6 +86,16 @@ describe('DriveSyncConfig & Core model helpers', () => {
         }),
       ),
     ).toBe('/data/library');
+
+    expect(
+      activeStorageLocationSummary(
+        createDefaultDriveSyncConfig({
+          mode: 'localOnly',
+          localLibraryPath: '/data/library',
+        }),
+        'cloudflare',
+      ),
+    ).toBe('内置云存储');
   });
 
   it('detects all 8 MediaKind categories and synthesizes legacy social attachments', () => {

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -11,22 +12,28 @@ import {
   toSwiftUUID,
 } from '@charkle/shared';
 import { EventBus } from '../src/api/events.js';
-import { LibraryDatabase } from '../src/db/library-database.js';
 import { MediaPipeline } from '../src/media/media-pipeline.js';
-import { ConfigStore } from '../src/storage/config-store.js';
-import { SecretVault } from '../src/storage/secret-vault.js';
+import { NodeBlobStore } from '../src/runtime/node-blob.js';
+import { NodeImageProcessor } from '../src/runtime/node-image.js';
+import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
+import { createNodeConfigStore, createNodeSecretVault } from '../src/runtime/node-storage.js';
 import { DriveSyncEngine } from '../src/sync/drive-sync-engine.js';
 import { InMemoryDriveTransport } from '../src/sync/in-memory-transport.js';
+import { LocalFolderTransport } from '../src/sync/local-folder-transport.js';
 
 const tempDirs: string[] = [];
 
 function createNodeDevice(transport: InMemoryDriveTransport) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'charkle-sync-test-'));
   tempDirs.push(dir);
-  const db = new LibraryDatabase(path.join(dir, 'library.sqlite'));
-  const media = new MediaPipeline(path.join(dir, 'media'));
-  const configStore = new ConfigStore(dir);
-  const secretVault = new SecretVault(dir, 'test-sync-secret');
+  const db = openNodeLibraryDatabase(path.join(dir, 'library.sqlite'));
+  const media = new MediaPipeline({
+    blobs: new NodeBlobStore(path.join(dir, 'media')),
+    images: new NodeImageProcessor(),
+    readLocalFile: async (filePath) => new Uint8Array(await fsp.readFile(filePath)),
+  });
+  const configStore = createNodeConfigStore(db.sql, dir);
+  const secretVault = createNodeSecretVault(db.sql, dir, 'test-sync-secret');
   const events = new EventBus();
   const engine = new DriveSyncEngine({
     db,
@@ -35,6 +42,11 @@ function createNodeDevice(transport: InMemoryDriveTransport) {
     secretVault,
     events,
     transportOverride: transport,
+    localTransportFactory: (cfg) =>
+      cfg.mode === 'gdirectMount'
+        ? new LocalFolderTransport(cfg.mountPath.trim(), 'gdirectMount')
+        : new LocalFolderTransport(path.dirname(path.resolve(cfg.localLibraryPath)), 'LocalFolder'),
+    runtimeMode: 'node',
   });
   return { dir, db, media, configStore, secretVault, events, engine };
 }

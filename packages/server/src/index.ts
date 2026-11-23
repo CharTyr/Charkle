@@ -1,9 +1,15 @@
 import { serve } from '@hono/node-server';
 import type { HealthResponse } from '@charkle/shared';
 import { createApp, createServerContext, SERVER_DEFAULT_PORT } from './app.js';
+import { defaultRuntimeFeatures } from './core-app.js';
 import { seedSampleLibrary } from './media/sample-seeder.js';
 
 export { createApp, createServerContext, SERVER_DEFAULT_PORT } from './app.js';
+export {
+  createCoreApp,
+  createRuntimeContext,
+  defaultRuntimeFeatures,
+} from './core-app.js';
 export type { ServerContext } from './context.js';
 export { LibraryDatabase } from './db/library-database.js';
 export { MediaPipeline } from './media/media-pipeline.js';
@@ -17,6 +23,8 @@ export function createPlaceholderHealth(): HealthResponse {
   return {
     ok: true,
     version: '1.0.0',
+    runtimeMode: 'node',
+    features: defaultRuntimeFeatures('node'),
     timestamp: new Date().toISOString(),
   };
 }

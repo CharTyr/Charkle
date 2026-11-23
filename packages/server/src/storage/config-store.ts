@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import {
   createDefaultAIProviderConfig,
   createDefaultDriveSyncConfig,
@@ -11,11 +9,12 @@ import {
   type ExternalAgentConfig,
   type TypeSafeExperimentalConfig,
 } from '@charkle/shared';
+import type { ISqlDatabase } from '../runtime/types.js';
 
 export const DEFAULT_CACHE_BUDGET_BYTES = 10 * 1024 * 1024 * 1024; // 10 GiB
 
-interface PersistedConfigFile {
-  version: number;
+export interface PersistedConfigSnapshot {
+  version?: number;
   aiConfig?: AIProviderConfig;
   typeSafeConfig?: TypeSafeExperimentalConfig;
   syncConfig?: DriveSyncConfig;
@@ -25,97 +24,144 @@ interface PersistedConfigFile {
   custom?: Record<string, unknown>;
 }
 
+const KEY_AI = 'config.ai';
+const KEY_TYPESAFE = 'config.typesafe';
+const KEY_SYNC = 'config.sync';
+const KEY_EXTERNAL_AGENT = 'config.externalAgent';
+const KEY_CACHE_BUDGET = 'config.cacheBudgetBytes';
+const KEY_CHATGPT_SESSION = 'config.chatGPTSession';
+const KEY_CUSTOM_PREFIX = 'config.custom.';
+
+export interface ConfigStoreOptions {
+  defaultLocalLibraryPath?: string;
+}
+
 /**
- * Atomic JSON configuration store persisted under `<dataDir>/config.json`.
+ * Runtime-agnostic configuration store backed by `ISqlDatabase` (`sync_state` table).
+ * Works identically on Node.js SQLite and Cloudflare Durable Object SQLite.
  */
 export class ConfigStore {
-  private readonly filePath: string;
-  private readonly dataDir: string;
-  private data: PersistedConfigFile;
+  private readonly sql: ISqlDatabase;
+  private readonly defaultLocalLibraryPath: string;
 
-  constructor(dataDir: string) {
-    this.dataDir = dataDir;
-    fs.mkdirSync(dataDir, { recursive: true });
-    this.filePath = path.join(dataDir, 'config.json');
-    this.data = this.loadFromDisk();
+  constructor(sql: ISqlDatabase, options: ConfigStoreOptions = {}) {
+    this.sql = sql;
+    this.defaultLocalLibraryPath = options.defaultLocalLibraryPath ?? '.charkle-data/library';
+    this.sql.exec('CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, payload TEXT NOT NULL);');
   }
 
-  private loadFromDisk(): PersistedConfigFile {
+  private readState<T>(key: string): T | null {
+    const row = this.sql.get<{ payload: string }>(
+      'SELECT payload FROM sync_state WHERE key = ?',
+      [key],
+    );
+    if (!row) return null;
     try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, 'utf8');
-        const parsed = JSON.parse(raw) as Partial<PersistedConfigFile>;
-        if (parsed && typeof parsed === 'object') {
-          return { ...parsed, version: parsed.version ?? 1 };
+      return JSON.parse(row.payload) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeState(key: string, value: unknown | null): void {
+    if (value === null || value === undefined) {
+      this.sql.run('DELETE FROM sync_state WHERE key = ?', [key]);
+    } else {
+      this.sql.run(
+        'INSERT OR REPLACE INTO sync_state (key, payload) VALUES (?, ?)',
+        [key, JSON.stringify(value)],
+      );
+    }
+  }
+
+  /**
+   * Imports an initial config snapshot (e.g. migrating legacy Node `<dataDir>/config.json`)
+   * without overwriting keys that are already persisted in SQLite.
+   */
+  importSnapshotIfEmpty(snapshot: PersistedConfigSnapshot): void {
+    if (snapshot.aiConfig && this.readState(KEY_AI) === null) {
+      this.setAIConfig(snapshot.aiConfig);
+    }
+    if (snapshot.typeSafeConfig && this.readState(KEY_TYPESAFE) === null) {
+      this.setTypeSafeConfig(snapshot.typeSafeConfig);
+    }
+    if (snapshot.syncConfig && this.readState(KEY_SYNC) === null) {
+      this.setSyncConfig(snapshot.syncConfig);
+    }
+    if (snapshot.externalAgentConfig && this.readState(KEY_EXTERNAL_AGENT) === null) {
+      this.setExternalAgentConfig(snapshot.externalAgentConfig);
+    }
+    if (
+      typeof snapshot.cacheBudgetBytes === 'number' &&
+      this.readState(KEY_CACHE_BUDGET) === null
+    ) {
+      this.setCacheBudgetBytes(snapshot.cacheBudgetBytes);
+    }
+    if (snapshot.chatGPTSession && this.readState(KEY_CHATGPT_SESSION) === null) {
+      this.setChatGPTSession(snapshot.chatGPTSession);
+    }
+    if (snapshot.custom && typeof snapshot.custom === 'object') {
+      for (const [k, v] of Object.entries(snapshot.custom)) {
+        if (this.readState(`${KEY_CUSTOM_PREFIX}${k}`) === null && v !== undefined) {
+          this.set(k, v);
         }
       }
-    } catch {
-      // Recover cleanly with defaults if config file was corrupted.
     }
-    return { version: 1 };
-  }
-
-  private persist(): void {
-    fs.mkdirSync(this.dataDir, { recursive: true });
-    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2) + '\n', { mode: 0o600 });
-    fs.renameSync(tmpPath, this.filePath);
   }
 
   getAIConfig(): AIProviderConfig {
-    return createDefaultAIProviderConfig(this.data.aiConfig ?? {});
+    return createDefaultAIProviderConfig(this.readState<AIProviderConfig>(KEY_AI) ?? {});
   }
 
   setAIConfig(config: AIProviderConfig): AIProviderConfig {
     const merged = createDefaultAIProviderConfig(config);
-    this.data.aiConfig = merged;
-    this.persist();
+    this.writeState(KEY_AI, merged);
     return merged;
   }
 
   getTypeSafeConfig(): TypeSafeExperimentalConfig {
-    return createDefaultTypeSafeExperimentalConfig(this.data.typeSafeConfig ?? {});
+    return createDefaultTypeSafeExperimentalConfig(
+      this.readState<TypeSafeExperimentalConfig>(KEY_TYPESAFE) ?? {},
+    );
   }
 
   setTypeSafeConfig(config: TypeSafeExperimentalConfig): TypeSafeExperimentalConfig {
     const merged = createDefaultTypeSafeExperimentalConfig(config);
-    this.data.typeSafeConfig = merged;
-    this.persist();
+    this.writeState(KEY_TYPESAFE, merged);
     return merged;
   }
 
   getSyncConfig(): DriveSyncConfig {
-    const defaultLibraryPath = path.join(this.dataDir, 'library');
+    const stored = this.readState<DriveSyncConfig>(KEY_SYNC);
     return createDefaultDriveSyncConfig({
-      localLibraryPath: defaultLibraryPath,
-      ...(this.data.syncConfig ?? {}),
+      localLibraryPath: this.defaultLocalLibraryPath,
+      ...(stored ?? {}),
     });
   }
 
   setSyncConfig(config: DriveSyncConfig): DriveSyncConfig {
-    const defaultLibraryPath = path.join(this.dataDir, 'library');
     const merged = createDefaultDriveSyncConfig({
       ...config,
-      localLibraryPath: config.localLibraryPath || defaultLibraryPath,
+      localLibraryPath: config.localLibraryPath || this.defaultLocalLibraryPath,
     });
-    this.data.syncConfig = merged;
-    this.persist();
+    this.writeState(KEY_SYNC, merged);
     return merged;
   }
 
   getExternalAgentConfig(): ExternalAgentConfig {
-    return createDefaultExternalAgentConfig(this.data.externalAgentConfig ?? {});
+    return createDefaultExternalAgentConfig(
+      this.readState<ExternalAgentConfig>(KEY_EXTERNAL_AGENT) ?? {},
+    );
   }
 
   setExternalAgentConfig(config: ExternalAgentConfig): ExternalAgentConfig {
     const merged = createDefaultExternalAgentConfig(config);
-    this.data.externalAgentConfig = merged;
-    this.persist();
+    this.writeState(KEY_EXTERNAL_AGENT, merged);
     return merged;
   }
 
   getCacheBudgetBytes(): number {
-    const v = this.data.cacheBudgetBytes;
+    const v = this.readState<number>(KEY_CACHE_BUDGET);
     if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
       return Math.round(v);
     }
@@ -124,14 +170,13 @@ export class ConfigStore {
 
   setCacheBudgetBytes(bytes: number): number {
     const clamped = Math.max(1024 * 1024, Math.round(bytes)); // min 1 MiB for tests & safety
-    this.data.cacheBudgetBytes = clamped;
-    this.persist();
+    this.writeState(KEY_CACHE_BUDGET, clamped);
     return clamped;
   }
 
   getChatGPTSession(): ChatGPTAccountSession {
     return (
-      this.data.chatGPTSession ?? {
+      this.readState<ChatGPTAccountSession>(KEY_CHATGPT_SESSION) ?? {
         status: 'disconnected',
         sharingEnabled: false,
         email: null,
@@ -143,23 +188,16 @@ export class ConfigStore {
   }
 
   setChatGPTSession(session: ChatGPTAccountSession): ChatGPTAccountSession {
-    this.data.chatGPTSession = { ...session };
-    this.persist();
-    return this.data.chatGPTSession;
+    const copy = { ...session };
+    this.writeState(KEY_CHATGPT_SESSION, copy);
+    return copy;
   }
 
   get<T = unknown>(key: string): T | null {
-    if (!this.data.custom || !(key in this.data.custom)) return null;
-    return this.data.custom[key] as T;
+    return this.readState<T>(`${KEY_CUSTOM_PREFIX}${key}`);
   }
 
   set<T = unknown>(key: string, value: T | null): void {
-    if (!this.data.custom) this.data.custom = {};
-    if (value === null || value === undefined) {
-      delete this.data.custom[key];
-    } else {
-      this.data.custom[key] = value;
-    }
-    this.persist();
+    this.writeState(`${KEY_CUSTOM_PREFIX}${key}`, value);
   }
 }

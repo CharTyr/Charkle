@@ -4,9 +4,26 @@ import type { NormalizedCropRect } from './moodboard.js';
 
 // MARK: - Capture & Media Cache
 
+export interface ClientPreprocessedMedia {
+  pixelWidth?: number | null;
+  pixelHeight?: number | null;
+  thumbnail520Base64?: string | null;
+  thumbnail1400Base64?: string | null;
+  dominantColors?: LabColor[] | null;
+  featurePrintBase64?: string | null;
+  waveformPeaks?: number[] | null;
+  durationSeconds?: number | null;
+}
+
 export type CaptureInput =
-  | { type: 'fileURL'; url: string }
-  | { type: 'imageData'; base64Data: string; suggestedName: string; sourceURL?: string | null }
+  | { type: 'fileURL'; url: string; preprocessed?: ClientPreprocessedMedia | null }
+  | {
+      type: 'imageData';
+      base64Data: string;
+      suggestedName: string;
+      sourceURL?: string | null;
+      preprocessed?: ClientPreprocessedMedia | null;
+    }
   | { type: 'webURL'; url: string; title?: string | null; notes?: string | null }
   | { type: 'textSnippet'; title: string; text: string; sourceURL?: string | null }
   | { type: 'colorSwatch'; hex: string; title?: string | null };

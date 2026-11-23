@@ -1,13 +1,14 @@
-import { randomUUID } from 'node:crypto';
-import sharp from 'sharp';
 import {
   cropFromBoxEdges,
   type NormalizedCropRect,
   type TypeSafeModelInfo,
 } from '@charkle/shared';
+import type { IImageProcessor } from '../runtime/types.js';
+import { randomUUID, toBuffer } from '../runtime/web-crypto-utils.js';
+import { inspectImageHeader } from '../runtime/workers-image.js';
+import { SECRET_KEYS } from '../storage/secret-vault.js';
 import type { FetchLike } from './cloud-ai-provider.js';
 import type { CloudAIUsageTracker } from './cloud-ai-usage-tracker.js';
-import { SECRET_KEYS } from '../storage/secret-vault.js';
 
 export const TYPESAFE_DANGER_ZONE_IMAGES_HEADER = 'TypeSafe-Danger-Zone-Images';
 export const TYPESAFE_SECRET_KEY = SECRET_KEYS.TYPESAFE_API_KEY;
@@ -221,68 +222,41 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 /**
  * Ensures every image sent to TypeSafe strictly obeys `280 <= width, height <= 1568`
  * and upright EXIF-normalized JPEG encoding (padding extreme aspect ratios onto `#F5F5F5`).
+ * Delegates raster resizing/padding to the runtime's `IImageProcessor` (zero `sharp` import here).
  */
 export const TypeSafeImagePreparer = {
   minSide: 280,
   maxSide: 1568,
 
   async prepareJPEG(
-    input: Buffer | string,
+    input: Buffer | Uint8Array,
     targetLongSide = 768,
     quality = 0.86,
+    images?: IImageProcessor | null,
   ): Promise<{ data: Buffer; width: number; height: number } | null> {
     try {
-      const oriented = await sharp(input)
-        .rotate()
-        .toBuffer({ resolveWithObject: true });
-
-      const srcW = oriented.info.width;
-      const srcH = oriented.info.height;
-      if (!srcW || !srcH) return null;
-
-      const desiredMax = Math.max(this.minSide, Math.min(this.maxSide, Math.round(targetLongSide)));
-      let scale = desiredMax / Math.max(srcW, srcH);
-      if (Math.min(srcW, srcH) * scale < this.minSide) {
-        scale = this.minSide / Math.min(srcW, srcH);
-      }
-      if (Math.max(srcW, srcH) * scale > this.maxSide) {
-        scale = this.maxSide / Math.max(srcW, srcH);
-      }
-
-      const drawW = Math.max(1, Math.min(this.maxSide, Math.round(srcW * scale)));
-      const drawH = Math.max(1, Math.min(this.maxSide, Math.round(srcH * scale)));
-      const canvasW = Math.max(this.minSide, drawW);
-      const canvasH = Math.max(this.minSide, drawH);
-
-      let pipeline = sharp(oriented.data).resize(drawW, drawH, {
-        fit: 'fill',
-        kernel: sharp.kernel.lanczos3,
-      });
-
-      if (canvasW > drawW || canvasH > drawH) {
-        const left = Math.floor((canvasW - drawW) / 2);
-        const right = canvasW - drawW - left;
-        const top = Math.floor((canvasH - drawH) / 2);
-        const bottom = canvasH - drawH - top;
-        pipeline = pipeline.extend({
-          top,
-          bottom,
-          left,
-          right,
-          background: { r: 245, g: 245, b: 245, alpha: 1 },
+      const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+      if (images?.cropAndPad) {
+        const res = await images.cropAndPad(bytes, {
+          targetLongSide,
+          minSide: this.minSide,
+          maxSide: this.maxSide,
+          quality,
         });
+        if (res) {
+          return {
+            data: toBuffer(res.data),
+            width: res.width,
+            height: res.height,
+          };
+        }
       }
-
-      const jpegQuality = Math.max(40, Math.min(100, Math.round(quality * 100)));
-      const out = await pipeline
-        .flatten({ background: { r: 245, g: 245, b: 245 } })
-        .jpeg({ quality: jpegQuality })
-        .toBuffer({ resolveWithObject: true });
-
+      const header = inspectImageHeader(bytes);
+      if (!header) return null;
       return {
-        data: out.data,
-        width: out.info.width,
-        height: out.info.height,
+        data: toBuffer(bytes),
+        width: header.width,
+        height: header.height,
       };
     } catch {
       return null;

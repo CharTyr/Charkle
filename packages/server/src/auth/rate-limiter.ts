@@ -91,3 +91,5 @@ export class LoginRateLimiter {
     this.attempts.clear();
   }
 }
+
+export { LoginRateLimiter as SlidingWindowRateLimiter };

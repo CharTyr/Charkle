@@ -4,6 +4,8 @@ import type { BoardConnector, BoardNode, InkStroke } from './moodboard.js';
 
 // MARK: - Storage & Transport Modes
 
+export type RuntimeMode = 'node' | 'cloudflare';
+
 export type DriveTransportMode =
   | 'directAPIWithGDirect'
   | 'webDAV'
@@ -17,7 +19,10 @@ export const DRIVE_TRANSPORT_MODES: readonly DriveTransportMode[] = [
   'localOnly',
 ] as const;
 
-export function driveTransportModeLocalizedLabel(mode: DriveTransportMode): string {
+export function driveTransportModeLocalizedLabel(
+  mode: DriveTransportMode,
+  runtimeMode?: RuntimeMode,
+): string {
   switch (mode) {
     case 'directAPIWithGDirect':
       return 'Google Drive';
@@ -26,7 +31,7 @@ export function driveTransportModeLocalizedLabel(mode: DriveTransportMode): stri
     case 'gdirectMount':
       return 'gdirect 本地挂载';
     case 'localOnly':
-      return '纯本地文件夹';
+      return runtimeMode === 'cloudflare' ? '内置云存储' : '纯本地文件夹';
   }
 }
 
@@ -150,7 +155,10 @@ function trimSlashesAndSpaces(value: string): string {
  * Clean human-readable target path summary for the currently active storage backend.
  * Exact port of Swift `DriveSyncConfig.activeStorageLocationSummary`.
  */
-export function activeStorageLocationSummary(config: DriveSyncConfig): string {
+export function activeStorageLocationSummary(
+  config: DriveSyncConfig,
+  runtimeMode?: RuntimeMode,
+): string {
   switch (config.mode) {
     case 'directAPIWithGDirect': {
       const sharedID = resolvedSharedFolderID(config);
@@ -178,7 +186,7 @@ export function activeStorageLocationSummary(config: DriveSyncConfig): string {
       return `${config.mountPath}/${cleaned || 'Charkle'}`;
     }
     case 'localOnly':
-      return config.localLibraryPath;
+      return runtimeMode === 'cloudflare' ? '内置云存储' : config.localLibraryPath;
   }
 }
 

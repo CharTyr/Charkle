@@ -8,7 +8,6 @@ import {
   createDefaultTypeSafeExperimentalConfig,
   toSwiftUUID,
 } from '@charkle/shared';
-import { LibraryDatabase } from '../src/db/library-database.js';
 import { FakeCloudAIProvider, type FetchLike } from '../src/intelligence/cloud-ai-provider.js';
 import { CloudAIUsageTracker } from '../src/intelligence/cloud-ai-usage-tracker.js';
 import {
@@ -21,6 +20,9 @@ import {
   VisualGroundingService,
 } from '../src/intelligence/visual-grounding-engine.js';
 import { MediaPipeline } from '../src/media/media-pipeline.js';
+import { NodeBlobStore } from '../src/runtime/node-blob.js';
+import { NodeImageProcessor } from '../src/runtime/node-image.js';
+import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
 
 const tempDirs: string[] = [];
 
@@ -51,11 +53,13 @@ async function createSubjectTestPNG(): Promise<Buffer> {
 }
 
 describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
+  const nodeImages = new NodeImageProcessor();
+
   it('enforces 280..1568 pixel bounds on tiny, huge, and extreme-aspect images', async () => {
     const tiny = await sharp({
       create: { width: 80, height: 60, channels: 3, background: { r: 40, g: 80, b: 160 } },
     }).png().toBuffer();
-    const prepTiny = await TypeSafeImagePreparer.prepareJPEG(tiny, 512);
+    const prepTiny = await TypeSafeImagePreparer.prepareJPEG(tiny, 512, 0.86, nodeImages);
     expect(prepTiny).not.toBeNull();
     expect(prepTiny!.width).toBeGreaterThanOrEqual(280);
     expect(prepTiny!.height).toBeGreaterThanOrEqual(280);
@@ -65,7 +69,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
     const pano = await sharp({
       create: { width: 2000, height: 100, channels: 3, background: { r: 200, g: 120, b: 60 } },
     }).png().toBuffer();
-    const prepPano = await TypeSafeImagePreparer.prepareJPEG(pano, 1568);
+    const prepPano = await TypeSafeImagePreparer.prepareJPEG(pano, 1568, 0.86, nodeImages);
     expect(prepPano).not.toBeNull();
     expect(prepPano!.width).toBe(1568);
     expect(prepPano!.height).toBe(280);
@@ -73,7 +77,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
 
   it('sends exact /v1/systemone multipart protocol (part-1 JSON + TypeSafe-Danger-Zone-Images) and records Jev usage', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'jev.sqlite'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'jev.sqlite'));
     const usage = new CloudAIUsageTracker(db);
 
     let capturedUrl = '';
@@ -121,7 +125,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
     expect(models[0].name).toBe('jev-latest');
 
     const imgBuf = await createSubjectTestPNG();
-    const engine = new VisualGroundingEngine({ usage, fetchFn: mockFetch });
+    const engine = new VisualGroundingEngine({ usage, fetchFn: mockFetch, images: nodeImages });
     const cfg = createDefaultTypeSafeExperimentalConfig({
       enabled: true,
       minConfidence: 0.6,
@@ -167,15 +171,18 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
 
   it('falls back cleanly to local sharp saliency, clean bounds, and subject palette persistence when Jev is disabled', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'local-fallback.sqlite'));
-    const media = new MediaPipeline(path.join(dir, 'media'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'local-fallback.sqlite'));
+    const media = new MediaPipeline({
+      blobs: new NodeBlobStore(path.join(dir, 'media')),
+      images: nodeImages,
+    });
 
     const subjectPng = await createSubjectTestPNG();
     const assetID = toSwiftUUID('11111111-1111-4111-8111-111111111111');
     const ingested = await media.ingestUploadedFile(subjectPng, 'crimson-card.png', 'image/png', null, assetID);
     db.saveAssetLocally(ingested.asset);
 
-    const engine = new VisualGroundingEngine();
+    const engine = new VisualGroundingEngine({ images: nodeImages });
     const service = new VisualGroundingService({
       db,
       media,
@@ -211,8 +218,11 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
 
   it('runs 3-signal hybrid semanticSearch and closed-set batchTriageInbox respecting null rejection', async () => {
     const dir = createTempDir();
-    const db = new LibraryDatabase(path.join(dir, 'phase2.sqlite'));
-    const media = new MediaPipeline(path.join(dir, 'media'));
+    const db = openNodeLibraryDatabase(path.join(dir, 'phase2.sqlite'));
+    const media = new MediaPipeline({
+      blobs: new NodeBlobStore(path.join(dir, 'media')),
+      images: nodeImages,
+    });
 
     const archFolder = db.createFolder('Architecture');
     const uiFolder = db.createFolder('UI Design');
@@ -292,7 +302,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
       enableInboxSmartTriage: true,
       minPresenceProbability: 0.45,
     });
-    const engine = new VisualGroundingEngine({ fetchFn: mockFetch });
+    const engine = new VisualGroundingEngine({ fetchFn: mockFetch, images: nodeImages });
     const service = new VisualGroundingService({
       db,
       media,
@@ -344,7 +354,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
     const matchService = new VisualGroundingService({
       db,
       media,
-      engine: new VisualGroundingEngine({ fetchFn: matchMock }),
+      engine: new VisualGroundingEngine({ fetchFn: matchMock, images: nodeImages }),
       getTypeSafeConfig: () => tsCfg,
       getTypeSafeAPIKey: () => 'ts-key',
       getCloudAIProvider: () => null,

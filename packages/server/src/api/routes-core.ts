@@ -1,12 +1,6 @@
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import fsp from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Context, Hono } from 'hono';
 import { deleteCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
-import JSZip from 'jszip';
 import {
   activeStorageLocationSummary,
   createDefaultAutoLayoutConfig,
@@ -21,10 +15,12 @@ import {
   type AuthLoginRequest,
   type AuthSetupRequest,
   type BoardNode,
+  type ClientPreprocessedMedia,
   type CreateApiTokenRequest,
   type CreateBoardRequest,
   type CreateFolderRequest,
   type ExtractSocialMediaRequest,
+  type HealthResponse,
   type IngestRequest,
   type LabColor,
   type MigrateStorageRequest,
@@ -46,6 +42,7 @@ import { AuthError } from '../auth/auth-service.js';
 import { LoginRateLimiter } from '../auth/rate-limiter.js';
 import type { AuthenticatedPrincipal, ServerContext } from '../context.js';
 import { seedSampleLibrary } from '../media/sample-seeder.js';
+import { randomUUID, readEnv, toArrayBuffer } from '../runtime/web-crypto-utils.js';
 import { SECRET_KEYS } from '../storage/secret-vault.js';
 import { DriveTransportError } from '../sync/drive-transport.js';
 import type { DriveSyncEngine } from '../sync/drive-sync-engine.js';
@@ -82,19 +79,79 @@ function setSessionCookie(
   });
 }
 
+function resolveRequestOrigin(c: Context): string {
+  const url = new URL(c.req.url);
+  const forwardedHost = c.req.header('x-forwarded-host')?.split(',')[0]?.trim();
+  const forwardedProto = c.req.header('x-forwarded-proto')?.split(',')[0]?.trim();
+  if (forwardedHost) {
+    const proto =
+      forwardedProto === 'http' || forwardedProto === 'https'
+        ? forwardedProto
+        : url.protocol.replace(/:$/, '');
+    return `${proto}://${forwardedHost}`;
+  }
+  if (forwardedProto === 'http' || forwardedProto === 'https') {
+    return `${forwardedProto}://${url.host}`;
+  }
+  return url.origin;
+}
+
+function parsePreprocessedFormField(
+  form: FormData,
+  fileCount: number,
+): Array<ClientPreprocessedMedia | null> {
+  const out: Array<ClientPreprocessedMedia | null> = new Array(fileCount).fill(null);
+
+  const rawCombined = form.get('preprocessed');
+  if (typeof rawCombined === 'string' && rawCombined.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(rawCombined) as unknown;
+      if (Array.isArray(parsed)) {
+        for (let i = 0; i < Math.min(fileCount, parsed.length); i++) {
+          const item = parsed[i];
+          if (item && typeof item === 'object' && !Array.isArray(item)) {
+            out[i] = item as ClientPreprocessedMedia;
+          }
+        }
+      } else if (parsed && typeof parsed === 'object') {
+        out[0] = parsed as ClientPreprocessedMedia;
+      }
+    } catch {
+      // Ignore malformed optional preprocessed metadata
+    }
+  }
+
+  for (let i = 0; i < fileCount; i++) {
+    if (out[i]) continue;
+    const rawIdx = form.get(`preprocessed_${i}`);
+    if (typeof rawIdx === 'string' && rawIdx.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(rawIdx) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          out[i] = parsed as ClientPreprocessedMedia;
+        }
+      } catch {
+        // Ignore malformed per-file metadata
+      }
+    }
+  }
+
+  return out;
+}
+
 function buildSyncConfigResponse(ctx: ServerContext): SyncConfigResponse {
   const config = ctx.configStore.getSyncConfig();
   const status = ctx.sync.getStatus();
   const hasGoogleOAuthConfig =
     ctx.secretVault.has(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_ID) ||
-    Boolean(process.env.CHARKLE_GOOGLE_CLIENT_ID?.trim());
+    Boolean(readEnv('CHARKLE_GOOGLE_CLIENT_ID', ctx.env)?.trim());
   const hasWebDAVPassword = ctx.secretVault.has(SECRET_KEYS.WEBDAV_PASSWORD);
   return {
     config,
     status,
     hasGoogleOAuthConfig,
     hasWebDAVPassword,
-    activeLocationSummary: activeStorageLocationSummary(config),
+    activeLocationSummary: activeStorageLocationSummary(config, ctx.runtimeMode),
   };
 }
 
@@ -130,7 +187,7 @@ function appendAssetsToBoard(
     maxZ += 1;
     maxOrder += 1;
     newNodes.push({
-      id: toSwiftUUID(crypto.randomUUID()),
+      id: toSwiftUUID(randomUUID()),
       kind: {
         type: 'assetRef',
         assetID: uid,
@@ -183,11 +240,14 @@ export function registerCoreRoutes(
   // MARK: - Health (Public)
 
   app.get('/api/v1/health', (c) => {
-    return c.json({
+    const payload: HealthResponse = {
       ok: true,
       version: '1.0.0',
       timestamp: new Date().toISOString(),
-    });
+      runtimeMode: ctx.runtimeMode,
+      features: ctx.features,
+    };
+    return c.json(payload);
   });
 
   // MARK: - Auth Routes
@@ -204,8 +264,8 @@ export function registerCoreRoutes(
       const password = String(body.password ?? '');
       const displayName = typeof body.displayName === 'string' ? body.displayName : undefined;
 
-      ctx.auth.setupAdmin(username, password, displayName);
-      const loginRes = ctx.auth.login(username, password, {
+      await ctx.auth.setupAdmin(username, password, displayName);
+      const loginRes = await ctx.auth.login(username, password, {
         rememberMe: true,
         userAgent: c.req.header('user-agent') ?? null,
         ipAddress: getClientIP(c),
@@ -249,7 +309,7 @@ export function registerCoreRoutes(
       }
 
       try {
-        const loginRes = ctx.auth.login(username, password, {
+        const loginRes = await ctx.auth.login(username, password, {
           rememberMe: Boolean(body.rememberMe),
           userAgent: c.req.header('user-agent') ?? null,
           ipAddress: ip,
@@ -294,7 +354,7 @@ export function registerCoreRoutes(
     try {
       const principal = requirePrincipal(c);
       const body = (await c.req.json()) as Partial<AuthChangePasswordRequest>;
-      ctx.auth.changePassword(
+      await ctx.auth.changePassword(
         principal.user.id,
         String(body.currentPassword ?? ''),
         String(body.newPassword ?? ''),
@@ -529,14 +589,19 @@ export function registerCoreRoutes(
         return c.json({ error: '未检测到上传文件。', code: 'NO_FILES' }, 400);
       }
 
+      const preprocessedList = parsePreprocessedFormField(form, fileEntries.length);
+
       const created: AssetRecord[] = [];
-      for (const file of fileEntries) {
-        const buf = Buffer.from(await file.arrayBuffer());
+      for (let i = 0; i < fileEntries.length; i++) {
+        const file = fileEntries[i];
+        const bytes = new Uint8Array(await file.arrayBuffer());
         const res = await ctx.media.ingestUploadedFile(
-          buf,
+          bytes,
           file.name || 'upload',
           file.type || null,
           targetFolderID,
+          undefined,
+          preprocessedList[i] ?? null,
         );
         const saved = ctx.db.saveAssetLocally(res.asset);
         if (res.vector) {
@@ -684,30 +749,29 @@ export function registerCoreRoutes(
     }
   });
 
-  // MARK: - Authenticated Media Serving (Thumbnails + Range-capable Originals)
+  // MARK: - Authenticated Media Serving (Thumbnails + Streaming Range-capable Originals)
 
   app.get('/api/v1/media/:id/thumbnail/:tier', async (c) => {
     const id = c.req.param('id');
     const rawTier = c.req.param('tier');
     const tier: ThumbnailTier = rawTier === 'preview1400' ? 'preview1400' : 'grid520';
-    const thumbPath = ctx.media.getThumbnailPath(id, tier);
-    if (!thumbPath) {
+    const head = await ctx.media.getThumbnailHead(id, tier);
+    if (!head) {
       return c.json({ error: '缩略图不存在。', code: 'NOT_FOUND' }, 404);
     }
-    const stat = await fsp.stat(thumbPath).catch(() => null);
-    if (!stat) {
-      return c.json({ error: '缩略图不存在。', code: 'NOT_FOUND' }, 404);
-    }
-    const etag = `"${stat.size}-${Math.trunc(stat.mtimeMs)}"`;
+    const etag = head.etag ?? `"${head.size}-${Math.trunc(head.lastModifiedMs ?? 0)}"`;
     if (c.req.header('if-none-match') === etag) {
       return new Response(null, { status: 304, headers: { ETag: etag } });
     }
-    const buf = await fsp.readFile(thumbPath);
-    return new Response(new Uint8Array(buf), {
+    const streamRes = await ctx.media.getThumbnailStream(id, tier);
+    if (!streamRes) {
+      return c.json({ error: '缩略图不存在。', code: 'NOT_FOUND' }, 404);
+    }
+    return new Response(streamRes.stream, {
       status: 200,
       headers: {
-        'Content-Type': 'image/jpeg',
-        'Content-Length': String(buf.length),
+        'Content-Type': streamRes.contentType || 'image/jpeg',
+        'Content-Length': String(streamRes.size),
         'Cache-Control': 'private, max-age=3600',
         ETag: etag,
       },
@@ -723,11 +787,12 @@ export function registerCoreRoutes(
       }
       const cachedOnlyQuery = (c.req.query('cachedOnly') ?? '').trim().toLowerCase();
       const cachedOnly = cachedOnlyQuery === '1' || cachedOnlyQuery === 'true';
-      let filePath = ctx.media.cachedOriginalPath(asset);
-      if (!filePath && !cachedOnly) {
-        filePath = await ctx.sync.downloadOriginal(asset);
+      let head = await ctx.media.getOriginalHead(asset);
+      if (!head && !cachedOnly) {
+        await ctx.sync.downloadOriginal(asset);
+        head = await ctx.media.getOriginalHead(asset);
       }
-      if (!filePath || !fs.existsSync(filePath)) {
+      if (!head) {
         return c.json(
           {
             error: '原始文件暂未缓存到本地。',
@@ -740,9 +805,8 @@ export function registerCoreRoutes(
       if (!cachedOnly) {
         ctx.db.touchOriginal(asset.id);
       }
-      const stat = await fsp.stat(filePath);
-      const totalSize = stat.size;
-      const mimeType = asset.mimeType || 'application/octet-stream';
+      const totalSize = head.size;
+      const mimeType = asset.mimeType || head.contentType || 'application/octet-stream';
       const download = c.req.query('download') === '1';
 
       const headers: Record<string, string> = {
@@ -751,7 +815,6 @@ export function registerCoreRoutes(
         'Cache-Control': 'private, max-age=600',
       };
       if (mimeType === 'application/pdf') {
-        // Allow same-origin Quick Look PDF iframe rendering
         headers['X-Frame-Options'] = 'SAMEORIGIN';
       }
       if (download) {
@@ -772,7 +835,6 @@ export function registerCoreRoutes(
         let start = match[1] ? Number.parseInt(match[1], 10) : 0;
         let end = match[2] ? Number.parseInt(match[2], 10) : totalSize - 1;
         if (!match[1] && match[2]) {
-          // Suffix range: bytes=-N
           const suffixLen = Number.parseInt(match[2], 10);
           start = Math.max(0, totalSize - suffixLen);
           end = totalSize - 1;
@@ -785,29 +847,37 @@ export function registerCoreRoutes(
         }
         end = Math.min(end, totalSize - 1);
         const chunkLen = end - start + 1;
-        const fh = await fsp.open(filePath, 'r');
-        try {
-          const chunk = Buffer.alloc(chunkLen);
-          const { bytesRead } = await fh.read(chunk, 0, chunkLen, start);
-          return new Response(new Uint8Array(chunk.subarray(0, bytesRead)), {
-            status: 206,
-            headers: {
-              ...headers,
-              'Content-Range': `bytes ${start}-${start + bytesRead - 1}/${totalSize}`,
-              'Content-Length': String(bytesRead),
-            },
+        const partial = await ctx.media.getOriginalStream(asset, {
+          offset: start,
+          length: chunkLen,
+        });
+        if (!partial) {
+          return new Response(null, {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${totalSize}` },
           });
-        } finally {
-          await fh.close();
         }
+        const rangeEnd = partial.range?.end ?? start + partial.size - 1;
+        const rangeTotal = partial.range?.total ?? totalSize;
+        return new Response(partial.stream, {
+          status: 206,
+          headers: {
+            ...headers,
+            'Content-Range': `bytes ${start}-${rangeEnd}/${rangeTotal}`,
+            'Content-Length': String(partial.size),
+          },
+        });
       }
 
-      const fullBuf = await fsp.readFile(filePath);
-      return new Response(new Uint8Array(fullBuf), {
+      const fullStream = await ctx.media.getOriginalStream(asset);
+      if (!fullStream) {
+        return c.json({ error: '原始文件不存在。', code: 'NOT_FOUND' }, 404);
+      }
+      return new Response(fullStream.stream, {
         status: 200,
         headers: {
           ...headers,
-          'Content-Length': String(fullBuf.length),
+          'Content-Length': String(fullStream.size),
         },
       });
     } catch (err) {
@@ -925,7 +995,7 @@ export function registerCoreRoutes(
         ? ctx.db.fetchSmartFolders().find((s) => toSwiftUUID(s.id) === toSwiftUUID(body.id!))
         : undefined;
       const record: SmartFolderRecord = {
-        id: body.id ? toSwiftUUID(body.id) : toSwiftUUID(crypto.randomUUID()),
+        id: body.id ? toSwiftUUID(body.id) : toSwiftUUID(randomUUID()),
         name: String(body.name ?? '').trim() || '智能文件夹',
         colorHex: body.colorHex ?? body.rule?.colorHexes?.[0] ?? null,
         rule: createDefaultSmartFolderRule(body.rule ?? {}),
@@ -980,7 +1050,7 @@ export function registerCoreRoutes(
         const w = 280;
         const h = Math.round(w / ratio);
         nodes.push({
-          id: toSwiftUUID(crypto.randomUUID()),
+          id: toSwiftUUID(randomUUID()),
           kind: {
             type: 'assetRef',
             assetID: asset.id,
@@ -1008,7 +1078,7 @@ export function registerCoreRoutes(
       }
 
       const rawDoc = createDefaultMoodboardDocument({
-        id: toSwiftUUID(crypto.randomUUID()),
+        id: toSwiftUUID(randomUUID()),
         title: String(body.title ?? '').trim() || '未命名情绪板',
         subtitle: String(body.subtitle ?? ''),
         mode:
@@ -1109,10 +1179,21 @@ export function registerCoreRoutes(
     }
   });
 
-  app.post('/api/v1/sync/google/oauth/start', (c) => {
+  app.post('/api/v1/sync/google/oauth/start', async (c) => {
     try {
-      const origin = new URL(c.req.url).origin;
-      const redirectUri = `${origin}/api/v1/sync/google/callback`;
+      const origin = resolveRequestOrigin(c);
+      const body = (await c.req.json().catch(() => ({}))) as { redirectUri?: string };
+      let redirectUri = `${origin}/api/v1/sync/google/oauth/callback`;
+      if (typeof body.redirectUri === 'string' && body.redirectUri.trim()) {
+        try {
+          const parsed = new URL(body.redirectUri.trim());
+          if (parsed.origin === origin) {
+            redirectUri = parsed.toString();
+          }
+        } catch {
+          // Keep derived same-origin callback URL
+        }
+      }
       const result = ctx.sync.startGoogleOAuth(redirectUri);
       return c.json(result);
     } catch (err) {
@@ -1120,15 +1201,16 @@ export function registerCoreRoutes(
     }
   });
 
-  app.get('/api/v1/sync/google/callback', async (c) => {
+  const handleGoogleOAuthCallback = async (c: Context<{ Variables: AppVariables }>) => {
     try {
       const code = c.req.query('code') ?? '';
       const state = c.req.query('state') ?? '';
       if (!code || !state) {
         return c.html('<html><body><p>授权已取消或参数不完整。</p></body></html>', 400);
       }
-      const origin = new URL(c.req.url).origin;
-      const redirectUri = `${origin}/api/v1/sync/google/callback`;
+      const origin = resolveRequestOrigin(c);
+      const pathname = new URL(c.req.url).pathname;
+      const redirectUri = `${origin}${pathname}`;
       const account = await ctx.sync.completeGoogleOAuth(code, state, redirectUri);
       return c.html(
         `<!doctype html><html><body style="font-family:-apple-system,sans-serif;padding:32px;background:#F6F6F5;color:#1C1D21">
@@ -1144,7 +1226,10 @@ export function registerCoreRoutes(
         400,
       );
     }
-  });
+  };
+
+  app.get('/api/v1/sync/google/oauth/callback', handleGoogleOAuthCallback);
+  app.get('/api/v1/sync/google/callback', handleGoogleOAuthCallback);
 
   app.post('/api/v1/sync/google/sign-out', async (c) => {
     try {
@@ -1232,33 +1317,17 @@ export function registerCoreRoutes(
 
   app.get('/api/v1/extension/download', async (c) => {
     try {
-      const extDir = resolveExtensionDir();
-      if (!extDir) {
+      const zipBytes = await ctx.bundles.getExtensionZip();
+      if (!zipBytes || zipBytes.byteLength === 0) {
         return c.json({ error: '浏览器扩展包暂不可用。', code: 'NOT_FOUND' }, 404);
       }
-      const files = await collectExtensionFiles(extDir);
-      if (files.length === 0) {
-        return c.json({ error: '浏览器扩展目录为空。', code: 'NOT_FOUND' }, 404);
-      }
 
-      const zip = new JSZip();
-      for (const file of files) {
-        const data = await fsp.readFile(file.absPath);
-        zip.file(file.relPath, data);
-      }
-
-      const zipBuf = await zip.generateAsync({
-        type: 'nodebuffer',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 },
-      });
-
-      return new Response(new Uint8Array(zipBuf), {
+      return new Response(toArrayBuffer(zipBytes), {
         status: 200,
         headers: {
           'Content-Type': 'application/zip',
           'Content-Disposition': 'attachment; filename="charkle-web-clipper-extension.zip"',
-          'Content-Length': String(zipBuf.length),
+          'Content-Length': String(zipBytes.byteLength),
           'Cache-Control': 'private, no-cache',
         },
       });
@@ -1271,33 +1340,17 @@ export function registerCoreRoutes(
 
   app.get('/api/v1/figma-plugin/download', async (c) => {
     try {
-      const pluginDir = resolveFigmaPluginDir();
-      if (!pluginDir) {
+      const zipBytes = await ctx.bundles.getFigmaPluginZip();
+      if (!zipBytes || zipBytes.byteLength === 0) {
         return c.json({ error: 'Figma 桥接插件包暂不可用。', code: 'NOT_FOUND' }, 404);
       }
-      const files = await collectFigmaPluginFiles(pluginDir);
-      if (files.length === 0) {
-        return c.json({ error: 'Figma 桥接插件目录为空。', code: 'NOT_FOUND' }, 404);
-      }
 
-      const zip = new JSZip();
-      for (const file of files) {
-        const data = await fsp.readFile(file.absPath);
-        zip.file(file.relPath, data);
-      }
-
-      const zipBuf = await zip.generateAsync({
-        type: 'nodebuffer',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 },
-      });
-
-      return new Response(new Uint8Array(zipBuf), {
+      return new Response(toArrayBuffer(zipBytes), {
         status: 200,
         headers: {
           'Content-Type': 'application/zip',
           'Content-Disposition': 'attachment; filename="charkle-figma-bridge-plugin.zip"',
-          'Content-Length': String(zipBuf.length),
+          'Content-Length': String(zipBytes.byteLength),
           'Cache-Control': 'private, no-cache',
         },
       });
@@ -1305,125 +1358,4 @@ export function registerCoreRoutes(
       return handleRouteError(c, err);
     }
   });
-}
-
-const EXCLUDED_EXTENSION_DIRS = new Set(['tests', 'test', '__tests__', 'node_modules']);
-const EXCLUDED_EXTENSION_FILES = new Set([
-  '.DS_Store',
-  'Thumbs.db',
-  'package.json',
-  'package-lock.json',
-  'tsconfig.json',
-]);
-
-function isExcludedExtensionFileName(name: string): boolean {
-  if (name.startsWith('.')) return true;
-  if (EXCLUDED_EXTENSION_FILES.has(name)) return true;
-  if (/^vitest\.config\./i.test(name)) return true;
-  if (/\.(?:test|spec)\.[^.]+$/i.test(name)) return true;
-  if (/\.map$/i.test(name)) return true;
-  return false;
-}
-
-export function resolveExtensionDir(): string | null {
-  const envDir = process.env.CHARKLE_EXTENSION_DIR?.trim();
-  if (envDir) {
-    const resolved = path.resolve(envDir);
-    return fs.existsSync(path.join(resolved, 'manifest.json')) ? resolved : null;
-  }
-
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.resolve(here, '../../../extension'),
-    path.resolve(process.cwd(), 'packages/extension'),
-    path.resolve(process.cwd(), '../extension'),
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, 'manifest.json'))) {
-      return dir;
-    }
-  }
-  return null;
-}
-
-async function collectExtensionFiles(
-  rootDir: string,
-  subDir = '',
-): Promise<Array<{ absPath: string; relPath: string }>> {
-  const currentDir = subDir ? path.join(rootDir, subDir) : rootDir;
-  const entries = await fsp.readdir(currentDir, { withFileTypes: true });
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-
-  const results: Array<{ absPath: string; relPath: string }> = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (entry.name.startsWith('.') || EXCLUDED_EXTENSION_DIRS.has(entry.name)) {
-        continue;
-      }
-      const nextSub = subDir ? `${subDir}/${entry.name}` : entry.name;
-      const nested = await collectExtensionFiles(rootDir, nextSub);
-      results.push(...nested);
-    } else if (entry.isFile()) {
-      if (isExcludedExtensionFileName(entry.name)) {
-        continue;
-      }
-      const absPath = path.join(currentDir, entry.name);
-      const relPath = subDir ? `${subDir}/${entry.name}` : entry.name;
-      results.push({ absPath, relPath });
-    }
-  }
-  return results;
-}
-
-const EXCLUDED_FIGMA_FILES = new Set(['.DS_Store', 'Thumbs.db', 'ui-template.html']);
-
-export function resolveFigmaPluginDir(): string | null {
-  const envDir = process.env.CHARKLE_FIGMA_PLUGIN_DIR?.trim();
-  if (envDir) {
-    const resolved = path.resolve(envDir);
-    return fs.existsSync(path.join(resolved, 'manifest.json')) ? resolved : null;
-  }
-
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.resolve(here, '../../../../figma-plugin'),
-    path.resolve(here, '../../../figma-plugin'),
-    path.resolve(process.cwd(), 'figma-plugin'),
-    path.resolve(process.cwd(), '../../figma-plugin'),
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(path.join(dir, 'manifest.json'))) {
-      return dir;
-    }
-  }
-  return null;
-}
-
-async function collectFigmaPluginFiles(
-  rootDir: string,
-  subDir = '',
-): Promise<Array<{ absPath: string; relPath: string }>> {
-  const currentDir = subDir ? path.join(rootDir, subDir) : rootDir;
-  const entries = await fsp.readdir(currentDir, { withFileTypes: true });
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-
-  const results: Array<{ absPath: string; relPath: string }> = [];
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (entry.name.startsWith('.') || EXCLUDED_EXTENSION_DIRS.has(entry.name)) {
-        continue;
-      }
-      const nextSub = subDir ? `${subDir}/${entry.name}` : entry.name;
-      const nested = await collectFigmaPluginFiles(rootDir, nextSub);
-      results.push(...nested);
-    } else if (entry.isFile()) {
-      if (entry.name.startsWith('.') || EXCLUDED_FIGMA_FILES.has(entry.name)) {
-        continue;
-      }
-      const absPath = path.join(currentDir, entry.name);
-      const relPath = subDir ? `${subDir}/${entry.name}` : entry.name;
-      results.push({ absPath, relPath });
-    }
-  }
-  return results;
 }
