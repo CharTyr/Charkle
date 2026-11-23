@@ -178,4 +178,87 @@ struct ExternalAgentMCPTests {
         let trashedA2 = try #require(await engine.fetchAsset(id: a2.id))
         #expect(trashedA2.isTrashed == true)
     }
+
+    @Test("MCP and CLI services can be enabled or disabled independently with legacy config migration")
+    func independentMCPAndCLIToggles() async throws {
+        let (dir, _, service, _) = try await makeTestService()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // 1. Legacy v1.0.0 JSON (`enabled` only, no `mcpEnabled`/`cliEnabled`) migrates cleanly
+        let legacyDisabledJSON = Data(#"{"enabled":false,"accessLevel":"readWriteOrganize"}"#.utf8)
+        let decodedDisabled = try JSONDecoder().decode(ExternalAgentConfig.self, from: legacyDisabledJSON)
+        #expect(decodedDisabled.mcpEnabled == false)
+        #expect(decodedDisabled.cliEnabled == false)
+        #expect(decodedDisabled.enabled == false)
+        #expect(decodedDisabled.accessLevel == .readWriteOrganize)
+
+        let legacyEnabledJSON = Data(#"{"enabled":true,"accessLevel":"readOnly"}"#.utf8)
+        let decodedEnabled = try JSONDecoder().decode(ExternalAgentConfig.self, from: legacyEnabledJSON)
+        #expect(decodedEnabled.mcpEnabled == true)
+        #expect(decodedEnabled.cliEnabled == true)
+        #expect(decodedEnabled.enabled == true)
+
+        // 2. MCP OFF, CLI ON -> MCP JSON-RPC & MCP tool calls blocked; CLI read & write succeed
+        try ExternalAgentConfigStore.save(
+            ExternalAgentConfig(mcpEnabled: false, cliEnabled: true, accessLevel: .readWriteOrganize),
+            in: service.configDirectory
+        )
+        let mcpInitBlocked = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "initialize",
+            "params": ["protocolVersion": "2025-03-26"]
+        ]))
+        #expect(mcpInitBlocked["error"] != nil)
+
+        let mcpListBlocked = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/list"
+        ]))
+        #expect(mcpListBlocked["error"] != nil)
+
+        let mcpReadBlocked = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "resources/read",
+            "params": ["uri": "charkle://library/overview"]
+        ]))
+        #expect(mcpReadBlocked["error"] != nil)
+
+        let mcpToolBlocked = await service.callTool(name: "library_overview", arguments: [:], channel: .mcp)
+        #expect(mcpToolBlocked.isError == true)
+
+        let cliReadAllowed = await service.callTool(name: "library_overview", arguments: [:], channel: .cli)
+        #expect(cliReadAllowed.isError == false)
+        let cliWriteAllowed = await service.callTool(name: "create_folder", arguments: ["name": "CLI Only Folder"], channel: .cli)
+        #expect(cliWriteAllowed.isError == false)
+
+        // 3. MCP ON, CLI OFF -> CLI calls blocked; MCP JSON-RPC & MCP tools succeed
+        try ExternalAgentConfigStore.save(
+            ExternalAgentConfig(mcpEnabled: true, cliEnabled: false, accessLevel: .readWriteOrganize),
+            in: service.configDirectory
+        )
+        let cliReadBlocked = await service.callTool(name: "library_overview", arguments: [:], channel: .cli)
+        #expect(cliReadBlocked.isError == true)
+        let cliWriteBlocked = await service.callTool(name: "create_folder", arguments: ["name": "ShouldBlock"], channel: .cli)
+        #expect(cliWriteBlocked.isError == true)
+
+        let mcpInitAllowed = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "initialize",
+            "params": ["protocolVersion": "2025-03-26"]
+        ]))
+        #expect(mcpInitAllowed["result"] != nil)
+
+        let mcpToolAllowed = await service.callTool(name: "create_folder", arguments: ["name": "MCP Only Folder"], channel: .mcp)
+        #expect(mcpToolAllowed.isError == false)
+
+        // 4. Persisted round-trip preserves independent channel flags
+        let reloaded = ExternalAgentConfigStore.load(in: service.configDirectory)
+        #expect(reloaded.mcpEnabled == true)
+        #expect(reloaded.cliEnabled == false)
+        #expect(reloaded.enabled == true)
+    }
 }

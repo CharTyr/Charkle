@@ -25,16 +25,89 @@ public nonisolated enum ExternalAgentAccessLevel: String, Codable, CaseIterable,
     }
 }
 
+/// Transport channel through which an external AI agent or script accesses Charkle.
+public nonisolated enum ExternalAgentChannel: String, Codable, CaseIterable, Hashable, Sendable {
+    case mcp
+    case cli
+
+    public var displayTitle: String {
+        switch self {
+        case .mcp: "MCP 服务"
+        case .cli: "CLI 命令行服务"
+        }
+    }
+}
+
 public nonisolated struct ExternalAgentConfig: Codable, Hashable, Sendable {
-    public var enabled: Bool
+    public var mcpEnabled: Bool
+    public var cliEnabled: Bool
     public var accessLevel: ExternalAgentAccessLevel
 
+    /// Aggregate convenience toggle: `true` if either MCP or CLI is enabled.
+    /// Assigning sets both channels together for backward compatibility.
+    public var enabled: Bool {
+        get { mcpEnabled || cliEnabled }
+        set {
+            mcpEnabled = newValue
+            cliEnabled = newValue
+        }
+    }
+
     public init(
-        enabled: Bool = true,
+        mcpEnabled: Bool = true,
+        cliEnabled: Bool = true,
         accessLevel: ExternalAgentAccessLevel = .readOnly
     ) {
-        self.enabled = enabled
+        self.mcpEnabled = mcpEnabled
+        self.cliEnabled = cliEnabled
         self.accessLevel = accessLevel
+    }
+
+    public init(
+        enabled: Bool,
+        accessLevel: ExternalAgentAccessLevel = .readOnly
+    ) {
+        self.mcpEnabled = enabled
+        self.cliEnabled = enabled
+        self.accessLevel = accessLevel
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case mcpEnabled
+        case cliEnabled
+        case accessLevel
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let legacyEnabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.mcpEnabled = try container.decodeIfPresent(Bool.self, forKey: .mcpEnabled) ?? legacyEnabled
+        self.cliEnabled = try container.decodeIfPresent(Bool.self, forKey: .cliEnabled) ?? legacyEnabled
+        self.accessLevel = try container.decodeIfPresent(ExternalAgentAccessLevel.self, forKey: .accessLevel) ?? .readOnly
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(mcpEnabled, forKey: .mcpEnabled)
+        try container.encode(cliEnabled, forKey: .cliEnabled)
+        try container.encode(accessLevel, forKey: .accessLevel)
+    }
+
+    public func isEnabled(for channel: ExternalAgentChannel) -> Bool {
+        switch channel {
+        case .mcp: mcpEnabled
+        case .cli: cliEnabled
+        }
+    }
+
+    public func allowsRead(for channel: ExternalAgentChannel) -> Bool {
+        isEnabled(for: channel)
+    }
+
+    public func allowsWrite(for channel: ExternalAgentChannel) -> Bool {
+        isEnabled(for: channel) && accessLevel == .readWriteOrganize
     }
 
     public var allowsRead: Bool { enabled }

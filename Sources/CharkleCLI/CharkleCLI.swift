@@ -4,7 +4,7 @@ import Foundation
 
 @main
 struct CharkleCLI {
-    static let version = "1.0.0"
+    static let version = "1.0.1"
 
     static func main() async {
         let rawArgs = Array(CommandLine.arguments.dropFirst())
@@ -44,26 +44,32 @@ struct CharkleCLI {
 
             switch command {
             case "mcp":
+                let policy = service.currentPolicy()
+                if !policy.allowsRead(for: .mcp) && isatty(STDIN_FILENO) != 0 {
+                    writeStderr("MCP 服务已在 Charkle「设置 → 外部 Agent」中关闭，请先开启「启用 MCP 服务」后再试。\n")
+                    exit(1)
+                }
                 await runMCPStdioLoop(service: service)
             case "status":
                 let policy = service.currentPolicy()
-                let overview = await service.callTool(name: "library_overview", arguments: [:])
-                if policy.allowsRead {
-                    printToolOutput(overview)
+                if policy.allowsRead(for: .cli) {
+                    printToolOutput(await service.callTool(name: "library_overview", arguments: [:], channel: .cli))
                 } else {
                     print(CharkleExternalAgentService.encodePrettyJSON([
                         "enabled": policy.enabled,
+                        "mcpEnabled": policy.mcpEnabled,
+                        "cliEnabled": policy.cliEnabled,
                         "accessLevel": policy.accessLevel.rawValue,
                         "libraryDir": resolvedDir.path
                     ]))
                 }
             case "overview":
-                printToolOutput(await service.callTool(name: "library_overview", arguments: [:]))
+                printToolOutput(await service.callTool(name: "library_overview", arguments: [:], channel: .cli))
             case "inbox":
                 let flags = parseFlags(subArgs)
                 var params: [String: Any] = [:]
                 if let limit = flags["limit"].flatMap(Int.init) { params["limit"] = limit }
-                printToolOutput(await service.callTool(name: "list_inbox", arguments: params))
+                printToolOutput(await service.callTool(name: "list_inbox", arguments: params, channel: .cli))
             case "search":
                 let (positionals, flags) = parsePositionalsAndFlags(subArgs)
                 var params: [String: Any] = [:]
@@ -74,11 +80,11 @@ struct CharkleCLI {
                 if let limit = flags["limit"].flatMap(Int.init) { params["limit"] = limit }
                 if flags["inbox"] == "true" { params["only_inbox"] = true }
                 if flags["untagged"] == "true" { params["only_untagged"] = true }
-                printToolOutput(await service.callTool(name: "search_assets", arguments: params))
+                printToolOutput(await service.callTool(name: "search_assets", arguments: params, channel: .cli))
             case "asset":
                 let (positionals, flags) = parsePositionalsAndFlags(subArgs)
                 let id = flags["id"] ?? positionals.first ?? ""
-                printToolOutput(await service.callTool(name: "get_asset", arguments: ["asset_id": id]))
+                printToolOutput(await service.callTool(name: "get_asset", arguments: ["asset_id": id], channel: .cli))
             case "contact-sheet":
                 let (_, flags) = parsePositionalsAndFlags(subArgs)
                 var params: [String: Any] = [:]
@@ -90,7 +96,7 @@ struct CharkleCLI {
                 if let color = flags["color"] { params["color_hex"] = color }
                 if let limit = flags["limit"].flatMap(Int.init) { params["limit"] = limit }
                 if let out = flags["out"] ?? flags["output"] { params["output_path"] = out }
-                printToolOutput(await service.callTool(name: "render_contact_sheet", arguments: params))
+                printToolOutput(await service.callTool(name: "render_contact_sheet", arguments: params, channel: .cli))
             case "board":
                 await handleBoardCommand(subArgs, service: service)
             case "organize":
@@ -105,7 +111,7 @@ struct CharkleCLI {
                 if let notes = flags["notes"] { params["notes"] = notes }
                 if let title = flags["title"] { params["title"] = title }
                 if let desc = flags["ai-description"] { params["ai_description"] = desc }
-                printToolOutput(await service.callTool(name: "organize_assets", arguments: params))
+                printToolOutput(await service.callTool(name: "organize_assets", arguments: params, channel: .cli))
             case "folder":
                 guard subArgs.first == "create" else {
                     writeStderr("Usage: charkle folder create <name> [--parent <path>]\n")
@@ -114,7 +120,7 @@ struct CharkleCLI {
                 let (positionals, flags) = parsePositionalsAndFlags(Array(subArgs.dropFirst()))
                 var params: [String: Any] = ["name": positionals.first ?? ""]
                 if let parent = flags["parent"] { params["parent_path"] = parent }
-                printToolOutput(await service.callTool(name: "create_folder", arguments: params))
+                printToolOutput(await service.callTool(name: "create_folder", arguments: params, channel: .cli))
             case "import":
                 let (positionals, flags) = parsePositionalsAndFlags(subArgs)
                 var params: [String: Any] = [:]
@@ -129,14 +135,14 @@ struct CharkleCLI {
                 if let title = flags["title"] { params["title"] = title }
                 if let folder = flags["folder"] { params["folder_path"] = folder }
                 if let tags = flags["tags"] { params["tags"] = splitCSV(tags) }
-                printToolOutput(await service.callTool(name: "ingest_asset", arguments: params))
+                printToolOutput(await service.callTool(name: "ingest_asset", arguments: params, channel: .cli))
             case "trash":
                 let (_, flags) = parsePositionalsAndFlags(subArgs)
                 var params: [String: Any] = [
                     "trashed": flags["restore"] != "true"
                 ]
                 if let ids = flags["ids"] { params["asset_ids"] = splitCSV(ids) }
-                printToolOutput(await service.callTool(name: "trash_assets", arguments: params))
+                printToolOutput(await service.callTool(name: "trash_assets", arguments: params, channel: .cli))
             default:
                 writeStderr("Unknown command: \(command)\nRun `charkle --help` for usage.\n")
                 exit(2)
@@ -159,13 +165,13 @@ struct CharkleCLI {
 
         switch action {
         case "list":
-            printToolOutput(await service.callTool(name: "list_boards", arguments: [:]))
+            printToolOutput(await service.callTool(name: "list_boards", arguments: [:], channel: .cli))
         case "get":
             var params: [String: Any] = [:]
             if let ref = positionals.first {
                 if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
             }
-            printToolOutput(await service.callTool(name: "get_board_context", arguments: params))
+            printToolOutput(await service.callTool(name: "get_board_context", arguments: params, channel: .cli))
         case "export":
             var params: [String: Any] = [:]
             if let ref = positionals.first {
@@ -174,7 +180,7 @@ struct CharkleCLI {
             if let out = flags["out"] ?? flags["output"] { params["output_path"] = out }
             if let w = flags["width"].flatMap(Int.init) { params["width"] = w }
             if flags["dark"] == "true" { params["dark_appearance"] = true }
-            printToolOutput(await service.callTool(name: "export_board_image", arguments: params))
+            printToolOutput(await service.callTool(name: "export_board_image", arguments: params, channel: .cli))
         case "compose":
             var params: [String: Any] = [:]
             if let title = flags["title"] { params["title"] = title }
@@ -184,7 +190,7 @@ struct CharkleCLI {
             if let note = flags["note"] { params["curator_note"] = note }
             if let layout = flags["layout"] { params["layout_style"] = layout }
             if flags["freeform"] == "true" { params["use_freeform"] = true }
-            printToolOutput(await service.callTool(name: "compose_moodboard", arguments: params))
+            printToolOutput(await service.callTool(name: "compose_moodboard", arguments: params, channel: .cli))
         default:
             writeStderr("Unknown board subcommand: \(action)\n")
             exit(2)

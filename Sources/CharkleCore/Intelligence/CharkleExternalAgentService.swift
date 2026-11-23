@@ -78,6 +78,10 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
         switch method {
         case "initialize":
+            let policy = currentPolicy()
+            guard policy.allowsRead(for: .mcp) else {
+                return makeErrorResponse(id: id, code: -32001, message: "Charkle MCP service is disabled in Settings.")
+            }
             let requestedVersion = (params["protocolVersion"] as? String) ?? "2025-03-26"
             let result: [String: Any] = [
                 "protocolVersion": requestedVersion,
@@ -87,7 +91,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                 ],
                 "serverInfo": [
                     "name": "charkle",
-                    "version": "1.0.0"
+                    "version": "1.0.1"
                 ],
                 "instructions": "Charkle is a macOS visual reference library and moodboard studio. Use `library_overview` to inspect folders and tags, `search_assets` / `list_inbox` to find candidates, `render_contact_sheet` to visually inspect up to 16 numbered thumbnails in one image, `get_board_context` / `export_board_image` to inspect moodboards, and write tools (`organize_assets`, `compose_moodboard`, `patch_moodboard`, `ingest_asset`, `trash_assets`) when write access is enabled in Charkle Settings."
             ]
@@ -100,6 +104,10 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             return makeResultResponse(id: id, result: [:])
 
         case "tools/list":
+            let policy = currentPolicy()
+            guard policy.allowsRead(for: .mcp) else {
+                return makeErrorResponse(id: id, code: -32001, message: "Charkle MCP service is disabled in Settings.")
+            }
             return makeResultResponse(id: id, result: ["tools": Self.mcpToolDefinitions()])
 
         case "tools/call":
@@ -107,7 +115,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                 return makeErrorResponse(id: id, code: -32602, message: "Invalid params: missing tool name")
             }
             let args = params["arguments"] as? [String: Any] ?? [:]
-            let output = await callTool(name: name, arguments: args)
+            let output = await callTool(name: name, arguments: args, channel: .mcp)
             let result: [String: Any] = [
                 "content": output.content.map { $0.mcpObject() },
                 "isError": output.isError
@@ -115,6 +123,10 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             return makeResultResponse(id: id, result: result)
 
         case "resources/list":
+            let policy = currentPolicy()
+            guard policy.allowsRead(for: .mcp) else {
+                return makeErrorResponse(id: id, code: -32001, message: "Charkle MCP service is disabled in Settings.")
+            }
             let resources: [[String: Any]] = [
                 [
                     "uri": "charkle://library/overview",
@@ -136,17 +148,17 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                 return makeErrorResponse(id: id, code: -32602, message: "Missing resource uri")
             }
             let policy = currentPolicy()
-            guard policy.allowsRead else {
-                return makeErrorResponse(id: id, code: -32001, message: "Charkle external agent access is disabled in Settings.")
+            guard policy.allowsRead(for: .mcp) else {
+                return makeErrorResponse(id: id, code: -32001, message: "Charkle MCP service is disabled in Settings.")
             }
             if uri == "charkle://library/overview" {
-                let out = await callTool(name: "library_overview", arguments: [:])
+                let out = await callTool(name: "library_overview", arguments: [:], channel: .mcp)
                 let text = out.content.compactMap { if case .text(let t) = $0 { return t } else { return nil } }.joined(separator: "\n")
                 return makeResultResponse(id: id, result: [
                     "contents": [["uri": uri, "mimeType": "application/json", "text": text]]
                 ])
             } else if uri == "charkle://boards" {
-                let out = await callTool(name: "list_boards", arguments: [:])
+                let out = await callTool(name: "list_boards", arguments: [:], channel: .mcp)
                 let text = out.content.compactMap { if case .text(let t) = $0 { return t } else { return nil } }.joined(separator: "\n")
                 return makeResultResponse(id: id, result: [
                     "contents": [["uri": uri, "mimeType": "application/json", "text": text]]
@@ -172,19 +184,28 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         "trash_assets"
     ]
 
-    public func callTool(name: String, arguments args: [String: Any]) async -> ToolOutput {
+    public func callTool(
+        name: String,
+        arguments args: [String: Any],
+        channel: ExternalAgentChannel = .mcp
+    ) async -> ToolOutput {
         let policy = currentPolicy()
-        guard policy.allowsRead else {
-            return .error("外部 Agent 接入已在 Charkle「设置 → 外部 Agent 与 MCP」中关闭，请先开启后再试。")
+        guard policy.allowsRead(for: channel) else {
+            switch channel {
+            case .mcp:
+                return .error("MCP 服务已在 Charkle「设置 → 外部 Agent」中关闭，请先开启「启用 MCP 服务」后再试。")
+            case .cli:
+                return .error("CLI 命令行服务已在 Charkle「设置 → 外部 Agent」中关闭，请先开启「启用 CLI 命令行服务」后再试。")
+            }
         }
-        if Self.writeToolNames.contains(name) && !policy.allowsWrite {
-            return .error("当前 Charkle 外部 Agent 权限为「仅只读检索与导出」，无法执行写入操作「\(name)」。请在 Charkle「设置 → 外部 Agent 与 MCP」中切换为「允许整理与生成情绪板」。")
+        if Self.writeToolNames.contains(name) && !policy.allowsWrite(for: channel) {
+            return .error("当前 Charkle 外部 Agent 权限为「仅只读检索与导出」，无法执行写入操作「\(name)」。请在 Charkle「设置 → 外部 Agent」中切换为「允许整理与生成情绪板」。")
         }
 
         do {
             switch name {
             case "library_overview":
-                return try await handleLibraryOverview(policy: policy)
+                return try await handleLibraryOverview(policy: policy, channel: channel)
             case "search_assets":
                 return try await handleSearchAssets(args)
             case "list_inbox":
@@ -221,14 +242,16 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
     // MARK: - Read Tool Handlers
 
-    private func handleLibraryOverview(policy: ExternalAgentConfig) async throws -> ToolOutput {
+    private func handleLibraryOverview(policy: ExternalAgentConfig, channel: ExternalAgentChannel) async throws -> ToolOutput {
         let overview = try await tools.libraryOverview()
         let payload: [String: Any] = [
             "totalAssets": overview.totalAssets,
             "inboxCount": overview.inboxCount,
             "boardCount": overview.boardCount,
+            "mcpEnabled": policy.mcpEnabled,
+            "cliEnabled": policy.cliEnabled,
             "accessLevel": policy.accessLevel.rawValue,
-            "canWrite": policy.allowsWrite,
+            "canWrite": policy.allowsWrite(for: channel),
             "mediaKindCounts": overview.mediaKindCounts,
             "folders": overview.folders.map { folder -> [String: Any] in
                 [
