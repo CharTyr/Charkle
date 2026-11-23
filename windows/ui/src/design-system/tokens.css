@@ -1,0 +1,582 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  /* Gallery-First Neutral Surfaces — Light (DESIGN.md §2.1) */
+  --bg-gallery: #F6F6F5;
+  --bg-elevated: #FFFFFF;
+  --bg-subtle: #EDEDE9;
+  --bg-sidebar: #F2F1EE;
+  --bg-inspector: #F1F0EC;
+  --bg-inspector-field: #F6F5F1;
+
+  /* Calibrated Settings Neutral Surfaces — Light */
+  --settings-rail: #F0EFEA;
+  --settings-content: #F6F6F4;
+  --settings-card: #FFFFFF;
+  --settings-subtle: rgba(0, 0, 0, 0.04);
+  --settings-label: rgba(0, 0, 0, 0.48);
+  --settings-divider: rgba(0, 0, 0, 0.065);
+  --settings-border: rgba(0, 0, 0, 0.08);
+  --settings-positive: #15803D;
+  --settings-warning: #B45309;
+  --settings-destructive: #DC2626;
+
+  --border-hairline: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+
+  --text-primary: #18191C;
+  --text-secondary: #5C6069;
+  --text-tertiary: #8A8F99;
+
+  /* Calm Studio Cobalt Accent (strictly zero violet / neon chrome) */
+  --accent: #2A60E0;
+  --accent-hover: #2151C7;
+  --accent-soft: rgba(42, 96, 224, 0.11);
+  --accent-ring: rgba(42, 96, 224, 0.35);
+
+  --success: #249A4B;
+  --success-soft: rgba(36, 154, 75, 0.12);
+  --warning: #C98212;
+  --warning-soft: rgba(201, 130, 18, 0.13);
+  --danger: #D93B30;
+  --danger-soft: rgba(217, 59, 48, 0.11);
+
+  /* Concentric Continuous Radii (4px grid, DESIGN.md §3.2) */
+  --radius-dock-outer: 20px;
+  --radius-dock-inner: 12px;
+  --radius-popover-outer: 16px;
+  --radius-popover-inner: 10px;
+  --radius-settings-outer: 14px;
+  --radius-settings-inner: 8px;
+  --radius-card-outer: 12px;
+  --radius-card-inner: 6px;
+  --radius-chip: 8px;
+
+  /* Restrained Floating Glass / Acrylic (strictly over media/canvas) */
+  --glass-bg: rgba(255, 255, 255, 0.76);
+  --glass-bg-hover: rgba(255, 255, 255, 0.88);
+  --glass-backdrop: blur(22px) saturate(180%) brightness(1.03);
+  --glass-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    inset 1px 0 0 rgba(255, 255, 255, 0.56),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.04),
+    0 0 0 0.5px rgba(0, 0, 0, 0.08),
+    0 8px 28px rgba(0, 0, 0, 0.08);
+
+  --glass-dark-bg: rgba(11, 12, 15, 0.88);
+  --glass-dark-backdrop: blur(24px) saturate(180%);
+  --glass-dark-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 1px 0 0 rgba(255, 255, 255, 0.08),
+    0 0 0 0.5px rgba(255, 255, 255, 0.11),
+    0 12px 36px rgba(0, 0, 0, 0.42);
+
+  /* GPU Radial Soft Modal Backdrop Scrim matching macOS CharkleModalBackdrop (DESIGN.md P0-2) */
+  --modal-scrim: radial-gradient(
+    ellipse 78% 72% at 50% 48%,
+    rgba(24, 25, 28, 0.075) 0%,
+    rgba(24, 25, 28, 0.165) 100%
+  );
+
+  /* Role-Mapped Easing Curves & Durations (DESIGN.md §6.2) */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out-strong: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --duration-press: 120ms;
+  --duration-sm: 180ms;
+  --duration-settle: 220ms;
+  --duration-move: 240ms;
+  --duration-md: 240ms;
+  --duration-lg: 280ms;
+  --duration-drawer: 300ms;
+  --duration-exit-sm: 130ms;
+  --duration-exit-md: 170ms;
+  --duration-overshoot: 260ms;
+  --duration-popover-in: 160ms;
+  --duration-popover-out: 110ms;
+
+  /* Skeleton shimmer */
+  --skeleton-base: rgba(0, 0, 0, 0.055);
+  --skeleton-shine: rgba(255, 255, 255, 0.52);
+
+  /* Miniature UI vignette tokens (DESIGN.md §5.2) */
+  --vignette-bg: #FAFAFA;
+  --vignette-hatch: rgba(0, 0, 0, 0.05);
+  --vignette-card: #FFFFFF;
+  --vignette-stroke: rgba(0, 0, 0, 0.10);
+  --vignette-muted: rgba(0, 0, 0, 0.07);
+
+  /* Windows 11 Mica tint over sidebar rail */
+  --sidebar-mica-bg: rgba(242, 241, 238, 0.58);
+
+  color-scheme: light;
+}
+
+@supports (animation-timing-function: linear(0, 1)) {
+  :root {
+    --ease-spring: linear(0, 0.32, 0.78, 1.04, 1.09, 1.06, 1.02, 1, 0.99, 0.99, 1);
+  }
+}
+
+:root[data-theme="dark"],
+.dark {
+  --bg-gallery: #141517;
+  --bg-elevated: #1E2025;
+  --bg-subtle: #24272C;
+  --bg-sidebar: #17191D;
+  --bg-inspector: #131519;
+  --bg-inspector-field: #16181D;
+
+  --settings-rail: #17181B;
+  --settings-content: #121316;
+  --settings-card: #1B1C20;
+  --settings-subtle: rgba(255, 255, 255, 0.05);
+  --settings-label: rgba(255, 255, 255, 0.46);
+  --settings-divider: rgba(255, 255, 255, 0.065);
+  --settings-border: rgba(255, 255, 255, 0.085);
+  --settings-positive: #4ADE80;
+  --settings-warning: #FBBF24;
+  --settings-destructive: #F87171;
+
+  --border-hairline: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --text-primary: #F2F3F5;
+  --text-secondary: #A1A6B0;
+  --text-tertiary: #6E737D;
+
+  --accent: #5B8DEF;
+  --accent-hover: #74A0F7;
+  --accent-soft: rgba(91, 141, 239, 0.16);
+  --accent-ring: rgba(91, 141, 239, 0.44);
+
+  --success: #34C769;
+  --success-soft: rgba(52, 199, 105, 0.16);
+  --warning: #F2B23E;
+  --warning-soft: rgba(242, 178, 62, 0.16);
+  --danger: #F2584D;
+  --danger-soft: rgba(242, 88, 77, 0.16);
+
+  --glass-bg: rgba(26, 28, 34, 0.78);
+  --glass-bg-hover: rgba(34, 37, 45, 0.88);
+  --glass-backdrop: blur(22px) saturate(165%) brightness(0.94);
+  --glass-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 1px 0 0 rgba(255, 255, 255, 0.08),
+    inset 0 -0.5px 0 rgba(0, 0, 0, 0.3),
+    0 0 0 0.5px rgba(255, 255, 255, 0.10),
+    0 10px 30px rgba(0, 0, 0, 0.38);
+
+  --modal-scrim: radial-gradient(
+    ellipse 78% 72% at 50% 48%,
+    rgba(6, 7, 10, 0.34) 0%,
+    rgba(6, 7, 10, 0.50) 100%
+  );
+
+  --skeleton-base: rgba(255, 255, 255, 0.06);
+  --skeleton-shine: rgba(255, 255, 255, 0.11);
+
+  --vignette-bg: #26262B;
+  --vignette-hatch: rgba(255, 255, 255, 0.035);
+  --vignette-card: #1E2025;
+  --vignette-stroke: rgba(255, 255, 255, 0.12);
+  --vignette-muted: rgba(255, 255, 255, 0.08);
+
+  --sidebar-mica-bg: rgba(23, 25, 29, 0.62);
+
+  color-scheme: dark;
+}
+
+/* Progressive continuous superellipse curvature (DESIGN.md §3.2) */
+@supports (corner-shape: superellipse(1.25)) {
+  :where(*) {
+    corner-shape: superellipse(1.25);
+  }
+  .rounded-full,
+  [data-pill="true"] {
+    corner-shape: round;
+  }
+}
+
+/* Base Reset + Windows Native Typography Stack (DESIGN.md §4.1 & §4.2) */
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: transparent;
+  color: var(--text-primary);
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+:root[data-backdrop="solidFallback"] body,
+:root:not([data-backdrop="mica"]) body {
+  background-color: var(--bg-gallery);
+}
+
+code,
+pre,
+kbd,
+.charkle-mono {
+  font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+}
+
+/* Mandatory CJK + Latin Typography Switches (DESIGN.md §4.2 & P0-3) */
+h1,
+h2,
+h3,
+.charkle-heading {
+  text-wrap: balance;
+}
+
+p,
+.charkle-prose {
+  text-wrap: pretty;
+}
+
+.charkle-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.charkle-wrap-safe {
+  overflow-wrap: anywhere;
+}
+
+:lang(zh) {
+  text-autospace: normal;
+  text-spacing-trim: trim-start;
+}
+
+code,
+pre,
+kbd,
+input,
+textarea {
+  text-autospace: no-autospace;
+}
+
+::selection {
+  background-color: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+/* Windows 11 Mica Rail behind Sidebar & Titlebar with Win10 solid fallback */
+.charkle-sidebar-surface {
+  background-color: var(--bg-sidebar);
+}
+
+:root[data-backdrop="mica"] .charkle-sidebar-surface {
+  background-color: var(--sidebar-mica-bg);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-backdrop="mica"] .charkle-sidebar-surface {
+    background-color: var(--bg-sidebar);
+  }
+}
+
+/* Floating Acrylic / Liquid Glass Surfaces (strictly floating over media/canvas) */
+.charkle-glass {
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-shadow);
+}
+
+.charkle-glass-dark {
+  background: var(--glass-dark-bg);
+  backdrop-filter: var(--glass-dark-backdrop);
+  -webkit-backdrop-filter: var(--glass-dark-backdrop);
+  box-shadow: var(--glass-dark-shadow);
+  color: #F4F5F7;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .charkle-glass {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow:
+      0 0 0 1px var(--border-strong),
+      0 8px 24px rgba(0, 0, 0, 0.12);
+  }
+
+  .charkle-glass-dark {
+    background: #0B0C0F;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.16),
+      0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Tactile press feedback — never uses transition: all */
+.charkle-pressable {
+  transition:
+    transform var(--duration-press) var(--ease-out),
+    opacity var(--duration-press) var(--ease-out),
+    background-color var(--duration-press) var(--ease-out),
+    border-color var(--duration-press) var(--ease-out),
+    color var(--duration-press) var(--ease-out);
+}
+
+.charkle-pressable:active:not(:disabled) {
+  transform: scale(0.97);
+  opacity: 0.88;
+}
+
+/* Interruptible Modal / Sheet Transitions with @starting-style (DESIGN.md P0-2 & modern-web-guidance) */
+.charkle-modal-scrim {
+  background: var(--modal-scrim);
+  opacity: 1;
+  transition: opacity var(--duration-sm) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-modal-scrim {
+    opacity: 0;
+  }
+}
+
+.charkle-modal-scrim[data-closing="true"] {
+  opacity: 0;
+  transition-duration: var(--duration-exit-md);
+}
+
+.charkle-modal-panel {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  transition:
+    opacity var(--duration-md) var(--ease-out),
+    transform var(--duration-md) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-modal-panel {
+    opacity: 0;
+    transform: scale(0.96) translateY(6px);
+  }
+}
+
+.charkle-modal-panel[data-closing="true"] {
+  opacity: 0;
+  transform: scale(0.96) translateY(4px);
+  transition-duration: var(--duration-exit-md);
+}
+
+/* Origin-Aware Interruptible Popover (DESIGN.md §6.2 & §6.3) */
+.charkle-popover-panel {
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity var(--duration-popover-in) var(--ease-out),
+    transform var(--duration-popover-in) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-popover-panel {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.charkle-popover-panel[data-closing="true"] {
+  opacity: 0;
+  transform: scale(0.96);
+  transition-duration: var(--duration-popover-out);
+}
+
+/* Interruptible Toast Entry/Exit (DESIGN.md P0-1) */
+.charkle-toast-item {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity var(--duration-sm) var(--ease-out),
+    transform var(--duration-sm) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-toast-item {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+}
+
+.charkle-toast-item[data-closing="true"] {
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+  transition-duration: var(--duration-exit-sm);
+}
+
+/* Safe-Triangle Submenu Bridge (DESIGN.md §7.4 & modern-web-guidance menu) */
+.charkle-submenu-portal {
+  overflow: visible;
+}
+
+.charkle-submenu-portal[data-bridge="true"]::before {
+  content: "";
+  position: absolute;
+  inset: -100vh -100vw;
+  pointer-events: auto;
+  --bridge-slack: 6px;
+  --bridge-edge: clamp(100vw, 50% + var(--pointer-x, -1px) * 100000, 100% - 100vw);
+  --bridge-apex: calc(
+    100vw + var(--pointer-x, 0px) + clamp(-1 * var(--bridge-slack), var(--pointer-x, 0px) * 100000, var(--bridge-slack))
+  );
+  clip-path: polygon(
+    var(--bridge-apex) calc(100vh + var(--pointer-y, 0px) - var(--bridge-slack)),
+    var(--bridge-edge) 100vh,
+    var(--bridge-edge) calc(100% - 100vh),
+    var(--bridge-apex) calc(100vh + var(--pointer-y, 0px) + var(--bridge-slack))
+  );
+}
+
+/* Hover-only zoom inside asset frames (gated strictly to fine pointers) */
+.charkle-media-zoom {
+  transition: transform var(--duration-settle) var(--ease-out-strong);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .group:hover .charkle-media-zoom {
+    transform: scale(1.02);
+  }
+}
+
+/* Micro overshoot strictly for <= 64px controls (stars, checkboxes, pins) */
+@keyframes charkle-micro-pop {
+  0% {
+    transform: scale(0.86);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.charkle-micro-pop {
+  animation: charkle-micro-pop var(--duration-overshoot) var(--ease-overshoot) both;
+}
+
+/* Synchronized Geometry Skeleton Shimmer (DESIGN.md P0-4) */
+@keyframes charkle-skeleton-wave {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.charkle-skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--skeleton-base);
+}
+
+.charkle-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, var(--skeleton-shine) 50%, transparent 100%);
+  animation: charkle-skeleton-wave 1.6s var(--ease-in-out) infinite;
+}
+
+/* Filmstrip active thumbnail focus lift */
+.charkle-filmstrip-thumb {
+  transition:
+    transform var(--duration-settle) var(--ease-out-strong),
+    opacity var(--duration-sm) var(--ease-out),
+    box-shadow var(--duration-sm) var(--ease-out);
+}
+
+.charkle-filmstrip-thumb[data-active="true"] {
+  transform: scale(1.04);
+}
+
+/* Reduced Motion: 150ms cross-fade, remove all displacement/springs/shimmer */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-press: 150ms;
+    --duration-sm: 150ms;
+    --duration-settle: 150ms;
+    --duration-move: 150ms;
+    --duration-md: 150ms;
+    --duration-lg: 150ms;
+    --duration-drawer: 150ms;
+    --duration-exit-sm: 150ms;
+    --duration-exit-md: 150ms;
+    --duration-overshoot: 150ms;
+    --duration-popover-in: 150ms;
+    --duration-popover-out: 150ms;
+    --ease-spring: linear;
+    --ease-overshoot: linear;
+    --ease-drawer: var(--ease-out);
+  }
+
+  .charkle-pressable:active:not(:disabled),
+  .group:hover .charkle-media-zoom,
+  .charkle-filmstrip-thumb[data-active="true"],
+  .charkle-modal-panel,
+  .charkle-modal-panel[data-closing="true"],
+  .charkle-popover-panel,
+  .charkle-popover-panel[data-closing="true"],
+  .charkle-toast-item,
+  .charkle-toast-item[data-closing="true"] {
+    transform: none;
+  }
+
+  @starting-style {
+    .charkle-modal-panel,
+    .charkle-popover-panel,
+    .charkle-toast-item {
+      transform: none;
+    }
+  }
+
+  .charkle-skeleton::after {
+    animation: none;
+    display: none;
+  }
+
+  .charkle-micro-pop {
+    animation: none;
+  }
+}
+
+/* Calm Minimal Scrollbars */
+.charkle-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 132, 142, 0.28) transparent;
+}
+
+.charkle-scroll::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.charkle-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.charkle-scroll::-webkit-scrollbar-thumb {
+  background: rgba(128, 132, 142, 0.26);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.charkle-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 132, 142, 0.45);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}

@@ -37,18 +37,6 @@ try {
     node scripts/sync-icons.mjs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    Write-Host '==> Checking Rust formatting...' -ForegroundColor Cyan
-    cargo fmt --all -- --check
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    Write-Host '==> Running cargo clippy...' -ForegroundColor Cyan
-    cargo clippy --workspace --all-targets -- -D warnings
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    Write-Host '==> Running cargo test --workspace...' -ForegroundColor Cyan
-    cargo test --workspace
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
     $uiPackageJson = Join-Path $windowsRoot 'ui\package.json'
     if (-not $SkipUi -and (Test-Path $uiPackageJson)) {
         Write-Host '==> Verifying UI workspace...' -ForegroundColor Cyan
@@ -64,6 +52,18 @@ try {
             Pop-Location
         }
     }
+
+    Write-Host '==> Checking Rust formatting...' -ForegroundColor Cyan
+    cargo fmt --all -- --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host '==> Running cargo clippy...' -ForegroundColor Cyan
+    cargo clippy --workspace --all-targets -- -D warnings
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host '==> Running cargo test --workspace...' -ForegroundColor Cyan
+    cargo test --workspace
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Host '==> Windows verification gate passed.' -ForegroundColor Green
 } finally {

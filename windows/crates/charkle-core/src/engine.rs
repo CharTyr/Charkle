@@ -10,16 +10,22 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use url::Url;
 use uuid::Uuid;
 
 use crate::db::{search_text, LibraryDatabase};
 use crate::error::{CoreError, CoreResult};
+use crate::media::artwork::MediaArtwork;
+use crate::media::metadata::ImageMetadataExtractor;
+use crate::media::resolvers::{
+    GitHubRepoResolver, GitHubRepoURLParser, SocialPostResolver, SocialPostURLParser,
+};
 use crate::media::{MediaPipeline, SampleLibrarySeeder};
 use crate::models::core::{
-    AssetBatchPatch, AssetRecord, FilterCriteria, FolderAssignment, FolderRecord, MediaKind,
-    QuickJumpMatch, SmartFolderRecord, TagCount,
+    AssetBatchPatch, AssetRecord, FilterCriteria, FolderAssignment, FolderRecord, FolderSuggestion,
+    MediaKind, QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind, TagCount,
 };
-use crate::models::media::{CacheStats, CaptureInput, ThumbnailTier};
+use crate::models::media::{cosine_similarity, CacheStats, CaptureInput, ThumbnailTier};
 use crate::models::moodboard::{
     BoardNode, BoardNodeKind, BoardRect, MoodboardDocument, MoodboardSummary,
 };
@@ -640,6 +646,322 @@ impl LiveCharkleEngine {
     ) -> CoreResult<Vec<(Uuid, f32)>> {
         self.db
             .search_by_embedding(query_embedding, limit, min_score)
+    }
+
+    /// Computes local similarity rankings using available embeddings, CIELAB dominant color
+    /// harmony, tag overlap, and media kind affinity.
+    pub fn similar_assets(&self, asset_id: Uuid, limit: usize) -> CoreResult<Vec<ScoredAsset>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(anchor) = self.db.asset(asset_id)? else {
+            return Ok(Vec::new());
+        };
+        let all = self.db.fetch_assets(
+            &FilterCriteria {
+                include_trashed: false,
+                ..FilterCriteria::default()
+            },
+            None,
+        )?;
+        let vectors = self.db.vectors().unwrap_or_default();
+        let anchor_emb = vectors.get(&asset_id).and_then(|v| v.embedding.as_deref());
+        let anchor_tags: HashSet<String> = anchor
+            .tags
+            .iter()
+            .map(|t| search_text::normalize(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        let mut scored = Vec::new();
+        for cand in all {
+            if cand.id == asset_id {
+                continue;
+            }
+            let mut score = 0.0_f64;
+            let mut reasons = Vec::new();
+
+            if let (Some(a_emb), Some(c_emb)) = (
+                anchor_emb,
+                vectors.get(&cand.id).and_then(|v| v.embedding.as_deref()),
+            ) {
+                if let Some(sim) = cosine_similarity(a_emb, c_emb) {
+                    if sim > 0.25 {
+                        score += f64::from(sim) * 0.55;
+                        reasons.push("语义与视觉风格相近".to_string());
+                    }
+                }
+            }
+
+            if !anchor.dominant_colors.is_empty() && !cand.dominant_colors.is_empty() {
+                let mut best_de = f64::MAX;
+                for ac in anchor.dominant_colors.iter().take(3) {
+                    for cc in cand.dominant_colors.iter().take(3) {
+                        best_de = best_de.min(ac.delta_e_2000(cc));
+                    }
+                }
+                if best_de < 28.0 {
+                    let color_sim = (1.0 - (best_de / 28.0)).clamp(0.0, 1.0);
+                    score += color_sim * 0.35;
+                    reasons.push("相近色板".to_string());
+                }
+            }
+
+            if !anchor_tags.is_empty() && !cand.tags.is_empty() {
+                let shared: Vec<String> = cand
+                    .tags
+                    .iter()
+                    .filter(|t| anchor_tags.contains(&search_text::normalize(t)))
+                    .cloned()
+                    .collect();
+                if !shared.is_empty() {
+                    let ratio = shared.len() as f64 / anchor_tags.len().max(1) as f64;
+                    score += ratio.min(1.0) * 0.35;
+                    reasons.push(format!(
+                        "共同标签：{}",
+                        shared.into_iter().take(2).collect::<Vec<_>>().join("、")
+                    ));
+                }
+            }
+
+            if cand.media_kind == anchor.media_kind {
+                score += 0.08;
+            }
+            if anchor.folder_id.is_some() && cand.folder_id == anchor.folder_id {
+                score += 0.06;
+            }
+
+            if score >= 0.16 {
+                scored.push(ScoredAsset {
+                    asset: cand,
+                    score: score.min(1.0),
+                    match_reasons: reasons,
+                });
+            }
+        }
+
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.asset.created_at.cmp(&a.asset.created_at))
+        });
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// Suggests the best-fitting existing folder for Inbox Triage using local tag, title,
+    /// and color-palette affinity.
+    pub fn suggest_folder(&self, asset_id: Uuid) -> CoreResult<Option<FolderSuggestion>> {
+        let Some(asset) = self.db.asset(asset_id)? else {
+            return Ok(None);
+        };
+        let folders = self.db.fetch_folders()?;
+        if folders.is_empty() {
+            return Ok(None);
+        }
+        let all_assets = self.db.fetch_assets(
+            &FilterCriteria {
+                include_trashed: false,
+                ..FilterCriteria::default()
+            },
+            None,
+        )?;
+        let mut by_folder: HashMap<Uuid, Vec<&AssetRecord>> = HashMap::new();
+        for item in &all_assets {
+            if item.id != asset_id {
+                if let Some(fid) = item.folder_id {
+                    by_folder.entry(fid).or_default().push(item);
+                }
+            }
+        }
+
+        let asset_tags: HashSet<String> = asset
+            .tags
+            .iter()
+            .chain(asset.suggested_tags.iter())
+            .map(|t| search_text::normalize(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let asset_text = search_text::normalize(&format!("{} {}", asset.title, asset.notes));
+
+        let mut best: Option<(f64, FolderSuggestion)> = None;
+        for folder in folders {
+            if Some(folder.id) == asset.folder_id {
+                continue;
+            }
+            let mut score = 0.0_f64;
+            let mut reason = String::new();
+            let folder_norm = search_text::normalize(&folder.name);
+            if !folder_norm.is_empty() && asset_text.contains(&folder_norm) {
+                score += 0.55;
+                reason = format!("标题或备注包含「{}」", folder.name);
+            }
+
+            if let Some(members) = by_folder.get(&folder.id) {
+                if !asset_tags.is_empty() {
+                    let mut shared_hits = 0usize;
+                    let mut sample_tag = None;
+                    for m in members {
+                        for t in &m.tags {
+                            if asset_tags.contains(&search_text::normalize(t)) {
+                                shared_hits += 1;
+                                if sample_tag.is_none() {
+                                    sample_tag = Some(t.clone());
+                                }
+                            }
+                        }
+                    }
+                    if shared_hits > 0 {
+                        let bonus = (0.35 + (shared_hits as f64 * 0.12)).min(0.82);
+                        if bonus > score {
+                            score = bonus;
+                            if let Some(tag) = sample_tag {
+                                reason = format!("与该目录中标签「{tag}」高度一致");
+                            }
+                        }
+                    }
+                }
+
+                if score < 0.45 && !asset.dominant_colors.is_empty() {
+                    let mut min_de = f64::MAX;
+                    for m in members.iter().take(24) {
+                        for ac in asset.dominant_colors.iter().take(2) {
+                            for mc in m.dominant_colors.iter().take(2) {
+                                min_de = min_de.min(ac.delta_e_2000(mc));
+                            }
+                        }
+                    }
+                    if min_de < 16.0 {
+                        let color_score = (0.42 + (16.0 - min_de) / 40.0).min(0.70);
+                        if color_score > score {
+                            score = color_score;
+                            reason = "色彩风格与该目录素材接近".to_string();
+                        }
+                    }
+                }
+            }
+
+            if score >= 0.35 && best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((
+                    score,
+                    FolderSuggestion {
+                        folder_id: folder.id,
+                        folder_name: folder.name,
+                        confidence: score.min(0.98),
+                        reason: if reason.is_empty() {
+                            "根据目录内容匹配推荐".to_string()
+                        } else {
+                            reason
+                        },
+                    },
+                ));
+            }
+        }
+        Ok(best.map(|(_, s)| s))
+    }
+
+    /// Re-extracts EXIF and AI prompt metadata from the cached original if absent.
+    pub fn hydrate_image_metadata(&self, id: Uuid) -> CoreResult<Option<AssetRecord>> {
+        let Some(mut asset) = self.db.asset(id)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            asset.media_kind,
+            MediaKind::Image | MediaKind::AnimatedImage | MediaKind::DesignFile
+        ) {
+            return Ok(None);
+        }
+        let already_present = asset
+            .rich_metadata
+            .as_ref()
+            .is_some_and(|r| r.photo_exif.is_some() || r.ai_generation.is_some());
+        if already_present {
+            return Ok(Some(asset));
+        }
+        let Some(orig) = self.media.cached_original(&asset) else {
+            return Ok(None);
+        };
+        let extracted = ImageMetadataExtractor::extract_from_path(&orig);
+        if extracted.photo_exif.is_none() && extracted.ai_generation.is_none() {
+            return Ok(None);
+        }
+        let mut rich = asset.rich_metadata.clone().unwrap_or_default();
+        if let Some(exif) = extracted.photo_exif {
+            rich.photo_exif = Some(exif);
+        }
+        if let Some(ai) = extracted.ai_generation {
+            rich.ai_generation = Some(ai);
+        }
+        asset.rich_metadata = Some(rich);
+        let saved = self.db.save_asset_locally(&asset, true)?;
+        self.emit(EngineEvent::AssetEnriched(saved.id));
+        Ok(Some(saved))
+    }
+
+    /// Re-resolves rich GitHub repository or Social Post metadata and regenerates its poster card.
+    pub async fn refresh_rich_asset(&self, id: Uuid) -> CoreResult<AssetRecord> {
+        let Some(mut current) = self.db.asset(id)? else {
+            return Err(CoreError::NotFound(format_swift_uuid(&id)));
+        };
+        let Some(url) = current
+            .source_url
+            .as_deref()
+            .and_then(|s| Url::parse(s).ok())
+        else {
+            return Ok(current);
+        };
+
+        if let Some(repo_ref) = GitHubRepoURLParser::parse(&url) {
+            let repo = GitHubRepoResolver::resolve(&repo_ref).await;
+            let mut rich = current.rich_metadata.clone().unwrap_or_default();
+            current.title = repo.full_name.clone();
+            if let Some(ref desc) = repo.description {
+                if !desc.is_empty() {
+                    current.notes = desc.clone();
+                }
+            }
+            let poster = GitHubRepoResolver::fetch_open_graph_image(&repo)
+                .await
+                .unwrap_or_else(|| MediaArtwork::github_repo_card(&repo));
+            let _ = self.media.write_custom_poster(&poster, &mut current);
+            rich.github_repo = Some(repo);
+            current.rich_metadata = Some(rich);
+            let saved = self.db.save_asset_locally(&current, true)?;
+            self.emit(EngineEvent::AssetEnriched(saved.id));
+            return Ok(saved);
+        }
+
+        if let Some(social_ref) = SocialPostURLParser::parse(&url) {
+            if let Some(resolved) = SocialPostResolver::resolve(&social_ref).await {
+                let mut cover = None;
+                if let Some(ref thumb) = resolved.primary_thumbnail_url {
+                    if let Some((bytes, _)) = SocialPostResolver::download_media_bytes(
+                        thumb,
+                        SocialMediaAttachmentKind::Photo,
+                    )
+                    .await
+                    {
+                        cover = image::load_from_memory(&bytes).ok();
+                    }
+                }
+                let card = MediaArtwork::social_post_card(&resolved.metadata, cover.as_ref());
+                let _ = self.media.write_custom_poster(&card, &mut current);
+                current.title = resolved.short_title();
+                current.media_kind = MediaKind::WebBookmark;
+                if !resolved.metadata.body_text.is_empty() {
+                    current.ocr_text = Some(resolved.metadata.body_text.clone());
+                }
+                let mut rich = current.rich_metadata.clone().unwrap_or_default();
+                rich.social_post = Some(resolved.metadata);
+                current.rich_metadata = Some(rich);
+                let saved = self.db.save_asset_locally(&current, true)?;
+                self.emit(EngineEvent::AssetEnriched(saved.id));
+                return Ok(saved);
+            }
+        }
+
+        Ok(current)
     }
 
     // =========================================================================

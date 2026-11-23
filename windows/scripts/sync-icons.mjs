@@ -51,3 +51,19 @@ for (const entry of fs.readdirSync(targetDir, { withFileTypes: true })) {
 console.log(
   `[sync-icons] Synced ${sourceFiles.length} SVG icons (${copied} updated, ${unchanged} unchanged, ${removed} removed) -> ${path.relative(repoRoot, targetDir)}`
 );
+
+const appIconSrcDir = path.join(repoRoot, 'web', 'packages', 'client', 'public', 'app-icons');
+const appIconDstDir = path.join(windowsDir, 'ui', 'public', 'app-icons');
+if (fs.existsSync(appIconSrcDir)) {
+  fs.mkdirSync(appIconDstDir, { recursive: true });
+  for (const name of ['Charkle-Light.svg', 'Charkle-Dark.svg']) {
+    const src = path.join(appIconSrcDir, name);
+    const dst = path.join(appIconDstDir, name);
+    if (fs.existsSync(src)) {
+      const bytes = fs.readFileSync(src);
+      if (!fs.existsSync(dst) || Buffer.compare(bytes, fs.readFileSync(dst)) !== 0) {
+        fs.writeFileSync(dst, bytes);
+      }
+    }
+  }
+}

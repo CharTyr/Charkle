@@ -8,8 +8,11 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 charkle-core = { path = "../charkle-core" }
-thiserror.workspace = true
+serde.workspace = true
 tracing.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
 
 [lints]
 workspace = true

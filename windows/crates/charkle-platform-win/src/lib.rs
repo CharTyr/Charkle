@@ -1,8 +1,11 @@
 //! Windows native platform bridge (`charkle-platform-win`).
 //!
-//! M1 provides trait stubs implementing the `charkle-core` OS seams.
-//! Concrete Win32 / WinRT implementations (DPAPI vault, WinRT OCR, Shell thumbnails,
-//! Mica/Snap Layouts, Top-Edge Drop Shelf, OLE drag-out, DXGI capture) land in M2/M3.
+//! M2 adds real Win32 windowing chrome (Windows 11 22H2+ Mica backdrop, Win10 fallback,
+//! immersive dark mode, and custom titlebar Snap Layouts via `WM_NCHITTEST` `HTMAXBUTTON`).
+//! Remaining M3 seams (DPAPI vault, WinRT OCR, Shell thumbnails, Drop Shelf, OLE drag-out,
+//! DXGI capture) stay behind trait stubs until M3.
+
+pub mod windowing;
 
 use std::path::Path;
 
