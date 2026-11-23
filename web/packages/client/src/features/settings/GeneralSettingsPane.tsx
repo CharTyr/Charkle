@@ -50,11 +50,10 @@ const THEME_OPTIONS: ReadonlyArray<{
 const ICON_VARIANTS: ReadonlyArray<{
   id: 'auto' | 'light' | 'dark';
   label: string;
-  hint: string;
 }> = [
-  { id: 'auto', label: '跟随主题', hint: '随明暗自动切换' },
-  { id: 'light', label: '浅色图标', hint: '固定浅色标识' },
-  { id: 'dark', label: '深色图标', hint: '固定深色标识' },
+  { id: 'auto', label: '跟随主题' },
+  { id: 'light', label: '浅色图标' },
+  { id: 'dark', label: '深色图标' },
 ];
 
 const LAYOUT_OPTIONS: ReadonlyArray<{ id: GalleryLayoutMode; label: string }> = [
@@ -81,12 +80,7 @@ export const GeneralSettingsPane: React.FC = () => {
       <SettingsSection title="外观与图标">
         {/* Theme Mode Cards */}
         <div className="px-4 py-3.5 flex flex-col gap-2.5">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-[13px] font-medium text-[var(--text-primary)]">主题模式</span>
-            <span className="text-[11px] text-[var(--settings-label,var(--text-tertiary))]">
-              切换界面的明暗外观
-            </span>
-          </div>
+          <span className="text-[13px] font-medium text-[var(--text-primary)]">主题模式</span>
           <div className="grid grid-cols-3 gap-2.5">
             {THEME_OPTIONS.map((opt) => {
               const active = themeMode === opt.id;
@@ -141,12 +135,7 @@ export const GeneralSettingsPane: React.FC = () => {
 
         {/* App Icon Style Cards */}
         <div className="px-4 py-3.5 flex flex-col gap-2.5">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-[13px] font-medium text-[var(--text-primary)]">应用图标</span>
-            <span className="text-[11px] text-[var(--settings-label,var(--text-tertiary))]">
-              侧边栏与浏览器标签页图标风格
-            </span>
-          </div>
+          <span className="text-[13px] font-medium text-[var(--text-primary)]">应用图标</span>
           <div className="grid grid-cols-3 gap-2.5">
             {ICON_VARIANTS.map((opt) => {
               const active = brandIconVariant === opt.id;
@@ -165,14 +154,9 @@ export const GeneralSettingsPane: React.FC = () => {
                   ].join(' ')}
                 >
                   <CharkleBrandMark size={30} variant={opt.id} />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[12px] font-medium text-[var(--text-primary)] truncate">
-                      {opt.label}
-                    </div>
-                    <div className="text-[10.5px] text-[var(--text-tertiary)] truncate">
-                      {opt.hint}
-                    </div>
-                  </div>
+                  <span className="text-[12px] font-medium text-[var(--text-primary)] truncate">
+                    {opt.label}
+                  </span>
                 </button>
               );
             })}
@@ -182,10 +166,7 @@ export const GeneralSettingsPane: React.FC = () => {
         <SettingsCardDivider />
 
         {/* Default Gallery Layout */}
-        <SettingsRow
-          title="画廊默认排布"
-          subtitle="浏览全部素材与文件夹时的默认排列方式"
-        >
+        <SettingsRow title="画廊默认排布">
           <SettingsSegmented
             ariaLabel="画廊默认排布"
             options={LAYOUT_OPTIONS}
@@ -199,7 +180,7 @@ export const GeneralSettingsPane: React.FC = () => {
         {/* Compact Sidebar */}
         <SettingsRow
           title="默认收起侧边栏为精简图标栏"
-          subtitle="给瀑布流留出更宽画幅，随时可用 ⌘\ 切换展开"
+          subtitle="快捷键 ⌘\"
         >
           <SettingsSwitch
             ariaLabel="默认收起侧边栏为精简图标栏"
@@ -211,10 +192,7 @@ export const GeneralSettingsPane: React.FC = () => {
 
       {/* 入门与帮助 */}
       <SettingsSection title="入门与帮助">
-        <SettingsRow
-          title="快速上手引导"
-          subtitle="随时重温素材库存储、浏览器扩展、AI 智能与外观配置"
-        >
+        <SettingsRow title="快速上手引导">
           <SettingsButton
             variant="primary"
             onClick={() => {

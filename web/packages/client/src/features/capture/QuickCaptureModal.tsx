@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
+  ChevronDown,
   FileText,
   Folder,
   Inbox,
@@ -12,9 +13,17 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { labFromHex, parseHex } from '@charkle/shared';
+import { buildFolderPathsMap, labFromHex, parseHex } from '@charkle/shared';
 import type { CaptureInput } from '@charkle/shared';
-import { Button, formatBytes, ModalShell } from '../../design-system';
+import {
+  Button,
+  CharkleFolderIcon,
+  FolderHierarchyMenu,
+  formatBytes,
+  ModalShell,
+  Popover,
+  SegmentedControl,
+} from '../../design-system';
 import type { CaptureTarget, QuickCaptureTab } from '../../stores/coordinatorStore';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
@@ -69,6 +78,9 @@ export const QuickCaptureModal: React.FC = () => {
 
   const [tab, setTab] = useState<QuickCaptureTab>('upload');
   const [submitting, setSubmitting] = useState(false);
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const folderPickerBtnRef = useRef<HTMLButtonElement | null>(null);
+  const folderPaths = useMemo(() => buildFolderPathsMap(folders), [folders]);
 
   // Tab 1: Upload
   const [queuedFiles, setQueuedFiles] = useState<File[]>([]);
@@ -384,34 +396,22 @@ export const QuickCaptureModal: React.FC = () => {
       <div className="flex flex-col">
       {/* 5 Capture Mode Tabs */}
       <div className="px-5 pt-3 pb-2 shrink-0">
-        <div
-          role="tablist"
-          aria-label="采集方式"
-          className="grid grid-cols-5 gap-1 p-1 rounded-[var(--radius-settings-outer)] bg-[var(--bg-subtle)]/85 border border-[var(--border-hairline)]"
-        >
-          {TABS.map((item) => {
+        <SegmentedControl
+          options={TABS.map((item) => {
             const Icon = item.icon;
-            const active = tab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setTab(item.id)}
-                className={[
-                  'charkle-pressable h-8 px-2 rounded-[var(--radius-settings-inner)] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer truncate',
-                  active
-                    ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                ].join(' ')}
-              >
-                <Icon size={13.5} className={active ? 'text-[var(--accent)] shrink-0' : 'shrink-0'} />
-                <span className="truncate">{item.label}</span>
-              </button>
-            );
+            return {
+              id: item.id,
+              label: item.label,
+              icon: <Icon size={13.5} className="shrink-0" />,
+            };
           })}
-        </div>
+          value={tab}
+          onChange={setTab}
+          size="md"
+          fullWidth
+          ariaLabel="采集方式"
+          className="rounded-[var(--radius-settings-outer)] p-1"
+        />
       </div>
 
       {/* Target Destination Selector */}
@@ -448,20 +448,54 @@ export const QuickCaptureModal: React.FC = () => {
             指定文件夹
           </button>
 
-          {captureTarget.type === 'folder' && folders.length > 0 && (
-            <select
-              aria-label="选择目标文件夹"
-              value={captureTarget.folderID}
-              onChange={(e) => setCaptureTarget({ type: 'folder', folderID: e.target.value })}
-              className="h-7 px-2 text-[12px] rounded-[var(--radius-chip)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] max-w-[160px]"
-            >
-              {folders.map((folder) => (
-                <option key={folder.id} value={folder.id}>
-                  {folder.name}
-                </option>
-              ))}
-            </select>
-          )}
+          {captureTarget.type === 'folder' && folders.length > 0 && (() => {
+            const currentFolder = folders.find((f) => f.id === captureTarget.folderID) ?? folders[0];
+            return (
+              <>
+                <button
+                  ref={folderPickerBtnRef}
+                  type="button"
+                  aria-label="选择目标文件夹"
+                  aria-haspopup="menu"
+                  aria-expanded={folderPickerOpen}
+                  onClick={() => setFolderPickerOpen((v) => !v)}
+                  className="charkle-pressable min-h-[28px] px-2 text-[12px] rounded-[var(--radius-chip)] bg-[var(--bg-gallery)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-primary)] inline-flex items-center gap-1.5 max-w-[180px] cursor-pointer"
+                >
+                  {currentFolder && (
+                    <CharkleFolderIcon
+                      colorHex={currentFolder.colorHex}
+                      customSymbol={currentFolder.customSymbol}
+                      size={13}
+                    />
+                  )}
+                  <span className="truncate">
+                    {currentFolder ? folderPaths[currentFolder.id] || currentFolder.name : '选择文件夹'}
+                  </span>
+                  <ChevronDown size={11.5} className="text-[var(--text-tertiary)] shrink-0" />
+                </button>
+                <Popover
+                  open={folderPickerOpen}
+                  onOpenChange={setFolderPickerOpen}
+                  anchorEl={folderPickerBtnRef.current}
+                  placement="bottom-start"
+                >
+                  <FolderHierarchyMenu
+                    folders={folders}
+                    includeInbox={false}
+                    selectedFolderID={captureTarget.folderID}
+                    highlightSelection
+                    parentSelfPrefix="选择"
+                    onSelectFolder={(folderID) => {
+                      setFolderPickerOpen(false);
+                      if (folderID) {
+                        setCaptureTarget({ type: 'folder', folderID });
+                      }
+                    }}
+                  />
+                </Popover>
+              </>
+            );
+          })()}
 
           <button
             type="button"
@@ -593,7 +627,7 @@ export const QuickCaptureModal: React.FC = () => {
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between">
                 <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-                  网页 / X / Threads / Bluesky / GitHub 链接
+                  网页链接
                 </label>
                 {detectedURL && (
                   <span className="px-2 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-medium">
@@ -607,14 +641,14 @@ export const QuickCaptureModal: React.FC = () => {
                 required
                 value={urlValue}
                 onChange={(e) => setUrlValue(e.target.value)}
-                placeholder="https://x.com/... 或 https://github.com/owner/repo"
+                placeholder="https://..."
                 className="h-9.5 px-3 text-[13px] rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-ring)]"
               />
             </div>
 
             <div className="flex flex-col gap-1.5">
               <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-                标题（可选，留空自动抓取网页标题）
+                标题（可选）
               </label>
               <input
                 type="text"
@@ -628,7 +662,7 @@ export const QuickCaptureModal: React.FC = () => {
             {urlNotes && (
               <div className="flex flex-col gap-1.5">
                 <label className="text-[12px] font-medium text-[var(--text-secondary)]">
-                  顺带保存网页选中文本摘录（可选）
+                  摘录（可选）
                 </label>
                 <textarea
                   rows={3}
@@ -663,7 +697,7 @@ export const QuickCaptureModal: React.FC = () => {
               type="text"
               value={noteTitle}
               onChange={(e) => setNoteTitle(e.target.value)}
-              placeholder="标题（可选，留空取首行）"
+              placeholder="标题（可选）"
               className="h-9 px-3 text-[13px] rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:border-[var(--accent)]"
             />
             <textarea
@@ -677,7 +711,7 @@ export const QuickCaptureModal: React.FC = () => {
                   void handleSubmitNote();
                 }
               }}
-              placeholder="输入文案片段、提示词、设计灵感或 Markdown 笔记…（⌘Enter 快速保存）"
+              placeholder="输入内容…（⌘Enter 保存）"
               className="p-3 text-[13px] leading-relaxed rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:border-[var(--accent)] resize-y"
             />
             <div className="flex justify-end gap-2">
@@ -705,7 +739,7 @@ export const QuickCaptureModal: React.FC = () => {
                 className="w-36 h-32 rounded-[var(--radius-settings-outer)] border border-[var(--border-hairline)] shrink-0 shadow-xs flex items-end p-2.5"
                 style={{ backgroundColor: validHex }}
               >
-                <span className="px-2 py-0.5 rounded-[6px] bg-black/45 backdrop-blur-xs text-white text-[11.5px] font-mono">
+                <span className="px-2 py-0.5 rounded-[6px] bg-black/55 text-white text-[11.5px] font-mono">
                   {validHex}
                 </span>
               </div>
@@ -734,7 +768,7 @@ export const QuickCaptureModal: React.FC = () => {
                     title={
                       hasEyeDropper
                         ? '使用屏幕吸管取色'
-                        : '当前浏览器不支持屏幕吸管（建议使用 Chrome / Edge）'
+                        : '当前浏览器不支持取色'
                     }
                     onClick={() => void handlePickEyeDropper()}
                   >
@@ -747,7 +781,7 @@ export const QuickCaptureModal: React.FC = () => {
                   type="text"
                   value={colorTitle}
                   onChange={(e) => setColorTitle(e.target.value)}
-                  placeholder="色卡名称（可选，如：青瓷釉色）"
+                  placeholder="色卡名称（可选）"
                   className="h-9 px-3 text-[13px] rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:border-[var(--accent)]"
                 />
 
@@ -823,11 +857,6 @@ export const QuickCaptureModal: React.FC = () => {
               <div className="rounded-[var(--radius-settings-outer)] border border-[var(--border-hairline)] bg-[var(--bg-gallery)]/75 p-7 flex flex-col items-center text-center gap-3">
                 <div className="h-11 w-11 rounded-[var(--radius-settings-inner)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] flex items-center justify-center text-[var(--text-secondary)]">
                   <Camera size={20} />
-                </div>
-                <div className="flex flex-col gap-1 max-w-[360px]">
-                  <div className="text-[13.5px] font-medium text-[var(--text-primary)]">
-                    截取窗口、标签页或屏幕画面
-                  </div>
                 </div>
                 <Button
                   variant="primary"

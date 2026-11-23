@@ -1,14 +1,27 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   ChevronRight,
   FolderPlus,
   RotateCcw,
   Sparkles,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react';
+import { hasActiveVisualFilters } from '@charkle/shared';
 import type { FolderRecord, UUID } from '@charkle/shared';
-import { Button, CharkleFolderIcon, CharkleIcon } from '../../design-system';
+import {
+  Button,
+  CharkleFolderIcon,
+  ConfirmDialog,
+  EmptyStateVignette,
+  GalleryMasonrySkeleton,
+  GlassSurface,
+  useDelayedFlag,
+  usePresence,
+} from '../../design-system';
+import type { EmptyStateKind } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { BatchActionPill } from './BatchActionPill';
@@ -22,11 +35,20 @@ import { VerticalMasonryView } from './VerticalMasonryView';
 export const GalleryView: React.FC = () => {
   const destination = useCoordinatorStore((s) => s.destination);
   const navigate = useCoordinatorStore((s) => s.navigate);
+  const openBoard = useCoordinatorStore((s) => s.openBoard);
   const layoutMode = useCoordinatorStore((s) => s.layoutMode);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+  const returnToMoodboardState = useCoordinatorStore((s) => s.returnToMoodboardState);
+  const setReturnToMoodboardState = useCoordinatorStore((s) => s.setReturnToMoodboardState);
+  const returnPillPresence = usePresence(Boolean(returnToMoodboardState), 135);
 
   const assets = useLibraryStore((s) => s.assets);
   const loading = useLibraryStore((s) => s.loading);
+  const criteria = useLibraryStore((s) => s.criteria);
+  const semanticReport = useLibraryStore((s) => s.semanticReport);
+  const resetVisualFilters = useLibraryStore((s) => s.resetVisualFilters);
+  const setCriteria = useLibraryStore((s) => s.setCriteria);
+  const clearSemanticSearch = useLibraryStore((s) => s.clearSemanticSearch);
   const folders = useLibraryStore((s) => s.folders);
   const smartFolders = useLibraryStore((s) => s.smartFolders);
   const uploadFiles = useLibraryStore((s) => s.uploadFiles);
@@ -42,6 +64,12 @@ export const GalleryView: React.FC = () => {
   const [subfolderDraft, setSubfolderDraft] = useState('');
   const [seedingDemo, setSeedingDemo] = useState(false);
   const [confirmEmptyTrash, setConfirmEmptyTrash] = useState(false);
+
+  const showInitialSkeleton = useDelayedFlag(loading && assets.length === 0, 300, 500);
+
+  const hasFiltersOrSearch = Boolean(
+    criteria.searchQuery.trim() || hasActiveVisualFilters(criteria) || semanticReport,
+  );
 
   const currentFolder = useMemo(() => {
     if (destination.type !== 'folder') return null;
@@ -118,6 +146,67 @@ export const GalleryView: React.FC = () => {
     navigate({ type: 'folder', id: created.id });
   };
 
+  const emptyStateSpec: {
+    kind: EmptyStateKind;
+    title: string;
+    subtitle: string;
+    showUpload: boolean;
+    showDemo: boolean;
+    showResetFilters: boolean;
+  } = useMemo(() => {
+    if (hasFiltersOrSearch) {
+      return {
+        kind: 'noFilterResults',
+        title: '没有匹配的素材',
+        subtitle: '尝试更换关键词或清除筛选条件',
+        showUpload: false,
+        showDemo: false,
+        showResetFilters: true,
+      };
+    }
+    if (destination.type === 'trash') {
+      return {
+        kind: 'emptyTrash',
+        title: '回收站是空的',
+        subtitle: '',
+        showUpload: false,
+        showDemo: false,
+        showResetFilters: false,
+      };
+    }
+    if (destination.type === 'folder') {
+      return {
+        kind: 'emptyFolder',
+        title: `「${currentFolder?.name ?? '文件夹'}」暂无素材`,
+        subtitle: '拖入文件添加素材',
+        showUpload: true,
+        showDemo: false,
+        showResetFilters: false,
+      };
+    }
+    if (destination.type === 'tag' || destination.type === 'smartFolder') {
+      return {
+        kind: 'noFilterResults',
+        title:
+          destination.type === 'tag'
+            ? `标签 #${destination.name} 下暂无素材`
+            : '当前智能文件夹暂无匹配素材',
+        subtitle: '',
+        showUpload: false,
+        showDemo: false,
+        showResetFilters: false,
+      };
+    }
+    return {
+      kind: 'emptyLibrary',
+      title: '暂无素材',
+      subtitle: '拖入文件或粘贴链接即可添加',
+      showUpload: true,
+      showDemo: destination.type === 'allItems',
+      showResetFilters: false,
+    };
+  }, [hasFiltersOrSearch, destination, currentFolder]);
+
   return (
     <div className="relative flex-1 min-w-0 h-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden">
       <input
@@ -139,7 +228,7 @@ export const GalleryView: React.FC = () => {
           layoutMode === 'galleryFilmstrip' ? 'overflow-hidden' : 'overflow-y-auto charkle-scroll',
         ].join(' ')}
       >
-        {/* Floating Liquid Glass Top Filter Bar */}
+        {/* Floating Translucent Top Filter Bar */}
         <TopFilterCapsule
           destinationTitle={destinationTitle}
           assetCount={assets.length}
@@ -226,35 +315,17 @@ export const GalleryView: React.FC = () => {
         {destination.type === 'trash' && assets.length > 0 && (
           <div className="mx-5 mb-2 px-3.5 py-2 rounded-[var(--radius-settings-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] flex items-center justify-between gap-3">
             <span className="text-[12.5px] text-[var(--text-secondary)]">
-              回收站中的素材可随时恢复，清空后将无法找回。
+              清空后无法恢复
             </span>
             <div className="flex items-center gap-2">
               <Button variant="secondary" size="xs" onClick={() => void restoreAllTrash()}>
                 <RotateCcw size={13} />
                 全部恢复
               </Button>
-              {confirmEmptyTrash ? (
-                <div className="flex items-center gap-1.5">
-                  <Button
-                    variant="danger"
-                    size="xs"
-                    onClick={async () => {
-                      setConfirmEmptyTrash(false);
-                      await emptyTrash();
-                    }}
-                  >
-                    确认彻底清空
-                  </Button>
-                  <Button variant="ghost" size="xs" onClick={() => setConfirmEmptyTrash(false)}>
-                    取消
-                  </Button>
-                </div>
-              ) : (
-                <Button variant="danger" size="xs" onClick={() => setConfirmEmptyTrash(true)}>
-                  <Trash2 size={13} />
-                  清空回收站
-                </Button>
-              )}
+              <Button variant="danger" size="xs" onClick={() => setConfirmEmptyTrash(true)}>
+                <Trash2 size={13} />
+                清空回收站
+              </Button>
             </div>
           </div>
         )}
@@ -262,30 +333,49 @@ export const GalleryView: React.FC = () => {
         {/* Contextual Strip 3: Inbox Triage Bar */}
         {destination.type === 'inbox' && <InboxTriageBar />}
 
-        {/* Main Content Area */}
+        {/* Main Content Area (delayed structural skeleton -> vignette empty states -> virtualized gallery) */}
         {loading && assets.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center p-12 text-[13px] text-[var(--text-secondary)] gap-2">
-            <span className="h-4 w-4 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
-            正在载入素材…
-          </div>
+          showInitialSkeleton ? (
+            <GalleryMasonrySkeleton />
+          ) : (
+            <div className="flex-1" />
+          )
         ) : assets.length === 0 ? (
-          destination.type === 'inbox' ? (
+          destination.type === 'inbox' && !hasFiltersOrSearch ? (
             <InboxZeroView />
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center p-10 text-center">
-              <CharkleIcon name="library" style="layered" size={76} className="mb-3" />
+              <EmptyStateVignette kind={emptyStateSpec.kind} className="mb-4" />
               <h2 className="text-[15.5px] font-semibold text-[var(--text-primary)]">
-                暂无素材
+                {emptyStateSpec.title}
               </h2>
-              <p className="text-[12.5px] text-[var(--text-secondary)] mt-1">
-                拖入文件或粘贴链接即可添加
-              </p>
+              {emptyStateSpec.subtitle && (
+                <p className="text-[12.5px] text-[var(--text-secondary)] mt-1 max-w-[320px]">
+                  {emptyStateSpec.subtitle}
+                </p>
+              )}
               <div className="flex items-center gap-2.5 mt-5">
-                <Button variant="primary" size="sm" onClick={() => fileInputRef.current?.click()}>
-                  <Upload size={14} />
-                  导入本地素材
-                </Button>
-                {destination.type === 'allItems' && (
+                {emptyStateSpec.showResetFilters && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      clearSemanticSearch();
+                      setCriteria({ searchQuery: '' }, false);
+                      resetVisualFilters();
+                    }}
+                  >
+                    <X size={14} />
+                    清空筛选条件
+                  </Button>
+                )}
+                {emptyStateSpec.showUpload && (
+                  <Button variant="primary" size="sm" onClick={() => fileInputRef.current?.click()}>
+                    <Upload size={14} />
+                    导入本地素材
+                  </Button>
+                )}
+                {emptyStateSpec.showDemo && (
                   <Button
                     variant="secondary"
                     size="sm"
@@ -316,8 +406,56 @@ export const GalleryView: React.FC = () => {
         )}
       </div>
 
-      {/* Multi-Select Floating Liquid Glass Batch Action Pill */}
+      {/* Multi-Select Floating Batch Action Pill */}
       <BatchActionPill />
+
+      {/* Persistent Return-to-Moodboard Floating Pill (after Reveal-in-Library) */}
+      {returnPillPresence.rendered && returnToMoodboardState && (
+        <div className="fixed bottom-5 right-5 z-30 pointer-events-none">
+          <GlassSurface
+            variant="regular"
+            radius="dock"
+            data-state={returnPillPresence.state}
+            className={[
+              'charkle-pill-transition p-1 flex items-center gap-1',
+              returnPillPresence.state === 'closing' ? 'pointer-events-none' : 'pointer-events-auto',
+            ].join(' ')}
+          >
+            <button
+              type="button"
+              onClick={() => openBoard(returnToMoodboardState.boardID)}
+              className="charkle-pressable h-8 px-2.5 inline-flex items-center gap-1.5 rounded-[var(--radius-dock-inner)] text-[12.5px] font-medium text-[var(--accent)] hover:bg-[var(--accent-soft)] cursor-pointer"
+            >
+              <ArrowLeft size={13.5} />
+              <span className="max-w-[180px] truncate">
+                {returnToMoodboardState.boardTitle
+                  ? `返回「${returnToMoodboardState.boardTitle}」`
+                  : '返回情绪板'}
+              </span>
+            </button>
+            <button
+              type="button"
+              aria-label="关闭返回提示"
+              onClick={() => setReturnToMoodboardState(null)}
+              className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-[var(--radius-dock-inner)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+            >
+              <X size={13} />
+            </button>
+          </GlassSurface>
+        </div>
+      )}
+
+      {/* Confirmed Empty Trash Dialog */}
+      <ConfirmDialog
+        open={confirmEmptyTrash}
+        onClose={() => setConfirmEmptyTrash(false)}
+        title="清空回收站？"
+        description={`将永久删除回收站中的 ${assets.length} 项素材，且无法恢复。`}
+        confirmLabel="清空回收站"
+        onConfirm={async () => {
+          await emptyTrash();
+        }}
+      />
     </div>
   );
 };

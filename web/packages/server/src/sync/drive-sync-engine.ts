@@ -1,8 +1,9 @@
 import {
   activeStorageLocationSummary,
-  canonicalSwiftJsonStringify,
   createDefaultSyncStatus,
+  decodeBytesBase64,
   driveTransportModeLocalizedLabel,
+  encodeBytesBase64,
   formatOpsShardFileName,
   isRemoteDriveFolder,
   parseOpsShardFileName,
@@ -10,14 +11,17 @@ import {
   SwiftWireCodec,
   toSwiftUUID,
   type AssetRecord,
+  type AssetVector,
   type DriveAccountInfo,
   type DriveSyncConfig,
+  type EmbeddingPrecision,
   type FolderRecord,
   type RemoteDriveFile,
   type RuntimeMode,
   type StorageMigrationReport,
   type SyncLogLine,
   type SyncManifest,
+  type SyncOperation,
   type SyncPhase,
   type SyncReport,
   type SyncStatus,
@@ -25,11 +29,17 @@ import {
 } from '@charkle/shared';
 import type { EventBus } from '../api/events.js';
 import type { IDriveSyncEngine, IMediaPipeline } from '../context.js';
-import type { LibraryDatabase } from '../db/library-database.js';
+import {
+  decodeEmbeddingBlob,
+  encodeEmbeddingBlob,
+  type LibraryDatabase,
+} from '../db/library-database.js';
 import { assetChangesTouchesLocation, stableUUID } from '../db/sync-operations.js';
+import { encodeBinaryPlist, isBinaryPlist, parseBinaryPlist, type PlistValue } from '../runtime/bplist.js';
 import type { LocalTransportFactory, RuntimeEnv } from '../runtime/types.js';
 import {
   posixBasename,
+  posixExtname,
   posixStripExt,
   sha256HexSync,
   utf8Decode,
@@ -128,9 +138,38 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     config: DriveSyncConfig,
     webDAVPassword?: string | null,
   ): Promise<SyncStatus> {
+    if (config.rootFolderName) {
+      const segs = config.rootFolderName
+        .split('/')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const seg of segs) {
+        if (seg === '.' || seg === '..' || seg.startsWith('.')) {
+          throw new DriveTransportError(`无效的同步根目录名：${config.rootFolderName}`, 'INVALID_CONFIG');
+        }
+        validateDriveName(seg);
+      }
+    }
+    if (config.webDAVRemotePath) {
+      const segs = config.webDAVRemotePath
+        .split('/')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const seg of segs) {
+        if (seg === '.' || seg === '..') {
+          throw new DriveTransportError(`无效的 WebDAV 远程路径：${config.webDAVRemotePath}`, 'INVALID_CONFIG');
+        }
+        validateDriveName(seg);
+      }
+    }
+
     const saved = this.configStore.setSyncConfig(config);
-    if (webDAVPassword !== undefined && webDAVPassword !== null && webDAVPassword.length > 0) {
-      this.secretVault.set(SECRET_KEYS.WEBDAV_PASSWORD, webDAVPassword);
+    if (webDAVPassword !== undefined && webDAVPassword !== null) {
+      if (webDAVPassword.length === 0) {
+        this.secretVault.delete(SECRET_KEYS.WEBDAV_PASSWORD);
+      } else {
+        this.secretVault.set(SECRET_KEYS.WEBDAV_PASSWORD, webDAVPassword);
+      }
     }
     this.status.activeMode = saved.mode;
     this.status.lastError = null;
@@ -290,10 +329,17 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       const changedBoards = new Set<UUID>(pulled1.changedBoards);
 
       // 2. Crawl human-readable remote inventory and reconcile renames/moves/discoveries
+      // Collect pending local mutations BEFORE inventory reconciliation so local renames/moves are NEVER reverted (`P0-13`)
+      const pendingBeforeReconcile = this.db.pendingOps(10_000);
       this.updateProgress({ type: 'scanning' }, '正在扫描云端目录与文件变更…', 0.34);
       const inventory = await this.crawlHumanReadableInventory(transport, layout);
       this.updateProgress({ type: 'merging' }, '正在比对云端重命名与新增素材…', 0.46);
-      const reconciled = await this.reconcileInventory(transport, layout, inventory);
+      const reconciled = await this.reconcileInventory(
+        transport,
+        layout,
+        inventory,
+        pendingBeforeReconcile,
+      );
       report.discoveredRemoteAssets += reconciled.discoveredIDs.length;
       report.discoveredAssetIDs.push(...reconciled.discoveredIDs);
       report.reconciledRenames += reconciled.reconciledRenames;
@@ -306,10 +352,10 @@ export class DriveSyncEngine implements IDriveSyncEngine {
           '正在同步本地文件与文件夹…',
           0.6,
         );
-        await this.uploadPhysicalChanges(transport, layout, pendingBeforeUpload);
+        await this.uploadPhysicalChanges(transport, layout, pendingBeforeUpload, inventory);
       }
 
-      // 4. Push local op shard (`ops-<device>-<endSeq>.jsonl`) encoded via SwiftWireCodec
+      // 4. Push local op shards (`ops-<device>-<endSeq>.jsonl`, max 200 ops/shard) encoded via SwiftWireCodec
       const readyOps = this.db.pendingOps(10_000);
       if (readyOps.length > 0) {
         this.updateProgress(
@@ -331,6 +377,10 @@ export class DriveSyncEngine implements IDriveSyncEngine {
             changedBoards.add(toSwiftUUID(line.operation.change.id));
           }
         }
+        // Post-push pull pass (matching macOS DriveSyncEngine) to catch concurrent peer ops
+        const pulled2 = await this.pullRemoteOps(transport, layout, scope, config.syncEmbeddings);
+        report.downloadedOps += pulled2.downloadedOps;
+        for (const bid of pulled2.changedBoards) changedBoards.add(bid);
       }
 
       // 5. Project changed boards, thumbnails, and embeddings into `/.charkle/`
@@ -425,23 +475,35 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       thumbnails: thumbnails.id,
     };
 
-    // Ensure `/.charkle/manifest.json` is written in Swift wire format
+    // Ensure `/.charkle/manifest.json` is validated & written in Swift wire format (`directories.Inbox`)
     const metaFiles = await transport.listFiles(metadata.id);
     const existingManifest = metaFiles.find((f) => f.name === 'manifest.json');
-    const manifest: SyncManifest = {
-      version: 1,
-      rootFolderID: layout.root,
-      directories: {
-        inbox: layout.inbox,
-        metadata: layout.metadata,
-        ops: layout.ops,
-        boards: layout.boards,
-        embeddings: layout.embeddings,
-        thumbnails: layout.thumbnails,
-      },
-    };
-    const manifestJson = SwiftWireCodec.encodeManifest(manifest);
-    if (!existingManifest) {
+    if (existingManifest) {
+      try {
+        const raw = await transport.downloadFile(existingManifest.id);
+        const decoded = SwiftWireCodec.decodeManifest(utf8Decode(raw));
+        if (decoded.version !== 1) {
+          throw new DriveTransportError(
+            `不支持的同步清单版本 v${decoded.version}，请升级 Charkle。`,
+            'UNSUPPORTED_MANIFEST_VERSION',
+          );
+        }
+      } catch (err) {
+        if (err instanceof DriveTransportError) throw err;
+      }
+    } else {
+      const manifest: SyncManifest = {
+        version: 1,
+        rootFolderID: layout.root,
+        directories: {
+          Inbox: layout.inbox,
+          ops: layout.ops,
+          boards: layout.boards,
+          embeddings: layout.embeddings,
+          thumbnails: layout.thumbnails,
+        },
+      };
+      const manifestJson = SwiftWireCodec.encodeManifest(manifest);
       await transport.uploadFile({
         data: utf8Encode(manifestJson),
         name: 'manifest.json',
@@ -461,6 +523,19 @@ export class DriveSyncEngine implements IDriveSyncEngine {
   ): Promise<{ downloadedOps: number; changedBoards: Set<UUID> }> {
     const myDevice = this.db.deviceID();
     const files = await transport.listFiles(layout.ops);
+
+    // Replay previously deferred disabled.vector.* ops if syncEmbeddings was re-enabled
+    if (syncEmbeddings) {
+      const disabledVectors = this.db.getStatesWithPrefix<SyncOperation>('disabled.vector.');
+      for (const item of disabledVectors) {
+        try {
+          this.db.applySyncOperation(item.value);
+        } catch {
+          // ignore stale deferred vector
+        }
+        this.db.setState(item.key, null);
+      }
+    }
 
     const shards: Array<{ file: RemoteDriveFile; device: string; endSeq: number }> = [];
     for (const file of files) {
@@ -486,6 +561,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       for (const line of lines) {
         if (line.seq <= seenSeq) continue;
         if (line.operation.change.type === 'vector' && !syncEmbeddings) {
+          this.db.setState(`disabled.vector.${toSwiftUUID(line.operation.change.id)}`, line.operation);
           maxApplied = Math.max(maxApplied, line.seq);
           continue;
         }
@@ -543,11 +619,31 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     transport: DriveTransport,
     layout: SyncLayout,
     inventory: CrawledInventory,
+    pendingOps: readonly SyncLogLine[] = [],
   ): Promise<{ discoveredIDs: UUID[]; reconciledRenames: number }> {
     const discoveredIDs: UUID[] = [];
     let reconciledRenames = 0;
 
-    // 1. Map remote folders -> local FolderRecords (reconciling renames too)
+    // Collect pending local mutation guards BEFORE reconciling remote state (`P0-13`)
+    const pendingAssetMoves = new Set<UUID>();
+    const pendingFolderMutations = new Set<UUID>();
+    const pendingDeletedDriveIDs = new Set<string>();
+    for (const line of pendingOps) {
+      const ch = line.operation.change;
+      if (
+        ch.type === 'asset' &&
+        line.operation.projectLocation !== false &&
+        assetChangesTouchesLocation(ch.delta)
+      ) {
+        pendingAssetMoves.add(toSwiftUUID(ch.delta.id));
+      } else if (ch.type === 'folder') {
+        pendingFolderMutations.add(toSwiftUUID(ch.folder.id));
+      } else if ((ch.type === 'deleteAsset' || ch.type === 'deleteFolder') && ch.driveID) {
+        pendingDeletedDriveIDs.add(ch.driveID);
+      }
+    }
+
+    // 1. Map remote folders -> local FolderRecords (respecting pending local folder renames/moves!)
     const folderByDriveID = new Map<string, FolderRecord>();
     const allLocalFolders = this.db.fetchFolders();
     for (const f of allLocalFolders) {
@@ -564,6 +660,11 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       progress = false;
       for (const [remoteID, rf] of inventory.folders.entries()) {
         if (resolvedFolderIDByRemote.has(remoteID)) continue;
+        if (pendingDeletedDriveIDs.has(remoteID)) {
+          resolvedFolderIDByRemote.set(remoteID, null);
+          progress = true;
+          continue;
+        }
         const parentRemoteID = rf.parents[0] ?? layout.root;
         if (!resolvedFolderIDByRemote.has(parentRemoteID)) continue;
         const parentLocalID = resolvedFolderIDByRemote.get(parentRemoteID) ?? null;
@@ -580,7 +681,18 @@ export class DriveSyncEngine implements IDriveSyncEngine {
             );
         }
         if (local) {
-          if (local.name !== rf.name || (local.parentID ?? null) !== parentLocalID || local.driveFolderID !== remoteID) {
+          if (pendingFolderMutations.has(local.id)) {
+            // Do NOT revert pending local rename/move — only bind driveFolderID if missing
+            if (local.driveFolderID !== remoteID) {
+              const bound: FolderRecord = { ...local, driveFolderID: remoteID };
+              this.db.putFolder(bound);
+              folderByDriveID.set(remoteID, bound);
+            }
+          } else if (
+            local.name !== rf.name ||
+            (local.parentID ?? null) !== parentLocalID ||
+            local.driveFolderID !== remoteID
+          ) {
             const updated: FolderRecord = {
               ...local,
               name: rf.name,
@@ -596,6 +708,8 @@ export class DriveSyncEngine implements IDriveSyncEngine {
           const id = stableUUID(`folder:${remoteID}`);
           if (!this.db.isTombstoned('folder', id)) {
             const now = new Date().toISOString();
+            const existingFolders = this.db.fetchFolders();
+            const maxSort = existingFolders.reduce((m, f) => Math.max(m, f.sortOrder), -1);
             const created: FolderRecord = {
               id,
               name: rf.name,
@@ -603,7 +717,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
               driveFolderID: remoteID,
               colorHex: null,
               customSymbol: null,
-              sortOrder: this.db.fetchFolders().length,
+              sortOrder: maxSort + 1,
               assetCount: 0,
               createdAt: now,
               updatedAt: now,
@@ -623,7 +737,17 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     const remoteFileIDs = new Set(inventory.files.keys());
 
     for (const [remoteID, rf] of inventory.files.entries()) {
-      if (this.db.getState<boolean>(`deleted.drive.${remoteID}`)) continue;
+      if (pendingDeletedDriveIDs.has(remoteID)) {
+        continue;
+      }
+      // Tombstone remote cleanup (`P0-15`)
+      if (
+        this.db.getState<boolean>(`deleted.drive.${remoteID}`) ||
+        (rf.md5Checksum && this.db.getState<boolean>(`deleted.md5.${rf.md5Checksum.toLowerCase()}`))
+      ) {
+        await transport.deleteFile(remoteID).catch(() => undefined);
+        continue;
+      }
 
       const parentRemote = rf.parents[0] ?? layout.inbox;
       const targetFolderID = resolvedFolderIDByRemote.get(parentRemote) ?? null;
@@ -631,24 +755,77 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       // Case A: Matched directly by driveFileID
       const existingByDrive = this.db.getAssetByDriveID(remoteID);
       if (existingByDrive) {
-        const nameChanged = existingByDrive.fileName !== rf.name;
-        const folderChanged = (existingByDrive.folderID ?? null) !== targetFolderID;
-        if (nameChanged || folderChanged) {
-          const oldStem = posixStripExt(posixBasename(existingByDrive.fileName));
-          const newStem = posixStripExt(posixBasename(rf.name));
-          const updatedTitle =
-            nameChanged && existingByDrive.title === oldStem ? newStem : existingByDrive.title;
-          this.db.saveAssetLocally(
-            {
-              ...existingByDrive,
-              title: updatedTitle,
-              fileName: rf.name,
-              folderID: targetFolderID,
-              updatedAt: new Date().toISOString(),
-            },
-            false,
-          );
-          reconciledRenames++;
+        if (!pendingAssetMoves.has(existingByDrive.id)) {
+          const nameChanged = existingByDrive.fileName !== rf.name;
+          const folderChanged = (existingByDrive.folderID ?? null) !== targetFolderID;
+          if (nameChanged || folderChanged) {
+            const oldStem = posixStripExt(posixBasename(existingByDrive.fileName));
+            const newStem = posixStripExt(posixBasename(rf.name));
+            const updatedTitle =
+              nameChanged && existingByDrive.title === oldStem ? newStem : existingByDrive.title;
+            this.db.saveAssetLocally(
+              {
+                ...existingByDrive,
+                title: updatedTitle,
+                fileName: rf.name,
+                folderID: targetFolderID,
+                updatedAt: new Date().toISOString(),
+              },
+              false,
+            );
+            reconciledRenames++;
+          }
+
+          // Detect remote file content edit via md5Checksum / size change (`P0-15`)
+          const remoteSig = `${rf.md5Checksum ?? ''}:${rf.size ?? ''}`;
+          const prevSig = this.db.getState<string>(`remote.sig.${existingByDrive.id}`);
+          const contentEdited =
+            (rf.md5Checksum != null && prevSig != null && prevSig !== remoteSig) ||
+            (rf.size != null &&
+              rf.size > 0 &&
+              existingByDrive.fileSizeBytes > 0 &&
+              rf.size !== existingByDrive.fileSizeBytes &&
+              prevSig !== remoteSig);
+          if (contentEdited) {
+            try {
+              const latestBytes = await transport.downloadFile(remoteID);
+              const latestSha = sha256HexSync(latestBytes);
+              if (latestSha !== existingByDrive.contentHash) {
+                const reingested = await this.media.ingestUploadedFile(
+                  latestBytes,
+                  rf.name,
+                  rf.mimeType,
+                  targetFolderID,
+                  existingByDrive.id,
+                );
+                this.db.saveAssetLocally(
+                  {
+                    ...existingByDrive,
+                    fileName: rf.name,
+                    folderID: targetFolderID,
+                    driveFileID: remoteID,
+                    contentHash: reingested.asset.contentHash,
+                    fileSizeBytes: reingested.asset.fileSizeBytes,
+                    pixelWidth: reingested.asset.pixelWidth,
+                    pixelHeight: reingested.asset.pixelHeight,
+                    dominantColors: reingested.asset.dominantColors,
+                    isLocalOriginalCached: true,
+                    updatedAt: new Date().toISOString(),
+                  },
+                  false,
+                );
+                if (reingested.vector) {
+                  this.db.saveVector(existingByDrive.id, reingested.vector);
+                }
+                this.db.markProjection('thumbnails', existingByDrive.id);
+              }
+            } catch {
+              // ignore transient download error; retry next sync
+            }
+          }
+          if (rf.md5Checksum != null || rf.size != null) {
+            this.db.setState(`remote.sig.${existingByDrive.id}`, remoteSig);
+          }
         }
         continue;
       }
@@ -663,6 +840,7 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       const sha256 = sha256HexSync(bytes);
 
       if (this.db.getState(`deleted.content.${sha256}`)) {
+        await transport.deleteFile(remoteID).catch(() => undefined);
         continue;
       }
 
@@ -672,25 +850,35 @@ export class DriveSyncEngine implements IDriveSyncEngine {
         (a) => !a.driveFileID || !remoteFileIDs.has(a.driveFileID),
       );
       if (reconcilable) {
-        const nameChanged = reconcilable.fileName !== rf.name;
-        const folderChanged = (reconcilable.folderID ?? null) !== targetFolderID;
-        const oldStem = posixStripExt(posixBasename(reconcilable.fileName));
-        const newStem = posixStripExt(posixBasename(rf.name));
-        const updatedTitle =
-          nameChanged && reconcilable.title === oldStem ? newStem : reconcilable.title;
-        this.db.saveAssetLocally(
-          {
-            ...reconcilable,
-            title: updatedTitle,
-            fileName: rf.name,
-            folderID: targetFolderID,
-            driveFileID: remoteID,
-            updatedAt: new Date().toISOString(),
-          },
-          false,
-        );
-        if (nameChanged || folderChanged) {
-          reconciledRenames++;
+        if (pendingAssetMoves.has(reconcilable.id)) {
+          this.db.saveAssetLocally({ ...reconcilable, driveFileID: remoteID }, false);
+        } else {
+          const nameChanged = reconcilable.fileName !== rf.name;
+          const folderChanged = (reconcilable.folderID ?? null) !== targetFolderID;
+          const oldStem = posixStripExt(posixBasename(reconcilable.fileName));
+          const newStem = posixStripExt(posixBasename(rf.name));
+          const updatedTitle =
+            nameChanged && reconcilable.title === oldStem ? newStem : reconcilable.title;
+          this.db.saveAssetLocally(
+            {
+              ...reconcilable,
+              title: updatedTitle,
+              fileName: rf.name,
+              folderID: targetFolderID,
+              driveFileID: remoteID,
+              updatedAt: new Date().toISOString(),
+            },
+            false,
+          );
+          if (nameChanged || folderChanged) {
+            reconciledRenames++;
+          }
+        }
+        if (rf.md5Checksum != null || rf.size != null) {
+          this.db.setState(
+            `remote.sig.${reconcilable.id}`,
+            `${rf.md5Checksum ?? ''}:${rf.size ?? ''}`,
+          );
         }
         continue;
       }
@@ -712,8 +900,32 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       if (ingested.vector) {
         this.db.saveVector(ingested.asset.id, ingested.vector);
       }
+      if (rf.md5Checksum != null || rf.size != null) {
+        this.db.setState(
+          `remote.sig.${ingested.asset.id}`,
+          `${rf.md5Checksum ?? ''}:${rf.size ?? ''}`,
+        );
+      }
       this.db.touchOriginal(ingested.asset.id);
       discoveredIDs.push(ingested.asset.id);
+    }
+
+    // 3. Remote deletion detection (`P0-15`): move previously cloud-bound local assets whose remote file disappeared to local Trash
+    const localNonTrashed = this.db.fetchAssets({ includeTrashed: false });
+    for (const asset of localNonTrashed) {
+      if (!asset.driveFileID) continue;
+      if (asset.driveFileID.startsWith('mounted-')) continue;
+      if (remoteFileIDs.has(asset.driveFileID)) continue;
+      if (pendingAssetMoves.has(asset.id)) continue;
+      this.db.saveAssetLocally(
+        {
+          ...asset,
+          isTrashed: true,
+          driveFileID: null,
+          updatedAt: new Date().toISOString(),
+        },
+        false,
+      );
     }
 
     return { discoveredIDs, reconciledRenames };
@@ -737,11 +949,53 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     return created.id;
   }
 
+  private resolveUploadFileName(
+    asset: AssetRecord,
+    targetParentID: string,
+    usedNamesByParent: Map<string, Set<string>>,
+  ): string {
+    let used = usedNamesByParent.get(targetParentID);
+    if (!used) {
+      used = new Set<string>();
+      usedNamesByParent.set(targetParentID, used);
+    }
+    const baseName = asset.fileName;
+    if (!used.has(baseName.toLowerCase())) {
+      used.add(baseName.toLowerCase());
+      return baseName;
+    }
+    const ext = posixExtname(baseName);
+    const stem = posixStripExt(baseName);
+    const shortID = asset.id.slice(0, 8).toLowerCase();
+    let candidate = `${stem}-${shortID}${ext}`;
+    let counter = 2;
+    while (used.has(candidate.toLowerCase())) {
+      candidate = `${stem}-${shortID}-${counter}${ext}`;
+      counter++;
+    }
+    used.add(candidate.toLowerCase());
+    return candidate;
+  }
+
   private async uploadPhysicalChanges(
     transport: DriveTransport,
     layout: SyncLayout,
     pending: SyncLogLine[],
+    inventory?: CrawledInventory,
   ): Promise<void> {
+    const usedNamesByParent = new Map<string, Set<string>>();
+    if (inventory) {
+      for (const rf of inventory.files.values()) {
+        const parent = rf.parents[0] ?? layout.inbox;
+        let set = usedNamesByParent.get(parent);
+        if (!set) {
+          set = new Set<string>();
+          usedNamesByParent.set(parent, set);
+        }
+        set.add(rf.name.toLowerCase());
+      }
+    }
+
     let completed = 0;
     const total = pending.length;
 
@@ -787,14 +1041,30 @@ export class DriveSyncEngine implements IDriveSyncEngine {
           if (!asset.driveFileID) {
             const streamRes = await this.media.getOriginalStream(asset);
             if (streamRes) {
+              const uploadName = this.resolveUploadFileName(
+                asset,
+                targetParentID,
+                usedNamesByParent,
+              );
               const uploaded = await transport.uploadFile({
                 data: streamRes.stream,
                 size: streamRes.size,
-                name: asset.fileName,
+                name: uploadName,
                 mimeType: asset.mimeType,
                 parentID: targetParentID,
               });
-              this.db.saveAssetLocally({ ...asset, driveFileID: uploaded.id }, false);
+              const updatedAsset: AssetRecord = {
+                ...asset,
+                fileName: uploadName,
+                driveFileID: uploaded.id,
+              };
+              this.db.saveAssetLocally(updatedAsset, false);
+              if (uploaded.md5Checksum != null || uploaded.size != null) {
+                this.db.setState(
+                  `remote.sig.${asset.id}`,
+                  `${uploaded.md5Checksum ?? ''}:${uploaded.size ?? ''}`,
+                );
+              }
             }
           } else if (
             line.operation.projectLocation !== false &&
@@ -813,14 +1083,22 @@ export class DriveSyncEngine implements IDriveSyncEngine {
               // If remote file disappeared, stream re-upload if local/R2 original exists
               const streamRes = await this.media.getOriginalStream(asset);
               if (streamRes) {
+                const uploadName = this.resolveUploadFileName(
+                  asset,
+                  targetParentID,
+                  usedNamesByParent,
+                );
                 const uploaded = await transport.uploadFile({
                   data: streamRes.stream,
                   size: streamRes.size,
-                  name: asset.fileName,
+                  name: uploadName,
                   mimeType: asset.mimeType,
                   parentID: targetParentID,
                 });
-                this.db.saveAssetLocally({ ...asset, driveFileID: uploaded.id }, false);
+                this.db.saveAssetLocally(
+                  { ...asset, fileName: uploadName, driveFileID: uploaded.id },
+                  false,
+                );
               }
             }
           }
@@ -859,24 +1137,36 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     ops: SyncLogLine[],
     syncEmbeddings: boolean,
   ): Promise<number> {
+    if (ops.length === 0) return 0;
     const filtered = syncEmbeddings
       ? ops
       : ops.filter((line) => line.operation.change.type !== 'vector');
-    const maxSeq = ops[ops.length - 1].seq;
+    const ackSeq = ops[ops.length - 1].seq;
 
     if (filtered.length > 0) {
       const device = this.db.deviceID();
-      const shardName = formatOpsShardFileName(device, maxSeq);
-      const jsonl = SwiftWireCodec.encodeOpsJsonl(filtered);
-      await transport.uploadFile({
-        data: utf8Encode(jsonl),
-        name: shardName,
-        mimeType: 'application/x-ndjson',
-        parentID: layout.ops,
-      });
+      const existingOpsFiles = await transport.listFiles(layout.ops).catch(() => []);
+      const existingByName = new Map(existingOpsFiles.map((f) => [f.name, f]));
+
+      // Chunk max 200 ops per shard matching macOS DriveSyncEngine, with shard endSeq === chunk.last.seq (`P0-12`)
+      const CHUNK_SIZE = 200;
+      for (let start = 0; start < filtered.length; start += CHUNK_SIZE) {
+        const chunk = filtered.slice(start, start + CHUNK_SIZE);
+        const chunkEndSeq = chunk[chunk.length - 1].seq;
+        const shardName = formatOpsShardFileName(device, chunkEndSeq);
+        const jsonl = SwiftWireCodec.encodeOpsJsonl(chunk);
+        const existingShard = existingByName.get(shardName);
+        await transport.uploadFile({
+          data: utf8Encode(jsonl),
+          name: shardName,
+          mimeType: 'application/x-ndjson',
+          parentID: layout.ops,
+          existingFileID: existingShard?.id ?? null,
+        });
+      }
     }
 
-    this.db.acknowledgeOps(maxSeq);
+    this.db.acknowledgeOps(ackSeq);
     return filtered.length;
   }
 
@@ -890,13 +1180,21 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     if (toSync.size === 0) return 0;
 
     const remoteBoards = await transport.listFiles(layout.boards);
-    const byName = new Map(remoteBoards.map((f) => [f.name, f]));
+    const byNameLower = new Map<string, RemoteDriveFile>();
+    for (const f of remoteBoards) {
+      const lower = f.name.toLowerCase();
+      // Prefer exact lowercase filename if both exist
+      if (!byNameLower.has(lower) || f.name === lower) {
+        byNameLower.set(lower, f);
+      }
+    }
     let written = 0;
 
     for (const boardID of toSync) {
-      const fileName = `${boardID}.json`;
+      // macOS Swift wire contract: lowercase UUID filename (`P0-10`)
+      const fileName = `${boardID.toLowerCase()}.json`;
       const board = this.db.getBoard(boardID);
-      const existing = byName.get(fileName);
+      const existing = byNameLower.get(fileName);
       if (board) {
         const json = SwiftWireCodec.stringifyMoodboardDocument(board);
         await transport.uploadFile({
@@ -922,13 +1220,19 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     layout: SyncLayout,
   ): Promise<void> {
     const remoteThumbs = await transport.listFiles(layout.thumbnails);
-    const byName = new Map(remoteThumbs.map((f) => [f.name, f]));
+    const byNameLower = new Map<string, RemoteDriveFile>();
+    for (const f of remoteThumbs) {
+      const lower = f.name.toLowerCase();
+      if (!byNameLower.has(lower) || f.name === lower) {
+        byNameLower.set(lower, f);
+      }
+    }
 
-    // Upload dirty thumbnails
+    // Upload dirty thumbnails using lowercase UUID filenames (`P0-10`)
     const dirty = this.db.getState<Record<string, string>>('projection.thumbnails') ?? {};
     for (const [assetID, version] of Object.entries(dirty)) {
-      const fileName = `${assetID}.jpg`;
-      const existing = byName.get(fileName);
+      const fileName = `${assetID.toLowerCase()}.jpg`;
+      const existing = byNameLower.get(fileName);
       const asset = this.db.getAsset(assetID);
       if (!asset) {
         if (existing) await transport.deleteFile(existing.id).catch(() => undefined);
@@ -947,10 +1251,10 @@ export class DriveSyncEngine implements IDriveSyncEngine {
       this.db.clearProjection('thumbnails', assetID, version);
     }
 
-    // Download thumbnails for assets missing a local thumbnail
+    // Download thumbnails for assets missing a local thumbnail (defensively reads BOTH lowercase & uppercase!)
     for (const asset of this.db.fetchAssets({ includeTrashed: false })) {
       if (await this.media.hasThumbnail(asset.id, 'grid520')) continue;
-      const remote = byName.get(`${asset.id}.jpg`);
+      const remote = byNameLower.get(`${asset.id.toLowerCase()}.jpg`);
       if (!remote) continue;
       try {
         const buf = await transport.downloadFile(remote.id);
@@ -965,29 +1269,142 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     transport: DriveTransport,
     layout: SyncLayout,
   ): Promise<void> {
-    const dirty = this.db.getState<Record<string, string>>('projection.embeddings') ?? {};
-    if (Object.keys(dirty).length === 0) return;
-
     const remoteFiles = await transport.listFiles(layout.embeddings);
-    const byName = new Map(remoteFiles.map((f) => [f.name, f]));
+    const byNameLower = new Map<string, RemoteDriveFile>();
+    for (const f of remoteFiles) {
+      byNameLower.set(f.name.toLowerCase(), f);
+    }
 
-    for (const [assetID, version] of Object.entries(dirty)) {
-      const fileName = `${assetID}.json`;
-      const existing = byName.get(fileName);
-      const vec = this.db.getVector(assetID);
-      if (vec && this.db.getAsset(assetID)) {
-        const wire = canonicalSwiftJsonStringify(SwiftWireCodec.encodeAssetVector(vec));
-        await transport.uploadFile({
-          data: utf8Encode(wire),
-          name: fileName,
-          mimeType: 'application/json',
-          parentID: layout.embeddings,
-          existingFileID: existing?.id ?? null,
-        });
-      } else if (existing) {
-        await transport.deleteFile(existing.id).catch(() => undefined);
+    const decodeShardEntry = (rawEntry: PlistValue): AssetVector | null => {
+      if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry) || rawEntry instanceof Uint8Array) {
+        return null;
       }
-      this.db.clearProjection('embeddings', assetID, version);
+      const dict = rawEntry as Record<string, PlistValue>;
+      const precision: EmbeddingPrecision = dict.precision === 32 ? 32 : 16;
+      const featurePrint =
+        dict.feature instanceof Uint8Array && dict.feature.byteLength > 0
+          ? encodeBytesBase64(dict.feature)
+          : null;
+      const embedding =
+        dict.semantic instanceof Uint8Array && dict.semantic.byteLength > 0
+          ? decodeEmbeddingBlob(dict.semantic, precision)
+          : null;
+      const embeddingModel = typeof dict.model === 'string' && dict.model.length > 0 ? dict.model : null;
+      if (!featurePrint && !embedding) return null;
+      return { featurePrint, embedding, embeddingModel, precision };
+    };
+
+    const encodeShardEntry = (vec: AssetVector): Record<string, PlistValue> => {
+      const entry: Record<string, PlistValue> = {
+        precision: vec.precision,
+      };
+      if (vec.featurePrint) {
+        try {
+          entry.feature = decodeBytesBase64(vec.featurePrint);
+        } catch {
+          // ignore malformed base64
+        }
+      }
+      if (vec.embedding && vec.embedding.length > 0) {
+        entry.semantic = encodeEmbeddingBlob(vec.embedding, vec.precision);
+      }
+      if (vec.embeddingModel) {
+        entry.model = vec.embeddingModel;
+      }
+      return entry;
+    };
+
+    // 1. Push dirty local vectors into macOS-compatible 2-hex-prefix binary plist shards (`shard-<prefix>.bin`, `P0-11`)
+    const dirty = this.db.getState<Record<string, string>>('projection.embeddings') ?? {};
+    const dirtyEntries = Object.entries(dirty);
+    if (dirtyEntries.length > 0) {
+      const allVectors = this.db.getAllVectors();
+      const grouped = new Map<string, Array<[string, string]>>();
+      for (const [assetID, version] of dirtyEntries) {
+        const prefix = assetID.toLowerCase().slice(0, 2);
+        const list = grouped.get(prefix) ?? [];
+        list.push([assetID, version]);
+        grouped.set(prefix, list);
+      }
+
+      for (const [prefix, touched] of grouped.entries()) {
+        const shardName = `shard-${prefix}.bin`;
+        const existingFile = byNameLower.get(shardName);
+        const shardDict: Record<string, PlistValue> = {};
+
+        if (existingFile) {
+          try {
+            const raw = await transport.downloadFile(existingFile.id);
+            if (isBinaryPlist(raw)) {
+              const parsed = parseBinaryPlist(raw);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !(parsed instanceof Uint8Array)) {
+                Object.assign(shardDict, parsed);
+              }
+            }
+          } catch {
+            // start fresh if remote shard unreadable
+          }
+        }
+
+        // Merge all local vectors in this prefix + remove deleted assets
+        for (const [vid, vec] of allVectors.entries()) {
+          if (vid.toLowerCase().startsWith(prefix)) {
+            shardDict[toSwiftUUID(vid)] = encodeShardEntry(vec);
+          }
+        }
+        for (const [touchedID] of touched) {
+          const uid = toSwiftUUID(touchedID);
+          if (!allVectors.has(uid) || !this.db.getAsset(uid)) {
+            delete shardDict[uid];
+          }
+        }
+
+        const encodedBytes = encodeBinaryPlist(shardDict);
+        await transport.uploadFile({
+          data: encodedBytes,
+          name: shardName,
+          mimeType: 'application/octet-stream',
+          parentID: layout.embeddings,
+          existingFileID: existingFile?.id ?? null,
+        });
+
+        for (const [touchedID, version] of touched) {
+          this.db.clearProjection('embeddings', touchedID, version);
+        }
+      }
+    }
+
+    // 2. Pull remote binary plist shards (`shard-<prefix>.bin`) for local assets missing vectors (`P0-11`)
+    const existingVectors = this.db.getAllVectors();
+    const assetsMissingVectors = this.db
+      .fetchAssets({ includeTrashed: false })
+      .filter((a) => !existingVectors.has(a.id));
+    if (assetsMissingVectors.length === 0) return;
+
+    const neededPrefixes = new Set(assetsMissingVectors.map((a) => a.id.toLowerCase().slice(0, 2)));
+    for (const prefix of neededPrefixes) {
+      const shardFile = byNameLower.get(`shard-${prefix}.bin`);
+      if (!shardFile) continue;
+      try {
+        const raw = await transport.downloadFile(shardFile.id);
+        if (!isBinaryPlist(raw)) continue;
+        const parsed = parseBinaryPlist(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed instanceof Uint8Array) {
+          continue;
+        }
+        for (const [rawKey, rawVal] of Object.entries(parsed)) {
+          const uid = toSwiftUUID(rawKey);
+          if (existingVectors.has(uid)) continue;
+          if (!this.db.getAsset(uid)) continue;
+          const vec = decodeShardEntry(rawVal);
+          if (vec) {
+            this.db.saveVector(uid, vec);
+            existingVectors.set(uid, vec);
+          }
+        }
+      } catch {
+        // ignore unreadable remote shard
+      }
     }
   }
 

@@ -21,10 +21,8 @@ import { ModalShell } from '../../design-system/ModalShell';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useSyncAIStore } from '../../stores/syncAIStore';
 import {
-  InlineGuideDisclosure,
   SettingsButton,
   SettingsCardDivider,
-  SettingsGuideStep,
   SettingsInput,
   SettingsRow,
   SettingsSection,
@@ -153,9 +151,9 @@ export const LibrarySettingsPane: React.FC = () => {
           title={storageHeadline(currentConfig.mode, isBuiltInCloud)}
           subtitle={
             !isCloudMode && isBuiltInCloud ? (
-              '素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。'
+              '默认保存在云端，可开启 Google Drive 或 WebDAV 同步'
             ) : (
-              <span className="font-mono text-[11px] break-all">{activeStorageSummary}</span>
+              <span className="font-mono text-[11px] charkle-wrap-anywhere">{activeStorageSummary}</span>
             )
           }
         >
@@ -174,7 +172,7 @@ export const LibrarySettingsPane: React.FC = () => {
             <SettingsCardDivider />
             <SettingsRow
               title="本地目录同步检查"
-              subtitle="扫描当前素材库目录中手动新增的文件并更新画廊索引"
+              subtitle="扫描本地目录中新增的文件"
             >
               <SettingsButton
                 variant="secondary"
@@ -187,24 +185,6 @@ export const LibrarySettingsPane: React.FC = () => {
             </SettingsRow>
           </>
         )}
-
-        <InlineGuideDisclosure title="切换存储方式会丢失素材吗？怎么安全搬家">
-          <SettingsGuideStep
-            number={1}
-            title="完整无损迁移（推荐）"
-            detail="会自动拉取尚未缓存的云端原件，将全部原文件、文件夹结构、标签、色板与情绪板完整复制到新位置，原位置的旧数据绝不会被删除。"
-          />
-          <SettingsGuideStep
-            number={2}
-            title="仅切换指向位置"
-            detail="只修改当前绑定的存储目录或云盘路径，不搬运现有文件，适合切换到另一台设备已经同步好的素材库。"
-          />
-          <SettingsGuideStep
-            number={3}
-            title="多端兼容格式"
-            detail="所有存储方式均使用统一的 /.charkle/ 目录结构，可在桌面端与网页版之间无缝双向同步。"
-          />
-        </InlineGuideDisclosure>
       </SettingsSection>
 
       {/* 缓存空间 */}
@@ -217,42 +197,43 @@ export const LibrarySettingsPane: React.FC = () => {
           <div className="h-2.5 w-full rounded-full bg-[var(--settings-subtle,var(--bg-subtle))] overflow-hidden flex">
             <div
               style={{ width: `${thumbPct}%`, backgroundColor: '#4E7D96' }}
-              className="h-full transition-[width] duration-300 ease-[var(--ease-out)]"
+              className="h-full"
               title={`画廊预览图：${formatBytes(cacheStats.thumbnailBytes)}`}
             />
             <div
               style={{ width: `${origPct}%`, backgroundColor: '#D4A373' }}
-              className="h-full transition-[width] duration-300 ease-[var(--ease-out)]"
+              className="h-full"
               title={`临时原件：${formatBytes(cacheStats.originalCacheBytes)}`}
             />
             <div
               style={{ width: `${pinnedPct}%`, backgroundColor: '#6B8E76' }}
-              className="h-full transition-[width] duration-300 ease-[var(--ease-out)]"
+              className="h-full"
               title={`常驻离线：${formatBytes(cacheStats.pinnedOfflineBytes)}`}
             />
           </div>
 
           <div className="grid grid-cols-3 gap-2.5">
-            {[
-              {
-                color: '#4E7D96',
-                label: '画廊预览图',
-                bytes: cacheStats.thumbnailBytes,
-                sub: '加速瀑布流加载',
-              },
-              {
-                color: '#D4A373',
-                label: '临时原件',
-                bytes: cacheStats.originalCacheBytes,
-                sub: `${cacheStats.cachedOriginalCount} 项 · 超限自动释放`,
-              },
-              {
-                color: '#6B8E76',
-                label: '常驻离线',
-                bytes: cacheStats.pinnedOfflineBytes,
-                sub: `${cacheStats.pinnedAssetCount} 项 · 永不自动清理`,
-              },
-            ].map((seg) => (
+            {(
+              [
+                {
+                  color: '#4E7D96',
+                  label: '画廊预览图',
+                  bytes: cacheStats.thumbnailBytes,
+                },
+                {
+                  color: '#D4A373',
+                  label: '临时原件',
+                  bytes: cacheStats.originalCacheBytes,
+                  sub: `${cacheStats.cachedOriginalCount} 项 · 超限自动释放`,
+                },
+                {
+                  color: '#6B8E76',
+                  label: '常驻离线',
+                  bytes: cacheStats.pinnedOfflineBytes,
+                  sub: `${cacheStats.pinnedAssetCount} 项 · 永不自动清理`,
+                },
+              ] as Array<{ color: string; label: string; bytes: number; sub?: string }>
+            ).map((seg) => (
               <div
                 key={seg.label}
                 className="p-2.5 rounded-[9px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))]"
@@ -267,9 +248,11 @@ export const LibrarySettingsPane: React.FC = () => {
                 <div className="text-[14px] font-semibold font-mono text-[var(--text-primary)] mt-1 tabular-nums">
                   {formatBytes(seg.bytes)}
                 </div>
-                <div className="text-[10.5px] text-[var(--text-tertiary)] mt-0.5 truncate">
-                  {seg.sub}
-                </div>
+                {seg.sub && (
+                  <div className="text-[10.5px] text-[var(--text-tertiary)] mt-0.5 truncate">
+                    {seg.sub}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -313,7 +296,7 @@ export const LibrarySettingsPane: React.FC = () => {
 
         <SettingsRow
           title="清理临时原件缓存"
-          subtitle="仅清理临时下载的原件副本，已固定「常驻离线」的素材与情绪板不受影响"
+          subtitle="不影响已固定的离线素材"
         >
           <SettingsButton
             variant="secondary"
@@ -435,11 +418,6 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
       }}
       width="md"
       title="更改或转移素材库位置"
-      subtitle={
-        isBuiltInCloud
-          ? '在内置云存储、Google Drive 与 WebDAV 云盘之间安全切换或无损搬家'
-          : '在本地文件夹、Google Drive 与 WebDAV 云盘之间安全切换或无损搬家'
-      }
       footer={
         report ? (
           <SettingsButton variant="primary" onClick={onClose}>
@@ -469,10 +447,8 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
             />
             <p className="text-[11.5px] text-[var(--text-secondary)] leading-relaxed">
               {actionMode === 'migrate'
-                ? '完整无损迁移会先拉取尚未缓存的原件，再将全部原文件、目录结构、标签与情绪板复制到新位置，原位置文件不会被删除。'
-                : isBuiltInCloud
-                  ? '仅切换指向位置不会复制现有文件，适合直接连接到另一个已有的云端素材库目录。'
-                  : '仅切换指向位置不会复制现有文件，适合直接连接到另一个已有的本地或云端素材库目录。'}
+                ? '复制全部素材到新位置，原数据保留'
+                : '仅切换存储地址，不复制文件'}
             </p>
           </div>
         )}
@@ -525,7 +501,7 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
                 </div>
               ))}
             </div>
-            <div className="text-[11px] text-[var(--text-secondary)] break-all">
+            <div className="text-[11px] text-[var(--text-secondary)] charkle-wrap-anywhere">
               新存储路径：<span className="font-mono">{report.targetLocation}</span>
             </div>
           </div>
@@ -540,7 +516,8 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
                 options={targetStorageOptions}
                 value={activeTarget}
                 onChange={(m) => setDraft((d) => ({ ...d, mode: m }))}
-                className="w-full grid grid-cols-3"
+                fullWidth
+                className="w-full"
               />
             </div>
 
@@ -632,18 +609,18 @@ const LocationTransferWizardModal: React.FC<LocationTransferWizardModalProps> = 
             {activeTarget === 'localOnly' &&
               (isBuiltInCloud ? (
                 <div className="rounded-[9px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] p-3 text-[12px] text-[var(--text-secondary)] leading-relaxed">
-                  素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。
+                  默认保存在云端
                 </div>
               ) : (
                 <div className="flex flex-col gap-1">
                   <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                    本地素材库目录路径（服务端文件系统路径）
+                    本地文件夹路径
                   </label>
                   <SettingsInput
                     type="text"
                     value={draft.localLibraryPath}
                     onChange={(e) => setDraft((d) => ({ ...d, localLibraryPath: e.target.value }))}
-                    placeholder=".charkle-data/library"
+                    placeholder="本地文件夹路径"
                     className="w-full font-mono"
                   />
                 </div>

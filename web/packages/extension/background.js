@@ -239,7 +239,7 @@ async function captureCurrentPage(tab) {
   const pageUrl = tab?.url || '';
   if (!isCapturablePageUrl(pageUrl)) {
     flashErrorBadge();
-    await notifyUser(tab, 'error', '当前页面不支持网页收藏', '仅支持 http/https 页面');
+    await notifyUser(tab, 'error', '当前页面不支持网页收藏', '仅支持普通网页');
     return;
   }
 
@@ -689,7 +689,7 @@ async function handleMessage(msg, sender) {
     }
 
     default:
-      return { ok: false, error: `未知操作类型：${msg.type}` };
+      return { ok: false, error: '不支持的操作' };
   }
 }
 

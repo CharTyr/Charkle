@@ -118,7 +118,7 @@ export class R2BlobStore implements IBlobStore {
   async put(
     key: string,
     data: Uint8Array | ReadableStream<Uint8Array>,
-    options?: { contentType?: string },
+    options?: { contentType?: string; size?: number },
   ): Promise<{ size: number }> {
     const cleanKey = sanitizeBlobKey(key);
     const contentType = options?.contentType || guessContentTypeFromKey(cleanKey);
@@ -126,18 +126,40 @@ export class R2BlobStore implements IBlobStore {
       ? { httpMetadata: { contentType } }
       : undefined;
 
-    let bytes: Uint8Array;
     if (data instanceof Uint8Array) {
-      bytes =
+      const bytes =
         data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
           ? data
           : data.slice();
-    } else {
-      // Cloudflare R2 requires a known length for ReadableStream uploads;
-      // collect unknown-length streams safely into a Uint8Array.
-      bytes = await collectStreamBytes(data);
+      const stored = await this.bucket.put(cleanKey, bytes, putOptions);
+      return { size: stored?.size ?? bytes.byteLength };
     }
 
+    // Stream directly into R2 with FixedLengthStream when total Content-Length is known,
+    // avoiding full-file RAM buffering inside the 128 MiB Cloudflare Worker isolate (P0-20).
+    const knownSize =
+      typeof options?.size === 'number' && Number.isFinite(options.size) && options.size >= 0
+        ? Math.trunc(options.size)
+        : undefined;
+
+    const FixedLengthCtor = (
+      globalThis as unknown as {
+        FixedLengthStream?: new (expectedLength: number) => TransformStream<Uint8Array, Uint8Array>;
+      }
+    ).FixedLengthStream;
+
+    if (knownSize !== undefined && typeof FixedLengthCtor === 'function') {
+      const fixed = new FixedLengthCtor(knownSize);
+      const pipePromise = data.pipeTo(fixed.writable);
+      const [stored] = await Promise.all([
+        this.bucket.put(cleanKey, fixed.readable, putOptions),
+        pipePromise,
+      ]);
+      return { size: stored?.size ?? knownSize };
+    }
+
+    // Fallback when total stream length is unknown or FixedLengthStream is unavailable
+    const bytes = await collectStreamBytes(data);
     const stored = await this.bucket.put(cleanKey, bytes, putOptions);
     return { size: stored?.size ?? bytes.byteLength };
   }

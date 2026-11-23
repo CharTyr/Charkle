@@ -33,6 +33,7 @@ import type {
   DeleteFolderRequest,
   ExportMoodboardRequest,
   ExternalAgentConfigResponse,
+  ExternalAgentDiagnosticsResponse,
   ExtractPaletteRequest,
   ExtractPaletteResponse,
   ExtractSocialMediaRequest,
@@ -412,6 +413,11 @@ export const apiClient = {
       method: 'POST',
     }),
 
+  hydrateAssetMetadata: (id: UUID) =>
+    requestJson<AssetDetailResponse>(`/assets/${encodeURIComponent(id)}/hydrate-metadata`, {
+      method: 'POST',
+    }),
+
   extractSocialMedia: (id: UUID, req: ExtractSocialMediaRequest = {}) =>
     requestJson<IngestResponse>(`/assets/${encodeURIComponent(id)}/extract-social-media`, {
       method: 'POST',
@@ -571,7 +577,7 @@ export const apiClient = {
               error?: string;
             };
             if (eventName === 'error' || parsed.error) {
-              throw new ApiError(parsed.error || 'AI 策展流式响应失败', 500);
+              throw new ApiError(parsed.error || '生成情绪板失败', 500);
             }
             if (parsed.step && (eventName === 'step' || parsed.type === 'ai.curate.step')) {
               onStep?.(parsed.step);
@@ -588,7 +594,7 @@ export const apiClient = {
       }
 
       if (finalProposal) return finalProposal;
-      throw new ApiError('策展响应未返回有效情绪板提案', 500);
+      throw new ApiError('未生成有效情绪板，请重试', 500);
     }
 
     const data = (await res.json()) as MoodboardProposalResponse;
@@ -809,6 +815,9 @@ export const apiClient = {
       method: 'PUT',
       body: JSON.stringify(req),
     }),
+
+  getExternalAgentDiagnostics: () =>
+    requestJson<ExternalAgentDiagnosticsResponse>('/agent/diagnostics'),
 
   // URL helpers
   thumbnailURL,

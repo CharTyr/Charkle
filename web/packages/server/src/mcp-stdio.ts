@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import type { ExternalAgentChannel } from '@charkle/shared';
 import { EventBus } from './api/events.js';
 import { ExternalAgentService } from './agent/external-agent-service.js';
 import {
@@ -11,17 +11,20 @@ import {
 } from './intelligence/cloud-ai-provider.js';
 import { CloudAIUsageTracker } from './intelligence/cloud-ai-usage-tracker.js';
 import { VisualGroundingEngine } from './intelligence/visual-grounding-engine.js';
+import { MCPStdioFrameParser, type MCPStdioFrameEvent } from './mcp/stdio-frame-parser.js';
 import { MediaPipeline } from './media/media-pipeline.js';
 import { NodeBlobStore } from './runtime/node-blob.js';
 import { NodeImageProcessor } from './runtime/node-image.js';
 import { openNodeLibraryDatabase } from './runtime/node-sql.js';
 import { createNodeConfigStore, createNodeSecretVault } from './runtime/node-storage.js';
+import { utf8Decode, utf8Encode } from './runtime/web-crypto-utils.js';
 import { SECRET_KEYS } from './storage/secret-vault.js';
 
 export interface StdioMCPOptions {
   dataDir?: string;
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
+  channel?: ExternalAgentChannel;
 }
 
 /**
@@ -39,7 +42,7 @@ export function resolveDatabasePath(dataDir: string): string {
 
 /**
  * Creates a standalone `ExternalAgentService` wired directly against `dataDir`
- * for stdio JSON-RPC 2.0 MCP usage (Claude Desktop, Cursor, Antigravity, etc.).
+ * for stdio JSON-RPC 2.0 MCP usage (Claude Code, Codex, MCP clients).
  */
 export function createStdioMCPService(dataDir: string): {
   service: ExternalAgentService;
@@ -74,6 +77,7 @@ export function createStdioMCPService(dataDir: string): {
     media,
     configStore,
     events,
+    runtimeMode: 'node',
     getCloudAIProvider: () =>
       createCloudAIProvider(configStore.getAIConfig(), {
         vault: secretVault,
@@ -97,27 +101,57 @@ export function createStdioMCPService(dataDir: string): {
 }
 
 /**
- * Runs a newline-delimited JSON-RPC 2.0 MCP server over stdio (`stdin` / `stdout`).
+ * Runs a chunk-safe JSON-RPC 2.0 MCP server over stdio (`stdin` / `stdout`),
+ * seamlessly supporting both `NDJSON` and `Content-Length` framing and replying in matching framing.
  */
 export async function runStdioMCPServer(options: StdioMCPOptions = {}): Promise<void> {
   const dataDir = options.dataDir ?? process.env.CHARKLE_DATA_DIR ?? path.resolve('.charkle-data');
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
+  const channel: ExternalAgentChannel = options.channel ?? 'mcp';
   const { service, close } = createStdioMCPService(dataDir);
+  const parser = new MCPStdioFrameParser();
 
-  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  const dispatchEvent = async (event: MCPStdioFrameEvent): Promise<void> => {
+    if (event.type === 'invalidFrame') {
+      const errBytes = utf8Encode(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32700, message: event.reason },
+        }),
+      );
+      output.write(MCPStdioFrameParser.encode(errBytes, event.framing));
+      return;
+    }
+
+    const text = utf8Decode(event.payload).trim();
+    if (!text) return;
+    const response = await service.handleJSONRPC(text, channel);
+    if (response !== null) {
+      const respBytes = utf8Encode(JSON.stringify(response));
+      output.write(MCPStdioFrameParser.encode(respBytes, event.framing));
+    }
+  };
 
   try {
-    for await (const rawLine of rl) {
-      const line = rawLine.trim();
-      if (!line) continue;
-      const response = await service.handleJSONRPC(line);
-      if (response !== null) {
-        output.write(`${JSON.stringify(response)}\n`);
+    for await (const rawChunk of input) {
+      const bytes =
+        rawChunk instanceof Uint8Array
+          ? rawChunk
+          : typeof rawChunk === 'string'
+            ? utf8Encode(rawChunk)
+            : new Uint8Array(Buffer.from(rawChunk as ArrayBufferLike));
+      const events = parser.append(bytes);
+      for (const ev of events) {
+        await dispatchEvent(ev);
       }
     }
+    const trailing = parser.finishEOF();
+    for (const ev of trailing) {
+      await dispatchEvent(ev);
+    }
   } finally {
-    rl.close();
     close();
   }
 }

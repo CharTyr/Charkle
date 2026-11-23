@@ -285,9 +285,159 @@ export function getEffectiveSocialAttachments(post: SocialPostMetadata): SocialM
   return items;
 }
 
+export interface PhotoExifMetadata {
+  cameraMake?: string | null;
+  cameraModel?: string | null;
+  lensModel?: string | null;
+  capturedAt?: string | null;
+  exposureTime?: string | null;
+  fNumber?: number | null;
+  iso?: number | null;
+  focalLengthMM?: number | null;
+  focalLength35mm?: number | null;
+  exposureBiasEV?: number | null;
+  meteringMode?: string | null;
+  flashFired?: boolean | null;
+  whiteBalance?: string | null;
+  colorProfile?: string | null;
+  bitDepth?: number | null;
+  dpiWidth?: number | null;
+  software?: string | null;
+  artist?: string | null;
+  copyright?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  altitudeMeters?: number | null;
+}
+
+export interface AIGenerationMetadata {
+  generator?: string | null;
+  prompt?: string | null;
+  negativePrompt?: string | null;
+  modelName?: string | null;
+  modelHash?: string | null;
+  sampler?: string | null;
+  scheduler?: string | null;
+  steps?: number | null;
+  cfgScale?: number | null;
+  seed?: string | null;
+  sizeText?: string | null;
+  clipSkip?: number | null;
+  loras: string[];
+  extraParameters: Record<string, string>;
+  rawParameters?: string | null;
+}
+
+export function getPhotoExifCameraDisplayName(exif: PhotoExifMetadata): string | null {
+  const make = exif.cameraMake?.trim() ?? '';
+  const model = exif.cameraModel?.trim() ?? '';
+  if (!make && !model) return null;
+  if (!model) return make;
+  if (!make) return model;
+  if (model.toLowerCase().startsWith(make.toLowerCase())) {
+    return model;
+  }
+  return `${make} ${model}`;
+}
+
+export function formatPhotoExifAperture(exif: PhotoExifMetadata): string | null {
+  if (exif.fNumber == null || !Number.isFinite(exif.fNumber) || exif.fNumber <= 0) {
+    return null;
+  }
+  const rounded = Math.round(exif.fNumber * 10) / 10;
+  if (Math.abs(rounded - Math.round(rounded)) < 0.01) {
+    return `f/${Math.round(rounded)}`;
+  }
+  return `f/${rounded.toFixed(1)}`;
+}
+
+export function formatPhotoExifFocalLength(exif: PhotoExifMetadata): string | null {
+  if (exif.focalLengthMM == null || !Number.isFinite(exif.focalLengthMM) || exif.focalLengthMM <= 0) {
+    return null;
+  }
+  const base =
+    Math.abs(exif.focalLengthMM - Math.round(exif.focalLengthMM)) < 0.05
+      ? `${Math.round(exif.focalLengthMM)}mm`
+      : `${exif.focalLengthMM.toFixed(1)}mm`;
+  if (
+    exif.focalLength35mm != null &&
+    Number.isFinite(exif.focalLength35mm) &&
+    exif.focalLength35mm > 0 &&
+    Math.abs(exif.focalLength35mm - exif.focalLengthMM) >= 1.5
+  ) {
+    return `${base}（等效 ${Math.round(exif.focalLength35mm)}mm）`;
+  }
+  return base;
+}
+
+export function getPhotoExifExposureSummary(exif: PhotoExifMetadata): string | null {
+  const parts: string[] = [];
+  if (exif.focalLengthMM != null && Number.isFinite(exif.focalLengthMM) && exif.focalLengthMM > 0) {
+    if (Math.abs(exif.focalLengthMM - Math.round(exif.focalLengthMM)) < 0.05) {
+      parts.push(`${Math.round(exif.focalLengthMM)}mm`);
+    } else {
+      parts.push(`${exif.focalLengthMM.toFixed(1)}mm`);
+    }
+  }
+  const aperture = formatPhotoExifAperture(exif);
+  if (aperture) parts.push(aperture);
+  if (exif.exposureTime && exif.exposureTime.trim().length > 0) {
+    parts.push(exif.exposureTime.trim());
+  }
+  if (exif.iso != null && Number.isFinite(exif.iso) && exif.iso > 0) {
+    parts.push(`ISO ${Math.round(exif.iso)}`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+export function hasMeaningfulCameraExif(exif?: PhotoExifMetadata | null): boolean {
+  if (!exif) return false;
+  return Boolean(
+    getPhotoExifCameraDisplayName(exif) !== null ||
+      (exif.lensModel && exif.lensModel.trim().length > 0) ||
+      (exif.capturedAt && exif.capturedAt.trim().length > 0) ||
+      (exif.exposureTime && exif.exposureTime.trim().length > 0) ||
+      exif.fNumber != null ||
+      exif.iso != null ||
+      exif.focalLengthMM != null ||
+      exif.latitude != null ||
+      (exif.software && exif.software.trim().length > 0) ||
+      (exif.artist && exif.artist.trim().length > 0) ||
+      (exif.copyright && exif.copyright.trim().length > 0),
+  );
+}
+
+export function isPhotoExifEmpty(exif?: PhotoExifMetadata | null): boolean {
+  if (!exif) return true;
+  return (
+    !hasMeaningfulCameraExif(exif) &&
+    !(exif.colorProfile && exif.colorProfile.trim().length > 0) &&
+    exif.bitDepth == null &&
+    exif.dpiWidth == null
+  );
+}
+
+export function isAIGenerationEmpty(ai?: AIGenerationMetadata | null): boolean {
+  if (!ai) return true;
+  const hasPrompt = Boolean(ai.prompt && ai.prompt.trim().length > 0);
+  const hasNeg = Boolean(ai.negativePrompt && ai.negativePrompt.trim().length > 0);
+  const hasRaw = Boolean(ai.rawParameters && ai.rawParameters.trim().length > 0);
+  return (
+    !hasPrompt &&
+    !hasNeg &&
+    !(ai.modelName && ai.modelName.trim().length > 0) &&
+    !(ai.sampler && ai.sampler.trim().length > 0) &&
+    ai.steps == null &&
+    !(ai.seed && ai.seed.trim().length > 0) &&
+    !hasRaw
+  );
+}
+
 export interface AssetRichMetadata {
   githubRepo?: GitHubRepoMetadata | null;
   socialPost?: SocialPostMetadata | null;
+  photoExif?: PhotoExifMetadata | null;
+  aiGeneration?: AIGenerationMetadata | null;
   textExcerpt?: string | null;
   isMarkdown: boolean;
   model3DFormat?: string | null;
@@ -485,6 +635,210 @@ export interface FolderRecord {
   assetCount: number;
   createdAt: ISODateString;
   updatedAt: ISODateString;
+}
+
+export interface FolderHierarchyNode {
+  id: UUID;
+  folder: FolderRecord;
+  depth: number;
+  children: FolderHierarchyNode[];
+}
+
+export function sortedFolderSiblings(items: readonly FolderRecord[]): FolderRecord[] {
+  return [...items].sort((lhs, rhs) => {
+    if (lhs.sortOrder !== rhs.sortOrder) return lhs.sortOrder - rhs.sortOrder;
+    const nameCmp = lhs.name.localeCompare(rhs.name, undefined, { sensitivity: 'base' });
+    if (nameCmp !== 0) return nameCmp;
+    return lhs.id < rhs.id ? -1 : lhs.id > rhs.id ? 1 : 0;
+  });
+}
+
+export function buildFolderTree(folders: readonly FolderRecord[]): FolderHierarchyNode[] {
+  const byParent = new Map<UUID | null, FolderRecord[]>();
+  const knownIDs = new Set<UUID>();
+  for (const folder of folders) {
+    knownIDs.add(folder.id);
+    const parentKey = folder.parentID ?? null;
+    const list = byParent.get(parentKey);
+    if (list) list.push(folder);
+    else byParent.set(parentKey, [folder]);
+  }
+
+  const visited = new Set<UUID>();
+  const makeNodes = (records: readonly FolderRecord[], depth: number): FolderHierarchyNode[] => {
+    const nodes: FolderHierarchyNode[] = [];
+    for (const folder of sortedFolderSiblings(records)) {
+      if (visited.has(folder.id)) continue;
+      visited.add(folder.id);
+      const children = makeNodes(byParent.get(folder.id) ?? [], depth + 1);
+      nodes.push({ id: folder.id, folder, depth, children });
+    }
+    return nodes;
+  };
+
+  const roots = folders.filter((folder) => !folder.parentID || !knownIDs.has(folder.parentID));
+  const forest = makeNodes(roots, 0);
+
+  const remaining = folders.filter((folder) => !visited.has(folder.id));
+  if (remaining.length > 0) {
+    forest.push(...makeNodes(remaining, 0));
+  }
+  return forest;
+}
+
+export function flattenFolderTree(folders: readonly FolderRecord[]): FolderHierarchyNode[] {
+  const result: FolderHierarchyNode[] = [];
+  const walk = (nodes: readonly FolderHierarchyNode[]): void => {
+    for (const node of nodes) {
+      result.push(node);
+      if (node.children.length > 0) {
+        walk(node.children);
+      }
+    }
+  };
+  walk(buildFolderTree(folders));
+  return result;
+}
+
+export function folderNodeContains(node: FolderHierarchyNode, folderID?: UUID | null): boolean {
+  if (!folderID) return false;
+  if (node.folder.id === folderID) return true;
+  return node.children.some((child) => folderNodeContains(child, folderID));
+}
+
+export function buildFolderPathsMap(folders: readonly FolderRecord[]): Record<UUID, string> {
+  const byID = new Map<UUID, FolderRecord>();
+  for (const folder of folders) {
+    byID.set(folder.id, folder);
+  }
+  const paths: Record<UUID, string> = {};
+  for (const folder of folders) {
+    const segments: string[] = [];
+    const seen = new Set<UUID>();
+    let current: FolderRecord | undefined = folder;
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      segments.push(current.name);
+      current = current.parentID ? byID.get(current.parentID) : undefined;
+    }
+    paths[folder.id] = segments.reverse().join('/');
+  }
+  return paths;
+}
+
+export type InspectorInfoSection =
+  | 'previewIdentity'
+  | 'quickActions'
+  | 'colorsAndTags'
+  | 'notesAndOCR'
+  | 'aiGeneration'
+  | 'photoExif'
+  | 'mediaSpecs'
+  | 'githubRepo'
+  | 'socialMediaExtract';
+
+export const DEFAULT_INSPECTOR_SECTION_ORDER: readonly InspectorInfoSection[] = [
+  'previewIdentity',
+  'quickActions',
+  'colorsAndTags',
+  'notesAndOCR',
+  'aiGeneration',
+  'photoExif',
+  'mediaSpecs',
+  'githubRepo',
+  'socialMediaExtract',
+] as const;
+
+const INSPECTOR_SECTION_SET: ReadonlySet<string> = new Set(DEFAULT_INSPECTOR_SECTION_ORDER);
+
+const INSPECTOR_SECTION_TITLES: Record<InspectorInfoSection, string> = {
+  previewIdentity: '素材预览',
+  quickActions: '快捷操作',
+  colorsAndTags: '色板与标签',
+  notesAndOCR: '备注与识别文本',
+  aiGeneration: 'AI 生图信息',
+  photoExif: '拍摄参数 (EXIF)',
+  mediaSpecs: '媒体信息',
+  githubRepo: 'GitHub 仓库信息',
+  socialMediaExtract: '推文媒体提取',
+};
+
+export function inspectorInfoSectionTitle(section: InspectorInfoSection): string {
+  return INSPECTOR_SECTION_TITLES[section];
+}
+
+export function normalizeInspectorSectionOrder(rawValues: readonly string[]): InspectorInfoSection[] {
+  const result: InspectorInfoSection[] = [];
+  const seen = new Set<InspectorInfoSection>();
+  for (const raw of rawValues) {
+    if (INSPECTOR_SECTION_SET.has(raw)) {
+      const section = raw as InspectorInfoSection;
+      if (!seen.has(section)) {
+        seen.add(section);
+        result.push(section);
+      }
+    }
+  }
+  for (const fallback of DEFAULT_INSPECTOR_SECTION_ORDER) {
+    if (!seen.has(fallback)) {
+      seen.add(fallback);
+      result.push(fallback);
+    }
+  }
+  return result;
+}
+
+export function moveInspectorSection(
+  dragged: InspectorInfoSection,
+  target: InspectorInfoSection,
+  order: readonly InspectorInfoSection[],
+): InspectorInfoSection[] {
+  if (dragged === target) return [...order];
+  const fromIdx = order.indexOf(dragged);
+  const toIdx = order.indexOf(target);
+  if (fromIdx < 0 || toIdx < 0) return [...order];
+  const next = [...order];
+  const [item] = next.splice(fromIdx, 1);
+  next.splice(toIdx, 0, item);
+  return next;
+}
+
+export function moveInspectorSectionToTop(
+  section: InspectorInfoSection,
+  order: readonly InspectorInfoSection[],
+): InspectorInfoSection[] {
+  const idx = order.indexOf(section);
+  if (idx <= 0) return [...order];
+  const next = [...order];
+  const [item] = next.splice(idx, 1);
+  next.unshift(item);
+  return next;
+}
+
+export function moveInspectorSectionToBottom(
+  section: InspectorInfoSection,
+  order: readonly InspectorInfoSection[],
+): InspectorInfoSection[] {
+  const idx = order.indexOf(section);
+  if (idx < 0 || idx === order.length - 1) return [...order];
+  const next = [...order];
+  const [item] = next.splice(idx, 1);
+  next.push(item);
+  return next;
+}
+
+export function stepInspectorSection(
+  section: InspectorInfoSection,
+  delta: number,
+  visible: readonly InspectorInfoSection[],
+  order: readonly InspectorInfoSection[],
+): InspectorInfoSection[] {
+  if (delta === 0) return [...order];
+  const visIdx = visible.indexOf(section);
+  if (visIdx < 0) return [...order];
+  const targetVisIdx = visIdx + (delta > 0 ? 1 : -1);
+  if (targetVisIdx < 0 || targetVisIdx >= visible.length) return [...order];
+  return moveInspectorSection(section, visible[targetVisIdx], order);
 }
 
 export interface TagCount {

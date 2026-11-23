@@ -8,7 +8,8 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react';
-import type { ApiTokenScope } from '@charkle/shared';
+import type { ApiTokenScope, UUID } from '@charkle/shared';
+import { ConfirmDialog } from '../../design-system';
 import { useAuthStore } from '../../stores/authStore';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import {
@@ -54,6 +55,12 @@ export const AccountSecurityPane: React.FC = () => {
   const [creatingToken, setCreatingToken] = useState(false);
   const [newlyCreatedToken, setNewlyCreatedToken] = useState<string | null>(null);
   const [copiedNewToken, setCopiedNewToken] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<
+    | { type: 'revokeOtherSessions' }
+    | { type: 'revokeSession'; id: UUID; label: string }
+    | { type: 'revokeToken'; id: UUID; name: string }
+    | null
+  >(null);
 
   useEffect(() => {
     void loadSessions();
@@ -194,7 +201,7 @@ export const AccountSecurityPane: React.FC = () => {
           </div>
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] text-[var(--text-secondary)]">
-              修改后将自动注销其他设备的登录会话
+              修改后需在其他设备重新登录
             </span>
             <SettingsButton
               type="submit"
@@ -212,16 +219,10 @@ export const AccountSecurityPane: React.FC = () => {
       <SettingsSection title={`活跃登录会话 (${sessions.length})`}>
         {sessions.length > 1 && (
           <>
-            <SettingsRow
-              title="多设备会话管理"
-              subtitle="发现异常设备时可一键注销其他会话"
-            >
+            <SettingsRow title="多设备会话管理">
               <SettingsButton
                 variant="secondary"
-                onClick={async () => {
-                  await revokeOtherSessions();
-                  pushToast({ tone: 'success', message: '已注销其他全部设备会话' });
-                }}
+                onClick={() => setConfirmAction({ type: 'revokeOtherSessions' })}
               >
                 注销其他设备
               </SettingsButton>
@@ -258,10 +259,13 @@ export const AccountSecurityPane: React.FC = () => {
                   {!session.isCurrent && (
                     <SettingsButton
                       variant="secondary"
-                      onClick={async () => {
-                        await revokeSession(session.id);
-                        pushToast({ tone: 'info', message: '已注销该设备会话' });
-                      }}
+                      onClick={() =>
+                        setConfirmAction({
+                          type: 'revokeSession',
+                          id: session.id,
+                          label: session.userAgent || '该设备',
+                        })
+                      }
                     >
                       注销
                     </SettingsButton>
@@ -274,13 +278,13 @@ export const AccountSecurityPane: React.FC = () => {
       </SettingsSection>
 
       {/* Personal Access Tokens */}
-      <SettingsSection title="访问令牌" caption="用于浏览器扩展、外部 AI 助手或脚本接入">
+      <SettingsSection title="访问令牌" caption="用于浏览器扩展与外部 AI 助手">
         <div className="p-4 flex flex-col gap-3">
           {newlyCreatedToken && (
             <div className="p-3 rounded-[9px] bg-[var(--success-soft)] border border-[var(--settings-positive,var(--success))]/30 flex flex-col gap-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[12px] font-semibold text-[var(--settings-positive,var(--success))]">
-                  令牌已生成（仅此一次展示完整明文，请立即复制保存）
+                  请立即复制保存，关闭后不再显示
                 </span>
                 <button
                   type="button"
@@ -291,7 +295,7 @@ export const AccountSecurityPane: React.FC = () => {
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                <code className="flex-1 px-2.5 py-1.5 rounded-[7px] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11.5px] text-[var(--text-primary)] break-all select-all">
+                <code className="flex-1 px-2.5 py-1.5 rounded-[var(--radius-settings-inner)] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11.5px] text-[var(--text-primary)] charkle-wrap-anywhere select-all">
                   {newlyCreatedToken}
                 </code>
                 <SettingsButton variant="primary" onClick={() => handleCopyToken(newlyCreatedToken)}>
@@ -308,7 +312,7 @@ export const AccountSecurityPane: React.FC = () => {
                 type="text"
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
-                placeholder="令牌备注（如：浏览器扩展、Cursor MCP）"
+                placeholder="令牌名称"
                 className="flex-1 min-w-[200px]"
               />
               <SettingsButton
@@ -360,7 +364,7 @@ export const AccountSecurityPane: React.FC = () => {
                           <span className="text-[12.5px] font-medium text-[var(--text-primary)] truncate">
                             {t.name}
                           </span>
-                          <code className="px-1.5 py-0.5 rounded-[5px] bg-[var(--settings-subtle,var(--bg-subtle))] font-mono text-[10.5px] text-[var(--text-secondary)]">
+                          <code className="px-1.5 py-0.5 rounded-[var(--radius-chip)] bg-[var(--settings-subtle,var(--bg-subtle))] font-mono text-[10.5px] text-[var(--text-secondary)]">
                             {t.prefix}…
                           </code>
                         </div>
@@ -372,10 +376,13 @@ export const AccountSecurityPane: React.FC = () => {
                     </div>
                     <SettingsButton
                       variant="destructive"
-                      onClick={async () => {
-                        await revokeApiToken(t.id);
-                        pushToast({ tone: 'info', message: `已撤销令牌「${t.name}」` });
-                      }}
+                      onClick={() =>
+                        setConfirmAction({
+                          type: 'revokeToken',
+                          id: t.id,
+                          name: t.name,
+                        })
+                      }
                     >
                       <Trash2 size={12} />
                       撤销
@@ -387,6 +394,42 @@ export const AccountSecurityPane: React.FC = () => {
           </>
         )}
       </SettingsSection>
+
+      <ConfirmDialog
+        open={confirmAction !== null}
+        onClose={() => setConfirmAction(null)}
+        tone="danger"
+        title={
+          confirmAction?.type === 'revokeToken'
+            ? `撤销访问令牌「${confirmAction.name}」？`
+            : confirmAction?.type === 'revokeOtherSessions'
+              ? '注销其他全部设备？'
+              : '注销该设备会话？'
+        }
+        description={
+          confirmAction?.type === 'revokeToken'
+            ? '撤销后，使用此令牌的扩展或外部助手将立即失去访问权限。'
+            : confirmAction?.type === 'revokeOtherSessions'
+              ? '其他已登录设备将需要重新输入密码登录。'
+              : confirmAction?.type === 'revokeSession'
+                ? `设备「${confirmAction.label}」将需要重新登录。`
+                : undefined
+        }
+        confirmLabel={confirmAction?.type === 'revokeToken' ? '确认撤销' : '确认注销'}
+        onConfirm={async () => {
+          if (!confirmAction) return;
+          if (confirmAction.type === 'revokeToken') {
+            await revokeApiToken(confirmAction.id);
+            pushToast({ tone: 'info', message: `已撤销令牌「${confirmAction.name}」` });
+          } else if (confirmAction.type === 'revokeOtherSessions') {
+            await revokeOtherSessions();
+            pushToast({ tone: 'success', message: '已注销其他全部设备会话' });
+          } else if (confirmAction.type === 'revokeSession') {
+            await revokeSession(confirmAction.id);
+            pushToast({ tone: 'info', message: '已注销该设备会话' });
+          }
+        }}
+      />
     </div>
   );
 };

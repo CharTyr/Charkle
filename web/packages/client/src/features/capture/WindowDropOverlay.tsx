@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import { Folder, Inbox, LayoutGrid, Upload } from 'lucide-react';
 import type { UUID } from '@charkle/shared';
+import { usePresence } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { useMoodboardStore } from '../../stores/moodboardStore';
@@ -12,7 +13,7 @@ type DropZoneKey = 'inbox' | 'folder' | 'board';
 interface DropZoneOption {
   key: DropZoneKey;
   label: string;
-  sublabel: string;
+  sublabel?: string;
   targetFolderID: UUID | null;
   targetBoardID: UUID | null;
 }
@@ -71,7 +72,6 @@ export const WindowDropOverlay: React.FC = () => {
       {
         key: 'inbox',
         label: '收件箱',
-        sublabel: '稍后使用 1–9 快速归档',
         targetFolderID: null,
         targetBoardID: null,
       },
@@ -236,10 +236,13 @@ export const WindowDropOverlay: React.FC = () => {
     };
   }, [visible, resetOverlay]);
 
-  if (!visible || typeof document === 'undefined') return null;
+  const presence = usePresence(visible, 175);
+
+  if (!presence.rendered || typeof document === 'undefined') return null;
 
   return createPortal(
     <div
+      data-state={presence.state}
       onDragOver={(e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'copy';
@@ -252,7 +255,10 @@ export const WindowDropOverlay: React.FC = () => {
         resetOverlay();
         void performDrop(dt, chosen);
       }}
-      className="charkle-modal-backdrop fixed inset-0 z-[145] flex items-center justify-center p-5 bg-black/26 backdrop-blur-[3px] select-none"
+      className={[
+        'charkle-modal-veil charkle-modal-veil-transition fixed inset-0 z-[145] flex items-center justify-center p-5 select-none',
+        presence.state === 'closing' ? 'pointer-events-none' : '',
+      ].join(' ')}
     >
       {/* Calm full-window dashed drop ring */}
       <div
@@ -260,8 +266,11 @@ export const WindowDropOverlay: React.FC = () => {
         className="pointer-events-none absolute inset-4 rounded-[22px] border-2 border-dashed border-[var(--accent)]/65"
       />
 
-      {/* Centered Liquid Glass drop target card */}
-      <div className="charkle-glass charkle-modal-panel relative z-10 w-full max-w-[500px] p-6 rounded-[var(--radius-dock-outer)] flex flex-col items-center gap-4 text-center">
+      {/* Centered translucent floating drop target card */}
+      <div
+        data-state={presence.state}
+        className="charkle-glass charkle-modal-surface-transition relative z-10 w-full max-w-[500px] p-6 rounded-[var(--radius-dock-outer)] flex flex-col items-center gap-4 text-center"
+      >
         <div className="h-11 w-11 rounded-[var(--radius-dock-inner)] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center">
           <Upload size={20} />
         </div>
@@ -314,9 +323,11 @@ export const WindowDropOverlay: React.FC = () => {
                   />
                   <span className="truncate">{zone.label}</span>
                 </div>
-                <span className="text-[11px] text-[var(--text-tertiary)] truncate">
-                  {zone.sublabel}
-                </span>
+                {zone.sublabel && (
+                  <span className="text-[11px] text-[var(--text-tertiary)] truncate">
+                    {zone.sublabel}
+                  </span>
+                )}
               </div>
             );
           })}

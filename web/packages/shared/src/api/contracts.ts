@@ -56,6 +56,7 @@ import type {
 import type {
   DriveAccountInfo,
   DriveSyncConfig,
+  ExternalAgentAccessLevel,
   ExternalAgentConfig,
   RemoteDriveFile,
   RuntimeMode,
@@ -162,6 +163,8 @@ export interface AssetsListResponse {
 export interface AssetDetailResponse {
   asset: AssetRecord;
 }
+
+export type HydrateMetadataResponse = AssetDetailResponse;
 
 export interface IngestRequest {
   inputs: CaptureInput[];
@@ -278,6 +281,10 @@ export interface CreateBoardRequest {
 
 export interface SaveBoardRequest {
   document: MoodboardDocument;
+}
+
+export interface PinBoardOfflineRequest {
+  pinned: boolean;
 }
 
 export interface ProposeMoodboardRequest {
@@ -584,7 +591,7 @@ export interface SyncNowResponse {
   status: SyncStatus;
 }
 
-// MARK: - External Agent Policy API
+// MARK: - External Agent Policy & Diagnostics API
 
 export interface ExternalAgentConfigResponse {
   config: ExternalAgentConfig;
@@ -592,6 +599,47 @@ export interface ExternalAgentConfigResponse {
 
 export interface SaveExternalAgentConfigRequest {
   config: ExternalAgentConfig;
+}
+
+export interface ExternalAgentDiagnosticsResponse {
+  ok: boolean;
+  serverVersion: string;
+  runtimeMode: RuntimeMode;
+  supportedProtocolVersions: string[];
+  policy: {
+    mcpEnabled: boolean;
+    cliEnabled: boolean;
+    accessLevel: ExternalAgentAccessLevel;
+    mcpCanWrite: boolean;
+    cliCanWrite: boolean;
+  };
+  capabilities: {
+    toolCount: number;
+    readToolCount: number;
+    writeToolCount: number;
+    resourceCount: number;
+    resourceTemplateCount: number;
+    promptCount: number;
+    permanentDeleteAllowed: false;
+  };
+  library: {
+    totalAssets: number;
+    inboxCount: number;
+    untaggedCount: number;
+    trashedCount: number;
+    folderCount: number;
+    smartFolderCount: number;
+    boardCount: number;
+  };
+  syncMode: string;
+  aiProvider: string;
+  cache: CacheStats;
+  database?: {
+    healthy: boolean;
+    exists: boolean;
+    sizeBytes: number;
+  };
+  error?: string;
 }
 
 // MARK: - Server-Sent Events (SSE) Discriminated Union (/api/events)

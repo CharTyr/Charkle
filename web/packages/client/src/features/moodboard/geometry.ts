@@ -320,6 +320,22 @@ export function snapRotationDegrees(rawDegrees: number, shiftPressed: boolean): 
 }
 
 /**
+ * Advances `prevAngle` by the shortest signed angular delta ([-180, 180]) to match `targetDeg`,
+ * preventing 270° backwards jumps across the 0°/360° or ±180° boundary.
+ */
+export function shortestArcRotation(
+  prevAngle: number,
+  targetDeg: number,
+  hintDelta?: number,
+): number {
+  let delta = (((targetDeg - prevAngle) % 360) + 540) % 360 - 180;
+  if (Math.abs(Math.abs(delta) - 180) < 0.001 && hintDelta !== undefined && hintDelta !== 0) {
+    delta = hintDelta < 0 ? -180 : 180;
+  }
+  return prevAngle + delta;
+}
+
+/**
  * Rotate a local offset around a node center.
  */
 function rotateAroundCenter(point: BoardPoint, center: BoardPoint, rotationDegrees: number): BoardPoint {
@@ -574,6 +590,52 @@ export function hitTestInkStroke(
   }
   for (let i = 0; i < strokePoints.length - 1; i++) {
     if (distancePointToSegment(point, strokePoints[i], strokePoints[i + 1]) <= hitRadius) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function segmentsCross(a: BoardPoint, b: BoardPoint, c: BoardPoint, d: BoardPoint): boolean {
+  const cross = (o: BoardPoint, p: BoardPoint, q: BoardPoint) =>
+    (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x);
+  const d1 = cross(a, b, c);
+  const d2 = cross(a, b, d);
+  const d3 = cross(c, d, a);
+  const d4 = cross(c, d, b);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+function distanceSegmentToSegment(
+  a: BoardPoint,
+  b: BoardPoint,
+  c: BoardPoint,
+  d: BoardPoint,
+): number {
+  if (segmentsCross(a, b, c, d)) return 0;
+  return Math.min(
+    distancePointToSegment(a, c, d),
+    distancePointToSegment(b, c, d),
+    distancePointToSegment(c, a, b),
+    distancePointToSegment(d, a, b),
+  );
+}
+
+/**
+ * Tests whether an eraser pointer sweep segment (a -> b) intersects an ink stroke within `hitRadius`.
+ */
+export function segmentIntersectsInkStroke(
+  a: BoardPoint,
+  b: BoardPoint,
+  strokePoints: readonly InkStrokePoint[],
+  hitRadius: number,
+): boolean {
+  if (strokePoints.length === 0) return false;
+  if (strokePoints.length === 1) {
+    return distancePointToSegment(strokePoints[0], a, b) <= hitRadius;
+  }
+  for (let i = 0; i < strokePoints.length - 1; i++) {
+    if (distanceSegmentToSegment(a, b, strokePoints[i], strokePoints[i + 1]) <= hitRadius) {
       return true;
     }
   }

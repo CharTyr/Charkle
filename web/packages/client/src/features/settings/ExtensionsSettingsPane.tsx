@@ -145,7 +145,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
       <SettingsSection title="浏览器采集扩展">
         <SettingsRow
           title="Charkle 浏览器采集扩展"
-          subtitle="Chrome / Edge / Arc / Brave · 右键收藏图片与链接、批量抓图、网页截屏与取色器"
+          subtitle="支持 Chrome / Edge / Arc / Brave"
         >
           <SettingsButton
             variant="primary"
@@ -205,7 +205,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-[7px] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11px] text-[var(--text-primary)] select-all break-all">
+                <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-[var(--radius-settings-inner)] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11px] text-[var(--text-primary)] select-all charkle-wrap-anywhere">
                   {generatedToken}
                 </code>
                 <SettingsButton variant="primary" onClick={() => void handleCopyToken()}>
@@ -234,7 +234,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
           <SettingsGuideStep
             number={3}
             title="填入服务地址与扩展令牌"
-            detail="打开扩展设置页，粘贴当前服务地址与上方生成的 chk_... 令牌，点击「测试并保存」即可开始跨网页收藏。"
+            detail="在扩展设置中填入服务地址与令牌并保存。"
           />
         </InlineGuideDisclosure>
 
@@ -242,7 +242,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
 
         <SettingsRow
           title="Safari / 移动端书签小工具"
-          subtitle="免安装：将按钮拖至书签栏，在任意网页点击即可收藏当前链接与选中文本"
+          subtitle="拖至书签栏，点击即可收藏网页"
         >
           <a
             ref={bookmarkletAnchorRef}
@@ -276,7 +276,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
       <SettingsSection title="Figma 与 FigJam">
         <SettingsRow
           title="Charkle → Figma / FigJam 插件"
-          subtitle="纯本地离线导入，无需 API 密钥，保留独立图层、原图像素与动图"
+          subtitle="将 .charkleboard 导入 Figma / FigJam"
         >
           <SettingsButton
             variant="primary"
@@ -295,39 +295,18 @@ export const ExtensionsSettingsPane: React.FC = () => {
           </SettingsButton>
         </SettingsRow>
 
-        <InlineGuideDisclosure title="如何在 Figma 桌面端导入（仅首次需要，3 步）">
+        <InlineGuideDisclosure title="安装与使用步骤">
           <SettingsGuideStep
             number={1}
-            title="下载并解压插件包"
-            detail="点击上方「下载 Figma 插件 (.zip)」并解压到一个不会被随意删除的本地文件夹。"
+            title="下载并解压插件包，在 Figma 菜单选择 Plugins → Development → Import plugin from manifest… 导入 manifest.json"
           />
           <SettingsGuideStep
             number={2}
-            title="打开 Figma 开发者导入入口"
-            detail="在 Figma 桌面端菜单栏依次点击 Plugins → Development → Import plugin from manifest…"
+            title="在任意情绪板导出 .charkleboard 文件"
           />
           <SettingsGuideStep
             number={3}
-            title="选中 manifest.json 完成安装"
-            detail="选择解压目录里的 manifest.json，此后即可在 Figma 设计文件与 FigJam 白板中随时启动插件。"
-          />
-        </InlineGuideDisclosure>
-
-        <InlineGuideDisclosure title="查看情绪板导入 Figma / FigJam 完整流程">
-          <SettingsGuideStep
-            number={1}
-            title="从情绪板导出 .charkleboard 文件"
-            detail="打开任意情绪板 → 点击右上角「导出」→ 切换到「Figma / FigJam (.charkleboard)」下载迁移包。"
-          />
-          <SettingsGuideStep
-            number={2}
-            title="在画布中运行 Charkle Board Importer"
-            detail="打开目标 Figma 或 FigJam 文档，通过插件菜单启动 Charkle Board Importer。"
-          />
-          <SettingsGuideStep
-            number={3}
-            title="拖入迁移包，1:1 还原全部元素"
-            detail="将 .charkleboard 文件拖入插件窗口，自动生成独立图片图层、动态 GIF、便签、分组框、箭头连线与手绘标注。"
+            title="在 Figma / FigJam 中运行 Charkle Board Importer 并拖入文件即可导入"
           />
         </InlineGuideDisclosure>
       </SettingsSection>

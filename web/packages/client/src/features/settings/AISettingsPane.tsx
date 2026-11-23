@@ -9,12 +9,10 @@ import {
   XCircle,
 } from 'lucide-react';
 import {
-  CUSTOM_AI_ENDPOINT_FORMATS,
   cloudAIProviderLocalizedLabel,
   customAIEndpointDefaultBaseURL,
   customAIEndpointDefaultChatModel,
   customAIEndpointDefaultEmbeddingModel,
-  customAIEndpointLocalizedLabel,
   customAIEndpointSupportsEmbeddings,
   formatTokenCount,
   getChatGPTAccountDisplayName,
@@ -26,21 +24,20 @@ import type {
   CustomAIEndpointFormat,
   TypeSafeExperimentalConfig,
 } from '@charkle/shared';
+import { DisclosureGroup } from '../../design-system';
 import { ModalShell } from '../../design-system/ModalShell';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useSyncAIStore } from '../../stores/syncAIStore';
 import {
   ChatGPTBrandMark,
-  InlineGuideDisclosure,
   SETTINGS_LINKS,
   SettingsButton,
   SettingsCardDivider,
-  SettingsGuideStep,
   SettingsInput,
+  SettingsMenuPicker,
   SettingsRow,
   SettingsSection,
   SettingsSegmented,
-  SettingsSelect,
   SettingsStatusBadge,
   SettingsSwitch,
 } from './SettingsChrome';
@@ -58,6 +55,12 @@ const PROVIDER_SEGMENT_OPTIONS: ReadonlyArray<{ id: CloudAIProviderKind; label: 
   { id: 'chatGPTSubscription', label: 'ChatGPT 订阅' },
   { id: 'gemini', label: 'Google Gemini' },
   { id: 'openAICompatible', label: '自定义 API' },
+];
+
+const ENDPOINT_FORMAT_OPTIONS: ReadonlyArray<{ id: CustomAIEndpointFormat; label: string }> = [
+  { id: 'openAIChatCompletions', label: 'OpenAI 兼容' },
+  { id: 'anthropicMessages', label: 'Anthropic' },
+  { id: 'openAIResponses', label: 'OpenAI Responses' },
 ];
 
 interface CustomPreset {
@@ -90,7 +93,7 @@ const CUSTOM_API_PRESETS: readonly CustomPreset[] = [
     id: 'openrouter',
     label: 'OpenRouter',
     format: 'openAIChatCompletions',
-    baseURL: 'https://openrouter.ai/api',
+    baseURL: 'https://openrouter.ai/api/v1',
     chatModel: 'google/gemini-2.5-flash',
     embeddingModel: 'openai/text-embedding-3-small',
   },
@@ -124,15 +127,15 @@ const JEV_SCENARIO_TOGGLES: ReadonlyArray<{
     | 'enableCuratorVisualRerank'
   >;
   label: string;
-  desc: string;
+  desc?: string;
 }> = [
-  { key: 'enableMoodboardFocusCrop', label: '情绪板智能聚焦裁切', desc: '按主体或描述生成非破坏性局部裁切框' },
-  { key: 'enableAutoCleanCrop', label: '自动去杂边裁净', desc: '自动识别截图与扫描图多余边框并裁切主体' },
-  { key: 'enableSubjectPalette', label: '按主体提取色卡', desc: '仅针对画面前景主体区域提取主色调' },
-  { key: 'enablePinpointAnnotations', label: '指物精准批注', desc: '定位画面局部元素并生成连线便签' },
-  { key: 'enableSemanticSearch', label: '语义搜图视觉精排', desc: '结合文本与画面内容优化自然语言搜索排序' },
-  { key: 'enableInboxSmartTriage', label: '收件箱批量智能分拣', desc: '按现有目录结构自动给出归档建议' },
-  { key: 'enableCuratorVisualRerank', label: '情绪板候选图评分', desc: '生成情绪板时对候选素材进行视觉评分筛选' },
+  { key: 'enableMoodboardFocusCrop', label: '情绪板智能聚焦裁切', desc: '自动裁切画面焦点' },
+  { key: 'enableAutoCleanCrop', label: '自动去杂边裁净' },
+  { key: 'enableSubjectPalette', label: '按主体提取色卡' },
+  { key: 'enablePinpointAnnotations', label: '指物精准批注' },
+  { key: 'enableSemanticSearch', label: '语义搜图视觉精排' },
+  { key: 'enableInboxSmartTriage', label: '收件箱批量智能分拣' },
+  { key: 'enableCuratorVisualRerank', label: '情绪板候选图评分' },
 ];
 
 function isLocalhostURL(raw: string): boolean {
@@ -255,13 +258,13 @@ export const AISettingsPane: React.FC = () => {
           : '';
       return `${acct}模型：${aiConfig.chatModel || 'gpt-5-mini'}`;
     }
-    return `模型：${aiConfig.chatModel || '默认'}${aiConfig.embeddingModel ? ` · 向量：${aiConfig.embeddingModel}` : ''}`;
+    return `模型：${aiConfig.chatModel || '默认'}${aiConfig.embeddingModel ? ` · 搜索：${aiConfig.embeddingModel}` : ''}`;
   })();
 
   return (
     <div className="flex flex-col gap-[22px]">
       {/* 1. 基础离线能力 */}
-      <SettingsSection title="基础离线能力" caption="免费内置 · 无需下载模型">
+      <SettingsSection title="基础离线能力">
         <div className="px-4 py-3 flex flex-wrap items-center gap-2">
           {BUILTIN_CAPABILITIES.map((cap) => (
             <span
@@ -278,42 +281,22 @@ export const AISettingsPane: React.FC = () => {
       {/* 2. 云端增强智能 */}
       <SettingsSection title="云端增强智能">
         {!isCloudReady ? (
-          <>
-            <SettingsRow
-              title={aiConfig.provider === 'disabled' ? '尚未接入云端增强模型' : '待完成连接配置'}
-              subtitle="接入后可解锁自然语言搜图、导入自动识图打标与智能生成情绪板"
+          <SettingsRow
+            title={aiConfig.provider === 'disabled' ? '尚未接入云端增强模型' : '待完成连接配置'}
+            subtitle="用于语义搜图、自动打标与生成情绪板"
+          >
+            <SettingsButton variant="secondary" onClick={() => openCloudConfig('gemini')}>
+              <Sparkles size={12} />
+              Gemini / 自定义 API…
+            </SettingsButton>
+            <SettingsButton
+              variant="primary"
+              onClick={() => openCloudConfig('chatGPTSubscription')}
             >
-              <SettingsButton variant="secondary" onClick={() => openCloudConfig('gemini')}>
-                <Sparkles size={12} />
-                Gemini / 自定义 API…
-              </SettingsButton>
-              <SettingsButton
-                variant="primary"
-                onClick={() => openCloudConfig('chatGPTSubscription')}
-              >
-                <ChatGPTBrandMark size={13} />
-                连接 ChatGPT…
-              </SettingsButton>
-            </SettingsRow>
-
-            <InlineGuideDisclosure title="各方案怎么选？如何获取 API 密钥">
-              <SettingsGuideStep
-                number={1}
-                title="Google Gemini（上手最省心）"
-                detail="前往 Google AI Studio 即可免费申请 API Key，支持识图与语义搜图，适合个人日常使用。"
-              />
-              <SettingsGuideStep
-                number={2}
-                title="ChatGPT 订阅账号"
-                detail="已有 ChatGPT 账号可直接填写访问令牌并选择可用模型，无需单独管理第三方网关。"
-              />
-              <SettingsGuideStep
-                number={3}
-                title="自定义 API（OpenAI / Claude / DeepSeek / Ollama）"
-                detail="内置 5 套常用服务预设；若本机运行 Ollama 多模态模型，无需填写密钥即可完全离线增强。"
-              />
-            </InlineGuideDisclosure>
-          </>
+              <ChatGPTBrandMark size={13} />
+              连接 ChatGPT…
+            </SettingsButton>
+          </SettingsRow>
         ) : (
           <SettingsRow
             title={
@@ -344,7 +327,7 @@ export const AISettingsPane: React.FC = () => {
             <SettingsCardDivider />
             <SettingsRow
               title="导入时自动分析"
-              subtitle="采集新图片后后台自动生成视觉描述与建议标签（不覆盖手动标签）"
+              subtitle="导入后自动生成建议标签"
             >
               <SettingsSwitch
                 ariaLabel="导入时自动分析"
@@ -356,7 +339,7 @@ export const AISettingsPane: React.FC = () => {
             <SettingsCardDivider />
             <SettingsRow
               title="仅上传轻量化预览图"
-              subtitle="仅将压缩预览图用于识图分析，不上传高分辨率原件，更省流量与隐私"
+              subtitle="分析时不上传原图"
             >
               <SettingsSwitch
                 ariaLabel="仅上传轻量化预览图"
@@ -372,7 +355,7 @@ export const AISettingsPane: React.FC = () => {
       <SettingsSection title="进阶视觉定位（实验性）">
         <SettingsRow
           title="精准画面定位与智能分拣"
-          subtitle="结合 TypeSafe 视觉定位引擎，解锁情绪板聚焦裁切、主体取色与收件箱批量分拣"
+          subtitle="用于智能裁切、主体取色与批量分拣"
         >
           <SettingsSwitch
             ariaLabel="精准画面定位与智能分拣"
@@ -409,26 +392,13 @@ export const AISettingsPane: React.FC = () => {
             密钥与功能开关…
           </SettingsButton>
         </SettingsRow>
-
-        <InlineGuideDisclosure title="这是什么？和上方云端 AI 有什么区别？">
-          <SettingsGuideStep
-            number={1}
-            title="专注「找位置」的视觉定位模型"
-            detail="上方云端 AI 负责理解画面语义、生成标签与策展方案；进阶视觉定位引擎则专注输出精确坐标框，用于主体裁切、去杂边与指物批注。"
-          />
-          <SettingsGuideStep
-            number={2}
-            title="未开启也能正常运行"
-            detail="关闭或未配置密钥时，Charkle 会自动使用内置视觉分析完成常规配色与画廊检索，互不冲突。"
-          />
-        </InlineGuideDisclosure>
       </SettingsSection>
 
       {/* 4. 用量统计 */}
       <SettingsSection title="用量统计">
         <SettingsRow
           title="云端模型调用记录"
-          subtitle={`今日 ${aiUsage.todayRequests} 次 · 累计 ${aiUsage.totalRequests} 次（${formatTokenCount(aiUsage.totalTokens)} tokens）`}
+          subtitle={`今日 ${aiUsage.todayRequests} 次 · 累计 ${aiUsage.totalRequests} 次 · 累计用量 ${formatTokenCount(aiUsage.totalTokens)}`}
         >
           <SettingsButton variant="secondary" onClick={() => setUsageModalOpen(true)}>
             查看明细…
@@ -480,6 +450,7 @@ const CloudAIConfigModal: React.FC<{
   const [connectingChatGPT, setConnectingChatGPT] = useState(false);
   const [disconnectingChatGPT, setDisconnectingChatGPT] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [geminiAdvancedOpen, setGeminiAdvancedOpen] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const applyProviderDefaults = (
@@ -627,7 +598,6 @@ const CloudAIConfigModal: React.FC<{
       }}
       width="md"
       title="配置云端增强 AI"
-      subtitle="按需选择服务商，密钥仅保存在服务端加密存储中"
       footer={
         <>
           {draft.provider !== 'disabled' && (
@@ -661,12 +631,13 @@ const CloudAIConfigModal: React.FC<{
             setApiKeyInput('');
             setDraft((prev) => applyProviderDefaults(prev, kind));
           }}
-          className="w-full grid grid-cols-2 sm:grid-cols-4"
+          fullWidth
+          className="w-full overflow-x-auto"
         />
 
         {draft.provider === 'disabled' && (
           <div className="p-3.5 rounded-[10px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] text-[12px] text-[var(--text-secondary)] leading-relaxed">
-            关闭后将仅使用内置离线配色、相似图推荐、图内文字与中文拼音检索，不会向任何外部 AI 服务发送数据。
+            仅使用本地基础功能，不向云端发送数据。
           </div>
         )}
 
@@ -700,7 +671,7 @@ const CloudAIConfigModal: React.FC<{
                     type="password"
                     value={apiKeyInput}
                     onChange={(e) => setApiKeyInput(e.target.value)}
-                    placeholder="粘贴 ChatGPT Access Token 或 OpenAI API Key"
+                    placeholder="粘贴访问凭据或 API Key"
                     className="w-full"
                   />
                   <div className="flex items-center gap-2">
@@ -740,17 +711,18 @@ const CloudAIConfigModal: React.FC<{
                 </button>
               </div>
               {chatGPTModels.length > 0 ? (
-                <SettingsSelect
+                <SettingsMenuPicker
+                  ariaLabel="默认对话与识图模型"
+                  mono
+                  className="w-full"
                   value={draft.chatModel}
-                  onChange={(e) => setDraft((p) => ({ ...p, chatModel: e.target.value }))}
-                  className="w-full font-mono"
-                >
-                  {chatGPTModels.map((m) => (
-                    <option key={m.slug} value={m.slug}>
-                      {m.displayName} ({m.slug})
-                    </option>
-                  ))}
-                </SettingsSelect>
+                  onChange={(chatModel) => setDraft((p) => ({ ...p, chatModel }))}
+                  options={chatGPTModels.map((m) => ({
+                    value: m.slug,
+                    label: m.displayName,
+                    hint: m.slug,
+                  }))}
+                />
               ) : (
                 <SettingsInput
                   type="text"
@@ -793,12 +765,21 @@ const CloudAIConfigModal: React.FC<{
               />
             </div>
 
-            <div className="rounded-[10px] border border-[var(--settings-border,var(--border-hairline))] overflow-hidden">
-              <InlineGuideDisclosure title="高级选项（接口地址与模型名称）">
-                <div className="flex flex-col gap-2.5">
+            <div className="rounded-[10px] border border-[var(--settings-border,var(--border-hairline))] p-1.5">
+              <DisclosureGroup
+                open={geminiAdvancedOpen}
+                onOpenChange={setGeminiAdvancedOpen}
+                headerClassName="px-2 py-1.5"
+                label={
+                  <span className="text-[11.5px] font-medium text-[var(--text-secondary)] group-hover:text-[var(--text-primary)]">
+                    高级选项（接口地址与模型名称）
+                  </span>
+                }
+              >
+                <div className="p-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2.5">
                   <div className="flex flex-col gap-1">
                     <label className="text-[11px] font-medium text-[var(--text-secondary)]">
-                      接口 Base URL
+                      接口地址
                     </label>
                     <SettingsInput
                       type="url"
@@ -823,7 +804,7 @@ const CloudAIConfigModal: React.FC<{
                     </div>
                     <div className="flex flex-col gap-1">
                       <label className="text-[11px] font-medium text-[var(--text-secondary)]">
-                        语义向量模型
+                        搜索模型（可选）
                       </label>
                       <SettingsInput
                         type="text"
@@ -837,7 +818,7 @@ const CloudAIConfigModal: React.FC<{
                     </div>
                   </div>
                 </div>
-              </InlineGuideDisclosure>
+              </DisclosureGroup>
             </div>
           </div>
         )}
@@ -884,14 +865,15 @@ const CloudAIConfigModal: React.FC<{
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <div className="flex flex-col gap-1">
+              <div className="sm:col-span-2 flex flex-col gap-1">
                 <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                  接口协议格式
+                  接口格式
                 </label>
-                <SettingsSelect
+                <SettingsSegmented
+                  ariaLabel="接口格式"
+                  options={ENDPOINT_FORMAT_OPTIONS}
                   value={draft.customEndpointFormat}
-                  onChange={(e) => {
-                    const fmt = e.target.value as CustomAIEndpointFormat;
+                  onChange={(fmt) => {
                     setDraft((prev) => ({
                       ...prev,
                       customEndpointFormat: fmt,
@@ -900,19 +882,14 @@ const CloudAIConfigModal: React.FC<{
                       embeddingModel: customAIEndpointDefaultEmbeddingModel(fmt),
                     }));
                   }}
+                  fullWidth
                   className="w-full"
-                >
-                  {CUSTOM_AI_ENDPOINT_FORMATS.map((fmt) => (
-                    <option key={fmt} value={fmt}>
-                      {customAIEndpointLocalizedLabel(fmt)}
-                    </option>
-                  ))}
-                </SettingsSelect>
+                />
               </div>
 
-              <div className="flex flex-col gap-1">
+              <div className="sm:col-span-2 flex flex-col gap-1">
                 <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                  接口 Base URL
+                  接口地址
                 </label>
                 <SettingsInput
                   type="url"
@@ -956,14 +933,14 @@ const CloudAIConfigModal: React.FC<{
 
               <div className="flex flex-col gap-1">
                 <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-                  语义向量模型 {!supportsEmbeddings ? '（当前协议不支持）' : ''}
+                  搜索模型 {!supportsEmbeddings ? '（不支持）' : ''}
                 </label>
                 <SettingsInput
                   type="text"
                   disabled={!supportsEmbeddings}
                   value={draft.embeddingModel}
                   onChange={(e) => setDraft((p) => ({ ...p, embeddingModel: e.target.value }))}
-                  placeholder={supportsEmbeddings ? '可选' : 'Anthropic 协议不支持向量接口'}
+                  placeholder={supportsEmbeddings ? '可选' : '当前格式不支持'}
                   className="w-full font-mono"
                 />
               </div>
@@ -986,7 +963,7 @@ const CloudAIConfigModal: React.FC<{
             ) : (
               <XCircle size={14} className="shrink-0" />
             )}
-            <span className="break-all">{testResult.message}</span>
+            <span className="charkle-wrap-anywhere">{testResult.message}</span>
           </div>
         )}
       </div>
@@ -1062,7 +1039,6 @@ const TypeSafeConfigModal: React.FC<{
       }}
       width="md"
       title="进阶视觉定位配置"
-      subtitle="配置 TypeSafe API 密钥、灵敏度与按场景启用开关"
       footer={
         <>
           <SettingsButton
@@ -1088,7 +1064,7 @@ const TypeSafeConfigModal: React.FC<{
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <div className="flex flex-col gap-1">
             <label className="text-[11.5px] font-medium text-[var(--text-secondary)]">
-              接口 Base URL
+              接口地址
             </label>
             <SettingsInput
               type="url"
@@ -1104,17 +1080,14 @@ const TypeSafeConfigModal: React.FC<{
               模型名称
             </label>
             {typeSafeModels.length > 0 ? (
-              <SettingsSelect
+              <SettingsMenuPicker
+                ariaLabel="模型名称"
+                mono
+                className="w-full"
                 value={draft.model}
-                onChange={(e) => setDraft((p) => ({ ...p, model: e.target.value }))}
-                className="w-full font-mono"
-              >
-                {typeSafeModels.map((m) => (
-                  <option key={m.name} value={m.name}>
-                    {m.name}
-                  </option>
-                ))}
-              </SettingsSelect>
+                onChange={(model) => setDraft((p) => ({ ...p, model }))}
+                options={typeSafeModels.map((m) => ({ value: m.name, label: m.name }))}
+              />
             ) : (
               <SettingsInput
                 type="text"
@@ -1156,7 +1129,7 @@ const TypeSafeConfigModal: React.FC<{
         {/* Confidence / Padding / Presence Sliders */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 rounded-[10px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))]">
           <SliderField
-            label="置信度阈值"
+            label="识别严格度"
             value={draft.minConfidence}
             min={0.3}
             max={0.9}
@@ -1165,7 +1138,7 @@ const TypeSafeConfigModal: React.FC<{
             onChange={(v) => setDraft((p) => ({ ...p, minConfidence: v }))}
           />
           <SliderField
-            label="低置信外扩留白"
+            label="裁切留白"
             value={draft.lowConfidencePadding}
             min={0}
             max={0.15}
@@ -1174,7 +1147,7 @@ const TypeSafeConfigModal: React.FC<{
             onChange={(v) => setDraft((p) => ({ ...p, lowConfidencePadding: v }))}
           />
           <SliderField
-            label="主体判定阈值"
+            label="主体识别阈值"
             value={draft.minPresenceProbability}
             min={0.2}
             max={0.85}
@@ -1192,7 +1165,9 @@ const TypeSafeConfigModal: React.FC<{
                 <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
                   {sc.label}
                 </div>
-                <div className="text-[11px] text-[var(--text-secondary)]">{sc.desc}</div>
+                {sc.desc && (
+                  <div className="text-[11px] text-[var(--text-secondary)]">{sc.desc}</div>
+                )}
               </div>
               <SettingsSwitch
                 ariaLabel={sc.label}
@@ -1306,7 +1281,7 @@ const UsageBucketPanel: React.FC<{
 
     <div className="grid grid-cols-2 gap-2 text-center">
       <div className="p-2.5 rounded-[8px] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))]">
-        <div className="text-[10.5px] text-[var(--text-tertiary)]">今日 Tokens</div>
+        <div className="text-[10.5px] text-[var(--text-tertiary)]">今日用量</div>
         <div className="text-[15px] font-semibold text-[var(--text-primary)] tabular-nums mt-0.5">
           {formatTokenCount(bucket.todayTotalTokens)}
         </div>
@@ -1315,7 +1290,7 @@ const UsageBucketPanel: React.FC<{
         </div>
       </div>
       <div className="p-2.5 rounded-[8px] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))]">
-        <div className="text-[10.5px] text-[var(--text-tertiary)]">累计 Tokens</div>
+        <div className="text-[10.5px] text-[var(--text-tertiary)]">累计用量</div>
         <div className="text-[15px] font-semibold text-[var(--text-primary)] tabular-nums mt-0.5">
           {formatTokenCount(bucket.totalTokens)}
         </div>

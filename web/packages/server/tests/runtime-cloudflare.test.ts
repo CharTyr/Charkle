@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createDefaultAssetRecord,
   createDefaultDriveSyncConfig,
   createDefaultMoodboardDocument,
   labFromHex,
@@ -259,6 +260,47 @@ describe('Cloudflare Workers Runtime Seams, Dual-Runtime Parity & Import Audit',
 
     expect(visited.size).toBeGreaterThanOrEqual(20);
     expect(violations).toEqual([]);
+
+    // Also audit compiled dist/worker-exports.js when built!
+    const distRoot = path.resolve(here, '../dist');
+    const distEntry = path.join(distRoot, 'worker-exports.js');
+    if (fs.existsSync(distEntry)) {
+      const distVisited = new Set<string>();
+      const distViolations: string[] = [];
+      const walkDist = (filePath: string) => {
+        const abs = path.resolve(filePath);
+        if (distVisited.has(abs)) return;
+        distVisited.add(abs);
+        const rel = path.relative(distRoot, abs).replace(/\\/g, '/');
+        if (rel.includes('local-folder-transport') || /^runtime\/node-/.test(rel)) {
+          distViolations.push(`Forbidden Node-only dist module reached: ${rel}`);
+        }
+        const content = fs.readFileSync(abs, 'utf8');
+        let m: RegExpExecArray | null;
+        IMPORT_RE.lastIndex = 0;
+        while ((m = IMPORT_RE.exec(content)) !== null) {
+          const spec = m[1] ?? m[2];
+          if (!spec) continue;
+          if (FORBIDDEN_SPECIFIERS.has(spec) || spec.startsWith('node:')) {
+            distViolations.push(`${rel} imports forbidden specifier "${spec}"`);
+            continue;
+          }
+          if (spec.includes('local-folder-transport') || /runtime\/node-/.test(spec)) {
+            distViolations.push(`${rel} imports forbidden local module "${spec}"`);
+            continue;
+          }
+          if (spec.startsWith('.')) {
+            const resolved = path.resolve(path.dirname(abs), spec);
+            if (fs.existsSync(resolved) && fs.statSync(resolved).isFile() && resolved.startsWith(distRoot)) {
+              walkDist(resolved);
+            }
+          }
+        }
+      };
+      walkDist(distEntry);
+      expect(distVisited.size).toBeGreaterThanOrEqual(20);
+      expect(distViolations).toEqual([]);
+    }
   });
 
   it('hashes with Web Crypto PBKDF2-SHA256 (<=100k iterations) and verifies legacy Node scrypt hashes', async () => {
@@ -390,7 +432,20 @@ describe('Cloudflare Workers Runtime Seams, Dual-Runtime Parity & Import Audit',
     expect(cfThumbs.grid520?.byteLength).toBeGreaterThan(0);
     expect(cfThumbs.preview1400?.byteLength).toBeGreaterThan(0);
 
-    // Pure-JS lossless .charkleboard ZIP export without sharp
+    // P0-18 & P0-19: WorkersImageProcessor MUST NOT emit SVG-as-JPEG contact sheets or invalid .charkleboard ZIPs
+    const emptyContactSheet = await processor.renderContactSheet([
+      {
+        slot: 1,
+        asset: createDefaultAssetRecord({
+          id: toSwiftUUID('77777777-7777-4777-8777-777777777702'),
+          title: 'Edge Asset',
+          fileName: 'edge.jpg',
+        }),
+        thumbnailBytes: jpeg,
+      },
+    ]);
+    expect(emptyContactSheet).toBeNull();
+
     const board = createDefaultMoodboardDocument({
       id: toSwiftUUID('77777777-7777-4777-8777-777777777701'),
       title: 'Edge Moodboard',
@@ -415,16 +470,37 @@ describe('Cloudflare Workers Runtime Seams, Dual-Runtime Parity & Import Audit',
         },
       ],
     });
-    const zipResult = await processor.exportFigmaBridgeZip({
-      document: board,
-      assetsByID: new Map(),
-      loadOriginalBytes: async () => null,
-      loadThumbnailBytes: async () => null,
+    await expect(
+      processor.exportMoodboardImage({
+        document: board,
+        assetsByID: new Map(),
+        loadAssetBytes: async () => null,
+        format: 'png',
+      }),
+    ).rejects.toMatchObject({ code: 'CLIENT_EXPORT_REQUIRED', status: 501 });
+    await expect(
+      processor.exportFigmaBridgeZip({
+        document: board,
+        assetsByID: new Map(),
+        loadOriginalBytes: async () => null,
+        loadThumbnailBytes: async () => null,
+      }),
+    ).rejects.toMatchObject({ code: 'CLIENT_EXPORT_REQUIRED', status: 501 });
+
+    // P1-10: EXIF orientation 6 portrait JPEG reports upright swapped dimensions
+    const rotatedJpeg = await sharp({
+      create: { width: 400, height: 200, channels: 3, background: { r: 20, g: 40, b: 200 } },
+    })
+      .withMetadata({ orientation: 6 })
+      .jpeg()
+      .toBuffer();
+    const rotatedHeader = inspectImageHeader(rotatedJpeg);
+    expect(rotatedHeader).toEqual({
+      width: 200,
+      height: 400,
+      format: 'jpeg',
+      mimeType: 'image/jpeg',
     });
-    const parsedZip = await JSZip.loadAsync(zipResult.zipBytes);
-    expect(parsedZip.file('board.json')).not.toBeNull();
-    expect(parsedZip.file('migration-report.json')).not.toBeNull();
-    expect(zipResult.report.noteCount).toBe(1);
   });
 
   it('persists SecretVault AES-256-GCM ciphertext in ISqlDatabase via Web Crypto and stays wire-compatible with Node vault', async () => {
@@ -685,6 +761,77 @@ describe('Cloudflare Workers Runtime Seams, Dual-Runtime Parity & Import Audit',
       );
       expect(syncReport.uploadedOps).toBeGreaterThan(0);
       expect(sharedDrive.readTextByPath('CharkleEdge/.charkle/manifest.json')).not.toBeNull();
+
+      // 10. Workers export endpoints cleanly return 501 CLIENT_EXPORT_REQUIRED (P0-18/P0-19)
+      const boardCreateRes = await app.request('/api/v1/boards', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Edge Export Guard', seedAssetIDs: [asset.id] }),
+      });
+      expect(boardCreateRes.status).toBe(201);
+      const { board: edgeBoard } = (await boardCreateRes.json()) as { board: { id: string } };
+
+      const expImgRes = await app.request(`/api/v1/boards/${edgeBoard.id}/export/image`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format: 'png' }),
+      });
+      expect(expImgRes.status).toBe(501);
+      expect(((await expImgRes.json()) as { code: string }).code).toBe('CLIENT_EXPORT_REQUIRED');
+
+      const expFigmaRes = await app.request(`/api/v1/boards/${edgeBoard.id}/export/figma`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(expFigmaRes.status).toBe(501);
+      expect(((await expFigmaRes.json()) as { code: string }).code).toBe('CLIENT_EXPORT_REQUIRED');
+
+      // 11. Workers Cloud AI curation NEVER sends SVG XML mislabeled as image/jpeg (P0-19)
+      const { MoodboardAgentHarness } = await import('../src/intelligence/moodboard-agent-harness.js');
+      const { FakeCloudAIProvider } = await import('../src/intelligence/cloud-ai-provider.js');
+      let receivedImagesCount = -1;
+      const harness = new MoodboardAgentHarness(ctx.db, ctx.media);
+      const fakeProvider = new FakeCloudAIProvider({
+        jsonResponder: (_inst, _prompt, imagesCount) => {
+          receivedImagesCount = imagesCount;
+          return JSON.stringify({
+            boardTitle: 'Workers Curated',
+            boardSubtitle: 'Text + metadata grounded curation',
+            recommendedLayout: 'editorialMagazine',
+            sections: [
+              {
+                title: 'Hero',
+                tint: 'terracotta',
+                rationale: 'Warm palette',
+                picks: [{ slot: 1, weight: 2, reason: 'Matches brief' }],
+              },
+            ],
+            candidatePicks: [],
+            visualInsights: [],
+          });
+        },
+      });
+      const workersProposal = await harness.curate({
+        request: {
+          prompt: 'terracotta',
+          preferredCount: 4,
+          candidateCount: 4,
+          layoutStyle: 'editorialMagazine',
+          scopeFolderIDs: [],
+          requiredTags: [],
+          seedAssetIDs: [],
+          lockedAssetIDs: [],
+          excludedAssetIDs: [],
+          targetPalette: [],
+          includeCuratorNotes: true,
+          autoFocusDetailCrop: false,
+        },
+        provider: fakeProvider,
+      });
+      expect(receivedImagesCount).toBe(0);
+      expect(workersProposal.usedCloudAI).toBe(true);
+      expect(workersProposal.primaryMatches.length).toBeGreaterThanOrEqual(1);
     } finally {
       sql.close();
     }

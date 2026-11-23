@@ -560,4 +560,158 @@ describe('MoodboardExporter & FigmaBridgeExporter (.charkleboard)', () => {
 
     ctx.db.close();
   });
+
+  it('crops EXIF-rotated orientation-6 portrait JPEGs upright and preserves strict node Z-order interleaving in MoodboardExporter (P0-05, P1-16)', async () => {
+    // 1. EXIF orientation 6 portrait: raw 300x100 (left=red, right=blue) -> upright 100x300 (top=red, bottom=blue)
+    const rotatedJpeg = await sharp(
+      Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+          <rect x="0" y="0" width="150" height="100" fill="#E63946"/>
+          <rect x="150" y="0" width="150" height="100" fill="#1D4ED8"/>
+        </svg>`,
+      ),
+    )
+      .withMetadata({ orientation: 6 })
+      .jpeg({ quality: 95 })
+      .toBuffer();
+
+    const assetID = toSwiftUUID('88888888-8888-4888-8888-888888888801');
+    const asset = createDefaultAssetRecord({
+      id: assetID,
+      title: 'Portrait EXIF',
+      fileName: 'portrait.jpg',
+      pixelWidth: 100,
+      pixelHeight: 300,
+    });
+    const now = new Date().toISOString();
+    const exifDoc = createDefaultMoodboardDocument({
+      id: toSwiftUUID('88888888-8888-4888-8888-888888888890'),
+      title: 'EXIF Crop Test',
+      mode: { type: 'freeform' },
+      nodes: [
+        {
+          id: toSwiftUUID('88888888-8888-4888-8888-888888888811'),
+          kind: {
+            type: 'assetRef',
+            assetID,
+            // Bottom half of upright portrait -> MUST be blue!
+            crop: { x: 0.1, y: 0.6, width: 0.8, height: 0.35 },
+            weight: 1,
+            autoplayLoop: false,
+          },
+          frame: { x: 20, y: 20, width: 200, height: 200 },
+          zIndex: 1,
+          rotationDegrees: 0,
+          flipHorizontal: false,
+          flipVertical: false,
+          isLocked: false,
+          editorialOrder: 0,
+          updatedAt: now,
+        },
+      ],
+    });
+
+    const exifRendered = await MoodboardExporter.exportImage({
+      document: exifDoc,
+      assetsByID: { [assetID]: asset },
+      loadAssetBuffer: async () => rotatedJpeg,
+      format: 'png',
+      options: { scale: 1, includePaletteStrip: false, includeAnnotations: false, padding: 20 },
+    });
+    const { data: exifRaw, info: exifInfo } = await sharp(exifRendered.buffer)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    // Count strongly blue vs strongly red pixels in the rendered canvas:
+    // bottom half of upright orientation-6 portrait is blue (#1D4ED8), top half is red (#E63946).
+    let bluePixels = 0;
+    let redPixels = 0;
+    for (let p = 0; p < exifRaw.length; p += 4) {
+      const r = exifRaw[p];
+      const b = exifRaw[p + 2];
+      if (b > r + 60) bluePixels++;
+      else if (r > b + 60) redPixels++;
+    }
+    expect(bluePixels).toBeGreaterThan(5000);
+    expect(redPixels).toBeLessThan(100);
+
+    // 2. Z-order interleaving: Note(z=1) BEHIND Red Image(z=5), and Ink Note(z=10) ABOVE Red Image(z=5)
+    const redPng = await sharp({
+      create: { width: 300, height: 300, channels: 3, background: { r: 220, g: 30, b: 30 } },
+    })
+      .png()
+      .toBuffer();
+    const redAssetID = toSwiftUUID('88888888-8888-4888-8888-888888888802');
+    const redAsset = createDefaultAssetRecord({
+      id: redAssetID,
+      title: 'Solid Red',
+      fileName: 'red.png',
+      pixelWidth: 300,
+      pixelHeight: 300,
+    });
+    const zDoc = createDefaultMoodboardDocument({
+      id: toSwiftUUID('88888888-8888-4888-8888-888888888891'),
+      title: 'Z-Order Test',
+      mode: { type: 'freeform' },
+      nodes: [
+        {
+          id: toSwiftUUID('88888888-8888-4888-8888-888888888821'),
+          kind: { type: 'note', title: 'Behind', text: 'Should be covered', style: 'paper', fontSize: 16 },
+          frame: { x: 0, y: 0, width: 200, height: 200 },
+          zIndex: 1,
+          rotationDegrees: 0,
+          flipHorizontal: false,
+          flipVertical: false,
+          isLocked: false,
+          editorialOrder: 0,
+          updatedAt: now,
+        },
+        {
+          id: toSwiftUUID('88888888-8888-4888-8888-888888888822'),
+          kind: { type: 'assetRef', assetID: redAssetID, crop: null, weight: 1, autoplayLoop: false },
+          frame: { x: 0, y: 0, width: 300, height: 200 },
+          zIndex: 5,
+          rotationDegrees: 0,
+          flipHorizontal: false,
+          flipVertical: false,
+          isLocked: false,
+          editorialOrder: 1,
+          updatedAt: now,
+        },
+        {
+          id: toSwiftUUID('88888888-8888-4888-8888-888888888823'),
+          kind: { type: 'note', title: 'Above', text: 'Should cover right side', style: 'ink', fontSize: 16 },
+          frame: { x: 180, y: 0, width: 120, height: 200 },
+          zIndex: 10,
+          rotationDegrees: 0,
+          flipHorizontal: false,
+          flipVertical: false,
+          isLocked: false,
+          editorialOrder: 2,
+          updatedAt: now,
+        },
+      ],
+    });
+    const zRendered = await MoodboardExporter.exportImage({
+      document: zDoc,
+      assetsByID: { [redAssetID]: redAsset },
+      loadAssetBuffer: async () => redPng,
+      format: 'png',
+      options: { scale: 1, includePaletteStrip: false, includeAnnotations: false, padding: 20 },
+    });
+    const { data: zRaw, info: zInfo } = await sharp(zRendered.buffer)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    // Canvas has offsetX = 20, offsetY = 20 + 48 = 68; red image occupies x: 20..320, y: 68..268.
+    // Left region (x = 100, y = 168): z=5 red image MUST occlude z=1 paper note -> red dominant!
+    const leftIdx = (168 * zInfo.width + 100) * 4;
+    expect(zRaw[leftIdx]).toBeGreaterThan(170);
+    expect(zRaw[leftIdx + 1]).toBeLessThan(80);
+
+    // Right region (x = 250, y = 168): z=10 dark ink note (x: 200..320) MUST sit ABOVE z=5 red image -> dark low R!
+    const rightIdx = (168 * zInfo.width + 250) * 4;
+    expect(zRaw[rightIdx]).toBeLessThan(70);
+  });
 });

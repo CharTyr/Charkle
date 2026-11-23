@@ -1,5 +1,7 @@
-import React from 'react';
-import { Plus, Puzzle, Terminal } from 'lucide-react';
+import React, { useMemo, useRef, useState } from 'react';
+import { ChevronDown, Plus, Puzzle, Terminal } from 'lucide-react';
+import { buildFolderPathsMap, flattenFolderTree } from '@charkle/shared';
+import { CharkleFolderIcon, FolderHierarchyMenu, Popover } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import {
@@ -7,9 +9,11 @@ import {
   SettingsCardDivider,
   SettingsRow,
   SettingsSection,
-  SettingsSelect,
+  SettingsSegmented,
 } from './SettingsChrome';
 import { KEYBOARD_SHORTCUTS, SHORTCUT_SCOPES } from './shortcuts';
+
+type CaptureTargetKind = 'inbox' | 'folder' | 'activeMoodboard';
 
 export const CaptureShortcutsSettingsPane: React.FC = () => {
   const captureTarget = useCoordinatorStore((s) => s.captureTarget);
@@ -19,44 +23,94 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
   const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
   const folders = useLibraryStore((s) => s.folders);
 
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const folderTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const flattenedFolders = useMemo(() => flattenFolderTree(folders), [folders]);
+  const folderPaths = useMemo(() => buildFolderPathsMap(folders), [folders]);
+
+  const selectedFolder = useMemo(
+    () =>
+      captureTarget.type === 'folder'
+        ? folders.find((f) => f.id === captureTarget.folderID) ?? null
+        : null,
+    [captureTarget, folders],
+  );
+
+  const targetOptions = useMemo<ReadonlyArray<{ id: CaptureTargetKind; label: string }>>(() => {
+    const base: Array<{ id: CaptureTargetKind; label: string }> = [
+      { id: 'inbox', label: '收件箱' },
+    ];
+    if (folders.length > 0) {
+      base.push({ id: 'folder', label: '指定文件夹' });
+    }
+    base.push({ id: 'activeMoodboard', label: '活跃情绪板' });
+    return base;
+  }, [folders.length]);
+
   return (
     <div className="flex flex-col gap-[22px]">
       {/* 应用内采集 */}
       <SettingsSection title="应用内采集">
-        <SettingsRow
-          title="默认采集去向"
-          subtitle="通过全窗口拖放、全局 ⌘V 粘贴或 ⇧⌘N 快速采集时的默认入库位置"
-        >
-          <SettingsSelect
-            aria-label="默认采集去向"
+        <SettingsRow title="默认采集去向">
+          <SettingsSegmented
+            ariaLabel="默认采集去向"
+            options={targetOptions}
             value={captureTarget.type}
-            onChange={(e) => {
-              const val = e.target.value;
+            onChange={(val) => {
               if (val === 'inbox') setCaptureTarget({ type: 'inbox' });
               else if (val === 'activeMoodboard') setCaptureTarget({ type: 'activeMoodboard' });
-              else if (val === 'folder' && folders[0]) {
-                setCaptureTarget({ type: 'folder', folderID: folders[0].id });
+              else if (val === 'folder' && flattenedFolders[0]) {
+                setCaptureTarget({ type: 'folder', folderID: flattenedFolders[0].id });
               }
             }}
-          >
-            <option value="inbox">收件箱</option>
-            {folders.length > 0 && <option value="folder">指定文件夹</option>}
-            <option value="activeMoodboard">当前活跃情绪板</option>
-          </SettingsSelect>
+          />
 
-          {captureTarget.type === 'folder' && folders.length > 0 && (
-            <SettingsSelect
-              aria-label="选择目标文件夹"
-              value={captureTarget.folderID}
-              onChange={(e) => setCaptureTarget({ type: 'folder', folderID: e.target.value })}
-              className="max-w-[140px]"
-            >
-              {folders.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.name}
-                </option>
-              ))}
-            </SettingsSelect>
+          {captureTarget.type === 'folder' && flattenedFolders.length > 0 && (
+            <>
+              <button
+                ref={folderTriggerRef}
+                type="button"
+                aria-label="选择目标文件夹"
+                aria-haspopup="menu"
+                aria-expanded={folderPickerOpen}
+                onClick={() => setFolderPickerOpen((v) => !v)}
+                className="charkle-pressable h-[30px] max-w-[180px] px-2.5 rounded-[8px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] hover:border-[var(--border-strong)] inline-flex items-center gap-1.5 text-[12px] text-[var(--text-primary)] cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]"
+              >
+                <CharkleFolderIcon
+                  colorHex={selectedFolder?.colorHex}
+                  customSymbol={selectedFolder?.customSymbol}
+                  size={14}
+                />
+                <span className="truncate">
+                  {selectedFolder
+                    ? folderPaths[selectedFolder.id] || selectedFolder.name
+                    : '选择文件夹'}
+                </span>
+                <ChevronDown size={12} className="text-[var(--text-tertiary)] shrink-0" />
+              </button>
+
+              <Popover
+                open={folderPickerOpen}
+                onOpenChange={setFolderPickerOpen}
+                anchorEl={folderTriggerRef.current}
+                placement="bottom-end"
+              >
+                <FolderHierarchyMenu
+                  folders={folders}
+                  includeInbox={false}
+                  highlightSelection
+                  selectedFolderID={captureTarget.folderID}
+                  parentSelfPrefix="存入"
+                  onSelectFolder={(folderID) => {
+                    if (folderID) {
+                      setCaptureTarget({ type: 'folder', folderID });
+                    }
+                    setFolderPickerOpen(false);
+                  }}
+                />
+              </Popover>
+            </>
           )}
 
           <SettingsButton
@@ -73,10 +127,7 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
 
         <SettingsCardDivider />
 
-        <SettingsRow
-          title="全窗口拖放 · ⌘V 剪贴板粘贴 · ⇧⌘N 弹窗"
-          subtitle="拖入本地文件或直接粘贴截图、网页、推文、GitHub 与色卡即可入库；跨网页采集可配合浏览器扩展"
-        >
+        <SettingsRow title="应用内采集" subtitle="支持拖放、⌘V 粘贴或 ⇧⌘N">
           <SettingsButton variant="secondary" onClick={() => setSettingsTab('extensions')}>
             <Puzzle size={12} />
             安装浏览器扩展
@@ -93,7 +144,7 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
             {entries.map((entry, idx) => (
               <React.Fragment key={entry.title}>
                 {idx > 0 && <SettingsCardDivider />}
-                <SettingsRow title={entry.title} subtitle={entry.description}>
+                <SettingsRow title={entry.title}>
                   <div className="flex items-center gap-1 shrink-0">
                     {entry.keys.map((keyLabel, kIdx) => (
                       <kbd
@@ -113,7 +164,7 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
 
       <div className="flex items-center gap-1.5 px-1 text-[11px] text-[var(--settings-label,var(--text-tertiary))]">
         <Terminal size={12} />
-        <span>在 Windows / Linux 上可使用 Ctrl 替代 ⌘（Command）。</span>
+        <span>Windows / Linux 用 Ctrl 替代 ⌘</span>
       </div>
     </div>
   );

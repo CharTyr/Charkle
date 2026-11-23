@@ -115,7 +115,7 @@ function renderTargetControls() {
   if (folderOptions.length === 0) {
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = '暂无文件夹（将存入收件箱）';
+    opt.textContent = '暂无文件夹';
     folderSelect.appendChild(opt);
     folderSelect.disabled = true;
   } else {
@@ -143,7 +143,7 @@ function renderTargetControls() {
   if (boards.length === 0) {
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = '暂无情绪板（将存入收件箱）';
+    opt.textContent = '暂无情绪板';
     boardSelect.appendChild(opt);
     boardSelect.disabled = true;
   } else {
@@ -351,9 +351,9 @@ function renderImagesGrid() {
     grid.hidden = true;
     emptyEl.hidden = false;
     if (!isCapturablePageUrl(state.activeTab?.url)) {
-      emptyText.textContent = '浏览器内部页面不支持扫描图片，可在任意普通网页使用。';
+      emptyText.textContent = '此页面不支持扫描图片';
     } else {
-      emptyText.textContent = '未发现大于 64px 的图片，可滚动加载页面后点击「重扫」。';
+      emptyText.textContent = '未发现图片，可滚动页面后重扫';
     }
     summaryEl.textContent = '发现 0 张图片';
     updateImagesSelectionUI();

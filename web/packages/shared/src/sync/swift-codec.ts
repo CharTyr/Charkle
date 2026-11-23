@@ -1,9 +1,11 @@
 import type {
+  AIGenerationMetadata,
   AssetRecord,
   AssetRichMetadata,
   FolderRecord,
   GitHubRepoMetadata,
   ISODateString,
+  PhotoExifMetadata,
   UUID,
 } from '../models/core.js';
 import type { AssetVector, EmbeddingPrecision } from '../models/media.js';
@@ -511,12 +513,203 @@ export function decodeSwiftGitHubRepoMetadata(raw: unknown): GitHubRepoMetadata 
   };
 }
 
+export function encodeSwiftPhotoExifMetadata(exif: PhotoExifMetadata): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (exif.cameraMake != null) out.cameraMake = exif.cameraMake;
+  if (exif.cameraModel != null) out.cameraModel = exif.cameraModel;
+  if (exif.lensModel != null) out.lensModel = exif.lensModel;
+  if (exif.capturedAt != null) out.capturedAt = exif.capturedAt;
+  if (exif.exposureTime != null) out.exposureTime = exif.exposureTime;
+  if (exif.fNumber != null) out.fNumber = exif.fNumber;
+  if (exif.iso != null) out.iso = exif.iso;
+  if (exif.focalLengthMM != null) out.focalLengthMM = exif.focalLengthMM;
+  if (exif.focalLength35mm != null) out.focalLength35mm = exif.focalLength35mm;
+  if (exif.exposureBiasEV != null) out.exposureBiasEV = exif.exposureBiasEV;
+  if (exif.meteringMode != null) out.meteringMode = exif.meteringMode;
+  if (exif.flashFired != null) out.flashFired = exif.flashFired;
+  if (exif.whiteBalance != null) out.whiteBalance = exif.whiteBalance;
+  if (exif.colorProfile != null) out.colorProfile = exif.colorProfile;
+  if (exif.bitDepth != null) out.bitDepth = exif.bitDepth;
+  if (exif.dpiWidth != null) out.dpiWidth = exif.dpiWidth;
+  if (exif.software != null) out.software = exif.software;
+  if (exif.artist != null) out.artist = exif.artist;
+  if (exif.copyright != null) out.copyright = exif.copyright;
+  if (exif.latitude != null) out.latitude = exif.latitude;
+  if (exif.longitude != null) out.longitude = exif.longitude;
+  if (exif.altitudeMeters != null) out.altitudeMeters = exif.altitudeMeters;
+  return out;
+}
+
+export function decodeSwiftPhotoExifMetadata(raw: unknown): PhotoExifMetadata {
+  const obj = asRecord(raw, 'PhotoExifMetadata');
+  return {
+    cameraMake: typeof obj.cameraMake === 'string' ? obj.cameraMake : null,
+    cameraModel: typeof obj.cameraModel === 'string' ? obj.cameraModel : null,
+    lensModel: typeof obj.lensModel === 'string' ? obj.lensModel : null,
+    capturedAt: typeof obj.capturedAt === 'string' ? obj.capturedAt : null,
+    exposureTime: typeof obj.exposureTime === 'string' ? obj.exposureTime : null,
+    fNumber: typeof obj.fNumber === 'number' ? obj.fNumber : null,
+    iso: typeof obj.iso === 'number' ? Math.round(obj.iso) : null,
+    focalLengthMM: typeof obj.focalLengthMM === 'number' ? obj.focalLengthMM : null,
+    focalLength35mm: typeof obj.focalLength35mm === 'number' ? Math.round(obj.focalLength35mm) : null,
+    exposureBiasEV: typeof obj.exposureBiasEV === 'number' ? obj.exposureBiasEV : null,
+    meteringMode: typeof obj.meteringMode === 'string' ? obj.meteringMode : null,
+    flashFired: typeof obj.flashFired === 'boolean' ? obj.flashFired : null,
+    whiteBalance: typeof obj.whiteBalance === 'string' ? obj.whiteBalance : null,
+    colorProfile: typeof obj.colorProfile === 'string' ? obj.colorProfile : null,
+    bitDepth: typeof obj.bitDepth === 'number' ? Math.round(obj.bitDepth) : null,
+    dpiWidth: typeof obj.dpiWidth === 'number' ? Math.round(obj.dpiWidth) : null,
+    software: typeof obj.software === 'string' ? obj.software : null,
+    artist: typeof obj.artist === 'string' ? obj.artist : null,
+    copyright: typeof obj.copyright === 'string' ? obj.copyright : null,
+    latitude: typeof obj.latitude === 'number' ? obj.latitude : null,
+    longitude: typeof obj.longitude === 'number' ? obj.longitude : null,
+    altitudeMeters: typeof obj.altitudeMeters === 'number' ? obj.altitudeMeters : null,
+  };
+}
+
+export function encodeSwiftAIGenerationMetadata(ai: AIGenerationMetadata): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    extraParameters: ai.extraParameters ?? {},
+    loras: ai.loras ?? [],
+  };
+  if (ai.generator != null) out.generator = ai.generator;
+  if (ai.prompt != null) out.prompt = ai.prompt;
+  if (ai.negativePrompt != null) out.negativePrompt = ai.negativePrompt;
+  if (ai.modelName != null) out.modelName = ai.modelName;
+  if (ai.modelHash != null) out.modelHash = ai.modelHash;
+  if (ai.sampler != null) out.sampler = ai.sampler;
+  if (ai.scheduler != null) out.scheduler = ai.scheduler;
+  if (ai.steps != null) out.steps = ai.steps;
+  if (ai.cfgScale != null) out.cfgScale = ai.cfgScale;
+  if (ai.seed != null) out.seed = ai.seed;
+  if (ai.sizeText != null) out.sizeText = ai.sizeText;
+  if (ai.clipSkip != null) out.clipSkip = ai.clipSkip;
+  if (ai.rawParameters != null) out.rawParameters = ai.rawParameters;
+  return out;
+}
+
+export function decodeSwiftAIGenerationMetadata(raw: unknown): AIGenerationMetadata {
+  const obj = asRecord(raw, 'AIGenerationMetadata');
+  const extraParameters: Record<string, string> = {};
+  if (obj.extraParameters && typeof obj.extraParameters === 'object' && !Array.isArray(obj.extraParameters)) {
+    for (const [k, v] of Object.entries(obj.extraParameters as Record<string, unknown>)) {
+      if (v != null) extraParameters[k] = String(v);
+    }
+  }
+  return {
+    generator: typeof obj.generator === 'string' ? obj.generator : null,
+    prompt: typeof obj.prompt === 'string' ? obj.prompt : null,
+    negativePrompt: typeof obj.negativePrompt === 'string' ? obj.negativePrompt : null,
+    modelName: typeof obj.modelName === 'string' ? obj.modelName : null,
+    modelHash: typeof obj.modelHash === 'string' ? obj.modelHash : null,
+    sampler: typeof obj.sampler === 'string' ? obj.sampler : null,
+    scheduler: typeof obj.scheduler === 'string' ? obj.scheduler : null,
+    steps: typeof obj.steps === 'number' ? Math.round(obj.steps) : null,
+    cfgScale: typeof obj.cfgScale === 'number' ? obj.cfgScale : null,
+    seed: typeof obj.seed === 'string' ? obj.seed : null,
+    sizeText: typeof obj.sizeText === 'string' ? obj.sizeText : null,
+    clipSkip: typeof obj.clipSkip === 'number' ? Math.round(obj.clipSkip) : null,
+    loras: Array.isArray(obj.loras) ? obj.loras.map(String) : [],
+    extraParameters,
+    rawParameters: typeof obj.rawParameters === 'string' ? obj.rawParameters : null,
+  };
+}
+
+export function encodeSwiftSocialMediaAttachment(
+  att: NonNullable<AssetRichMetadata['socialPost']>['attachments'][number],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    id: att.id,
+    kind: att.kind,
+    url: att.url,
+  };
+  if (att.thumbnailURL != null) out.thumbnailURL = att.thumbnailURL;
+  return out;
+}
+
+export function decodeSwiftSocialMediaAttachment(
+  raw: unknown,
+): NonNullable<AssetRichMetadata['socialPost']>['attachments'][number] {
+  const obj = asRecord(raw, 'SocialMediaAttachment');
+  const kind = obj.kind === 'video' || obj.kind === 'gif' ? obj.kind : 'photo';
+  return {
+    id: String(obj.id ?? ''),
+    kind,
+    url: String(obj.url ?? ''),
+    thumbnailURL: typeof obj.thumbnailURL === 'string' ? obj.thumbnailURL : null,
+  };
+}
+
+export function encodeSwiftSocialPostMetadata(
+  post: NonNullable<AssetRichMetadata['socialPost']>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    attachments: (post.attachments ?? []).map(encodeSwiftSocialMediaAttachment),
+    authorHandle: post.authorHandle,
+    authorName: post.authorName,
+    bodyText: post.bodyText,
+    hasVideo: Boolean(post.hasVideo),
+    mediaFetchFailed: Boolean(post.mediaFetchFailed),
+    mediaThumbnailURLs: post.mediaThumbnailURLs ?? [],
+    mediaURLs: post.mediaURLs ?? [],
+    originalURL: post.originalURL,
+    platform: post.platform,
+  };
+  if (post.authorAvatarURL != null) out.authorAvatarURL = post.authorAvatarURL;
+  if (post.publishedAtText != null) out.publishedAtText = post.publishedAtText;
+  if (post.quotedAuthor != null) out.quotedAuthor = post.quotedAuthor;
+  if (post.quotedText != null) out.quotedText = post.quotedText;
+  if (post.articleTitle != null) out.articleTitle = post.articleTitle;
+  if (post.videoURL != null) out.videoURL = post.videoURL;
+  if (post.replyCount != null) out.replyCount = post.replyCount;
+  if (post.repostCount != null) out.repostCount = post.repostCount;
+  if (post.likeCount != null) out.likeCount = post.likeCount;
+  if (post.viewCount != null) out.viewCount = post.viewCount;
+  return out;
+}
+
+export function decodeSwiftSocialPostMetadata(
+  raw: unknown,
+): NonNullable<AssetRichMetadata['socialPost']> {
+  const obj = asRecord(raw, 'SocialPostMetadata');
+  const platform = obj.platform === 'threads' || obj.platform === 'bluesky' ? obj.platform : 'x';
+  return {
+    platform,
+    authorName: String(obj.authorName ?? ''),
+    authorHandle: String(obj.authorHandle ?? ''),
+    authorAvatarURL: typeof obj.authorAvatarURL === 'string' ? obj.authorAvatarURL : null,
+    publishedAtText: typeof obj.publishedAtText === 'string' ? obj.publishedAtText : null,
+    bodyText: String(obj.bodyText ?? ''),
+    quotedAuthor: typeof obj.quotedAuthor === 'string' ? obj.quotedAuthor : null,
+    quotedText: typeof obj.quotedText === 'string' ? obj.quotedText : null,
+    articleTitle: typeof obj.articleTitle === 'string' ? obj.articleTitle : null,
+    mediaURLs: Array.isArray(obj.mediaURLs) ? obj.mediaURLs.map(String) : [],
+    mediaThumbnailURLs: Array.isArray(obj.mediaThumbnailURLs)
+      ? obj.mediaThumbnailURLs.map(String)
+      : [],
+    attachments: Array.isArray(obj.attachments)
+      ? obj.attachments.map(decodeSwiftSocialMediaAttachment)
+      : [],
+    hasVideo: Boolean(obj.hasVideo),
+    videoURL: typeof obj.videoURL === 'string' ? obj.videoURL : null,
+    replyCount: typeof obj.replyCount === 'number' ? Math.round(obj.replyCount) : null,
+    repostCount: typeof obj.repostCount === 'number' ? Math.round(obj.repostCount) : null,
+    likeCount: typeof obj.likeCount === 'number' ? Math.round(obj.likeCount) : null,
+    viewCount: typeof obj.viewCount === 'number' ? Math.round(obj.viewCount) : null,
+    originalURL: String(obj.originalURL ?? ''),
+    mediaFetchFailed: Boolean(obj.mediaFetchFailed),
+  };
+}
+
 export function encodeSwiftAssetRichMetadata(meta: AssetRichMetadata): Record<string, unknown> {
   const out: Record<string, unknown> = {
     isMarkdown: meta.isMarkdown,
   };
   if (meta.githubRepo != null) out.githubRepo = encodeSwiftGitHubRepoMetadata(meta.githubRepo);
-  if (meta.socialPost != null) out.socialPost = meta.socialPost;
+  if (meta.socialPost != null) out.socialPost = encodeSwiftSocialPostMetadata(meta.socialPost);
+  if (meta.photoExif != null) out.photoExif = encodeSwiftPhotoExifMetadata(meta.photoExif);
+  if (meta.aiGeneration != null) out.aiGeneration = encodeSwiftAIGenerationMetadata(meta.aiGeneration);
   if (meta.textExcerpt != null) out.textExcerpt = meta.textExcerpt;
   if (meta.model3DFormat != null) out.model3DFormat = meta.model3DFormat;
   return out;
@@ -526,7 +719,9 @@ export function decodeSwiftAssetRichMetadata(raw: unknown): AssetRichMetadata {
   const obj = asRecord(raw, 'AssetRichMetadata');
   return {
     githubRepo: obj.githubRepo != null ? decodeSwiftGitHubRepoMetadata(obj.githubRepo) : null,
-    socialPost: (obj.socialPost as AssetRichMetadata['socialPost']) ?? null,
+    socialPost: obj.socialPost != null ? decodeSwiftSocialPostMetadata(obj.socialPost) : null,
+    photoExif: obj.photoExif != null ? decodeSwiftPhotoExifMetadata(obj.photoExif) : null,
+    aiGeneration: obj.aiGeneration != null ? decodeSwiftAIGenerationMetadata(obj.aiGeneration) : null,
     textExcerpt: typeof obj.textExcerpt === 'string' ? obj.textExcerpt : null,
     isMarkdown: typeof obj.isMarkdown === 'boolean' ? obj.isMarkdown : false,
     model3DFormat: typeof obj.model3DFormat === 'string' ? obj.model3DFormat : null,
@@ -1078,6 +1273,14 @@ export const SwiftWireCodec = {
   decodeMoodboardDocument: decodeSwiftMoodboardDocument,
   stringifyMoodboardDocument: stringifySwiftMoodboardDocument,
   parseMoodboardDocument: parseSwiftMoodboardDocument,
+  encodePhotoExifMetadata: encodeSwiftPhotoExifMetadata,
+  decodePhotoExifMetadata: decodeSwiftPhotoExifMetadata,
+  encodeSocialPostMetadata: encodeSwiftSocialPostMetadata,
+  decodeSocialPostMetadata: decodeSwiftSocialPostMetadata,
+  encodeAIGenerationMetadata: encodeSwiftAIGenerationMetadata,
+  decodeAIGenerationMetadata: decodeSwiftAIGenerationMetadata,
+  encodeAssetRichMetadata: encodeSwiftAssetRichMetadata,
+  decodeAssetRichMetadata: decodeSwiftAssetRichMetadata,
   encodeAssetRecord: encodeSwiftAssetRecord,
   decodeAssetRecord: decodeSwiftAssetRecord,
   encodeFolderRecord: encodeSwiftFolderRecord,

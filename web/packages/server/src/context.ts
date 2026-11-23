@@ -102,6 +102,7 @@ export interface IMediaPipeline {
     preprocessed?: ClientPreprocessedMedia | null,
   ): Promise<MediaIngestResult>;
   refreshRichAsset(asset: AssetRecord): Promise<MediaIngestResult>;
+  hydrateImageMetadata(asset: AssetRecord): Promise<AssetRecord | null>;
   extractSocialMedia(
     postAsset: AssetRecord,
     attachmentIndex?: number | null,
@@ -121,7 +122,7 @@ export interface IMediaPipeline {
   getCacheStats(db: LibraryDatabase): Promise<CacheStats>;
   setCacheBudgetBytes(bytes: number): void;
   getCacheBudgetBytes(): number;
-  evictCacheNow(db: LibraryDatabase): Promise<CacheStats>;
+  evictCacheNow(db: LibraryDatabase, keepingIDs?: ReadonlySet<UUID>): Promise<CacheStats>;
 }
 
 /**

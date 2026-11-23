@@ -1,8 +1,33 @@
 import { describe, expect, it } from 'vitest';
 import { labFromHex } from '../src/color/lab.js';
-import { createDefaultAssetRecord } from '../src/models/core.js';
-import type { FolderRecord } from '../src/models/core.js';
+import {
+  DEFAULT_INSPECTOR_SECTION_ORDER,
+  buildFolderPathsMap,
+  buildFolderTree,
+  createDefaultAssetRecord,
+  flattenFolderTree,
+  folderNodeContains,
+  formatPhotoExifAperture,
+  formatPhotoExifFocalLength,
+  getPhotoExifCameraDisplayName,
+  getPhotoExifExposureSummary,
+  hasMeaningfulCameraExif,
+  inspectorInfoSectionTitle,
+  isAIGenerationEmpty,
+  isPhotoExifEmpty,
+  moveInspectorSection,
+  moveInspectorSectionToBottom,
+  moveInspectorSectionToTop,
+  normalizeInspectorSectionOrder,
+  stepInspectorSection,
+} from '../src/models/core.js';
+import type { AIGenerationMetadata, FolderRecord, PhotoExifMetadata } from '../src/models/core.js';
 import { createDefaultAutoLayoutConfig, createDefaultMoodboardDocument } from '../src/models/moodboard.js';
+import {
+  createDefaultExternalAgentConfig,
+  externalAgentAllowsRead,
+  externalAgentAllowsWrite,
+} from '../src/models/sync.js';
 import type { SyncLogLine, SyncManifest } from '../src/models/sync.js';
 import {
   COCOA_REFERENCE_EPOCH_UNIX_SECONDS,
@@ -392,5 +417,162 @@ describe('SwiftWireCodec (/.charkle/ bidirectional macOS sync)', () => {
       title: 'New',
       folderID: null,
     });
+  });
+
+  it('round-trips PhotoExifMetadata and AIGenerationMetadata through SwiftWireCodec', () => {
+    const exif: PhotoExifMetadata = {
+      cameraMake: 'FUJIFILM',
+      cameraModel: 'X-T5',
+      lensModel: 'XF23mmF1.4 R LM WR',
+      capturedAt: '2026-11-20 15:30:12 (+08:00)',
+      exposureTime: '1/250s',
+      fNumber: 1.8,
+      iso: 400,
+      focalLengthMM: 23,
+      focalLength35mm: 35,
+      exposureBiasEV: -0.33,
+      meteringMode: '评价测光',
+      flashFired: false,
+      whiteBalance: '自动',
+      colorProfile: 'Display P3',
+      bitDepth: 16,
+      dpiWidth: 300,
+      software: 'Capture One 23',
+      artist: 'Studio Photographer',
+      copyright: '© 2026 Studio',
+      latitude: 31.2304,
+      longitude: 121.4737,
+      altitudeMeters: 12.5,
+    };
+
+    expect(getPhotoExifCameraDisplayName(exif)).toBe('FUJIFILM X-T5');
+    expect(getPhotoExifCameraDisplayName({ cameraMake: 'Sony', cameraModel: 'Sony A7RV' })).toBe('Sony A7RV');
+    expect(formatPhotoExifAperture(exif)).toBe('f/1.8');
+    expect(formatPhotoExifAperture({ fNumber: 2.0 })).toBe('f/2');
+    expect(formatPhotoExifFocalLength(exif)).toBe('23mm（等效 35mm）');
+    expect(getPhotoExifExposureSummary(exif)).toBe('23mm · f/1.8 · 1/250s · ISO 400');
+    expect(hasMeaningfulCameraExif(exif)).toBe(true);
+    expect(hasMeaningfulCameraExif({ colorProfile: 'sRGB', bitDepth: 8, dpiWidth: 72 })).toBe(false);
+    expect(isPhotoExifEmpty({ colorProfile: 'sRGB', bitDepth: 8, dpiWidth: 72 })).toBe(false);
+    expect(isPhotoExifEmpty({})).toBe(true);
+
+    const ai: AIGenerationMetadata = {
+      generator: 'Stable Diffusion (A1111)',
+      prompt: 'architectural concrete pavilion, soft daylight',
+      negativePrompt: 'blurry, lowres',
+      modelName: 'juggernautXL_v9',
+      modelHash: 'abc12345',
+      sampler: 'DPM++ 2M',
+      scheduler: 'Karras',
+      steps: 30,
+      cfgScale: 6.5,
+      seed: '42424242',
+      sizeText: '1024x1344',
+      clipSkip: 2,
+      loras: ['film_grain:0.7'],
+      extraParameters: { Denoising: '0.45' },
+      rawParameters: 'architectural concrete pavilion, soft daylight\nNegative prompt: blurry, lowres',
+    };
+    expect(isAIGenerationEmpty(ai)).toBe(false);
+    expect(isAIGenerationEmpty({ loras: [], extraParameters: {} })).toBe(true);
+
+    const asset = createDefaultAssetRecord({
+      id: '550E8400-E29B-41D4-A716-446655440099',
+      title: 'Studio Render',
+      fileName: 'render.png',
+      createdAt: '2026-11-22T10:00:00.000Z',
+      updatedAt: '2026-11-22T10:00:00.000Z',
+      richMetadata: {
+        isMarkdown: false,
+        photoExif: exif,
+        aiGeneration: ai,
+      },
+    });
+
+    const wire = SwiftWireCodec.encodeAssetRecord(asset);
+    const decoded = SwiftWireCodec.decodeAssetRecord(wire);
+    expect(decoded.richMetadata?.photoExif).toEqual(exif);
+    expect(decoded.richMetadata?.aiGeneration).toEqual(ai);
+
+    // SyncFields round-trip for richMetadata
+    const encodedFields = SwiftWireCodec.encodeSyncFields('asset', {
+      richMetadata: asset.richMetadata,
+    });
+    const decodedFields = SwiftWireCodec.decodeSyncFields('asset', encodedFields);
+    expect(decodedFields.richMetadata).toEqual(decoded.richMetadata);
+  });
+
+  it('builds cycle-safe FolderHierarchyNode trees, InspectorInfoSection orders, and migrates ExternalAgentConfig', () => {
+    const now = '2026-11-22T10:00:00.000Z';
+    const folders: FolderRecord[] = [
+      { id: 'f-root', name: 'Branding', parentID: null, sortOrder: 1, assetCount: 2, createdAt: now, updatedAt: now },
+      { id: 'f-child', name: 'Logos', parentID: 'f-root', sortOrder: 0, assetCount: 5, createdAt: now, updatedAt: now },
+      { id: 'f-grand', name: '2026', parentID: 'f-child', sortOrder: 0, assetCount: 1, createdAt: now, updatedAt: now },
+      { id: 'f-orphan', name: 'Orphan', parentID: 'missing-id', sortOrder: 0, assetCount: 0, createdAt: now, updatedAt: now },
+      { id: 'f-cyc1', name: 'CycA', parentID: 'f-cyc2', sortOrder: 2, assetCount: 0, createdAt: now, updatedAt: now },
+      { id: 'f-cyc2', name: 'CycB', parentID: 'f-cyc1', sortOrder: 3, assetCount: 0, createdAt: now, updatedAt: now },
+    ];
+
+    const tree = buildFolderTree(folders);
+    expect(tree[0].id).toBe('f-orphan');
+    expect(tree[1].id).toBe('f-root');
+    expect(tree[1].children[0].id).toBe('f-child');
+    expect(tree[1].children[0].children[0].depth).toBe(2);
+    expect(folderNodeContains(tree[1], 'f-grand')).toBe(true);
+    expect(folderNodeContains(tree[1], 'f-orphan')).toBe(false);
+    expect(flattenFolderTree(folders).map((n) => n.id)).toContain('f-cyc1');
+
+    const paths = buildFolderPathsMap(folders);
+    expect(paths['f-grand']).toBe('Branding/Logos/2026');
+    expect(paths['f-orphan']).toBe('Orphan');
+
+    // InspectorInfoSection ordering
+    const normalized = normalizeInspectorSectionOrder(['photoExif', 'invalid', 'photoExif', 'aiGeneration']);
+    expect(normalized[0]).toBe('photoExif');
+    expect(normalized[1]).toBe('aiGeneration');
+    expect(normalized).toHaveLength(DEFAULT_INSPECTOR_SECTION_ORDER.length);
+    expect(inspectorInfoSectionTitle('aiGeneration')).toBe('AI 生图信息');
+
+    const moved = moveInspectorSection('mediaSpecs', 'previewIdentity', DEFAULT_INSPECTOR_SECTION_ORDER);
+    expect(moved[0]).toBe('mediaSpecs');
+    expect(moveInspectorSectionToTop('githubRepo', DEFAULT_INSPECTOR_SECTION_ORDER)[0]).toBe('githubRepo');
+    expect(moveInspectorSectionToBottom('previewIdentity', DEFAULT_INSPECTOR_SECTION_ORDER).at(-1)).toBe('previewIdentity');
+    const stepped = stepInspectorSection(
+      'quickActions',
+      1,
+      ['previewIdentity', 'quickActions', 'mediaSpecs'],
+      DEFAULT_INSPECTOR_SECTION_ORDER,
+    );
+    expect(stepped.indexOf('quickActions')).toBeGreaterThan(stepped.indexOf('mediaSpecs'));
+
+    // ExternalAgentConfig v1.0.0 migration & channel-aware permissions
+    const legacyDisabled = createDefaultExternalAgentConfig({ enabled: false, accessLevel: 'readWriteOrganize' });
+    expect(legacyDisabled).toEqual({
+      enabled: false,
+      mcpEnabled: false,
+      cliEnabled: false,
+      accessLevel: 'readWriteOrganize',
+    });
+    expect(externalAgentAllowsRead(legacyDisabled, 'mcp')).toBe(false);
+    expect(externalAgentAllowsWrite(legacyDisabled, 'cli')).toBe(false);
+
+    const mcpOnly = createDefaultExternalAgentConfig({
+      mcpEnabled: true,
+      cliEnabled: false,
+      accessLevel: 'readWriteOrganize',
+    });
+    expect(mcpOnly.enabled).toBe(true);
+    expect(externalAgentAllowsRead(mcpOnly, 'mcp')).toBe(true);
+    expect(externalAgentAllowsWrite(mcpOnly, 'mcp')).toBe(true);
+    expect(externalAgentAllowsRead(mcpOnly, 'cli')).toBe(false);
+    expect(externalAgentAllowsWrite(mcpOnly, 'cli')).toBe(false);
+
+    const bothDisabledWithStaleFlag = createDefaultExternalAgentConfig({
+      enabled: true,
+      mcpEnabled: false,
+      cliEnabled: false,
+    });
+    expect(bothDisabledWithStaleFlag.enabled).toBe(false);
+    expect(externalAgentAllowsRead(bothDisabledWithStaleFlag)).toBe(false);
   });
 });

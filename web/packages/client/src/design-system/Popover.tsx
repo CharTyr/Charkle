@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { usePresence } from './usePresence';
 
 export type PopoverPlacement =
   | 'bottom-start'
@@ -29,10 +30,12 @@ interface ComputedPosition {
   transformOrigin: string;
 }
 
+const POPOVER_EXIT_MS = 115;
+
 /**
- * Trigger-origin aware Popover:
- * scales `0.96 -> 1.0` with `opacity: 0 -> 1` from the exact trigger edge (and flips
- * transform-origin automatically if the popover flips above or shifts to fit viewport).
+ * Trigger-origin aware Popover with mounted-exit animation:
+ * scales `0.96 -> 1.0` (`--duration-popover-in`) on open and collapses `1.0 -> 0.96`
+ * (`--duration-popover-out`) back toward the exact trigger edge on close.
  */
 export const Popover: React.FC<PopoverProps> = ({
   open,
@@ -46,6 +49,7 @@ export const Popover: React.FC<PopoverProps> = ({
   children,
 }) => {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const { rendered, state } = usePresence(open, POPOVER_EXIT_MS);
   const [pos, setPos] = useState<ComputedPosition | null>(null);
 
   const computePosition = useCallback(() => {
@@ -55,9 +59,8 @@ export const Popover: React.FC<PopoverProps> = ({
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const margin = 10;
-    const panelRect = panel.getBoundingClientRect();
-    const pw = panelRect.width || 240;
-    const ph = panelRect.height || 160;
+    const pw = panel.offsetWidth || 240;
+    const ph = panel.offsetHeight || 160;
 
     if (anchorPoint) {
       let left = anchorPoint.x;
@@ -86,7 +89,7 @@ export const Popover: React.FC<PopoverProps> = ({
     ];
     let side = sideRaw;
 
-    // Auto-flip vertical placement if overflowing viewport
+    // Auto-flip placement if overflowing viewport
     if (side === 'bottom' && rect.bottom + offset + ph > vh - margin && rect.top - offset - ph >= margin) {
       side = 'top';
     } else if (side === 'top' && rect.top - offset - ph < margin && rect.bottom + offset + ph <= vh - margin) {
@@ -135,10 +138,11 @@ export const Popover: React.FC<PopoverProps> = ({
   }, [anchorEl, anchorPoint, placement, offset]);
 
   useLayoutEffect(() => {
-    if (!open) {
+    if (!rendered) {
       setPos(null);
       return;
     }
+    if (!open) return;
     computePosition();
     const raf = requestAnimationFrame(computePosition);
     window.addEventListener('resize', computePosition);
@@ -148,7 +152,7 @@ export const Popover: React.FC<PopoverProps> = ({
       window.removeEventListener('resize', computePosition);
       window.removeEventListener('scroll', computePosition, true);
     };
-  }, [open, computePosition]);
+  }, [open, rendered, computePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -176,14 +180,18 @@ export const Popover: React.FC<PopoverProps> = ({
     };
   }, [open, anchorEl, onOpenChange]);
 
-  if (!open || typeof document === 'undefined') return null;
+  if (!rendered || typeof document === 'undefined') return null;
+
+  const effectiveState = pos ? state : 'entering';
 
   return createPortal(
     <div
       ref={panelRef}
       role="dialog"
+      data-state={effectiveState}
       className={[
-        'fixed z-[120] rounded-[var(--radius-popover-outer)] charkle-popover-enter',
+        'fixed z-[120] rounded-[var(--radius-popover-outer)] charkle-popover-transition',
+        effectiveState === 'closing' ? 'pointer-events-none' : '',
         glass
           ? 'charkle-glass'
           : 'bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-xl',

@@ -1,13 +1,17 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Check, Sparkles } from 'lucide-react';
-import { createDefaultAssetBatchPatch } from '@charkle/shared';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, MoreHorizontal, Sparkles } from 'lucide-react';
+import { createDefaultAssetBatchPatch, flattenFolderTree } from '@charkle/shared';
 import type { UUID } from '@charkle/shared';
 import { apiClient } from '../../api/client';
 import {
   Button,
   CharkleFolderIcon,
   CharkleIcon,
+  FolderHierarchyMenu,
+  InboxTriageSkeleton,
   ModalShell,
+  Popover,
+  useDelayedFlag,
 } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
@@ -35,6 +39,9 @@ export const InboxTriageBar: React.FC = () => {
 
   const [checkedAssetIDs, setCheckedAssetIDs] = useState<Set<UUID>>(new Set());
   const [applyingTriage, setApplyingTriage] = useState(false);
+  const [moreFoldersOpen, setMoreFoldersOpen] = useState(false);
+  const moreFoldersBtnRef = useRef<HTMLButtonElement | null>(null);
+  const showTriageSkeleton = useDelayedFlag(isTriaging, 300, 500);
 
   const targetAssetIDs = useMemo(() => {
     if (selectedAssetIDs.size > 0) return Array.from(selectedAssetIDs);
@@ -59,7 +66,12 @@ export const InboxTriageBar: React.FC = () => {
     setCheckedAssetIDs(auto);
   }, [triageRecommendations]);
 
-  const topNineFolders = useMemo(() => folders.slice(0, 9), [folders]);
+  const orderedFolders = useMemo(
+    () => flattenFolderTree(folders).map((node) => node.folder),
+    [folders],
+  );
+  const topNineFolders = useMemo(() => orderedFolders.slice(0, 9), [orderedFolders]);
+  const hasMoreFolders = orderedFolders.length > 9;
   const activeBoard = boards.find((b) => b.id === activeBoardID) ?? boards[0] ?? null;
 
   if (assets.length === 0) return null;
@@ -194,6 +206,37 @@ export const InboxTriageBar: React.FC = () => {
                 <span className="max-w-[110px] truncate">{folder.name}</span>
               </button>
             ))}
+            {hasMoreFolders && (
+              <>
+                <button
+                  ref={moreFoldersBtnRef}
+                  type="button"
+                  onClick={() => setMoreFoldersOpen((v) => !v)}
+                  className="charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)]/80 hover:bg-[var(--bg-subtle)] text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                >
+                  <MoreHorizontal size={13} />
+                  更多…
+                </button>
+                <Popover
+                  open={moreFoldersOpen}
+                  onOpenChange={setMoreFoldersOpen}
+                  anchorEl={moreFoldersBtnRef.current}
+                  placement="bottom-start"
+                >
+                  <FolderHierarchyMenu
+                    folders={folders}
+                    includeInbox={false}
+                    parentSelfPrefix="放入"
+                    onSelectFolder={(folderID) => {
+                      setMoreFoldersOpen(false);
+                      if (!folderID) return;
+                      const label = folders.find((f) => f.id === folderID)?.name ?? '文件夹';
+                      void moveTargetToFolder(folderID, label);
+                    }}
+                  />
+                </Popover>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -239,13 +282,14 @@ export const InboxTriageBar: React.FC = () => {
         }
       >
         {isTriaging ? (
-          <div className="py-12 flex flex-col items-center gap-3 text-[13px] text-[var(--text-secondary)]">
-            <span className="h-6 w-6 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
-            正在并行分析收件箱素材并匹配最佳文件夹…
-          </div>
+          showTriageSkeleton ? (
+            <InboxTriageSkeleton rows={5} />
+          ) : (
+            <div className="py-12" />
+          )
         ) : triageRecommendations.length === 0 ? (
           <div className="py-10 text-center text-[13px] text-[var(--text-secondary)]">
-            暂无可分析的收件箱素材或尚未创建目标文件夹。
+            暂无可分拣素材
           </div>
         ) : (
           <div className="flex flex-col gap-2">
@@ -314,7 +358,7 @@ export const InboxTriageBar: React.FC = () => {
                     <div className="text-[12.5px] font-semibold tabular-nums text-[var(--text-primary)]">
                       {Math.round(rec.confidence * 100)}%
                     </div>
-                    <div className="text-[10.5px] text-[var(--text-tertiary)]">置信度</div>
+                    <div className="text-[10.5px] text-[var(--text-tertiary)]">匹配度</div>
                   </div>
                 </div>
               );

@@ -57,6 +57,17 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     const app = createApp(ctx, { staticClientDir: null });
 
     const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const loginRes = await app.request('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'strong-password-123' }),
+    });
+    expect(loginRes.status).toBe(200);
+    const sessionCookie = (loginRes.headers.get('set-cookie') ?? '').split(';')[0];
+    const sessionHeaders = {
+      Cookie: sessionCookie,
+      'Content-Type': 'application/json',
+    };
     const pat = ctx.auth.createApiToken(user.id, 'routes-pat', ['read', 'write', 'mcp']);
     const authHeaders = {
       Authorization: `Bearer ${pat.token}`,
@@ -278,9 +289,17 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     // 5. External Agent Config + Tools listing
     const agentGet = await app.request('/api/v1/agent/config', { headers: authHeaders });
     expect(agentGet.status).toBe(200);
-    const agentPut = await app.request('/api/v1/agent/config', {
+    // P0-02: PATs must NEVER mutate External Agent config -> 403 Forbidden
+    const agentPutPat = await app.request('/api/v1/agent/config', {
       method: 'PUT',
       headers: authHeaders,
+      body: JSON.stringify({ config: { enabled: true, accessLevel: 'readWrite' } }),
+    });
+    expect(agentPutPat.status).toBe(403);
+    // Admin session cookie succeeds
+    const agentPut = await app.request('/api/v1/agent/config', {
+      method: 'PUT',
+      headers: sessionHeaders,
       body: JSON.stringify({ config: { enabled: true, accessLevel: 'readWrite' } }),
     });
     expect(agentPut.status).toBe(200);
@@ -291,7 +310,13 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     const toolsRes = await app.request('/api/v1/agent/tools', { headers: authHeaders });
     expect(toolsRes.status).toBe(200);
     const toolsJson = (await toolsRes.json()) as { tools: Array<{ name: string }> };
-    expect(toolsJson.tools).toHaveLength(14);
+    expect(toolsJson.tools).toHaveLength(20);
+
+    const diagRes = await app.request('/api/v1/agent/diagnostics', { headers: authHeaders });
+    expect(diagRes.status).toBe(200);
+    const diagJson = (await diagRes.json()) as { ok: boolean; capabilities: { toolCount: number } };
+    expect(diagJson.ok).toBe(true);
+    expect(diagJson.capabilities.toolCount).toBe(20);
 
     ctx.db.close();
   });
@@ -300,7 +325,12 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     const dir = createTempDir();
     // Seed a database with external agent enabled in readOnly mode
     const ctx = createServerContext({ dataDir: dir });
-    ctx.configStore.setExternalAgentConfig({ enabled: true, accessLevel: 'readOnly' });
+    ctx.configStore.setExternalAgentConfig({
+      enabled: true,
+      mcpEnabled: true,
+      cliEnabled: true,
+      accessLevel: 'readOnly',
+    });
     ctx.db.close();
 
     const stdioScript = path.resolve(
@@ -348,7 +378,7 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
     expect(responses).toHaveLength(3);
     expect(responses[0].id).toBe(1);
     expect((responses[0].result as { serverInfo: { name: string } }).serverInfo.name).toBe('charkle');
-    expect((responses[1].result as { tools: unknown[] }).tools).toHaveLength(14);
+    expect((responses[1].result as { tools: unknown[] }).tools).toHaveLength(20);
     const callRes = responses[2].result as { isError: boolean; content: Array<{ text: string }> };
     expect(callRes.isError).toBe(false);
     expect(JSON.parse(callRes.content[0].text)).toMatchObject({ totalAssets: 0, boardCount: 0 });
@@ -674,6 +704,74 @@ describe('AI, TypeSafe, Board Export & Agent HTTP Routes + Real Stdio MCP Subpro
 
       const vec = ctx.db.getVector(id);
       expect(vec?.featurePrint).toBeTruthy();
+    } finally {
+      ctx.db.close();
+    }
+  });
+
+  it('propagates AbortSignal cancellation to POST /api/v1/boards/curate and stops upstream AI calls (P1-12)', async () => {
+    const dir = createTempDir();
+    const ctx = createServerContext({ dataDir: dir });
+
+    let upstreamAborted = false;
+    let upstreamStarted!: () => void;
+    const upstreamReady = new Promise<void>((resolve) => {
+      upstreamStarted = resolve;
+    });
+
+    const slowFetch: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        upstreamStarted();
+        const sig = init?.signal;
+        if (sig?.aborted) {
+          upstreamAborted = true;
+          reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+          return;
+        }
+        sig?.addEventListener(
+          'abort',
+          () => {
+            upstreamAborted = true;
+            reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+          },
+          { once: true },
+        );
+      });
+
+    const app = createApp(ctx, { staticClientDir: null, aiOptions: { fetchFn: slowFetch } });
+    const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
+    const pat = ctx.auth.createApiToken(user.id, 'curate-abort-pat', ['read', 'write']);
+    const authHeaders = {
+      Authorization: `Bearer ${pat.token}`,
+      'Content-Type': 'application/json',
+    };
+
+    try {
+      ctx.configStore.setAIConfig(
+        createDefaultAIProviderConfig({
+          provider: 'gemini',
+          chatModel: 'gemini-2.5-flash',
+          embeddingModel: '',
+        }),
+      );
+      ctx.secretVault.set('ai.gemini.apiKey', 'fake-key');
+      const png = await makeSubjectPNG();
+      const ing = await ctx.media.ingestUploadedFile(png, 'abort-test.png', 'image/png');
+      ctx.db.saveAssetLocally(ing.asset);
+
+      const ac = new AbortController();
+      const reqPromise = app.request('/api/v1/boards/curate', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ prompt: 'warm terracotta editorial' }),
+        signal: ac.signal,
+      });
+
+      await upstreamReady;
+      ac.abort();
+      const res = await reqPromise;
+      expect(upstreamAborted).toBe(true);
+      expect(res.status).not.toBe(200);
     } finally {
       ctx.db.close();
     }

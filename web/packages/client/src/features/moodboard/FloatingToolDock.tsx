@@ -20,6 +20,8 @@ import {
   Unlock,
 } from 'lucide-react';
 import type { ConnectorStyle } from '@charkle/shared';
+import { SegmentedControl } from '../../design-system';
+import type { PresenceState } from '../../design-system';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { GlassSurface } from '../../design-system/GlassSurface';
 import type { MoodboardTool } from './geometry';
@@ -67,11 +69,6 @@ export const FloatingToolDock: React.FC<FloatingToolDockProps> = ({
   onRedo,
   onOpenExport,
 }) => {
-  const activeStyleIndex = Math.max(
-    0,
-    CONNECTOR_STYLE_OPTIONS.findIndex((o) => o.id === connectorStyle),
-  );
-
   return (
     <GlassSurface
       variant="regular"
@@ -125,39 +122,14 @@ export const FloatingToolDock: React.FC<FloatingToolDockProps> = ({
       {showConnectorStylePicker && (
         <>
           <span className="w-px h-5 bg-[var(--border-hairline)] mx-0.5 shrink-0" />
-          <div
-            role="radiogroup"
-            aria-label="连线样式"
-            className="relative inline-grid grid-cols-3 items-center p-0.5 rounded-[var(--radius-dock-inner)] bg-[var(--bg-subtle)]/90 border border-[var(--border-hairline)] shrink-0"
-          >
-            <span
-              aria-hidden="true"
-              className="absolute top-0.5 bottom-0.5 left-0.5 w-[calc((100%-4px)/3)] rounded-[10px] bg-[var(--bg-elevated)] shadow-xs transition-transform"
-              style={{
-                transitionDuration: 'var(--duration-settle, 220ms)',
-                transitionTimingFunction: 'var(--ease-out-strong, cubic-bezier(0.22, 1, 0.36, 1))',
-                transform: `translateX(${activeStyleIndex * 100}%)`,
-              }}
-            />
-            {CONNECTOR_STYLE_OPTIONS.map((opt) => {
-              const selected = connectorStyle === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  onClick={() => onChangeConnectorStyle(opt.id)}
-                  className={[
-                    'relative z-10 px-2.5 py-1 text-[11.5px] font-medium cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
-                    selected ? 'text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                  ].join(' ')}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
+          <SegmentedControl
+            ariaLabel="连线样式"
+            size="sm"
+            options={CONNECTOR_STYLE_OPTIONS}
+            value={connectorStyle}
+            onChange={onChangeConnectorStyle}
+            className="shrink-0"
+          />
         </>
       )}
 
@@ -238,19 +210,22 @@ const DockIconButton: React.FC<{
 
 export interface SelectedConnectorBarProps {
   dashed: boolean;
+  presenceState?: PresenceState;
   onToggleDashed: () => void;
   onDelete: () => void;
 }
 
 export const SelectedConnectorBar: React.FC<SelectedConnectorBarProps> = ({
   dashed,
+  presenceState = 'open',
   onToggleDashed,
   onDelete,
 }) => (
   <GlassSurface
     variant="regular"
     radius="pill"
-    className="inline-flex items-center gap-1.5 px-2.5 py-1 charkle-popover-enter"
+    data-state={presenceState}
+    className="inline-flex items-center gap-1.5 px-2.5 py-1 charkle-pill-transition"
     style={{ transformOrigin: 'bottom center' }}
   >
     <span className="text-[11px] font-medium text-[var(--text-secondary)] px-1">
@@ -282,6 +257,7 @@ export interface SelectedTransformBarProps {
   selectedCount: number;
   allLocked: boolean;
   hasCroppedAsset: boolean;
+  presenceState?: PresenceState;
   onRotateCCW: () => void;
   onRotateCW: () => void;
   onFlipH: () => void;
@@ -297,6 +273,7 @@ export const SelectedTransformBar: React.FC<SelectedTransformBarProps> = ({
   selectedCount,
   allLocked,
   hasCroppedAsset,
+  presenceState = 'open',
   onRotateCCW,
   onRotateCW,
   onFlipH,
@@ -311,7 +288,8 @@ export const SelectedTransformBar: React.FC<SelectedTransformBarProps> = ({
     <GlassSurface
       variant="regular"
       radius="pill"
-      className="inline-flex items-center gap-1 px-2.5 py-1 charkle-popover-enter"
+      data-state={presenceState}
+      className="inline-flex items-center gap-1 px-2.5 py-1 charkle-pill-transition"
       style={{ transformOrigin: 'bottom center' }}
     >
       <span className="text-[11px] font-medium text-[var(--text-secondary)] px-1.5 tabular-nums">

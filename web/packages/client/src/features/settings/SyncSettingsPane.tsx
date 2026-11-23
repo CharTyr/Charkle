@@ -21,18 +21,27 @@ import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useSyncAIStore } from '../../stores/syncAIStore';
 import { GoogleOAuthSetupModal } from './GoogleOAuthSetupModal';
 import {
-  InlineGuideDisclosure,
   SettingsButton,
   SettingsCardDivider,
-  SettingsGuideStep,
   SettingsInput,
   SettingsRow,
   SettingsSection,
-  SettingsSelect,
+  SettingsSegmented,
   SettingsStatusBadge,
   SettingsSwitch,
 } from './SettingsChrome';
 import { formatBytes, formatRelativeDate } from './shortcuts';
+
+const AUTO_SYNC_INTERVAL_OPTIONS: ReadonlyArray<{
+  id: '60' | '120' | '300' | '900' | '0';
+  label: string;
+}> = [
+  { id: '60', label: '1 分钟' },
+  { id: '120', label: '2 分钟' },
+  { id: '300', label: '5 分钟' },
+  { id: '900', label: '15 分钟' },
+  { id: '0', label: '仅手动' },
+];
 
 export const SyncSettingsPane: React.FC = () => {
   const runtimeMode = useSyncAIStore((s) => s.runtimeMode);
@@ -211,9 +220,9 @@ export const SyncSettingsPane: React.FC = () => {
             title={isBuiltInCloud ? '当前使用内置云存储' : '当前使用本地文件夹存储'}
             subtitle={
               isBuiltInCloud ? (
-                '素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。'
+                '默认保存在云端'
               ) : (
-                <span className="font-mono text-[11px] break-all">{activeStorageSummary}</span>
+                <span className="font-mono text-[11px] charkle-wrap-anywhere">{activeStorageSummary}</span>
               )
             }
           >
@@ -226,7 +235,7 @@ export const SyncSettingsPane: React.FC = () => {
 
           <SettingsRow
             title="Google Drive 云端直连"
-            subtitle="直连你自己的 Google Drive，自动与桌面端双向同步原文件与情绪板"
+            subtitle="与桌面端自动同步"
           >
             <SettingsButton
               variant="primary"
@@ -237,33 +246,11 @@ export const SyncSettingsPane: React.FC = () => {
             </SettingsButton>
           </SettingsRow>
 
-          <InlineGuideDisclosure title="Google Drive 直连如何工作？需要什么准备">
-            <SettingsGuideStep
-              number={1}
-              title="直连你的个人或团队网盘"
-              detail="素材直接存放在你自己的 Google Drive 目录中，不经第三方中转服务器，随时可在网盘直接查看原文件。"
-            />
-            <SettingsGuideStep
-              number={2}
-              title="首次配置 OAuth 凭据"
-              detail="按内置图文教程在 Google Cloud 导出 client_secret.json，一键导入即可登录，全程只需 3 分钟。"
-            />
-            <SettingsGuideStep
-              number={3}
-              title={isBuiltInCloud ? '随时可无损切回内置云存储' : '随时可无损搬回本地'}
-              detail={
-                isBuiltInCloud
-                  ? '如需将当前素材完整同步到云盘或切回内置云存储，可前往「素材库 → 更改或转移…」选择完整无损迁移。'
-                  : '如需将已有本地素材完整同步到云端，可前往「素材库 → 更改或转移…」选择完整无损迁移。'
-              }
-            />
-          </InlineGuideDisclosure>
-
           <SettingsCardDivider />
 
           <SettingsRow
             title="WebDAV 云盘"
-            subtitle="支持坚果云、Nextcloud、群晖 NAS 等标准 WebDAV 网盘服务"
+            subtitle="坚果云、Nextcloud、群晖 NAS"
           >
             <SettingsButton variant="secondary" onClick={() => setWebDAVModalOpen(true)}>
               配置 WebDAV…
@@ -319,8 +306,10 @@ export const SyncSettingsPane: React.FC = () => {
                 {(syncing || progressPct !== null) && (
                   <div className="h-1.5 w-full rounded-full bg-[var(--settings-subtle,var(--bg-subtle))] overflow-hidden">
                     <div
-                      className="h-full bg-[var(--accent)] transition-[width] duration-200 ease-[var(--ease-out)]"
-                      style={{ width: `${progressPct ?? 35}%` }}
+                      className="h-full w-full bg-[var(--accent)] origin-left transition-transform duration-200 ease-[var(--ease-out)]"
+                      style={{
+                        transform: `scaleX(${Math.max(0.05, Math.min(1, (progressPct ?? 35) / 100))})`,
+                      }}
                     />
                   </div>
                 )}
@@ -369,8 +358,8 @@ export const SyncSettingsPane: React.FC = () => {
                     syncStatus.account
                       ? syncStatus.account.email
                       : hasGoogleOAuthConfig
-                        ? '已保存 OAuth 凭据，点击右侧按钮完成授权登录'
-                        : '首次使用需导入或填写 Google Cloud OAuth 凭据'
+                        ? '已配置凭据，点击登录'
+                        : '首次使用需配置登录凭据'
                   }
                 >
                   {syncStatus.account ? (
@@ -432,8 +421,10 @@ export const SyncSettingsPane: React.FC = () => {
                     </div>
                     <div className="h-1.5 w-full rounded-full bg-[var(--settings-subtle,var(--bg-subtle))] overflow-hidden">
                       <div
-                        className="h-full bg-[var(--accent)] rounded-full transition-[width] duration-300 ease-[var(--ease-out)]"
-                        style={{ width: `${quotaPct}%` }}
+                        className="h-full w-full bg-[var(--accent)] rounded-full origin-left transition-transform duration-300 ease-[var(--ease-out)]"
+                        style={{
+                          transform: `scaleX(${Math.max(0, Math.min(1, quotaPct / 100))})`,
+                        }}
                       />
                     </div>
                   </div>
@@ -441,10 +432,7 @@ export const SyncSettingsPane: React.FC = () => {
 
                 <SettingsCardDivider />
 
-                <SettingsRow
-                  title="云端保存路径"
-                  subtitle="素材库在「我的云端硬盘」下的根目录名称"
-                >
+                <SettingsRow title="云端保存路径">
                   <SettingsInput
                     type="text"
                     aria-label="云端保存路径"
@@ -468,13 +456,8 @@ export const SyncSettingsPane: React.FC = () => {
               <SettingsSection title="团队共享协作（可选）">
                 <div className="px-4 py-3 flex flex-col gap-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <div className="text-[13px] font-medium text-[var(--text-primary)]">
-                        共享文件夹链接或 ID
-                      </div>
-                      <div className="text-[11.5px] text-[var(--text-secondary)]">
-                        指定「与我共享」的文件夹作为多人协作素材库根目录
-                      </div>
+                    <div className="text-[13px] font-medium text-[var(--text-primary)]">
+                      共享文件夹链接或 ID
                     </div>
                     <div className="flex items-center gap-1.5">
                       <SettingsButton
@@ -536,19 +519,6 @@ export const SyncSettingsPane: React.FC = () => {
                     </div>
                   )}
                 </div>
-
-                <InlineGuideDisclosure title="如何与团队成员共享同一素材库">
-                  <SettingsGuideStep
-                    number={1}
-                    title="由创建者在 Google Drive 分享目录"
-                    detail="在 Google Drive 中右键 Charkle 素材库文件夹 → 共享，授予团队成员「编辑者」权限并复制链接。"
-                  />
-                  <SettingsGuideStep
-                    number={2}
-                    title="成员点击「选择与我共享」或粘贴链接"
-                    detail="保存后点击「立即同步」，即可实时协作管理同一份文件夹树、标签与情绪板。"
-                  />
-                </InlineGuideDisclosure>
               </SettingsSection>
             </>
           )}
@@ -576,50 +546,35 @@ export const SyncSettingsPane: React.FC = () => {
                   编辑配置…
                 </SettingsButton>
               </SettingsRow>
-
-              <InlineGuideDisclosure title="常见 WebDAV 网盘配置参考">
-                <SettingsGuideStep
-                  number={1}
-                  title="坚果云"
-                  detail="服务器地址填写 https://dav.jianguoyun.com/dav/，密码请使用账户安全选项中生成的「应用专用密码」。"
-                />
-                <SettingsGuideStep
-                  number={2}
-                  title="Nextcloud / 群晖 NAS"
-                  detail="填写完整的 WebDAV 根地址与具备读写权限的账号密码，远程路径推荐设为 /Charkle。"
-                />
-              </InlineGuideDisclosure>
             </SettingsSection>
           )}
 
           {/* 3. Sync Preferences */}
           <SettingsSection title="同步偏好">
-            <SettingsRow
-              title="自动同步周期"
-              subtitle="后台自动拉取与合并其他设备变更的频率"
-            >
-              <SettingsSelect
-                aria-label="自动同步周期"
-                value={draft.autoSyncIntervalSeconds}
-                onChange={(e) => {
-                  const next = { ...draft, autoSyncIntervalSeconds: Number(e.target.value) };
+            <SettingsRow title="自动同步周期">
+              <SettingsSegmented
+                ariaLabel="自动同步周期"
+                options={AUTO_SYNC_INTERVAL_OPTIONS}
+                value={
+                  (['60', '120', '300', '900', '0'].includes(
+                    String(draft.autoSyncIntervalSeconds),
+                  )
+                    ? String(draft.autoSyncIntervalSeconds)
+                    : '300') as '60' | '120' | '300' | '900' | '0'
+                }
+                onChange={(val) => {
+                  const next = { ...draft, autoSyncIntervalSeconds: Number(val) };
                   setDraft(next);
                   void commitConfig(next, null, '已更新自动同步周期');
                 }}
-              >
-                <option value={60}>每 1 分钟</option>
-                <option value={120}>每 2 分钟</option>
-                <option value={300}>每 5 分钟</option>
-                <option value={900}>每 15 分钟</option>
-                <option value={0}>仅手动同步</option>
-              </SettingsSelect>
+              />
             </SettingsRow>
 
             <SettingsCardDivider />
 
             <SettingsRow
               title="同步轻量化预览图"
-              subtitle="换设备打开画廊时立即呈现瀑布流预览，无需等待下载全部原件"
+              subtitle="切换设备时更快加载预览"
             >
               <SettingsSwitch
                 ariaLabel="同步轻量化预览图"
@@ -636,7 +591,7 @@ export const SyncSettingsPane: React.FC = () => {
 
             <SettingsRow
               title="同步智能搜索索引"
-              subtitle="多设备共享视觉与语义特征，保持一致的相似推荐与智能搜索效果"
+              subtitle="多设备共享智能搜索结果"
             >
               <SettingsSwitch
                 ariaLabel="同步智能搜索索引"
@@ -674,7 +629,6 @@ export const SyncSettingsPane: React.FC = () => {
         onClose={() => setSharedPickerOpen(false)}
         width="md"
         title="选择 Google Drive 共享目录"
-        subtitle="从「与我共享」中选择文件夹作为协作素材库"
       >
         {loadingShared ? (
           <div className="py-10 text-center text-[12.5px] text-[var(--text-secondary)]">
@@ -802,7 +756,6 @@ const WebDAVConfigModal: React.FC<{
       }}
       width="sm"
       title="配置 WebDAV 云盘"
-      subtitle="支持坚果云、Nextcloud、群晖 NAS 等标准 WebDAV 服务"
       footer={
         <>
           <SettingsButton

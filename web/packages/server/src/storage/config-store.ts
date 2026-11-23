@@ -162,14 +162,14 @@ export class ConfigStore {
 
   getCacheBudgetBytes(): number {
     const v = this.readState<number>(KEY_CACHE_BUDGET);
-    if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
       return Math.round(v);
     }
     return DEFAULT_CACHE_BUDGET_BYTES;
   }
 
   setCacheBudgetBytes(bytes: number): number {
-    const clamped = Math.max(1024 * 1024, Math.round(bytes)); // min 1 MiB for tests & safety
+    const clamped = Math.max(0, Math.round(bytes));
     this.writeState(KEY_CACHE_BUDGET, clamped);
     return clamped;
   }

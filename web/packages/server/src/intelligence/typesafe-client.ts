@@ -311,8 +311,13 @@ export class TypeSafeSystemOneClient {
     return `${baseStr}/${rel}`;
   }
 
-  async listModels(timeoutMs = 20_000): Promise<TypeSafeModelInfo[]> {
+  async listModels(timeoutMs = 20_000, externalSignal?: AbortSignal): Promise<TypeSafeModelInfo[]> {
     const controller = new AbortController();
+    const onExternalAbort = () => controller.abort(externalSignal?.reason);
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort(externalSignal.reason);
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await this.fetchFn(this.endpoint('models'), {
@@ -324,10 +329,32 @@ export class TypeSafeSystemOneClient {
         signal: controller.signal,
       });
       await this.validateResponse(res);
-      const payload = (await res.json()) as { models?: TypeSafeModelInfo[] };
-      return Array.isArray(payload.models) ? payload.models : [];
+      const payload = (await res.json()) as {
+        models?: Array<{
+          name?: string;
+          alias?: string | null;
+          description?: string;
+          release_date?: string;
+          releaseDate?: string;
+        }>;
+      };
+      if (!Array.isArray(payload.models)) return [];
+      return payload.models
+        .filter((m) => typeof m?.name === 'string' && m.name.trim().length > 0)
+        .map((m) => ({
+          name: m.name!.trim(),
+          alias: m.alias ?? null,
+          description: typeof m.description === 'string' ? m.description : '',
+          releaseDate:
+            typeof m.releaseDate === 'string' && m.releaseDate
+              ? m.releaseDate
+              : typeof m.release_date === 'string'
+                ? m.release_date
+                : '',
+        }));
     } finally {
       clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     }
   }
 
@@ -342,6 +369,7 @@ export class TypeSafeSystemOneClient {
     questions: Record<string, TypeSafeQuestion>;
     images?: TypeSafeImageAttachment[];
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<TypeSafeSystemOneResponse> {
     const questionEntries = Object.entries(params.questions);
     if (questionEntries.length === 0) {
@@ -390,6 +418,12 @@ export class TypeSafeSystemOneClient {
     }
 
     const controller = new AbortController();
+    const externalSignal = params.signal;
+    const onExternalAbort = () => controller.abort(externalSignal?.reason);
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort(externalSignal.reason);
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
     const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 45_000);
     try {
       const res = await this.fetchFn(this.endpoint('systemone'), {
@@ -433,6 +467,7 @@ export class TypeSafeSystemOneClient {
       };
     } finally {
       clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     }
   }
 

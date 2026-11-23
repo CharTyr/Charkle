@@ -41,12 +41,17 @@ import { HoverMediaPreview } from '../../components/HoverMediaPreview';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { GlassSurface } from '../../design-system/GlassSurface';
 import { Popover } from '../../design-system/Popover';
+import { SegmentedControl } from '../../design-system';
 import { useResolvedIsDark } from '../../design-system/theme';
 import {
   GROUP_TINT_PALETTE,
   NOTE_FONT_SIZES,
   NOTE_STYLE_PALETTE,
 } from './palettes';
+
+const NOTE_FONT_SIZE_OPTIONS: ReadonlyArray<{ id: string; label: string }> = NOTE_FONT_SIZES.map(
+  (sz) => ({ id: String(sz), label: `${sz}` }),
+);
 
 // MARK: - Top Floating Board Palette Strip
 
@@ -302,6 +307,7 @@ export interface AssetNodeViewProps {
   onToggleHero: () => void;
   onTriggerSwap: () => void;
   onOpenQuickLook: () => void;
+  onRevealInLibrary?: () => void;
   onSmartFocusSubject: () => void;
   onSemanticCropPrompt: () => void;
   onVisualMatchCrop: () => void;
@@ -327,6 +333,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
   onToggleHero,
   onTriggerSwap,
   onOpenQuickLook,
+  onRevealInLibrary,
   onSmartFocusSubject,
   onSemanticCropPrompt,
   onVisualMatchCrop,
@@ -450,7 +457,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
         node.frame.height >= 64 && (
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute bottom-2 left-2 z-20 h-5 w-5 rounded-[10px] bg-black/56 backdrop-blur-xs text-white flex items-center justify-center shadow-xs"
+            className="pointer-events-none absolute bottom-2 left-2 z-20 h-5 w-5 rounded-[10px] bg-black/56 backdrop-blur-xs [@media(prefers-reduced-transparency:reduce)]:backdrop-blur-none [@media(prefers-reduced-transparency:reduce)]:bg-[#141517] text-white flex items-center justify-center shadow-xs"
           >
             <VolumeX size={12} strokeWidth={2.2} />
           </span>
@@ -494,14 +501,14 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
                   e.stopPropagation();
                   onToggleHero();
                 }}
-                title="切换 2× 主图权重（杂志主次重排时跨列强调）"
+                title="设为主图"
                 className={[
                   'charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-card-inner)] text-[10px] font-semibold text-white cursor-pointer',
                   weight >= 2 ? 'bg-[var(--accent)]' : 'bg-black/58 hover:bg-black/75',
                 ].join(' ')}
               >
                 <Star size={10} fill={weight >= 2 ? 'currentColor' : 'none'} />
-                {weight >= 2 ? '主图 2×' : '设为主图'}
+                {weight >= 2 ? '主图' : '设为主图'}
               </button>
               {node.isLocked && (
                 <span
@@ -558,7 +565,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
                   e.stopPropagation();
                   onCommitCrop(null);
                 }}
-                title="点击还原完整画面（非破坏性裁切）"
+                title="还原完整画面"
                 className="charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-card-inner)] bg-black/62 hover:bg-black/80 text-white text-[10px] font-medium cursor-pointer"
               >
                 <Focus size={10} />
@@ -594,7 +601,11 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
         placement="bottom-end"
         className="w-56 p-1.5"
       >
-        <div className="flex flex-col text-[12px] text-[var(--text-primary)]">
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          className="flex flex-col text-[12px] text-[var(--text-primary)]"
+        >
           <MenuAction
             icon={<Expand size={13} />}
             label="快速预览 (Space)"
@@ -603,6 +614,16 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
               onOpenQuickLook();
             }}
           />
+          {asset && onRevealInLibrary && (
+            <MenuAction
+              icon={<Crosshair size={13} />}
+              label="在素材库中定位"
+              onClick={() => {
+                setMenuOpen(false);
+                onRevealInLibrary();
+              }}
+            />
+          )}
           <MenuAction
             icon={<ArrowLeftRight size={13} />}
             label="从候选池换一张…"
@@ -702,7 +723,7 @@ export const AssetNodeView: React.FC<AssetNodeViewProps> = ({
           />
           <MenuAction
             icon={<Star size={13} />}
-            label={weight >= 2 ? '取消主图 2× 权重' : '设为主图 2× 权重'}
+            label={weight >= 2 ? '取消主图' : '设为主图'}
             onClick={() => {
               setMenuOpen(false);
               onToggleHero();
@@ -741,6 +762,8 @@ const MenuAction: React.FC<{
 }> = ({ icon, label, danger = false, onClick }) => (
   <button
     type="button"
+    onPointerDown={(e) => e.stopPropagation()}
+    onDoubleClick={(e) => e.stopPropagation()}
     onClick={onClick}
     className={[
       'charkle-pressable flex items-center gap-2 w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-left cursor-pointer',
@@ -785,14 +808,14 @@ export const NoteNodeView: React.FC<NoteNodeViewProps> = ({
       }}
     >
       {/* Header row: Title + quick style/size/delete bar on hover or selection */}
-      <div className="flex items-center gap-1.5 min-w-0">
+      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
         <input
           type="text"
           value={title ?? ''}
           placeholder="标题 / 氛围词"
           onPointerDown={(e) => e.stopPropagation()}
           onChange={(e) => onUpdate(e.target.value || null, text, style, fontSize)}
-          className="flex-1 min-w-0 bg-transparent border-0 outline-none font-semibold placeholder:opacity-45"
+          className="flex-1 min-w-[72px] bg-transparent border-0 outline-none font-semibold placeholder:opacity-45"
           style={{
             fontSize: `${Math.max(13, fontSize)}px`,
             color: theme.foreground,
@@ -828,20 +851,19 @@ export const NoteNodeView: React.FC<NoteNodeViewProps> = ({
             ))}
           </div>
 
-          {/* Font size selector */}
-          <select
-            aria-label="便签字号"
-            value={fontSize}
-            onChange={(e) => onUpdate(title ?? null, text, style, Number(e.target.value))}
-            className="text-[10.5px] font-medium rounded-[6px] px-1 py-0.5 bg-black/8 border-0 outline-none cursor-pointer"
-            style={{ color: theme.foreground }}
-          >
-            {NOTE_FONT_SIZES.map((sz) => (
-              <option key={sz} value={sz} className="text-black bg-white">
-                {sz}px
-              </option>
-            ))}
-          </select>
+          {/* Font size segmented control */}
+          <SegmentedControl
+            ariaLabel="便签字号"
+            size="sm"
+            options={NOTE_FONT_SIZE_OPTIONS}
+            value={String(
+              NOTE_FONT_SIZES.includes(fontSize as (typeof NOTE_FONT_SIZES)[number])
+                ? fontSize
+                : 14,
+            )}
+            onChange={(next) => onUpdate(title ?? null, text, style, Number(next))}
+            className="[&_button]:min-h-[20px] [&_button]:px-1.5 [&_button]:py-0 [&_button]:text-[10px]"
+          />
 
           <button
             type="button"
@@ -858,7 +880,7 @@ export const NoteNodeView: React.FC<NoteNodeViewProps> = ({
       {/* Body textarea */}
       <textarea
         value={text}
-        placeholder="写下材质笔记、构图意图或策展说明…"
+        placeholder="输入便签内容…"
         onPointerDown={(e) => e.stopPropagation()}
         onChange={(e) => onUpdate(title ?? null, e.target.value, style, fontSize)}
         className="flex-1 w-full resize-none bg-transparent border-0 outline-none leading-relaxed placeholder:opacity-40 charkle-scroll"
@@ -1087,7 +1109,7 @@ export const PaletteStripNodeView: React.FC<PaletteStripNodeViewProps> = ({
           })
         ) : (
           <span className="text-[11.5px] text-[var(--text-tertiary)]">
-            添加图片到情绪板后将自动同步提取色卡
+            添加图片后自动提取色卡
           </span>
         )}
       </div>

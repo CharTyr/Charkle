@@ -1,12 +1,25 @@
 import JSZip from 'jszip';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DurableObjectSqlDatabase,
   splitSqlStatements,
   type DurableObjectSqlStorageLike,
 } from '../src/do-sql.js';
+import type { CharkleWorkerEnv } from '../src/env.js';
 import { BUNDLE_METADATA, createBundledAssets } from '../src/generated/bundles.js';
 import { R2BlobStore } from '../src/r2-blob.js';
+
+vi.mock('cloudflare:workers', () => {
+  class DurableObject<Env = unknown> {
+    protected readonly ctx: DurableObjectState;
+    protected readonly env: Env;
+    constructor(ctx: DurableObjectState, env: Env) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+  }
+  return { DurableObject };
+});
 
 // MARK: - Faithful Cloudflare DurableObjectStorage Mock
 
@@ -541,6 +554,68 @@ describe('R2BlobStore', () => {
     ]);
     expect(listed.map((i) => i.size)).toEqual([3, 2, 5, 4, 1]);
   });
+
+  it('streams directly through FixedLengthStream when total size is known (P0-20)', async () => {
+    const payload = new TextEncoder().encode('streaming-video-payload-chunked-data');
+    let receivedStreamType = '';
+    let streamedBytes: Uint8Array = new Uint8Array(0);
+
+    class FakeFixedLengthStream extends TransformStream<Uint8Array, Uint8Array> {
+      readonly expectedLength: number;
+      constructor(expectedLength: number) {
+        super();
+        this.expectedLength = expectedLength;
+      }
+    }
+
+    const fakeBucket = {
+      async put(
+        key: string,
+        value: ReadableStream<Uint8Array> | Uint8Array,
+      ): Promise<R2Object> {
+        if (value instanceof ReadableStream) {
+          receivedStreamType = 'ReadableStream';
+          streamedBytes = await readStreamAll(value);
+        } else {
+          receivedStreamType = 'Uint8Array';
+          streamedBytes = value;
+        }
+        return {
+          key,
+          size: streamedBytes.byteLength,
+          etag: 'etag-stream',
+          httpEtag: '"etag-stream"',
+          uploaded: new Date(),
+        } as R2Object;
+      },
+    } as unknown as R2Bucket;
+
+    const prevFixed = (globalThis as Record<string, unknown>).FixedLengthStream;
+    (globalThis as Record<string, unknown>).FixedLengthStream = FakeFixedLengthStream;
+    try {
+      const store = new R2BlobStore(fakeBucket);
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(payload.subarray(0, 10));
+          c.enqueue(payload.subarray(10));
+          c.close();
+        },
+      });
+      const res = await store.put('originals/video.mp4', stream, {
+        contentType: 'video/mp4',
+        size: payload.byteLength,
+      });
+      expect(receivedStreamType).toBe('ReadableStream');
+      expect(res.size).toBe(payload.byteLength);
+      expect(streamedBytes).toEqual(payload);
+    } finally {
+      if (prevFixed === undefined) {
+        delete (globalThis as Record<string, unknown>).FixedLengthStream;
+      } else {
+        (globalThis as Record<string, unknown>).FixedLengthStream = prevFixed;
+      }
+    }
+  });
 });
 
 // MARK: - 3. Build-Time Bundled ZIP Assets Tests
@@ -589,5 +664,256 @@ describe('createBundledAssets', () => {
     expect(names).not.toContain('ui-template.html');
     expect(names.some((n) => n.includes('.DS_Store'))).toBe(false);
     expect(names.some((n) => n.split('/').some((seg) => seg.startsWith('.')))).toBe(false);
+  });
+});
+
+// MARK: - 4. Worker Entrypoint Routing & CharkleLibraryDO Lifecycle Tests (P2-10)
+
+interface NodeSqliteStatementLike {
+  all(...params: unknown[]): Array<Record<string, SqlStorageValue>>;
+  run(...params: unknown[]): { changes: number };
+}
+
+interface NodeSqliteDatabaseLike {
+  prepare(sql: string): NodeSqliteStatementLike;
+  exec(sql: string): void;
+  close(): void;
+}
+
+async function createSqliteBackedDoState(options?: { failFirstInit?: boolean }) {
+  const mod = (await import('node:sqlite' as string)) as {
+    DatabaseSync: new (path: string) => NodeSqliteDatabaseLike;
+  };
+  const nativeDb = new mod.DatabaseSync(':memory:');
+  let currentAlarm: number | null = null;
+  let initAttempts = 0;
+  let shouldFailOnce = Boolean(options?.failFirstInit);
+
+  const storage = {
+    sql: {
+      exec<T extends Record<string, SqlStorageValue>>(
+        query: string,
+        ...bindings: unknown[]
+      ): SqlStorageCursor<T> {
+        const trimmed = query.trim();
+        const isQuery =
+          /^(SELECT|PRAGMA|WITH)\b/i.test(trimmed) || /\bRETURNING\b/i.test(trimmed);
+        let rows: T[] = [];
+        let rowsWritten = 0;
+        if (isQuery) {
+          rows = nativeDb.prepare(query).all(...bindings) as T[];
+        } else {
+          const info = nativeDb.prepare(query).run(...bindings);
+          rowsWritten = Number(info.changes ?? 0);
+        }
+        let idx = 0;
+        return {
+          columnNames: rows.length > 0 ? Object.keys(rows[0]) : [],
+          get rowsRead() {
+            return rows.length;
+          },
+          get rowsWritten() {
+            return rowsWritten;
+          },
+          toArray: () => rows,
+          one() {
+            if (rows.length !== 1) throw new Error(`Expected 1 row, got ${rows.length}`);
+            return rows[0];
+          },
+          next(): IteratorResult<T, undefined> {
+            if (idx < rows.length) return { done: false, value: rows[idx++] };
+            return { done: true, value: undefined };
+          },
+          raw<U extends SqlStorageValue[]>(): IterableIterator<U> {
+            return rows.map((r) => Object.values(r) as U)[Symbol.iterator]();
+          },
+          [Symbol.iterator]: () => rows[Symbol.iterator](),
+        } as SqlStorageCursor<T>;
+      },
+      get databaseSize() {
+        return 8192;
+      },
+      Cursor: null as never,
+      Statement: null as never,
+    },
+    transactionSync<T>(closure: () => T): T {
+      nativeDb.exec('BEGIN IMMEDIATE');
+      try {
+        const out = closure();
+        nativeDb.exec('COMMIT');
+        return out;
+      } catch (err) {
+        nativeDb.exec('ROLLBACK');
+        throw err;
+      }
+    },
+    async getAlarm(): Promise<number | null> {
+      return currentAlarm;
+    },
+    async setAlarm(scheduledTime: number | Date): Promise<void> {
+      currentAlarm = scheduledTime instanceof Date ? scheduledTime.getTime() : scheduledTime;
+    },
+    async deleteAlarm(): Promise<void> {
+      currentAlarm = null;
+    },
+  };
+
+  const state = {
+    storage,
+    async blockConcurrencyWhile<T>(fn: () => Promise<T>): Promise<T> {
+      initAttempts += 1;
+      if (shouldFailOnce) {
+        shouldFailOnce = false;
+        throw new Error('transient DO cold-start failure');
+      }
+      return fn();
+    },
+  } as unknown as DurableObjectState;
+
+  return {
+    state,
+    getAlarm: () => currentAlarm,
+    getInitAttempts: () => initAttempts,
+    close: () => nativeDb.close(),
+  };
+}
+
+describe('Worker entrypoint routing & CharkleLibraryDO', () => {
+  it('routes /api and /api/* requests to CHARKLE_LIBRARY Durable Object and non-API paths to ASSETS', async () => {
+    const workerModule = await import('../src/index.js');
+    const handler = workerModule.default;
+
+    const doNamedCalls: string[] = [];
+    const doFetchUrls: string[] = [];
+    const assetFetchUrls: string[] = [];
+
+    const mockEnv = {
+      CHARKLE_LIBRARY_ID: 'studio-main',
+      CHARKLE_LIBRARY: {
+        idFromName(name: string) {
+          doNamedCalls.push(name);
+          return { toString: () => name } as DurableObjectId;
+        },
+        get() {
+          return {
+            async fetch(req: Request) {
+              doFetchUrls.push(new URL(req.url).pathname);
+              return new Response('from-do', { status: 200 });
+            },
+          } as unknown as DurableObjectStub;
+        },
+      },
+      ASSETS: {
+        async fetch(req: Request) {
+          assetFetchUrls.push(new URL(req.url).pathname);
+          return new Response('from-assets', { status: 200 });
+        },
+      },
+    } as unknown as CharkleWorkerEnv;
+
+    const apiRes = await handler.fetch(
+      new Request('https://charkle.example.com/api/v1/health'),
+      mockEnv,
+      {} as ExecutionContext,
+    );
+    expect(await apiRes.text()).toBe('from-do');
+    expect(doNamedCalls).toEqual(['studio-main']);
+    expect(doFetchUrls).toEqual(['/api/v1/health']);
+
+    const spaRes = await handler.fetch(
+      new Request('https://charkle.example.com/library/all'),
+      mockEnv,
+      {} as ExecutionContext,
+    );
+    expect(await spaRes.text()).toBe('from-assets');
+    expect(assetFetchUrls).toEqual(['/library/all']);
+  });
+
+  it('recovers from transient cold-start init failure, serves /api/v1/health, and reconciles auto-sync alarms on PUT /api/v1/sync/config & alarm()', async () => {
+    const { CharkleLibraryDO } = await import('../src/library-do.js');
+    const doMock = await createSqliteBackedDoState({ failFirstInit: true });
+    const { bucket } = createMockR2Bucket(10);
+
+    const env = {
+      MEDIA_BUCKET: bucket,
+      CHARKLE_VAULT_KEY: 'worker-test-vault-secret',
+      CHARKLE_ADMIN_USERNAME: 'admin',
+      CHARKLE_ADMIN_PASSWORD: 'worker-strong-password',
+      ASSETS: { fetch: async () => new Response('ok') },
+      CHARKLE_LIBRARY: {} as DurableObjectNamespace,
+    } as unknown as CharkleWorkerEnv;
+
+    const instance = new CharkleLibraryDO(doMock.state, env);
+    try {
+      // First call fails cold-start -> initPromise must clear so retry succeeds!
+      await expect(
+        instance.fetch(new Request('https://charkle.example.com/api/v1/health')),
+      ).rejects.toThrow(/transient DO cold-start failure/);
+
+      // Second call succeeds cleanly
+      const healthRes = await instance.fetch(
+        new Request('https://charkle.example.com/api/v1/health'),
+      );
+      expect(healthRes.status).toBe(200);
+      const health = (await healthRes.json()) as {
+        ok: boolean;
+        runtimeMode: string;
+        features: { clientExportPreferred: boolean };
+      };
+      expect(health.ok).toBe(true);
+      expect(health.runtimeMode).toBe('cloudflare');
+      expect(health.features.clientExportPreferred).toBe(true);
+      expect(doMock.getInitAttempts()).toBe(2);
+      expect(doMock.getAlarm()).toBeNull(); // localOnly default -> no alarm
+
+      // Log in and enable WebDAV auto-sync -> reconcileAutoSyncAlarm MUST schedule a DO alarm!
+      const loginRes = await instance.fetch(
+        new Request('https://charkle.example.com/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'admin', password: 'worker-strong-password' }),
+        }),
+      );
+      expect(loginRes.status).toBe(200);
+      const cookie = (loginRes.headers.get('set-cookie') ?? '').split(';')[0];
+
+      const syncPut = await instance.fetch(
+        new Request('https://charkle.example.com/api/v1/sync/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Cookie: cookie },
+          body: JSON.stringify({
+            config: {
+              mode: 'webDAV',
+              webDAVServerURL: 'https://dav.example.com',
+              webDAVRemotePath: '/Charkle',
+              autoSyncIntervalSeconds: 60,
+            },
+          }),
+        }),
+      );
+      expect(syncPut.status).toBe(200);
+      const scheduledAt = doMock.getAlarm();
+      expect(scheduledAt).not.toBeNull();
+      expect(scheduledAt!).toBeGreaterThan(Date.now() + 10_000);
+
+      // Firing alarm() catches unauthenticated/network error cleanly and reschedules next alarm without crashing
+      await instance.alarm();
+      expect(doMock.getAlarm()).not.toBeNull();
+
+      // Switching back to localOnly clears the DO alarm
+      const disablePut = await instance.fetch(
+        new Request('https://charkle.example.com/api/v1/sync/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Cookie: cookie },
+          body: JSON.stringify({
+            config: { mode: 'localOnly', autoSyncIntervalSeconds: 0 },
+          }),
+        }),
+      );
+      expect(disablePut.status).toBe(200);
+      expect(doMock.getAlarm()).toBeNull();
+    } finally {
+      doMock.close();
+    }
   });
 });

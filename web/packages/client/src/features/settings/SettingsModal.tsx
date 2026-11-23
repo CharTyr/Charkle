@@ -1,6 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ShieldCheck, X } from 'lucide-react';
+import { usePresence } from '../../design-system';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import type { SettingsTabID } from '../../stores/coordinatorStore';
@@ -66,6 +67,8 @@ const TAB_LABEL_MAP: Record<SettingsTabID, string> = {
   advancedAbout: '高级与关于',
 };
 
+const EXIT_DURATION_MS = 175;
+
 export const SettingsModal: React.FC = () => {
   const open = useCoordinatorStore((s) => s.settingsOpen);
   const closeSettings = useCoordinatorStore((s) => s.closeSettings);
@@ -78,9 +81,16 @@ export const SettingsModal: React.FC = () => {
   const loadCacheStats = useSyncAIStore((s) => s.loadCacheStats);
   const loadExternalAgentConfig = useSyncAIStore((s) => s.loadExternalAgentConfig);
 
+  const { rendered, state: phase } = usePresence(open, EXIT_DURATION_MS);
+
   const scrollPaneRef = useRef<HTMLDivElement | null>(null);
+  const navListRef = useRef<HTMLDivElement | null>(null);
+  const tabBtnRefs = useRef<Partial<Record<SettingsTabID, HTMLButtonElement | null>>>({});
+  const pressedBackdropRef = useRef(false);
   const closeRef = useRef(closeSettings);
   closeRef.current = closeSettings;
+
+  const [railIndicator, setRailIndicator] = useState<{ top: number; height: number } | null>(null);
 
   // Hydrate all settings data when opened
   useEffect(() => {
@@ -106,6 +116,43 @@ export const SettingsModal: React.FC = () => {
     }
   }, [activeTab, open]);
 
+  // Measure active left-rail row for smooth travelling indicator pill on desktop
+  useLayoutEffect(() => {
+    if (!rendered) {
+      setRailIndicator(null);
+      return;
+    }
+    const update = () => {
+      const list = navListRef.current;
+      const btn = tabBtnRefs.current[activeTab];
+      if (!list || !btn) {
+        setRailIndicator(null);
+        return;
+      }
+      const listRect = list.getBoundingClientRect();
+      const btnRect = btn.getBoundingClientRect();
+      if (btnRect.height <= 0 || listRect.height <= 0) return;
+      setRailIndicator({
+        top: btnRect.top - listRect.top + list.scrollTop,
+        height: btnRect.height,
+      });
+    };
+
+    update();
+    const raf = requestAnimationFrame(update);
+    const ro =
+      typeof ResizeObserver !== 'undefined' && navListRef.current
+        ? new ResizeObserver(update)
+        : null;
+    if (ro && navListRef.current) {
+      ro.observe(navListRef.current);
+    }
+    return () => {
+      cancelAnimationFrame(raf);
+      ro?.disconnect();
+    };
+  }, [activeTab, rendered]);
+
   // Esc dismissal (yields automatically to any nested ModalShell open on top at z-[100])
   useEffect(() => {
     if (!open) return;
@@ -120,7 +167,7 @@ export const SettingsModal: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKey, false);
   }, [open]);
 
-  if (!open || typeof document === 'undefined') return null;
+  if (!rendered || typeof document === 'undefined') return null;
 
   const activeLabel = TAB_LABEL_MAP[activeTab] ?? '通用';
 
@@ -130,17 +177,28 @@ export const SettingsModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       aria-label="Charkle 设置"
+      data-modal-state={phase}
     >
       {/* Backdrop */}
       <div
-        className="charkle-modal-backdrop fixed inset-0 bg-black/38 backdrop-blur-[3px]"
-        onClick={closeSettings}
+        data-state={phase}
+        className="charkle-modal-veil charkle-modal-veil-transition fixed inset-0"
+        onPointerDown={(e) => {
+          pressedBackdropRef.current = e.target === e.currentTarget;
+        }}
+        onPointerUp={(e) => {
+          if (pressedBackdropRef.current && e.target === e.currentTarget) {
+            closeSettings();
+          }
+          pressedBackdropRef.current = false;
+        }}
       />
 
       {/* Centered Two-Pane Settings Surface */}
       <div
+        data-state={phase}
         className={[
-          'charkle-modal-panel relative z-10 max-w-[860px] w-[calc(100vw-32px)] sm:w-full h-[min(80vh,640px)]',
+          'charkle-modal-surface-transition relative z-10 max-w-[860px] w-[calc(100vw-32px)] sm:w-full h-[min(80vh,640px)]',
           'rounded-[16px] overflow-hidden flex flex-col sm:flex-row',
           'border border-[var(--settings-border,var(--border-hairline))]',
           'shadow-[0_24px_64px_rgba(0,0,0,0.22)]',
@@ -166,7 +224,22 @@ export const SettingsModal: React.FC = () => {
             </button>
           </div>
 
-          <div className="px-2.5 pb-3 flex sm:flex-col gap-3 overflow-x-auto sm:overflow-y-auto charkle-scroll flex-1 min-h-0">
+          <div
+            ref={navListRef}
+            className="relative px-2.5 pb-3 flex sm:flex-col gap-3 overflow-x-auto sm:overflow-y-auto charkle-scroll flex-1 min-h-0"
+          >
+            {/* Desktop travelling active rail pill */}
+            {railIndicator && (
+              <div
+                aria-hidden="true"
+                className="hidden sm:block pointer-events-none absolute left-2.5 right-2.5 top-0 rounded-[8px] bg-black/[0.075] dark:bg-white/[0.10] transition-transform duration-[var(--duration-move,240ms)] ease-[var(--ease-in-out)]"
+                style={{
+                  height: railIndicator.height,
+                  transform: `translate3d(0, ${railIndicator.top}px, 0)`,
+                }}
+              />
+            )}
+
             {SETTINGS_NAV_GROUPS.map((group) => (
               <div key={group.title} className="flex sm:flex-col gap-0.5 shrink-0">
                 <div className="hidden sm:block px-2.5 pt-1 pb-1 text-[10.5px] font-medium text-[var(--settings-label,var(--text-tertiary))] select-none">
@@ -177,14 +250,17 @@ export const SettingsModal: React.FC = () => {
                   return (
                     <button
                       key={tab.id}
+                      ref={(el) => {
+                        tabBtnRefs.current[tab.id] = el;
+                      }}
                       type="button"
                       aria-current={active ? 'page' : undefined}
                       onClick={() => setActiveTab(tab.id)}
                       className={[
-                        'charkle-pressable flex items-center gap-2.5 px-2.5 h-[32px] rounded-[8px] text-left text-[12.5px] whitespace-nowrap shrink-0 cursor-pointer',
+                        'relative z-10 charkle-pressable flex items-center gap-2.5 px-2.5 h-[32px] rounded-[8px] text-left text-[12.5px] whitespace-nowrap shrink-0 cursor-pointer',
                         'transition-[background-color,color] duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
                         active
-                          ? 'bg-black/[0.075] dark:bg-white/[0.10] text-[var(--text-primary)] font-semibold'
+                          ? 'bg-black/[0.075] dark:bg-white/[0.10] sm:bg-transparent sm:dark:bg-transparent text-[var(--text-primary)] font-semibold'
                           : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.035] dark:hover:bg-white/[0.05] font-normal',
                       ].join(' ')}
                     >

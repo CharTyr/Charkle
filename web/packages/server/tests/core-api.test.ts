@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createDefaultSmartFolderRule } from '@charkle/shared';
+import { createDefaultAIProviderConfig, createDefaultSmartFolderRule, toSwiftUUID } from '@charkle/shared';
 import { createApp, createServerContext } from '../src/app.js';
 
 const tempDirs: string[] = [];
@@ -190,6 +190,167 @@ describe('Core REST + SSE API end-to-end', () => {
       expect(text2).toContain('event: library.changed');
       abort.abort();
       await reader.cancel().catch(() => undefined);
+    } finally {
+      ctx.db.close();
+    }
+  });
+
+  it('wires autoAnalyzeOnImport, board pin-offline, 4xx DB errors, missing board delete 404, recent-activity total, and similar/suggest-folder (P0-03, P0-06, P0-09, P1-01, P1-16, P2-02)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'charkle-api-p0-'));
+    tempDirs.push(dir);
+    const ctx = createServerContext({ dataDir: dir, vaultSecret: 'api-p0-secret' });
+    const mockAIFetch: typeof fetch = async (input) => {
+      const u = String(input);
+      if (u.includes(':embedContent')) {
+        return new Response(JSON.stringify({ embedding: { values: [0.1, 0.2, 0.3, 0.4] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: JSON.stringify({ description: '自动分析温暖陶土色卡', tags: ['陶土', '暖色'] }) },
+                ],
+              },
+            },
+          ],
+          usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 10, totalTokenCount: 30 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    };
+    const app = createApp(ctx, { staticClientDir: null, aiOptions: { fetchFn: mockAIFetch } });
+
+    try {
+      const setup = await app.request('/api/v1/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'studio', password: 'studio-password-123' }),
+      });
+      const cookie = (setup.headers.get('set-cookie') ?? '').split(';')[0];
+      const headers = { 'Content-Type': 'application/json', Cookie: cookie };
+
+      // Enable autoAnalyzeOnImport with Gemini provider
+      ctx.configStore.setAIConfig(
+        createDefaultAIProviderConfig({
+          provider: 'gemini',
+          chatModel: 'gemini-2.5-flash',
+          embeddingModel: '',
+          autoAnalyzeOnImport: true,
+        }),
+      );
+      ctx.secretVault.set('ai.gemini.apiKey', 'test-key');
+
+      // Listen for library.enriched event emitted by background autoAnalyzeOnImport
+      const enrichedIDs = await new Promise<string[]>(async (resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Timed out waiting for library.enriched')), 15_000);
+        const unsub = ctx.events.subscribe((ev) => {
+          if (ev.type === 'library.enriched') {
+            clearTimeout(timer);
+            unsub();
+            resolve(ev.assetIDs);
+          }
+        });
+        const ing = await app.request('/api/v1/assets/ingest', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            inputs: [
+              { type: 'colorSwatch', hex: '#C46A34', title: 'Terracotta Swatch' },
+              { type: 'colorSwatch', hex: '#D4A373', title: 'Warm Sand Swatch' },
+            ],
+          }),
+        });
+        expect(ing.status).toBe(201);
+      });
+      expect(enrichedIDs).toHaveLength(2);
+      const enrichedAsset = ctx.db.getAsset(enrichedIDs[0])!;
+      expect(enrichedAsset.aiDescription).toBe('自动分析温暖陶土色卡');
+      expect(enrichedAsset.suggestedTags).toContain('陶土');
+
+      // P2-02: /assets/recent-activity?limit=1 returns full total (2), not truncated page size (1)
+      const recentRes = await app.request('/api/v1/assets/recent-activity?limit=1', {
+        headers: { Cookie: cookie },
+      });
+      expect(recentRes.status).toBe(200);
+      const recentBody = (await recentRes.json()) as { assets: unknown[]; total: number };
+      expect(recentBody.assets).toHaveLength(1);
+      expect(recentBody.total).toBe(2);
+
+      // P0-09: GET /assets/:id/similar & /assets/:id/suggest-folder
+      const simRes = await app.request(`/api/v1/assets/${enrichedIDs[0]}/similar`, {
+        headers: { Cookie: cookie },
+      });
+      expect(simRes.status).toBe(200);
+      const simBody = (await simRes.json()) as { items: Array<{ asset: { id: string } }> };
+      expect(simBody.items.some((r) => r.asset.id === enrichedIDs[1])).toBe(true);
+
+      const sugRes = await app.request(`/api/v1/assets/${enrichedIDs[0]}/suggest-folder`, {
+        headers: { Cookie: cookie },
+      });
+      expect(sugRes.status).toBe(200);
+
+      // P0-03 / P1-04: POST /api/v1/boards/:id/pin-offline pins board & referenced assets
+      const boardRes = await app.request('/api/v1/boards', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ title: 'Offline Board', seedAssetIDs: [enrichedIDs[0]] }),
+      });
+      const { board } = (await boardRes.json()) as { board: { id: string } };
+      const pinRes = await app.request(`/api/v1/boards/${board.id}/pin-offline`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ pinned: true }),
+      });
+      expect(pinRes.status).toBe(200);
+      expect(ctx.db.getBoard(board.id)?.pinnedOffline).toBe(true);
+
+      // P1-16: DELETE /api/v1/boards/:missing returns 404 without creating a tombstone
+      const missingId = toSwiftUUID('99999999-9999-4999-8999-999999999999');
+      const delMissing = await app.request(`/api/v1/boards/${missingId}`, {
+        method: 'DELETE',
+        headers: { Cookie: cookie },
+      });
+      expect(delMissing.status).toBe(404);
+      expect(ctx.db.getState(`deleted.board.${missingId}`)).toBeNull();
+
+      // P1-01: DB validation errors map to clean 400/404/409 (never 500)
+      expect(
+        (
+          await app.request('/api/v1/folders', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ name: '.charkle' }),
+          })
+        ).status,
+      ).toBe(400);
+      await app.request('/api/v1/folders', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name: 'UniqueFolder' }),
+      });
+      expect(
+        (
+          await app.request('/api/v1/folders', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ name: 'UniqueFolder' }),
+          })
+        ).status,
+      ).toBe(409);
+      expect(
+        (
+          await app.request(`/api/v1/folders/${missingId}`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ name: 'Renamed' }),
+          })
+        ).status,
+      ).toBe(404);
     } finally {
       ctx.db.close();
     }

@@ -1,33 +1,57 @@
 import {
+  ASPECT_SHAPES,
   createDefaultAssetBatchPatch,
+  createDefaultAutoLayoutConfig,
   createDefaultFilterCriteria,
   createDefaultMoodboardCurationRequest,
   EDITORIAL_STYLES,
   externalAgentAllowsRead,
   externalAgentAllowsWrite,
+  flattenFolderTree,
+  formatPhotoExifAperture,
   getAssetAspectRatio,
+  getAssetAspectShape,
+  getAssetDisplayTypeLabel,
   getBoardReferencedAssetIDs,
+  getEffectiveSocialAttachments,
+  getPhotoExifCameraDisplayName,
+  getPhotoExifExposureSummary,
   GROUP_TINTS,
+  hasMeaningfulCameraExif,
+  isAIGenerationEmpty,
+  isMeaningfulCropSubregion,
+  isPhotoExifEmpty,
+  labFromHex,
+  matchesSmartFolderRule,
   MEDIA_KINDS,
+  NOTE_STYLES,
   toSwiftUUID,
+  type AspectShape,
   type AssetRecord,
+  type AssetRichMetadata,
   type BoardLayoutMode,
+  type BoardNode,
+  type BoardRect,
   type CaptureInput,
   type EditorialStyle,
+  type ExternalAgentChannel,
   type ExternalAgentConfig,
+  type ExternalAgentDiagnosticsResponse,
   type FilterCriteria,
   type FolderAssignment,
   type FolderRecord,
   type GroupTint,
   type MediaKind,
   type MoodboardDocument,
+  type NoteStyle,
+  type RuntimeMode,
+  type SmartFolderRecord,
+  type SortOrder,
   type UUID,
 } from '@charkle/shared';
 import type { EventBus } from '../api/events.js';
 import type { IMediaPipeline, ServerContext } from '../context.js';
-import type { LibraryDatabase } from '../db/library-database.js';
-import { bytesToBase64, randomUUID } from '../runtime/web-crypto-utils.js';
-import type { ConfigStore } from '../storage/config-store.js';
+import { encodeFeaturePrintFloat32, type LibraryDatabase } from '../db/library-database.js';
 import type { CloudAIProvider } from '../intelligence/cloud-ai-provider.js';
 import {
   buildFolderPathsMap,
@@ -39,7 +63,25 @@ import {
   type AgentSlotPick,
 } from '../intelligence/moodboard-agent-harness.js';
 import { MoodboardCurator } from '../intelligence/moodboard-curator.js';
-import type { VisualGroundingEngine } from '../intelligence/visual-grounding-engine.js';
+import {
+  VisualGroundingEngine,
+  VisualGroundingService,
+} from '../intelligence/visual-grounding-engine.js';
+import { bytesToBase64, randomUUID } from '../runtime/web-crypto-utils.js';
+import { sniffImageMimeType } from '../runtime/workers-image.js';
+import type { ConfigStore } from '../storage/config-store.js';
+import {
+  MCP_DEFAULT_PROTOCOL_VERSION,
+  MCP_SERVER_VERSION,
+  MCP_SUPPORTED_PROTOCOL_VERSIONS,
+  MCP_WRITE_TOOL_NAMES,
+  mcpPromptDefinitions,
+  mcpResourceDefinitions,
+  mcpResourceTemplateDefinitions,
+  mcpToolDefinitions,
+  negotiateProtocolVersion,
+  renderPrompt,
+} from './external-agent-schema.js';
 
 export type MCPToolContent =
   | { type: 'text'; text: string }
@@ -55,22 +97,15 @@ export interface ExternalAgentServiceDeps {
   media: IMediaPipeline;
   configStore: ConfigStore;
   events: EventBus;
+  runtimeMode?: RuntimeMode;
   localFs?: ServerContext['localFs'];
   getCloudAIProvider?: () => CloudAIProvider | null;
   getTypeSafeAPIKey?: () => string | null;
   grounding?: VisualGroundingEngine | null;
+  groundingService?: VisualGroundingService | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const WRITE_TOOL_NAMES = new Set([
-  'organize_assets',
-  'create_folder',
-  'ingest_asset',
-  'compose_moodboard',
-  'patch_moodboard',
-  'trash_assets',
-]);
 
 function asString(v: unknown): string | null {
   return typeof v === 'string' ? v : null;
@@ -83,7 +118,13 @@ function asTrimmedString(v: unknown): string | null {
 }
 
 function asBool(v: unknown): boolean | null {
-  return typeof v === 'boolean' ? v : null;
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string') {
+    const low = v.trim().toLowerCase();
+    if (low === 'true' || low === '1' || low === 'yes') return true;
+    if (low === 'false' || low === '0' || low === 'no') return false;
+  }
+  return null;
 }
 
 function asNumber(v: unknown): number | null {
@@ -121,8 +162,60 @@ function parseUUIDList(raw: unknown): UUID[] {
   return out;
 }
 
+function parseMediaKinds(raw: unknown): MediaKind[] {
+  const out: MediaKind[] = [];
+  for (const k of asStringArray(raw) ?? []) {
+    const trimmed = k.trim();
+    if ((MEDIA_KINDS as readonly string[]).includes(trimmed)) {
+      out.push(trimmed as MediaKind);
+    }
+  }
+  return out;
+}
+
+function parseSortOrder(raw: unknown, defaultOrder: SortOrder): SortOrder {
+  const s = asTrimmedString(raw)?.toLowerCase();
+  if (!s) return defaultOrder;
+  switch (s) {
+    case 'newest':
+      return 'newest';
+    case 'oldest':
+      return 'oldest';
+    case 'name_asc':
+    case 'nameasc':
+    case 'name':
+      return 'nameAsc';
+    case 'rating_desc':
+    case 'ratingdesc':
+    case 'rating':
+      return 'ratingDesc';
+    case 'file_size_desc':
+    case 'filesizedesc':
+    case 'size':
+      return 'fileSizeDesc';
+    case 'relevance':
+      return 'relevance';
+    default:
+      return defaultOrder;
+  }
+}
+
+function paginate<T>(items: readonly T[], offset: number, limit: number): T[] {
+  if (offset >= items.length) return [];
+  return items.slice(offset, Math.min(items.length, offset + limit));
+}
+
 function layoutModeLabel(mode: BoardLayoutMode): string {
   return mode.type === 'autoEditorial' ? `autoEditorial(${mode.config.style})` : 'freeform';
+}
+
+function frameDict(f: BoardRect): Record<string, number> {
+  return {
+    x: Math.round(f.x),
+    y: Math.round(f.y),
+    width: Math.round(f.width),
+    height: Math.round(f.height),
+  };
 }
 
 function jsonToolOutput(obj: unknown, isError = false): MCPToolOutput {
@@ -139,49 +232,210 @@ function errorToolOutput(message: string): MCPToolOutput {
   };
 }
 
+function extractTextFromToolOutput(out: MCPToolOutput): string {
+  return out.content
+    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+    .map((c) => c.text)
+    .join('\n');
+}
+
 /**
- * Grounded External Agent Service & 14-Tool JSON-RPC 2.0 MCP Server.
- * Powers BOTH HTTP `POST /api/v1/mcp` and stdio `packages/server/src/mcp-stdio.ts`.
+ * Grounded External Agent Service & MCP v2 JSON-RPC 2.0 Server
+ * (20 Safe Tools · 4 Static + 2 Dynamic Resources · 4 Curated Studio Prompts · Batch JSON-RPC).
+ * Powers BOTH HTTP `POST /api/v1/mcp` (Node & Cloudflare Workers) and stdio `mcp-stdio.ts`.
  */
 export class ExternalAgentService {
+  static readonly serverVersion = MCP_SERVER_VERSION;
+  static readonly supportedProtocolVersions = MCP_SUPPORTED_PROTOCOL_VERSIONS;
+  static readonly defaultProtocolVersion = MCP_DEFAULT_PROTOCOL_VERSION;
+  static readonly negotiateProtocolVersion = negotiateProtocolVersion;
+  static readonly mcpToolDefinitions = mcpToolDefinitions;
+  static readonly mcpResourceDefinitions = mcpResourceDefinitions;
+  static readonly mcpResourceTemplateDefinitions = mcpResourceTemplateDefinitions;
+  static readonly mcpPromptDefinitions = mcpPromptDefinitions;
+  static readonly renderPrompt = renderPrompt;
+
   private readonly deps: ExternalAgentServiceDeps;
   private readonly tools: CharkleAgentTools;
   private readonly curator: MoodboardCurator;
   private readonly harness: MoodboardAgentHarness;
+  private readonly groundingService: VisualGroundingService;
+  private readonly runtimeMode: RuntimeMode;
 
   constructor(deps: ExternalAgentServiceDeps) {
     this.deps = deps;
+    this.runtimeMode = deps.runtimeMode ?? 'node';
     this.tools = new CharkleAgentTools(deps.db, deps.media);
     this.curator = new MoodboardCurator(deps.db);
     this.harness = new MoodboardAgentHarness(deps.db, deps.media);
+    this.groundingService =
+      deps.groundingService ??
+      new VisualGroundingService({
+        db: deps.db,
+        media: deps.media,
+        engine: deps.grounding ?? new VisualGroundingEngine({ images: deps.media.images }),
+        getTypeSafeConfig: () => deps.configStore.getTypeSafeConfig(),
+        getTypeSafeAPIKey: () => deps.getTypeSafeAPIKey?.() ?? null,
+        getCloudAIProvider: () => {
+          try {
+            return deps.getCloudAIProvider?.() ?? null;
+          } catch {
+            return null;
+          }
+        },
+      });
   }
 
   currentPolicy(): ExternalAgentConfig {
     return this.deps.configStore.getExternalAgentConfig();
   }
 
-  // MARK: - JSON-RPC 2.0 Dispatcher
+  // MARK: - Diagnostics (`GET /api/v1/agent/diagnostics`)
 
-  /**
-   * Handles a single JSON-RPC 2.0 message (object or raw JSON string) and returns the response object,
-   * or `null` for JSON-RPC notifications that expect no reply.
-   */
-  async handleJSONRPC(payload: string | Record<string, unknown>): Promise<Record<string, unknown> | null> {
-    let obj: Record<string, unknown>;
+  async runDiagnostics(): Promise<ExternalAgentDiagnosticsResponse> {
+    const policy = this.currentPolicy();
+    const toolDefs = mcpToolDefinitions();
+    const readToolCount = toolDefs.filter(
+      (t) => ((t.annotations as Record<string, unknown> | undefined)?.readOnlyHint as boolean) === true,
+    ).length;
+    const writeToolCount = toolDefs.length - readToolCount;
+
+    let ok = true;
+    let error: string | undefined;
+    let totalAssets = 0;
+    let inboxCount = 0;
+    let untaggedCount = 0;
+    let trashedCount = 0;
+    let folderCount = 0;
+    let smartFolderCount = 0;
+    let boardCount = 0;
+    let syncMode = 'localOnly';
+    let aiProvider = 'disabled';
+    let cache = {
+      thumbnailBytes: 0,
+      originalCacheBytes: 0,
+      pinnedOfflineBytes: 0,
+      budgetBytes: this.deps.media.getCacheBudgetBytes(),
+      cachedOriginalCount: 0,
+      pinnedAssetCount: 0,
+    };
+
+    try {
+      const overview = this.tools.libraryOverview();
+      const smartFolders = this.deps.db.fetchSmartFolders();
+      const syncCfg = this.deps.configStore.getSyncConfig();
+      const aiCfg = this.deps.configStore.getAIConfig();
+      cache = await this.deps.media.getCacheStats(this.deps.db);
+
+      totalAssets = overview.totalAssets;
+      inboxCount = overview.inboxCount;
+      untaggedCount = this.deps.db.untaggedCount();
+      trashedCount = this.deps.db.trashCount();
+      folderCount = overview.folders.length;
+      smartFolderCount = smartFolders.length;
+      boardCount = overview.boardCount;
+      syncMode = syncCfg.mode;
+      aiProvider = aiCfg.provider;
+    } catch (err) {
+      ok = false;
+      error = err instanceof Error ? err.message : String(err);
+    }
+
+    return {
+      ok,
+      serverVersion: MCP_SERVER_VERSION,
+      runtimeMode: this.runtimeMode,
+      supportedProtocolVersions: [...MCP_SUPPORTED_PROTOCOL_VERSIONS],
+      policy: {
+        mcpEnabled: policy.mcpEnabled,
+        cliEnabled: policy.cliEnabled,
+        accessLevel: policy.accessLevel,
+        mcpCanWrite: externalAgentAllowsWrite(policy, 'mcp'),
+        cliCanWrite: externalAgentAllowsWrite(policy, 'cli'),
+      },
+      capabilities: {
+        toolCount: toolDefs.length,
+        readToolCount,
+        writeToolCount,
+        resourceCount: mcpResourceDefinitions().length,
+        resourceTemplateCount: mcpResourceTemplateDefinitions().length,
+        promptCount: mcpPromptDefinitions().length,
+        permanentDeleteAllowed: false,
+      },
+      library: {
+        totalAssets,
+        inboxCount,
+        untaggedCount,
+        trashedCount,
+        folderCount,
+        smartFolderCount,
+        boardCount,
+      },
+      syncMode,
+      aiProvider,
+      cache,
+      database: {
+        healthy: ok,
+        exists: true,
+        sizeBytes: 0,
+      },
+      ...(error ? { error } : {}),
+    };
+  }
+
+  // MARK: - JSON-RPC 2.0 Dispatcher (Single Object & Batch Array)
+
+  async handleJSONRPC(
+    payload: string | Record<string, unknown> | unknown[],
+    channel: ExternalAgentChannel = 'mcp',
+  ): Promise<Record<string, unknown> | Array<Record<string, unknown>> | null> {
+    let parsed: unknown;
     if (typeof payload === 'string') {
       try {
-        const parsed = JSON.parse(payload) as unknown;
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          return this.makeErrorResponse(null, -32700, 'Parse error: invalid JSON');
-        }
-        obj = parsed as Record<string, unknown>;
+        parsed = JSON.parse(payload);
       } catch {
         return this.makeErrorResponse(null, -32700, 'Parse error: invalid JSON');
       }
     } else {
-      obj = payload;
+      parsed = payload;
     }
 
+    if (Array.isArray(parsed)) {
+      if (parsed.length === 0) {
+        return this.makeErrorResponse(null, -32600, 'Invalid Request: empty JSON-RPC batch');
+      }
+      const responses: Array<Record<string, unknown>> = [];
+      for (const item of parsed) {
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          const resp = await this.handleSingleJSONRPCObject(
+            item as Record<string, unknown>,
+            channel,
+          );
+          if (resp !== null) responses.push(resp);
+        } else {
+          responses.push(
+            this.makeErrorResponse(null, -32600, 'Invalid Request: batch element must be an object'),
+          );
+        }
+      }
+      return responses.length > 0 ? responses : null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return this.makeErrorResponse(
+        null,
+        -32600,
+        'Invalid Request: expected JSON object or array',
+      );
+    }
+
+    return this.handleSingleJSONRPCObject(parsed as Record<string, unknown>, channel);
+  }
+
+  private async handleSingleJSONRPCObject(
+    obj: Record<string, unknown>,
+    channel: ExternalAgentChannel,
+  ): Promise<Record<string, unknown> | null> {
     const id = 'id' in obj ? obj.id : undefined;
     const isNotification = id === undefined || id === null;
     const method = asString(obj.method);
@@ -196,34 +450,52 @@ export class ExternalAgentService {
         ? (obj.params as Record<string, unknown>)
         : {};
 
+    const disabledMessage =
+      channel === 'cli'
+        ? 'Charkle CLI service is disabled in Settings.'
+        : 'Charkle MCP service is disabled in Settings.';
+
     switch (method) {
       case 'initialize': {
-        const requestedVersion = asString(params.protocolVersion) ?? '2025-03-26';
+        const policy = this.currentPolicy();
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
+        }
+        const negotiatedVersion = negotiateProtocolVersion(asString(params.protocolVersion));
         return this.makeResultResponse(id, {
-          protocolVersion: requestedVersion,
+          protocolVersion: negotiatedVersion,
           capabilities: {
             tools: { listChanged: false },
             resources: { subscribe: false, listChanged: false },
+            prompts: { listChanged: false },
+            logging: {},
           },
           serverInfo: {
             name: 'charkle',
-            version: '1.0.0',
+            version: MCP_SERVER_VERSION,
           },
           instructions:
-            'Charkle is a visual reference library and moodboard studio. Use `library_overview` to inspect folders and tags, `search_assets` / `list_inbox` to find candidates, `render_contact_sheet` to visually inspect up to 16 numbered thumbnails in one image, `get_board_context` / `export_board_image` to inspect moodboards, and write tools (`organize_assets`, `compose_moodboard`, `patch_moodboard`, `ingest_asset`, `trash_assets`) when write access is enabled in Charkle Settings.',
+            'Charkle is a visual reference library and moodboard studio. Start with `library_overview` to inspect folders, smart folders, and tags. Use `search_assets` (with pagination, subfolder recursion, color, media kind, and smart folder filters), `semantic_search`, `find_similar_assets`, `quick_jump`, or `list_inbox` to locate references. Use `render_contact_sheet` to visually inspect up to 16 numbered thumbnails in one image, `get_asset` (with optional `include_image: true`) for full EXIF, AI generation prompts, social post, and GitHub metadata, and `get_board_context` / `export_board_image` to inspect moodboards. Safe write tools (`organize_assets`, `create_folder`, `update_folder`, `ingest_asset`, `compose_moodboard`, `patch_moodboard`, `trash_assets`, `analyze_assets`) are available when write access is enabled in Charkle Settings; permanent deletion is never permitted.',
         });
       }
 
       case 'notifications/initialized':
       case 'notifications/cancelled':
+      case 'notifications/roots/list_changed':
       case 'initialized':
         return null;
 
       case 'ping':
+      case 'logging/setLevel':
         return this.makeResultResponse(id, {});
 
-      case 'tools/list':
-        return this.makeResultResponse(id, { tools: ExternalAgentService.mcpToolDefinitions() });
+      case 'tools/list': {
+        const policy = this.currentPolicy();
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
+        }
+        return this.makeResultResponse(id, { tools: mcpToolDefinitions() });
+      }
 
       case 'tools/call': {
         const name = asString(params.name);
@@ -234,31 +506,30 @@ export class ExternalAgentService {
           params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
             ? (params.arguments as Record<string, unknown>)
             : {};
-        const output = await this.callTool(name, args);
+        const output = await this.callTool(name, args, channel);
         return this.makeResultResponse(id, {
           content: output.content,
           isError: output.isError,
         });
       }
 
-      case 'resources/list':
+      case 'resources/list': {
+        const policy = this.currentPolicy();
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
+        }
+        return this.makeResultResponse(id, { resources: mcpResourceDefinitions() });
+      }
+
+      case 'resources/templates/list': {
+        const policy = this.currentPolicy();
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
+        }
         return this.makeResultResponse(id, {
-          resources: [
-            {
-              uri: 'charkle://library/overview',
-              name: 'Charkle Library Overview',
-              description:
-                'Folders, top tags, media distribution, and counts for the Charkle library.',
-              mimeType: 'application/json',
-            },
-            {
-              uri: 'charkle://boards',
-              name: 'Charkle Moodboards',
-              description: 'Summary list of all moodboards in Charkle.',
-              mimeType: 'application/json',
-            },
-          ],
+          resourceTemplates: mcpResourceTemplateDefinitions(),
         });
+      }
 
       case 'resources/read': {
         const uri = asString(params.uri);
@@ -266,34 +537,38 @@ export class ExternalAgentService {
           return this.makeErrorResponse(id, -32602, 'Missing resource uri');
         }
         const policy = this.currentPolicy();
-        if (!externalAgentAllowsRead(policy)) {
-          return this.makeErrorResponse(
-            id,
-            -32001,
-            'Charkle external agent access is disabled in Settings.',
-          );
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
         }
-        if (uri === 'charkle://library/overview') {
-          const out = await this.callTool('library_overview', {});
-          const text = out.content
-            .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-            .map((c) => c.text)
-            .join('\n');
-          return this.makeResultResponse(id, {
-            contents: [{ uri, mimeType: 'application/json', text }],
-          });
+        return this.handleReadResource(uri, id, channel);
+      }
+
+      case 'prompts/list': {
+        const policy = this.currentPolicy();
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
         }
-        if (uri === 'charkle://boards') {
-          const out = await this.callTool('list_boards', {});
-          const text = out.content
-            .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-            .map((c) => c.text)
-            .join('\n');
-          return this.makeResultResponse(id, {
-            contents: [{ uri, mimeType: 'application/json', text }],
-          });
+        return this.makeResultResponse(id, { prompts: mcpPromptDefinitions() });
+      }
+
+      case 'prompts/get': {
+        const policy = this.currentPolicy();
+        if (!externalAgentAllowsRead(policy, channel)) {
+          return this.makeErrorResponse(id, -32001, disabledMessage);
         }
-        return this.makeErrorResponse(id, -32002, `Unknown resource URI: ${uri}`);
+        const name = asString(params.name);
+        if (!name) {
+          return this.makeErrorResponse(id, -32602, 'Invalid params: missing prompt name');
+        }
+        const promptArgs =
+          params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
+            ? (params.arguments as Record<string, unknown>)
+            : {};
+        const rendered = renderPrompt(name, promptArgs);
+        if (!rendered) {
+          return this.makeErrorResponse(id, -32602, `Unknown prompt: ${name}`);
+        }
+        return this.makeResultResponse(id, rendered);
       }
 
       default:
@@ -302,16 +577,94 @@ export class ExternalAgentService {
     }
   }
 
+  private async handleReadResource(
+    uri: string,
+    id: unknown,
+    channel: ExternalAgentChannel,
+  ): Promise<Record<string, unknown>> {
+    const wrapOutput = (out: MCPToolOutput): Record<string, unknown> => {
+      const text = extractTextFromToolOutput(out);
+      if (out.isError) {
+        return this.makeErrorResponse(id, -32002, text || `Failed to read resource: ${uri}`);
+      }
+      return this.makeResultResponse(id, {
+        contents: [{ uri, mimeType: 'application/json', text }],
+      });
+    };
+
+    if (uri === 'charkle://library/overview') {
+      return wrapOutput(await this.callTool('library_overview', {}, channel));
+    }
+    if (uri === 'charkle://boards') {
+      return wrapOutput(await this.callTool('list_boards', {}, channel));
+    }
+    if (uri === 'charkle://folders') {
+      try {
+        const folders = this.deps.db.fetchFolders();
+        const paths = buildFolderPathsMap(folders);
+        const items = flattenFolderTree(folders).map((node) => ({
+          id: node.folder.id,
+          name: node.folder.name,
+          path: paths.get(node.folder.id) ?? node.folder.name,
+          parentID: node.folder.parentID ?? '',
+          depth: node.depth,
+          assetCount: node.folder.assetCount,
+          colorHex: node.folder.colorHex ?? '',
+          customSymbol: node.folder.customSymbol ?? '',
+        }));
+        return wrapOutput(jsonToolOutput({ count: items.length, folders: items }));
+      } catch (err) {
+        return this.makeErrorResponse(id, -32603, err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (uri === 'charkle://smart-folders') {
+      try {
+        const smartFolders = this.deps.db.fetchSmartFolders();
+        const activeAssets = this.deps.db.fetchAssets({ includeTrashed: false });
+        const items = smartFolders.map((sf) => ({
+          id: sf.id,
+          name: sf.name,
+          colorHex: sf.colorHex ?? '',
+          matchMode: sf.rule.matchMode,
+          tags: sf.rule.tags,
+          descriptionQuery: sf.rule.descriptionQuery,
+          colorHexes: sf.rule.colorHexes,
+          mediaKinds: sf.rule.mediaKinds,
+          minRating: sf.rule.minRating,
+          matchCount: activeAssets.filter((a) => matchesSmartFolderRule(sf.rule, a)).length,
+        }));
+        return wrapOutput(jsonToolOutput({ count: items.length, smartFolders: items }));
+      } catch (err) {
+        return this.makeErrorResponse(id, -32603, err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (uri.startsWith('charkle://assets/')) {
+      const assetID = uri.slice('charkle://assets/'.length);
+      return wrapOutput(await this.callTool('get_asset', { asset_id: assetID }, channel));
+    }
+    if (uri.startsWith('charkle://boards/')) {
+      const boardID = uri.slice('charkle://boards/'.length);
+      return wrapOutput(await this.callTool('get_board_context', { board_id: boardID }, channel));
+    }
+    return this.makeErrorResponse(id, -32002, `Unknown resource URI: ${uri}`);
+  }
+
   // MARK: - Tool Dispatcher & Policy Enforcement
 
-  async callTool(name: string, args: Record<string, unknown> = {}): Promise<MCPToolOutput> {
+  async callTool(
+    name: string,
+    args: Record<string, unknown> = {},
+    channel: ExternalAgentChannel = 'mcp',
+  ): Promise<MCPToolOutput> {
     const policy = this.currentPolicy();
-    if (!externalAgentAllowsRead(policy)) {
+    if (!externalAgentAllowsRead(policy, channel)) {
       return errorToolOutput(
-        '外部 Agent 接入已在 Charkle「设置 → 外部 Agent 与 MCP」中关闭，请先开启后再试。',
+        channel === 'cli'
+          ? 'CLI 命令行服务已在 Charkle「设置 → 外部 Agent 与 MCP」中关闭，请先开启「启用本地命令行 (stdio) 服务」后再试。'
+          : 'MCP 服务已在 Charkle「设置 → 外部 Agent 与 MCP」中关闭，请先开启「启用 MCP 服务」后再试。',
       );
     }
-    if (WRITE_TOOL_NAMES.has(name) && !externalAgentAllowsWrite(policy)) {
+    if (MCP_WRITE_TOOL_NAMES.has(name) && !externalAgentAllowsWrite(policy, channel)) {
       return errorToolOutput(
         `当前 Charkle 外部 Agent 权限为「仅只读检索与导出」，无法执行写入操作「${name}」。请在 Charkle「设置 → 外部 Agent 与 MCP」中切换为「允许整理与生成情绪板」。`,
       );
@@ -319,26 +672,39 @@ export class ExternalAgentService {
 
     try {
       switch (name) {
+        // 12 Read Tools
         case 'library_overview':
-          return this.handleLibraryOverview(policy);
+          return await this.handleLibraryOverview(policy, channel);
         case 'search_assets':
           return this.handleSearchAssets(args);
         case 'list_inbox':
           return this.handleListInbox(args);
         case 'get_asset':
-          return this.handleGetAsset(args);
+          return await this.handleGetAsset(args);
         case 'render_contact_sheet':
           return await this.handleRenderContactSheet(args);
+        case 'find_similar_assets':
+          return await this.handleFindSimilarAssets(args);
+        case 'semantic_search':
+          return await this.handleSemanticSearch(args);
+        case 'quick_jump':
+          return this.handleQuickJump(args);
+        case 'suggest_folder':
+          return this.handleSuggestFolder(args);
         case 'list_boards':
           return this.handleListBoards();
         case 'get_board_context':
           return this.handleGetBoardContext(args);
         case 'export_board_image':
           return await this.handleExportBoardImage(args);
+
+        // 8 Safe Write Tools (Zero Permanent Delete)
         case 'organize_assets':
           return this.handleOrganizeAssets(args);
         case 'create_folder':
           return this.handleCreateFolder(args);
+        case 'update_folder':
+          return this.handleUpdateFolder(args);
         case 'ingest_asset':
           return await this.handleIngestAsset(args);
         case 'compose_moodboard':
@@ -347,6 +713,9 @@ export class ExternalAgentService {
           return this.handlePatchMoodboard(args);
         case 'trash_assets':
           return this.handleTrashAssets(args);
+        case 'analyze_assets':
+          return await this.handleAnalyzeAssets(args);
+
         default:
           return errorToolOutput(`Unknown Charkle tool: ${name}`);
       }
@@ -356,19 +725,66 @@ export class ExternalAgentService {
     }
   }
 
-  // MARK: - 8 Read Tool Handlers
+  // MARK: - 12 Read Tool Handlers
 
-  private handleLibraryOverview(policy: ExternalAgentConfig): MCPToolOutput {
+  private async handleLibraryOverview(
+    policy: ExternalAgentConfig,
+    channel: ExternalAgentChannel,
+  ): Promise<MCPToolOutput> {
     const overview = this.tools.libraryOverview();
+    const trashedCount = this.deps.db.trashCount();
+    const smartFolders = this.deps.db.fetchSmartFolders();
+    let untaggedCount: number;
+    let smartFolderPayloads: Array<Record<string, unknown>>;
+
+    if (smartFolders.length === 0) {
+      untaggedCount = this.deps.db.untaggedCount();
+      smartFolderPayloads = [];
+    } else {
+      const activeAssets = this.deps.db.fetchAssets({ includeTrashed: false });
+      untaggedCount = activeAssets.filter((a) => a.tags.length === 0).length;
+      smartFolderPayloads = smartFolders.map((sf) => ({
+        id: sf.id,
+        name: sf.name,
+        colorHex: sf.colorHex ?? '',
+        matchCount: activeAssets.filter((a) => matchesSmartFolderRule(sf.rule, a)).length,
+      }));
+    }
+
+    const foldersRaw = this.deps.db.fetchFolders();
+    const folderByID = new Map(foldersRaw.map((f) => [f.id, f]));
+    const syncCfg = this.deps.configStore.getSyncConfig();
+    const aiCfg = this.deps.configStore.getAIConfig();
+    const cache = await this.deps.media.getCacheStats(this.deps.db);
+
     return jsonToolOutput({
       totalAssets: overview.totalAssets,
       inboxCount: overview.inboxCount,
+      untaggedCount,
+      trashedCount,
       boardCount: overview.boardCount,
+      mcpEnabled: policy.mcpEnabled,
+      cliEnabled: policy.cliEnabled,
       accessLevel: policy.accessLevel,
-      canWrite: externalAgentAllowsWrite(policy),
+      canWrite: externalAgentAllowsWrite(policy, channel),
+      syncMode: syncCfg.mode,
+      aiConfigured: aiCfg.provider !== 'disabled',
       mediaKindCounts: overview.mediaKindCounts,
-      folders: overview.folders,
+      folders: overview.folders.map((folder) => {
+        const raw = folderByID.get(folder.id);
+        return {
+          id: folder.id,
+          name: folder.name,
+          path: folder.path,
+          parentID: raw?.parentID ?? '',
+          assetCount: folder.assetCount,
+          colorHex: raw?.colorHex ?? '',
+          customSymbol: raw?.customSymbol ?? '',
+        };
+      }),
+      smartFolders: smartFolderPayloads,
       topTags: overview.topTags.slice(0, 40),
+      cache,
     });
   }
 
@@ -376,75 +792,172 @@ export class ExternalAgentService {
     const folders = this.deps.db.fetchFolders();
     const folderPathByID = buildFolderPathsMap(folders);
     const criteria = this.buildFilterCriteria(args, folders, folderPathByID);
+    const smartFolder = this.resolveOptionalSmartFolder(args);
+    const offset = Math.max(0, asInt(args.offset) ?? 0);
     const limit = Math.max(1, Math.min(100, asInt(args.limit) ?? 30));
 
-    const matches = this.deps.db.fetchAssets(criteria);
-    const sliced = matches.slice(0, limit);
-    return jsonToolOutput({
+    let matches = this.deps.db.fetchAssets(criteria);
+    if (smartFolder) {
+      matches = matches.filter((a) => matchesSmartFolderRule(smartFolder.rule, a));
+    }
+    const sliced = paginate(matches, offset, limit);
+    const hasMore = offset + sliced.length < matches.length;
+
+    const payload: Record<string, unknown> = {
       totalMatched: matches.length,
+      offset,
       returned: sliced.length,
+      hasMore,
       assets: sliced.map((a) => this.serializeAssetSummary(a, folderPathByID)),
-    });
+    };
+    if (hasMore) payload.nextOffset = offset + sliced.length;
+    if (smartFolder) payload.smartFolder = { id: smartFolder.id, name: smartFolder.name };
+    return jsonToolOutput(payload);
   }
 
   private handleListInbox(args: Record<string, unknown>): MCPToolOutput {
+    const offset = Math.max(0, asInt(args.offset) ?? 0);
     const limit = Math.max(1, Math.min(100, asInt(args.limit) ?? 40));
-    const matches = this.deps.db.fetchAssets({ onlyInbox: true, sortBy: 'newest' });
-    const sliced = matches.slice(0, limit);
-    return jsonToolOutput({
+    const sortBy = parseSortOrder(args.sort_by, 'newest');
+    const kinds = parseMediaKinds(args.media_kinds);
+
+    const matches = this.deps.db.fetchAssets({ kinds, onlyInbox: true, sortBy });
+    const sliced = paginate(matches, offset, limit);
+    const hasMore = offset + sliced.length < matches.length;
+
+    const payload: Record<string, unknown> = {
       inboxTotal: matches.length,
+      offset,
       returned: sliced.length,
+      hasMore,
       assets: sliced.map((a) => this.serializeAssetSummary(a, new Map())),
-    });
+    };
+    if (hasMore) payload.nextOffset = offset + sliced.length;
+    return jsonToolOutput(payload);
   }
 
-  private handleGetAsset(args: Record<string, unknown>): MCPToolOutput {
+  private async handleGetAsset(args: Record<string, unknown>): Promise<MCPToolOutput> {
     const assetID = parseUUID(args.asset_id ?? args.id);
     if (!assetID) {
       return errorToolOutput('Missing or invalid UUID for `asset_id`.');
     }
-    const asset = this.deps.db.getAsset(assetID);
+    let asset = this.deps.db.getAsset(assetID);
     if (!asset) {
       return errorToolOutput(`Asset not found: ${assetID}`);
     }
+
+    // Lazily hydrate camera EXIF / AI generation prompt metadata if not yet populated
+    const hydrated = await this.deps.media.hydrateImageMetadata(asset).catch(() => null);
+    if (hydrated) {
+      asset = this.deps.db.saveAssetLocally(hydrated, false);
+    }
+
     const folders = this.deps.db.fetchFolders();
     const folderPathByID = buildFolderPathsMap(folders);
     const thumbPath = this.deps.media.getThumbnailPath(assetID, 'grid520') ?? '';
+    const previewPath = this.deps.media.getThumbnailPath(assetID, 'preview1400') ?? '';
     const origPath = this.deps.media.getOriginalPath(asset) ?? '';
+    const hasOrig = origPath ? true : await this.deps.media.hasOriginal(asset);
 
-    return jsonToolOutput({
+    const dict: Record<string, unknown> = {
       ...this.serializeAssetSummary(asset, folderPathByID),
+      mimeType: asset.mimeType,
+      displayType: getAssetDisplayTypeLabel(asset),
+      aspectShape: getAssetAspectShape(asset),
       ocrText: asset.ocrText ?? '',
       suggestedTags: asset.suggestedTags,
       sourceDomain: asset.sourceDomain ?? '',
       fileSizeBytes: asset.fileSizeBytes,
       pixelWidth: asset.pixelWidth,
       pixelHeight: asset.pixelHeight,
+      pinnedOffline: asset.pinnedOffline,
+      isLocalOriginalCached: hasOrig,
       thumbnailPath: thumbPath,
+      previewPath,
       localOriginalPath: origPath,
       isTrashed: asset.isTrashed,
-    });
+      createdAt: asset.createdAt,
+      updatedAt: asset.updatedAt,
+    };
+    if (asset.durationSeconds != null) {
+      dict.durationSeconds = Math.round(asset.durationSeconds * 100) / 100;
+    }
+    if (asset.lastOpenedAt) {
+      dict.lastOpenedAt = asset.lastOpenedAt;
+    }
+    const rich = this.serializeRichMetadata(asset.richMetadata);
+    if (rich) {
+      dict.richMetadata = rich;
+    }
+
+    const includeImage = asBool(args.include_image) ?? false;
+    if (includeImage) {
+      const maxSide = Math.max(280, Math.min(1568, asInt(args.image_max_side) ?? 800));
+      const rawBuf =
+        (await this.deps.media.readThumbnailBuffer(assetID, 'preview1400')) ??
+        (await this.deps.media.readThumbnailBuffer(assetID, 'grid520')) ??
+        (await this.deps.media.readOriginalBuffer(asset));
+      if (rawBuf && rawBuf.byteLength > 0) {
+        let imgData: Uint8Array = rawBuf;
+        let imgMime = sniffImageMimeType(rawBuf, 'image/jpeg');
+        if (this.deps.media.images.cropAndPad) {
+          const prepared = await this.deps.media.images
+            .cropAndPad(rawBuf, { targetLongSide: maxSide, maxSide: 1568, quality: 0.86 })
+            .catch(() => null);
+          if (prepared) {
+            imgData = prepared.data;
+            imgMime = prepared.mimeType;
+          }
+        }
+        return {
+          content: [
+            { type: 'image', mimeType: imgMime, data: bytesToBase64(imgData) },
+            { type: 'text', text: JSON.stringify(dict, null, 2) },
+          ],
+          isError: false,
+        };
+      }
+    }
+
+    return jsonToolOutput(dict);
   }
 
   private async handleRenderContactSheet(args: Record<string, unknown>): Promise<MCPToolOutput> {
     const folders = this.deps.db.fetchFolders();
     const folderPathByID = buildFolderPathsMap(folders);
+    const offset = Math.max(0, asInt(args.offset) ?? 0);
+    const limit = Math.max(1, Math.min(16, asInt(args.limit) ?? 16));
+    const maxWidth = Math.max(640, Math.min(1920, asInt(args.max_width) ?? 1280));
+    const includeImage = asBool(args.include_image) ?? true;
 
+    let totalMatched = 0;
     let selectedAssets: AssetRecord[] = [];
     const rawIDs = parseUUIDList(args.asset_ids);
     if (rawIDs.length > 0) {
-      for (const id of rawIDs.slice(0, 16)) {
+      const resolved: AssetRecord[] = [];
+      for (const id of rawIDs) {
         const asset = this.deps.db.getAsset(id);
-        if (asset) selectedAssets.push(asset);
+        if (asset) resolved.push(asset);
       }
+      totalMatched = resolved.length;
+      selectedAssets = paginate(resolved, offset, limit);
     } else {
       const criteria = this.buildFilterCriteria(args, folders, folderPathByID);
-      const limit = Math.max(1, Math.min(16, asInt(args.limit) ?? 16));
-      selectedAssets = this.deps.db.fetchAssets(criteria, limit);
+      const smartFolder = this.resolveOptionalSmartFolder(args);
+      let matches = this.deps.db.fetchAssets(criteria);
+      if (smartFolder) {
+        matches = matches.filter((a) => matchesSmartFolderRule(smartFolder.rule, a));
+      }
+      totalMatched = matches.length;
+      selectedAssets = paginate(matches, offset, limit);
     }
 
     if (selectedAssets.length === 0) {
       return jsonToolOutput({
+        totalMatched,
+        offset,
+        slotCount: 0,
+        hasMore: false,
         slots: [],
         message: 'No assets matched the requested filter or asset_ids.',
       });
@@ -454,6 +967,7 @@ export class ExternalAgentService {
       candidates: selectedAssets,
       folderPathByID,
       sheetCapacity: 16,
+      maxCanvasWidth: maxWidth,
       format: 'jpeg',
     });
     const sheet = pkg.sheets[0];
@@ -478,9 +992,11 @@ export class ExternalAgentService {
         if (!asset) return null;
         return {
           slot: pair.slot,
+          index: offset + pair.slot,
           badge: `#${String(pair.slot).padStart(2, '0')}`,
           assetID: asset.id,
           title: asset.title,
+          mediaKind: asset.mediaKind,
           folderPath: (asset.folderID && folderPathByID.get(asset.folderID)) || 'Inbox',
           tags: asset.tags,
           dominantColors: asset.dominantColors.slice(0, 4).map((c) => c.hex.toUpperCase()),
@@ -489,21 +1005,186 @@ export class ExternalAgentService {
       })
       .filter(Boolean);
 
+    const hasMore = offset + slots.length < totalMatched;
     const metadata: Record<string, unknown> = {
       sheetWidth: sheet.width,
       sheetHeight: sheet.height,
+      totalMatched,
+      offset,
       slotCount: slots.length,
+      hasMore,
       slots,
     };
+    if (hasMore) metadata.nextOffset = offset + slots.length;
     if (savedPath) metadata.savedPath = savedPath;
 
-    return {
-      content: [
-        { type: 'image', mimeType: sheet.mimeType, data: bytesToBase64(sheet.jpegData) },
-        { type: 'text', text: JSON.stringify(metadata, null, 2) },
-      ],
-      isError: false,
+    const content: MCPToolContent[] = [];
+    if (includeImage) {
+      content.push({ type: 'image', mimeType: sheet.mimeType, data: bytesToBase64(sheet.jpegData) });
+    }
+    content.push({ type: 'text', text: JSON.stringify(metadata, null, 2) });
+    return { content, isError: false };
+  }
+
+  private async handleFindSimilarAssets(args: Record<string, unknown>): Promise<MCPToolOutput> {
+    const assetID = parseUUID(args.asset_id ?? args.id);
+    if (!assetID) {
+      return errorToolOutput('Missing or invalid UUID for `asset_id`.');
+    }
+    if (!this.deps.db.getAsset(assetID)) {
+      return errorToolOutput(`Asset not found: ${assetID}`);
+    }
+    const limit = Math.max(1, Math.min(32, asInt(args.limit) ?? 12));
+    const matches = this.deps.db.similarAssets(assetID, limit);
+    const folders = this.deps.db.fetchFolders();
+    const folderPathByID = buildFolderPathsMap(folders);
+
+    const items = matches.map((scored, idx) => ({
+      ...this.serializeAssetSummary(scored.asset, folderPathByID),
+      rank: idx + 1,
+      score: Math.round(scored.score * 1000) / 1000,
+      matchReasons: scored.matchReasons,
+    }));
+
+    const payload = {
+      referenceAssetID: assetID,
+      returned: items.length,
+      matches: items,
     };
+
+    const wantSheet = asBool(args.render_contact_sheet) ?? false;
+    if (wantSheet && matches.length > 0) {
+      const pkg = await this.tools.buildContactSheets({
+        candidates: matches.slice(0, 16).map((m) => m.asset),
+        folderPathByID,
+        sheetCapacity: 16,
+        format: 'jpeg',
+      });
+      const sheet = pkg.sheets[0];
+      if (sheet) {
+        return {
+          content: [
+            { type: 'image', mimeType: sheet.mimeType, data: bytesToBase64(sheet.jpegData) },
+            { type: 'text', text: JSON.stringify(payload, null, 2) },
+          ],
+          isError: false,
+        };
+      }
+    }
+
+    return jsonToolOutput(payload);
+  }
+
+  private async handleSemanticSearch(args: Record<string, unknown>): Promise<MCPToolOutput> {
+    const query = asTrimmedString(args.query);
+    if (!query) {
+      return errorToolOutput('Missing non-empty `query` for semantic_search.');
+    }
+    const folders = this.deps.db.fetchFolders();
+    const folderPathByID = buildFolderPathsMap(folders);
+    const criteria = this.buildFilterCriteria(args, folders, folderPathByID);
+    criteria.searchQuery = '';
+    const limit = Math.max(1, Math.min(50, asInt(args.limit) ?? 20));
+
+    const report = await this.groundingService.semanticSearch(query, criteria, limit);
+    const hits = report.hits.map((hit, idx) => {
+      const dict: Record<string, unknown> = {
+        ...this.serializeAssetSummary(hit.asset, folderPathByID),
+        rank: idx + 1,
+        score: Math.round(hit.score * 1000) / 1000,
+        reason: hit.reason,
+        source: hit.sourceLabel,
+      };
+      if (hit.confidence != null) {
+        dict.confidence = Math.round(hit.confidence * 1000) / 1000;
+      }
+      return dict;
+    });
+
+    return jsonToolOutput({
+      query: report.query,
+      summary: report.summary,
+      usedCloudEmbedding: report.usedCloudEmbedding,
+      usedVisualRerank: report.usedTypeSafeJev,
+      evaluatedVisualCount: report.evaluatedVisualCount,
+      returned: hits.length,
+      hits,
+    });
+  }
+
+  private handleQuickJump(args: Record<string, unknown>): MCPToolOutput {
+    const query = asTrimmedString(args.query);
+    if (!query) {
+      return errorToolOutput('Missing non-empty `query` for quick_jump.');
+    }
+    const limit = Math.max(1, Math.min(50, asInt(args.limit) ?? 20));
+    const matches = this.deps.db.quickJump(query, limit);
+    const items = matches.map((match) => {
+      const dict: Record<string, unknown> = {
+        kind: match.kind,
+        title: match.title,
+        subtitle: match.subtitle,
+        score: Math.round(match.score * 1000) / 1000,
+      };
+      if (match.targetUUID) dict.targetUUID = match.targetUUID;
+      if (match.tagName) dict.tagName = match.tagName;
+      return dict;
+    });
+    return jsonToolOutput({
+      query,
+      returned: items.length,
+      matches: items,
+    });
+  }
+
+  private handleSuggestFolder(args: Record<string, unknown>): MCPToolOutput {
+    const ids = parseUUIDList(args.asset_ids);
+    const single = parseUUID(args.asset_id ?? args.id);
+    if (single && !ids.includes(single)) {
+      ids.unshift(single);
+    }
+    if (ids.length === 0) {
+      return errorToolOutput('Provide `asset_id` or a non-empty `asset_ids` array.');
+    }
+
+    const folders = this.deps.db.fetchFolders();
+    const folderPathByID = buildFolderPathsMap(folders);
+    const recommendations: Array<Record<string, unknown>> = [];
+
+    for (const uuid of ids.slice(0, 20)) {
+      const asset = this.deps.db.getAsset(uuid);
+      if (!asset) {
+        recommendations.push({ assetID: uuid, found: false });
+        continue;
+      }
+      const currentFolderPath = (asset.folderID && folderPathByID.get(asset.folderID)) || 'Inbox';
+      const suggestion = this.deps.db.suggestFolder(uuid);
+      if (suggestion) {
+        recommendations.push({
+          assetID: uuid,
+          assetTitle: asset.title,
+          currentFolderPath,
+          suggestedFolderID: suggestion.folderID,
+          suggestedFolderName: suggestion.folderName,
+          suggestedFolderPath: folderPathByID.get(suggestion.folderID) ?? suggestion.folderName,
+          confidence: Math.round(suggestion.confidence * 1000) / 1000,
+          reason: suggestion.reason,
+        });
+      } else {
+        recommendations.push({
+          assetID: uuid,
+          assetTitle: asset.title,
+          currentFolderPath,
+          suggestedFolderID: '',
+          reason: 'No confident folder match found.',
+        });
+      }
+    }
+
+    return jsonToolOutput({
+      evaluatedCount: recommendations.length,
+      recommendations,
+    });
   }
 
   private handleListBoards(): MCPToolOutput {
@@ -516,7 +1197,7 @@ export class ExternalAgentService {
         subtitle: b.subtitle,
         mode: layoutModeLabel(b.mode),
         itemCount: b.itemCount,
-        paletteHexes: b.paletteHexes,
+        paletteHexes: b.paletteHexes.map((h) => h.toUpperCase()),
         pinnedOffline: b.pinnedOffline,
         updatedAt: b.updatedAt,
       })),
@@ -531,8 +1212,9 @@ export class ExternalAgentService {
     const folders = this.deps.db.fetchFolders();
     const folderPathByID = buildFolderPathsMap(folders);
     const refIDs = getBoardReferencedAssetIDs(doc);
+    const allAssetIDs = new Set<UUID>([...refIDs, ...doc.candidateAssetIDs]);
     const assetsByID = new Map<UUID, AssetRecord>();
-    for (const id of refIDs) {
+    for (const id of allAssetIDs) {
       const a = this.deps.db.getAsset(id);
       if (a) assetsByID.set(id, a);
     }
@@ -549,12 +1231,16 @@ export class ExternalAgentService {
           title: node.kind.title ?? '',
           text: node.kind.text,
           style: node.kind.style,
+          isLocked: node.isLocked,
+          frame: frameDict(node.frame),
         });
       } else if (node.kind.type === 'groupFrame') {
         sections.push({
           nodeID: node.id,
           title: node.kind.title,
           tint: node.kind.tint,
+          isLocked: node.isLocked,
+          frame: frameDict(node.frame),
         });
       } else if (node.kind.type === 'assetRef') {
         const asset = assetsByID.get(node.kind.assetID);
@@ -565,12 +1251,43 @@ export class ExternalAgentService {
           weight: node.kind.weight,
           isHero: node.kind.weight >= 2,
           isLocked: node.isLocked,
+          frame: frameDict(node.frame),
         };
+        if (node.kind.crop && isMeaningfulCropSubregion(node.kind.crop)) {
+          summary.crop = {
+            x: Math.round(node.kind.crop.x * 1000) / 1000,
+            y: Math.round(node.kind.crop.y * 1000) / 1000,
+            width: Math.round(node.kind.crop.width * 1000) / 1000,
+            height: Math.round(node.kind.crop.height * 1000) / 1000,
+          };
+        }
         const origPath = this.deps.media.getOriginalPath(asset);
         if (origPath) summary.localOriginalPath = origPath;
         cardRefs.push(summary);
       }
     }
+
+    const connectors = doc.connectors.map((c) => ({
+      id: c.id,
+      fromNodeID: c.fromNodeID,
+      toNodeID: c.toNodeID,
+      label: c.label ?? '',
+      style: c.style,
+      colorHex: c.colorHex.toUpperCase(),
+      dashed: c.dashed,
+    }));
+
+    const candidatePool = doc.candidateAssetIDs
+      .map((cid) => {
+        const asset = assetsByID.get(cid);
+        if (!asset) return null;
+        return {
+          id: asset.id,
+          title: asset.title,
+          folderPath: (asset.folderID && folderPathByID.get(asset.folderID)) || 'Inbox',
+        };
+      })
+      .filter(Boolean);
 
     const palette = doc.extractedPalette.map((c) => ({
       hex: c.hex.toUpperCase(),
@@ -583,11 +1300,16 @@ export class ExternalAgentService {
       title: doc.title,
       subtitle: doc.subtitle,
       mode: layoutModeLabel(doc.mode),
+      pinnedOffline: doc.pinnedOffline,
+      updatedAt: doc.updatedAt,
       itemCount: cardRefs.length,
+      inkStrokeCount: doc.inkStrokes.length,
       palette,
       notes,
       sections,
+      connectors,
       assets: cardRefs,
+      candidatePool,
     });
   }
 
@@ -605,14 +1327,16 @@ export class ExternalAgentService {
 
     const dark = asBool(args.dark_appearance) ?? false;
     const width = Math.max(640, Math.min(2800, asInt(args.width) ?? 1440));
+    const includeImage = asBool(args.include_image) ?? true;
     if (!this.deps.media.images.exportMoodboardImage) {
       return errorToolOutput('Moodboard image export is not available on this runtime.');
     }
+
     const rendered = await this.deps.media.images.exportMoodboardImage({
       document: doc,
       assetsByID,
-      loadAssetBytes: async (assetID, tier) =>
-        (await this.deps.media.readThumbnailBuffer(assetID, tier)) ??
+      loadAssetBytes: async (assetID) =>
+        (await this.deps.media.readThumbnailBuffer(assetID, 'preview1400')) ??
         (await this.deps.media.readThumbnailBuffer(assetID, 'grid520')),
       format: 'png',
       containerWidth: width,
@@ -629,6 +1353,8 @@ export class ExternalAgentService {
       boardID: doc.id,
       title: doc.title,
       itemCount: refIDs.length,
+      width,
+      darkAppearance: dark,
       bytes: rendered.data.byteLength,
       mimeType: rendered.mimeType,
     };
@@ -643,16 +1369,15 @@ export class ExternalAgentService {
       metadata.savedPath = resolved;
     }
 
-    return {
-      content: [
-        { type: 'image', mimeType: rendered.mimeType, data: bytesToBase64(rendered.data) },
-        { type: 'text', text: JSON.stringify(metadata, null, 2) },
-      ],
-      isError: false,
-    };
+    const content: MCPToolContent[] = [];
+    if (includeImage) {
+      content.push({ type: 'image', mimeType: rendered.mimeType, data: bytesToBase64(rendered.data) });
+    }
+    content.push({ type: 'text', text: JSON.stringify(metadata, null, 2) });
+    return { content, isError: false };
   }
 
-  // MARK: - 6 Write Tool Handlers (Never Permanent Delete)
+  // MARK: - 8 Safe Write Tool Handlers (Never Permanent Delete)
 
   private handleOrganizeAssets(args: Record<string, unknown>): MCPToolOutput {
     const ids = parseUUIDList(args.asset_ids);
@@ -680,27 +1405,37 @@ export class ExternalAgentService {
       addTags: asStringArray(args.add_tags) ?? [],
       removeTags: asStringArray(args.remove_tags) ?? [],
       acceptSuggestedTags: asBool(args.accept_suggested_tags) ?? false,
+      dismissSuggestedTags: asStringArray(args.dismiss_suggested_tags) ?? [],
       folderAssignment,
+      pinnedOffline: asBool(args.pinned_offline),
     });
 
     const updated = this.deps.db.applyBatchPatch(patch);
+    const updatedSet = new Set(updated.map((a) => a.id));
+    const skippedIDs = ids.filter((id) => !updatedSet.has(id));
 
+    // Explicit overwrite when external agent passes `ai_description`
     const aiDesc = asTrimmedString(args.ai_description);
-    if (aiDesc) {
+    if (aiDesc && updated.length > 0) {
       this.tools.persistVisualInsights(
-        ids.map((assetID) => ({ assetID, description: aiDesc, tags: [] })),
+        updated.map((a) => ({ assetID: a.id, description: aiDesc, tags: [] })),
+        true,
       );
     }
 
-    this.deps.events.emitLibraryChanged(
-      'mcp.organize_assets',
-      updated.map((a) => a.id),
-    );
+    if (updated.length > 0) {
+      this.deps.events.emitLibraryChanged(
+        'mcp.organize_assets',
+        updated.map((a) => a.id),
+      );
+    }
 
-    return jsonToolOutput({
+    const result: Record<string, unknown> = {
       updatedCount: updated.length,
       assetIDs: updated.map((a) => a.id),
-    });
+    };
+    if (skippedIDs.length > 0) result.skippedIDs = skippedIDs;
+    return jsonToolOutput(result);
   }
 
   private handleCreateFolder(args: Record<string, unknown>): MCPToolOutput {
@@ -715,13 +1450,85 @@ export class ExternalAgentService {
       folders,
       folderPathByID,
     );
-    const created = this.deps.db.createFolder(name, parentID);
+    let created = this.deps.db.createFolder(name, parentID);
+
+    const hasColor = 'color_hex' in args && args.color_hex !== undefined;
+    const hasSymbol = 'custom_symbol' in args && args.custom_symbol !== undefined;
+    if (hasColor || hasSymbol) {
+      created = this.deps.db.updateFolderAppearance(created.id, {
+        ...(hasColor ? { colorHex: asTrimmedString(args.color_hex) } : {}),
+        ...(hasSymbol ? { customSymbol: asTrimmedString(args.custom_symbol) } : {}),
+      });
+    }
+
+    const refreshedPaths = buildFolderPathsMap(this.deps.db.fetchFolders());
     this.deps.events.emitLibraryChanged('mcp.create_folder', undefined, [created.id]);
 
     return jsonToolOutput({
       id: created.id,
       name: created.name,
+      path: refreshedPaths.get(created.id) ?? created.name,
       parentID: created.parentID ?? '',
+      colorHex: created.colorHex ?? '',
+      customSymbol: created.customSymbol ?? '',
+    });
+  }
+
+  private handleUpdateFolder(args: Record<string, unknown>): MCPToolOutput {
+    const folders = this.deps.db.fetchFolders();
+    const folderPathByID = buildFolderPathsMap(folders);
+    const folderID = this.resolveOptionalFolderID(args, folders, folderPathByID);
+    let current = folderID ? folders.find((f) => f.id === folderID) ?? null : null;
+    if (!folderID || !current) {
+      return errorToolOutput(
+        'Folder not found. Pass a valid `folder_id` UUID or matching `folder_path`.',
+      );
+    }
+
+    const newName = asTrimmedString(args.new_name);
+    if (newName) {
+      current = this.deps.db.renameFolder(folderID, newName);
+    }
+
+    const moveToRoot = asBool(args.move_to_root) ?? false;
+    const hasParentArg =
+      Boolean(asTrimmedString(args.parent_id)) || Boolean(asTrimmedString(args.parent_path));
+    if (moveToRoot || hasParentArg) {
+      const latestFolders = this.deps.db.fetchFolders();
+      const latestPaths = buildFolderPathsMap(latestFolders);
+      const newParentID = moveToRoot
+        ? null
+        : this.resolveOptionalFolderID(
+            { folder_id: args.parent_id, folder_path: args.parent_path },
+            latestFolders,
+            latestPaths,
+          );
+      this.deps.db.moveFolder(folderID, newParentID, null);
+    }
+
+    const hasColor = 'color_hex' in args && args.color_hex !== undefined;
+    const hasSymbol = 'custom_symbol' in args && args.custom_symbol !== undefined;
+    if (hasColor || hasSymbol) {
+      current = this.deps.db.updateFolderAppearance(folderID, {
+        ...(hasColor ? { colorHex: asTrimmedString(args.color_hex) } : {}),
+        ...(hasSymbol ? { customSymbol: asTrimmedString(args.custom_symbol) } : {}),
+      });
+    }
+
+    const finalFolders = this.deps.db.fetchFolders();
+    const finalPaths = buildFolderPathsMap(finalFolders);
+    const finalFolder = finalFolders.find((f) => f.id === folderID) ?? current;
+
+    this.deps.events.emitLibraryChanged('mcp.update_folder', undefined, [finalFolder.id]);
+
+    return jsonToolOutput({
+      id: finalFolder.id,
+      name: finalFolder.name,
+      path: finalPaths.get(finalFolder.id) ?? finalFolder.name,
+      parentID: finalFolder.parentID ?? '',
+      colorHex: finalFolder.colorHex ?? '',
+      customSymbol: finalFolder.customSymbol ?? '',
+      assetCount: finalFolder.assetCount,
     });
   }
 
@@ -730,13 +1537,38 @@ export class ExternalAgentService {
     const folderPathByID = buildFolderPathsMap(folders);
     const targetFolderID = this.resolveOptionalFolderID(args, folders, folderPathByID);
 
-    let input: CaptureInput;
+    let targetBoardID: UUID | null = null;
+    const rawBoard = asTrimmedString(args.target_board_id);
+    if (rawBoard) {
+      targetBoardID = parseUUID(rawBoard);
+      if (!targetBoardID) {
+        return errorToolOutput(`Invalid \`target_board_id\` UUID: ${rawBoard}`);
+      }
+      if (!this.deps.db.getBoard(targetBoardID)) {
+        return errorToolOutput(`Target moodboard not found: ${targetBoardID}`);
+      }
+    }
+
+    const inputs: CaptureInput[] = [];
+    const filePaths = asStringArray(args.file_paths)?.filter((p) => p.trim().length > 0) ?? [];
     const filePath = asTrimmedString(args.file_path);
     const webURL = asTrimmedString(args.web_url);
     const text = asTrimmedString(args.text);
     const title = asTrimmedString(args.title);
+    const initialNotes = asString(args.notes);
 
-    if (filePath) {
+    if (filePaths.length > 0) {
+      if (!this.deps.localFs) {
+        return errorToolOutput('`file_paths` local filesystem ingest is not supported in cloud runtime.');
+      }
+      for (const rawPath of filePaths) {
+        const resolved = this.deps.localFs.resolvePath(rawPath.trim());
+        if (!this.deps.localFs.existsSync(resolved)) {
+          return errorToolOutput(`File not found at path: ${resolved}`);
+        }
+        inputs.push({ type: 'fileURL', url: resolved });
+      }
+    } else if (filePath) {
       if (!this.deps.localFs) {
         return errorToolOutput('`file_path` local filesystem ingest is not supported in cloud runtime.');
       }
@@ -744,7 +1576,7 @@ export class ExternalAgentService {
       if (!this.deps.localFs.existsSync(resolved)) {
         return errorToolOutput(`File not found at path: ${resolved}`);
       }
-      input = { type: 'fileURL', url: resolved };
+      inputs.push({ type: 'fileURL', url: resolved });
     } else if (webURL) {
       try {
         const parsed = new URL(webURL);
@@ -752,36 +1584,71 @@ export class ExternalAgentService {
       } catch {
         return errorToolOutput(`Invalid web_url: ${webURL}`);
       }
-      input = { type: 'webURL', url: webURL, title, notes: null };
+      inputs.push({ type: 'webURL', url: webURL, title, notes: initialNotes ?? null });
     } else if (text) {
-      input = { type: 'textSnippet', title: title ?? 'Agent 笔记', text, sourceURL: null };
+      inputs.push({ type: 'textSnippet', title: title ?? 'Agent 笔记', text, sourceURL: null });
     } else {
-      return errorToolOutput('Provide one of `file_path`, `web_url`, or `text`.');
+      return errorToolOutput('Provide one of `file_path`, `file_paths`, `web_url`, or `text`.');
     }
 
-    const ingested = await this.deps.media.ingest(input, targetFolderID);
-    let saved = this.deps.db.transaction(() => {
-      const persisted = this.deps.db.saveAssetLocally(ingested.asset);
-      this.deps.db.touchOriginal(persisted.id);
-      if (ingested.vector) {
-        this.deps.db.saveVector(persisted.id, ingested.vector);
-      }
-      return persisted;
-    });
+    const syncCfg = this.deps.configStore.getSyncConfig();
+    let finalAssets: AssetRecord[] = [];
+    for (const input of inputs) {
+      const ingested = await this.deps.media.ingest(input, targetFolderID);
+      const saved = this.deps.db.transaction(() => {
+        if (ingested.asset.contentHash) {
+          this.deps.db.setState(`deleted.content.${ingested.asset.contentHash}`, null);
+        }
+        const persisted = this.deps.db.saveAssetLocally(ingested.asset);
+        this.deps.db.touchOriginal(persisted.id);
+        this.deps.db.markProjection('thumbnails', persisted.id);
+        if (ingested.vector) {
+          if (syncCfg.syncEmbeddings) {
+            this.deps.db.recordSyncChange({
+              type: 'vector',
+              id: persisted.id,
+              vector: ingested.vector,
+            });
+          } else {
+            this.deps.db.saveVector(persisted.id, ingested.vector);
+          }
+        }
+        return persisted;
+      });
+      finalAssets.push(saved);
+    }
 
-    const tags = asStringArray(args.tags);
-    if (tags && tags.length > 0) {
+    const tags = asStringArray(args.tags) ?? [];
+    const rating = asInt(args.rating);
+    if (finalAssets.length > 0 && (tags.length > 0 || initialNotes !== null || rating !== null)) {
       const patched = this.deps.db.applyBatchPatch(
-        createDefaultAssetBatchPatch([saved.id], { addTags: tags }),
+        createDefaultAssetBatchPatch(
+          finalAssets.map((a) => a.id),
+          {
+            addTags: tags,
+            notes: initialNotes,
+            rating,
+          },
+        ),
       );
-      if (patched[0]) saved = patched[0];
+      if (patched.length > 0) finalAssets = patched;
     }
 
-    this.deps.events.emitLibraryChanged('mcp.ingest_asset', [saved.id]);
+    if (targetBoardID && finalAssets.length > 0) {
+      this.appendAssetsToBoard(targetBoardID, finalAssets);
+    }
+
+    const latestPaths = buildFolderPathsMap(this.deps.db.fetchFolders());
+    if (finalAssets.length > 0) {
+      this.deps.events.emitLibraryChanged(
+        'mcp.ingest_asset',
+        finalAssets.map((a) => a.id),
+      );
+    }
 
     return jsonToolOutput({
-      importedCount: 1,
-      assets: [this.serializeAssetSummary(saved, folderPathByID)],
+      importedCount: finalAssets.length,
+      assets: finalAssets.map((a) => this.serializeAssetSummary(a, latestPaths)),
     });
   }
 
@@ -898,12 +1765,13 @@ export class ExternalAgentService {
         boardID: saved.id,
         title: saved.title,
         subtitle: saved.subtitle,
+        mode: layoutModeLabel(saved.mode),
         itemCount: getBoardReferencedAssetIDs(saved).length,
         paletteHexes: saved.extractedPalette.map((c) => c.hex.toUpperCase()),
       });
     }
 
-    // Mode B: Prompt-driven automatic curation via MoodboardAgentHarness
+    // Mode B: Prompt-driven automatic curation
     const prompt = asTrimmedString(args.prompt) ?? title;
     if (!prompt) {
       return errorToolOutput(
@@ -915,10 +1783,16 @@ export class ExternalAgentService {
     const folderPathByID = buildFolderPathsMap(folders);
     const scopeID = this.resolveOptionalFolderID(args, folders, folderPathByID);
     const preferredCount = Math.max(2, Math.min(24, asInt(args.preferred_count) ?? 12));
+    const seedAssetIDs = parseUUIDList(args.seed_asset_ids);
+    const requiredTags = asStringArray(args.required_tags) ?? [];
+    const targetPalette = (asStringArray(args.target_palette) ?? []).map((hex) => labFromHex(hex));
 
     const req = createDefaultMoodboardCurationRequest({
       prompt,
+      seedAssetIDs,
       scopeFolderIDs: scopeID ? [scopeID] : [],
+      requiredTags,
+      targetPalette,
       preferredCount,
       layoutStyle,
       useFreeformLayout: useFreeform,
@@ -952,6 +1826,7 @@ export class ExternalAgentService {
       boardID: saved.id,
       title: saved.title,
       subtitle: saved.subtitle,
+      mode: layoutModeLabel(saved.mode),
       itemCount: getBoardReferencedAssetIDs(saved).length,
       usedCloudAI: proposal.usedCloudAI,
       curatedSummary: proposal.curatedSummary,
@@ -968,76 +1843,171 @@ export class ExternalAgentService {
     const doc: MoodboardDocument = {
       ...existingDoc,
       nodes: [...existingDoc.nodes],
+      connectors: [...existingDoc.connectors],
     };
 
     const newTitle = asTrimmedString(args.new_title);
     if (newTitle) doc.title = newTitle;
     if (typeof args.subtitle === 'string') doc.subtitle = args.subtitle.trim();
 
-    const removeSet = new Set(parseUUIDList(args.remove_asset_ids));
-    if (removeSet.size > 0) {
-      doc.nodes = doc.nodes.filter((node) => {
-        if (node.kind.type !== 'assetRef') return true;
-        return !(removeSet.has(node.kind.assetID) && !node.isLocked);
-      });
-    }
+    const useFreeformArg = asBool(args.use_freeform);
+    const styleRaw = asTrimmedString(args.layout_style)?.toLowerCase();
+    const validStyle: EditorialStyle | null =
+      styleRaw && (EDITORIAL_STYLES as readonly string[]).includes(styleRaw)
+        ? (styleRaw as EditorialStyle)
+        : null;
 
-    const addIDs = parseUUIDList(args.add_asset_ids);
-    const now = new Date().toISOString();
-    if (addIDs.length > 0) {
-      const existingRefs = new Set(getBoardReferencedAssetIDs(doc));
-      let nextZ = doc.nodes.reduce((m, n) => Math.max(m, n.zIndex), 0) + 1;
-      let nextOrder = doc.nodes.reduce((m, n) => Math.max(m, n.editorialOrder), 0) + 1;
-      for (const aid of addIDs) {
-        if (existingRefs.has(aid)) continue;
-        const asset = this.deps.db.getAsset(aid);
-        if (!asset) continue;
-        existingRefs.add(aid);
-        const ratio = Math.max(0.6, Math.min(1.9, getAssetAspectRatio(asset)));
-        const w = 240;
-        const h = w / ratio;
-        const idx = doc.nodes.length;
-        doc.nodes.push({
-          id: toSwiftUUID(randomUUID()),
-          kind: {
-            type: 'assetRef',
-            assetID: aid,
-            crop: null,
-            weight: 1,
-            autoplayLoop: asset.mediaKind === 'animatedImage' || asset.mediaKind === 'video',
-          },
-          frame: {
-            x: (idx % 4) * 260 + 40,
-            y: Math.floor(idx / 4) * 240 + 40,
-            width: w,
-            height: h,
-          },
-          zIndex: nextZ++,
-          rotationDegrees: 0,
-          flipHorizontal: false,
-          flipVertical: false,
-          isLocked: false,
-          editorialOrder: nextOrder++,
-          updatedAt: now,
-        });
+    if (useFreeformArg !== null) {
+      if (useFreeformArg) {
+        doc.mode = { type: 'freeform' };
+      } else {
+        doc.mode = {
+          type: 'autoEditorial',
+          config: createDefaultAutoLayoutConfig({ style: validStyle ?? 'magazine' }),
+        };
       }
+    } else if (validStyle && doc.mode.type === 'autoEditorial') {
+      doc.mode = {
+        type: 'autoEditorial',
+        config: { ...doc.mode.config, style: validStyle },
+      };
     }
 
-    const noteText = asTrimmedString(args.add_note);
-    if (noteText) {
-      const noteTitle = asTrimmedString(args.note_title) ?? 'Agent 批注';
-      const nextZ = doc.nodes.reduce((m, n) => Math.max(m, n.zIndex), 0) + 1;
-      const nextOrder = doc.nodes.reduce((m, n) => Math.max(m, n.editorialOrder), 0) + 1;
+    // Remove unlocked nodes by asset UUID or explicit node UUID
+    const removeAssetSet = new Set(parseUUIDList(args.remove_asset_ids));
+    const removeNodeSet = new Set(parseUUIDList(args.remove_node_ids));
+    let removedCount = 0;
+    const skippedLockedAssetIDs: string[] = [];
+    const skippedLockedNodeIDs: string[] = [];
+
+    if (removeAssetSet.size > 0 || removeNodeSet.size > 0) {
+      const remaining: BoardNode[] = [];
+      for (const node of doc.nodes) {
+        const refAssetID = node.kind.type === 'assetRef' ? node.kind.assetID : null;
+        const matchesAsset = refAssetID !== null && removeAssetSet.has(refAssetID);
+        const matchesNode = removeNodeSet.has(node.id);
+        if (matchesAsset || matchesNode) {
+          if (node.isLocked) {
+            if (matchesAsset && refAssetID) skippedLockedAssetIDs.push(refAssetID);
+            if (matchesNode) skippedLockedNodeIDs.push(node.id);
+            remaining.push(node);
+          } else {
+            removedCount++;
+          }
+        } else {
+          remaining.push(node);
+        }
+      }
+      doc.nodes = remaining;
+      const survivingIDs = new Set(doc.nodes.map((n) => n.id));
+      doc.connectors = doc.connectors.filter(
+        (c) => survivingIDs.has(c.fromNodeID) && survivingIDs.has(c.toNodeID),
+      );
+    }
+
+    // Non-overlapping placement below existing board content (maxY + 24)
+    const now = new Date().toISOString();
+    const maxY = doc.nodes.reduce((m, n) => Math.max(m, n.frame.y + n.frame.height), 16);
+    let cursorY = maxY + 24;
+    let nextZ = doc.nodes.reduce((m, n) => Math.max(m, n.zIndex), 0) + 1;
+    let nextOrder = doc.nodes.reduce((m, n) => Math.max(m, n.editorialOrder), 0) + 1;
+    const leftMargin = 32;
+    const canvasWidth = 1108;
+
+    // Optional section header
+    const sectionTitle = asTrimmedString(args.add_section);
+    if (sectionTitle) {
+      const tintRaw = (asString(args.section_tint) ?? 'neutral').toLowerCase();
+      const tint: GroupTint = (GROUP_TINTS as readonly string[]).includes(tintRaw)
+        ? (tintRaw as GroupTint)
+        : 'neutral';
       doc.nodes.push({
         id: toSwiftUUID(randomUUID()),
-        kind: { type: 'note', title: noteTitle, text: noteText, style: 'paper', fontSize: 13.5 },
-        frame: { x: 40, y: 40, width: 320, height: 148 },
-        zIndex: nextZ,
+        kind: { type: 'groupFrame', title: sectionTitle.slice(0, 72), tint },
+        frame: { x: leftMargin, y: cursorY, width: canvasWidth, height: 60 },
+        zIndex: nextZ++,
         rotationDegrees: 0,
         flipHorizontal: false,
         flipVertical: false,
         isLocked: false,
-        editorialOrder: nextOrder,
+        editorialOrder: nextOrder++,
+        updatedAt: now,
+      });
+      cursorY += 76;
+    }
+
+    // Append new asset cards in clean 4-column non-overlapping rows
+    const addIDs = parseUUIDList(args.add_asset_ids);
+    let addedCount = 0;
+    const skippedMissingAssetIDs: string[] = [];
+    if (addIDs.length > 0) {
+      const existingRefs = new Set(getBoardReferencedAssetIDs(doc));
+      const toAppend: AssetRecord[] = [];
+      for (const aid of addIDs) {
+        if (existingRefs.has(aid)) continue;
+        const asset = this.deps.db.getAsset(aid);
+        if (asset) {
+          existingRefs.add(aid);
+          toAppend.push(asset);
+        } else {
+          skippedMissingAssetIDs.push(aid);
+        }
+      }
+
+      const gap = 18;
+      const perRow = 4;
+      const colWidth = (canvasWidth - gap * (perRow - 1)) / perRow;
+      for (let rowStart = 0; rowStart < toAppend.length; rowStart += perRow) {
+        const row = toAppend.slice(rowStart, rowStart + perRow);
+        let rowMaxHeight = 160;
+        for (let col = 0; col < row.length; col++) {
+          const asset = row[col];
+          const ratio = Math.max(0.6, Math.min(1.9, getAssetAspectRatio(asset)));
+          const h = Math.min(360, Math.max(140, Math.round(colWidth / ratio)));
+          rowMaxHeight = Math.max(rowMaxHeight, h);
+          const x = leftMargin + col * (colWidth + gap);
+          doc.nodes.push({
+            id: toSwiftUUID(randomUUID()),
+            kind: {
+              type: 'assetRef',
+              assetID: asset.id,
+              crop: null,
+              weight: 1,
+              autoplayLoop: asset.mediaKind === 'animatedImage' || asset.mediaKind === 'video',
+            },
+            frame: { x, y: cursorY, width: colWidth, height: h },
+            zIndex: nextZ++,
+            rotationDegrees: 0,
+            flipHorizontal: false,
+            flipVertical: false,
+            isLocked: false,
+            editorialOrder: nextOrder++,
+            updatedAt: now,
+          });
+          addedCount++;
+        }
+        cursorY += rowMaxHeight + gap;
+      }
+    }
+
+    // Optional curator note placed cleanly below appended cards
+    const noteText = asTrimmedString(args.add_note);
+    if (noteText) {
+      const noteTitle = asTrimmedString(args.note_title) ?? 'Agent 批注';
+      const styleRawNote = (asString(args.note_style) ?? 'paper').toLowerCase();
+      const noteStyle: NoteStyle = (NOTE_STYLES as readonly string[]).includes(styleRawNote)
+        ? (styleRawNote as NoteStyle)
+        : 'paper';
+      doc.nodes.push({
+        id: toSwiftUUID(randomUUID()),
+        kind: { type: 'note', title: noteTitle, text: noteText, style: noteStyle, fontSize: 13.5 },
+        frame: { x: leftMargin, y: cursorY, width: 360, height: 148 },
+        zIndex: nextZ++,
+        rotationDegrees: 0,
+        flipHorizontal: false,
+        flipVertical: false,
+        isLocked: false,
+        editorialOrder: nextOrder++,
         updatedAt: now,
       });
     }
@@ -1058,12 +2028,19 @@ export class ExternalAgentService {
     const saved = this.deps.db.saveBoardLocally(doc);
     this.deps.events.emitBoardUpdated(saved.id);
 
-    return jsonToolOutput({
+    const result: Record<string, unknown> = {
       boardID: saved.id,
       title: saved.title,
+      mode: layoutModeLabel(saved.mode),
       itemCount: getBoardReferencedAssetIDs(saved).length,
+      addedCount,
+      removedCount,
       paletteHexes: saved.extractedPalette.map((c) => c.hex.toUpperCase()),
-    });
+    };
+    if (skippedLockedAssetIDs.length > 0) result.skippedLockedAssetIDs = skippedLockedAssetIDs;
+    if (skippedLockedNodeIDs.length > 0) result.skippedLockedNodeIDs = skippedLockedNodeIDs;
+    if (skippedMissingAssetIDs.length > 0) result.skippedMissingAssetIDs = skippedMissingAssetIDs;
+    return jsonToolOutput(result);
   }
 
   private handleTrashAssets(args: Record<string, unknown>): MCPToolOutput {
@@ -1075,18 +2052,186 @@ export class ExternalAgentService {
     const updated = this.deps.db.applyBatchPatch(
       createDefaultAssetBatchPatch(ids, { isTrashed: trashed }),
     );
-    this.deps.events.emitLibraryChanged(
-      trashed ? 'mcp.trash_assets' : 'mcp.restore_assets',
-      updated.map((a) => a.id),
-    );
-    return jsonToolOutput({
+    const updatedSet = new Set(updated.map((a) => a.id));
+    const skippedIDs = ids.filter((id) => !updatedSet.has(id));
+
+    if (updated.length > 0) {
+      this.deps.events.emitLibraryChanged(
+        trashed ? 'mcp.trash_assets' : 'mcp.restore_assets',
+        updated.map((a) => a.id),
+      );
+    }
+
+    const result: Record<string, unknown> = {
       updatedCount: updated.length,
       trashed,
+      assetIDs: updated.map((a) => a.id),
       note: 'Soft Trash only; external agents can never permanently delete assets.',
+    };
+    if (skippedIDs.length > 0) result.skippedIDs = skippedIDs;
+    return jsonToolOutput(result);
+  }
+
+  private async handleAnalyzeAssets(args: Record<string, unknown>): Promise<MCPToolOutput> {
+    const ids = parseUUIDList(args.asset_ids).slice(0, 20);
+    if (ids.length === 0) {
+      return errorToolOutput('`asset_ids` must be a non-empty array of asset UUID strings (max 20).');
+    }
+    const refreshRich = asBool(args.refresh_rich_metadata) ?? false;
+    const syncCfg = this.deps.configStore.getSyncConfig();
+    const seen = new Set<UUID>();
+    const analyzed: AssetRecord[] = [];
+
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const before = this.deps.db.getAsset(id);
+      if (!before) continue;
+
+      let current = before;
+      // 1. Hydrate EXIF / AI generation metadata for image/animatedImage/designFile
+      const hydrated = await this.deps.media.hydrateImageMetadata(current).catch(() => null);
+      if (hydrated) {
+        current = hydrated;
+      }
+
+      // 2. Refresh dominant colors & visual feature print from thumbnail
+      const thumbBuf = await this.deps.media.readThumbnailBuffer(id, 'grid520');
+      let colors = current.dominantColors;
+      let fp: number[] = [];
+      if (thumbBuf && thumbBuf.byteLength > 0) {
+        const [extractedColors, extractedFp] = await Promise.all([
+          current.mediaKind === 'audio'
+            ? Promise.resolve(current.dominantColors)
+            : this.deps.media.extractDominantColors(thumbBuf, 6).catch(() => current.dominantColors),
+          this.deps.media.computeVisualFingerprint(thumbBuf).catch(() => []),
+        ]);
+        if (extractedColors.length > 0 && current.mediaKind !== 'audio') {
+          colors = extractedColors;
+        }
+        fp = extractedFp;
+      }
+
+      let saved = this.deps.db.transaction(() => {
+        const latest = this.deps.db.getAsset(id);
+        if (!latest || latest.contentHash !== before.contentHash) return null;
+        const next: AssetRecord = {
+          ...latest,
+          dominantColors: colors,
+          richMetadata: current.richMetadata ?? latest.richMetadata ?? null,
+        };
+        if (fp.length > 0) {
+          const vec = {
+            featurePrint: encodeFeaturePrintFloat32(fp),
+            embedding: null,
+            embeddingModel: null,
+            precision: 16 as const,
+          };
+          if (syncCfg.syncEmbeddings) this.deps.db.recordSyncChange({ type: 'vector', id, vector: vec });
+          else this.deps.db.saveVector(id, vec);
+        }
+        return this.deps.db.saveAssetLocally(next);
+      });
+
+      // 3. Optionally refresh live GitHub / Social rich metadata for web bookmarks
+      if (saved && refreshRich && saved.mediaKind === 'webBookmark' && saved.sourceURL) {
+        try {
+          const refreshed = await this.deps.media.refreshRichAsset(saved);
+          saved = this.deps.db.saveAssetLocally(refreshed.asset);
+          if (refreshed.vector) {
+            this.deps.db.saveVector(saved.id, refreshed.vector);
+          }
+          this.deps.db.markProjection('thumbnails', saved.id);
+        } catch {
+          // keep locally analyzed record if remote fetch fails
+        }
+      }
+
+      if (saved) analyzed.push(saved);
+    }
+
+    const folders = this.deps.db.fetchFolders();
+    const folderPathByID = buildFolderPathsMap(folders);
+    if (analyzed.length > 0) {
+      this.deps.events.emitLibraryEnriched(analyzed.map((a) => a.id));
+    }
+
+    return jsonToolOutput({
+      analyzedCount: analyzed.length,
+      refreshedRichMetadata: refreshRich,
+      assets: analyzed.map((a) => this.serializeAssetSummary(a, folderPathByID)),
     });
   }
 
   // MARK: - Helpers
+
+  private appendAssetsToBoard(boardID: UUID, assets: readonly AssetRecord[]): void {
+    const board = this.deps.db.getBoard(boardID);
+    if (!board || assets.length === 0) return;
+
+    const existingRefs = new Set(getBoardReferencedAssetIDs(board));
+    const now = new Date().toISOString();
+    const maxY = board.nodes.reduce((m, n) => Math.max(m, n.frame.y + n.frame.height), 16);
+    let cursorY = maxY + 24;
+    let rowMaxH = 0;
+    let maxZ = board.nodes.reduce((m, n) => Math.max(m, n.zIndex), 0);
+    let maxOrder = board.nodes.reduce((m, n) => Math.max(m, n.editorialOrder), -1);
+    const newNodes: BoardNode[] = [...board.nodes];
+    let added = 0;
+
+    for (let idx = 0; idx < assets.length; idx++) {
+      const asset = assets[idx];
+      if (existingRefs.has(asset.id)) continue;
+      existingRefs.add(asset.id);
+      const ratio = Math.max(0.6, Math.min(1.9, getAssetAspectRatio(asset)));
+      const w = 264;
+      const h = Math.min(360, Math.max(140, Math.round(w / ratio)));
+      const col = added % 4;
+      if (added > 0 && col === 0) {
+        cursorY += Math.max(rowMaxH, 240) + 24;
+        rowMaxH = 0;
+      }
+      rowMaxH = Math.max(rowMaxH, h);
+      newNodes.push({
+        id: toSwiftUUID(randomUUID()),
+        kind: {
+          type: 'assetRef',
+          assetID: asset.id,
+          crop: null,
+          weight: 1,
+          autoplayLoop: asset.mediaKind === 'animatedImage' || asset.mediaKind === 'video',
+        },
+        frame: { x: 32 + col * 282, y: cursorY, width: w, height: h },
+        zIndex: ++maxZ,
+        rotationDegrees: 0,
+        flipHorizontal: false,
+        flipVertical: false,
+        isLocked: false,
+        editorialOrder: ++maxOrder,
+        updatedAt: now,
+      });
+      added++;
+    }
+
+    if (added > 0) {
+      const refAssets: AssetRecord[] = [];
+      for (const n of newNodes) {
+        if (n.kind.type === 'assetRef') {
+          const a = this.deps.db.getAsset(n.kind.assetID);
+          if (a) refAssets.push(a);
+        }
+      }
+      const extractedPalette =
+        refAssets.length > 0
+          ? MoodboardCurator.harmonizePalette(
+              refAssets.flatMap((a) => a.dominantColors),
+              6,
+            )
+          : board.extractedPalette;
+      this.deps.db.saveBoardLocally({ ...board, nodes: newNodes, extractedPalette, updatedAt: now });
+      this.deps.events.emitBoardUpdated(board.id);
+    }
+  }
 
   private resolveBoard(args: Record<string, unknown>): MoodboardDocument | null {
     const boardID = parseUUID(args.board_id ?? args.id);
@@ -1094,6 +2239,27 @@ export class ExternalAgentService {
     const title = asTrimmedString(args.title);
     if (title) return this.deps.db.findBoardByTitle(title);
     return null;
+  }
+
+  private resolveOptionalSmartFolder(args: Record<string, unknown>): SmartFolderRecord | null {
+    const rawID = asTrimmedString(args.smart_folder_id);
+    const rawName = asTrimmedString(args.smart_folder_name);
+    if (!rawID && !rawName) return null;
+
+    const all = this.deps.db.fetchSmartFolders();
+    if (rawID) {
+      const uuid = parseUUID(rawID);
+      if (!uuid) throw new Error(`Invalid smart_folder_id UUID: ${rawID}`);
+      const found = all.find((s) => s.id === uuid);
+      if (!found) throw new Error(`Smart folder not found: ${rawID}`);
+      return found;
+    }
+    const lower = rawName!.toLowerCase();
+    const exact = all.find((s) => s.name.toLowerCase() === lower);
+    if (exact) return exact;
+    const partial = all.find((s) => s.name.toLowerCase().includes(lower));
+    if (partial) return partial;
+    throw new Error(`Smart folder not found: ${rawName}`);
   }
 
   private buildFilterCriteria(
@@ -1108,26 +2274,39 @@ export class ExternalAgentService {
     const minRating = asInt(args.min_rating) ?? 0;
     const onlyInbox = asBool(args.only_inbox) ?? false;
     const onlyUntagged = asBool(args.only_untagged) ?? false;
+    const includeSubfolders = asBool(args.include_subfolders) ?? false;
+    const recentRaw = asInt(args.only_recent_days);
+    const onlyRecentDays = recentRaw !== null ? Math.max(1, recentRaw) : null;
+    const onlyPinnedOffline = asBool(args.only_pinned_offline) ?? false;
+    const onlyTrashed = asBool(args.only_trashed) ?? false;
+    const includeTrashed = (asBool(args.include_trashed) ?? false) || onlyTrashed;
     const folderID = this.resolveOptionalFolderID(args, folders, folderPathByID);
-
-    const kinds: MediaKind[] = [];
-    for (const k of asStringArray(args.media_kinds) ?? []) {
-      if ((MEDIA_KINDS as readonly string[]).includes(k)) {
-        kinds.push(k as MediaKind);
-      }
-    }
+    const kinds = parseMediaKinds(args.media_kinds);
+    const shapeRaw = asTrimmedString(args.aspect_shape);
+    const shape: AspectShape | null =
+      shapeRaw && (ASPECT_SHAPES as readonly string[]).includes(shapeRaw)
+        ? (shapeRaw as AspectShape)
+        : null;
+    const defaultSort: SortOrder = query ? 'relevance' : 'newest';
+    const sortBy = parseSortOrder(args.sort_by, defaultSort);
 
     return createDefaultFilterCriteria({
       searchQuery: query,
       kinds,
       selectedColorHex: colorHex,
       colorTolerance,
+      shape,
       minRating,
       tags,
       folderID: onlyInbox ? null : folderID,
+      includeSubfolders,
       onlyInbox,
       onlyUntagged,
-      sortBy: 'newest',
+      onlyRecentDays,
+      onlyPinnedOffline,
+      includeTrashed,
+      onlyTrashed,
+      sortBy,
     });
   }
 
@@ -1176,6 +2355,124 @@ export class ExternalAgentService {
     };
   }
 
+  private serializeRichMetadata(rich?: AssetRichMetadata | null): Record<string, unknown> | null {
+    if (!rich) return null;
+    const out: Record<string, unknown> = {};
+
+    if (rich.photoExif && !isPhotoExifEmpty(rich.photoExif)) {
+      const exif = rich.photoExif;
+      const e: Record<string, unknown> = {
+        hasMeaningfulCameraExif: hasMeaningfulCameraExif(exif),
+      };
+      const displayName = getPhotoExifCameraDisplayName(exif);
+      const aperture = formatPhotoExifAperture(exif);
+      const summary = getPhotoExifExposureSummary(exif);
+      if (exif.cameraMake) e.cameraMake = exif.cameraMake;
+      if (exif.cameraModel) e.cameraModel = exif.cameraModel;
+      if (displayName) e.cameraDisplayName = displayName;
+      if (exif.lensModel) e.lensModel = exif.lensModel;
+      if (exif.capturedAt) e.capturedAt = exif.capturedAt;
+      if (exif.exposureTime) e.exposureTime = exif.exposureTime;
+      if (exif.fNumber != null) e.fNumber = exif.fNumber;
+      if (aperture) e.aperture = aperture;
+      if (exif.iso != null) e.iso = exif.iso;
+      if (exif.focalLengthMM != null) e.focalLengthMM = exif.focalLengthMM;
+      if (exif.focalLength35mm != null) e.focalLength35mm = exif.focalLength35mm;
+      if (summary) e.exposureSummary = summary;
+      if (exif.exposureBiasEV != null) e.exposureBiasEV = exif.exposureBiasEV;
+      if (exif.meteringMode) e.meteringMode = exif.meteringMode;
+      if (exif.flashFired != null) e.flashFired = exif.flashFired;
+      if (exif.whiteBalance) e.whiteBalance = exif.whiteBalance;
+      if (exif.colorProfile) e.colorProfile = exif.colorProfile;
+      if (exif.bitDepth != null) e.bitDepth = exif.bitDepth;
+      if (exif.dpiWidth != null) e.dpiWidth = exif.dpiWidth;
+      if (exif.software) e.software = exif.software;
+      if (exif.artist) e.artist = exif.artist;
+      if (exif.copyright) e.copyright = exif.copyright;
+      if (exif.latitude != null && exif.longitude != null) {
+        const gps: Record<string, number> = {
+          latitude: exif.latitude,
+          longitude: exif.longitude,
+        };
+        if (exif.altitudeMeters != null) gps.altitudeMeters = exif.altitudeMeters;
+        e.gps = gps;
+      }
+      out.photoExif = e;
+    }
+
+    if (rich.aiGeneration && !isAIGenerationEmpty(rich.aiGeneration)) {
+      const ai = rich.aiGeneration;
+      const g: Record<string, unknown> = {};
+      if (ai.generator) g.generator = ai.generator;
+      if (ai.prompt) g.prompt = ai.prompt;
+      if (ai.negativePrompt) g.negativePrompt = ai.negativePrompt;
+      if (ai.modelName) g.modelName = ai.modelName;
+      if (ai.modelHash) g.modelHash = ai.modelHash;
+      if (ai.sampler) g.sampler = ai.sampler;
+      if (ai.scheduler) g.scheduler = ai.scheduler;
+      if (ai.steps != null) g.steps = ai.steps;
+      if (ai.cfgScale != null) g.cfgScale = ai.cfgScale;
+      if (ai.seed) g.seed = ai.seed;
+      if (ai.sizeText) g.sizeText = ai.sizeText;
+      if (ai.clipSkip != null) g.clipSkip = ai.clipSkip;
+      if (ai.loras.length > 0) g.loras = ai.loras;
+      if (Object.keys(ai.extraParameters).length > 0) g.extraParameters = ai.extraParameters;
+      out.aiGeneration = g;
+    }
+
+    if (rich.socialPost) {
+      const post = rich.socialPost;
+      const s: Record<string, unknown> = {
+        platform: post.platform,
+        authorName: post.authorName,
+        authorHandle: post.authorHandle,
+        bodyText: post.bodyText,
+        originalURL: post.originalURL,
+        hasVideo: post.hasVideo,
+        attachments: getEffectiveSocialAttachments(post).map((att) => ({
+          kind: att.kind,
+          url: att.url,
+          thumbnailURL: att.thumbnailURL ?? '',
+        })),
+      };
+      if (post.publishedAtText) s.publishedAtText = post.publishedAtText;
+      if (post.quotedAuthor) s.quotedAuthor = post.quotedAuthor;
+      if (post.quotedText) s.quotedText = post.quotedText;
+      if (post.articleTitle) s.articleTitle = post.articleTitle;
+      if (post.likeCount != null) s.likeCount = post.likeCount;
+      if (post.repostCount != null) s.repostCount = post.repostCount;
+      if (post.replyCount != null) s.replyCount = post.replyCount;
+      if (post.viewCount != null) s.viewCount = post.viewCount;
+      out.socialPost = s;
+    }
+
+    if (rich.githubRepo) {
+      const repo = rich.githubRepo;
+      const r: Record<string, unknown> = {
+        owner: repo.owner,
+        repo: repo.repo,
+        fullName: repo.fullName,
+        stars: repo.stars,
+        forks: repo.forks,
+        topics: repo.topics,
+        defaultBranch: repo.defaultBranch,
+      };
+      if (repo.description) r.description = repo.description;
+      if (repo.watchers != null) r.watchers = repo.watchers;
+      if (repo.language) r.language = repo.language;
+      if (repo.licenseName) r.licenseName = repo.licenseName;
+      if (repo.homepageURL) r.homepageURL = repo.homepageURL;
+      if (repo.readmeMarkdown) r.readmeExcerpt = repo.readmeMarkdown.slice(0, 2000);
+      out.githubRepo = r;
+    }
+
+    if (rich.textExcerpt) out.textExcerpt = rich.textExcerpt;
+    if (rich.isMarkdown) out.isMarkdown = true;
+    if (rich.model3DFormat) out.model3DFormat = rich.model3DFormat;
+
+    return Object.keys(out).length > 0 ? out : null;
+  }
+
   private makeResultResponse(id: unknown, result: unknown): Record<string, unknown> {
     return {
       jsonrpc: '2.0',
@@ -1190,225 +2487,5 @@ export class ExternalAgentService {
       id: id ?? null,
       error: { code, message },
     };
-  }
-
-  // MARK: - All 14 MCP Tool Definitions
-
-  static mcpToolDefinitions(): Array<Record<string, unknown>> {
-    const tool = (
-      name: string,
-      description: string,
-      properties: Record<string, unknown>,
-      required: string[] = [],
-      readOnly = true,
-    ): Record<string, unknown> => ({
-      name,
-      description,
-      inputSchema: {
-        type: 'object',
-        properties,
-        ...(required.length > 0 ? { required } : {}),
-      },
-      annotations: {
-        readOnlyHint: readOnly,
-        destructiveHint: false,
-      },
-    });
-
-    return [
-      tool(
-        'library_overview',
-        'Get an overview of the Charkle visual reference library: total assets, inbox count, folder tree with IDs/paths, top tags, media distribution, board count, and active external agent permission level.',
-        {},
-        [],
-        true,
-      ),
-      tool(
-        'search_assets',
-        'Search assets in Charkle by text query (supports Chinese, Pinyin, tags, OCR, AI descriptions), folder path/ID, tags, CIELAB dominant color hex, media kind, or rating.',
-        {
-          query: { type: 'string', description: 'Full-text search query across titles, notes, tags, OCR, and AI descriptions.' },
-          folder_id: { type: 'string', description: 'Optional folder UUID.' },
-          folder_path: { type: 'string', description: "Optional folder path or name, e.g. 'UI Inspiration'." },
-          tags: { type: 'array', items: { type: 'string' }, description: 'Filter assets having all given tags.' },
-          color_hex: { type: 'string', description: "Dominant color hex filter such as '#C86D51'." },
-          color_tolerance: { type: 'number', description: 'CIELAB DeltaE tolerance (default 28).' },
-          min_rating: { type: 'integer', description: 'Minimum star rating (0-5).' },
-          only_inbox: { type: 'boolean', description: 'Only return untriaged Inbox assets.' },
-          only_untagged: { type: 'boolean', description: 'Only return assets with no tags.' },
-          media_kinds: { type: 'array', items: { type: 'string' }, description: 'Optional MediaKind filters.' },
-          limit: { type: 'integer', description: 'Max items to return (1-100, default 30).' },
-        },
-        [],
-        true,
-      ),
-      tool(
-        'list_inbox',
-        "List untriaged assets currently in Charkle's Inbox.",
-        { limit: { type: 'integer', description: 'Max items to return (default 40).' } },
-        [],
-        true,
-      ),
-      tool(
-        'get_asset',
-        'Get complete metadata, OCR text, palette, tags, notes, thumbnail path, and local original path for a single asset UUID.',
-        { asset_id: { type: 'string', description: 'Asset UUID.' } },
-        ['asset_id'],
-        true,
-      ),
-      tool(
-        'render_contact_sheet',
-        'Render up to 16 candidate assets into a numbered Visual Contact Sheet JPEG (#01..#16) returned as an image plus grounded slot-to-assetID JSON manifest.',
-        {
-          asset_ids: { type: 'array', items: { type: 'string' }, description: 'Explicit asset UUIDs to render (up to 16).' },
-          query: { type: 'string', description: 'Search query when asset_ids is omitted.' },
-          folder_path: { type: 'string', description: 'Optional folder path filter.' },
-          only_inbox: { type: 'boolean', description: 'Render current Inbox assets.' },
-          only_untagged: { type: 'boolean', description: 'Render untagged assets.' },
-          color_hex: { type: 'string', description: 'Optional color hex filter.' },
-          limit: { type: 'integer', description: 'Number of tiles (1-16, default 16).' },
-          output_path: { type: 'string', description: 'Optional local path to also write the JPEG file.' },
-        },
-        [],
-        true,
-      ),
-      tool(
-        'list_boards',
-        'List all Moodboards in Charkle with ID, title, subtitle, layout mode, item count, and extracted palette HEX codes.',
-        {},
-        [],
-        true,
-      ),
-      tool(
-        'get_board_context',
-        'Read full structured design context of a Moodboard (title, subtitle, curator notes, section groups, harmonized HEX/CIELAB palette, and referenced assets with paths).',
-        {
-          board_id: { type: 'string', description: 'Moodboard UUID.' },
-          title: { type: 'string', description: 'Moodboard title lookup when board_id is omitted.' },
-        },
-        [],
-        true,
-      ),
-      tool(
-        'export_board_image',
-        'Render a Moodboard headlessly to PNG and return the image directly (optionally saving to output_path).',
-        {
-          board_id: { type: 'string', description: 'Moodboard UUID.' },
-          title: { type: 'string', description: 'Moodboard title lookup when board_id is omitted.' },
-          width: { type: 'integer', description: 'Canvas width in pixels (default 1440).' },
-          dark_appearance: { type: 'boolean', description: 'Render in dark studio theme (default false).' },
-          output_path: { type: 'string', description: 'Optional path to write the PNG file.' },
-        },
-        [],
-        true,
-      ),
-      tool(
-        'organize_assets',
-        'Batch-organize assets: move to a folder or Inbox, add/remove tags, set rating, notes, title, or AI description. Requires write permission in Charkle Settings.',
-        {
-          asset_ids: { type: 'array', items: { type: 'string' }, description: 'Asset UUIDs to update.' },
-          folder_id: { type: 'string', description: 'Move assets to this folder UUID.' },
-          folder_path: { type: 'string', description: 'Move assets to this folder path/name.' },
-          move_to_inbox: { type: 'boolean', description: 'Move assets back to Inbox.' },
-          add_tags: { type: 'array', items: { type: 'string' }, description: 'Tags to add.' },
-          remove_tags: { type: 'array', items: { type: 'string' }, description: 'Tags to remove.' },
-          rating: { type: 'integer', description: 'Star rating 0-5.' },
-          title: { type: 'string', description: 'Set title.' },
-          notes: { type: 'string', description: 'Set notes.' },
-          ai_description: { type: 'string', description: 'Save a visual description for these assets.' },
-          accept_suggested_tags: { type: 'boolean', description: 'Accept AI suggested tags.' },
-        },
-        ['asset_ids'],
-        false,
-      ),
-      tool(
-        'create_folder',
-        'Create a new folder in Charkle (optionally nested under parent_id or parent_path). Requires write permission.',
-        {
-          name: { type: 'string', description: 'New folder name.' },
-          parent_id: { type: 'string', description: 'Optional parent folder UUID.' },
-          parent_path: { type: 'string', description: 'Optional parent folder path.' },
-        },
-        ['name'],
-        false,
-      ),
-      tool(
-        'ingest_asset',
-        'Import a local image/media file, a web URL (including X/Twitter/Threads/Bluesky/GitHub), or a text snippet into Charkle. Requires write permission.',
-        {
-          file_path: { type: 'string', description: 'Local file path to import.' },
-          web_url: { type: 'string', description: 'Web or social/GitHub URL to capture.' },
-          text: { type: 'string', description: 'Text snippet to save as a reference card.' },
-          title: { type: 'string', description: 'Optional title for web_url or text.' },
-          folder_path: { type: 'string', description: 'Optional destination folder path (defaults to Inbox).' },
-          folder_id: { type: 'string', description: 'Optional destination folder UUID.' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'Optional initial tags.' },
-        },
-        [],
-        false,
-      ),
-      tool(
-        'compose_moodboard',
-        "Create and save a new Moodboard in Charkle. Pass explicit `sections` / `asset_ids` for direct art direction, or `prompt` to invoke Charkle's Moodboard Agent Harness. Requires write permission.",
-        {
-          title: { type: 'string', description: 'Moodboard title.' },
-          subtitle: { type: 'string', description: 'Short subtitle.' },
-          curator_note: { type: 'string', description: 'Art direction note card shown on the moodboard.' },
-          layout_style: { type: 'string', enum: ['magazine', 'balanced', 'compact'], description: 'Editorial layout rhythm.' },
-          use_freeform: {
-            type: 'boolean',
-            description: 'Use freeform spatial canvas (default: true). Pass false for legacy Auto Editorial mode.',
-          },
-          sections: {
-            type: 'array',
-            description: 'Explicit curated sections with asset_ids and optional hero_asset_ids.',
-            items: {
-              type: 'object',
-              properties: {
-                title: { type: 'string' },
-                tint: { type: 'string', enum: ['neutral', 'sand', 'sage', 'slate', 'terracotta', 'ocean'] },
-                rationale: { type: 'string' },
-                asset_ids: { type: 'array', items: { type: 'string' } },
-                hero_asset_ids: { type: 'array', items: { type: 'string' } },
-              },
-              required: ['title', 'asset_ids'],
-            },
-          },
-          asset_ids: { type: 'array', items: { type: 'string' }, description: 'Flat list of asset UUIDs if not specifying sections.' },
-          hero_asset_ids: { type: 'array', items: { type: 'string' }, description: 'Optional hero asset UUIDs (weight=2).' },
-          prompt: { type: 'string', description: "Natural-language brief when delegating curation to Charkle's harness." },
-          folder_path: { type: 'string', description: 'Optional scope folder when using prompt mode.' },
-          preferred_count: { type: 'integer', description: 'Max assets when using prompt mode (default 12).' },
-        },
-        [],
-        false,
-      ),
-      tool(
-        'patch_moodboard',
-        'Modify an existing Moodboard (rename, add/remove asset cards while respecting locked cards, or append a curator note). Requires write permission.',
-        {
-          board_id: { type: 'string', description: 'Target Moodboard UUID.' },
-          title: { type: 'string', description: 'Existing board title lookup if board_id is omitted.' },
-          new_title: { type: 'string', description: 'Optional new title.' },
-          subtitle: { type: 'string', description: 'Optional updated subtitle.' },
-          add_asset_ids: { type: 'array', items: { type: 'string' }, description: 'Asset UUIDs to append.' },
-          remove_asset_ids: { type: 'array', items: { type: 'string' }, description: 'Unlocked asset UUIDs to remove.' },
-          add_note: { type: 'string', description: 'Append a note card to the board.' },
-          note_title: { type: 'string', description: 'Title for the appended note card.' },
-        },
-        [],
-        false,
-      ),
-      tool(
-        'trash_assets',
-        'Soft-move assets to Trash (or restore with trashed=false). External agents are NEVER allowed to permanently delete user assets. Requires write permission.',
-        {
-          asset_ids: { type: 'array', items: { type: 'string' }, description: 'Asset UUIDs to move to or restore from Trash.' },
-          trashed: { type: 'boolean', description: 'true to move to Trash (default), false to restore.' },
-        },
-        ['asset_ids'],
-        false,
-      ),
-    ];
   }
 }

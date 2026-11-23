@@ -4,13 +4,18 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createDefaultAIProviderConfig } from '@charkle/shared';
 import {
+  AIHTTPClient,
   AnthropicMessagesProvider,
+  CHATGPT_REGISTRATION_STATE_KEY,
   ChatGPTSubscriptionClient,
+  CloudAIError,
   CloudTagNormalizer,
   createCloudAIProvider,
   GeminiProvider,
   OpenAICompatibleProvider,
   OpenAIResponsesProvider,
+  resolveProviderBaseURL,
+  testCloudAIConnection,
   type FetchLike,
 } from '../src/intelligence/cloud-ai-provider.js';
 import { CloudAIUsageTracker } from '../src/intelligence/cloud-ai-usage-tracker.js';
@@ -386,5 +391,205 @@ describe('CloudAIProvider & CloudAIUsageTracker', () => {
       ['已有标签'],
     );
     expect(tags).toEqual(['极简', '建筑', '插画', 'UI']);
+  });
+
+  it('normalizes OpenRouter /api -> /api/v1, catches postJSON network/timeout errors, and keeps completeJSON Contact Sheets while stripping SVG XML (P0-17, P0-19, P1-11, P1-13)', async () => {
+    expect(resolveProviderBaseURL('https://openrouter.ai/api', 'v1', false).toString()).toBe(
+      'https://openrouter.ai/api/v1',
+    );
+    expect(resolveProviderBaseURL('https://openrouter.ai/api/', 'v1', false).toString()).toBe(
+      'https://openrouter.ai/api/v1',
+    );
+
+    // AIHTTPClient.postJSON wraps timeout -> CloudAIError(timeout, 504) and network -> CloudAIError(network_error, 502)
+    const timeoutClient = new AIHTTPClient({
+      baseURL: new URL('https://example.com/v1'),
+      fetchFn: (_u, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+          });
+        }),
+    });
+    await expect(timeoutClient.postJSON('ping', {}, 15)).rejects.toMatchObject({
+      code: 'timeout',
+      status: 504,
+    });
+
+    const netClient = new AIHTTPClient({
+      baseURL: new URL('https://example.com/v1'),
+      fetchFn: async () => {
+        throw new TypeError('fetch failed');
+      },
+    });
+    await expect(netClient.postJSON('ping', {})).rejects.toMatchObject({
+      code: 'network_error',
+      status: 502,
+    });
+
+    // completeJSON sends valid JPEG Contact Sheets even when sendThumbnailsToCloud=false, while silently filtering SVG XML!
+    let capturedParts: Array<Record<string, unknown>> = [];
+    const gemini = new GeminiProvider(
+      createDefaultAIProviderConfig({
+        provider: 'gemini',
+        sendThumbnailsToCloud: false,
+      }),
+      'secret-key',
+      {
+        fetchFn: async (_u, init) => {
+          const body = JSON.parse(String(init?.body)) as {
+            contents: Array<{ parts: Array<Record<string, unknown>> }>;
+          };
+          capturedParts = body.contents[0].parts;
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }),
+            { status: 200 },
+          );
+        },
+      },
+    );
+    await gemini.completeJSON('JSON', 'curate', [
+      Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]),
+    ]);
+    // 1 text part + 1 valid JPEG part (SVG filtered out!)
+    expect(capturedParts).toHaveLength(2);
+    expect(capturedParts[1].inline_data).toBeDefined();
+  });
+
+  it('supports ChatGPT wire display_name, visibility=list, SSE /v1/responses + text-only retry, token refresh, remote revocation, resetRegistration, and honest testCloudAIConnection failure (P0-16, P2-05)', async () => {
+    const dir = createTempDir();
+    const db = openNodeLibraryDatabase(path.join(dir, 'chatgpt-p0.sqlite'));
+    const vault = createNodeSecretVault(db.sql, dir);
+    const configStore = createNodeConfigStore(db.sql, dir);
+    const usage = new CloudAIUsageTracker(db);
+
+    let revokedTokenBody = '';
+    let responsesAttempt = 0;
+    let modelStatus = 200;
+
+    const mockFetch: FetchLike = async (input, init) => {
+      const url = String(input);
+      const auth = ((init?.headers ?? {}) as Record<string, string>).Authorization ?? '';
+
+      if (url.endsWith('/oauth/token')) {
+        return new Response(
+          JSON.stringify({
+            access_token: 'fresh-access-tok',
+            refresh_token: 'rotated-refresh-tok',
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/oauth/revoke')) {
+        revokedTokenBody = String(init?.body ?? '');
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/models')) {
+        if (modelStatus !== 200) {
+          return new Response('Upstream Unavailable', { status: modelStatus });
+        }
+        return new Response(
+          JSON.stringify({
+            models: [
+              { slug: 'gpt-5.4-mini', display_name: 'GPT-5.4 Mini Wire', visibility: 'list' },
+              { slug: 'gpt-5.4-internal', display_name: 'Hidden Model', visibility: 'hide' },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/responses')) {
+        if (auth !== 'Bearer fresh-access-tok') {
+          return new Response(JSON.stringify({ error: { code: 'token_expired' } }), { status: 401 });
+        }
+        responsesAttempt += 1;
+        const body = JSON.parse(String(init?.body)) as {
+          stream?: boolean;
+          input: Array<{ content: Array<{ type: string }> }>;
+        };
+        expect(body.stream).toBe(true);
+        const hasImage = body.input[0].content.some((p) => p.type === 'input_image');
+        if (hasImage) {
+          // Simulate capability rejection triggering automatic text-only retry
+          return new Response(
+            JSON.stringify({ error: { code: 'subscription_sharing_unsupported_capability' } }),
+            { status: 400 },
+          );
+        }
+        // Return SSE text/event-stream
+        const sse = [
+          'event: response.output_text.delta',
+          'data: {"type":"response.output_text.delta","delta":"{\\"description\\":\\"SSE"}',
+          '',
+          'event: response.output_text.delta',
+          'data: {"type":"response.output_text.delta","delta":" ok\\",\\"tags\\":[\\"极简\\"]}"}',
+          '',
+          'event: response.completed',
+          'data: {"type":"response.completed","response":{"usage":{"input_tokens":55,"output_tokens":15,"total_tokens":70}}}',
+          '',
+        ].join('\n');
+        return new Response(sse, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+
+    try {
+      const client = new ChatGPTSubscriptionClient({
+        vault,
+        stateStore: db,
+        configStore,
+        usage,
+        fetchFn: mockFetch,
+      });
+      await db.setState(CHATGPT_REGISTRATION_STATE_KEY, { client_id: 'dyn-client-1' });
+      await client.connectWithToken({
+        accessToken: 'stale-access-tok',
+        refreshToken: 'initial-refresh-tok',
+        expiresAt: new Date(Date.now() - 60_000).toISOString(), // already expired -> auto refresh!
+        tokenEndpoint: 'https://auth.openai.com/oauth/token',
+        revocationEndpoint: 'https://auth.openai.com/oauth/revoke',
+        clientId: 'dyn-client-1',
+        sharingEnabled: true,
+      });
+
+      // 1. display_name + visibility === 'list' filtering
+      const models = await client.listModels();
+      expect(models).toEqual([{ slug: 'gpt-5.4-mini', displayName: 'GPT-5.4 Mini Wire' }]);
+      expect(vault.get(SECRET_KEYS.CHATGPT_ACCESS_TOKEN)).toBe('fresh-access-tok');
+      expect(vault.get(SECRET_KEYS.CHATGPT_REFRESH_TOKEN)).toBe('rotated-refresh-tok');
+
+      // 2. SSE /v1/responses + automatic text-only retry on 400 unsupported image
+      const text = await client.invokeResponses({
+        model: 'gpt-5.4-mini',
+        instructions: 'Return JSON',
+        userText: 'Analyze',
+        imagesJPEG: [Buffer.from([0xff, 0xd8, 0xff, 0xe0])],
+      });
+      expect(responsesAttempt).toBe(2);
+      expect(JSON.parse(text)).toEqual({ description: 'SSE ok', tags: ['极简'] });
+
+      // 3. testCloudAIConnection MUST fail honestly on 503 (never false-positive green!)
+      modelStatus = 503;
+      await expect(
+        testCloudAIConnection({
+          config: createDefaultAIProviderConfig({ provider: 'chatGPTSubscription' }),
+          vault,
+          chatGPTClient: client,
+          fetchFn: mockFetch,
+        }),
+      ).rejects.toBeInstanceOf(CloudAIError);
+
+      // 4. disconnect with resetRegistration revokes remotely and clears registration state
+      await client.disconnect({ resetRegistration: true });
+      expect(revokedTokenBody).toContain('token=rotated-refresh-tok');
+      expect(db.getState(CHATGPT_REGISTRATION_STATE_KEY)).toBeNull();
+    } finally {
+      db.close();
+    }
   });
 });

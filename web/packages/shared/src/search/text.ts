@@ -42,9 +42,22 @@ export function tokenizeSearchText(text: string): string[] {
   return tokens;
 }
 
+const zhWordSegmenter =
+  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter('zh-CN', { granularity: 'word' })
+    : null;
+
+function pushUnique(target: string[], seen: Set<string>, token: string): void {
+  if (token.length === 0 || seen.has(token)) return;
+  seen.add(token);
+  target.push(token);
+}
+
 export function extractPinyin(text: string): { full: string; initials: string } {
   const fullParts: string[] = [];
   const initialParts: string[] = [];
+  const seenFull = new Set<string>();
+  const seenInitials = new Set<string>();
 
   // Split into contiguous Han phrases
   let phrase = '';
@@ -60,12 +73,74 @@ export function extractPinyin(text: string): { full: string; initials: string } 
   if (phrase.length > 0) phrases.push(phrase);
 
   for (const p of phrases) {
-    const syllables = pinyin(p, { toneType: 'none', type: 'array' })
+    // Contextual phrase-level syllables (handles polyphones in context)
+    const contextual = pinyin(p, { toneType: 'none', type: 'array' })
       .map((s) => normalizeSearchText(s))
       .filter((s) => s.length > 0);
-    if (syllables.length === 0) continue;
-    fullParts.push(syllables.join(' '), syllables.join(''));
-    initialParts.push(syllables.map((s) => s[0]).join(''));
+    if (contextual.length === 0) continue;
+
+    pushUnique(fullParts, seenFull, contextual.join(' '));
+    pushUnique(fullParts, seenFull, contextual.join(''));
+    pushUnique(initialParts, seenInitials, contextual.map((s) => s[0]).join(''));
+
+    // Standard per-character readings fallback (mirrors Swift SearchText.pinyin dual standard+contextual output)
+    const chars = Array.from(p);
+    const standard: string[] = [];
+    for (const ch of chars) {
+      const syl = normalizeSearchText(pinyin(ch, { toneType: 'none' }));
+      if (syl.length > 0) standard.push(syl);
+    }
+    if (standard.length > 0) {
+      pushUnique(fullParts, seenFull, standard.join(' '));
+      pushUnique(fullParts, seenFull, standard.join(''));
+      pushUnique(initialParts, seenInitials, standard.map((s) => s[0]).join(''));
+    }
+
+    // Word-segmented sub-phrase & suffix tokens so mid-title compound pinyin/initials
+    // queries (e.g. "暗黑仪表盘设计" -> "ybp"* / "yibiaopan"*) always match prefix FTS5.
+    if (zhWordSegmenter && chars.length > 1) {
+      let charOffset = 0;
+      for (const seg of zhWordSegmenter.segment(p)) {
+        const segChars = Array.from(seg.segment);
+        const segLen = segChars.length;
+        if (segLen > 1) {
+          const slice =
+            contextual.length === chars.length
+              ? contextual.slice(charOffset, charOffset + segLen)
+              : pinyin(seg.segment, { toneType: 'none', type: 'array' })
+                  .map((s) => normalizeSearchText(s))
+                  .filter((s) => s.length > 0);
+          if (slice.length > 1) {
+            pushUnique(fullParts, seenFull, slice.join(''));
+            pushUnique(initialParts, seenInitials, slice.map((s) => s[0]).join(''));
+          }
+          // Also include standard reading for this segmented word if polyphone differs
+          if (standard.length === chars.length) {
+            const stdSlice = standard.slice(charOffset, charOffset + segLen);
+            if (stdSlice.length > 1) {
+              pushUnique(fullParts, seenFull, stdSlice.join(''));
+              pushUnique(initialParts, seenInitials, stdSlice.map((s) => s[0]).join(''));
+            }
+          }
+        }
+        // Emit suffix from each non-zero word boundary (O(words) tokens, matches compound nouns like "仪表"+"盘")
+        if (charOffset > 0 && contextual.length === chars.length) {
+          const suffix = contextual.slice(charOffset);
+          if (suffix.length > 1) {
+            pushUnique(fullParts, seenFull, suffix.join(''));
+            pushUnique(initialParts, seenInitials, suffix.map((s) => s[0]).join(''));
+          }
+          if (standard.length === chars.length) {
+            const stdSuffix = standard.slice(charOffset);
+            if (stdSuffix.length > 1) {
+              pushUnique(fullParts, seenFull, stdSuffix.join(''));
+              pushUnique(initialParts, seenInitials, stdSuffix.map((s) => s[0]).join(''));
+            }
+          }
+        }
+        charOffset += segLen;
+      }
+    }
   }
 
   return {

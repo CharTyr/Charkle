@@ -1,8 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowDownCircle,
+  ArrowUpDown,
+  Check,
+  ChevronDown,
   Columns3,
   Film,
+  Minus,
   PanelRight,
   Plus,
   Rows2,
@@ -27,9 +31,13 @@ import {
   CharkleIcon,
   FILTER_PRESET_COLORS,
   GlassSurface,
+  Popover,
+  SegmentedControl,
+  usePresence,
 } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
+import { steppedColumnWidth } from './galleryZoomMath';
 
 export interface TopFilterCapsuleProps {
   destinationTitle: string;
@@ -64,7 +72,19 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   const selectedAssetIDs = useLibraryStore((s) => s.selectedAssetIDs);
 
   const [localQuery, setLocalQuery] = useState(criteria.searchQuery);
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const sortBtnRef = useRef<HTMLButtonElement | null>(null);
   const debounceRef = useRef<number | null>(null);
+  const filterBarPresence = usePresence(showVisualFilterBar, 120);
+
+  const stepGalleryDensity = (deltaColumns: -1 | 1) => {
+    const stageEl =
+      typeof document !== 'undefined'
+        ? document.querySelector<HTMLElement>('[data-gallery-stage="true"]')
+        : null;
+    const stageW = stageEl?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth - 320 : 960);
+    setTargetColumnWidth(steppedColumnWidth(stageW, targetColumnWidth, deltaColumns));
+  };
 
   useEffect(() => {
     setLocalQuery(criteria.searchQuery);
@@ -121,16 +141,21 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   const toleranceLabel =
     criteria.colorTolerance <= 18 ? '精确' : criteria.colorTolerance <= 34 ? '适中' : '宽松';
 
-  const layoutOptions: ReadonlyArray<{ mode: GalleryLayoutMode; label: string; icon: React.ReactNode }> = [
-    { mode: 'verticalMasonry', label: '纵向瀑布流', icon: <Columns3 size={14} /> },
-    { mode: 'horizontalJustified', label: '横向瀑布流', icon: <Rows2 size={14} /> },
-    { mode: 'galleryFilmstrip', label: '画廊视图', icon: <Film size={14} /> },
+  const layoutOptions: ReadonlyArray<{
+    id: GalleryLayoutMode;
+    title: string;
+    ariaLabel: string;
+    icon: React.ReactNode;
+  }> = [
+    { id: 'verticalMasonry', title: '纵向瀑布流', ariaLabel: '纵向瀑布流', icon: <Columns3 size={14} /> },
+    { id: 'horizontalJustified', title: '横向瀑布流', ariaLabel: '横向瀑布流', icon: <Rows2 size={14} /> },
+    { id: 'galleryFilmstrip', title: '画廊视图', ariaLabel: '画廊视图', icon: <Film size={14} /> },
   ];
 
   return (
     <div className="sticky top-0 z-30 px-4 pt-1.5 pb-2 pointer-events-none">
       <div className="pointer-events-auto flex flex-col gap-2">
-        {/* Main Floating Liquid Glass Bar */}
+        {/* Main Floating Translucent Filter Bar */}
         <GlassSurface
           variant="regular"
           radius="dock"
@@ -156,8 +181,8 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
               onKeyDown={handleSearchKeyDown}
               placeholder={
                 semanticSearchEnabled
-                  ? '描述画面、情绪或材质，回车语义检索…'
-                  : '搜索标题、标签、拼音、文字…'
+                  ? '描述画面内容，回车搜索…'
+                  : '搜索素材…'
               }
               className="flex-1 min-w-0 bg-transparent text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none"
             />
@@ -215,55 +240,98 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             )}
           </Button>
 
-          {/* Sort Select */}
-          <select
+          {/* Sort Menu Trigger (Custom Popover Choice Control) */}
+          <button
+            ref={sortBtnRef}
+            type="button"
             aria-label="排序方式"
-            value={criteria.sortBy}
-            onChange={(e) => setCriteria({ sortBy: e.target.value as SortOrder })}
-            className="h-7 px-1.5 text-[12px] rounded-[var(--radius-chip)] bg-[var(--bg-subtle)]/80 border border-[var(--border-hairline)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] cursor-pointer shrink-0"
+            aria-haspopup="menu"
+            aria-expanded={sortMenuOpen}
+            onClick={() => setSortMenuOpen((v) => !v)}
+            className="charkle-pressable min-h-[28px] px-2 text-[12px] rounded-[var(--radius-chip)] bg-[var(--bg-subtle)]/80 hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0"
           >
-            {SORT_ORDERS.map((order) => (
-              <option key={order} value={order}>
-                {sortOrderLocalizedLabel(order)}
-              </option>
-            ))}
-          </select>
+            <ArrowUpDown size={11.5} className="text-[var(--text-tertiary)] shrink-0" />
+            <span>{sortOrderLocalizedLabel(criteria.sortBy)}</span>
+            <ChevronDown size={11.5} className="text-[var(--text-tertiary)] shrink-0" />
+          </button>
 
-          {/* 3-Mode Layout Switcher */}
-          <div className="inline-flex items-center p-0.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)]/85 border border-[var(--border-hairline)] shrink-0">
-            {layoutOptions.map((opt) => {
-              const active = layoutMode === opt.mode;
-              return (
-                <button
-                  key={opt.mode}
-                  type="button"
-                  title={opt.label}
-                  onClick={() => setLayoutMode(opt.mode)}
-                  className={[
-                    'charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[6px] cursor-pointer',
-                    active
-                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                  ].join(' ')}
-                >
-                  {opt.icon}
-                </button>
-              );
-            })}
-          </div>
+          <Popover
+            open={sortMenuOpen}
+            onOpenChange={setSortMenuOpen}
+            anchorEl={sortBtnRef.current}
+            placement="bottom-end"
+          >
+            <div role="menu" className="w-[156px] p-1.5 flex flex-col gap-0.5 text-[12.5px]">
+              {SORT_ORDERS.map((order: SortOrder) => {
+                const active = criteria.sortBy === order;
+                return (
+                  <button
+                    key={order}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={active}
+                    onClick={() => {
+                      setSortMenuOpen(false);
+                      setCriteria({ sortBy: order });
+                    }}
+                    className={[
+                      'charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center justify-between gap-2 text-left cursor-pointer',
+                      active
+                        ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
+                        : 'text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+                    ].join(' ')}
+                  >
+                    <span>{sortOrderLocalizedLabel(order)}</span>
+                    {active && <Check size={13} className="shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          </Popover>
 
-          {/* Card Density Slider (when not in Filmstrip; wide screens only to preserve crisp 1-row 1440px fit) */}
+          {/* 3-Mode Layout Switcher (SegmentedControl with sliding indicator pill) */}
+          <SegmentedControl
+            ariaLabel="视图布局"
+            iconOnly
+            size="sm"
+            value={layoutMode}
+            onChange={setLayoutMode}
+            options={layoutOptions}
+            className="shrink-0"
+          />
+
+          {/* Card Density Controls (− / Slider / +) for Column-Stepped Anchor-Locked Zoom */}
           {layoutMode !== 'galleryFilmstrip' && (
-            <div className="hidden 2xl:flex items-center gap-1 px-0.5 shrink-0" title="调整瀑布流卡片尺寸">
+            <div
+              className="hidden lg:flex items-center gap-0.5 px-0.5 shrink-0"
+              title="缩放卡片"
+            >
+              <button
+                type="button"
+                aria-label="缩小卡片"
+                onClick={() => stepGalleryDensity(1)}
+                className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[6px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+              >
+                <Minus size={12} />
+              </button>
               <input
                 type="range"
+                aria-label="调整卡片密度"
                 min={130}
                 max={420}
                 step={8}
                 value={targetColumnWidth}
                 onChange={(e) => setTargetColumnWidth(Number(e.target.value))}
-                className="w-16 accent-[var(--accent)] cursor-pointer"
+                className="hidden 2xl:block w-16 accent-[var(--accent)] cursor-pointer"
               />
+              <button
+                type="button"
+                aria-label="放大卡片"
+                onClick={() => stepGalleryDensity(-1)}
+                className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[6px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+              >
+                <Plus size={12} />
+              </button>
             </div>
           )}
 
@@ -284,7 +352,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
               variant="ghost"
               size="xs"
               onClick={() => openGeneratorModal(Array.from(selectedAssetIDs))}
-              title="基于素材库或当前选中项生成情绪板"
+              title="生成情绪板"
               className="px-2 gap-1"
             >
               <CharkleIcon name="sparkle-board" size={15} />
@@ -316,11 +384,6 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
               <span className="text-[var(--text-primary)] font-medium truncate">
                 {semanticReport.summary || `语义检索「${semanticReport.query}」命中 ${semanticReport.hits.length} 项`}
               </span>
-              {semanticReport.evaluatedVisualCount > 0 && (
-                <span className="text-[11px] text-[var(--text-tertiary)] shrink-0">
-                  已视觉重排 {semanticReport.evaluatedVisualCount} 项
-                </span>
-              )}
             </div>
             <button
               type="button"
@@ -332,12 +395,17 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
           </GlassSurface>
         )}
 
-        {/* Expandable Visual Filter Bar */}
-        {showVisualFilterBar && (
+        {/* Expandable Visual Filter Bar (with mounted exit transition) */}
+        {filterBarPresence.rendered && (
           <GlassSurface
             variant="regular"
             radius="settings"
-            className="px-3.5 py-3 flex flex-col gap-2.5 charkle-popover-enter"
+            data-state={filterBarPresence.state}
+            style={{ transformOrigin: 'top center' }}
+            className={[
+              'px-3.5 py-3 flex flex-col gap-2.5 charkle-popover-transition',
+              filterBarPresence.state === 'closing' ? 'pointer-events-none' : '',
+            ].join(' ')}
           >
             {/* Row 1: Media Kinds + Aspect Shape */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">

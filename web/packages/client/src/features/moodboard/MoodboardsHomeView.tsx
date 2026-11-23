@@ -11,6 +11,7 @@ import {
 import { isLightHex } from '@charkle/shared';
 import type { MoodboardSummary, UUID } from '@charkle/shared';
 import { apiClient, thumbnailURL } from '../../api/client';
+import { EmptyStateVignette } from '../../design-system';
 import { Button } from '../../design-system/Button';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
@@ -151,14 +152,11 @@ export const MoodboardsHomeView: React.FC = () => {
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll px-6 py-6">
         {boards.length === 0 ? (
           <div className="h-full min-h-[380px] flex flex-col items-center justify-center text-center max-w-md mx-auto gap-4">
-            <CharkleIcon name="moodboard" style="layered" size={64} />
+            <EmptyStateVignette kind="emptyMoodboard" />
             <div>
               <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
                 暂无情绪板
               </h2>
-              <p className="text-[13px] text-[var(--text-secondary)] mt-1.5 leading-relaxed">
-                新建空白画布，或从素材库自动生成情绪板。
-              </p>
             </div>
             <div className="flex items-center gap-2.5 pt-1">
               <Button variant="secondary" size="md" loading={creating} onClick={handleCreateBlank}>
@@ -228,7 +226,7 @@ export const MoodboardsHomeView: React.FC = () => {
 
                     {/* Top-left Active Board / Mode Badge */}
                     <div className="absolute top-3 left-3 flex items-center gap-1.5">
-                      <span className="px-2 py-0.5 rounded-[var(--radius-card-inner)] bg-black/58 text-white text-[10px] font-medium backdrop-blur-sm">
+                      <span className="px-2 py-0.5 rounded-[var(--radius-card-inner)] bg-black/58 text-white text-[10px] font-medium backdrop-blur-sm [@media(prefers-reduced-transparency:reduce)]:backdrop-blur-none [@media(prefers-reduced-transparency:reduce)]:bg-[#141517]">
                         自由画布
                       </span>
                       {isActiveTarget && (

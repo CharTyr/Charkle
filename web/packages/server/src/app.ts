@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Hono } from 'hono';
@@ -99,8 +100,19 @@ export function createServerContext(options: CreateServerContextOptions = {}): S
     dataDir,
     localFs: {
       existsSync: (filePath: string) => fs.existsSync(filePath),
-      resolvePath: (filePath: string) => path.resolve(filePath),
-      writeFileSync: (filePath: string, data: Uint8Array) => fs.writeFileSync(filePath, data),
+      resolvePath: (filePath: string) => {
+        const expanded =
+          filePath === '~'
+            ? os.homedir()
+            : filePath.startsWith('~/') || filePath.startsWith('~\\')
+              ? path.join(os.homedir(), filePath.slice(2))
+              : filePath;
+        return path.resolve(expanded);
+      },
+      writeFileSync: (filePath: string, data: Uint8Array) => {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, data);
+      },
     },
   };
 }

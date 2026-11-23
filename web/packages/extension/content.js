@@ -26,7 +26,6 @@
   let shadowRoot = null;
   let dropPillEl = null;
   let dropPillTitleEl = null;
-  let dropPillSubEl = null;
   let toastEl = null;
   let toastIconEl = null;
   let toastTextEl = null;
@@ -268,15 +267,6 @@
         text-overflow: ellipsis;
       }
 
-      .ck-pill-sub {
-        font-size: 11px;
-        line-height: 1.3;
-        color: var(--text-secondary);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
       /* In-Page Status Toast (CSS transition retargeting) */
       .ck-toast {
         position: fixed;
@@ -405,11 +395,9 @@
       </div>
       <div class="ck-pill-copy">
         <span class="ck-pill-title"></span>
-        <span class="ck-pill-sub"></span>
       </div>
     `;
     dropPillTitleEl = dropPillEl.querySelector('.ck-pill-title');
-    dropPillSubEl = dropPillEl.querySelector('.ck-pill-sub');
     updateDropPillCopy(false);
 
     dropPillEl.addEventListener('dragenter', (e) => {
@@ -488,14 +476,10 @@
   }
 
   function updateDropPillCopy(isHovering) {
-    if (!dropPillTitleEl || !dropPillSubEl) return;
-    if (isHovering) {
-      dropPillTitleEl.textContent = `松手收藏 · ${runtimeState.targetLabel}`;
-      dropPillSubEl.textContent = '保存原图并记录来源';
-    } else {
-      dropPillTitleEl.textContent = `收藏到 Charkle · ${runtimeState.targetLabel}`;
-      dropPillSubEl.textContent = '松手即可保存图片';
-    }
+    if (!dropPillTitleEl) return;
+    dropPillTitleEl.textContent = isHovering
+      ? `松手收藏 · ${runtimeState.targetLabel}`
+      : `收藏到 Charkle · ${runtimeState.targetLabel}`;
   }
 
   function showDropDock() {
@@ -738,7 +722,7 @@
       .catch(() => {
         showToast({
           variant: 'error',
-          message: '扩展服务暂未响应，请重试',
+          message: '收藏失败，请重试',
         });
       });
   }

@@ -70,7 +70,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
           window.open(authURL, '_blank', 'noopener,noreferrer');
           pushToast({
             tone: 'success',
-            message: '凭据已加密保存，已打开 Google 登录授权页',
+            message: '凭据已保存，已打开 Google 登录授权页',
           });
         } catch (oauthErr) {
           pushToast({
@@ -79,7 +79,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
           });
         }
       } else {
-        pushToast({ tone: 'success', message: 'Google Drive 登录凭据已安全保存至服务端' });
+        pushToast({ tone: 'success', message: '凭据已保存' });
       }
     } catch (err) {
       pushToast({
@@ -105,7 +105,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
       if (!cid || !secret) {
         pushToast({
           tone: 'error',
-          message: '该 JSON 文件缺少 client_id 或 client_secret，请确认选择了正确的 Google OAuth 凭据文件',
+          message: '凭据文件无效，请重新选择',
         });
         return;
       }
@@ -138,7 +138,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
           配置 Google Drive 登录凭据
         </span>
       }
-      subtitle="直连你自己的 Google Drive，仅首次需要配置一次，凭据由服务端加密保存"
+      subtitle="仅首次登录需配置一次"
       footer={
         <>
           <SettingsButton variant="secondary" disabled={saving} onClick={onClose}>
@@ -160,7 +160,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
         <div className="p-3 rounded-[10px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
             <div className="text-[11.5px] font-medium text-[var(--text-primary)]">
-              授权回调地址（已授权的重定向 URI）
+              授权回调地址
             </div>
             <SettingsButton
               variant="secondary"
@@ -172,14 +172,14 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
             </SettingsButton>
           </div>
           <div className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
-            在 Google Cloud 创建 Web 应用凭据时，请将下方地址添加到「已授权的重定向 URI」：
+            将此地址添加到 Google 凭据的重定向地址：
           </div>
-          <code className="block w-full px-2.5 py-2 rounded-[7px] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11.5px] leading-relaxed text-[var(--text-primary)] break-all select-all">
+          <code className="block w-full px-2.5 py-2 rounded-[var(--radius-settings-inner)] bg-[var(--settings-card,var(--bg-elevated))] border border-[var(--settings-border,var(--border-hairline))] font-mono text-[11.5px] leading-relaxed text-[var(--text-primary)] charkle-wrap-anywhere select-all">
             {oauthRedirectURI}
           </code>
         </div>
 
-        {/* Tutorial link + client_secret.json importer */}
+        {/* Tutorial link + credentials importer */}
         <div className="p-3 rounded-[10px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2.5">
           <a
             href={SETTINGS_LINKS.googleOAuthGuide}
@@ -187,7 +187,7 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] hover:underline self-start"
           >
-            查看 Google Cloud OAuth 凭据 3 分钟图文教程
+            查看配置教程
             <ExternalLink size={11} />
           </a>
 
@@ -205,11 +205,8 @@ export const GoogleOAuthSetupModal: React.FC<GoogleOAuthSetupModalProps> = ({
               onClick={() => fileInputRef.current?.click()}
             >
               <FileUp size={13} />
-              导入 client_secret.json…
+              导入凭据文件 (.json)…
             </SettingsButton>
-            <span className="text-[11px] text-[var(--text-tertiary)]">
-              导入后自动识别并保存
-            </span>
           </div>
         </div>
 

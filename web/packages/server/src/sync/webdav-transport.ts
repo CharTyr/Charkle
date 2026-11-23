@@ -55,6 +55,29 @@ function decodeXmlTag(block: string, tagName: string): string | null {
     .trim();
 }
 
+function isLocalOrLanHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.lan')
+  ) {
+    return true;
+  }
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 10 || a === 127) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  return false;
+}
+
 /**
  * Runtime-agnostic streaming WebDAV transport implementing PROPFIND, GET (streaming),
  * PUT (streaming), MKCOL, MOVE, DELETE with Basic Auth.
@@ -75,6 +98,12 @@ export class WebDAVTransport implements DriveTransport {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new DriveTransportError('WebDAV 地址必须以 http:// 或 https:// 开头。', 'INVALID_URL');
+    }
+    if (parsed.protocol === 'http:' && !isLocalOrLanHost(parsed.hostname)) {
+      throw new DriveTransportError(
+        '出于安全考虑，公网 WebDAV 服务器必须使用 https:// 加密连接（局域网或本机可使用 http://）。',
+        'INSECURE_URL',
+      );
     }
     this.baseOrigin = parsed.origin;
     this.basePath = parsed.pathname.replace(/\/+$/, '');
@@ -223,7 +252,12 @@ export class WebDAVTransport implements DriveTransport {
       } catch {
         hrefPath = rawHref;
       }
-      const decodedPath = decodeURIComponent(hrefPath).replace(/\/+$/, '');
+      let decodedPath: string;
+      try {
+        decodedPath = decodeURIComponent(hrefPath).replace(/\/+$/, '');
+      } catch {
+        decodedPath = hrefPath.replace(/\/+$/, '');
+      }
       if (decodedPath === expectedParentPath) continue;
 
       const relFromBase =
@@ -238,7 +272,8 @@ export class WebDAVTransport implements DriveTransport {
       const isCollection = /<(?:[a-zA-Z0-9_-]+:)?collection\s*\/?>/i.test(block);
       const sizeStr = decodeXmlTag(block, 'getcontentlength');
       const modifiedStr = decodeXmlTag(block, 'getlastmodified');
-      const etag = decodeXmlTag(block, 'getetag')?.replace(/^W\//, '').replace(/"/g, '') ?? null;
+      const etag = decodeXmlTag(block, 'getetag')?.replace(/^W\//, '').replace(/"/g, '').trim() ?? null;
+      const validMd5 = etag && /^[0-9a-f]{32}$/i.test(etag) ? etag.toLowerCase() : null;
       const contentType = decodeXmlTag(block, 'getcontenttype');
 
       let modifiedIso: string | null = null;
@@ -253,7 +288,7 @@ export class WebDAVTransport implements DriveTransport {
         mimeType: isCollection ? GOOGLE_DRIVE_FOLDER_MIME_TYPE : contentType || guessMimeType(name),
         size: sizeStr ? Number.parseInt(sizeStr, 10) || 0 : 0,
         modifiedTime: modifiedIso,
-        md5Checksum: etag,
+        md5Checksum: validMd5,
         parents: [parentID],
         trashed: false,
         webViewLink: null,

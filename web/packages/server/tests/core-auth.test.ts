@@ -293,4 +293,136 @@ describe('Auth, Security Middleware, Sessions, PATs, Rate Limiter & Core REST AP
       ctx.db.close();
     }
   });
+
+  it('strictly enforces PAT scopes (read, write, mcp) and blocks PATs from admin auth/agent endpoints with 403 (P0-02)', async () => {
+    const { ctx, app } = createTestServer();
+    try {
+      const user = await ctx.auth.setupAdmin('admin', 'strong-password-123');
+      const loginRes = await app.request('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'admin', password: 'strong-password-123' }),
+      });
+      const cookie = extractSessionCookie(loginRes);
+
+      const readPat = ctx.auth.createApiToken(user.id, 'read-only', ['read']);
+      const mcpPat = ctx.auth.createApiToken(user.id, 'mcp-only', ['mcp']);
+      const fullPat = ctx.auth.createApiToken(user.id, 'full-pat', ['read', 'write', 'mcp']);
+
+      // 1. read-only PAT: GET + read-only POST query work (200), write mutations & /mcp return 403
+      expect(
+        (
+          await app.request('/api/v1/library/bootstrap', {
+            headers: { Authorization: `Bearer ${readPat.token}` },
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await app.request('/api/v1/assets/query', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${readPat.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ criteria: {} }),
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await app.request('/api/v1/folders', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${readPat.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ name: 'ShouldFail' }),
+          })
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await app.request('/api/v1/mcp', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${readPat.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+          })
+        ).status,
+      ).toBe(403);
+
+      // 2. mcp-only PAT: /api/v1/mcp allowed (200), standard REST GET /library/bootstrap blocked (403)
+      expect(
+        (
+          await app.request('/api/v1/library/bootstrap', {
+            headers: { Authorization: `Bearer ${mcpPat.token}` },
+          })
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await app.request('/api/v1/mcp', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${mcpPat.token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+          })
+        ).status,
+      ).toBe(200);
+
+      // 3. Even full ['read','write','mcp'] PAT is NEVER allowed to mint/revoke tokens, manage sessions, change password, or mutate /agent/config
+      const adminOnlyChecks = [
+        app.request('/api/v1/auth/tokens', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${fullPat.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Escalated', scopes: ['read', 'write', 'mcp'] }),
+        }),
+        app.request(`/api/v1/auth/tokens/${readPat.info.id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${fullPat.token}` },
+        }),
+        app.request('/api/v1/auth/sessions', {
+          headers: { Authorization: `Bearer ${fullPat.token}` },
+        }),
+        app.request('/api/v1/auth/change-password', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${fullPat.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            currentPassword: 'strong-password-123',
+            newPassword: 'another-strong-password',
+          }),
+        }),
+        app.request('/api/v1/agent/config', {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${fullPat.token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config: { enabled: true, accessLevel: 'readWrite' } }),
+        }),
+      ];
+      const patResults = await Promise.all(adminOnlyChecks);
+      for (const r of patResults) {
+        expect(r.status).toBe(403);
+      }
+
+      // Session cookie retains full admin privilege on all of them
+      expect(
+        (await app.request('/api/v1/auth/sessions', { headers: { Cookie: cookie } })).status,
+      ).toBe(200);
+      expect(
+        (
+          await app.request('/api/v1/agent/config', {
+            method: 'PUT',
+            headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { enabled: true, accessLevel: 'readWrite' } }),
+          })
+        ).status,
+      ).toBe(200);
+    } finally {
+      ctx.db.close();
+    }
+  });
 });

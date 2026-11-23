@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import {
   ChevronLeft,
   ChevronRight,
@@ -10,12 +9,13 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   FolderInput,
-  Inbox,
   LayoutGrid,
+  Maximize2,
   Pin,
   RotateCcw,
   RotateCw,
   Scissors,
+  ScrollText,
   Sparkles,
   Star,
   Trash2,
@@ -23,10 +23,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import {
-  createDefaultAssetBatchPatch,
-  getAssetDisplayTypeLabel,
-} from '@charkle/shared';
+import { createDefaultAssetBatchPatch, getAssetDisplayTypeLabel } from '@charkle/shared';
 import type { AssetRecord, UUID } from '@charkle/shared';
 import { apiClient } from '../../api/client';
 import {
@@ -34,7 +31,16 @@ import {
   notifyLiveScrolling,
   stopAllHoverPreviews,
 } from '../../components/HoverMediaPreview';
-import { Button, formatBytes } from '../../design-system';
+import {
+  Button,
+  ConfirmDialog,
+  FolderHierarchyMenu,
+  formatBytes,
+  Popover,
+  prefersReducedMotion,
+  usePresence,
+  useSafeTriangleSubmenu,
+} from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { useMoodboardStore } from '../../stores/moodboardStore';
@@ -45,8 +51,11 @@ import { GitHubRepoViewer } from '../quicklook/GitHubRepoViewer';
 import {
   classifyAssetViewerKind,
   ColorSwatchViewer,
+  computeDynamicMaxZoom,
   computeQuarterTurnFitScale,
   computeWheelZoomFactor,
+  Delayed3DStagePlaceholder,
+  isTallStripDimensions,
   LazyModel3DViewer,
   supportsVisualTransform,
   useHorizontalWheelRedirect,
@@ -65,6 +74,36 @@ interface ContextMenuState {
   y: number;
 }
 
+const FilmstripSubmenuShell: React.FC<{
+  open: boolean;
+  side: 'left' | 'right';
+  panelRef: React.MutableRefObject<HTMLDivElement | null>;
+  onMouseEnter: () => void;
+  children: React.ReactNode;
+}> = ({ open, side, panelRef, onMouseEnter, children }) => {
+  const { rendered, state } = usePresence(open, 115);
+  if (!rendered) return null;
+  return (
+    <div
+      ref={(el) => {
+        if (open) panelRef.current = el;
+      }}
+      data-state={state}
+      onMouseEnter={onMouseEnter}
+      style={{ transformOrigin: side === 'left' ? 'top right' : 'top left' }}
+      className={[
+        'charkle-popover-transition absolute top-0 z-30 rounded-[var(--radius-popover-outer)] bg-[var(--bg-elevated)] border border-[var(--border-strong)] shadow-xl',
+        state === 'closing' ? 'pointer-events-none' : '',
+        side === 'left'
+          ? 'right-full mr-1 before:content-[""] before:absolute before:inset-y-0 before:-right-2 before:w-2.5'
+          : 'left-full ml-1 before:content-[""] before:absolute before:inset-y-0 before:-left-2 before:w-2.5',
+      ].join(' ')}
+    >
+      {children}
+    </div>
+  );
+};
+
 export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ assets }) => {
   const selectedAssetIDs = useLibraryStore((s) => s.selectedAssetIDs);
   const selectAsset = useLibraryStore((s) => s.selectAsset);
@@ -82,13 +121,15 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
   const openGeneratorModal = useCoordinatorStore((s) => s.openGeneratorModal);
   const activeBoardID = useCoordinatorStore((s) => s.activeBoardID);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+  const pendingGalleryReveal = useCoordinatorStore((s) => s.pendingGalleryReveal);
+  const clearPendingGalleryReveal = useCoordinatorStore((s) => s.clearPendingGalleryReveal);
 
   const boards = useMoodboardStore((s) => s.boards);
   const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
 
   const stripRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
+  const longStripUserOverrideRef = useRef(false);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -98,12 +139,15 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
   const [draggingPan, setDraggingPan] = useState(false);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+  const [originalFailedID, setOriginalFailedID] = useState<UUID | null>(null);
+  const [isLongStripScrollMode, setIsLongStripScrollMode] = useState(false);
   const [hoveredThumbID, setHoveredThumbID] = useState<UUID | null>(null);
   const [poppedStar, setPoppedStar] = useState<{ assetID: UUID; star: number; seq: number } | null>(
     null,
   );
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [activeSubmenu, setActiveSubmenu] = useState<'boards' | 'folders' | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ ids: UUID[]; label: string } | null>(null);
+  const [spotlightAssetID, setSpotlightAssetID] = useState<UUID | null>(null);
 
   const panOriginRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
@@ -121,6 +165,39 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
   const viewerKind = activeAsset ? classifyAssetViewerKind(activeAsset) : 'visual';
   const isTransformable = activeAsset ? supportsVisualTransform(activeAsset) : false;
 
+  const effWidth = naturalSize?.width || activeAsset?.pixelWidth || 0;
+  const effHeight = naturalSize?.height || activeAsset?.pixelHeight || 0;
+  const maxZoomLimit = useMemo(
+    () => computeDynamicMaxZoom(effWidth, effHeight),
+    [effWidth, effHeight],
+  );
+  const isTallStripImage = Boolean(
+    activeAsset &&
+      isTransformable &&
+      activeAsset.mediaKind !== 'animatedImage' &&
+      isTallStripDimensions(effWidth, effHeight),
+  );
+
+  const submenuSide: 'left' | 'right' =
+    contextMenu && typeof window !== 'undefined' && contextMenu.x + 440 > window.innerWidth
+      ? 'left'
+      : 'right';
+
+  const {
+    openKey: activeSubmenu,
+    setOpenKey: setActiveSubmenu,
+    submenuElRef,
+    recordPointer,
+    requestOpen: requestSubmenu,
+    cancelPendingClose,
+    closeImmediately: closeSubmenu,
+  } = useSafeTriangleSubmenu<'boards' | 'folders'>(submenuSide, 145);
+
+  const closeMenu = useCallback(() => {
+    setContextMenu(null);
+    closeSubmenu();
+  }, [closeSubmenu]);
+
   const resetTransforms = useCallback(() => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
@@ -129,20 +206,28 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
     setFlipV(false);
   }, []);
 
-  const applyZoomMultiplier = useCallback((factor: number) => {
-    setZoom((z) => {
-      const next = Math.max(0.5, Math.min(5, Number((z * factor).toFixed(3))));
-      if (next <= 1.01) {
-        setPan({ x: 0, y: 0 });
-      }
-      return next;
-    });
-  }, []);
+  const applyZoomMultiplier = useCallback(
+    (factor: number) => {
+      setIsLongStripScrollMode(false);
+      longStripUserOverrideRef.current = true;
+      setZoom((z) => {
+        const next = Math.max(0.5, Math.min(maxZoomLimit, Number((z * factor).toFixed(3))));
+        if (next <= 1.01) {
+          setPan({ x: 0, y: 0 });
+        }
+        return next;
+      });
+    },
+    [maxZoomLimit],
+  );
 
+  // Shortest-arc cumulative rotation (90 -> 180 -> 270 -> 360, never spinning backwards -270°)
   const rotateByScreenDelta = useCallback(
     (screenDelta: number) => {
+      setIsLongStripScrollMode(false);
+      longStripUserOverrideRef.current = true;
       const parity = flipH !== flipV ? -1 : 1;
-      setRotation((r) => (r + screenDelta * parity) % 360);
+      setRotation((r) => r + screenDelta * parity);
     },
     [flipH, flipV],
   );
@@ -151,13 +236,26 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
   useEffect(() => {
     resetTransforms();
     setNaturalSize(null);
+    setOriginalFailedID(null);
+    longStripUserOverrideRef.current = false;
+    setIsLongStripScrollMode(false);
     if (!activeAssetID) return;
     void markOpened(activeAssetID);
     const thumbEl = stripRef.current?.querySelector<HTMLElement>(
       `[data-filmstrip-id="${activeAssetID}"]`,
     );
-    thumbEl?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    thumbEl?.scrollIntoView({
+      behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+      inline: 'center',
+      block: 'nearest',
+    });
   }, [activeAssetID, markOpened, resetTransforms]);
+
+  useEffect(() => {
+    if (isTallStripImage && !longStripUserOverrideRef.current) {
+      setIsLongStripScrollMode(true);
+    }
+  }, [isTallStripImage]);
 
   // Live stage viewport size for quarter-turn fit scale
   useEffect(() => {
@@ -172,19 +270,45 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
     return () => ro.disconnect();
   }, [activeAssetID]);
 
-  // Direct non-passive wheel zoom on the visual stage
+  // Handle Reveal-in-Library in Filmstrip view
+  useEffect(() => {
+    if (!pendingGalleryReveal) return;
+    const found = assets.some((a) => a.id === pendingGalleryReveal.assetID);
+    if (!found) return;
+    const thumbEl = stripRef.current?.querySelector<HTMLElement>(
+      `[data-filmstrip-id="${pendingGalleryReveal.assetID}"]`,
+    );
+    thumbEl?.scrollIntoView({
+      behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+      inline: 'center',
+      block: 'nearest',
+    });
+    setSpotlightAssetID(pendingGalleryReveal.assetID);
+    clearPendingGalleryReveal(pendingGalleryReveal.nonce);
+    const timer = window.setTimeout(() => {
+      setSpotlightAssetID((cur) => (cur === pendingGalleryReveal.assetID ? null : cur));
+    }, 950);
+    return () => window.clearTimeout(timer);
+  }, [pendingGalleryReveal, assets, clearPendingGalleryReveal]);
+
+  // Direct non-passive wheel zoom on the visual stage (skip during Long-Strip natural vertical scroll unless Cmd/Ctrl held)
   useEffect(() => {
     const el = stageRef.current;
     if (!el || !isTransformable) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (useCoordinatorStore.getState().quickLookAssetID !== null) return;
+      if (useCoordinatorStore.getState().isOverlayPresented()) return;
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (e.deltaY === 0) return;
+      if (isLongStripScrollMode && !e.metaKey && !e.ctrlKey) return;
       e.preventDefault();
+      if (isLongStripScrollMode) {
+        setIsLongStripScrollMode(false);
+        longStripUserOverrideRef.current = true;
+      }
       const factor = computeWheelZoomFactor(e);
       setZoom((z) => {
-        const next = Math.max(0.5, Math.min(5, Number((z * factor).toFixed(3))));
+        const next = Math.max(0.5, Math.min(maxZoomLimit, Number((z * factor).toFixed(3))));
         if (next <= 1.01) {
           setPan({ x: 0, y: 0 });
         }
@@ -194,7 +318,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
 
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [isTransformable, activeAssetID]);
+  }, [isTransformable, activeAssetID, maxZoomLimit, isLongStripScrollMode]);
 
   // Vertical mouse wheel -> horizontal scroll on bottom filmstrip
   useHorizontalWheelRedirect(stripRef, assets.length > 0);
@@ -203,7 +327,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isEditableElement(e.target)) return;
-      if (useCoordinatorStore.getState().quickLookAssetID !== null) return;
+      if (useCoordinatorStore.getState().isOverlayPresented()) return;
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (assets.length === 0) return;
 
@@ -254,34 +378,6 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
     resetTransforms,
   ]);
 
-  // Dismiss right-click context menu on outside interaction, Escape, scroll, or blur
-  useEffect(() => {
-    if (!contextMenu) return;
-    const onPointerDown = (e: MouseEvent) => {
-      if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
-      setContextMenu(null);
-      setActiveSubmenu(null);
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setContextMenu(null);
-        setActiveSubmenu(null);
-      }
-    };
-    const close = () => {
-      setContextMenu(null);
-      setActiveSubmenu(null);
-    };
-    window.addEventListener('mousedown', onPointerDown, true);
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('blur', close);
-    return () => {
-      window.removeEventListener('mousedown', onPointerDown, true);
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('blur', close);
-    };
-  }, [contextMenu]);
-
   if (!activeAsset) return null;
 
   const stepBy = (delta: number) => {
@@ -293,8 +389,18 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
     e.preventDefault();
     e.stopPropagation();
     stopAllHoverPreviews();
-    setActiveSubmenu(null);
+    closeSubmenu();
     setContextMenu({ asset, x: e.clientX, y: e.clientY });
+  };
+
+  const openQuickLookFromStage = (assetID: UUID, sourceEl?: HTMLElement | null) => {
+    const rect = sourceEl?.getBoundingClientRect();
+    openQuickLook(
+      assetID,
+      rect
+        ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+        : null,
+    );
   };
 
   const displayRotation = ((rotation % 360) + 360) % 360;
@@ -318,6 +424,18 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
       )
     : 1;
 
+  const useOriginalSrc =
+    activeAsset.mediaKind === 'animatedImage' ||
+    (activeAsset.mediaKind === 'image' && originalFailedID !== activeAsset.id);
+
+  const stageImgSrc = useOriginalSrc
+    ? apiClient.originalMediaURL(activeAsset.id)
+    : apiClient.thumbnailURL(
+        activeAsset.id,
+        'preview1400',
+        `${activeAsset.updatedAt}-${cacheBust}`,
+      );
+
   // Context menu action target calculation
   const contextTargetIDs: UUID[] = contextMenu
     ? selectedAssetIDs.has(contextMenu.asset.id) && selectedAssetIDs.size > 0
@@ -326,29 +444,11 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
     : [];
   const contextCountSuffix = contextTargetIDs.length > 1 ? ` (${contextTargetIDs.length} 项)` : '';
 
-  const clampedMenuPos = contextMenu
-    ? {
-        left: Math.min(
-          contextMenu.x,
-          typeof window !== 'undefined' ? Math.max(12, window.innerWidth - 236) : contextMenu.x,
-        ),
-        top: Math.min(
-          contextMenu.y,
-          typeof window !== 'undefined' ? Math.max(12, window.innerHeight - 380) : contextMenu.y,
-        ),
-      }
-    : null;
-
-  const submenuFlipLeft =
-    clampedMenuPos && typeof window !== 'undefined'
-      ? clampedMenuPos.left + 440 > window.innerWidth
-      : false;
-
   const handleCopyAssets = async (targetAsset: AssetRecord) => {
     const text = targetAsset.sourceURL || targetAsset.title || targetAsset.fileName;
     try {
       await navigator.clipboard.writeText(text);
-      pushToast({ tone: 'info', message: `已拷贝「${targetAsset.title}」` });
+      pushToast({ tone: 'info', message: `已复制「${targetAsset.title}」` });
     } catch {
       pushToast({ tone: 'error', message: '无法写入剪贴板' });
     }
@@ -370,13 +470,13 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
   };
 
   const handleAIAnalyze = async (ids: UUID[]) => {
-    pushToast({ tone: 'info', message: `正在对 ${ids.length} 项素材进行 AI 重新打标…` });
+    pushToast({ tone: 'info', message: `正在分析 ${ids.length} 项素材…` });
     try {
       const res = await apiClient.analyzeAssets({ ids });
       if (res.assets?.length) {
         upsertAssets(res.assets);
       }
-      pushToast({ tone: 'success', message: `AI 重新打标完成（${ids.length} 项）` });
+      pushToast({ tone: 'success', message: `已完成 ${ids.length} 项 AI 打标` });
     } catch (err) {
       pushToast({
         tone: 'error',
@@ -387,7 +487,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
 
   return (
     <div className="flex-1 min-h-0 flex flex-col px-5 pb-4 gap-3">
-      {/* Main Hero Preview Stage (Full 8-Media-Type Quick Look Parity) */}
+      {/* Main Hero Preview Stage */}
       <div
         ref={stageRef}
         onContextMenu={(e) => openContextMenuFor(activeAsset, e)}
@@ -395,8 +495,12 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
       >
         <div
           className={[
-            'w-full h-full flex items-center justify-center overflow-hidden',
-            isTransformable ? 'pb-11' : '[&>*]:max-h-full [&>*]:max-w-full',
+            'w-full h-full flex items-center justify-center',
+            isLongStripScrollMode
+              ? 'overflow-y-auto overflow-x-hidden charkle-scroll items-start pb-14'
+              : isTransformable
+                ? 'overflow-hidden pb-11'
+                : 'overflow-hidden [&>*]:max-h-full [&>*]:max-w-full',
           ].join(' ')}
         >
           {viewerKind === 'githubRepo' && activeAsset.richMetadata?.githubRepo ? (
@@ -408,14 +512,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
           ) : viewerKind === 'audio' ? (
             <AudioStudioViewer asset={activeAsset} />
           ) : viewerKind === 'model3D' ? (
-            <React.Suspense
-              fallback={
-                <div className="w-[min(860px,88vw)] h-full max-h-[560px] rounded-[var(--radius-dock-outer)] bg-[#181A20] flex items-center justify-center text-white text-[13px] gap-2">
-                  <span className="h-4 w-4 rounded-full border-2 border-[#5B8DEF] border-t-transparent animate-spin" />
-                  正在初始化 3D 预览引擎…
-                </div>
-              }
-            >
+            <React.Suspense fallback={<Delayed3DStagePlaceholder />}>
               <LazyModel3DViewer asset={activeAsset} />
             </React.Suspense>
           ) : viewerKind === 'document' ? (
@@ -436,18 +533,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
               playsInline
               className="max-w-full max-h-full rounded-[var(--radius-card-outer)] object-contain shadow-md"
             />
-          ) : (
+          ) : isLongStripScrollMode ? (
             <img
               key={activeAsset.id}
-              src={
-                activeAsset.mediaKind === 'animatedImage'
-                  ? apiClient.originalMediaURL(activeAsset.id)
-                  : apiClient.thumbnailURL(
-                      activeAsset.id,
-                      'preview1400',
-                      `${activeAsset.updatedAt}-${cacheBust}`,
-                    )
-              }
+              src={stageImgSrc}
               alt={activeAsset.title}
               draggable={false}
               onLoad={(e) => {
@@ -456,9 +545,33 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                   setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
                 }
               }}
+              onError={() => {
+                if (useOriginalSrc && activeAsset.mediaKind === 'image') {
+                  setOriginalFailedID(activeAsset.id);
+                }
+              }}
+              className="w-full max-w-[920px] h-auto rounded-[var(--radius-card-outer)] select-none block mx-auto"
+            />
+          ) : (
+            <img
+              key={activeAsset.id}
+              src={stageImgSrc}
+              alt={activeAsset.title}
+              draggable={false}
+              onLoad={(e) => {
+                const img = e.currentTarget;
+                if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                  setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+                }
+              }}
+              onError={() => {
+                if (useOriginalSrc && activeAsset.mediaKind === 'image') {
+                  setOriginalFailedID(activeAsset.id);
+                }
+              }}
               onDoubleClick={() => {
                 setZoom((z) => {
-                  const next = z > 1.1 ? 1 : 2;
+                  const next = z > 1.1 ? 1 : Math.min(maxZoomLimit, 2.5);
                   if (next === 1) setPan({ x: 0, y: 0 });
                   return next;
                 });
@@ -514,9 +627,33 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
           <ChevronRight size={18} />
         </button>
 
-        {/* Always-Visible Floating Liquid Glass Controls Pill (Visual Stage) */}
+        {/* Always-Visible Floating Translucent Controls Pill */}
         {isTransformable && (
           <div className="charkle-glass absolute bottom-3 left-1/2 -translate-x-1/2 z-20 px-1.5 py-1 rounded-full flex items-center gap-0.5 max-w-[calc(100%-24px)] overflow-x-auto">
+            {isTallStripImage && (
+              <>
+                <button
+                  type="button"
+                  title={isLongStripScrollMode ? '切换为整图缩放' : '切换为长图纵览'}
+                  onClick={() => {
+                    longStripUserOverrideRef.current = true;
+                    setIsLongStripScrollMode((v) => !v);
+                    resetTransforms();
+                  }}
+                  className={[
+                    'charkle-pressable h-7 px-2 rounded-full text-[11.5px] font-medium inline-flex items-center gap-1 cursor-pointer shrink-0',
+                    isLongStripScrollMode
+                      ? 'bg-[var(--accent)] text-white'
+                      : 'hover:bg-black/6 dark:hover:bg-white/10 text-[var(--text-primary)]',
+                  ].join(' ')}
+                >
+                  {isLongStripScrollMode ? <Maximize2 size={12} /> : <ScrollText size={12} />}
+                  {isLongStripScrollMode ? '整图' : '长图'}
+                </button>
+                <div className="w-px h-4 bg-[var(--border-strong)] mx-1 shrink-0" />
+              </>
+            )}
+
             {/* Zoom Group */}
             <button
               type="button"
@@ -606,7 +743,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
             <button
               type="button"
               title="沉浸预览 (Space)"
-              onClick={() => openQuickLook(activeAsset.id)}
+              onClick={() => openQuickLookFromStage(activeAsset.id, stageRef.current)}
               className="charkle-pressable h-7 px-2.5 rounded-full hover:bg-black/6 dark:hover:bg-white/10 text-[var(--text-primary)] text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer shrink-0"
             >
               <Eye size={13} />
@@ -673,7 +810,11 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
           </span>
 
           {!isTransformable && (
-            <Button variant="secondary" size="xs" onClick={() => openQuickLook(activeAsset.id)}>
+            <Button
+              variant="secondary"
+              size="xs"
+              onClick={() => openQuickLookFromStage(activeAsset.id, stageRef.current)}
+            >
               <Eye size={13} />
               沉浸预览
             </Button>
@@ -681,7 +822,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
         </div>
       </div>
 
-      {/* Bottom 92px Filmstrip (Wheel-redirect + Hover Media Preview + Focus Scale) */}
+      {/* Bottom 92px Filmstrip */}
       <div
         ref={stripRef}
         onScroll={() => notifyLiveScrolling()}
@@ -706,7 +847,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                 else if (e.metaKey || e.ctrlKey) selectAsset(asset.id, 'toggle');
                 else selectAsset(asset.id, 'replace');
               }}
-              onDoubleClick={() => openQuickLook(asset.id)}
+              onDoubleClick={(e) => openQuickLookFromStage(asset.id, e.currentTarget)}
               onContextMenu={(e) => openContextMenuFor(asset, e)}
               style={{ width: thumbW, height: 68 }}
               className={[
@@ -716,6 +857,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                   : isSelected
                     ? 'ring-2 ring-[var(--accent)]/60 opacity-95'
                     : 'opacity-72 hover:opacity-100',
+                spotlightAssetID === asset.id ? 'charkle-reveal-spotlight' : '',
               ].join(' ')}
             >
               <img
@@ -736,25 +878,30 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
         })}
       </div>
 
-      {/* Right-Click Context Menu Portal */}
-      {contextMenu &&
-        clampedMenuPos &&
-        typeof document !== 'undefined' &&
-        createPortal(
+      {/* Right-Click Context Menu (Trigger-Origin Popover + Safe-Triangle Submenus + Animated Exit) */}
+      <Popover
+        open={Boolean(contextMenu)}
+        onOpenChange={(open) => {
+          if (!open) closeMenu();
+        }}
+        anchorPoint={contextMenu ? { x: contextMenu.x, y: contextMenu.y } : null}
+        glass={false}
+      >
+        {contextMenu && (
           <div
-            ref={menuRef}
             role="menu"
-            style={{ left: clampedMenuPos.left, top: clampedMenuPos.top }}
-            className="charkle-popover-enter fixed z-[140] w-[224px] py-1.5 rounded-[var(--radius-popover-outer)] bg-[var(--bg-elevated)] border border-[var(--border-strong)] shadow-xl text-[12.5px] text-[var(--text-primary)] select-none"
+            onMouseMove={recordPointer}
+            className="w-[228px] p-1.5 flex flex-col gap-0.5 text-[12.5px] text-[var(--text-primary)] select-none"
           >
             <button
               type="button"
               role="menuitem"
+              onMouseEnter={(e) => requestSubmenu(null, e)}
               onClick={() => {
-                openQuickLook(contextMenu.asset.id);
-                setContextMenu(null);
+                openQuickLookFromStage(contextMenu.asset.id, stageRef.current);
+                closeMenu();
               }}
-              className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
             >
               <Eye size={13.5} className="text-[var(--text-secondary)] shrink-0" />
               <span>沉浸预览</span>
@@ -767,9 +914,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
               <a
                 href={contextMenu.asset.sourceURL}
                 target="_blank"
-                rel="noreferrer"
-                onClick={() => setContextMenu(null)}
-                className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                rel="noopener noreferrer"
+                onMouseEnter={(e) => requestSubmenu(null, e)}
+                onClick={closeMenu}
+                className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
               >
                 <ExternalLink size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                 <span>打开来源网页</span>
@@ -781,29 +929,31 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
             <button
               type="button"
               role="menuitem"
+              onMouseEnter={(e) => requestSubmenu(null, e)}
               onClick={() => {
                 void handleCopyAssets(contextMenu.asset);
-                setContextMenu(null);
+                closeMenu();
               }}
-              className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
             >
               <Copy size={13.5} className="text-[var(--text-secondary)] shrink-0" />
-              <span>拷贝{contextCountSuffix}</span>
+              <span>复制{contextCountSuffix}</span>
             </button>
 
             {!contextMenu.asset.isTrashed && (
               <button
                 type="button"
                 role="menuitem"
+                onMouseEnter={(e) => requestSubmenu(null, e)}
                 onClick={() => {
                   setCutAssetIDs(contextTargetIDs);
                   pushToast({
                     tone: 'info',
-                    message: `已剪切 ${contextTargetIDs.length} 项素材，选择目标文件夹后按 ⌘V 移动`,
+                    message: `已剪切 ${contextTargetIDs.length} 项素材`,
                   });
-                  setContextMenu(null);
+                  closeMenu();
                 }}
-                className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
               >
                 <Scissors size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                 <span>剪切{contextCountSuffix}</span>
@@ -813,8 +963,9 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
             <a
               href={apiClient.originalMediaURL(contextMenu.asset.id, { download: true })}
               download={contextMenu.asset.fileName}
-              onClick={() => setContextMenu(null)}
-              className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              onMouseEnter={(e) => requestSubmenu(null, e)}
+              onClick={closeMenu}
+              className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
             >
               <Download size={13.5} className="text-[var(--text-secondary)] shrink-0" />
               <span>下载原文件</span>
@@ -827,41 +978,48 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={(e) => requestSubmenu(null, e)}
                   onClick={() => {
                     void handleAddToActiveBoard(contextTargetIDs);
-                    setContextMenu(null);
+                    closeMenu();
                   }}
-                  className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                  className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
                 >
                   <LayoutGrid size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                   <span>加入活跃情绪板{contextCountSuffix}</span>
                 </button>
 
-                {/* Submenu: Join Specific Moodboard */}
+                {/* Safe-Triangle Submenu: Join Specific Moodboard */}
                 <div
                   className="relative"
-                  onMouseEnter={() => setActiveSubmenu('boards')}
-                  onMouseLeave={() => setActiveSubmenu((cur) => (cur === 'boards' ? null : cur))}
+                  onMouseEnter={(e) => requestSubmenu('boards', e)}
                 >
                   <button
                     type="button"
                     role="menuitem"
+                    aria-haspopup="menu"
+                    aria-expanded={activeSubmenu === 'boards'}
                     onClick={() => setActiveSubmenu((cur) => (cur === 'boards' ? null : 'boards'))}
-                    className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className={[
+                      'w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 cursor-pointer text-left',
+                      activeSubmenu === 'boards'
+                        ? 'bg-[var(--bg-subtle)]'
+                        : 'hover:bg-[var(--bg-subtle)]',
+                    ].join(' ')}
                   >
                     <LayoutGrid size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                     <span className="flex-1 truncate">加入指定情绪板</span>
                     <ChevronRight size={13} className="text-[var(--text-tertiary)] shrink-0" />
                   </button>
-                  {activeSubmenu === 'boards' && (
-                    <div
-                      className={[
-                        'absolute top-0 w-[200px] max-h-[240px] overflow-y-auto charkle-scroll py-1.5 rounded-[var(--radius-popover-outer)] bg-[var(--bg-elevated)] border border-[var(--border-strong)] shadow-xl',
-                        submenuFlipLeft ? 'right-full mr-1' : 'left-full ml-1',
-                      ].join(' ')}
-                    >
+                  <FilmstripSubmenuShell
+                    open={activeSubmenu === 'boards'}
+                    side={submenuSide}
+                    panelRef={submenuElRef}
+                    onMouseEnter={cancelPendingClose}
+                  >
+                    <div className="w-[200px] max-h-[240px] overflow-y-auto charkle-scroll p-1.5 flex flex-col gap-0.5">
                       {boards.length === 0 ? (
-                        <div className="px-3 py-2 text-[12px] text-[var(--text-tertiary)]">
+                        <div className="px-2.5 py-2 text-[12px] text-[var(--text-tertiary)]">
                           暂无情绪板
                         </div>
                       ) : (
@@ -869,9 +1027,9 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                           <button
                             key={board.id}
                             type="button"
+                            role="menuitem"
                             onClick={async () => {
-                              setContextMenu(null);
-                              setActiveSubmenu(null);
+                              closeMenu();
                               try {
                                 await addAssetsToBoard(board.id, contextTargetIDs);
                                 pushToast({
@@ -882,90 +1040,80 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                                 pushToast({ tone: 'error', message: '加入情绪板失败' });
                               }
                             }}
-                            className="w-full px-3 py-1.5 text-left truncate hover:bg-[var(--bg-subtle)] cursor-pointer"
+                            className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-left truncate hover:bg-[var(--bg-subtle)] cursor-pointer"
                           >
                             {board.title}
                           </button>
                         ))
                       )}
                     </div>
-                  )}
+                  </FilmstripSubmenuShell>
                 </div>
 
-                {/* Submenu: Move to Folder */}
+                {/* Safe-Triangle Submenu: Move to Folder */}
                 <div
                   className="relative"
-                  onMouseEnter={() => setActiveSubmenu('folders')}
-                  onMouseLeave={() => setActiveSubmenu((cur) => (cur === 'folders' ? null : cur))}
+                  onMouseEnter={(e) => requestSubmenu('folders', e)}
                 >
                   <button
                     type="button"
                     role="menuitem"
+                    aria-haspopup="menu"
+                    aria-expanded={activeSubmenu === 'folders'}
                     onClick={() =>
                       setActiveSubmenu((cur) => (cur === 'folders' ? null : 'folders'))
                     }
-                    className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className={[
+                      'w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 cursor-pointer text-left',
+                      activeSubmenu === 'folders'
+                        ? 'bg-[var(--bg-subtle)]'
+                        : 'hover:bg-[var(--bg-subtle)]',
+                    ].join(' ')}
                   >
                     <FolderInput size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                     <span className="flex-1 truncate">移动到文件夹</span>
                     <ChevronRight size={13} className="text-[var(--text-tertiary)] shrink-0" />
                   </button>
-                  {activeSubmenu === 'folders' && (
-                    <div
-                      className={[
-                        'absolute top-0 w-[200px] max-h-[240px] overflow-y-auto charkle-scroll py-1.5 rounded-[var(--radius-popover-outer)] bg-[var(--bg-elevated)] border border-[var(--border-strong)] shadow-xl',
-                        submenuFlipLeft ? 'right-full mr-1' : 'left-full ml-1',
-                      ].join(' ')}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setContextMenu(null);
-                          setActiveSubmenu(null);
-                          void batchPatch(
-                            createDefaultAssetBatchPatch(contextTargetIDs, {
-                              folderAssignment: { type: 'inbox' },
-                            }),
-                          );
-                          pushToast({
-                            tone: 'info',
-                            message: `已移动 ${contextTargetIDs.length} 项到收件箱`,
-                          });
-                        }}
-                        className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
-                      >
-                        <Inbox size={13} className="text-[var(--text-tertiary)] shrink-0" />
-                        <span className="truncate">收件箱</span>
-                      </button>
-                      {folders.map((folder) => (
-                        <button
-                          key={folder.id}
-                          type="button"
-                          onClick={() => {
-                            setContextMenu(null);
-                            setActiveSubmenu(null);
-                            void batchPatch(
-                              createDefaultAssetBatchPatch(contextTargetIDs, {
-                                folderAssignment: { type: 'folder', folderID: folder.id },
-                              }),
-                            );
-                            pushToast({
-                              tone: 'info',
-                              message: `已移动 ${contextTargetIDs.length} 项到「${folder.name}」`,
-                            });
-                          }}
-                          className="w-full px-3 py-1.5 text-left truncate hover:bg-[var(--bg-subtle)] cursor-pointer"
-                        >
-                          {folder.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <FilmstripSubmenuShell
+                    open={activeSubmenu === 'folders'}
+                    side={submenuSide}
+                    panelRef={submenuElRef}
+                    onMouseEnter={cancelPendingClose}
+                  >
+                    <FolderHierarchyMenu
+                      folders={folders}
+                      includeInbox
+                      selectedFolderID={
+                        contextTargetIDs.length === 1 ? contextMenu.asset.folderID ?? null : null
+                      }
+                      highlightSelection={contextTargetIDs.length === 1}
+                      parentSelfPrefix="放入"
+                      submenuSide={submenuSide}
+                      onSelectFolder={(folderID) => {
+                        closeMenu();
+                        void batchPatch(
+                          createDefaultAssetBatchPatch(contextTargetIDs, {
+                            folderAssignment: folderID
+                              ? { type: 'folder', folderID }
+                              : { type: 'inbox' },
+                          }),
+                        );
+                        const label = folderID
+                          ? folders.find((f) => f.id === folderID)?.name ?? '文件夹'
+                          : '收件箱';
+                        pushToast({
+                          tone: 'info',
+                          message: `已移动 ${contextTargetIDs.length} 项到「${label}」`,
+                        });
+                      }}
+                    />
+                  </FilmstripSubmenuShell>
                 </div>
 
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={(e) => requestSubmenu(null, e)}
                   onClick={() => {
                     const nextPinned = !contextMenu.asset.pinnedOffline;
                     void batchPatch(
@@ -977,9 +1125,9 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                       tone: 'info',
                       message: nextPinned ? '已标记为始终保留在本地' : '已取消始终保留在本地',
                     });
-                    setContextMenu(null);
+                    closeMenu();
                   }}
-                  className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                  className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
                 >
                   <Pin size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                   <span>
@@ -990,11 +1138,12 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={(e) => requestSubmenu(null, e)}
                   onClick={() => {
                     void handleAIAnalyze(contextTargetIDs);
-                    setContextMenu(null);
+                    closeMenu();
                   }}
-                  className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                  className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
                 >
                   <Sparkles size={13.5} className="text-[var(--text-secondary)] shrink-0" />
                   <span>AI 重新打标{contextCountSuffix}</span>
@@ -1005,14 +1154,15 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={(e) => requestSubmenu(null, e)}
                   onClick={() => {
                     void trashAssets(contextTargetIDs);
-                    setContextMenu(null);
+                    closeMenu();
                   }}
-                  className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--danger-soft)] text-[var(--danger)] cursor-pointer text-left"
+                  className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--danger-soft)] text-[var(--danger)] cursor-pointer text-left"
                 >
                   <Trash2 size={13.5} className="shrink-0" />
-                  <span>移至废纸篓{contextCountSuffix}</span>
+                  <span>移入回收站{contextCountSuffix}</span>
                 </button>
               </>
             ) : (
@@ -1020,33 +1170,54 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({ asse
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={(e) => requestSubmenu(null, e)}
                   onClick={() => {
                     void restoreAssets(contextTargetIDs);
-                    setContextMenu(null);
+                    closeMenu();
                   }}
-                  className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                  className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
                 >
                   <Undo2 size={13.5} className="text-[var(--text-secondary)] shrink-0" />
-                  <span>放回原处{contextCountSuffix}</span>
+                  <span>恢复素材{contextCountSuffix}</span>
                 </button>
 
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={(e) => requestSubmenu(null, e)}
                   onClick={() => {
-                    void permanentlyDeleteAssets(contextTargetIDs);
-                    setContextMenu(null);
+                    const targetLabel =
+                      contextTargetIDs.length > 1
+                        ? `${contextTargetIDs.length} 项素材`
+                        : `「${contextMenu.asset.title}」`;
+                    const idsCopy = [...contextTargetIDs];
+                    closeMenu();
+                    setConfirmDelete({ ids: idsCopy, label: targetLabel });
                   }}
-                  className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--danger-soft)] text-[var(--danger)] cursor-pointer text-left"
+                  className="w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--danger-soft)] text-[var(--danger)] cursor-pointer text-left"
                 >
                   <Trash2 size={13.5} className="shrink-0" />
                   <span>彻底删除{contextCountSuffix}</span>
                 </button>
               </>
             )}
-          </div>,
-          document.body,
+          </div>
         )}
+      </Popover>
+
+      {/* Confirmed Permanent Delete Dialog */}
+      <ConfirmDialog
+        open={Boolean(confirmDelete)}
+        onClose={() => setConfirmDelete(null)}
+        title={`彻底删除${confirmDelete?.label ?? ''}？`}
+        description="删除后将永久移除文件且无法恢复。"
+        confirmLabel="彻底删除"
+        onConfirm={async () => {
+          if (!confirmDelete) return;
+          await permanentlyDeleteAssets(confirmDelete.ids);
+          pushToast({ tone: 'info', message: `已彻底删除 ${confirmDelete.ids.length} 项素材` });
+        }}
+      />
     </div>
   );
 };

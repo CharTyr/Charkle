@@ -41,6 +41,8 @@ import {
 import { AuthError } from '../auth/auth-service.js';
 import { LoginRateLimiter } from '../auth/rate-limiter.js';
 import type { AuthenticatedPrincipal, ServerContext } from '../context.js';
+import { LibraryDatabaseError } from '../db/library-database.js';
+import { MoodboardCurator } from '../intelligence/moodboard-curator.js';
 import { seedSampleLibrary } from '../media/sample-seeder.js';
 import { randomUUID, readEnv, toArrayBuffer } from '../runtime/web-crypto-utils.js';
 import { SECRET_KEYS } from '../storage/secret-vault.js';
@@ -51,9 +53,14 @@ import {
   isSecureRequest,
   type AppVariables,
 } from './middleware-auth.js';
+import {
+  enrichAssetsWithCloudAI,
+  type AIRuntime,
+} from './routes-ai.js';
 
 export interface CoreRouteOptions {
   rateLimiter?: LoginRateLimiter;
+  aiRuntime?: AIRuntime;
 }
 
 function requirePrincipal(c: Context<{ Variables: AppVariables }>): AuthenticatedPrincipal {
@@ -169,6 +176,9 @@ function appendAssetsToBoard(
       .map((n) => (n.kind.type === 'assetRef' ? toSwiftUUID(n.kind.assetID) : '')),
   );
   const now = new Date().toISOString();
+  const maxY = board.nodes.reduce((m, n) => Math.max(m, n.frame.y + n.frame.height), 40);
+  let cursorY = board.nodes.length > 0 ? maxY + 24 : 80;
+  let rowMaxH = 0;
   let maxZ = board.nodes.reduce((m, n) => Math.max(m, n.zIndex), 0);
   let maxOrder = board.nodes.reduce((m, n) => Math.max(m, n.editorialOrder), -1);
   const newNodes: BoardNode[] = [...board.nodes];
@@ -184,6 +194,12 @@ function appendAssetsToBoard(
         : 1.25;
     const width = 280;
     const height = Math.round(width / ratio);
+    const col = added % 4;
+    if (added > 0 && col === 0) {
+      cursorY += Math.max(rowMaxH, 240) + 24;
+      rowMaxH = 0;
+    }
+    rowMaxH = Math.max(rowMaxH, height);
     maxZ += 1;
     maxOrder += 1;
     newNodes.push({
@@ -193,11 +209,11 @@ function appendAssetsToBoard(
         assetID: uid,
         crop: null,
         weight: 1,
-        autoplayLoop: true,
+        autoplayLoop: asset.mediaKind === 'animatedImage' || asset.mediaKind === 'video',
       },
       frame: {
-        x: 60 + ((newNodes.length * 44) % 420),
-        y: 80 + Math.floor(newNodes.length / 4) * 320,
+        x: 60 + col * 304,
+        y: cursorY,
         width,
         height,
       },
@@ -213,14 +229,82 @@ function appendAssetsToBoard(
   }
 
   if (added > 0) {
-    ctx.db.saveBoardLocally({ ...board, nodes: newNodes, updatedAt: now });
+    const refAssets: AssetRecord[] = [];
+    for (const node of newNodes) {
+      if (node.kind.type === 'assetRef') {
+        const a = ctx.db.getAsset(node.kind.assetID);
+        if (a) refAssets.push(a);
+      }
+    }
+    const extractedPalette =
+      refAssets.length > 0
+        ? MoodboardCurator.harmonizePalette(
+            refAssets.flatMap((a) => a.dominantColors),
+            6,
+          )
+        : board.extractedPalette;
+    ctx.db.saveBoardLocally({ ...board, nodes: newNodes, extractedPalette, updatedAt: now });
     ctx.events.emitBoardUpdated(board.id);
   }
+}
+
+function persistAssetVector(
+  ctx: ServerContext,
+  assetID: UUID,
+  vector: { featurePrint?: string | null; embedding?: number[] | null; embeddingModel?: string | null; precision: 16 | 32 },
+): void {
+  const syncCfg = ctx.configStore.getSyncConfig();
+  if (syncCfg.syncEmbeddings) {
+    ctx.db.recordSyncChange({ type: 'vector', id: assetID, vector });
+  } else {
+    ctx.db.saveVector(assetID, vector);
+  }
+}
+
+function scheduleAutoAnalyzeIfEnabled(
+  ctx: ServerContext,
+  aiRuntime: AIRuntime | undefined,
+  assetIDs: readonly UUID[],
+): void {
+  if (!aiRuntime || assetIDs.length === 0) return;
+  const aiCfg = ctx.configStore.getAIConfig();
+  if (!aiCfg.autoAnalyzeOnImport || aiCfg.provider === 'disabled') return;
+  const idsCopy = [...assetIDs];
+  void Promise.resolve()
+    .then(async () => {
+      await enrichAssetsWithCloudAI(ctx, aiRuntime, idsCopy);
+    })
+    .catch(() => undefined);
+}
+
+function scheduleAutoEvict(
+  ctx: ServerContext,
+  keepingIDs: ReadonlySet<UUID> = new Set(),
+): void {
+  void ctx.media.evictCacheNow(ctx.db, keepingIDs).catch(() => undefined);
+}
+
+function warmPinnedAssetsInBackground(
+  ctx: ServerContext,
+  assets: readonly AssetRecord[],
+): void {
+  const candidates = assets.filter((a) => Boolean(a.driveFileID) && !a.isLocalOriginalCached);
+  if (candidates.length === 0) return;
+  void Promise.resolve()
+    .then(async () => {
+      for (const asset of candidates) {
+        await ctx.sync.downloadOriginal(asset).catch(() => undefined);
+      }
+    })
+    .catch(() => undefined);
 }
 
 function handleRouteError(c: Context, err: unknown) {
   if (err instanceof AuthError) {
     return c.json({ error: err.message, code: err.code }, err.statusCode as 400 | 401 | 403 | 404 | 409);
+  }
+  if (err instanceof LibraryDatabaseError) {
+    return c.json({ error: err.message, code: err.code }, err.status);
   }
   if (err instanceof DriveTransportError) {
     const status = err.code === 'UNAUTHORIZED' ? 401 : err.code === 'NOT_FOUND' ? 404 : 400;
@@ -236,6 +320,8 @@ export function registerCoreRoutes(
   options: CoreRouteOptions = {},
 ): void {
   const rateLimiter = options.rateLimiter ?? new LoginRateLimiter(10, 15 * 60 * 1000);
+  const aiRuntime = options.aiRuntime;
+  const curator = aiRuntime?.curator ?? new MoodboardCurator(ctx.db);
 
   // MARK: - Health (Public)
 
@@ -523,7 +609,7 @@ export function registerCoreRoutes(
     const limitRaw = Number.parseInt(c.req.query('limit') ?? '24', 10);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 24;
     const assets = ctx.db.recentActivityAssets(limit);
-    return c.json({ assets, total: assets.length });
+    return c.json({ assets, total: ctx.db.totalAssetCount() });
   });
 
   app.get('/api/v1/assets/:id', (c) => {
@@ -542,26 +628,36 @@ export function registerCoreRoutes(
         return c.json({ error: '请提供至少一个待导入项。', code: 'INVALID_INPUT' }, 400);
       }
       const targetFolderID = body.targetFolderID ? toSwiftUUID(body.targetFolderID) : null;
+      if (targetFolderID && !ctx.db.getFolder(targetFolderID)) {
+        return c.json({ error: '目标文件夹不存在。', code: 'FOLDER_NOT_FOUND' }, 404);
+      }
+      const targetBoardID = body.targetBoardID ? toSwiftUUID(body.targetBoardID) : null;
+      if (targetBoardID && !ctx.db.getBoard(targetBoardID)) {
+        return c.json({ error: '目标情绪板不存在。', code: 'BOARD_NOT_FOUND' }, 404);
+      }
       const created: AssetRecord[] = [];
 
       for (const input of inputs) {
         const res = await ctx.media.ingest(input, targetFolderID);
+        if (res.asset.contentHash) {
+          ctx.db.setState(`deleted.content.${res.asset.contentHash}`, null);
+        }
         const saved = ctx.db.saveAssetLocally(res.asset);
         if (res.vector) {
-          ctx.db.saveVector(saved.id, res.vector);
+          persistAssetVector(ctx, saved.id, res.vector);
         }
         ctx.db.touchOriginal(saved.id);
         ctx.db.markProjection('thumbnails', saved.id);
         created.push(saved);
       }
 
-      if (body.targetBoardID) {
-        appendAssetsToBoard(ctx, body.targetBoardID, created);
+      if (targetBoardID) {
+        appendAssetsToBoard(ctx, targetBoardID, created);
       }
-      ctx.events.emitLibraryChanged(
-        'ingest',
-        created.map((a) => a.id),
-      );
+      const createdIDs = created.map((a) => a.id);
+      ctx.events.emitLibraryChanged('ingest', createdIDs);
+      scheduleAutoAnalyzeIfEnabled(ctx, aiRuntime, createdIDs);
+      scheduleAutoEvict(ctx, new Set(createdIDs));
       return c.json({ assets: created }, 201);
     } catch (err) {
       return handleRouteError(c, err);
@@ -581,6 +677,13 @@ export function registerCoreRoutes(
         typeof targetBoardRaw === 'string' && targetBoardRaw.trim()
           ? toSwiftUUID(targetBoardRaw.trim())
           : null;
+
+      if (targetFolderID && !ctx.db.getFolder(targetFolderID)) {
+        return c.json({ error: '目标文件夹不存在。', code: 'FOLDER_NOT_FOUND' }, 404);
+      }
+      if (targetBoardID && !ctx.db.getBoard(targetBoardID)) {
+        return c.json({ error: '目标情绪板不存在。', code: 'BOARD_NOT_FOUND' }, 404);
+      }
 
       const fileEntries = [...form.getAll('files'), ...form.getAll('file')].filter(
         (v): v is File => typeof v !== 'string' && typeof v.arrayBuffer === 'function',
@@ -603,9 +706,12 @@ export function registerCoreRoutes(
           undefined,
           preprocessedList[i] ?? null,
         );
+        if (res.asset.contentHash) {
+          ctx.db.setState(`deleted.content.${res.asset.contentHash}`, null);
+        }
         const saved = ctx.db.saveAssetLocally(res.asset);
         if (res.vector) {
-          ctx.db.saveVector(saved.id, res.vector);
+          persistAssetVector(ctx, saved.id, res.vector);
         }
         ctx.db.touchOriginal(saved.id);
         ctx.db.markProjection('thumbnails', saved.id);
@@ -615,10 +721,10 @@ export function registerCoreRoutes(
       if (targetBoardID) {
         appendAssetsToBoard(ctx, targetBoardID, created);
       }
-      ctx.events.emitLibraryChanged(
-        'upload',
-        created.map((a) => a.id),
-      );
+      const createdIDs = created.map((a) => a.id);
+      ctx.events.emitLibraryChanged('upload', createdIDs);
+      scheduleAutoAnalyzeIfEnabled(ctx, aiRuntime, createdIDs);
+      scheduleAutoEvict(ctx, new Set(createdIDs));
       return c.json({ assets: created }, 201);
     } catch (err) {
       return handleRouteError(c, err);
@@ -633,6 +739,11 @@ export function registerCoreRoutes(
         'batch-patch',
         assets.map((a) => a.id),
       );
+      if (patch.pinnedOffline === true) {
+        warmPinnedAssetsInBackground(ctx, assets);
+      } else if (patch.pinnedOffline === false) {
+        scheduleAutoEvict(ctx);
+      }
       return c.json({ assets });
     } catch (err) {
       return handleRouteError(c, err);
@@ -642,10 +753,13 @@ export function registerCoreRoutes(
   app.post('/api/v1/assets/permanent-delete', async (c) => {
     try {
       const body = (await c.req.json()) as { ids?: UUID[] };
-      const ids = Array.isArray(body.ids) ? body.ids : [];
+      const ids = Array.isArray(body.ids) ? body.ids.map(toSwiftUUID) : [];
       if (ids.length > 0) {
         ctx.db.permanentDeleteAssets(ids);
         await ctx.media.removeFilesByIDs(ids);
+        for (const id of ids) {
+          ctx.db.setState(`media.cleanup.${id}`, null);
+        }
         ctx.events.emitLibraryChanged('permanent-delete', ids);
       }
       return c.json({ ok: true as const });
@@ -657,10 +771,13 @@ export function registerCoreRoutes(
   app.post('/api/v1/assets/empty-trash', async (c) => {
     try {
       const trashed = ctx.db.fetchAssets({ onlyTrashed: true });
-      const ids = trashed.map((a) => a.id);
+      const ids = trashed.map((a) => toSwiftUUID(a.id));
       if (ids.length > 0) {
         ctx.db.permanentDeleteAssets(ids);
         await ctx.media.removeFilesByIDs(ids);
+        for (const id of ids) {
+          ctx.db.setState(`media.cleanup.${id}`, null);
+        }
         ctx.events.emitLibraryChanged('empty-trash', ids);
       }
       return c.json({ ok: true as const });
@@ -697,11 +814,37 @@ export function registerCoreRoutes(
   app.get('/api/v1/assets/:id/similar', (c) => {
     const limitRaw = Number.parseInt(c.req.query('limit') ?? '12', 10);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(60, limitRaw)) : 12;
-    return c.json({ items: ctx.db.similarAssets(c.req.param('id'), limit) });
+    return c.json({ items: curator.similarAssets(c.req.param('id'), limit) });
   });
 
-  app.get('/api/v1/assets/:id/suggest-folder', (c) => {
-    return c.json({ suggestion: ctx.db.suggestFolder(c.req.param('id')) });
+  app.get('/api/v1/assets/:id/suggest-folder', async (c) => {
+    try {
+      const id = c.req.param('id');
+      const suggestion = aiRuntime
+        ? await aiRuntime.groundingService.suggestFolder(id)
+        : curator.suggestFolder(id);
+      return c.json({ suggestion });
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
+  app.post('/api/v1/assets/:id/hydrate-metadata', async (c) => {
+    try {
+      const existing = ctx.db.getAsset(c.req.param('id'));
+      if (!existing) {
+        return c.json({ error: '素材不存在。', code: 'NOT_FOUND' }, 404);
+      }
+      const hydrated = await ctx.media.hydrateImageMetadata(existing);
+      if (!hydrated) {
+        return c.json({ asset: existing });
+      }
+      const saved = ctx.db.saveAssetLocally(hydrated, false);
+      ctx.events.emitLibraryChanged('hydrate-metadata', [saved.id]);
+      return c.json({ asset: saved });
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
   });
 
   app.post('/api/v1/assets/:id/refresh-rich', async (c) => {
@@ -713,7 +856,7 @@ export function registerCoreRoutes(
       const refreshed = await ctx.media.refreshRichAsset(existing);
       const saved = ctx.db.saveAssetLocally(refreshed.asset);
       if (refreshed.vector) {
-        ctx.db.saveVector(saved.id, refreshed.vector);
+        persistAssetVector(ctx, saved.id, refreshed.vector);
       }
       ctx.db.markProjection('thumbnails', saved.id);
       ctx.events.emitLibraryChanged('refresh-rich', [saved.id]);
@@ -733,16 +876,19 @@ export function registerCoreRoutes(
       const extracted = await ctx.media.extractSocialMedia(postAsset, body.attachmentIndex ?? null);
       const savedAssets: AssetRecord[] = [];
       for (const item of extracted) {
+        if (item.asset.contentHash) {
+          ctx.db.setState(`deleted.content.${item.asset.contentHash}`, null);
+        }
         const saved = ctx.db.saveAssetLocally(item.asset);
-        if (item.vector) ctx.db.saveVector(saved.id, item.vector);
+        if (item.vector) persistAssetVector(ctx, saved.id, item.vector);
         ctx.db.touchOriginal(saved.id);
         ctx.db.markProjection('thumbnails', saved.id);
         savedAssets.push(saved);
       }
-      ctx.events.emitLibraryChanged(
-        'extract-social-media',
-        savedAssets.map((a) => a.id),
-      );
+      const savedIDs = savedAssets.map((a) => a.id);
+      ctx.events.emitLibraryChanged('extract-social-media', savedIDs);
+      scheduleAutoAnalyzeIfEnabled(ctx, aiRuntime, savedIDs);
+      scheduleAutoEvict(ctx, new Set(savedIDs));
       return c.json({ assets: savedAssets }, 201);
     } catch (err) {
       return handleRouteError(c, err);
@@ -791,6 +937,9 @@ export function registerCoreRoutes(
       if (!head && !cachedOnly) {
         await ctx.sync.downloadOriginal(asset);
         head = await ctx.media.getOriginalHead(asset);
+        if (head) {
+          scheduleAutoEvict(ctx, new Set([asset.id]));
+        }
       }
       if (!head) {
         return c.json(
@@ -976,6 +1125,11 @@ export function registerCoreRoutes(
           assets.map((a) => a.id),
           [id],
         );
+        if (pinned) {
+          warmPinnedAssetsInBackground(ctx, assets);
+        } else {
+          scheduleAutoEvict(ctx);
+        }
       }
       return c.json({ ok: true as const });
     } catch (err) {
@@ -991,18 +1145,20 @@ export function registerCoreRoutes(
     try {
       const body = (await c.req.json()) as Partial<SaveSmartFolderRequest>;
       const now = new Date().toISOString();
+      const existingList = ctx.db.fetchSmartFolders();
       const existing = body.id
-        ? ctx.db.fetchSmartFolders().find((s) => toSwiftUUID(s.id) === toSwiftUUID(body.id!))
+        ? existingList.find((s) => toSwiftUUID(s.id) === toSwiftUUID(body.id!))
         : undefined;
+      const maxSortOrder = existingList.reduce((m, s) => Math.max(m, s.sortOrder), -1);
       const record: SmartFolderRecord = {
         id: body.id ? toSwiftUUID(body.id) : toSwiftUUID(randomUUID()),
-        name: String(body.name ?? '').trim() || '智能文件夹',
-        colorHex: body.colorHex ?? body.rule?.colorHexes?.[0] ?? null,
+        name: String(body.name ?? '').trim() || '未命名智能文件夹',
+        colorHex: body.colorHex !== undefined ? body.colorHex : (existing?.colorHex ?? null),
         rule: createDefaultSmartFolderRule(body.rule ?? {}),
         sortOrder:
           typeof body.sortOrder === 'number'
             ? body.sortOrder
-            : (existing?.sortOrder ?? ctx.db.fetchSmartFolders().length),
+            : (existing?.sortOrder ?? maxSortOrder + 1),
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };
@@ -1134,10 +1290,50 @@ export function registerCoreRoutes(
     }
   });
 
+  app.post('/api/v1/boards/:id/pin-offline', async (c) => {
+    try {
+      const id = toSwiftUUID(c.req.param('id'));
+      const existing = ctx.db.getBoard(id);
+      if (!existing) {
+        return c.json({ error: '情绪板不存在。', code: 'NOT_FOUND' }, 404);
+      }
+      const body = (await c.req.json().catch(() => ({}))) as { pinned?: boolean };
+      const pinned = Boolean(body.pinned);
+      const saved = ctx.db.saveBoardLocally({
+        ...existing,
+        pinnedOffline: pinned,
+        updatedAt: new Date().toISOString(),
+      });
+      ctx.events.emitBoardUpdated(saved.id);
+      if (pinned) {
+        const refAssets: AssetRecord[] = [];
+        for (const node of saved.nodes) {
+          if (node.kind.type === 'assetRef') {
+            const a = ctx.db.getAsset(node.kind.assetID);
+            if (a) refAssets.push(a);
+          }
+        }
+        warmPinnedAssetsInBackground(ctx, refAssets);
+      } else {
+        scheduleAutoEvict(ctx);
+      }
+      return c.json({ board: saved });
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
   app.delete('/api/v1/boards/:id', (c) => {
     const id = toSwiftUUID(c.req.param('id'));
+    const existing = ctx.db.getBoard(id);
+    if (!existing) {
+      return c.json({ error: '情绪板不存在。', code: 'NOT_FOUND' }, 404);
+    }
     ctx.db.deleteBoardLocally(id);
     ctx.events.emitBoardUpdated(id, true);
+    if (existing.pinnedOffline) {
+      scheduleAutoEvict(ctx);
+    }
     return c.json({ ok: true as const });
   });
 
@@ -1150,7 +1346,10 @@ export function registerCoreRoutes(
   app.put('/api/v1/sync/config', async (c) => {
     try {
       const body = (await c.req.json()) as SaveSyncConfigRequest;
-      await ctx.sync.updateConfig(body.config, body.webDAVPassword ?? null);
+      await ctx.sync.updateConfig(
+        body.config,
+        body.webDAVPassword === undefined ? null : body.webDAVPassword,
+      );
       return c.json(buildSyncConfigResponse(ctx));
     } catch (err) {
       return handleRouteError(c, err);
@@ -1291,12 +1490,12 @@ export function registerCoreRoutes(
     try {
       const body = (await c.req.json()) as Partial<UpdateCacheBudgetRequest>;
       const bytes = Number(body.budgetBytes);
-      if (!Number.isFinite(bytes) || bytes <= 0) {
+      if (!Number.isFinite(bytes) || bytes < 0) {
         return c.json({ error: '无效的缓存上限大小。', code: 'INVALID_INPUT' }, 400);
       }
       const saved = ctx.configStore.setCacheBudgetBytes(bytes);
       ctx.media.setCacheBudgetBytes(saved);
-      const stats = await ctx.media.getCacheStats(ctx.db);
+      const stats = await ctx.media.evictCacheNow(ctx.db);
       return c.json({ stats });
     } catch (err) {
       return handleRouteError(c, err);

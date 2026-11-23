@@ -3,12 +3,14 @@ import {
   classifyAspectShape,
   createDefaultFilterCriteria,
   decodeBytesBase64,
-  deltaE76,
+  deltaE2000,
   encodeBytesBase64,
   extractPinyin,
   fuzzyScoreSearchText,
   getAssetRecentActivityDate,
   getBoardReferencedAssetIDs,
+  getPhotoExifCameraDisplayName,
+  getPhotoExifExposureSummary,
   indexSearchText,
   labFromHex,
   matchesSmartFolderRule,
@@ -52,26 +54,87 @@ const SCHEMA_VERSION = 3;
 const SCHEMA_VERSION_STATE_KEY = 'schema.version';
 const SMART_FOLDERS_STATE_KEY = 'smart_folders.v1';
 
-// MARK: - Float16 / Float32 Embedding & Vector Helpers
+export class LibraryDatabaseError extends Error {
+  public readonly status: 400 | 404 | 409;
+  public readonly code: string;
 
-function float32ToFloat16Bits(val: number): number {
-  const f32 = new Float32Array(1);
-  const u32 = new Uint32Array(f32.buffer);
-  f32[0] = val;
-  const x = u32[0];
-  const sign = (x >> 16) & 0x8000;
-  let exp = ((x >> 23) & 0xff) - 127 + 15;
-  let mant = x & 0x7fffff;
-  if (exp <= 0) {
-    if (exp < -10) return sign;
-    mant = (mant | 0x800000) >> (1 - exp);
-    return sign | ((mant + 0x1000) >> 13);
+  constructor(message: string, status: 400 | 404 | 409 = 400, code = 'BAD_REQUEST') {
+    super(message);
+    this.name = 'LibraryDatabaseError';
+    this.status = status;
+    this.code = code;
   }
-  if (exp >= 31) return sign | 0x7c00;
-  return sign | (exp << 10) | ((mant + 0x1000) >> 13);
 }
 
-function float16BitsToFloat32(bits: number): number {
+export function validateDriveName(name: string): void {
+  if (
+    !name ||
+    name === '.' ||
+    name === '..' ||
+    name.includes('/') ||
+    name.includes('\\') ||
+    /[\u0000-\u001f\u007f]/.test(name)
+  ) {
+    throw new LibraryDatabaseError('无效的名称：不能包含路径分隔符或控制字符。', 400, 'INVALID_NAME');
+  }
+}
+
+export function validateFolderName(raw: string, parentID: UUID | null): string {
+  const name = raw.trim();
+  validateDriveName(name);
+  if (name.startsWith('.') || (parentID === null && name.toLowerCase() === 'inbox')) {
+    throw new LibraryDatabaseError(
+      '该文件夹名称为系统保留名称（不能以 "." 开头或在根目录命名为 "Inbox"）。',
+      400,
+      'RESERVED_FOLDER_NAME',
+    );
+  }
+  return name;
+}
+
+// MARK: - Float16 / Float32 Embedding & Vector Helpers
+
+const f32Scratch = new Float32Array(1);
+const u32Scratch = new Uint32Array(f32Scratch.buffer);
+
+export function float32ToFloat16Bits(val: number): number {
+  f32Scratch[0] = val;
+  const x = u32Scratch[0];
+  const sign = (x >>> 16) & 0x8000;
+  const expRaw = (x >>> 23) & 0xff;
+  const mant = x & 0x7fffff;
+
+  // Infinity & NaN (preserve NaN quiet bit instead of collapsing to +Infinity)
+  if (expRaw === 0xff) {
+    if (mant === 0) return sign | 0x7c00;
+    return sign | 0x7e00 | (mant >>> 13);
+  }
+
+  const exp = expRaw - 127 + 15;
+  if (exp <= 0) {
+    if (exp < -10) return sign;
+    const sig = mant | 0x800000;
+    const shift = 14 - exp;
+    const half = 1 << (shift - 1);
+    const rem = sig & ((1 << shift) - 1);
+    let frac = sig >>> shift;
+    if (rem > half || (rem === half && (frac & 1) !== 0)) {
+      frac += 1;
+    }
+    return sign | frac;
+  }
+  if (exp >= 31) return sign | 0x7c00;
+
+  // IEEE-754 round-to-nearest-even with proper carry addition (`+`, NOT `|`)
+  const rem = mant & 0x1fff;
+  let frac = mant >>> 13;
+  if (rem > 0x1000 || (rem === 0x1000 && (frac & 1) !== 0)) {
+    frac += 1;
+  }
+  return sign | ((exp << 10) + frac);
+}
+
+export function float16BitsToFloat32(bits: number): number {
   const sign = (bits & 0x8000) !== 0 ? -1 : 1;
   const exp = (bits >> 10) & 0x1f;
   const frac = bits & 0x3ff;
@@ -121,13 +184,35 @@ export function encodeFeaturePrintFloat32(vec: readonly number[]): string {
   return encodeBytesBase64(new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength));
 }
 
+const BPLIST00_MAGIC = [0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30] as const;
+
+export function isBinaryPlistBytes(bytes: Uint8Array): boolean {
+  if (bytes.byteLength < BPLIST00_MAGIC.length) return false;
+  for (let i = 0; i < BPLIST00_MAGIC.length; i++) {
+    if (bytes[i] !== BPLIST00_MAGIC[i]) return false;
+  }
+  return true;
+}
+
 export function decodeFeaturePrintFloat32(base64: string): number[] | null {
   try {
     const bytes = decodeBytesBase64(base64);
     if (bytes.byteLength === 0 || bytes.byteLength % 4 !== 0) return null;
+    // Guard macOS VNFeaturePrintObservation NSKeyedArchiver binary/XML plists from Float32 mis-decoding
+    if (isBinaryPlistBytes(bytes)) return null;
+    if (bytes.byteLength >= 5 && bytes[0] === 0x3c && (bytes[1] === 0x3f || bytes[1] === 0x21)) {
+      return null;
+    }
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
-    return Array.from(new Float32Array(copy.buffer));
+    const floats = new Float32Array(copy.buffer);
+    const out = new Array<number>(floats.length);
+    for (let i = 0; i < floats.length; i++) {
+      const v = floats[i];
+      if (!Number.isFinite(v) || Math.abs(v) > 1e6) return null;
+      out[i] = v;
+    }
+    return out;
   } catch {
     return null;
   }
@@ -332,8 +417,10 @@ export class LibraryDatabase implements SyncOperationStore {
       folderID: rawAsset.folderID ? toSwiftUUID(rawAsset.folderID) : null,
     };
     const old = this.getAsset(asset.id);
-    const createdSec = Date.parse(asset.createdAt) / 1000 || Date.now() / 1000;
-    const lastOpenedSec = asset.lastOpenedAt ? Date.parse(asset.lastOpenedAt) / 1000 : null;
+    const parsedCreated = Date.parse(asset.createdAt);
+    const createdSec = Number.isFinite(parsedCreated) ? parsedCreated / 1000 : Date.now() / 1000;
+    const parsedLastOpened = asset.lastOpenedAt ? Date.parse(asset.lastOpenedAt) : Number.NaN;
+    const lastOpenedSec = Number.isFinite(parsedLastOpened) ? parsedLastOpened / 1000 : null;
     const shape = classifyAspectShape(asset.pixelWidth, asset.pixelHeight);
 
     this.sql.run(
@@ -473,6 +560,37 @@ export class LibraryDatabase implements SyncOperationStore {
         extraOCR = extraOCR ? `${extraOCR}\n${postText}` : postText;
       }
     }
+    const exif = asset.richMetadata?.photoExif;
+    if (exif) {
+      const exifText = [
+        getPhotoExifCameraDisplayName(exif) ?? '',
+        exif.lensModel ?? '',
+        getPhotoExifExposureSummary(exif) ?? '',
+        exif.software ?? '',
+        exif.artist ?? '',
+      ]
+        .filter((s) => s.length > 0)
+        .join('\n');
+      if (exifText) {
+        extraOCR = extraOCR ? `${extraOCR}\n${exifText}` : exifText;
+      }
+    }
+    const ai = asset.richMetadata?.aiGeneration;
+    if (ai) {
+      const aiText = [
+        ai.generator ?? '',
+        ai.modelName ?? '',
+        ai.sampler ?? '',
+        ai.loras.join(' '),
+        (ai.prompt ?? '').slice(0, 2000),
+        (ai.negativePrompt ?? '').slice(0, 600),
+      ]
+        .filter((s) => s.length > 0)
+        .join('\n');
+      if (aiText) {
+        extraOCR = extraOCR ? `${extraOCR}\n${aiText}` : aiText;
+      }
+    }
     return [
       asset.title,
       asset.fileName,
@@ -488,7 +606,11 @@ export class LibraryDatabase implements SyncOperationStore {
     return this.transaction(() => {
       const id = toSwiftUUID(value.id);
       if (this.isTombstoned('asset', id)) {
-        throw new Error(`Asset ${id} has been permanently deleted.`);
+        throw new LibraryDatabaseError(
+          `Asset ${id} has been permanently deleted.`,
+          409,
+          'ENTITY_TOMBSTONED',
+        );
       }
       const existing = this.getAsset(id);
       const asset: AssetRecord = {
@@ -586,6 +708,17 @@ export class LibraryDatabase implements SyncOperationStore {
 
   applyBatchPatch(patch: AssetBatchPatch): AssetRecord[] {
     return this.transaction(() => {
+      if (patch.folderAssignment.type === 'folder') {
+        const targetFolderID = toSwiftUUID(patch.folderAssignment.folderID);
+        if (!this.getFolder(targetFolderID)) {
+          throw new LibraryDatabaseError(
+            `Folder ${targetFolderID} not found.`,
+            404,
+            'FOLDER_NOT_FOUND',
+          );
+        }
+      }
+
       const updated: AssetRecord[] = [];
       const removeSet = new Set(patch.removeTags.map((t) => normalizeSearchText(t)).filter(Boolean));
       const dismissSet = new Set(
@@ -593,8 +726,19 @@ export class LibraryDatabase implements SyncOperationStore {
       );
       const addTagsClean = patch.addTags.map((t) => t.trim()).filter(Boolean);
 
+      // Deduplicate assetIDs while preserving order
+      const seenIDs = new Set<UUID>();
+      const uniqueAssetIDs: UUID[] = [];
       for (const rawId of patch.assetIDs) {
-        const current = this.getAsset(rawId);
+        const uid = toSwiftUUID(rawId);
+        if (!seenIDs.has(uid)) {
+          seenIDs.add(uid);
+          uniqueAssetIDs.push(uid);
+        }
+      }
+
+      for (const uid of uniqueAssetIDs) {
+        const current = this.getAsset(uid);
         if (!current) continue;
         const next: AssetRecord = { ...current };
 
@@ -619,28 +763,36 @@ export class LibraryDatabase implements SyncOperationStore {
           next.folderID = toSwiftUUID(patch.folderAssignment.folderID);
         }
 
-        // Tag mutations
+        // Tag mutations matching Swift LiveCharkleEngine order:
+        // 1. Existing tags + addTags
         const tagByNorm = new Map<string, string>();
         for (const t of next.tags) {
           const n = normalizeSearchText(t);
-          if (n && !removeSet.has(n)) tagByNorm.set(n, t);
+          if (n) tagByNorm.set(n, t);
         }
         for (const t of addTagsClean) {
           const n = normalizeSearchText(t);
           if (n) tagByNorm.set(n, t);
         }
 
-        // Suggested tag mutations
+        // 2. Suggested tags: dismiss FIRST, then accept remaining if acceptSuggestedTags is true
         let suggested = [...next.suggestedTags];
+        if (dismissSet.size > 0) {
+          suggested = suggested.filter((st) => !dismissSet.has(normalizeSearchText(st)));
+        }
         if (patch.acceptSuggestedTags) {
           for (const st of suggested) {
             const n = normalizeSearchText(st);
             if (n && !tagByNorm.has(n)) tagByNorm.set(n, st.trim());
           }
           suggested = [];
-        } else if (dismissSet.size > 0) {
-          suggested = suggested.filter((st) => !dismissSet.has(normalizeSearchText(st)));
         }
+
+        // 3. Explicit removeTags applied LAST so user removals always win
+        for (const rm of removeSet) {
+          tagByNorm.delete(rm);
+        }
+
         next.tags = Array.from(tagByNorm.values()).sort((a, b) => a.localeCompare(b));
         next.suggestedTags = suggested;
 
@@ -651,18 +803,34 @@ export class LibraryDatabase implements SyncOperationStore {
     });
   }
 
-  permanentDeleteAssets(ids: readonly UUID[]): number {
+  permanentDeleteAssets(ids: readonly UUID[], md5ByID?: ReadonlyMap<UUID, string>): number {
     return this.transaction(() => {
       let count = 0;
       for (const rawId of ids) {
         const id = toSwiftUUID(rawId);
         const existing = this.getAsset(id);
         if (!existing) continue;
+        const md5 = md5ByID?.get(id)?.toLowerCase() ?? null;
         this.recordSyncChange({
           type: 'deleteAsset',
           id,
           driveID: existing.driveFileID ?? null,
         });
+        if (md5) {
+          this.setState(`deleted.md5.${md5}`, true);
+          if (existing.contentHash) {
+            const existingFp = this.getState<{
+              assetID: UUID;
+              sha256: string;
+              md5?: string | null;
+              fileName: string;
+              deletedAt: string;
+            }>(`deleted.content.${existing.contentHash}`);
+            if (existingFp) {
+              this.setState(`deleted.content.${existing.contentHash}`, { ...existingFp, md5 });
+            }
+          }
+        }
         count++;
       }
       return count;
@@ -808,6 +976,9 @@ export class LibraryDatabase implements SyncOperationStore {
         pageSql += ' OFFSET ?';
         pageArgs.push(Math.trunc(offset));
       }
+    } else if (offset !== undefined && offset !== null && offset > 0) {
+      pageSql += ' LIMIT -1 OFFSET ?';
+      pageArgs.push(Math.trunc(offset));
     }
     const sql = `${cte}SELECT a.payload FROM ${source}${where} ORDER BY ${order}, a.id ASC${pageSql}`;
     const rows = this.sql.all<{ payload: string }>(sql, pageArgs);
@@ -918,41 +1089,72 @@ export class LibraryDatabase implements SyncOperationStore {
     this.sql.run('DELETE FROM folders WHERE id = ?', [toSwiftUUID(id)]);
   }
 
-  private uniqueSiblingFolderName(
+  private disambiguateFolderName(
     baseName: string,
     parentID: UUID | null,
+    siblings: readonly FolderRecord[],
     excludingID?: UUID | null,
   ): string {
     const trimmed = baseName.trim() || '新建文件夹';
-    const siblings = this.fetchFolders().filter(
-      (f) => (f.parentID ?? null) === parentID && f.id !== (excludingID ? toSwiftUUID(excludingID) : null),
+    const excl = excludingID ? toSwiftUUID(excludingID) : null;
+    const used = new Set(
+      siblings
+        .filter((f) => (f.parentID ?? null) === parentID && f.id !== excl)
+        .map((f) => f.name.toLowerCase()),
     );
-    const used = new Set(siblings.map((f) => f.name.toLowerCase()));
-    if (!used.has(trimmed.toLowerCase())) return trimmed;
+    const collides = (candidate: string): boolean =>
+      (parentID === null && candidate.toLowerCase() === 'inbox') ||
+      used.has(candidate.toLowerCase());
+    if (!collides(trimmed)) return trimmed;
     for (let idx = 2; idx < 1000; idx++) {
-      const candidate = `${trimmed} (${idx})`;
-      if (!used.has(candidate.toLowerCase())) return candidate;
+      const candidate = `${trimmed} ${idx}`;
+      if (!collides(candidate)) return candidate;
     }
-    return `${trimmed} (${Date.now()})`;
+    return `${trimmed} ${Date.now()}`;
+  }
+
+  private ensureUniqueSiblingFolder(
+    name: string,
+    parentID: UUID | null,
+    folders: readonly FolderRecord[],
+    excludingID?: UUID | null,
+  ): void {
+    const excl = excludingID ? toSwiftUUID(excludingID) : null;
+    const lower = name.toLowerCase();
+    const conflict = folders.find(
+      (f) =>
+        (f.parentID ?? null) === parentID &&
+        f.id !== excl &&
+        f.name.toLowerCase() === lower,
+    );
+    if (conflict) {
+      throw new LibraryDatabaseError(
+        `同级目录下已存在名为「${name}」的文件夹。`,
+        409,
+        'FOLDER_EXISTS',
+      );
+    }
   }
 
   createFolder(name: string, parentID?: UUID | null): FolderRecord {
     return this.transaction(() => {
       const parent = parentID ? toSwiftUUID(parentID) : null;
-      if (parent && !this.getFolder(parent)) {
-        throw new Error(`Parent folder ${parent} not found.`);
+      const validName = validateFolderName(name, parent);
+      const allFolders = this.fetchFolders();
+      if (parent && !allFolders.some((f) => f.id === parent)) {
+        throw new LibraryDatabaseError(`Parent folder ${parent} not found.`, 404, 'FOLDER_NOT_FOUND');
       }
-      const siblings = this.fetchFolders().filter((f) => (f.parentID ?? null) === parent);
-      const uniqueName = this.uniqueSiblingFolderName(name, parent);
+      this.ensureUniqueSiblingFolder(validName, parent, allFolders, null);
+      const maxSort = allFolders.reduce((m, f) => Math.max(m, f.sortOrder), -1);
       const now = new Date().toISOString();
       const folder: FolderRecord = {
         id: toSwiftUUID(randomUUID()),
-        name: uniqueName,
+        name: validName,
         parentID: parent,
         driveFolderID: null,
         colorHex: null,
         customSymbol: null,
-        sortOrder: siblings.length,
+        sortOrder: maxSort + 1,
         assetCount: 0,
         createdAt: now,
         updatedAt: now,
@@ -965,11 +1167,18 @@ export class LibraryDatabase implements SyncOperationStore {
   renameFolder(id: UUID, name: string): FolderRecord {
     return this.transaction(() => {
       const existing = this.getFolder(id);
-      if (!existing) throw new Error(`Folder ${id} not found.`);
-      const uniqueName = this.uniqueSiblingFolderName(name, existing.parentID ?? null, existing.id);
+      if (!existing) {
+        throw new LibraryDatabaseError(`Folder ${id} not found.`, 404, 'FOLDER_NOT_FOUND');
+      }
+      const validName = validateFolderName(name, existing.parentID ?? null);
+      const allFolders = this.fetchFolders();
+      this.ensureUniqueSiblingFolder(validName, existing.parentID ?? null, allFolders, existing.id);
+      if (validName === existing.name) {
+        return existing;
+      }
       const updated: FolderRecord = {
         ...existing,
-        name: uniqueName,
+        name: validName,
         updatedAt: new Date().toISOString(),
       };
       this.recordSyncChange({ type: 'folder', folder: updated });
@@ -982,20 +1191,32 @@ export class LibraryDatabase implements SyncOperationStore {
       const folderID = toSwiftUUID(id);
       const targetParent = newParentID ? toSwiftUUID(newParentID) : null;
       const existing = this.getFolder(folderID);
-      if (!existing) throw new Error(`Folder ${folderID} not found.`);
+      if (!existing) {
+        throw new LibraryDatabaseError(`Folder ${folderID} not found.`, 404, 'FOLDER_NOT_FOUND');
+      }
 
       if (targetParent) {
         if (!this.getFolder(targetParent)) {
-          throw new Error(`Target parent folder ${targetParent} not found.`);
+          throw new LibraryDatabaseError(
+            `Target parent folder ${targetParent} not found.`,
+            404,
+            'FOLDER_NOT_FOUND',
+          );
         }
         const subtree = new Set(this.getFolderSubtreeIDs(folderID));
         if (subtree.has(targetParent)) {
-          throw new Error('Cannot move a folder into itself or one of its descendants.');
+          throw new LibraryDatabaseError(
+            'Cannot move a folder into itself or one of its descendants.',
+            400,
+            'FOLDER_CYCLE',
+          );
         }
       }
 
-      const uniqueName = this.uniqueSiblingFolderName(existing.name, targetParent, folderID);
-      const siblings = this.fetchFolders().filter(
+      const allFolders = this.fetchFolders();
+      const uniqueName = this.disambiguateFolderName(existing.name, targetParent, allFolders, folderID);
+      validateFolderName(uniqueName, targetParent);
+      const siblings = allFolders.filter(
         (f) => (f.parentID ?? null) === targetParent && f.id !== folderID,
       );
       const clampedIndex =
@@ -1031,14 +1252,19 @@ export class LibraryDatabase implements SyncOperationStore {
   ): FolderRecord {
     return this.transaction(() => {
       const existing = this.getFolder(id);
-      if (!existing) throw new Error(`Folder ${id} not found.`);
+      if (!existing) {
+        throw new LibraryDatabaseError(`Folder ${id} not found.`, 404, 'FOLDER_NOT_FOUND');
+      }
+      const normalizeOpt = (val: string | null | undefined, fallback: string | null): string | null => {
+        if (val === undefined) return fallback;
+        if (val === null) return null;
+        const trimmed = val.trim();
+        return trimmed.length > 0 ? trimmed : null;
+      };
       const updated: FolderRecord = {
         ...existing,
-        colorHex: appearance.colorHex !== undefined ? appearance.colorHex : existing.colorHex ?? null,
-        customSymbol:
-          appearance.customSymbol !== undefined
-            ? appearance.customSymbol
-            : existing.customSymbol ?? null,
+        colorHex: normalizeOpt(appearance.colorHex, existing.colorHex ?? null),
+        customSymbol: normalizeOpt(appearance.customSymbol, existing.customSymbol ?? null),
         updatedAt: new Date().toISOString(),
       };
       this.recordSyncChange({ type: 'folder', folder: updated });
@@ -1054,17 +1280,33 @@ export class LibraryDatabase implements SyncOperationStore {
 
       if (!trashContents) {
         // Move direct assets to Inbox; reparent direct children to deleted folder's parent
+        // with sibling & root-Inbox collision disambiguation (matching Swift LiveCharkleEngine).
         const directAssets = this.fetchAssets({ folderID, includeTrashed: true });
         for (const asset of directAssets) {
           this.saveAssetLocally({ ...asset, folderID: null });
         }
-        const children = this.fetchFolders().filter((f) => f.parentID === folderID);
+        const allFolders = this.fetchFolders();
+        const targetParent = existing.parentID ?? null;
+        const children = allFolders.filter((f) => f.parentID === folderID);
+        const targetSiblings = allFolders.filter(
+          (f) => (f.parentID ?? null) === targetParent && f.id !== folderID,
+        );
         const now = new Date().toISOString();
         for (const child of children) {
-          this.recordSyncChange({
-            type: 'folder',
-            folder: { ...child, parentID: existing.parentID ?? null, updatedAt: now },
-          });
+          const safeName = this.disambiguateFolderName(
+            child.name,
+            targetParent,
+            targetSiblings,
+            child.id,
+          );
+          const reparented: FolderRecord = {
+            ...child,
+            name: safeName,
+            parentID: targetParent,
+            updatedAt: now,
+          };
+          this.recordSyncChange({ type: 'folder', folder: reparented });
+          targetSiblings.push(reparented);
         }
         this.recordSyncChange({
           type: 'deleteFolder',
@@ -1154,35 +1396,44 @@ export class LibraryDatabase implements SyncOperationStore {
     const list = this.getState<SmartFolderRecord[]>(SMART_FOLDERS_STATE_KEY) ?? [];
     return [...list].sort((a, b) => {
       if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
-      return a.name.localeCompare(b.name);
+      const nameCmp = a.name.localeCompare(b.name);
+      if (nameCmp !== 0) return nameCmp;
+      return a.id.localeCompare(b.id);
     });
   }
 
   saveSmartFolder(record: SmartFolderRecord): SmartFolderRecord {
-    const list = this.fetchSmartFolders();
-    const id = toSwiftUUID(record.id);
-    const now = new Date().toISOString();
-    const normalized: SmartFolderRecord = {
-      ...record,
-      id,
-      colorHex: record.colorHex ?? record.rule.colorHexes[0] ?? null,
-      updatedAt: now,
-      createdAt: record.createdAt || now,
-    };
-    const idx = list.findIndex((s) => toSwiftUUID(s.id) === id);
-    if (idx >= 0) {
-      list[idx] = normalized;
-    } else {
-      list.push(normalized);
-    }
-    this.setState(SMART_FOLDERS_STATE_KEY, list);
-    return normalized;
+    return this.transaction(() => {
+      const list = this.fetchSmartFolders();
+      const id = toSwiftUUID(record.id);
+      const now = new Date().toISOString();
+      const trimmedColor = record.colorHex?.trim() ?? '';
+      const trimmedName = record.name.trim();
+      const normalized: SmartFolderRecord = {
+        ...record,
+        id,
+        name: trimmedName || '未命名智能文件夹',
+        colorHex: trimmedColor.length > 0 ? trimmedColor : null,
+        updatedAt: now,
+        createdAt: record.createdAt || now,
+      };
+      const idx = list.findIndex((s) => toSwiftUUID(s.id) === id);
+      if (idx >= 0) {
+        list[idx] = normalized;
+      } else {
+        list.push(normalized);
+      }
+      this.setState(SMART_FOLDERS_STATE_KEY, list);
+      return normalized;
+    });
   }
 
   deleteSmartFolder(id: UUID): void {
-    const uid = toSwiftUUID(id);
-    const next = this.fetchSmartFolders().filter((s) => toSwiftUUID(s.id) !== uid);
-    this.setState(SMART_FOLDERS_STATE_KEY, next);
+    this.transaction(() => {
+      const uid = toSwiftUUID(id);
+      const next = this.fetchSmartFolders().filter((s) => toSwiftUUID(s.id) !== uid);
+      this.setState(SMART_FOLDERS_STATE_KEY, next);
+    });
   }
 
   fetchAssetsForSmartFolder(
@@ -1269,9 +1520,9 @@ export class LibraryDatabase implements SyncOperationStore {
         title: b.title,
         subtitle: b.subtitle,
         mode: b.mode,
-        itemCount: refIDs.length,
-        previewAssetIDs: refIDs.slice(0, 6),
-        paletteHexes: b.extractedPalette.slice(0, 7).map((c) => c.hex),
+        itemCount: b.nodes.length,
+        previewAssetIDs: refIDs.slice(0, 4),
+        paletteHexes: b.extractedPalette.map((c) => c.hex),
         pinnedOffline: b.pinnedOffline,
         updatedAt: b.updatedAt,
       };
@@ -1305,7 +1556,8 @@ export class LibraryDatabase implements SyncOperationStore {
       ...rawBoard,
       id: toSwiftUUID(rawBoard.id),
     };
-    const updatedSec = Date.parse(board.updatedAt) / 1000 || Date.now() / 1000;
+    const parsedUpdated = Date.parse(board.updatedAt);
+    const updatedSec = Number.isFinite(parsedUpdated) ? parsedUpdated / 1000 : Date.now() / 1000;
     this.sql.run(
       `INSERT INTO boards (id, pinned, updated_at, payload)
          VALUES (?, ?, ?, ?)
@@ -1330,7 +1582,7 @@ export class LibraryDatabase implements SyncOperationStore {
     return this.transaction(() => {
       const id = toSwiftUUID(board.id);
       if (this.isTombstoned('board', id)) {
-        throw new Error(`Board ${id} has been deleted.`);
+        throw new LibraryDatabaseError(`Board ${id} has been deleted.`, 409, 'ENTITY_TOMBSTONED');
       }
       const existing = this.getBoard(id);
       const delta = diffBoardChanges({ ...board, id }, existing);
@@ -1425,7 +1677,10 @@ export class LibraryDatabase implements SyncOperationStore {
     const targetVec = this.getVector(targetID);
     const targetFp = targetVec?.featurePrint ? decodeFeaturePrintFloat32(targetVec.featurePrint) : null;
     const targetEmb = targetVec?.embedding ?? null;
-    const targetTags = new Set(target.tags.map((t) => normalizeSearchText(t)).filter(Boolean));
+    const targetEmbModel = targetVec?.embeddingModel ?? null;
+    const targetTags = new Set(
+      [...target.tags, ...target.suggestedTags].map((t) => normalizeSearchText(t)).filter(Boolean),
+    );
     const allVectors = this.getAllVectors();
 
     const candidates = this.fetchAssets({ includeTrashed: false });
@@ -1437,7 +1692,15 @@ export class LibraryDatabase implements SyncOperationStore {
       let score = 0;
 
       const candVec = allVectors.get(cand.id);
-      if (targetEmb && candVec?.embedding && targetEmb.length === candVec.embedding.length) {
+      const modelsCompatible =
+        (!targetEmbModel && !candVec?.embeddingModel) ||
+        targetEmbModel === candVec?.embeddingModel;
+      if (
+        modelsCompatible &&
+        targetEmb &&
+        candVec?.embedding &&
+        targetEmb.length === candVec.embedding.length
+      ) {
         const sim = Math.max(0, cosineSimilarity(targetEmb, candVec.embedding));
         score += sim * 0.48;
         if (sim >= 0.45) reasons.push(`语义相似 ${(sim * 100).toFixed(0)}%`);
@@ -1452,12 +1715,12 @@ export class LibraryDatabase implements SyncOperationStore {
         }
       }
 
-      // Color harmony similarity
+      // Color harmony similarity (CIEDE2000)
       if (target.dominantColors.length > 0 && cand.dominantColors.length > 0) {
         let bestD = Infinity;
         for (const tc of target.dominantColors.slice(0, 3)) {
           for (const cc of cand.dominantColors.slice(0, 3)) {
-            const d = deltaE76(tc, cc);
+            const d = deltaE2000(tc, cc);
             if (d < bestD) bestD = d;
           }
         }
@@ -1468,14 +1731,17 @@ export class LibraryDatabase implements SyncOperationStore {
         }
       }
 
-      // Tag overlap
-      if (targetTags.size > 0 && cand.tags.length > 0) {
+      // Tag overlap (including suggested tags)
+      const candAllTags = new Set(
+        [...cand.tags, ...cand.suggestedTags].map((t) => normalizeSearchText(t)).filter(Boolean),
+      );
+      if (targetTags.size > 0 && candAllTags.size > 0) {
         let overlap = 0;
-        for (const t of cand.tags) {
-          if (targetTags.has(normalizeSearchText(t))) overlap++;
+        for (const t of candAllTags) {
+          if (targetTags.has(t)) overlap++;
         }
         if (overlap > 0) {
-          const jaccard = overlap / (targetTags.size + cand.tags.length - overlap);
+          const jaccard = overlap / (targetTags.size + candAllTags.size - overlap);
           score += jaccard * 0.3;
           reasons.push(`共同标签 ×${overlap}`);
         }
@@ -1514,6 +1780,7 @@ export class LibraryDatabase implements SyncOperationStore {
 
     let best: FolderSuggestion | null = null;
     for (const folder of folders) {
+      if (target.folderID && folder.id === target.folderID) continue;
       let score = 0;
       const reasons: string[] = [];
 

@@ -1,11 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
-import { Copy, ExternalLink, GitFork, Globe, RefreshCw, Scale, Star } from 'lucide-react';
+import { Copy, ExternalLink, Eye, GitFork, Globe, RefreshCw, Scale, Star } from 'lucide-react';
+import { createGitHubMarkdownURLContext } from '@charkle/shared';
 import type { AssetRecord, GitHubRepoMetadata } from '@charkle/shared';
-import { getGitHubLanguageColor } from '../../design-system';
+import { getGitHubLanguageColor, SegmentedControl } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
+import { MarkdownContentView } from './MarkdownContentView';
 
 export interface GitHubRepoViewerProps {
   asset: AssetRecord;
@@ -18,18 +18,19 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
 
   const [mode, setMode] = useState<'rendered' | 'raw'>('rendered');
   const [refreshing, setRefreshing] = useState(false);
+  const [ogFailed, setOgFailed] = useState(false);
 
-  const readmeHtml = useMemo(() => {
-    if (!repo.readmeMarkdown || mode !== 'rendered') return '';
-    const raw = marked.parse(repo.readmeMarkdown, { async: false }) as string;
-    return DOMPurify.sanitize(raw);
-  }, [repo.readmeMarkdown, mode]);
+  const urlContext = useMemo(
+    () => createGitHubMarkdownURLContext(repo.owner, repo.repo, repo.defaultBranch || 'main'),
+    [repo.owner, repo.repo, repo.defaultBranch],
+  );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
       await refreshRichAsset(asset.id);
-      pushToast({ tone: 'success', message: '已刷新 GitHub 仓库元数据与 README' });
+      setOgFailed(false);
+      pushToast({ tone: 'success', message: '已刷新仓库信息' });
     } catch (err) {
       pushToast({ tone: 'error', message: err instanceof Error ? err.message : '刷新失败' });
     } finally {
@@ -38,22 +39,24 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
   };
 
   return (
-    <div className="w-[min(800px,92vw)] h-[min(700px,78vh)] rounded-[var(--radius-dock-outer)] overflow-hidden bg-[#111317] text-[#E6EDF3] border border-white/12 shadow-2xl flex flex-col">
-      {/* Dark Studio Header */}
-      <div className="p-5 bg-[#191D24] border-b border-white/10 shrink-0 flex flex-col gap-3">
+    <div className="w-[min(840px,92vw)] h-[min(720px,80vh)] rounded-[var(--radius-dock-outer)] overflow-hidden bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-hairline)] shadow-2xl flex flex-col">
+      {/* Adaptive Light/Dark Studio Header */}
+      <div className="p-5 bg-[var(--bg-gallery)]/85 border-b border-[var(--border-hairline)] shrink-0 flex flex-col gap-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             {repo.ownerAvatarURL && (
               <img
                 src={repo.ownerAvatarURL}
                 alt={repo.owner}
-                className="h-10 w-10 rounded-full border border-white/15 shrink-0"
+                className="h-10 w-10 rounded-full border border-[var(--border-hairline)] shrink-0"
               />
             )}
             <div className="min-w-0">
-              <h2 className="text-[16px] font-semibold text-white truncate">{repo.fullName}</h2>
+              <h2 className="text-[16px] font-semibold text-[var(--text-primary)] truncate">
+                {repo.fullName}
+              </h2>
               {repo.description && (
-                <p className="text-[12.5px] text-[#9CA3AF] line-clamp-2 mt-0.5">
+                <p className="text-[12.5px] text-[var(--text-secondary)] line-clamp-2 mt-0.5">
                   {repo.description}
                 </p>
               )}
@@ -65,8 +68,8 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
               type="button"
               onClick={() => void handleRefresh()}
               disabled={refreshing}
-              title="刷新仓库元数据"
-              className="charkle-pressable h-8 w-8 rounded-[var(--radius-chip)] bg-white/8 hover:bg-white/14 text-white flex items-center justify-center cursor-pointer"
+              title="刷新仓库信息"
+              className="charkle-pressable h-8 w-8 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[var(--text-primary)] border border-[var(--border-hairline)] flex items-center justify-center cursor-pointer"
             >
               <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
             </button>
@@ -74,8 +77,8 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
               <a
                 href={repo.homepageURL}
                 target="_blank"
-                rel="noreferrer"
-                className="charkle-pressable h-8 px-2.5 rounded-[var(--radius-chip)] bg-white/8 hover:bg-white/14 text-[12px] text-white inline-flex items-center gap-1.5"
+                rel="noopener noreferrer"
+                className="charkle-pressable h-8 px-2.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] inline-flex items-center gap-1.5"
               >
                 <Globe size={13} />
                 主页
@@ -84,8 +87,8 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
             <a
               href={asset.sourceURL || `https://github.com/${repo.fullName}`}
               target="_blank"
-              rel="noreferrer"
-              className="charkle-pressable h-8 px-3 rounded-[var(--radius-chip)] bg-[#2A60E0] hover:bg-[#3B70F0] text-[12px] font-medium text-white inline-flex items-center gap-1.5"
+              rel="noopener noreferrer"
+              className="charkle-pressable h-8 px-3 rounded-[var(--radius-chip)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[12px] font-medium text-white inline-flex items-center gap-1.5"
             >
               <ExternalLink size={13} />
               在 GitHub 打开
@@ -93,18 +96,27 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
           </div>
         </div>
 
-        {/* Stats + Language + License Pills */}
+        {/* Stats (Stars, Forks, Watchers) + Language + License Pills */}
         <div className="flex flex-wrap items-center gap-2 text-[12px]">
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#242A35] text-[#F2C14E] font-medium">
-            <Star size={12} className="fill-[#F2C14E]" />
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-primary)] font-medium tabular-nums">
+            <Star size={12} className="fill-[#E5A91A] text-[#E5A91A]" />
             {repo.stars.toLocaleString()}
           </span>
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#242A35] text-[#CBD5E1]">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-secondary)] tabular-nums">
             <GitFork size={12} />
             {repo.forks.toLocaleString()}
           </span>
+          {typeof repo.watchers === 'number' && (
+            <span
+              title="关注人数"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-secondary)] tabular-nums"
+            >
+              <Eye size={12} />
+              {repo.watchers.toLocaleString()}
+            </span>
+          )}
           {repo.language && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#242A35] text-[#E2E8F0]">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-primary)]">
               <span
                 className="h-2.5 w-2.5 rounded-full"
                 style={{ backgroundColor: getGitHubLanguageColor(repo.language) }}
@@ -113,7 +125,7 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
             </span>
           )}
           {repo.licenseName && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#242A35] text-[#9CA3AF]">
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-secondary)]">
               <Scale size={12} />
               {repo.licenseName}
             </span>
@@ -126,7 +138,7 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
             {repo.topics.slice(0, 12).map((topic) => (
               <span
                 key={topic}
-                className="px-2 py-0.5 rounded-full bg-[#1E3A5F]/60 text-[#93C5FD] text-[11px] font-medium"
+                className="px-2 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-medium"
               >
                 {topic}
               </span>
@@ -136,26 +148,21 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
       </div>
 
       {/* README Toolbar */}
-      <div className="px-5 py-2 border-b border-white/8 bg-[#15181E] flex items-center justify-between shrink-0">
-        <span className="text-[11.5px] font-mono text-[#9CA3AF]">
+      <div className="px-5 py-2 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)] flex items-center justify-between shrink-0">
+        <span className="text-[11.5px] font-mono text-[var(--text-secondary)]">
           README.md ({repo.defaultBranch})
         </span>
         <div className="flex items-center gap-2">
-          <div className="inline-flex p-0.5 rounded-[var(--radius-chip)] bg-white/8">
-            {(['rendered', 'raw'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={[
-                  'px-2 py-0.5 text-[11px] rounded-[6px] cursor-pointer',
-                  mode === m ? 'bg-white/18 text-white font-medium' : 'text-[#9CA3AF]',
-                ].join(' ')}
-              >
-                {m === 'rendered' ? '排版视图' : '源码'}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            ariaLabel="README 视图"
+            size="sm"
+            value={mode}
+            onChange={setMode}
+            options={[
+              { id: 'rendered', label: '排版视图' },
+              { id: 'raw', label: '源码' },
+            ]}
+          />
           {repo.readmeMarkdown && (
             <button
               type="button"
@@ -163,28 +170,41 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset, repo 
                 await navigator.clipboard.writeText(repo.readmeMarkdown ?? '').catch(() => {});
                 pushToast({ tone: 'info', message: '已复制 README 原文' });
               }}
-              className="charkle-pressable h-6.5 px-2 inline-flex items-center gap-1 rounded-[6px] bg-white/8 hover:bg-white/14 text-[11px] text-[#E2E8F0] cursor-pointer"
+              className="charkle-pressable h-7 px-2.5 inline-flex items-center gap-1 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[11.5px] text-[var(--text-primary)] cursor-pointer"
             >
-              <Copy size={11} />
+              <Copy size={11.5} />
               复制 README
             </button>
           )}
         </div>
       </div>
 
-      {/* README Content */}
-      <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-6">
+      {/* Scrollable OpenGraph Preview Card + README Content */}
+      <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-6 select-text">
+        {repo.openGraphImageURL && !ogFailed && (
+          <div className="mb-5 rounded-[var(--radius-settings-outer)] overflow-hidden border border-[var(--border-hairline)] bg-[var(--bg-subtle)]">
+            <img
+              src={repo.openGraphImageURL}
+              alt={`${repo.fullName} preview`}
+              loading="lazy"
+              onError={() => setOgFailed(true)}
+              className="w-full max-h-[240px] object-cover block"
+            />
+          </div>
+        )}
+
         {!repo.readmeMarkdown ? (
-          <div className="py-12 text-center text-[13px] text-[#8B949E]">
-            暂未获取到 README 文档，可点击右上角刷新重试。
+          <div className="py-12 text-center text-[13px] text-[var(--text-secondary)]">
+            暂无 README，可点击刷新重试
           </div>
         ) : mode === 'rendered' ? (
-          <article
-            className="text-[13.5px] leading-relaxed text-[#E6EDF3] [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:pb-2 [&_h1]:border-b [&_h1]:border-white/10 [&_h1]:mb-3 [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_p]:mb-3 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-white/10 [&_pre]:p-3.5 [&_pre]:rounded-[10px] [&_pre]:bg-[#1B2028] [&_pre]:overflow-x-auto [&_a]:text-[#60A5FA] [&_img]:max-w-full [&_img]:rounded-[8px] [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5"
-            dangerouslySetInnerHTML={{ __html: readmeHtml }}
+          <MarkdownContentView
+            markdown={repo.readmeMarkdown}
+            urlContext={urlContext}
+            emptyText="暂无 README，可点击刷新重试"
           />
         ) : (
-          <pre className="text-[12px] font-mono leading-relaxed whitespace-pre-wrap break-words text-[#C9D1D9]">
+          <pre className="text-[12px] font-mono leading-relaxed whitespace-pre-wrap charkle-wrap-anywhere text-[var(--text-primary)]">
             {repo.readmeMarkdown}
           </pre>
         )}

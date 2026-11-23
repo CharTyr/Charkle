@@ -66,6 +66,22 @@ export function cropFromBoxEdges(
   };
 }
 
+export function cropMinX(rect: NormalizedCropRect): number {
+  return rect.x;
+}
+
+export function cropMinY(rect: NormalizedCropRect): number {
+  return rect.y;
+}
+
+export function cropMaxX(rect: NormalizedCropRect): number {
+  return Math.min(1.0, rect.x + rect.width);
+}
+
+export function cropMaxY(rect: NormalizedCropRect): number {
+  return Math.min(1.0, rect.y + rect.height);
+}
+
 export function cropArea(rect: NormalizedCropRect): number {
   return Math.max(0.0, rect.width) * Math.max(0.0, rect.height);
 }

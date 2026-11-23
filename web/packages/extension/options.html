@@ -54,7 +54,7 @@
                 id="opt-api-token"
                 type="password"
                 class="input-control"
-                placeholder="chk_..."
+                placeholder="粘贴访问令牌"
                 autocomplete="off"
                 spellcheck="false"
                 required
@@ -73,7 +73,7 @@
               </button>
             </div>
             <p class="field-hint">
-              可在 Charkle「设置 → 浏览器扩展与采集」生成 <code>chk_</code> 访问令牌。
+              在 Charkle「设置 → 插件与扩展」生成访问令牌
             </p>
           </div>
 
@@ -95,7 +95,6 @@
         <div class="card-head-row">
           <div class="card-head">
             <h2>默认收藏目标</h2>
-            <p>右键菜单、网页拖图与快捷键均使用此目标。</p>
           </div>
           <button id="btn-sync-targets" type="button" class="btn-secondary btn-sm pressable">
             刷新列表
@@ -132,12 +131,7 @@
         </div>
 
         <div class="switch-row">
-          <div class="switch-copy">
-            <span id="drag-switch-label" class="switch-title">网页拖图收藏</span>
-            <span class="switch-desc">
-              在外部网页拖拽图片时，于右下角显示快捷收藏入口。
-            </span>
-          </div>
+          <span id="drag-switch-label" class="switch-title">网页拖图收藏</span>
           <button
             id="switch-drag-drop"
             type="button"
@@ -168,21 +162,6 @@
             自定义快捷键
           </button>
         </div>
-      </section>
-
-      <!-- Section 4: Context Menu Reference -->
-      <section class="settings-card">
-        <div class="card-head">
-          <h2>右键菜单</h2>
-        </div>
-
-        <ul class="menu-guide-list">
-          <li><strong>收藏图片到 Charkle</strong><span>保存原图并记录来源网页</span></li>
-          <li><strong>收藏链接/推文/GitHub 到 Charkle</strong><span>保存网页、X / Threads / Bluesky 贴文与 GitHub 仓库</span></li>
-          <li><strong>收藏选中文字到 Charkle</strong><span>保存选中的文字片段</span></li>
-          <li><strong>收藏当前网页到 Charkle</strong><span>将当前网页保存为书签</span></li>
-          <li><strong>截取当前页面到 Charkle</strong><span>截取当前可见区域并保存</span></li>
-        </ul>
       </section>
     </main>
   </div>

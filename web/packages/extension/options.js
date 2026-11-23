@@ -71,7 +71,7 @@ function renderTargetSection() {
   if (folderOptions.length === 0) {
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = '暂无文件夹（请先连接服务或点击刷新列表）';
+    opt.textContent = '暂无文件夹';
     folderSelect.appendChild(opt);
     folderSelect.disabled = true;
   } else {
@@ -92,7 +92,7 @@ function renderTargetSection() {
   if (boards.length === 0) {
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = '暂无情绪板（请先连接服务或点击刷新列表）';
+    opt.textContent = '暂无情绪板';
     boardSelect.appendChild(opt);
     boardSelect.disabled = true;
   } else {

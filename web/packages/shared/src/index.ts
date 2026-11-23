@@ -7,5 +7,6 @@ export * from './models/auth.js';
 export * from './rules/smart-folder.js';
 export * from './layout/editorial.js';
 export * from './search/text.js';
+export * from './markdown/parser.js';
 export * from './sync/swift-codec.js';
 export * from './api/contracts.js';

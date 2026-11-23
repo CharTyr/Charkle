@@ -22,7 +22,8 @@ import type { GoogleOAuthClient } from './google-oauth.js';
 
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
-const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink';
+const FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,shortcutDetails';
+const GOOGLE_DRIVE_SHORTCUT_MIME = 'application/vnd.google-apps.shortcut';
 const MULTIPART_MAX_BYTES = 5 * 1024 * 1024; // Stream via resumable upload above 5 MiB
 
 interface RawDriveFile {
@@ -35,6 +36,7 @@ interface RawDriveFile {
   parents?: string[];
   trashed?: boolean;
   webViewLink?: string;
+  shortcutDetails?: { targetId?: string; targetMimeType?: string };
 }
 
 function mapDriveFile(raw: RawDriveFile): RemoteDriveFile {
@@ -78,20 +80,63 @@ export class DirectAPITransport implements DriveTransport {
     };
   }
 
+  private async fetchWithRetry(url: string, init: RequestInit & { duplex?: 'half' }): Promise<Response> {
+    const canRetryBody =
+      init.body === undefined ||
+      typeof init.body === 'string' ||
+      init.body instanceof ArrayBuffer ||
+      init.body instanceof Uint8Array;
+    const maxAttempts = canRetryBody ? 3 : 1;
+    let lastRes: Response | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const res = await fetch(url, init);
+      lastRes = res;
+      if (res.status !== 429 && (res.status < 500 || res.status > 504)) {
+        return res;
+      }
+      if (attempt + 1 < maxAttempts) {
+        const retryAfter = Number.parseFloat(res.headers.get('retry-after') ?? '');
+        const delayMs =
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(5000, retryAfter * 1000)
+            : Math.min(4000, 300 * Math.pow(2, attempt));
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+    return lastRes!;
+  }
+
   async accountInfo(): Promise<DriveAccountInfo> {
     return this.oauth.fetchAccountInfo();
   }
 
   async resolveFolder(id: string): Promise<RemoteDriveFile> {
     const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(id)}?supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`;
-    const res = await fetch(url, { headers: await this.authHeaders() });
+    const res = await this.fetchWithRetry(url, { headers: await this.authHeaders() });
     if (!res.ok) {
       throw new DriveTransportError(
         `无法访问 Google Drive 目录 ${id}（HTTP ${res.status}）。`,
         'NOT_FOUND',
       );
     }
-    const raw = (await res.json()) as RawDriveFile;
+    let raw = (await res.json()) as RawDriveFile;
+    if (raw.trashed) {
+      throw new DriveTransportError(`Google Drive 目录 ${id} 已在回收站中。`, 'NOT_FOUND');
+    }
+    if (raw.mimeType === GOOGLE_DRIVE_SHORTCUT_MIME && raw.shortcutDetails?.targetId) {
+      const targetUrl = `${DRIVE_API_BASE}/files/${encodeURIComponent(raw.shortcutDetails.targetId)}?supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`;
+      const targetRes = await this.fetchWithRetry(targetUrl, { headers: await this.authHeaders() });
+      if (!targetRes.ok) {
+        throw new DriveTransportError(
+          `无法解析 Google Drive 目录快捷方式 ${id}（HTTP ${targetRes.status}）。`,
+          'NOT_FOUND',
+        );
+      }
+      raw = (await targetRes.json()) as RawDriveFile;
+      if (raw.trashed) {
+        throw new DriveTransportError(`快捷方式指向的目录 ${raw.id} 已在回收站中。`, 'NOT_FOUND');
+      }
+    }
     if (raw.mimeType !== GOOGLE_DRIVE_FOLDER_MIME_TYPE) {
       throw new DriveTransportError(`指定的 Drive ID (${id}) 不是文件夹。`, 'INVALID_FOLDER');
     }
@@ -100,24 +145,31 @@ export class DirectAPITransport implements DriveTransport {
 
   async listSharedFolders(): Promise<RemoteDriveFile[]> {
     const q = `mimeType='${GOOGLE_DRIVE_FOLDER_MIME_TYPE}' and sharedWithMe=true and trashed=false`;
-    const params = new URLSearchParams({
-      q,
-      supportsAllDrives: 'true',
-      includeItemsFromAllDrives: 'true',
-      pageSize: '100',
-      fields: `files(${FILE_FIELDS})`,
-    });
-    const res = await fetch(`${DRIVE_API_BASE}/files?${params.toString()}`, {
-      headers: await this.authHeaders(),
-    });
-    if (!res.ok) {
-      throw new DriveTransportError(
-        `无法获取共享文件夹列表（HTTP ${res.status}）。`,
-        'API_ERROR',
-      );
-    }
-    const json = (await res.json()) as { files?: RawDriveFile[] };
-    return (json.files ?? []).map(mapDriveFile);
+    const out: RemoteDriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({
+        q,
+        supportsAllDrives: 'true',
+        includeItemsFromAllDrives: 'true',
+        pageSize: '100',
+        fields: `nextPageToken,files(${FILE_FIELDS})`,
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const res = await this.fetchWithRetry(`${DRIVE_API_BASE}/files?${params.toString()}`, {
+        headers: await this.authHeaders(),
+      });
+      if (!res.ok) {
+        throw new DriveTransportError(
+          `无法获取共享文件夹列表（HTTP ${res.status}）。`,
+          'API_ERROR',
+        );
+      }
+      const json = (await res.json()) as { nextPageToken?: string; files?: RawDriveFile[] };
+      for (const f of json.files ?? []) out.push(mapDriveFile(f));
+      pageToken = json.nextPageToken;
+    } while (pageToken);
+    return out;
   }
 
   async findOrCreateFolder(name: string, parentID: string): Promise<RemoteDriveFile> {
@@ -127,10 +179,11 @@ export class DirectAPITransport implements DriveTransport {
       q,
       supportsAllDrives: 'true',
       includeItemsFromAllDrives: 'true',
+      orderBy: 'createdTime',
       pageSize: '10',
       fields: `files(${FILE_FIELDS})`,
     });
-    const findRes = await fetch(`${DRIVE_API_BASE}/files?${params.toString()}`, {
+    const findRes = await this.fetchWithRetry(`${DRIVE_API_BASE}/files?${params.toString()}`, {
       headers: await this.authHeaders(),
     });
     if (findRes.ok) {
@@ -140,7 +193,7 @@ export class DirectAPITransport implements DriveTransport {
       }
     }
 
-    const createRes = await fetch(
+    const createRes = await this.fetchWithRetry(
       `${DRIVE_API_BASE}/files?supportsAllDrives=true&fields=${encodeURIComponent(FILE_FIELDS)}`,
       {
         method: 'POST',
@@ -336,14 +389,51 @@ export class DirectAPITransport implements DriveTransport {
       supportsAllDrives: 'true',
       fields: FILE_FIELDS,
     });
-    if (opts.newParentID) params.set('addParents', opts.newParentID);
-    if (opts.previousParentID) params.set('removeParents', opts.previousParentID);
+
+    // Resolve current parents when moving so Google Drive API v3 always receives paired
+    // `addParents` + `removeParents` (and skips parent mutation on same-folder rename, `P0-14`).
+    if (opts.newParentID) {
+      let removeList: string[] = [];
+      if (opts.previousParentID) {
+        if (opts.previousParentID !== opts.newParentID) {
+          removeList = [opts.previousParentID];
+        }
+      } else {
+        const metaRes = await this.fetchWithRetry(
+          `${DRIVE_API_BASE}/files/${encodeURIComponent(opts.fileID)}?supportsAllDrives=true&fields=parents`,
+          { headers: await this.authHeaders() },
+        );
+        if (metaRes.ok) {
+          const metaJson = (await metaRes.json()) as { parents?: string[] };
+          const currentParents = Array.isArray(metaJson.parents) ? metaJson.parents : [];
+          if (!currentParents.includes(opts.newParentID)) {
+            removeList = currentParents;
+          } else {
+            // Already in target parent — same-folder rename only!
+            removeList = [];
+          }
+          if (!currentParents.includes(opts.newParentID)) {
+            params.set('addParents', opts.newParentID);
+            if (removeList.length > 0) {
+              params.set('removeParents', removeList.join(','));
+            }
+          }
+        } else {
+          params.set('addParents', opts.newParentID);
+        }
+      }
+      if (opts.previousParentID && opts.previousParentID !== opts.newParentID) {
+        params.set('addParents', opts.newParentID);
+        params.set('removeParents', opts.previousParentID);
+      }
+    }
+
     const payload: Record<string, unknown> = {};
     if (opts.newName) {
       validateDriveName(opts.newName);
       payload.name = opts.newName;
     }
-    const res = await fetch(
+    const res = await this.fetchWithRetry(
       `${DRIVE_API_BASE}/files/${encodeURIComponent(opts.fileID)}?${params.toString()}`,
       {
         method: 'PATCH',
@@ -362,7 +452,7 @@ export class DirectAPITransport implements DriveTransport {
 
   async deleteFile(fileID: string): Promise<void> {
     const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(fileID)}?supportsAllDrives=true`;
-    const res = await fetch(url, {
+    const res = await this.fetchWithRetry(url, {
       method: 'PATCH',
       headers: await this.authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ trashed: true }),
@@ -376,9 +466,10 @@ export class DirectAPITransport implements DriveTransport {
   }
 
   async getStartPageToken(): Promise<string> {
-    const res = await fetch(`${DRIVE_API_BASE}/changes/startPageToken?supportsAllDrives=true`, {
-      headers: await this.authHeaders(),
-    });
+    const res = await this.fetchWithRetry(
+      `${DRIVE_API_BASE}/changes/startPageToken?supportsAllDrives=true`,
+      { headers: await this.authHeaders() },
+    );
     if (!res.ok) {
       throw new DriveTransportError(
         `获取 Drive Changes token 失败（HTTP ${res.status}）。`,
@@ -394,10 +485,12 @@ export class DirectAPITransport implements DriveTransport {
       pageToken,
       supportsAllDrives: 'true',
       includeItemsFromAllDrives: 'true',
+      includeRemoved: 'true',
+      spaces: 'drive',
       pageSize: '500',
       fields: `nextPageToken,newStartPageToken,changes(fileId,removed,file(${FILE_FIELDS}))`,
     });
-    const res = await fetch(`${DRIVE_API_BASE}/changes?${params.toString()}`, {
+    const res = await this.fetchWithRetry(`${DRIVE_API_BASE}/changes?${params.toString()}`, {
       headers: await this.authHeaders(),
     });
     if (!res.ok) {

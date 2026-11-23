@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
-import { ChevronRight, Loader2 } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { Check, ChevronDown, Loader2 } from 'lucide-react';
+import { DisclosureGroup, Popover, SegmentedControl } from '../../design-system';
 
 export const SETTINGS_LINKS = {
   googleOAuthGuide:
-    'https://github.com/mizorewww/gdirect/blob/main/docs/configuration/google-cloud.md',
+    'https://developers.google.com/workspace/guides/create-credentials',
   geminiKey: 'https://aistudio.google.com/apikey',
   typeSafeHome: 'https://typesafe.ai',
 } as const;
@@ -86,7 +87,7 @@ export const SettingsRow: React.FC<{
   </div>
 );
 
-// MARK: - Quiet Inline Guide Disclosure (`如何… >`)
+// MARK: - Full-Row Clickable Inline Guide Disclosure
 
 export const InlineGuideDisclosure: React.FC<{
   title: string;
@@ -96,39 +97,30 @@ export const InlineGuideDisclosure: React.FC<{
   const [expanded, setExpanded] = useState(defaultOpen);
 
   return (
-    <div className="flex flex-col">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
-        className={[
-          'group inline-flex items-center gap-1.5 self-start px-4 pt-0.5 text-[11.5px] font-medium cursor-pointer',
-          'transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
-          expanded
-            ? 'pb-2.5 text-[var(--text-primary)]/85'
-            : 'pb-3 text-[var(--settings-label,var(--text-secondary))] hover:text-[var(--text-primary)]/85',
-        ].join(' ')}
+    <div className="px-2 pb-2 pt-0.5">
+      <DisclosureGroup
+        open={expanded}
+        onOpenChange={setExpanded}
+        headerClassName="min-h-[28px] px-2.5 py-1.5"
+        label={
+          <span
+            className={[
+              'text-[11.5px] font-medium transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
+              expanded
+                ? 'text-[var(--text-primary)]/90'
+                : 'text-[var(--settings-label,var(--text-secondary))] group-hover:text-[var(--text-primary)]/90',
+            ].join(' ')}
+          >
+            {title}
+          </span>
+        }
       >
-        <span>{title}</span>
-        <ChevronRight
-          size={11}
-          strokeWidth={2.3}
-          className="transition-transform"
-          style={{
-            transitionDuration: 'var(--duration-settle, 220ms)',
-            transitionTimingFunction: 'var(--ease-out-strong, cubic-bezier(0.22, 1, 0.36, 1))',
-            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-          }}
-        />
-      </button>
-
-      {expanded && (
-        <div className="px-4 pb-3.5">
-          <div className="p-3 rounded-[9px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2.5">
+        <div className="px-2 pb-1.5">
+          <div className="p-3 rounded-[var(--radius-settings-inner)] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))] flex flex-col gap-2.5">
             {children}
           </div>
         </div>
-      )}
+      </DisclosureGroup>
     </div>
   );
 };
@@ -207,7 +199,7 @@ export const SettingsCodeSnippet: React.FC<{
 }> = ({ text, className = '' }) => (
   <pre
     className={[
-      'p-2.5 rounded-[7px] bg-black/[0.045] dark:bg-black/35 font-mono text-[10.5px] leading-relaxed text-[var(--text-secondary)] overflow-x-auto charkle-scroll select-all whitespace-pre-wrap break-all',
+      'p-2.5 rounded-[var(--radius-settings-inner)] bg-black/[0.045] dark:bg-black/35 font-mono text-[10.5px] leading-relaxed text-[var(--text-secondary)] overflow-x-auto charkle-scroll select-all whitespace-pre-wrap charkle-wrap-anywhere',
       className,
     ].join(' ')}
   >
@@ -307,68 +299,143 @@ export const SettingsInput: React.FC<React.InputHTMLAttributes<HTMLInputElement>
   />
 );
 
-export const SettingsSelect: React.FC<React.SelectHTMLAttributes<HTMLSelectElement>> = ({
+export interface SettingsMenuOption {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
+export const SettingsMenuPicker: React.FC<{
+  options: ReadonlyArray<SettingsMenuOption>;
+  value: string;
+  onChange: (next: string) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+  disabled?: boolean;
+  mono?: boolean;
+  className?: string;
+}> = ({
+  options,
+  value,
+  onChange,
+  placeholder = '请选择',
+  ariaLabel,
+  disabled = false,
+  mono = false,
   className = '',
-  ...rest
-}) => (
-  <select
-    {...rest}
-    className={[
-      'h-[32px] px-2.5 rounded-[8px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))]',
-      'text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] cursor-pointer disabled:opacity-45',
-      'transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
-      className,
-    ].join(' ')}
-  />
-);
+}) => {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const activeOption = options.find((opt) => opt.value === value);
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+        className={[
+          'charkle-pressable h-[32px] px-2.5 rounded-[8px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))]',
+          'inline-flex items-center justify-between gap-2 text-[12px] text-[var(--text-primary)] cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed',
+          'hover:border-[var(--border-strong)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
+          'transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
+          mono ? 'font-mono' : '',
+          className,
+        ].join(' ')}
+      >
+        <span className="truncate">{activeOption?.label || value || placeholder}</span>
+        <ChevronDown
+          size={13}
+          className={[
+            'text-[var(--text-tertiary)] shrink-0 transition-transform duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
+            open ? 'rotate-180' : '',
+          ].join(' ')}
+        />
+      </button>
+
+      <Popover
+        open={open}
+        onOpenChange={setOpen}
+        anchorEl={triggerRef.current}
+        placement="bottom-start"
+        className="min-w-[220px] max-w-[360px] p-1.5"
+      >
+        <div
+          role="listbox"
+          aria-label={ariaLabel}
+          className="max-h-[260px] overflow-y-auto charkle-scroll flex flex-col gap-0.5"
+        >
+          {options.map((opt) => {
+            const selected = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                onClick={() => {
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={[
+                  'charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] flex items-center justify-between gap-2 text-left text-[12px] cursor-pointer',
+                  selected
+                    ? 'bg-[var(--accent-soft)]/60 text-[var(--accent)] font-medium'
+                    : 'text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+                ].join(' ')}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className={['truncate', mono ? 'font-mono text-[11.5px]' : ''].join(' ')}>
+                    {opt.label}
+                  </div>
+                  {opt.hint && (
+                    <div className="text-[10.5px] font-mono text-[var(--text-tertiary)] truncate">
+                      {opt.hint}
+                    </div>
+                  )}
+                </div>
+                {selected && <Check size={13} className="shrink-0 text-[var(--accent)]" />}
+              </button>
+            );
+          })}
+        </div>
+      </Popover>
+    </>
+  );
+};
 
 export function SettingsSegmented<T extends string>({
   options,
   value,
   onChange,
+  fullWidth = false,
   disabled = false,
   ariaLabel,
   className = '',
 }: {
-  options: ReadonlyArray<{ id: T; label: string }>;
+  options: ReadonlyArray<{ id: T; label: string; icon?: React.ReactNode }>;
   value: T;
   onChange: (next: T) => void;
+  fullWidth?: boolean;
   disabled?: boolean;
   ariaLabel?: string;
   className?: string;
 }) {
   return (
-    <div
-      role="radiogroup"
-      aria-label={ariaLabel}
-      className={[
-        'inline-flex p-0.5 rounded-[8px] bg-[var(--settings-subtle,var(--bg-subtle))] border border-[var(--settings-border,var(--border-hairline))]',
-        className,
-      ].join(' ')}
-    >
-      {options.map((opt) => {
-        const active = opt.id === value;
-        return (
-          <button
-            key={opt.id}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            disabled={disabled}
-            onClick={() => onChange(opt.id)}
-            className={[
-              'px-2.5 py-1 rounded-[6px] text-[11.5px] font-medium whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed',
-              'transition-[background-color,color,box-shadow] duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
-              active
-                ? 'bg-[var(--settings-card,var(--bg-elevated))] text-[var(--text-primary)] shadow-xs'
-                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-            ].join(' ')}
-          >
-            {opt.label}
-          </button>
-        );
-      })}
-    </div>
+    <SegmentedControl
+      options={options}
+      value={value}
+      onChange={onChange}
+      size="sm"
+      fullWidth={fullWidth}
+      disabled={disabled}
+      ariaLabel={ariaLabel}
+      className={className}
+    />
   );
 }
 

@@ -894,7 +894,7 @@ export async function exportMoodboardImageInBrowser(
     canvas.height = pixelH;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      throw new Error('浏览器画布上下文不可用');
+      throw new Error('导出失败，请刷新后重试');
     }
 
     ctx.scale(effectiveScale, effectiveScale);
@@ -1239,7 +1239,7 @@ async function writeBrowserLosslessTiles(
       tileCanvas.height = h;
       const tCtx = tileCanvas.getContext('2d');
       if (!tCtx) {
-        throw new Error('浏览器画布上下文不可用，无法切分无损图层');
+        throw new Error('导出图层失败，请刷新后重试');
       }
       tCtx.clearRect(0, 0, w, h);
       tCtx.drawImage(source, cropX + x, cropY + y, w, h, 0, 0, w, h);
@@ -1351,7 +1351,7 @@ export async function exportFigmaBridgeInBrowser(
 
         const picked = originalFetch ?? fallbackFetch;
         if (!picked || picked.bytes.byteLength === 0) {
-          itemWarnings.push('素材原图与预览图均未缓存在本地，无法导入像素');
+          itemWarnings.push('素材文件缺失，无法导出画面');
           warnings.push({ id: node.id, name: displayName, issues: itemWarnings });
           objects.push({
             id: node.id,
@@ -1424,14 +1424,14 @@ export async function exportFigmaBridgeInBrowser(
           decoded = await decodeImageBytes(thumbFetch.bytes, thumbFetch.contentType);
           const label = asset ? mediaKindLocalizedLabel(asset.mediaKind) : '附件';
           itemWarnings.push(
-            `非静态图片素材（${label}）已以静态预览导出，原始文件已归档在 originals/`,
+            `${label}素材已导出预览图，原文件已保留在导出包中`,
           );
           isAnimatedGIF = false;
         }
       }
 
       if (!decoded) {
-        itemWarnings.push('无法解码该素材的画面像素，原始文件已归档在 originals/');
+        itemWarnings.push('无法生成该素材预览，原文件已保留在导出包中');
         warnings.push({ id: node.id, name: displayName, issues: itemWarnings });
         objects.push({
           id: node.id,

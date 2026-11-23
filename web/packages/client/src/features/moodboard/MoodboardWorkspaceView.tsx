@@ -8,6 +8,7 @@ import {
   Maximize2,
   PanelRight,
   Redo2,
+  Sparkles,
   Star,
   Undo2,
 } from 'lucide-react';
@@ -15,7 +16,9 @@ import {
   EDITORIAL_STYLES,
   cropCenterPoint,
   editorialStyleLocalizedLabel,
+  freezeIntoFreeform,
   getBoardReferencedAssetIDs,
+  isAutoEditorialMode,
   mapImagePointToVisibleCrop,
 } from '@charkle/shared';
 import type {
@@ -23,27 +26,24 @@ import type {
   BoardNode,
   BoardPoint,
   EditorialStyle,
+  MoodboardProposal,
   UUID,
 } from '@charkle/shared';
 import { apiClient, thumbnailURL } from '../../api/client';
+import { BoardCanvasSkeleton, EmptyStateVignette } from '../../design-system';
 import { Button } from '../../design-system/Button';
-import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { ModalShell } from '../../design-system/ModalShell';
 import { Popover } from '../../design-system/Popover';
+import { revealAssetInLibrary } from '../../lib/revealAssetInLibrary';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { useMoodboardStore } from '../../stores/moodboardStore';
 import { CandidatePoolPanel } from './CandidatePoolPanel';
+import type { MoodboardDrawerTab } from './CandidatePoolPanel';
 import { ExportBoardModal } from './ExportBoardModal';
 import { MoodboardCanvasView } from './MoodboardCanvasView';
 import { computeFitCamera, tidyNodesWithStyle } from './geometry';
 import type { CameraState } from './geometry';
-
-const TIDY_STYLE_HINTS: Record<EditorialStyle, string> = {
-  balanced: '多列均衡留白，适合日常视觉整理',
-  magazine: '2× 主图跨列强调，突出画板视觉重心',
-  compact: '高密度紧凑网格，一屏容纳更多参考图',
-};
 
 const BOARD_FIT_MARGIN = 64;
 const BOARD_TOP_CLEARANCE = 76;
@@ -123,6 +123,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
     boardID ?? (destination.type === 'moodboard' ? destination.id : activeDocument?.id ?? null);
 
   const [candidateDrawerOpen, setCandidateDrawerOpen] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<MoodboardDrawerTab>('candidates');
+  const [extractingPalette, setExtractingPalette] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [viewportSize, setViewportSize] = useState({ width: 1120, height: 720 });
   const [viewportMeasured, setViewportMeasured] = useState(false);
@@ -296,12 +298,124 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
     };
   }, [activeDocument, assetsByID, upsertAssets]);
 
-  // Auto-open Candidate Pool drawer when user clicks "换一张" on a card
+  // Auto-open Candidate Pool drawer on the Candidates tab when user clicks "换一张" on a card
   useEffect(() => {
     if (swappingNodeID) {
+      setDrawerTab('candidates');
       setCandidateDrawerOpen(true);
     }
   }, [swappingNodeID]);
+
+  const handleToggleDrawerTab = useCallback(
+    (tab: MoodboardDrawerTab) => {
+      if (candidateDrawerOpen && drawerTab === tab) {
+        setCandidateDrawerOpen(false);
+      } else {
+        setDrawerTab(tab);
+        setCandidateDrawerOpen(true);
+      }
+    },
+    [candidateDrawerOpen, drawerTab],
+  );
+
+  const handleReextractPalette = useCallback(async () => {
+    if (!activeDocument) return;
+    const assetIDs = getBoardReferencedAssetIDs(activeDocument);
+    if (assetIDs.length === 0) {
+      pushToast({ tone: 'info', message: '画布中暂无图片素材' });
+      return;
+    }
+    setExtractingPalette(true);
+    try {
+      const res = await apiClient.extractBoardPalette({ assetIDs, count: 7 });
+      mutateDocument(
+        (current) => ({
+          ...current,
+          extractedPalette: res.colors,
+          nodes: current.nodes.map((node) =>
+            node.kind.type === 'paletteStrip' &&
+            (node.kind.autoSyncWithBoard || node.kind.colors.length === 0)
+              ? { ...node, kind: { ...node.kind, colors: res.colors } }
+              : node,
+          ),
+        }),
+        { recordHistory: false, immediateSave: true },
+      );
+      pushToast({ tone: 'success', message: '已重新提取板内配色' });
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        message: err instanceof Error ? err.message : '重新提取配色失败',
+      });
+    } finally {
+      setExtractingPalette(false);
+    }
+  }, [activeDocument, mutateDocument, pushToast]);
+
+  const handleApplyCuratedProposal = useCallback(
+    (proposal: MoodboardProposal) => {
+      if (!activeDocument) return;
+      const draft = proposal.draftDocument;
+      const normalized = isAutoEditorialMode(draft.mode)
+        ? freezeIntoFreeform(draft, Math.max(720, viewportSize.width), assetsByID)
+        : draft;
+
+      const fitCam = computeFitCamera(
+        normalized.nodes,
+        viewportSize.width,
+        viewportSize.height,
+        BOARD_FIT_MARGIN,
+        BOARD_TOP_CLEARANCE,
+        BOARD_BOTTOM_CLEARANCE,
+      );
+      setCamera(fitCam);
+
+      mutateDocument(
+        (current) => ({
+          ...current,
+          title: current.title || normalized.title,
+          subtitle: current.subtitle || normalized.subtitle,
+          mode: { type: 'freeform' },
+          nodes: normalized.nodes,
+          connectors: normalized.connectors,
+          extractedPalette:
+            proposal.extractedPalette.length > 0
+              ? proposal.extractedPalette
+              : normalized.extractedPalette.length > 0
+                ? normalized.extractedPalette
+                : current.extractedPalette,
+          candidateAssetIDs:
+            proposal.candidatePool.length > 0
+              ? proposal.candidatePool.map((item) => item.asset.id)
+              : normalized.candidateAssetIDs,
+          viewportCenter: { x: fitCam.centerX, y: fitCam.centerY },
+          viewportZoom: fitCam.zoom,
+        }),
+        { recordHistory: true, immediateSave: true },
+      );
+
+      if (proposal.candidatePool.length > 0) {
+        useMoodboardStore.setState({ candidatePool: proposal.candidatePool });
+      }
+
+      pushToast({
+        tone: 'success',
+        message: '已应用 AI 策展微调',
+        actionLabel: '撤销',
+        durationMs: 5200,
+        onAction: () => undo(),
+      });
+    },
+    [
+      activeDocument,
+      assetsByID,
+      viewportSize.width,
+      viewportSize.height,
+      mutateDocument,
+      pushToast,
+      undo,
+    ],
+  );
 
   const handleCameraChange = useCallback(
     (next: CameraState, persist = false) => {
@@ -390,7 +504,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
               : n,
           ),
         }));
-        pushToast({ tone: 'success', message: result.summary || '已应用非破坏性智能聚焦裁切' });
+        pushToast({ tone: 'success', message: result.summary || '已应用智能裁切' });
       } catch (err) {
         pushToast({
           tone: 'error',
@@ -554,8 +668,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
 
   if (loadingBoard && !activeDocument) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-[var(--bg-gallery)] text-[var(--text-secondary)] text-[13px]">
-        正在加载情绪板画布…
+      <div className="h-full w-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden">
+        <BoardCanvasSkeleton active delayMs={300} minVisibleMs={500} />
       </div>
     );
   }
@@ -563,8 +677,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
   if (!activeDocument) {
     return (
       <div className="h-full w-full flex flex-col items-center justify-center bg-[var(--bg-gallery)] gap-3 text-[var(--text-secondary)]">
-        <CharkleIcon name="moodboard" style="layered" size={48} />
-        <p className="text-[13.5px]">未选择情绪板</p>
+        <EmptyStateVignette kind="emptyMoodboard" />
+        <p className="text-[13.5px] font-medium text-[var(--text-primary)]">未选择情绪板</p>
         <Button variant="secondary" size="sm" onClick={() => navigate({ type: 'moodboardsHome' })}>
           返回情绪板列表
         </Button>
@@ -576,8 +690,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
 
   return (
     <div className="h-full w-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden">
-      {/* Top Clean Workspace Header */}
-      <header className="h-13 px-4 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)]/92 backdrop-blur-md flex items-center justify-between gap-3 shrink-0 z-20">
+      {/* Top Clean Workspace Header (solid elevated surface — zero glass blur on permanent chrome) */}
+      <header className="h-13 px-4 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)] flex items-center justify-between gap-3 shrink-0 z-20">
         {/* Left: Back + Editable Title & Subtitle */}
         <div className="flex items-center gap-2.5 min-w-0 flex-1">
           <button
@@ -616,7 +730,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
               type="text"
               aria-label="情绪板副标题"
               value={activeDocument.subtitle}
-              placeholder="添加副标题或项目方向…"
+              placeholder="添加副标题…"
               onChange={(e) =>
                 mutateDocument((doc) => ({ ...doc, subtitle: e.target.value }), {
                   recordHistory: false,
@@ -702,9 +816,6 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
                   <div className="text-[12px] font-medium text-[var(--text-primary)]">
                     {editorialStyleLocalizedLabel(style)}
                   </div>
-                  <div className="text-[10.5px] text-[var(--text-tertiary)] mt-0.5">
-                    {TIDY_STYLE_HINTS[style]}
-                  </div>
                 </button>
               ))}
             </div>
@@ -745,7 +856,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
                   : `已将「${activeDocument.title}」设为快速采集目标情绪板`,
               });
             }}
-            title="设为默认采集目标情绪板（供全局粘贴与浏览器扩展使用）"
+            title="设为默认采集目标"
           >
             <Star size={13} fill={isActiveTarget ? 'currentColor' : 'none'} />
             <span className="hidden sm:inline">{isActiveTarget ? '活跃情绪板' : '设为活跃'}</span>
@@ -766,7 +877,7 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
                 message: nextPinned ? '已为当前情绪板开启离线保留' : '已取消离线保留',
               });
             }}
-            title="离线保留本板原图，避免自动清理缓存"
+            title="离线保留"
           >
             <CloudDownload size={13} />
             <span className="hidden md:inline">离线</span>
@@ -775,8 +886,18 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
           <Button
             variant="secondary"
             size="xs"
-            active={candidateDrawerOpen}
-            onClick={() => setCandidateDrawerOpen((v) => !v)}
+            active={candidateDrawerOpen && drawerTab === 'curator'}
+            onClick={() => handleToggleDrawerTab('curator')}
+          >
+            <Sparkles size={13} />
+            AI 策展
+          </Button>
+
+          <Button
+            variant="secondary"
+            size="xs"
+            active={candidateDrawerOpen && drawerTab === 'candidates'}
+            onClick={() => handleToggleDrawerTab('candidates')}
           >
             <PanelRight size={13} />
             候选池
@@ -816,6 +937,12 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
             setCandidateDrawerOpen(true);
           }}
           onOpenQuickLook={(asset) => openQuickLook(asset.id)}
+          onRevealInLibrary={(assetID) =>
+            void revealAssetInLibrary(assetID, {
+              returnBoardId: activeDocument.id,
+              returnBoardTitle: activeDocument.title,
+            })
+          }
           onCopyHex={handleCopyHex}
           onSearchColor={handleSearchColor}
           onOpenExport={() => setExportModalOpen(true)}
@@ -837,6 +964,8 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
 
         <CandidatePoolPanel
           open={candidateDrawerOpen}
+          activeTab={drawerTab}
+          onChangeTab={setDrawerTab}
           document={activeDocument}
           assetsByID={assetsByID}
           allLibraryAssets={allLibraryAssets}
@@ -844,11 +973,18 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
           swappingNodeID={swappingNodeID}
           candidatePool={candidatePool}
           loadingCandidates={loadingCandidates}
+          canUndo={past.length > 0}
+          extractingPalette={extractingPalette}
           onClose={() => setCandidateDrawerOpen(false)}
           onCancelSwap={() => setSwappingNodeID(null)}
           onRefreshCandidates={(seedID) => void loadReplacementCandidates(seedID, 32)}
           onSwapWithAsset={(nodeID, newAssetID) => void swapNodeAsset(nodeID, newAssetID)}
           onAppendAsset={(assetID) => void addAssetsToBoard(activeDocument.id, [assetID], null)}
+          onReextractPalette={() => void handleReextractPalette()}
+          onCopyHex={handleCopyHex}
+          onSearchColor={handleSearchColor}
+          onApplyCuratedProposal={handleApplyCuratedProposal}
+          onUndo={undo}
         />
       </div>
 
@@ -866,7 +1002,6 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         onClose={handleCloseSemanticCrop}
         width="sm"
         title="语义裁切"
-        subtitle="输入想聚焦的画面局部"
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={handleCloseSemanticCrop}>
@@ -913,7 +1048,6 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         onClose={handleCloseVisualMatch}
         width="md"
         title="按参考图匹配区域"
-        subtitle="选择一张参考图进行局部匹配裁切"
       >
         <div className="grid grid-cols-4 gap-2 max-h-[340px] overflow-y-auto charkle-scroll">
           {allLibraryAssets
@@ -945,7 +1079,6 @@ export const MoodboardWorkspaceView: React.FC<MoodboardWorkspaceViewProps> = ({ 
         onClose={handleClosePinpoint}
         width="sm"
         title="指物批注"
-        subtitle="定位画面局部并添加连线便签"
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={handleClosePinpoint}>

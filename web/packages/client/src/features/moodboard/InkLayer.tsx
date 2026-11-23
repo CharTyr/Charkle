@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import type { InkStroke, InkStrokePoint, UUID } from '@charkle/shared';
+import { SegmentedControl } from '../../design-system';
 import { GlassSurface } from '../../design-system/GlassSurface';
 import { buildInkStrokePath } from './geometry';
 import { CALM_INK_SWATCHES, INK_STROKE_WIDTHS } from './palettes';
@@ -11,6 +12,7 @@ export interface InkLayerProps {
   activeLineWidth: number;
   activeOpacity: number;
   eraserActive: boolean;
+  erasedStrokeIDs?: ReadonlySet<UUID>;
   onEraseStroke?: (id: UUID) => void;
 }
 
@@ -20,8 +22,7 @@ export const InkLayer: React.FC<InkLayerProps> = ({
   activeColorHex,
   activeLineWidth,
   activeOpacity,
-  eraserActive,
-  onEraseStroke,
+  erasedStrokeIDs,
 }) => {
   return (
     <svg
@@ -32,33 +33,21 @@ export const InkLayer: React.FC<InkLayerProps> = ({
       {strokes.map((stroke) => {
         const d = buildInkStrokePath(stroke.points);
         if (!d) return null;
+        const isErased = erasedStrokeIDs?.has(stroke.id) ?? false;
         return (
-          <g key={stroke.id}>
-            {eraserActive && onEraseStroke && (
-              <path
-                d={d}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={Math.max(18, stroke.lineWidth * 4)}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="pointer-events-auto cursor-crosshair"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEraseStroke(stroke.id);
-                }}
-              />
-            )}
-            <path
-              d={d}
-              fill="none"
-              stroke={stroke.colorHex}
-              strokeWidth={stroke.lineWidth}
-              strokeOpacity={stroke.opacity}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </g>
+          <path
+            key={stroke.id}
+            d={d}
+            fill="none"
+            stroke={stroke.colorHex}
+            strokeWidth={stroke.lineWidth}
+            strokeOpacity={isErased ? 0 : stroke.opacity}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              transition: 'stroke-opacity var(--duration-popover-out, 110ms) var(--ease-out)',
+            }}
+          />
         );
       })}
 
@@ -96,6 +85,26 @@ export const InkPenControlsPill: React.FC<InkPenControlsPillProps> = ({
   onChangeWidth,
   onChangeOpacity,
 }) => {
+  const widthOptions = useMemo(
+    () =>
+      INK_STROKE_WIDTHS.map((w) => ({
+        id: String(w.value),
+        label: w.label,
+        icon: (
+          <span
+            className="rounded-full bg-current"
+            style={{ width: Math.max(4, w.value * 1.3), height: Math.max(4, w.value * 1.3) }}
+          />
+        ),
+      })),
+    [],
+  );
+
+  const selectedWidthID = useMemo(() => {
+    const matched = INK_STROKE_WIDTHS.find((w) => Math.abs(lineWidth - w.value) < 0.2);
+    return String(matched?.value ?? INK_STROKE_WIDTHS[1].value);
+  }, [lineWidth]);
+
   return (
     <GlassSurface
       variant="regular"
@@ -128,30 +137,13 @@ export const InkPenControlsPill: React.FC<InkPenControlsPillProps> = ({
       <span className="w-px h-4 bg-[var(--border-hairline)]" />
 
       {/* 3 Stroke Widths */}
-      <div className="flex items-center gap-1">
-        {INK_STROKE_WIDTHS.map((w) => {
-          const active = Math.abs(lineWidth - w.value) < 0.2;
-          return (
-            <button
-              key={w.label}
-              type="button"
-              onClick={() => onChangeWidth(w.value)}
-              className={[
-                'charkle-pressable inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium cursor-pointer',
-                active
-                  ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-              ].join(' ')}
-            >
-              <span
-                className="rounded-full bg-current"
-                style={{ width: Math.max(4, w.value * 1.4), height: Math.max(4, w.value * 1.4) }}
-              />
-              {w.label}
-            </button>
-          );
-        })}
-      </div>
+      <SegmentedControl
+        ariaLabel="画笔粗细"
+        size="sm"
+        options={widthOptions}
+        value={selectedWidthID}
+        onChange={(next) => onChangeWidth(Number(next))}
+      />
 
       <span className="w-px h-4 bg-[var(--border-hairline)]" />
 

@@ -61,7 +61,7 @@ export interface IBlobStore {
   put(
     key: string,
     data: Uint8Array | ReadableStream<Uint8Array>,
-    options?: { contentType?: string },
+    options?: { contentType?: string; size?: number },
   ): Promise<{ size: number }>;
   getBytes(key: string): Promise<Uint8Array | null>;
   getStream(key: string, range?: BlobRangeRequest): Promise<BlobStreamResult | null>;
@@ -82,7 +82,12 @@ export type ArtworkRenderRequest =
   | { kind: 'audioWaveform'; title: string; peaks: readonly number[]; durationSeconds: number | null }
   | { kind: 'model3D'; title: string; format: string }
   | { kind: 'githubRepo'; repo: GitHubRepoMetadata }
-  | { kind: 'socialPost'; post: SocialPostMetadata; coverImageBytes?: Uint8Array | null }
+  | {
+      kind: 'socialPost';
+      post: SocialPostMetadata;
+      coverImageBytes?: Uint8Array | null;
+      authorAvatarBytes?: Uint8Array | null;
+    }
   | { kind: 'webBookmark'; title: string; domain: string; description?: string | null }
   | { kind: 'genericBadge'; title: string; ext: string; kindLabel: string }
   | { kind: 'svg'; svg: string; width?: number; height?: number };

@@ -38,6 +38,7 @@ interface LibraryState {
   recentActivityAssets: AssetRecord[];
 
   folders: FolderRecord[];
+  pinnedFolderIDs: UUID[];
   smartFolders: SmartFolderRecord[];
   tags: TagCount[];
   counts: LibraryCounts;
@@ -52,6 +53,7 @@ interface LibraryState {
   selectedAssetIDs: Set<UUID>;
   lastSelectedAssetID: UUID | null;
   cutAssetIDs: Set<UUID>;
+  exitingAssetIDs: Set<UUID>;
 
   loading: boolean;
   bootstrapped: boolean;
@@ -98,6 +100,7 @@ interface LibraryState {
   restoreAllTrash: () => Promise<void>;
   markOpened: (id: UUID) => Promise<void>;
   refreshRichAsset: (id: UUID) => Promise<AssetRecord>;
+  hydrateAssetMetadata: (id: UUID) => Promise<AssetRecord | null>;
   extractSocialMedia: (id: UUID, attachmentIndex?: number | null) => Promise<AssetRecord[]>;
 
   createFolder: (name: string, parentID?: UUID | null) => Promise<FolderRecord>;
@@ -116,6 +119,7 @@ interface LibraryState {
 
   seedDemoLibrary: () => Promise<boolean>;
   upsertAssets: (incoming: AssetRecord[]) => void;
+  pruneDeletedAssets: (ids: UUID[]) => void;
   bumpCacheBust: () => void;
 }
 
@@ -171,6 +175,49 @@ function indexByID(prev: Record<UUID, AssetRecord>, list: AssetRecord[]): Record
   return next;
 }
 
+const PINNED_FOLDERS_STORAGE_KEY = 'charkle.web.pinnedFolderIDs';
+
+function loadPinnedFolderIDs(): UUID[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(PINNED_FOLDERS_STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.filter((x): x is UUID => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePinnedFolderIDs(ids: UUID[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(PINNED_FOLDERS_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // Ignore quota / privacy mode storage errors
+  }
+}
+
+function collectFolderSubtreeIDs(folders: readonly FolderRecord[], rootID: UUID): UUID[] {
+  const byParent = new Map<UUID, UUID[]>();
+  for (const f of folders) {
+    if (!f.parentID) continue;
+    const list = byParent.get(f.parentID) ?? [];
+    list.push(f.id);
+    byParent.set(f.parentID, list);
+  }
+  const visited = new Set<UUID>();
+  const stack: UUID[] = [rootID];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    for (const child of byParent.get(cur) ?? []) {
+      stack.push(child);
+    }
+  }
+  return Array.from(visited);
+}
+
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   assets: [],
   totalAssets: 0,
@@ -178,6 +225,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   recentActivityAssets: [],
 
   folders: [],
+  pinnedFolderIDs: loadPinnedFolderIDs(),
   smartFolders: [],
   tags: [],
   counts: { inbox: 0, total: 0, untagged: 0, trash: 0 },
@@ -192,6 +240,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   selectedAssetIDs: new Set<UUID>(),
   lastSelectedAssetID: null,
   cutAssetIDs: new Set<UUID>(),
+  exitingAssetIDs: new Set<UUID>(),
 
   loading: false,
   bootstrapped: false,
@@ -356,7 +405,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       set({ isSemanticSearching: false });
       useCoordinatorStore.getState().pushToast({
         tone: 'error',
-        message: err instanceof Error ? err.message : '混合语义检索失败',
+        message: err instanceof Error ? err.message : '语义搜索失败',
       });
     }
   },
@@ -455,16 +504,38 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   trashAssets: async (ids) => {
     if (ids.length === 0) return;
-    await get().batchPatch(createDefaultAssetBatchPatch(ids, { isTrashed: true }));
-    get().clearSelection();
-    useCoordinatorStore.getState().pushToast({
-      tone: 'info',
-      message: `已将 ${ids.length} 项素材移入回收站`,
-      actionLabel: '撤销',
-      onAction: () => {
-        void get().restoreAssets(ids);
-      },
+    // Play crisp 150ms soft-delete exit animation on visible gallery cards before removing
+    set((s) => {
+      const next = new Set(s.exitingAssetIDs);
+      for (const id of ids) next.add(id);
+      return { exitingAssetIDs: next };
     });
+    const reduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, reduced ? 40 : 150);
+    });
+    try {
+      await get().batchPatch(createDefaultAssetBatchPatch(ids, { isTrashed: true }));
+      get().clearSelection();
+      useCoordinatorStore.getState().pushToast({
+        tone: 'info',
+        message: `已将 ${ids.length} 项素材移入回收站`,
+        actionLabel: '撤销',
+        durationMs: 5200,
+        onAction: () => {
+          void get().restoreAssets(ids);
+        },
+      });
+    } finally {
+      set((s) => {
+        const next = new Set(s.exitingAssetIDs);
+        for (const id of ids) next.delete(id);
+        return { exitingAssetIDs: next };
+      });
+    }
   },
 
   restoreAssets: async (ids) => {
@@ -479,22 +550,46 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   permanentlyDeleteAssets: async (ids) => {
     if (ids.length === 0) return;
     await apiClient.permanentlyDeleteAssets(ids);
-    set((s) => {
-      const removed = new Set(ids);
-      const nextByID = { ...s.assetsByID };
-      for (const id of ids) delete nextByID[id];
-      return {
-        assets: s.assets.filter((a) => !removed.has(a.id)),
-        assetsByID: nextByID,
-        selectedAssetIDs: new Set<UUID>(),
-      };
-    });
+    get().pruneDeletedAssets(ids);
     await get().refreshSidebarMetadata();
   },
 
   emptyTrash: async () => {
     await apiClient.emptyTrash();
-    set({ assets: [], totalAssets: 0, selectedAssetIDs: new Set<UUID>() });
+    set((s) => {
+      const removedIDs = new Set<UUID>();
+      for (const asset of Object.values(s.assetsByID)) {
+        if (asset.isTrashed) removedIDs.add(asset.id);
+      }
+      for (const asset of s.assets) {
+        if (asset.isTrashed) removedIDs.add(asset.id);
+      }
+      const nextByID = { ...s.assetsByID };
+      for (const id of removedIDs) delete nextByID[id];
+      const nextAssets = s.assets.filter((a) => !a.isTrashed && !removedIDs.has(a.id));
+      const nextRecent = s.recentActivityAssets.filter(
+        (a) => !a.isTrashed && !removedIDs.has(a.id),
+      );
+      const nextCut = new Set(s.cutAssetIDs);
+      const nextExiting = new Set(s.exitingAssetIDs);
+      for (const id of removedIDs) {
+        nextCut.delete(id);
+        nextExiting.delete(id);
+      }
+      return {
+        assets: nextAssets,
+        totalAssets: Math.max(0, s.totalAssets - (s.assets.length - nextAssets.length)),
+        assetsByID: nextByID,
+        recentActivityAssets: nextRecent,
+        selectedAssetIDs: new Set<UUID>(),
+        lastSelectedAssetID:
+          s.lastSelectedAssetID && removedIDs.has(s.lastSelectedAssetID)
+            ? null
+            : s.lastSelectedAssetID,
+        cutAssetIDs: nextCut,
+        exitingAssetIDs: nextExiting,
+      };
+    });
     await get().refreshSidebarMetadata();
     useCoordinatorStore.getState().pushToast({ tone: 'success', message: '回收站已清空' });
   },
@@ -528,6 +623,19 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     get().upsertAssets([res.asset]);
     get().bumpCacheBust();
     return res.asset;
+  },
+
+  hydrateAssetMetadata: async (id) => {
+    try {
+      const res = await apiClient.hydrateAssetMetadata(id);
+      if (res.asset) {
+        get().upsertAssets([res.asset]);
+        return res.asset;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   },
 
   extractSocialMedia: async (id, attachmentIndex = null) => {
@@ -568,7 +676,11 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   },
 
   deleteFolder: async (id, trashContents = false) => {
+    const subtree = new Set(collectFolderSubtreeIDs(get().folders, id));
     await apiClient.deleteFolder(id, { trashContents });
+    const nextPinned = get().pinnedFolderIDs.filter((fid) => !subtree.has(fid));
+    savePinnedFolderIDs(nextPinned);
+    set({ pinnedFolderIDs: nextPinned });
     const coord = useCoordinatorStore.getState();
     if (coord.destination.type === 'folder' && coord.destination.id === id) {
       coord.navigate({ type: 'allItems' });
@@ -578,6 +690,30 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   pinFolderOffline: async (id, pinned) => {
     await apiClient.pinFolderOffline(id, pinned);
+    const subtree = collectFolderSubtreeIDs(get().folders, id);
+    const nextSet = new Set(get().pinnedFolderIDs);
+    for (const fid of subtree) {
+      if (pinned) nextSet.add(fid);
+      else nextSet.delete(fid);
+    }
+    const nextPinned = Array.from(nextSet);
+    savePinnedFolderIDs(nextPinned);
+    set((s) => {
+      const subtreeSet = new Set(subtree);
+      const nextByID = { ...s.assetsByID };
+      for (const [aid, asset] of Object.entries(nextByID)) {
+        if (asset.folderID && subtreeSet.has(asset.folderID)) {
+          nextByID[aid] = { ...asset, pinnedOffline: pinned };
+        }
+      }
+      return {
+        pinnedFolderIDs: nextPinned,
+        assetsByID: nextByID,
+        assets: s.assets.map((a) =>
+          a.folderID && subtreeSet.has(a.folderID) ? { ...a, pinnedOffline: pinned } : a,
+        ),
+      };
+    });
     await Promise.all([get().refreshSidebarMetadata(), get().loadAssets()]);
     useCoordinatorStore.getState().pushToast({
       tone: 'success',
@@ -644,6 +780,42 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
         recentActivityAssets: s.recentActivityAssets.map((a) => map.get(a.id) ?? a),
       };
     });
+  },
+
+  pruneDeletedAssets: (ids) => {
+    if (ids.length === 0) return;
+    const removed = new Set(ids);
+    set((s) => {
+      const nextByID = { ...s.assetsByID };
+      for (const id of ids) delete nextByID[id];
+      const nextAssets = s.assets.filter((a) => !removed.has(a.id));
+      const nextRecent = s.recentActivityAssets.filter((a) => !removed.has(a.id));
+      const nextSelected = new Set(s.selectedAssetIDs);
+      const nextCut = new Set(s.cutAssetIDs);
+      const nextExiting = new Set(s.exitingAssetIDs);
+      for (const id of ids) {
+        nextSelected.delete(id);
+        nextCut.delete(id);
+        nextExiting.delete(id);
+      }
+      return {
+        assets: nextAssets,
+        totalAssets: Math.max(0, s.totalAssets - (s.assets.length - nextAssets.length)),
+        assetsByID: nextByID,
+        recentActivityAssets: nextRecent,
+        selectedAssetIDs: nextSelected,
+        lastSelectedAssetID:
+          s.lastSelectedAssetID && removed.has(s.lastSelectedAssetID)
+            ? null
+            : s.lastSelectedAssetID,
+        cutAssetIDs: nextCut,
+        exitingAssetIDs: nextExiting,
+      };
+    });
+    const coord = useCoordinatorStore.getState();
+    if (coord.quickLookAssetID && removed.has(coord.quickLookAssetID)) {
+      coord.closeQuickLook();
+    }
   },
 
   bumpCacheBust: () => set((s) => ({ cacheBustVersion: s.cacheBustVersion + 1 })),

@@ -25,6 +25,7 @@ import type { IImageProcessor } from '../runtime/types.js';
 import { randomUUID } from '../runtime/web-crypto-utils.js';
 import type { CloudAIProvider, FetchLike } from './cloud-ai-provider.js';
 import type { CloudAIUsageTracker } from './cloud-ai-usage-tracker.js';
+import { MoodboardCurator } from './moodboard-curator.js';
 import {
   boxCoordinatesToNormalizedCrop,
   createTypeSafeImageAttachment,
@@ -1139,7 +1140,10 @@ export class VisualGroundingService {
       }
     }
 
-    return this.deps.db.suggestFolder(assetID);
+    return (
+      new MoodboardCurator(this.deps.db).suggestFolder(assetID) ??
+      this.deps.db.suggestFolder(assetID)
+    );
   }
 
   /**
