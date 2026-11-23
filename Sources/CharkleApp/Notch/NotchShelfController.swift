@@ -18,16 +18,22 @@ private final class NotchDropHostingView: NSHostingView<NotchShelfView> {
     var onDragEntered: ((Int) -> Void)?
     var onDragExited: (() -> Void)?
     var onPerformDrop: ((NSPasteboard, [NSFilePromiseReceiver]) -> Bool)?
-    var activeHitRectProvider: (() -> NSRect)?
+    /// Visible black notch capsule rect in **unflipped AppKit window coordinates** (`y = 0` at bottom of panel,
+    /// `y = window.frame.height` at top screen bezel). Avoids `NSHostingView.isFlipped` mismatch when the
+    /// backing panel is taller than the compact capsule.
+    var activeWindowRectProvider: (() -> NSRect)?
 
     private static let supportedTypes: [NSPasteboard.PasteboardType] = {
         var types: [NSPasteboard.PasteboardType] = [
             .fileURL,
             NSPasteboard.PasteboardType("NSFilenamesPboardType"),
             .URL,
+            NSPasteboard.PasteboardType("public.url"),
             .png,
             .tiff,
             NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+            NSPasteboard.PasteboardType(UTType.gif.identifier),
+            NSPasteboard.PasteboardType(UTType.webP.identifier),
             NSPasteboard.PasteboardType(UTType.image.identifier),
             .string
         ]
@@ -48,7 +54,11 @@ private final class NotchDropHostingView: NSHostingView<NotchShelfView> {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if let activeRect = activeHitRectProvider?(), !activeRect.contains(point) {
+        guard let activeWindowRect = activeWindowRectProvider?(), !activeWindowRect.isEmpty else {
+            return nil
+        }
+        let windowPoint = superview?.convert(point, to: nil) ?? convert(point, to: nil)
+        guard activeWindowRect.contains(windowPoint) else {
             return nil
         }
         return super.hitTest(point)
@@ -75,9 +85,9 @@ private final class NotchDropHostingView: NSHostingView<NotchShelfView> {
     private func acceptsDrag(_ sender: any NSDraggingInfo) -> Bool {
         inspectPasteboardIfNeeded(sender.draggingPasteboard)
         guard !cachedDragIsInternal else { return false }
-        guard let activeRect = activeHitRectProvider?(), !activeRect.isEmpty else { return false }
-        let localPoint = convert(sender.draggingLocation, from: nil)
-        return activeRect.contains(localPoint)
+        guard let activeWindowRect = activeWindowRectProvider?(), !activeWindowRect.isEmpty else { return false }
+        // `sender.draggingLocation` is already in unflipped AppKit window coordinates.
+        return activeWindowRect.contains(sender.draggingLocation)
     }
 
     override func wantsPeriodicDraggingUpdates() -> Bool {
@@ -146,6 +156,7 @@ private final class NotchSensorView: NSView {
     var onTriggerOpenForDrag: ((Int) -> Void)?
     var onDragExited: (() -> Void)?
     var onTriggerOpenForHover: (() -> Void)?
+    var onHoverExited: (() -> Void)?
     var onPerformDrop: ((NSPasteboard, [NSFilePromiseReceiver]) -> Bool)?
 
     private var trackingAreaRef: NSTrackingArea?
@@ -156,9 +167,12 @@ private final class NotchSensorView: NSView {
             .fileURL,
             NSPasteboard.PasteboardType("NSFilenamesPboardType"),
             .URL,
+            NSPasteboard.PasteboardType("public.url"),
             .png,
             .tiff,
             NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+            NSPasteboard.PasteboardType(UTType.gif.identifier),
+            NSPasteboard.PasteboardType(UTType.webP.identifier),
             NSPasteboard.PasteboardType(UTType.image.identifier),
             .string
         ]
@@ -188,6 +202,10 @@ private final class NotchSensorView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         onTriggerOpenForHover?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverExited?()
     }
 
     private var cachedSensorChangeCount: Int = -1
@@ -262,6 +280,7 @@ public final class NotchShelfController {
     private var sensorWindow: NotchPanel?
     private var pollTimer: Timer?
     private var hideWorkItem: DispatchWorkItem?
+    private var hoverExpandWorkItem: DispatchWorkItem?
     private var bannerResetTask: Task<Void, Never>?
     private let promiseQueue = OperationQueue()
 
@@ -269,6 +288,9 @@ public final class NotchShelfController {
     private var isPanelDragging = false
     private var lastObservedGeneralPasteboardChangeCount: Int = -1
     private var lastObservedDragPasteboardChangeCount: Int = -1
+    private var baselineDragChangeCount: Int = NSPasteboard(name: .drag).changeCount
+    private var lastBaselineSyncTime: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
+    private var wasMouseButtonDown: Bool = false
     private var cachedDragPBIsInternal: Bool = false
     private var cachedDragPBHasDroppable: Bool = false
     private var lastAnchoredScreenFrame: NSRect = .zero
@@ -350,6 +372,7 @@ public final class NotchShelfController {
     public func expand(forDrag: Bool = false) {
         guard coordinator.notchShelfEnabled else { return }
         hideWorkItem?.cancel()
+        cancelHoverExpand()
         anchorFixedPanelIfScreenChanged()
         refreshClipboardHint(force: true)
         guard let panel else { return }
@@ -365,12 +388,53 @@ public final class NotchShelfController {
         guard shelfState.isExpanded else { return }
         if shelfState.isDropTargeted || shelfState.processingMessage != nil { return }
         hideWorkItem?.cancel()
+        cancelHoverExpand()
         shelfState.isExpanded = false
         shelfState.isFullGalleryExpanded = false
         shelfState.isPinnedOpen = false
+        baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
+        lastBaselineSyncTime = CFAbsoluteTimeGetCurrent()
         // Immediately let pointer events pass through to underlying apps even during spring settle.
         // Never resize the backing NSPanel here so the closing spring never clips or hitches.
         panel?.ignoresMouseEvents = true
+    }
+
+    private func scheduleHoverExpand() {
+        guard !shelfState.isExpanded,
+              coordinator.notchShelfEnabled,
+              coordinator.notchHoverTriggerEnabled,
+              NSEvent.pressedMouseButtons == 0,
+              hoverExpandWorkItem == nil else { return }
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.hoverExpandWorkItem = nil
+            guard !self.shelfState.isExpanded,
+                  self.coordinator.notchShelfEnabled,
+                  self.coordinator.notchHoverTriggerEnabled,
+                  NSEvent.pressedMouseButtons == 0 else { return }
+            let loc = NSEvent.mouseLocation
+            let screen = self.screenUnderCursor(at: loc)
+            let metrics = self.notchMetrics(for: screen)
+            let stillInHover = NotchDropGeometry.isPointInHoverTriggerZone(
+                loc,
+                screenFrame: screen.frame,
+                hasPhysicalNotch: metrics.hasPhysicalNotch,
+                notchWidth: metrics.notchWidth,
+                notchHeight: metrics.notchHeight
+            )
+            if stillInHover {
+                self.expand(forDrag: false)
+            }
+        }
+        hoverExpandWorkItem = item
+        // 240ms dwell debounce prevents accidental pop-open when casually moving past the menu bar/notch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24, execute: item)
+    }
+
+    private func cancelHoverExpand() {
+        hoverExpandWorkItem?.cancel()
+        hoverExpandWorkItem = nil
     }
 
     public func toggleFullGallery(_ expanded: Bool) {
@@ -479,10 +543,11 @@ public final class NotchShelfController {
             guard let self else { return false }
             return self.handleAppKitDrop(pasteboard: pasteboard, promiseReceivers: receivers)
         }
-        hosting.activeHitRectProvider = { [weak self, weak hosting] in
+        hosting.activeWindowRectProvider = { [weak self, weak hosting] in
             guard let self, let hosting, self.shelfState.isExpanded else { return .zero }
+            let panelSize = hosting.window?.frame.size ?? hosting.bounds.size
             return NotchDropGeometry.strictCardRect(
-                panelBounds: hosting.bounds,
+                panelBounds: NSRect(origin: .zero, size: panelSize),
                 bodyWidth: self.shelfState.expandedBodyWidth,
                 cardHeight: self.shelfState.expandedCardHeight
             )
@@ -586,7 +651,10 @@ public final class NotchShelfController {
         }
         sensorView.onTriggerOpenForHover = { [weak self] in
             guard let self, self.coordinator.notchShelfEnabled, self.coordinator.notchHoverTriggerEnabled else { return }
-            self.expand(forDrag: false)
+            self.scheduleHoverExpand()
+        }
+        sensorView.onHoverExited = { [weak self] in
+            self?.cancelHoverExpand()
         }
         sensorView.onPerformDrop = { [weak self] pasteboard, receivers in
             guard let self else { return false }
@@ -675,16 +743,26 @@ public final class NotchShelfController {
             .fileURL,
             NSPasteboard.PasteboardType("NSFilenamesPboardType"),
             .URL,
+            NSPasteboard.PasteboardType("public.url"),
             .png,
             .tiff,
             NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+            NSPasteboard.PasteboardType(UTType.gif.identifier),
+            NSPasteboard.PasteboardType(UTType.webP.identifier),
             NSPasteboard.PasteboardType(UTType.image.identifier),
             NSPasteboard.PasteboardType("com.apple.NSFilePromiseItemMetaData")
         ]
-        return types.contains(where: { accepted.contains($0) })
+        if types.contains(where: { accepted.contains($0) }) {
+            return true
+        }
+        if let text = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           text.hasPrefix("http://") || text.hasPrefix("https://") {
+            return URL(string: text) != nil
+        }
+        return false
     }
 
-    private func inspectSystemDragPasteboard() -> (isInternal: Bool, hasDroppable: Bool) {
+    private func inspectSystemDragPasteboard() -> (changeCount: Int, isInternal: Bool, hasDroppable: Bool) {
         let dragPB = NSPasteboard(name: .drag)
         let cc = dragPB.changeCount
         if cc != lastObservedDragPasteboardChangeCount {
@@ -693,12 +771,23 @@ public final class NotchShelfController {
             cachedDragPBIsInternal = CharkleDragIdentifiers.isInternalDrag(rawString)
             cachedDragPBHasDroppable = !cachedDragPBIsInternal && dragPasteboardHasDroppablePayload(dragPB)
         }
-        return (cachedDragPBIsInternal, cachedDragPBHasDroppable)
+        return (cc, cachedDragPBIsInternal, cachedDragPBHasDroppable)
     }
 
     private func pollCursorAndDragState() {
         let enabled = coordinator.notchShelfEnabled
         let isMouseButtonDown = NSEvent.pressedMouseButtons != 0
+        let now = CFAbsoluteTimeGetCurrent()
+
+        // Keep idle drag-pasteboard baseline synced so stale files from past drags never trigger false opens
+        // when the user later clicks browser tabs, menu bar items, or window title bars near the notch.
+        if !isMouseButtonDown {
+            if wasMouseButtonDown || (now - lastBaselineSyncTime) >= 0.5 {
+                baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
+                lastBaselineSyncTime = now
+            }
+        }
+        wasMouseButtonDown = isMouseButtonDown
 
         // Fast idle exit when collapsed, no button pressed, and hover-open disabled:
         // avoids iterating NSScreen.screens or computing notch metrics 10x/sec while idle.
@@ -706,6 +795,7 @@ public final class NotchShelfController {
            enabled == lastObservedNotchEnabled,
            !isMouseButtonDown,
            !coordinator.notchHoverTriggerEnabled {
+            cancelHoverExpand()
             return
         }
 
@@ -713,6 +803,7 @@ public final class NotchShelfController {
         let screen = screenUnderCursor(at: loc)
         repositionSensorWindow(for: screen)
         guard enabled else {
+            cancelHoverExpand()
             if shelfState.isExpanded { collapse() }
             return
         }
@@ -740,12 +831,20 @@ public final class NotchShelfController {
 
         if !shelfState.isExpanded {
             if isMouseButtonDown && inDragTrigger {
+                cancelHoverExpand()
                 let state = inspectSystemDragPasteboard()
-                if !state.isInternal && state.hasDroppable {
+                if NotchDropGeometry.shouldTriggerProactiveDragExpand(
+                    currentDragChangeCount: state.changeCount,
+                    baselineDragChangeCount: baselineDragChangeCount,
+                    isInternalDrag: state.isInternal,
+                    hasDroppablePayload: state.hasDroppable
+                ) {
                     expand(forDrag: true)
                 }
             } else if !isMouseButtonDown && inHoverTrigger && coordinator.notchHoverTriggerEnabled {
-                expand(forDrag: false)
+                scheduleHoverExpand()
+            } else {
+                cancelHoverExpand()
             }
             return
         }
@@ -771,7 +870,7 @@ public final class NotchShelfController {
         // If user dragged an internal asset OUT of the Notch Shelf onto another window, gently collapse once cursor exits
         if isMouseButtonDown && !insideActiveArea {
             let state = inspectSystemDragPasteboard()
-            if state.isInternal {
+            if state.changeCount != baselineDragChangeCount && state.isInternal {
                 shelfState.isPinnedOpen = false
                 collapse()
                 return
@@ -897,6 +996,7 @@ public final class NotchShelfController {
         pollTimer?.invalidate()
         bannerResetTask?.cancel()
         hideWorkItem?.cancel()
+        hoverExpandWorkItem?.cancel()
         sensorWindow?.orderOut(nil)
         panel?.orderOut(nil)
     }

@@ -72,14 +72,39 @@ struct PerformanceAndNotchTests {
         ))
 
         // Fixed max-size NSPanel accommodates both compact and full-gallery states without window resize,
-        // while strictCardRect tracks the live visible capsule bounds inside the oversized panel.
+        // while strictCardRect tracks the live visible capsule bounds in unflipped AppKit window coordinates.
         let maxPanelBounds = NSRect(x: 0, y: 0, width: 980 + 24 + 96, height: 580 + 56)
         let compactHit = NotchDropGeometry.strictCardRect(panelBounds: maxPanelBounds, bodyWidth: 636, cardHeight: 330)
         let fullHit = NotchDropGeometry.strictCardRect(panelBounds: maxPanelBounds, bodyWidth: 980, cardHeight: 580)
         #expect(compactHit.maxY == maxPanelBounds.maxY)
         #expect(fullHit.maxY == maxPanelBounds.maxY)
+        // Drop well sits ~120pt below top bezel -> in unflipped window coords y = maxY - 120 = 516
+        #expect(compactHit.contains(NSPoint(x: maxPanelBounds.midX, y: maxPanelBounds.maxY - 120)))
+        // Below the 330pt compact capsule -> rejected in compact mode, accepted when full waterfall is open
         #expect(!compactHit.contains(NSPoint(x: maxPanelBounds.midX, y: maxPanelBounds.maxY - 400)))
         #expect(fullHit.contains(NSPoint(x: maxPanelBounds.midX, y: maxPanelBounds.maxY - 400)))
+
+        // Stale drag pasteboard (unchanged changeCount from a past drag) MUST NOT expand the notch
+        #expect(!NotchDropGeometry.shouldTriggerProactiveDragExpand(
+            currentDragChangeCount: 42,
+            baselineDragChangeCount: 42,
+            isInternalDrag: false,
+            hasDroppablePayload: true
+        ))
+        // Fresh external drag (changeCount incremented) triggers proactive expand
+        #expect(NotchDropGeometry.shouldTriggerProactiveDragExpand(
+            currentDragChangeCount: 43,
+            baselineDragChangeCount: 42,
+            isInternalDrag: false,
+            hasDroppablePayload: true
+        ))
+        // Fresh internal Charkle drag MUST NOT trigger expand
+        #expect(!NotchDropGeometry.shouldTriggerProactiveDragExpand(
+            currentDragChangeCount: 44,
+            baselineDragChangeCount: 43,
+            isInternalDrag: true,
+            hasDroppablePayload: true
+        ))
     }
 
     @Test("Hover muted preview eligibility & local-only cachedOriginalURL never trigger cloud downloads")

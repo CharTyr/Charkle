@@ -69,11 +69,14 @@ public enum CharkleDragIdentifiers {
     }
 }
 
-/// Pure, testable geometry rules for the Notch Shelf's drag-expand trigger strip
-/// and strict drop acceptance bounds (zero transparent shadow-margin bleed).
+/// Pure, testable geometry & drag-gating rules for the Notch Shelf's drag-expand trigger strip
+/// and strict drop acceptance bounds (zero transparent shadow-margin bleed, zero stale-pasteboard false triggers).
 public nonisolated enum NotchDropGeometry {
-    /// Strict hit-test & drop acceptance rect in `NotchDropHostingView` local coordinates,
+    /// Strict hit-test & drop acceptance rect in unflipped AppKit **window coordinates**
+    /// (`y = 0` at bottom of panel, `y = panelBounds.maxY` at top screen bezel),
     /// matching ONLY the visible pure-black notch capsule body (excluding transparent shadow margins).
+    /// Always compare against AppKit window coordinates (`sender.draggingLocation` or
+    /// `superview?.convert(point, to: nil)`), never against `NSHostingView`'s flipped local coordinates.
     public static func strictCardRect(
         panelBounds: NSRect,
         bodyWidth: CGFloat,
@@ -88,6 +91,18 @@ public nonisolated enum NotchDropGeometry {
             width: bodyWidth,
             height: cardHeight
         )
+    }
+
+    /// Guards proactive drag-open against macOS's persistent `NSPasteboard(.drag)` contents:
+    /// macOS never clears the drag pasteboard after a previous drag ends, so only a live `changeCount`
+    /// transition away from the idle baseline counts as an active external drag.
+    public static func shouldTriggerProactiveDragExpand(
+        currentDragChangeCount: Int,
+        baselineDragChangeCount: Int,
+        isInternalDrag: Bool,
+        hasDroppablePayload: Bool
+    ) -> Bool {
+        currentDragChangeCount != baselineDragChangeCount && !isInternalDrag && hasDroppablePayload
     }
 
     /// Strict visible pure-black notch capsule rect in global screen coordinates.
