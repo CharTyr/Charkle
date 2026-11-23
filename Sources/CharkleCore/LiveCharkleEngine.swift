@@ -256,7 +256,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             if let desc = repo.description, !desc.isEmpty {
                 current.notes = desc
             }
-            if let card = MediaArtwork.githubRepoCard(repo) {
+            let ogCard = await GitHubRepoResolver.fetchOpenGraphCardImage(for: repo)
+            if let card = ogCard ?? MediaArtwork.githubRepoCard(repo) {
                 try? media.writeCustomPoster(card, for: &current)
             }
             let updated = current
@@ -270,6 +271,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             let stagingDir = media.staging.appending(path: "social-refresh-\(UUID().uuidString)", directoryHint: .isDirectory)
             try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+            async let avatarTask = SocialPostResolver.fetchAvatarImage(from: resolved.metadata.authorAvatarURL)
 
             var embeddedPoster: CGImage?
             var mediaFailed = false
@@ -290,6 +293,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
             }
 
+            let authorAvatar = await avatarTask
+
             var meta = resolved.metadata
             meta.mediaFetchFailed = mediaFailed
             var rich = current.richMetadata ?? AssetRichMetadata()
@@ -305,7 +310,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
             current.mediaKind = .webBookmark
             current.ocrText = meta.bodyText.isEmpty ? current.ocrText : meta.bodyText
-            if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster) {
+            if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
                 try? media.writeCustomPoster(card, for: &current)
             }
             let updated = current
@@ -624,7 +629,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         tags.insert("GitHub")
         if let lang = repo.language, !lang.isEmpty { tags.insert(lang) }
         item.asset.tags = tags.sorted()
-        if let card = MediaArtwork.githubRepoCard(repo) {
+        let ogCard = await GitHubRepoResolver.fetchOpenGraphCardImage(for: repo)
+        if let card = ogCard ?? MediaArtwork.githubRepoCard(repo) {
             try? media.writeCustomPoster(card, for: &item.asset)
         }
         return item
@@ -638,6 +644,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         let stagingDir = media.staging.appending(path: "social-\(UUID().uuidString)", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        async let avatarTask = SocialPostResolver.fetchAvatarImage(from: resolved.metadata.authorAvatarURL)
 
         var downloadedVideoFile: URL?
         var embeddedPoster: CGImage?
@@ -661,6 +669,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 embeddedPoster = MediaPipeline.raster(thumbFile)?.poster
             }
         }
+
+        let authorAvatar = await avatarTask
 
         var meta = resolved.metadata
         meta.mediaFetchFailed = mediaFailed
@@ -692,7 +702,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             prepared.asset.tags.append(platformTag)
         }
 
-        if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster) {
+        if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
             try? media.writeCustomPoster(card, for: &prepared.asset)
         }
         return prepared
@@ -1001,11 +1011,23 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             guard let before = try await database.asset(id: id) else { continue }
             let thumbnail = media.thumbnailURL(for: id, tier: .grid520)
             let analysis = if let thumbnail { await intelligence.analyze(thumbnailURL: thumbnail) } else { LocalAnalysisResult() }
+            let extractedMeta: ExtractedImageMetadata? = {
+                guard before.mediaKind == .image || before.mediaKind == .animatedImage || before.mediaKind == .designFile,
+                      let orig = media.cachedOriginal(for: before) else { return nil }
+                let meta = ImageMetadataExtractor.extract(from: orig)
+                return (meta.photoExif != nil || meta.aiGeneration != nil) ? meta : nil
+            }()
             let saved = try await database.transaction { store -> AssetRecord? in
                 guard var current = try store.asset(id: id), current.contentHash == before.contentHash else { return nil }
                 if !analysis.dominantColors.isEmpty, current.mediaKind != .audio { current.dominantColors = analysis.dominantColors }
                 if current.ocrText == nil || current.mediaKind == .image || current.mediaKind == .animatedImage {
                     current.ocrText = analysis.ocrText ?? current.ocrText
+                }
+                if let extractedMeta {
+                    var rich = current.richMetadata ?? AssetRichMetadata()
+                    if let exif = extractedMeta.photoExif { rich.photoExif = exif }
+                    if let aiGen = extractedMeta.aiGeneration { rich.aiGeneration = aiGen }
+                    current.richMetadata = rich
                 }
                 if let feature = analysis.featurePrintData {
                     let vector = AssetVector(featurePrint: feature)
@@ -1017,6 +1039,27 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             if let saved { result.append(saved) }
         }
         return result
+    }
+
+    public func hydrateImageMetadataIfNeeded(id: UUID) async throws -> AssetRecord? {
+        guard let before = try await database.asset(id: id),
+              before.mediaKind == .image || before.mediaKind == .animatedImage || before.mediaKind == .designFile,
+              before.richMetadata?.photoExif == nil && before.richMetadata?.aiGeneration == nil,
+              let orig = media.cachedOriginal(for: before) else {
+            return nil
+        }
+        let extracted = ImageMetadataExtractor.extract(from: orig)
+        guard extracted.photoExif != nil || extracted.aiGeneration != nil else {
+            return nil
+        }
+        return try await database.transaction { store -> AssetRecord? in
+            guard var current = try store.asset(id: id), current.contentHash == before.contentHash else { return nil }
+            var rich = current.richMetadata ?? AssetRichMetadata()
+            if let exif = extracted.photoExif { rich.photoExif = exif }
+            if let aiGen = extracted.aiGeneration { rich.aiGeneration = aiGen }
+            current.richMetadata = rich
+            return try store.saveAssetLocally(current)
+        }
     }
 
     public func enrichAssetsWithCloudAI(ids: [UUID]) async throws -> [AssetRecord] {
@@ -1079,6 +1122,124 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             return await intelligence.chatGPT.hasUsableSession()
         case .gemini, .openAICompatible:
             return intelligence.keychain.exists(IntelligenceEngine.key(provider))
+        }
+    }
+
+    public func testAIConnection(config: AIProviderConfig, apiKey: String?) async throws -> String {
+        switch config.provider {
+        case .disabled:
+            throw LibraryDatabaseError("请先选择要测试的云端 AI 服务。")
+
+        case .chatGPTSubscription:
+            let session = await intelligence.chatGPT.currentSession()
+            guard session.status == .connected else {
+                throw LibraryDatabaseError("尚未连接 ChatGPT 订阅账号，请先完成登录。")
+            }
+            guard session.sharingEnabled else {
+                throw LibraryDatabaseError("已登录 ChatGPT，但尚未开启订阅额度共享授权。")
+            }
+            let models = try await intelligence.chatGPT.listModels()
+            return "ChatGPT 订阅连接正常（可用模型 \(models.count) 个）"
+
+        case .gemini:
+            let resolvedKey: String? = {
+                if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
+                    return provided
+                }
+                return try? intelligence.keychain.read(IntelligenceEngine.key(.gemini))
+                    .flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            }()
+            guard let resolvedKey, !resolvedKey.isEmpty else {
+                throw LibraryDatabaseError("请先填写 Gemini API 密钥后再测试连接。")
+            }
+            let normalizedModel = config.chatModel
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "models/", with: "", options: .anchored)
+            let targetModel = normalizedModel.isEmpty ? "gemini-2.5-flash" : normalizedModel
+            let client = try AIHTTPClient(
+                config: config,
+                defaultPath: "v1beta",
+                header: "x-goog-api-key",
+                secret: resolvedKey,
+                session: .shared
+            )
+            let (_, status) = try await client.get("models/\(targetModel)")
+            if (200..<300).contains(status) {
+                return "Gemini 连接成功 · 模型 \(targetModel) 可用"
+            }
+            if status == 404 {
+                let (_, listStatus) = try await client.get("models")
+                if (200..<300).contains(listStatus) {
+                    throw LibraryDatabaseError("API 密钥有效，但未找到模型「\(targetModel)」，请检查模型名称。")
+                }
+            }
+            throw LibraryDatabaseError("Gemini 服务返回 HTTP \(status)，请检查 API 密钥或服务地址。")
+
+        case .openAICompatible:
+            let resolvedKey: String? = {
+                if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
+                    return provided
+                }
+                let stored = try? intelligence.keychain.read(IntelligenceEngine.key(.openAICompatible))
+                    .flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                return stored?.isEmpty == true ? nil : stored
+            }()
+            let modelName = config.chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let labelModel = modelName.isEmpty ? config.customEndpointFormat.defaultChatModel : modelName
+
+            switch config.customEndpointFormat {
+            case .anthropicMessages:
+                guard let resolvedKey, !resolvedKey.isEmpty else {
+                    throw LibraryDatabaseError("请先填写 Anthropic API 密钥后再测试连接。")
+                }
+                let client = try AIHTTPClient(
+                    config: config,
+                    defaultPath: "v1",
+                    header: "x-api-key",
+                    secret: resolvedKey,
+                    extraHeaders: ["anthropic-version": "2023-06-01"],
+                    session: .shared
+                )
+                let (_, status) = try await client.get("models")
+                if (200..<300).contains(status) {
+                    return "Anthropic 连接成功 · 目标模型 \(labelModel)"
+                }
+                if status == 404 || status == 405 {
+                    let provider = try AnthropicMessagesProvider(config: config, apiKey: resolvedKey)
+                    _ = try await provider.completeJSON(
+                        instructions: "Reply with {\"ok\":true}",
+                        prompt: "ping",
+                        imagesJPEG: []
+                    )
+                    return "Anthropic 兼容接口连通正常 · 模型 \(labelModel)"
+                }
+                throw LibraryDatabaseError("Anthropic 接口返回 HTTP \(status)，请检查 API 密钥与服务地址。")
+
+            case .openAIChatCompletions, .openAIResponses:
+                let client = try AIHTTPClient(
+                    config: config,
+                    defaultPath: "v1",
+                    header: "Authorization",
+                    secret: resolvedKey.map { "Bearer " + $0 },
+                    session: .shared
+                )
+                let (_, status) = try await client.get("models")
+                if (200..<300).contains(status) {
+                    return "连接成功 · \(config.customEndpointFormat.localizedLabel)（\(labelModel)）"
+                }
+                if status == 404 || status == 405 {
+                    let provider: any CloudAIProvider = config.customEndpointFormat == .openAIResponses
+                        ? try OpenAIResponsesProvider(config: config, apiKey: resolvedKey)
+                        : try OpenAICompatibleProvider(config: config, apiKey: resolvedKey)
+                    _ = try await provider.completeJSON(
+                        instructions: "Reply with {\"ok\":true}",
+                        prompt: "ping",
+                        imagesJPEG: []
+                    )
+                    return "连接成功 · 模型 \(labelModel) 响应正常"
+                }
+                throw LibraryDatabaseError("服务返回 HTTP \(status)，请检查服务地址、端点格式或 API 密钥。")
+            }
         }
     }
 

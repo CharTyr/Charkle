@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// Parsed identity of a supported social media post URL (X/Twitter, Threads, Bluesky).
 public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
@@ -160,6 +161,42 @@ public nonisolated enum SocialPostResolver {
         case .threads(let handle, _, let canonicalURL):
             return await resolveThreads(handle: handle, canonicalURL: canonicalURL)
         }
+    }
+
+    /// Downloads the author's profile avatar (upgrading tiny `_normal` X avatars to `_400x400` when applicable)
+    /// for crisp circular compositing on social post gallery thumbnails.
+    public static func fetchAvatarImage(from rawURL: String?) async -> CGImage? {
+        guard let trimmed = rawURL?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        var candidates: [String] = []
+        if trimmed.contains("pbs.twimg.com/profile_images/") && trimmed.contains("_normal.") {
+            candidates.append(trimmed.replacingOccurrences(of: "_normal.", with: "_400x400."))
+        }
+        candidates.append(trimmed)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 8
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        for candidate in candidates {
+            guard let url = URL(string: candidate) else { continue }
+            var req = URLRequest(url: url, timeoutInterval: 6)
+            req.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+            req.setValue("image/webp,image/png,image/jpeg,image/*", forHTTPHeaderField: "Accept")
+            guard let (data, response) = try? await session.data(for: req),
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let src = CGImageSourceCreateWithData(data as CFData, nil),
+                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil),
+                  cg.width >= 16, cg.height >= 16 else {
+                continue
+            }
+            return cg
+        }
+        return nil
     }
 
     private static func resolveX(_ ref: XPostReference) async -> ResolvedSocialPost? {

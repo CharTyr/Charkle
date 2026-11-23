@@ -162,6 +162,31 @@ public final actor LibraryDatabase {
                 extraOCR = extraOCR.isEmpty ? postText : (extraOCR + "\n" + postText)
             }
         }
+        if let exif = asset.richMetadata?.photoExif {
+            let exifText = [
+                exif.cameraDisplayName ?? "",
+                exif.lensModel ?? "",
+                exif.exposureSummary ?? "",
+                exif.software ?? "",
+                exif.artist ?? ""
+            ].filter { !$0.isEmpty }.joined(separator: " ")
+            if !exifText.isEmpty {
+                extraOCR = extraOCR.isEmpty ? exifText : (extraOCR + "\n" + exifText)
+            }
+        }
+        if let ai = asset.richMetadata?.aiGeneration {
+            let aiText = [
+                ai.generator ?? "",
+                ai.modelName ?? "",
+                ai.sampler ?? "",
+                ai.loras.joined(separator: " "),
+                String((ai.prompt ?? "").prefix(2000)),
+                String((ai.negativePrompt ?? "").prefix(600))
+            ].filter { !$0.isEmpty }.joined(separator: "\n")
+            if !aiText.isEmpty {
+                extraOCR = extraOCR.isEmpty ? aiText : (extraOCR + "\n" + aiText)
+            }
+        }
         return [asset.title, asset.fileName, asset.notes, asset.tags.joined(separator: " "),
                 extraOCR, asset.aiDescription ?? "", asset.sourceDomain ?? ""]
     }

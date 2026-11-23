@@ -215,6 +215,7 @@ public nonisolated struct MediaPipeline: Sendable {
         case .image, .animatedImage:
             render = Self.raster(file)
             if ext == "png", let duration = render?.duration, duration > 0 { asset.mediaKind = .animatedImage }
+            Self.attachExtractedImageMetadata(from: file, to: &asset)
         case .video:
             render = await Self.video(file)
         case .webBookmark:
@@ -245,6 +246,7 @@ public nonisolated struct MediaPipeline: Sendable {
             render = Self.raster(file)
             if render == nil { render = await Self.quickLook(file) }
             if render == nil, ext == "svg" { render = SVGPreview.render(file).map { MediaRender($0) } }
+            Self.attachExtractedImageMetadata(from: file, to: &asset)
         case .audio:
             let audio = await Self.audio(file)
             asset.durationSeconds = audio.duration
@@ -282,6 +284,15 @@ public nonisolated struct MediaPipeline: Sendable {
         if asset.mediaKind != .audio {
             asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
         }
+    }
+
+    private static func attachExtractedImageMetadata(from file: URL, to asset: inout AssetRecord) {
+        let extracted = ImageMetadataExtractor.extract(from: file)
+        guard extracted.photoExif != nil || extracted.aiGeneration != nil else { return }
+        var rich = asset.richMetadata ?? AssetRichMetadata()
+        if let exif = extracted.photoExif { rich.photoExif = exif }
+        if let aiGen = extracted.aiGeneration { rich.aiGeneration = aiGen }
+        asset.richMetadata = rich
     }
 
     private static func cleanName(_ raw: String) -> String {
@@ -374,7 +385,7 @@ public nonisolated struct MediaPipeline: Sendable {
     }
 
     func writeCustomPoster(_ image: CGImage, for asset: inout AssetRecord) throws {
-        guard let grid = MediaArtwork.resize(image, maxSide: 520),
+        guard let grid = MediaArtwork.resize(image, maxSide: 720),
               let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
             return
         }
@@ -382,7 +393,7 @@ public nonisolated struct MediaPipeline: Sendable {
         asset.pixelHeight = image.height
         try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
         let previewPath = thumbnailPath(asset.id, tier: .preview1400)
-        if max(image.width, image.height) > 520, let large = MediaArtwork.resize(image, maxSide: 1_400),
+        if max(image.width, image.height) > 720, let large = MediaArtwork.resize(image, maxSide: 1_400),
            let preview = MediaArtwork.encode(large, type: .jpeg) {
             try preview.write(to: previewPath, options: .atomic)
         } else {

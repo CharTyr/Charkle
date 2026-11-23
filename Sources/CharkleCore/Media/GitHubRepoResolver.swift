@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// Parsed identity of a GitHub repository URL (`https://github.com/<owner>/<repo>`).
 public nonisolated struct GitHubRepoReference: Equatable, Hashable, Sendable {
@@ -130,6 +131,31 @@ public nonisolated enum GitHubRepoResolver {
             return nil
         }
         return text
+    }
+
+    /// Downloads the official GitHub OpenGraph preview card (`opengraph.githubassets.com/1/<owner>/<repo>`)
+    /// so GitHub repository bookmarks display GitHub's native visual preview card directly in the gallery.
+    public static func fetchOpenGraphCardImage(for repo: GitHubRepoMetadata) async -> CGImage? {
+        var candidates: [String] = []
+        if let custom = repo.openGraphImageURL?.trimmingCharacters(in: .whitespacesAndNewlines), !custom.isEmpty {
+            candidates.append(custom)
+        }
+        let standard = "https://opengraph.githubassets.com/1/\(repo.owner)/\(repo.repo)"
+        if !candidates.contains(standard) {
+            candidates.append(standard)
+        }
+
+        for rawURL in candidates {
+            guard let url = URL(string: rawURL),
+                  let data = await fetchData(url: url, accept: "image/png,image/webp,image/jpeg,image/*"),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+                  image.width >= 200, image.height >= 100 else {
+                continue
+            }
+            return image
+        }
+        return nil
     }
 
     private struct RepoAPIResponse: Decodable {

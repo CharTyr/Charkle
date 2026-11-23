@@ -72,10 +72,12 @@ public protocol CharkleEngineProtocol: Sendable {
 
     // MARK: - Intelligence
     func analyzeAssetsLocally(ids: [UUID]) async throws -> [AssetRecord]
+    func hydrateImageMetadataIfNeeded(id: UUID) async throws -> AssetRecord?
     func enrichAssetsWithCloudAI(ids: [UUID]) async throws -> [AssetRecord]
     func aiConfig() async -> AIProviderConfig
     func saveAIConfig(_ config: AIProviderConfig, apiKey: String?) async throws
     func hasStoredAIKey(for provider: CloudAIProviderKind) async -> Bool
+    func testAIConnection(config: AIProviderConfig, apiKey: String?) async throws -> String
     func chatGPTSession() async -> ChatGPTAccountSession
     func signInWithChatGPT(reconsent: Bool, switchAccount: Bool) async throws -> ChatGPTAccountSession
     func disconnectChatGPT(resetRegistration: Bool) async throws
@@ -149,6 +151,15 @@ public extension CharkleEngineProtocol {
             throw NSError(domain: "CharkleCore", code: 404, userInfo: [NSLocalizedDescriptionKey: "Asset not found"])
         }
         return asset
+    }
+
+    func hydrateImageMetadataIfNeeded(id: UUID) async throws -> AssetRecord? { nil }
+
+    func testAIConnection(config: AIProviderConfig, apiKey: String?) async throws -> String {
+        guard config.provider != .disabled else {
+            throw LibraryDatabaseError("请先选择要测试的云端 AI 服务。")
+        }
+        return "AI 服务连接正常"
     }
 }
 

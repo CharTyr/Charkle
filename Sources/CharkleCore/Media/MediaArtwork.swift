@@ -132,8 +132,13 @@ nonisolated enum MediaArtwork {
         return ctx.makeImage()
     }
 
-    /// Clean social post card (X / Threads / Bluesky) optionally compositing an embedded photo/video poster.
-    static func socialPostCard(_ post: SocialPostMetadata, embeddedMedia: CGImage? = nil) -> CGImage? {
+    /// Clean social post card (X / Threads / Bluesky) optionally compositing an embedded photo/video poster
+    /// and the author's real circular avatar.
+    static func socialPostCard(
+        _ post: SocialPostMetadata,
+        embeddedMedia: CGImage? = nil,
+        authorAvatar: CGImage? = nil
+    ) -> CGImage? {
         let hasMedia = embeddedMedia != nil
         let width = 800
         let height = hasMedia ? 920 : 620
@@ -148,33 +153,33 @@ nonisolated enum MediaArtwork {
         ctx.setLineWidth(2)
         ctx.stroke(CGRect(x: 1, y: 1, width: width - 2, height: height - 2))
 
-        // Avatar circle + Author header
+        // Avatar circle (real author photo when fetched, crisp monogram fallback when offline)
         let headerY = Double(height - 96)
-        ctx.setFillColor(color(0x18181B))
-        ctx.fillEllipse(in: CGRect(x: 44, y: headerY, width: 52, height: 52))
-        let initial = String((post.authorName.first ?? post.authorHandle.first ?? "X")).uppercased()
-        draw(initial, in: ctx, at: CGPoint(x: 62, y: headerY + 17), size: 22, ink: 0xFFFFFF, width: 32, bold: true)
+        let avatarRect = CGRect(x: 44, y: headerY, width: 52, height: 52)
+        if let authorAvatar {
+            ctx.saveGState()
+            ctx.addEllipse(in: avatarRect)
+            ctx.clip()
+            drawAspectFill(authorAvatar, in: avatarRect, ctx: ctx)
+            ctx.restoreGState()
+            ctx.setStrokeColor(color(0x000000, alpha: 0.08))
+            ctx.setLineWidth(1.5)
+            ctx.strokeEllipse(in: avatarRect.insetBy(dx: 0.75, dy: 0.75))
+        } else {
+            ctx.setFillColor(color(0x18181B))
+            ctx.fillEllipse(in: avatarRect)
+            let initial = String((post.authorName.first ?? post.authorHandle.first ?? "X")).uppercased()
+            draw(initial, in: ctx, at: CGPoint(x: 62, y: headerY + 17), size: 22, ink: 0xFFFFFF, width: 32, bold: true)
+        }
 
-        draw(post.authorName, in: ctx, at: CGPoint(x: 112, y: headerY + 26), size: 24, ink: 0x111827, width: 490, bold: true)
+        // Leave clean breathing room on the top-right where the gallery's floating platform badge sits
+        // (avoids colliding double "X" badges on masonry thumbnails).
+        draw(post.authorName, in: ctx, at: CGPoint(x: 112, y: headerY + 26), size: 24, ink: 0x111827, width: 540, bold: true)
         var handleLine = "@\(post.authorHandle)"
         if let date = post.publishedAtText, !date.isEmpty {
             handleLine += " · \(String(date.prefix(16)))"
         }
-        draw(handleLine, in: ctx, at: CGPoint(x: 112, y: headerY + 2), size: 17, ink: 0x6B7280, width: 500)
-
-        // Platform badge top-right (sized tightly to platform name so "X" looks balanced)
-        let badgeColor: UInt32 = switch post.platform {
-        case .x: 0x18181B
-        case .threads: 0x27272A
-        case .bluesky: 0x0284C7
-        }
-        let badgeLabel = post.platform.displayName
-        let badgeWidth: Double = max(46, Double(badgeLabel.count) * 12 + 28)
-        let badgeX = Double(width) - 44 - badgeWidth
-        ctx.setFillColor(color(badgeColor))
-        fillRoundedRect(CGRect(x: badgeX, y: headerY + 10, width: badgeWidth, height: 34), radius: 17, in: ctx)
-        let textInsetX = badgeLabel.count <= 2 ? (badgeWidth - 12) * 0.5 : 14
-        draw(badgeLabel, in: ctx, at: CGPoint(x: badgeX + textInsetX, y: headerY + 19), size: 16, ink: 0xFFFFFF, width: badgeWidth - 12, bold: true)
+        draw(handleLine, in: ctx, at: CGPoint(x: 112, y: headerY + 2), size: 17, ink: 0x6B7280, width: 560)
 
         // Body text
         let bodyMaxLines = hasMedia ? 4 : 9

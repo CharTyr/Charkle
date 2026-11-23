@@ -271,9 +271,222 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
     }
 }
 
+public struct PhotoExifMetadata: Codable, Hashable, Sendable {
+    public var cameraMake: String?
+    public var cameraModel: String?
+    public var lensModel: String?
+    public var capturedAt: String?
+    public var exposureTime: String?
+    public var fNumber: Double?
+    public var iso: Int?
+    public var focalLengthMM: Double?
+    public var focalLength35mm: Int?
+    public var exposureBiasEV: Double?
+    public var meteringMode: String?
+    public var flashFired: Bool?
+    public var whiteBalance: String?
+    public var colorProfile: String?
+    public var bitDepth: Int?
+    public var dpiWidth: Int?
+    public var software: String?
+    public var artist: String?
+    public var copyright: String?
+    public var latitude: Double?
+    public var longitude: Double?
+    public var altitudeMeters: Double?
+
+    public init(
+        cameraMake: String? = nil,
+        cameraModel: String? = nil,
+        lensModel: String? = nil,
+        capturedAt: String? = nil,
+        exposureTime: String? = nil,
+        fNumber: Double? = nil,
+        iso: Int? = nil,
+        focalLengthMM: Double? = nil,
+        focalLength35mm: Int? = nil,
+        exposureBiasEV: Double? = nil,
+        meteringMode: String? = nil,
+        flashFired: Bool? = nil,
+        whiteBalance: String? = nil,
+        colorProfile: String? = nil,
+        bitDepth: Int? = nil,
+        dpiWidth: Int? = nil,
+        software: String? = nil,
+        artist: String? = nil,
+        copyright: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        altitudeMeters: Double? = nil
+    ) {
+        self.cameraMake = cameraMake
+        self.cameraModel = cameraModel
+        self.lensModel = lensModel
+        self.capturedAt = capturedAt
+        self.exposureTime = exposureTime
+        self.fNumber = fNumber
+        self.iso = iso
+        self.focalLengthMM = focalLengthMM
+        self.focalLength35mm = focalLength35mm
+        self.exposureBiasEV = exposureBiasEV
+        self.meteringMode = meteringMode
+        self.flashFired = flashFired
+        self.whiteBalance = whiteBalance
+        self.colorProfile = colorProfile
+        self.bitDepth = bitDepth
+        self.dpiWidth = dpiWidth
+        self.software = software
+        self.artist = artist
+        self.copyright = copyright
+        self.latitude = latitude
+        self.longitude = longitude
+        self.altitudeMeters = altitudeMeters
+    }
+
+    public var cameraDisplayName: String? {
+        let make = cameraMake?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let model = cameraModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if make.isEmpty && model.isEmpty { return nil }
+        if model.isEmpty { return make }
+        if make.isEmpty { return model }
+        if model.lowercased().hasPrefix(make.lowercased()) {
+            return model
+        }
+        return "\(make) \(model)"
+    }
+
+    public var formattedAperture: String? {
+        guard let fNumber, fNumber > 0 else { return nil }
+        let rounded = (fNumber * 10).rounded() / 10
+        if abs(rounded - rounded.rounded()) < 0.01 {
+            return "f/\(Int(rounded.rounded()))"
+        }
+        return String(format: "f/%.1f", rounded)
+    }
+
+    public var formattedFocalLength: String? {
+        guard let focalLengthMM, focalLengthMM > 0 else { return nil }
+        let base: String
+        if abs(focalLengthMM - focalLengthMM.rounded()) < 0.05 {
+            base = "\(Int(focalLengthMM.rounded()))mm"
+        } else {
+            base = String(format: "%.1fmm", focalLengthMM)
+        }
+        if let eq = focalLength35mm, eq > 0, abs(Double(eq) - focalLengthMM) >= 1.5 {
+            return "\(base)（等效 \(eq)mm）"
+        }
+        return base
+    }
+
+    public var exposureSummary: String? {
+        var parts: [String] = []
+        if let focal = focalLengthMM, focal > 0 {
+            if abs(focal - focal.rounded()) < 0.05 {
+                parts.append("\(Int(focal.rounded()))mm")
+            } else {
+                parts.append(String(format: "%.1fmm", focal))
+            }
+        }
+        if let aperture = formattedAperture { parts.append(aperture) }
+        if let exposureTime, !exposureTime.isEmpty { parts.append(exposureTime) }
+        if let iso, iso > 0 { parts.append("ISO \(iso)") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    public var hasMeaningfulCameraExif: Bool {
+        cameraDisplayName != nil || lensModel != nil || capturedAt != nil || exposureTime != nil
+            || fNumber != nil || iso != nil || focalLengthMM != nil || latitude != nil
+            || software != nil || artist != nil || copyright != nil
+    }
+
+    public var isEmpty: Bool {
+        !hasMeaningfulCameraExif && colorProfile == nil && bitDepth == nil && dpiWidth == nil
+    }
+}
+
+public struct AIGenerationMetadata: Codable, Hashable, Sendable {
+    public var generator: String?
+    public var prompt: String?
+    public var negativePrompt: String?
+    public var modelName: String?
+    public var modelHash: String?
+    public var sampler: String?
+    public var scheduler: String?
+    public var steps: Int?
+    public var cfgScale: Double?
+    public var seed: String?
+    public var sizeText: String?
+    public var clipSkip: Int?
+    public var loras: [String]
+    public var extraParameters: [String: String]
+    public var rawParameters: String?
+
+    public init(
+        generator: String? = nil,
+        prompt: String? = nil,
+        negativePrompt: String? = nil,
+        modelName: String? = nil,
+        modelHash: String? = nil,
+        sampler: String? = nil,
+        scheduler: String? = nil,
+        steps: Int? = nil,
+        cfgScale: Double? = nil,
+        seed: String? = nil,
+        sizeText: String? = nil,
+        clipSkip: Int? = nil,
+        loras: [String] = [],
+        extraParameters: [String: String] = [:],
+        rawParameters: String? = nil
+    ) {
+        self.generator = generator
+        self.prompt = prompt
+        self.negativePrompt = negativePrompt
+        self.modelName = modelName
+        self.modelHash = modelHash
+        self.sampler = sampler
+        self.scheduler = scheduler
+        self.steps = steps
+        self.cfgScale = cfgScale
+        self.seed = seed
+        self.sizeText = sizeText
+        self.clipSkip = clipSkip
+        self.loras = loras
+        self.extraParameters = extraParameters
+        self.rawParameters = rawParameters
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.generator = try c.decodeIfPresent(String.self, forKey: .generator)
+        self.prompt = try c.decodeIfPresent(String.self, forKey: .prompt)
+        self.negativePrompt = try c.decodeIfPresent(String.self, forKey: .negativePrompt)
+        self.modelName = try c.decodeIfPresent(String.self, forKey: .modelName)
+        self.modelHash = try c.decodeIfPresent(String.self, forKey: .modelHash)
+        self.sampler = try c.decodeIfPresent(String.self, forKey: .sampler)
+        self.scheduler = try c.decodeIfPresent(String.self, forKey: .scheduler)
+        self.steps = try c.decodeIfPresent(Int.self, forKey: .steps)
+        self.cfgScale = try c.decodeIfPresent(Double.self, forKey: .cfgScale)
+        self.seed = try c.decodeIfPresent(String.self, forKey: .seed)
+        self.sizeText = try c.decodeIfPresent(String.self, forKey: .sizeText)
+        self.clipSkip = try c.decodeIfPresent(Int.self, forKey: .clipSkip)
+        self.loras = try c.decodeIfPresent([String].self, forKey: .loras) ?? []
+        self.extraParameters = try c.decodeIfPresent([String: String].self, forKey: .extraParameters) ?? [:]
+        self.rawParameters = try c.decodeIfPresent(String.self, forKey: .rawParameters)
+    }
+
+    public var isEmpty: Bool {
+        let hasPrompt = !(prompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let hasNeg = !(negativePrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let hasRaw = !(rawParameters?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return !hasPrompt && !hasNeg && modelName == nil && sampler == nil && steps == nil && seed == nil && !hasRaw
+    }
+}
+
 public struct AssetRichMetadata: Codable, Hashable, Sendable {
     public var githubRepo: GitHubRepoMetadata?
     public var socialPost: SocialPostMetadata?
+    public var photoExif: PhotoExifMetadata?
+    public var aiGeneration: AIGenerationMetadata?
     public var textExcerpt: String?
     public var isMarkdown: Bool
     public var model3DFormat: String?
@@ -281,12 +494,16 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
     public init(
         githubRepo: GitHubRepoMetadata? = nil,
         socialPost: SocialPostMetadata? = nil,
+        photoExif: PhotoExifMetadata? = nil,
+        aiGeneration: AIGenerationMetadata? = nil,
         textExcerpt: String? = nil,
         isMarkdown: Bool = false,
         model3DFormat: String? = nil
     ) {
         self.githubRepo = githubRepo
         self.socialPost = socialPost
+        self.photoExif = photoExif
+        self.aiGeneration = aiGeneration
         self.textExcerpt = textExcerpt
         self.isMarkdown = isMarkdown
         self.model3DFormat = model3DFormat
@@ -296,6 +513,8 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.githubRepo = try container.decodeIfPresent(GitHubRepoMetadata.self, forKey: .githubRepo)
         self.socialPost = try container.decodeIfPresent(SocialPostMetadata.self, forKey: .socialPost)
+        self.photoExif = try container.decodeIfPresent(PhotoExifMetadata.self, forKey: .photoExif)
+        self.aiGeneration = try container.decodeIfPresent(AIGenerationMetadata.self, forKey: .aiGeneration)
         self.textExcerpt = try container.decodeIfPresent(String.self, forKey: .textExcerpt)
         self.isMarkdown = try container.decodeIfPresent(Bool.self, forKey: .isMarkdown) ?? false
         self.model3DFormat = try container.decodeIfPresent(String.self, forKey: .model3DFormat)
@@ -567,6 +786,187 @@ public struct FolderRecord: Codable, Hashable, Identifiable, Sendable {
         self.assetCount = assetCount
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// Cycle-safe, orphan-tolerant hierarchical tree node for `FolderRecord`,
+/// shared across SwiftUI menus, AppKit `NSMenu`s, sidebar trees, and folder pickers.
+public nonisolated struct FolderHierarchyNode: Hashable, Identifiable, Sendable {
+    public let folder: FolderRecord
+    public let depth: Int
+    public let children: [FolderHierarchyNode]
+
+    public var id: UUID { folder.id }
+    public var hasChildren: Bool { !children.isEmpty }
+
+    public init(folder: FolderRecord, depth: Int = 0, children: [FolderHierarchyNode] = []) {
+        self.folder = folder
+        self.depth = depth
+        self.children = children
+    }
+
+    public static func sortedSiblings(_ items: [FolderRecord]) -> [FolderRecord] {
+        items.sorted { lhs, rhs in
+            if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+            let cmp = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+            if cmp != .orderedSame { return cmp == .orderedAscending }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+
+    public static func buildTree(from folders: [FolderRecord]) -> [FolderHierarchyNode] {
+        let byParent = Dictionary(grouping: folders) { $0.parentID }
+        let knownIDs = Set(folders.map(\.id))
+        var visited = Set<UUID>()
+
+        func makeNodes(for records: [FolderRecord], depth: Int) -> [FolderHierarchyNode] {
+            var nodes: [FolderHierarchyNode] = []
+            for folder in sortedSiblings(records) {
+                guard visited.insert(folder.id).inserted else { continue }
+                let childNodes = makeNodes(for: byParent[folder.id] ?? [], depth: depth + 1)
+                nodes.append(FolderHierarchyNode(folder: folder, depth: depth, children: childNodes))
+            }
+            return nodes
+        }
+
+        let roots = folders.filter { folder in
+            guard let pid = folder.parentID else { return true }
+            return !knownIDs.contains(pid)
+        }
+        var forest = makeNodes(for: roots, depth: 0)
+
+        let remaining = folders.filter { !visited.contains($0.id) }
+        if !remaining.isEmpty {
+            forest.append(contentsOf: makeNodes(for: remaining, depth: 0))
+        }
+        return forest
+    }
+
+    public static func flattened(from folders: [FolderRecord]) -> [FolderHierarchyNode] {
+        func appendSubtree(_ nodes: [FolderHierarchyNode], into out: inout [FolderHierarchyNode]) {
+            for node in nodes {
+                out.append(node)
+                appendSubtree(node.children, into: &out)
+            }
+        }
+        var result: [FolderHierarchyNode] = []
+        appendSubtree(buildTree(from: folders), into: &result)
+        return result
+    }
+
+    public func contains(folderID: UUID?) -> Bool {
+        guard let folderID else { return false }
+        if folder.id == folderID { return true }
+        return children.contains { $0.contains(folderID: folderID) }
+    }
+}
+
+/// Ordered sections of the Single-Asset Inspector info tab, supporting persistent user drag-to-reorder.
+public nonisolated enum InspectorInfoSection: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case previewIdentity
+    case quickActions
+    case colorsAndTags
+    case notesAndOCR
+    case aiGeneration
+    case photoExif
+    case mediaSpecs
+    case githubRepo
+    case socialMediaExtract
+
+    public var id: String { rawValue }
+
+    public var defaultTitle: String {
+        switch self {
+        case .previewIdentity: "素材预览"
+        case .quickActions: "快捷操作"
+        case .colorsAndTags: "色板与标签"
+        case .notesAndOCR: "备注与识别文本"
+        case .aiGeneration: "AI 生图信息"
+        case .photoExif: "拍摄参数 (EXIF)"
+        case .mediaSpecs: "媒体信息"
+        case .githubRepo: "GitHub 仓库信息"
+        case .socialMediaExtract: "推文媒体提取"
+        }
+    }
+
+    public static let defaultOrder: [InspectorInfoSection] = [
+        .previewIdentity,
+        .quickActions,
+        .colorsAndTags,
+        .notesAndOCR,
+        .aiGeneration,
+        .photoExif,
+        .mediaSpecs,
+        .githubRepo,
+        .socialMediaExtract
+    ]
+
+    /// Restores a persisted raw order while deduplicating and appending any newly introduced sections.
+    public static func normalizedOrder(from rawValues: [String]) -> [InspectorInfoSection] {
+        var result: [InspectorInfoSection] = []
+        var seen = Set<InspectorInfoSection>()
+        for raw in rawValues {
+            if let section = InspectorInfoSection(rawValue: raw), seen.insert(section).inserted {
+                result.append(section)
+            }
+        }
+        for fallback in defaultOrder where seen.insert(fallback).inserted {
+            result.append(fallback)
+        }
+        return result
+    }
+
+    public static func moving(
+        _ dragged: InspectorInfoSection,
+        toTarget target: InspectorInfoSection,
+        in order: [InspectorInfoSection]
+    ) -> [InspectorInfoSection] {
+        var next = order
+        guard dragged != target,
+              let fromIdx = next.firstIndex(of: dragged),
+              let toIdx = next.firstIndex(of: target) else {
+            return order
+        }
+        let item = next.remove(at: fromIdx)
+        next.insert(item, at: toIdx)
+        return next
+    }
+
+    public static func movingToTop(
+        _ section: InspectorInfoSection,
+        in order: [InspectorInfoSection]
+    ) -> [InspectorInfoSection] {
+        var next = order
+        guard let idx = next.firstIndex(of: section), idx != 0 else { return order }
+        let item = next.remove(at: idx)
+        next.insert(item, at: 0)
+        return next
+    }
+
+    public static func movingToBottom(
+        _ section: InspectorInfoSection,
+        in order: [InspectorInfoSection]
+    ) -> [InspectorInfoSection] {
+        var next = order
+        guard let idx = next.firstIndex(of: section), idx != next.count - 1 else { return order }
+        let item = next.remove(at: idx)
+        next.append(item)
+        return next
+    }
+
+    /// Moves `section` up (`delta < 0`) or down (`delta > 0`) to swap past its nearest currently-visible neighbor,
+    /// so hidden sections (e.g. EXIF on screenshots) never cause a no-op click.
+    public static func stepping(
+        _ section: InspectorInfoSection,
+        delta: Int,
+        visible: [InspectorInfoSection],
+        in order: [InspectorInfoSection]
+    ) -> [InspectorInfoSection] {
+        guard delta != 0,
+              let visIdx = visible.firstIndex(of: section) else { return order }
+        let targetVisIdx = visIdx + (delta > 0 ? 1 : -1)
+        guard visible.indices.contains(targetVisIdx) else { return order }
+        return moving(section, toTarget: visible[targetVisIdx], in: order)
     }
 }
 
