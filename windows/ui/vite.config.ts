@@ -14,6 +14,13 @@ export default defineConfig({
     target: 'es2022',
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        shelf: 'shelf.html',
+        capture: 'capture.html',
+      },
+    },
   },
   test: {
     environment: 'jsdom',

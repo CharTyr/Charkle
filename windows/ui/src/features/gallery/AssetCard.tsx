@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Pin,
   RotateCcw,
+  Share2,
   Star,
   Trash2,
 } from 'lucide-react';
@@ -381,6 +382,18 @@ export const AssetCard: React.FC<AssetCardProps> = ({
           >
             <FolderOpen size={14} className="text-[var(--text-secondary)]" />
             在资源管理器中显示
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setMenuPoint(null);
+              void transport.startOutboundDrag(targetIds);
+            }}
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+          >
+            <Share2 size={14} className="text-[var(--text-secondary)]" />
+            拖出原文件到外部应用
           </button>
 
           {asset.sourceURL && (

@@ -11,13 +11,20 @@ import {
   type AssetBatchPatch,
   type AssetRecord,
   type CacheStats,
+  type CaptureSessionInfo,
   type ClientRect,
+  type ClipboardPreview,
+  type DeepLinkPayload,
+  type DesktopIntegrationStatus,
+  type DragOutOutcome,
   type DriveSyncConfig,
   type FilterCriteria,
   type FolderRecord,
   type FolderSuggestion,
+  type HotkeyConfig,
   type MoodboardDocument,
   type MoodboardSummary,
+  type OcrDiagnostics,
   type QuickJumpMatch,
   type ScoredAsset,
   type SmartFolderRecord,
@@ -33,6 +40,10 @@ export interface CharkleEventHandlers {
   onSyncStatus?: (status: SyncStatus) => void;
   onAssetEnriched?: (assetId: string) => void;
   onBoardUpdated?: (boardId: string) => void;
+  onClipboardChanged?: (preview: ClipboardPreview) => void;
+  onClipboardCollected?: (count: number) => void;
+  onShelfState?: (state: { expanded: boolean; pinned: boolean }) => void;
+  onDeepLinkNavigate?: (payload: DeepLinkPayload) => void;
 }
 
 export interface CharkleTransport {
@@ -41,6 +52,7 @@ export interface CharkleTransport {
   // Media zero-copy URL builders
   thumbnailUrl(assetId: string, tier?: ThumbnailTier): string;
   originalUrl(assetId: string, opts?: { cachedOnly?: boolean }): string;
+  captureFrameUrl(token: string): string;
 
   // Assets
   fetchAssets(criteria: FilterCriteria): Promise<AssetRecord[]>;
@@ -103,6 +115,34 @@ export interface CharkleTransport {
   windowClose(): Promise<void>;
   windowIsMaximized(): Promise<boolean>;
 
+  // M3 Native Windows Shelf, OLE Drag-Out, Region Capture, Clipboard, Hotkeys & OCR
+  startOutboundDrag(assetIds: string[]): Promise<DragOutOutcome>;
+  setShelfHitRect(rect: ClientRect | null): Promise<void>;
+  toggleShelf(): Promise<boolean>;
+  showShelf(pinned?: boolean): Promise<void>;
+  hideShelf(): Promise<void>;
+  setShelfPinned(pinned: boolean): Promise<boolean>;
+  startRegionCapture(targetFolderId?: string | null, targetBoardId?: string | null): Promise<CaptureSessionInfo>;
+  getCaptureSession(token: string): Promise<CaptureSessionInfo | null>;
+  commitRegionCapture(
+    token: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    targetFolderId?: string | null,
+    targetBoardId?: string | null,
+  ): Promise<AssetRecord[]>;
+  cancelRegionCapture(token: string): Promise<void>;
+  collectClipboardNow(targetFolderId?: string | null, targetBoardId?: string | null): Promise<number>;
+  getClipboardPreview(): Promise<ClipboardPreview | null>;
+  getDesktopIntegrationStatus(): Promise<DesktopIntegrationStatus>;
+  setAutostartEnabled(enabled: boolean): Promise<boolean>;
+  updateHotkeys(config: HotkeyConfig): Promise<HotkeyConfig>;
+  getOcrDiagnostics(): Promise<OcrDiagnostics>;
+  runAssetOcr(id: string): Promise<AssetRecord | null>;
+  focusMainWindow(): Promise<void>;
+
   // Live Events
   subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void>;
 }
@@ -121,6 +161,10 @@ export class TauriTransport implements CharkleTransport {
   originalUrl(assetId: string, opts?: { cachedOnly?: boolean }): string {
     const suffix = opts?.cachedOnly ? '?cachedOnly=1' : '';
     return `http://charkle-media.localhost/original/${encodeURIComponent(assetId)}${suffix}`;
+  }
+
+  captureFrameUrl(token: string): string {
+    return `http://charkle-media.localhost/capture-frame/${encodeURIComponent(token)}`;
   }
 
   fetchAssets(criteria: FilterCriteria): Promise<AssetRecord[]> {
@@ -321,6 +365,100 @@ export class TauriTransport implements CharkleTransport {
     return invoke('window_is_maximized');
   }
 
+  startOutboundDrag(assetIds: string[]): Promise<DragOutOutcome> {
+    return invoke('start_outbound_drag', { assetIds });
+  }
+
+  setShelfHitRect(rect: ClientRect | null): Promise<void> {
+    return invoke('set_shelf_hit_rect', { rect });
+  }
+
+  toggleShelf(): Promise<boolean> {
+    return invoke('toggle_shelf');
+  }
+
+  showShelf(pinned = false): Promise<void> {
+    return invoke('show_shelf', { pinned });
+  }
+
+  hideShelf(): Promise<void> {
+    return invoke('hide_shelf');
+  }
+
+  setShelfPinned(pinned: boolean): Promise<boolean> {
+    return invoke('set_shelf_pinned', { pinned });
+  }
+
+  startRegionCapture(targetFolderId?: string | null, targetBoardId?: string | null): Promise<CaptureSessionInfo> {
+    return invoke('start_region_capture', {
+      targetFolderId: targetFolderId ?? null,
+      targetBoardId: targetBoardId ?? null,
+    });
+  }
+
+  getCaptureSession(token: string): Promise<CaptureSessionInfo | null> {
+    return invoke('get_capture_session', { token });
+  }
+
+  commitRegionCapture(
+    token: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    targetFolderId?: string | null,
+    targetBoardId?: string | null,
+  ): Promise<AssetRecord[]> {
+    return invoke('commit_region_capture', {
+      token,
+      x,
+      y,
+      width,
+      height,
+      targetFolderId: targetFolderId ?? null,
+      targetBoardId: targetBoardId ?? null,
+    });
+  }
+
+  cancelRegionCapture(token: string): Promise<void> {
+    return invoke('cancel_region_capture', { token });
+  }
+
+  collectClipboardNow(targetFolderId?: string | null, targetBoardId?: string | null): Promise<number> {
+    return invoke('collect_clipboard_now', {
+      targetFolderId: targetFolderId ?? null,
+      targetBoardId: targetBoardId ?? null,
+    });
+  }
+
+  getClipboardPreview(): Promise<ClipboardPreview | null> {
+    return invoke('get_clipboard_preview');
+  }
+
+  getDesktopIntegrationStatus(): Promise<DesktopIntegrationStatus> {
+    return invoke('get_desktop_integration_status');
+  }
+
+  setAutostartEnabled(enabled: boolean): Promise<boolean> {
+    return invoke('set_autostart_enabled', { enabled });
+  }
+
+  updateHotkeys(config: HotkeyConfig): Promise<HotkeyConfig> {
+    return invoke('update_hotkeys', { config });
+  }
+
+  getOcrDiagnostics(): Promise<OcrDiagnostics> {
+    return invoke('get_ocr_diagnostics');
+  }
+
+  runAssetOcr(id: string): Promise<AssetRecord | null> {
+    return invoke('run_asset_ocr', { id });
+  }
+
+  focusMainWindow(): Promise<void> {
+    return invoke('focus_main_window');
+  }
+
   async subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void> {
     const unsubs: UnlistenFn[] = [];
     if (handlers.onLibraryChanged) {
@@ -334,6 +472,34 @@ export class TauriTransport implements CharkleTransport {
     }
     if (handlers.onBoardUpdated) {
       unsubs.push(await listen<string>('board:updated', (e) => handlers.onBoardUpdated?.(e.payload)));
+    }
+    if (handlers.onClipboardChanged) {
+      unsubs.push(
+        await listen<ClipboardPreview>('clipboard:changed', (e) =>
+          handlers.onClipboardChanged?.(e.payload),
+        ),
+      );
+    }
+    if (handlers.onClipboardCollected) {
+      unsubs.push(
+        await listen<number>('clipboard:collected', (e) =>
+          handlers.onClipboardCollected?.(e.payload),
+        ),
+      );
+    }
+    if (handlers.onShelfState) {
+      unsubs.push(
+        await listen<{ expanded: boolean; pinned: boolean }>('shelf:state', (e) =>
+          handlers.onShelfState?.(e.payload),
+        ),
+      );
+    }
+    if (handlers.onDeepLinkNavigate) {
+      unsubs.push(
+        await listen<DeepLinkPayload>('deep-link:navigate', (e) =>
+          handlers.onDeepLinkNavigate?.(e.payload),
+        ),
+      );
     }
     return () => {
       for (const u of unsubs) u();
@@ -369,6 +535,26 @@ export class InMemoryMockTransport implements CharkleTransport {
   private textContent = new Map<string, string>();
   private thumbs = new Map<string, string>();
   private maximized = false;
+  private shelfVisible = false;
+  private shelfPinned = false;
+  private autostartEnabled = false;
+  private hotkeyConfig: HotkeyConfig = {
+    enabled: true,
+    captureArea: 'Alt+Shift+A',
+    toggleShelf: 'Alt+Shift+S',
+    collectClipboard: 'Alt+Shift+V',
+  };
+  private clipboardPreview: ClipboardPreview | null = {
+    kind: 'url',
+    label: 'https://x.com/charkle_design/status/1900000001',
+    url: 'https://x.com/charkle_design/status/1900000001',
+    hex: null,
+    fileCount: 0,
+    isSocialOrGithubUrl: true,
+  };
+  public lastOutboundDragIds: string[] = [];
+  public lastShelfHitRect: ClientRect | null = null;
+  public lastCommittedCrop: { token: string; x: number; y: number; width: number; height: number } | null = null;
   private syncCfg: DriveSyncConfig = {
     mode: 'localOnly',
     rootFolderName: 'Charkle',
@@ -614,6 +800,10 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   originalUrl(assetId: string): string {
     return this.thumbnailUrl(assetId);
+  }
+
+  captureFrameUrl(_token: string): string {
+    return makeSvgDataUrl('#141517', '#2A60E0', 'Desktop Snapshot', 1920, 1080);
   }
 
   async fetchAssets(criteria: FilterCriteria): Promise<AssetRecord[]> {
@@ -1106,6 +1296,158 @@ export class InMemoryMockTransport implements CharkleTransport {
   async windowIsMaximized(): Promise<boolean> {
     return this.maximized;
   }
+
+  async startOutboundDrag(assetIds: string[]): Promise<DragOutOutcome> {
+    this.lastOutboundDragIds = [...assetIds];
+    return assetIds.length > 0 ? 'copied' : 'cancelled';
+  }
+
+  async setShelfHitRect(rect: ClientRect | null): Promise<void> {
+    this.lastShelfHitRect = rect;
+  }
+
+  async toggleShelf(): Promise<boolean> {
+    this.shelfVisible = !this.shelfVisible;
+    return this.shelfVisible;
+  }
+
+  async showShelf(pinned = false): Promise<void> {
+    this.shelfVisible = true;
+    if (pinned) this.shelfPinned = true;
+  }
+
+  async hideShelf(): Promise<void> {
+    this.shelfVisible = false;
+    this.shelfPinned = false;
+  }
+
+  async setShelfPinned(pinned: boolean): Promise<boolean> {
+    this.shelfPinned = pinned;
+    return this.shelfPinned;
+  }
+
+  async startRegionCapture(
+    targetFolderId?: string | null,
+    targetBoardId?: string | null,
+  ): Promise<CaptureSessionInfo> {
+    return {
+      token: 'MOCK-CAPTURE-TOKEN',
+      bounds: { left: 0, top: 0, width: 1920, height: 1080 },
+      monitors: [
+        {
+          index: 0,
+          left: 0,
+          top: 0,
+          width: 1920,
+          height: 1080,
+          dpiX: 96,
+          dpiY: 96,
+          scaleFactor: 1,
+          isPrimary: true,
+        },
+      ],
+      width: 1920,
+      height: 1080,
+      targetFolderId: targetFolderId ?? null,
+      targetBoardId: targetBoardId ?? null,
+    };
+  }
+
+  async getCaptureSession(token: string): Promise<CaptureSessionInfo | null> {
+    return {
+      token,
+      bounds: { left: 0, top: 0, width: 1920, height: 1080 },
+      monitors: [
+        {
+          index: 0,
+          left: 0,
+          top: 0,
+          width: 1920,
+          height: 1080,
+          dpiX: 96,
+          dpiY: 96,
+          scaleFactor: 1,
+          isPrimary: true,
+        },
+      ],
+      width: 1920,
+      height: 1080,
+    };
+  }
+
+  async commitRegionCapture(
+    token: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    targetFolderId?: string | null,
+  ): Promise<AssetRecord[]> {
+    this.lastCommittedCrop = { token, x, y, width, height };
+    return this.ingestFiles([`screenshot-${width}x${height}.png`], targetFolderId);
+  }
+
+  async cancelRegionCapture(_token: string): Promise<void> {}
+
+  async collectClipboardNow(targetFolderId?: string | null): Promise<number> {
+    if (this.clipboardPreview?.url) {
+      await this.ingestUrl(this.clipboardPreview.url, null, null, targetFolderId);
+      return 1;
+    }
+    return 0;
+  }
+
+  async getClipboardPreview(): Promise<ClipboardPreview | null> {
+    return this.clipboardPreview;
+  }
+
+  async getDesktopIntegrationStatus(): Promise<DesktopIntegrationStatus> {
+    return {
+      hotkeys: { ...this.hotkeyConfig },
+      autostartEnabled: this.autostartEnabled,
+      trayActive: true,
+      deepLinkScheme: 'charkle',
+      ocr: {
+        availableLanguages: ['zh-Hans-CN', 'en-US'],
+        selectedLanguage: 'zh-Hans-CN',
+        hasChinese: true,
+        hasEnglish: true,
+        diagnosticMessage: null,
+      },
+      gdirectPath: null,
+      shelfVisible: this.shelfVisible,
+      shelfPinned: this.shelfPinned,
+    };
+  }
+
+  async setAutostartEnabled(enabled: boolean): Promise<boolean> {
+    this.autostartEnabled = enabled;
+    return this.autostartEnabled;
+  }
+
+  async updateHotkeys(config: HotkeyConfig): Promise<HotkeyConfig> {
+    this.hotkeyConfig = { ...config };
+    return { ...this.hotkeyConfig };
+  }
+
+  async getOcrDiagnostics(): Promise<OcrDiagnostics> {
+    return {
+      availableLanguages: ['zh-Hans-CN', 'en-US'],
+      selectedLanguage: 'zh-Hans-CN',
+      hasChinese: true,
+      hasEnglish: true,
+      diagnosticMessage: null,
+    };
+  }
+
+  async runAssetOcr(id: string): Promise<AssetRecord | null> {
+    const asset = this.assets.find((a) => a.id === id);
+    if (!asset) return null;
+    asset.ocrText = '识别文字：Charkle 视觉灵感参考';
+    return { ...asset };
+  }
+
+  async focusMainWindow(): Promise<void> {}
 
   async subscribeEvents(): Promise<() => void> {
     return () => {};

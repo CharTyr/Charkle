@@ -3,19 +3,33 @@
 pub mod assets;
 pub mod folders;
 pub mod media;
+pub mod native;
 pub mod query;
 pub mod sync;
 pub mod window;
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use charkle_core::engine::LiveCharkleEngine;
 use charkle_core::error::CoreError;
+use charkle_platform_win::clipboard::{ClipboardListenerHandle, ClipboardPreview};
+use charkle_platform_win::shelf_win::TopEdgeDragMonitorHandle;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::desktop::{CaptureFrameStore, HotkeyConfig};
+
 pub struct AppState {
     pub engine: Arc<LiveCharkleEngine>,
+    pub data_dir: PathBuf,
+    pub capture_frames: Arc<CaptureFrameStore>,
+    pub hotkeys: Arc<Mutex<HotkeyConfig>>,
+    pub shelf_pinned: Arc<AtomicBool>,
+    pub latest_clipboard: Arc<Mutex<Option<ClipboardPreview>>>,
+    pub _clipboard_listener: Option<ClipboardListenerHandle>,
+    pub _top_edge_monitor: Option<TopEdgeDragMonitorHandle>,
 }
 
 #[derive(Debug, Clone, Serialize)]

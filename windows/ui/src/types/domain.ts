@@ -452,6 +452,81 @@ export interface ClientRect {
   height: number;
 }
 
+export type DragOutOutcome = 'copied' | 'moved' | 'linked' | 'cancelled';
+
+export type ShelfTargetMode = 'inbox' | 'folder' | 'activeMoodboard';
+
+export interface HotkeyConfig {
+  enabled: boolean;
+  captureArea: string;
+  toggleShelf: string;
+  collectClipboard: string;
+}
+
+export interface MonitorCaptureInfo {
+  index: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  dpiX: number;
+  dpiY: number;
+  scaleFactor: number;
+  isPrimary: boolean;
+}
+
+export interface VirtualDesktopBounds {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface CaptureSessionInfo {
+  token: string;
+  bounds: VirtualDesktopBounds;
+  monitors: MonitorCaptureInfo[];
+  width: number;
+  height: number;
+  targetFolderId?: string | null;
+  targetBoardId?: string | null;
+}
+
+export interface ClipboardPreview {
+  kind: 'image' | 'files' | 'url' | 'color' | 'text' | string;
+  label: string;
+  url?: string | null;
+  hex?: string | null;
+  fileCount: number;
+  isSocialOrGithubUrl: boolean;
+}
+
+export interface OcrDiagnostics {
+  availableLanguages: string[];
+  selectedLanguage?: string | null;
+  hasChinese: boolean;
+  hasEnglish: boolean;
+  diagnosticMessage?: string | null;
+}
+
+export interface DesktopIntegrationStatus {
+  hotkeys: HotkeyConfig;
+  autostartEnabled: boolean;
+  trayActive: boolean;
+  deepLinkScheme: string;
+  ocr: OcrDiagnostics;
+  gdirectPath?: string | null;
+  shelfVisible: boolean;
+  shelfPinned: boolean;
+}
+
+export type DeepLinkPayload =
+  | { action: 'openAsset'; id: string }
+  | { action: 'openFolder'; id: string }
+  | { action: 'openBoard'; id: string }
+  | { action: 'captureArea' }
+  | { action: 'toggleShelf' };
+
 export type SidebarDestination =
   | { type: 'allItems' }
   | { type: 'inbox' }

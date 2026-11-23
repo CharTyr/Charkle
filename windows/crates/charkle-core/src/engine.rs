@@ -1299,6 +1299,33 @@ impl LiveCharkleEngine {
         self.emit(EngineEvent::LibraryChanged);
         Ok(report)
     }
+
+    /// Runs the configured OS `NativeOcrProvider` on an existing asset's original or preview image
+    /// and persists extracted text into SQLite + FTS5 immediately.
+    pub async fn run_ocr_for_asset(&self, id: Uuid) -> CoreResult<Option<AssetRecord>> {
+        let Some(mut asset) = self.db.asset(id)? else {
+            return Ok(None);
+        };
+        let path = self
+            .media
+            .cached_original(&asset)
+            .or_else(|| self.media.thumbnail_url(id, ThumbnailTier::Preview1400))
+            .or_else(|| self.media.thumbnail_url(id, ThumbnailTier::Grid520));
+        let Some(path) = path else {
+            return Ok(Some(asset));
+        };
+        let bytes = std::fs::read(&path)?;
+        if let Ok(Some(text)) = self.ocr.recognize_text(&bytes).await {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                asset.ocr_text = Some(trimmed.to_string());
+                let saved = self.db.save_asset_locally(&asset, false)?;
+                self.emit(EngineEvent::AssetEnriched(id));
+                return Ok(Some(saved));
+            }
+        }
+        Ok(Some(asset))
+    }
 }
 
 fn normalize_folder_name(raw: &str, parent: Option<Uuid>) -> CoreResult<String> {

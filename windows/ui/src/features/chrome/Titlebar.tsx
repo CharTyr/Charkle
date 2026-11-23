@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Camera,
+  Clipboard,
   Cloud,
   Copy,
+  Keyboard,
   Minus,
   Monitor,
   Moon,
   PanelLeft,
   PanelRight,
+  PanelTop,
   Plus,
   RefreshCw,
   Search,
@@ -15,8 +19,9 @@ import {
   X,
 } from 'lucide-react';
 import { getTransport } from '../../api/transport';
-import { CharkleBrandMark, type ThemeMode } from '../../design-system';
+import { CharkleBrandMark, Popover, type ThemeMode } from '../../design-system';
 import { useCoordinatorStore, useSyncAIStore } from '../../stores';
+import type { DesktopIntegrationStatus } from '../../types/domain';
 
 const NEXT_THEME: Record<ThemeMode, ThemeMode> = {
   system: 'light',
@@ -49,7 +54,18 @@ export const Titlebar: React.FC = () => {
   const syncNow = useSyncAIStore((s) => s.syncNow);
 
   const maxBtnRef = useRef<HTMLButtonElement | null>(null);
+  const desktopBtnRef = useRef<HTMLButtonElement | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [desktopMenuOpen, setDesktopMenuOpen] = useState(false);
+  const [desktopStatus, setDesktopStatus] = useState<DesktopIntegrationStatus | null>(null);
+  const pushToast = useCoordinatorStore((s) => s.pushToast);
+
+  const loadDesktopStatus = useCallback(() => {
+    void getTransport()
+      .getDesktopIntegrationStatus()
+      .then(setDesktopStatus)
+      .catch(() => {});
+  }, []);
 
   const reportMaximizeRect = useCallback(() => {
     const el = maxBtnRef.current;
@@ -156,6 +172,26 @@ export const Titlebar: React.FC = () => {
           <Plus size={14} />
           <span className="hidden sm:inline">采集</span>
         </button>
+
+        <button
+          type="button"
+          onClick={() => void getTransport().startRegionCapture()}
+          aria-label="区域截图采集"
+          title="区域截图采集 (Alt+Shift+A)"
+          className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+        >
+          <Camera size={14.5} />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => void getTransport().toggleShelf()}
+          aria-label="切换顶部灵感抽屉"
+          title="显示 / 隐藏顶部灵感抽屉 (Alt+Shift+S)"
+          className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+        >
+          <PanelTop size={14.5} />
+        </button>
       </div>
 
       {/* Center: Quick Jump Ctrl+J trigger */}
@@ -206,6 +242,21 @@ export const Titlebar: React.FC = () => {
                     ? `待同步 ${syncStatus.pendingOpCount}`
                     : '本地就绪'}
             </span>
+          </button>
+
+          <button
+            ref={desktopBtnRef}
+            type="button"
+            onClick={() => {
+              const next = !desktopMenuOpen;
+              setDesktopMenuOpen(next);
+              if (next) loadDesktopStatus();
+            }}
+            title="桌面集成、全局快捷键与开机自启"
+            aria-label="桌面集成设置"
+            className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+          >
+            <Keyboard size={14.5} />
           </button>
 
           <button
@@ -267,6 +318,112 @@ export const Titlebar: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Desktop Integration Quick Popover (M3-R4 & M3-R5) */}
+      <Popover
+        open={desktopMenuOpen}
+        onOpenChange={setDesktopMenuOpen}
+        anchorEl={desktopBtnRef.current}
+        placement="bottom-end"
+        className="w-[300px] p-3.5"
+      >
+        <div className="flex flex-col gap-3 text-[12px]">
+          <div className="flex items-center justify-between">
+            <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+              Windows 桌面集成
+            </span>
+            <button
+              type="button"
+              onClick={async () => {
+                setDesktopMenuOpen(false);
+                const count = await getTransport().collectClipboardNow();
+                pushToast({
+                  message: count > 0 ? `已采集 ${count} 项剪贴板内容` : '剪贴板暂无可采集内容',
+                  tone: 'info',
+                });
+              }}
+              className="charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-chip)] bg-[var(--accent-soft)] text-[var(--accent)] font-medium cursor-pointer"
+            >
+              <Clipboard size={12} />
+              采集剪贴板
+            </button>
+          </div>
+
+          {desktopStatus && (
+            <>
+              <label className="flex items-center justify-between text-[var(--text-primary)] cursor-pointer">
+                <span>启用全局快捷键</span>
+                <input
+                  type="checkbox"
+                  checked={desktopStatus.hotkeys.enabled}
+                  onChange={async (e) => {
+                    const updated = await getTransport().updateHotkeys({
+                      ...desktopStatus.hotkeys,
+                      enabled: e.target.checked,
+                    });
+                    setDesktopStatus({ ...desktopStatus, hotkeys: updated });
+                  }}
+                  className="accent-[var(--accent)] h-4 w-4 cursor-pointer"
+                />
+              </label>
+
+              <div className="p-2 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] flex flex-col gap-1.5 text-[11.5px] text-[var(--text-secondary)]">
+                <div className="flex items-center justify-between">
+                  <span>区域截图采集</span>
+                  <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[10.5px]">
+                    {desktopStatus.hotkeys.captureArea}
+                  </kbd>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>顶部灵感抽屉</span>
+                  <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[10.5px]">
+                    {desktopStatus.hotkeys.toggleShelf}
+                  </kbd>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>剪贴板快速采集</span>
+                  <kbd className="px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[10.5px]">
+                    {desktopStatus.hotkeys.collectClipboard}
+                  </kbd>
+                </div>
+              </div>
+
+              <label className="flex items-center justify-between text-[var(--text-primary)] cursor-pointer">
+                <span>随 Windows 开机自启</span>
+                <input
+                  type="checkbox"
+                  checked={desktopStatus.autostartEnabled}
+                  onChange={async (e) => {
+                    const enabled = await getTransport().setAutostartEnabled(e.target.checked);
+                    setDesktopStatus({ ...desktopStatus, autostartEnabled: enabled });
+                  }}
+                  className="accent-[var(--accent)] h-4 w-4 cursor-pointer"
+                />
+              </label>
+
+              <div className="pt-2 border-t border-[var(--border-hairline)] flex flex-col gap-1 text-[11px] text-[var(--text-tertiary)]">
+                <div className="flex items-center justify-between">
+                  <span>离线文字识别</span>
+                  <span className="text-[var(--text-secondary)]">
+                    {desktopStatus.ocr.selectedLanguage ?? '未安装语言包'}
+                  </span>
+                </div>
+                {desktopStatus.ocr.diagnosticMessage && (
+                  <p className="text-[11px] text-[var(--warning)] leading-relaxed">
+                    {desktopStatus.ocr.diagnosticMessage}
+                  </p>
+                )}
+                <div className="flex items-center justify-between">
+                  <span>系统托盘 & 协议链接</span>
+                  <span className="text-[var(--text-secondary)] charkle-mono">
+                    {desktopStatus.deepLinkScheme}://
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </Popover>
     </header>
   );
 };

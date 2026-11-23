@@ -5,6 +5,8 @@
 //! - `charkle-media://localhost/thumb/{id}/{tier}` (`grid520` | `preview1400`)
 //! - `charkle-media://localhost/original/{id}` (supports `?cachedOnly=1` so hover previews
 //!   strictly read local cache and never trigger cloud downloads)
+//! - `charkle-media://localhost/capture-frame/{token}` (frozen 1:1 physical-pixel screenshot
+//!   frame served directly from RAM without IPC base64 overhead)
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -17,6 +19,8 @@ use charkle_core::media::MediaPipeline;
 use charkle_core::models::media::ThumbnailTier;
 use tauri::http::{header, Request, Response, StatusCode};
 use uuid::Uuid;
+
+use crate::desktop::CaptureFrameStore;
 
 /// Maximum single Range response chunk size (4 MiB) so 4K video/GIF scrubbing never spikes RAM.
 const MAX_RANGE_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
@@ -84,10 +88,11 @@ pub fn parse_byte_range(header_value: &str, total_len: u64) -> ByteRangeResult {
     ByteRangeResult::Partial { start, end }
 }
 
-/// Handles a `charkle-media://` request synchronously from disk without copying whole large files
-/// when a `Range` header is supplied.
+/// Handles a `charkle-media://` request synchronously from disk or ephemeral capture frame
+/// store without copying whole large files when a `Range` header is supplied.
 pub fn handle_media_request(
     engine: &Arc<LiveCharkleEngine>,
+    capture_frames: Option<&Arc<CaptureFrameStore>>,
     request: &Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
     if request.method() == "OPTIONS" {
@@ -103,6 +108,28 @@ pub fn handle_media_request(
     let path = request.uri().path();
     let query = request.uri().query().unwrap_or("");
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    if let ["capture-frame", token] = segments.as_slice() {
+        let Some(store) = capture_frames else {
+            return error_response(StatusCode::NOT_FOUND, "Capture store unavailable");
+        };
+        let Some(frame) = store.get_frame(token) else {
+            return error_response(StatusCode::NOT_FOUND, "Capture frame expired");
+        };
+        let body = if request.method() == "HEAD" {
+            Vec::new()
+        } else {
+            frame.png_bytes.clone()
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CONTENT_LENGTH, frame.png_bytes.len().to_string())
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .body(body)
+            .unwrap_or_else(|_| Response::new(Vec::new()));
+    }
 
     let resolved: Option<(PathBuf, String, &'static str)> = match segments.as_slice() {
         ["thumb", id_str, tier_str] => {
@@ -327,7 +354,7 @@ mod tests {
             .uri(format!("http://charkle-media.localhost/thumb/{id}/grid520"))
             .body(Vec::new())
             .unwrap();
-        let thumb_res = handle_media_request(&engine, &thumb_req);
+        let thumb_res = handle_media_request(&engine, None, &thumb_req);
         assert_eq!(thumb_res.status(), StatusCode::OK);
         assert_eq!(
             thumb_res.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -343,7 +370,7 @@ mod tests {
             .header(header::RANGE, "bytes=10-19")
             .body(Vec::new())
             .unwrap();
-        let range_res = handle_media_request(&engine, &range_req);
+        let range_res = handle_media_request(&engine, None, &range_req);
         assert_eq!(range_res.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(range_res.body(), b"ABCDEFGHIJ");
         assert_eq!(
@@ -354,5 +381,39 @@ mod tests {
             range_res.headers().get(header::ACCEPT_RANGES).unwrap(),
             "bytes"
         );
+
+        // 3. Frozen capture-frame zero-copy serving
+        let store = Arc::new(CaptureFrameStore::default());
+        let info = store.insert(
+            charkle_platform_win::capture::CapturedDesktopFrame {
+                bounds: charkle_platform_win::capture::VirtualDesktopBounds {
+                    left: 0,
+                    top: 0,
+                    width: 2,
+                    height: 2,
+                },
+                monitors: Vec::new(),
+                width: 2,
+                height: 2,
+                rgba: vec![255u8; 16],
+                png_bytes: b"\x89PNG\r\n\x1a\nMOCK".to_vec(),
+            },
+            None,
+            None,
+        );
+        let cap_req = Request::builder()
+            .uri(format!(
+                "http://charkle-media.localhost/capture-frame/{}",
+                info.token
+            ))
+            .body(Vec::new())
+            .unwrap();
+        let cap_res = handle_media_request(&engine, Some(&store), &cap_req);
+        assert_eq!(cap_res.status(), StatusCode::OK);
+        assert_eq!(
+            cap_res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert!(cap_res.body().starts_with(b"\x89PNG"));
     }
 }

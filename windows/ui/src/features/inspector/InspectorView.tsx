@@ -10,6 +10,8 @@ import {
   Pin,
   Plus,
   RefreshCw,
+  ScanText,
+  Share2,
   Sparkles,
   Star,
   Tag,
@@ -163,6 +165,7 @@ export const InspectorView: React.FC = () => {
   const setCriteria = useLibraryStore((s) => s.setCriteria);
   const refreshRichAsset = useLibraryStore((s) => s.refreshRichAsset);
   const hydrateImageMetadata = useLibraryStore((s) => s.hydrateImageMetadata);
+  const patchSingleAssetInMemory = useLibraryStore((s) => s.patchSingleAssetInMemory);
 
   const isDark = useResolvedIsDark();
 
@@ -180,6 +183,7 @@ export const InspectorView: React.FC = () => {
   const [newTagDraft, setNewTagDraft] = useState('');
   const [batchTagDraft, setBatchTagDraft] = useState('');
   const [refreshingRich, setRefreshingRich] = useState(false);
+  const [runningOcr, setRunningOcr] = useState(false);
 
   if ((asset?.id ?? null) !== boundAssetId) {
     setBoundAssetId(asset?.id ?? null);
@@ -644,6 +648,53 @@ export const InspectorView: React.FC = () => {
                       <FolderOpen size={12.5} />
                       打开位置
                     </Button>
+                    <Button
+                      variant="secondary"
+                      size="xs"
+                      title="通过原生文件拖拽送入 Figma / Photoshop / 资源管理器"
+                      onClick={() => {
+                        void transport
+                          .startOutboundDrag([asset.id])
+                          .catch((err) =>
+                            pushToast({
+                              message: err instanceof Error ? err.message : '拖出原文件失败',
+                              tone: 'error',
+                            }),
+                          );
+                      }}
+                    >
+                      <Share2 size={12.5} />
+                      拖出原文件
+                    </Button>
+                    {(asset.mediaKind === 'image' ||
+                      asset.mediaKind === 'animatedImage' ||
+                      asset.mediaKind === 'designFile') && (
+                      <Button
+                        variant="secondary"
+                        size="xs"
+                        loading={runningOcr}
+                        onClick={async () => {
+                          setRunningOcr(true);
+                          try {
+                            const updated = await transport.runAssetOcr(asset.id);
+                            if (updated) {
+                              patchSingleAssetInMemory(updated);
+                              pushToast({
+                                message: updated.ocrText
+                                  ? '已提取画面文字并建立索引'
+                                  : '未在画面中检测到文字',
+                                tone: 'info',
+                              });
+                            }
+                          } finally {
+                            setRunningOcr(false);
+                          }
+                        }}
+                      >
+                        <ScanText size={12.5} />
+                        提取文字
+                      </Button>
+                    )}
                     {asset.sourceURL && (
                       <Button
                         variant="secondary"
@@ -673,6 +724,24 @@ export const InspectorView: React.FC = () => {
                       </Button>
                     )}
                   </div>
+
+                  {asset.ocrText && (
+                    <div className="pt-1.5 border-t border-[var(--border-hairline)] flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-[var(--text-tertiary)]">画面识别文字</span>
+                        <button
+                          type="button"
+                          onClick={() => void copyText(asset.ocrText!, '识别文字')}
+                          className="text-[11px] text-[var(--accent)] hover:underline cursor-pointer"
+                        >
+                          复制
+                        </button>
+                      </div>
+                      <p className="p-2 rounded-[var(--radius-card-inner)] bg-[var(--bg-inspector-field)] text-[11.5px] text-[var(--text-secondary)] leading-relaxed whitespace-pre-wrap charkle-wrap-safe">
+                        {asset.ocrText}
+                      </p>
+                    </div>
+                  )}
                 </InspectorCardShell>
               );
             }

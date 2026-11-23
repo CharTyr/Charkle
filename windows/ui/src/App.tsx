@@ -70,6 +70,25 @@ export const App: React.FC = () => {
         onBoardUpdated: () => {
           void fetchBoards();
         },
+        onClipboardCollected: (count) => {
+          if (count > 0) {
+            useCoordinatorStore.getState().pushToast({
+              message: `已从系统剪贴板采集 ${count} 项灵感`,
+              tone: 'success',
+            });
+          }
+        },
+        onDeepLinkNavigate: (payload) => {
+          const coord = useCoordinatorStore.getState();
+          if (payload.action === 'openAsset') {
+            coord.setDestination({ type: 'allItems' }, { preserveSelection: true });
+            coord.setSelection([payload.id], payload.id);
+          } else if (payload.action === 'openFolder') {
+            coord.setDestination({ type: 'folder', id: payload.id });
+          } else if (payload.action === 'openBoard') {
+            coord.setDestination({ type: 'moodboard', id: payload.id });
+          }
+        },
       })
       .then((fn) => {
         unlisten = fn;
