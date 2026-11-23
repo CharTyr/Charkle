@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Charkle 扩展设置</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="page-wrap">
+    <header class="page-header">
+      <div class="brand-lockup">
+        <picture class="brand-icon">
+          <source media="(prefers-color-scheme: dark)" srcset="icons/charkle-dark.svg" />
+          <img src="icons/charkle-light.svg" alt="Charkle" width="32" height="32" />
+        </picture>
+        <h1>Charkle 扩展设置</h1>
+      </div>
+      <div class="header-right">
+        <span id="header-conn-pill" class="conn-pill" data-state="idle">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span id="header-conn-text">未连接</span>
+        </span>
+        <button id="btn-open-charkle" type="button" class="btn-secondary pressable" hidden>
+          打开 Charkle
+        </button>
+      </div>
+    </header>
+
+    <main class="sections-stack">
+      <!-- Section 1: Server Connection -->
+      <section class="settings-card">
+        <div class="card-head">
+          <h2>服务连接</h2>
+        </div>
+
+        <form id="connection-form" class="form-stack" novalidate>
+          <div class="field-group">
+            <label for="opt-server-url">服务地址</label>
+            <input
+              id="opt-server-url"
+              type="url"
+              class="input-control"
+              placeholder="http://127.0.0.1:3417"
+              autocomplete="url"
+              required
+            />
+          </div>
+
+          <div class="field-group">
+            <label for="opt-api-token">访问令牌</label>
+            <div class="token-row">
+              <input
+                id="opt-api-token"
+                type="password"
+                class="input-control"
+                placeholder="chk_..."
+                autocomplete="off"
+                spellcheck="false"
+                required
+              />
+              <button
+                id="btn-toggle-token"
+                type="button"
+                class="btn-secondary btn-icon-only pressable"
+                aria-label="显示或隐藏访问令牌"
+                title="显示/隐藏访问令牌"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M1.8 8C3.1 5.3 5.3 4 8 4C10.7 4 12.9 5.3 14.2 8C12.9 10.7 10.7 12 8 12C5.3 12 3.1 10.7 1.8 8Z" stroke="currentColor" stroke-width="1.35" />
+                  <circle cx="8" cy="8" r="1.8" stroke="currentColor" stroke-width="1.35" />
+                </svg>
+              </button>
+            </div>
+            <p class="field-hint">
+              可在 Charkle「设置 → 浏览器扩展与采集」生成 <code>chk_</code> 访问令牌。
+            </p>
+          </div>
+
+          <div id="conn-feedback" class="feedback-box" role="status" aria-live="polite" hidden></div>
+
+          <div class="form-actions">
+            <button id="btn-test-conn" type="button" class="btn-secondary pressable">
+              测试连接
+            </button>
+            <button id="btn-save-conn" type="submit" class="btn-primary pressable">
+              测试并保存
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Section 2: Default Collection Target -->
+      <section class="settings-card">
+        <div class="card-head-row">
+          <div class="card-head">
+            <h2>默认收藏目标</h2>
+            <p>右键菜单、网页拖图与快捷键均使用此目标。</p>
+          </div>
+          <button id="btn-sync-targets" type="button" class="btn-secondary btn-sm pressable">
+            刷新列表
+          </button>
+        </div>
+
+        <div class="segmented-control" role="radiogroup" aria-label="默认收藏目标类型">
+          <button type="button" class="seg-btn pressable" role="radio" data-target-mode="inbox" aria-checked="true">
+            收件箱
+          </button>
+          <button type="button" class="seg-btn pressable" role="radio" data-target-mode="folder" aria-checked="false">
+            指定文件夹
+          </button>
+          <button type="button" class="seg-btn pressable" role="radio" data-target-mode="board" aria-checked="false">
+            当前情绪板
+          </button>
+        </div>
+
+        <div id="opt-folder-wrap" class="target-select-block" hidden>
+          <label for="opt-select-folder">目标文件夹</label>
+          <select id="opt-select-folder" class="select-control"></select>
+        </div>
+
+        <div id="opt-board-wrap" class="target-select-block" hidden>
+          <label for="opt-select-board">目标情绪板</label>
+          <select id="opt-select-board" class="select-control"></select>
+        </div>
+      </section>
+
+      <!-- Section 3: Drag & Shortcuts -->
+      <section class="settings-card">
+        <div class="card-head">
+          <h2>拖拽与快捷键</h2>
+        </div>
+
+        <div class="switch-row">
+          <div class="switch-copy">
+            <span id="drag-switch-label" class="switch-title">网页拖图收藏</span>
+            <span class="switch-desc">
+              在外部网页拖拽图片时，于右下角显示快捷收藏入口。
+            </span>
+          </div>
+          <button
+            id="switch-drag-drop"
+            type="button"
+            class="toggle-switch"
+            role="switch"
+            aria-checked="true"
+            aria-labelledby="drag-switch-label"
+          >
+            <span class="toggle-knob" aria-hidden="true"></span>
+          </button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="shortcut-list">
+          <div class="shortcut-row">
+            <span>收藏当前网页</span>
+            <kbd>Alt + Shift + C</kbd>
+          </div>
+          <div class="shortcut-row">
+            <span>打开 Charkle 面板</span>
+            <kbd>Alt + Shift + K</kbd>
+          </div>
+        </div>
+
+        <div class="shortcut-footer">
+          <button id="btn-open-shortcuts" type="button" class="btn-secondary btn-sm pressable">
+            自定义快捷键
+          </button>
+        </div>
+      </section>
+
+      <!-- Section 4: Context Menu Reference -->
+      <section class="settings-card">
+        <div class="card-head">
+          <h2>右键菜单</h2>
+        </div>
+
+        <ul class="menu-guide-list">
+          <li><strong>收藏图片到 Charkle</strong><span>保存原图并记录来源网页</span></li>
+          <li><strong>收藏链接/推文/GitHub 到 Charkle</strong><span>保存网页、X / Threads / Bluesky 贴文与 GitHub 仓库</span></li>
+          <li><strong>收藏选中文字到 Charkle</strong><span>保存选中的文字片段</span></li>
+          <li><strong>收藏当前网页到 Charkle</strong><span>将当前网页保存为书签</span></li>
+          <li><strong>截取当前页面到 Charkle</strong><span>截取当前可见区域并保存</span></li>
+        </ul>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>
