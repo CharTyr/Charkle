@@ -13,9 +13,10 @@ Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台
    - 界面主背景与容器保持低饱和中性色（亮色暖纸灰 `#F6F6F5`，暗色深曜石 `#141517`），色彩只来源于用户的素材作品、真实色板、文件夹标记与唯一强调色。
    - **严禁紫罗兰 / 霓虹 AI 渐变**：任何界面 chrome、按钮、强调色、背景光晕均不得落在紫罗兰色相区（`OKLCH 270°–330°`）；需要高亮时使用工作室钴蓝（`#2A60E0` / `#5B8DEF`）或高对比度中性墨色。
    - **默认无图下杂乱文字**：画廊素材卡片默认纯图展现，不强行在每张图下面堆砌标题、说明或标签墙；次要信息通过悬停微控件、检查器或 Quick Look 按需呈现。
-2. **一套语言贯穿三端，拒绝局部漂移**
-   - 整套产品只允许一套颜色 Token、一套 4pt 空间网格、一套连续同心圆角阶梯、一套按钮家族与一套动效曲线。
+2. **一套语言贯穿三端，拒绝局部漂移（同魂不同壳）**
+   - 整套产品只允许一套颜色 Token、一套 4pt 空间网格、一套清晰圆角阶梯、一套按钮家族与一套动效体系。
    - 禁止在业务页面散落手写十六进制色值、临时像素圆角（如 `7px` / `9px`）或重复造同职责的弹窗/提示组件。
+   - **宿主原生壳层适配**：三端严格共享品牌哲学、中性画布、默认工作室钴蓝强调色与核心交互契约；Windows 端在窗口外壳、Fluent 2 / WinUI 3 控件几何、Mica Alt / Acrylic 材质、可选系统强调色与原生动效上遵循专属平台规范 [`.trellis/spec/windows/fluent2-design-system.md`](.trellis/spec/windows/fluent2-design-system.md)，不在 WebView2 内仿制 macOS 液态玻璃折射胶囊或双层顶栏。
 3. **克制的光学材质，绝不玻璃叠玻璃**
    - 液态玻璃（macOS Liquid Glass / Web `backdrop-filter` / Windows 11 Mica & Acrylic）**仅限悬浮在媒体与画布之上的控制层**（顶部筛选胶囊、情绪板底部工具坞、多选批处理浮条、Quick Look 控制栏、顶部收纳浮窗）。
    - 绝不在纯色背景上使用半透明毛玻璃（会发灰发脏），绝不玻璃叠玻璃，并始终提供 `Reduce Transparency` 高对比度实色降级。
@@ -84,9 +85,9 @@ Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台
 
 | 悬浮层级 | macOS (SwiftUI/AppKit) | Web (CSS) | Windows (Tauri v2) | Reduce Transparency 降级 |
 | :--- | :--- | :--- | :--- | :--- |
-| 浅/暗通用玻璃浮层 | macOS 26+ `.glassEffect(.regular)`；macOS 15 `.ultraThinMaterial` + 0.75pt 顶边高光描边 | `.charkle-glass`（Light `rgba(255,255,255,0.74)` / Dark `rgba(26,28,34,0.78)` + `blur(22px) saturate(180%)` + 内高光） | Win11 22H2+ Acrylic/Glass CSS；Win10 实色浮面 | `--bg-elevated` + `1px var(--border-strong)` + 柔和投影 |
-| 顶部收纳暗色玻璃 / 刘海 | 刘海区严格纯黑 `#000000` 与硬件边框无缝融合；扩展态 `darkNotch` 暗玻璃 | `.charkle-glass-dark`（`rgba(11,12,15,0.88)` + `blur(24px)`） | 顶部悬浮窗纯深色高对比胶囊（`WS_EX_NOACTIVATE`） | `#0B0C0F` / `#121316` + `1px rgba(255,255,255,0.16)` |
-| 窗口侧栏背景 | 原生侧栏材质 | 纯中性实色 `--bg-sidebar` | Win11 `DWMSBT_MAINWINDOW` (Mica)；Win10 `--bg-sidebar` | `--bg-sidebar` 纯实色 |
+| 浅/暗通用玻璃浮层 | macOS 26+ `.glassEffect(.regular)`；macOS 15 `.ultraThinMaterial` + 0.75pt 顶边高光描边 | `.charkle-glass`（Light `rgba(255,255,255,0.74)` / Dark `rgba(26,28,34,0.78)` + `blur(22px) saturate(180%)` + 内高光） | Win11 Fluent 2 `.win-acrylic`（高可读 Acrylic，详见 [`.trellis/spec/windows/fluent2-design-system.md`](.trellis/spec/windows/fluent2-design-system.md)）；Win10 实色浮面 | `--bg-elevated` + `1px var(--border-strong)` + 柔和投影 |
+| 顶部收纳暗色玻璃 / 刘海 | 刘海区严格纯黑 `#000000` 与硬件边框无缝融合；扩展态 `darkNotch` 暗玻璃 | `.charkle-glass-dark`（`rgba(11,12,15,0.88)` + `blur(24px)`） | 顶部悬浮窗纯深色高对比胶囊（`WS_EX_NOACTIVATE` + `.win-acrylic-dark`） | `#0B0C0F` / `#121316` + `1px rgba(255,255,255,0.16)` |
+| 窗口侧栏背景 | 原生侧栏材质 | 纯中性实色 `--bg-sidebar` | Win11 `DWMSBT_TABBEDWINDOW` (Mica Alt 全高导航轨)；Win10 `--win-solid-base` | `--bg-sidebar` / `--win-solid-base` 纯实色 |
 | 弹窗遮罩背板 | 柔光径向暗幕（中心 `0.075` 边缘 `0.165` Light；中心 `0.34` 边缘 `0.50` Dark），无全屏毛玻璃卡顿 | 统一对齐柔光径向暗幕（见 §8 P0-2 调优项），轻遮罩不压灰亮色画廊 | 与 Web 保持一致 | 纯半透明中性色，无 `backdrop-filter` |
 
 ---
