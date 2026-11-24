@@ -1,0 +1,3 @@
+{
+  "install": "npm --prefix web ci --no-audit --no-fund && npm --prefix web run build -w @charkle/shared && npm --prefix web run build -w @charkle/server && npm --prefix web run cf:pack"
+}
