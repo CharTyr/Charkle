@@ -10,6 +10,8 @@ import type {
   ExternalAgentConfig,
   ExternalAgentSelfCheckDto,
   ExternalAgentStateDto,
+  GDirectInstallProgress,
+  GDirectInstallResult,
   StorageMigrationReport,
   SyncReport,
   SyncStatus,
@@ -51,6 +53,8 @@ export interface SyncAIState {
   agentSelfCheckSummary: string | null;
   rebuildingVisualIndex: boolean;
   rebuildVisualIndexProgress: { completed: number; total: number } | null;
+  installingGDirect: boolean;
+  gdirectInstallProgress: GDirectInstallProgress | null;
   diagnostics: SystemDiagnosticsDto | null;
 
   statusMessage: string | null;
@@ -105,6 +109,8 @@ export interface SyncAIState {
   ) => Promise<void>;
   runExternalAgentSelfCheck: () => Promise<ExternalAgentSelfCheckDto>;
   rebuildLocalVisualIndex: (assetIds?: string[]) => Promise<number>;
+  setGDirectInstallProgress: (progress: GDirectInstallProgress | null) => void;
+  installGDirectCli: () => Promise<GDirectInstallResult | null>;
   openDirectoryInExplorer: (path: string) => Promise<void>;
 }
 
@@ -133,6 +139,8 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   agentSelfCheckSummary: null,
   rebuildingVisualIndex: false,
   rebuildVisualIndexProgress: null,
+  installingGDirect: false,
+  gdirectInstallProgress: null,
   diagnostics: null,
 
   statusMessage: null,
@@ -719,6 +727,58 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
         errorMessage: msg,
       });
       return 0;
+    }
+  },
+
+  setGDirectInstallProgress(progress) {
+    set({ gdirectInstallProgress: progress });
+  },
+
+  async installGDirectCli() {
+    if (get().installingGDirect) return null;
+    set({
+      installingGDirect: true,
+      gdirectInstallProgress: {
+        phase: 'checking',
+        message: '正在查询 gdirect 最新 Windows 版本…',
+        downloadedBytes: 0,
+        totalBytes: 0,
+        fraction: 0.05,
+      },
+      errorMessage: null,
+    });
+    try {
+      const result = await getTransport().installGDirectCli();
+      await get().refreshSettingsData();
+      const msg = `已安装 gdirect v${result.version}（已通过 SHA-256 校验）`;
+      set({
+        installingGDirect: false,
+        gdirectInstallProgress: null,
+        statusMessage: msg,
+      });
+      useCoordinatorStore.getState().pushToast({
+        message: msg,
+        tone: 'success',
+      });
+      return result;
+    } catch (err) {
+      const detail =
+        err && typeof err === 'object' && 'message' in err && typeof (err as { message?: unknown }).message === 'string'
+          ? (err as { message: string }).message
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      const msg = `安装 gdirect 失败：${detail}`;
+      set({
+        installingGDirect: false,
+        gdirectInstallProgress: null,
+        errorMessage: msg,
+      });
+      useCoordinatorStore.getState().pushToast({
+        message: msg,
+        tone: 'error',
+      });
+      return null;
     }
   },
 

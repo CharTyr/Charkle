@@ -125,6 +125,7 @@ impl FsTransportCore {
             parents: vec![parent_id.to_string()],
             trashed: false,
             web_view_link: None,
+            thumbnail_link: None,
         })
     }
 
@@ -418,6 +419,10 @@ impl DriveTransport for MountedVolumeTransport {
 
     fn is_mounted_volume(&self) -> bool {
         true
+    }
+
+    fn accepts_remote_id(&self, id: &str) -> bool {
+        id == DRIVE_ROOT_ID || id.starts_with(MOUNTED_PATH_ID_PREFIX)
     }
 
     async fn account_info(&self) -> CoreResult<DriveAccountInfo> {

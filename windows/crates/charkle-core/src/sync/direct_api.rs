@@ -24,7 +24,7 @@ use crate::sync::transport::{validate_drive_name, DriveTransport};
 
 const DRIVE_API_BASE: &str = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_BASE: &str = "https://www.googleapis.com/upload/drive/v3";
-const FILE_FIELDS: &str = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,shortcutDetails(targetId,targetMimeType)";
+const FILE_FIELDS: &str = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,thumbnailLink,shortcutDetails(targetId,targetMimeType)";
 const SHORTCUT_MIME_TYPE: &str = "application/vnd.google-apps.shortcut";
 
 pub struct DirectAPITransport {
@@ -34,7 +34,10 @@ pub struct DirectAPITransport {
 
 impl DirectAPITransport {
     pub fn new(oauth: Arc<GoogleOAuthClient>, endpoints: &[GDirectEndpoint]) -> Self {
-        let mut builder = Client::builder().timeout(Duration::from_secs(120));
+        let mut builder = Client::builder()
+            .pool_max_idle_per_host(12)
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(60));
         // Optional `gdirect` IP direct-connect override when healthy endpoint is supplied
         if let Some(best) = endpoints
             .iter()
@@ -65,6 +68,46 @@ impl DirectAPITransport {
             )));
         }
         Ok(seg)
+    }
+
+    /// Rewrites a Google Drive `thumbnailLink` (`=s220`) to a higher-resolution HTTPS thumbnail
+    /// URL (`=s220..=s1024`) while strictly restricting hosts to Google-owned domains.
+    pub fn scaled_thumbnail_url(raw_link: &str, max_pixel_size: u32) -> Option<Url> {
+        let trimmed = raw_link.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let initial = Url::parse(trimmed).ok()?;
+        if !initial.scheme().eq_ignore_ascii_case("https") {
+            return None;
+        }
+        let host = initial.host_str()?.to_ascii_lowercase();
+        let allowed_host = host == "googleusercontent.com"
+            || host.ends_with(".googleusercontent.com")
+            || host == "googleapis.com"
+            || host.ends_with(".googleapis.com")
+            || host == "google.com"
+            || host.ends_with(".google.com");
+        if !allowed_host {
+            return None;
+        }
+
+        let target_size = max_pixel_size.clamp(220, 1024);
+        let (before_query, query_suffix) = match trimmed.find('?') {
+            Some(idx) => (&trimmed[..idx], &trimmed[idx..]),
+            None => (trimmed, ""),
+        };
+        if let Some(pos) = before_query.rfind("=s") {
+            let digits = &before_query[pos + 2..];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                let rewritten =
+                    format!("{}=s{}{}", &before_query[..pos], target_size, query_suffix);
+                if let Ok(upgraded) = Url::parse(&rewritten) {
+                    return Some(upgraded);
+                }
+            }
+        }
+        Some(initial)
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
@@ -246,6 +289,14 @@ impl DriveTransport for DirectAPITransport {
         "Google Drive API v3"
     }
 
+    fn accepts_remote_id(&self, id: &str) -> bool {
+        !id.is_empty()
+            && !id.starts_with("mounted-")
+            && !id.contains('/')
+            && !id.contains('\\')
+            && !id.contains("..")
+    }
+
     async fn account_info(&self) -> CoreResult<DriveAccountInfo> {
         let about: AboutDto = self
             .get_json(
@@ -411,6 +462,56 @@ impl DriveTransport for DirectAPITransport {
         }
         fs::write(destination, bytes)?;
         Ok(())
+    }
+
+    async fn download_thumbnail_data(
+        &self,
+        file: &RemoteDriveFile,
+        max_pixel_size: u32,
+    ) -> CoreResult<Option<Vec<u8>>> {
+        let Some(raw_link) = file.thumbnail_link.as_deref() else {
+            return Ok(None);
+        };
+        let Some(url) = Self::scaled_thumbnail_url(raw_link, max_pixel_size) else {
+            return Ok(None);
+        };
+
+        if let Ok(resp) = self
+            .client
+            .get(url.clone())
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+        {
+            let status = resp.status();
+            if status.is_success() {
+                if let Ok(bytes) = resp.bytes().await {
+                    if !bytes.is_empty() {
+                        return Ok(Some(bytes.to_vec()));
+                    }
+                }
+            } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                if let Ok(bearer) = self.bearer().await {
+                    if let Ok(authed) = self
+                        .client
+                        .get(url)
+                        .header(reqwest::header::AUTHORIZATION, bearer)
+                        .timeout(Duration::from_secs(20))
+                        .send()
+                        .await
+                    {
+                        if authed.status().is_success() {
+                            if let Ok(bytes) = authed.bytes().await {
+                                if !bytes.is_empty() {
+                                    return Ok(Some(bytes.to_vec()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn upload_data(
@@ -619,6 +720,7 @@ struct FileDto {
     parents: Vec<String>,
     trashed: Option<bool>,
     web_view_link: Option<String>,
+    thumbnail_link: Option<String>,
     shortcut_details: Option<ShortcutDetailsDto>,
 }
 
@@ -638,6 +740,73 @@ impl FileDto {
             parents: self.parents,
             trashed: self.trashed.unwrap_or(false),
             web_view_link: self.web_view_link,
+            thumbnail_link: self.thumbnail_link,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::GoogleOAuthClient;
+    use crate::traits::SecretVault;
+
+    struct DummyVault;
+    #[async_trait]
+    impl SecretVault for DummyVault {
+        async fn get_secret(&self, _key: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        async fn set_secret(&self, _key: &str, _value: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete_secret(&self, _key: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn direct_api_rejects_local_path_and_mounted_remote_ids() {
+        let oauth = Arc::new(GoogleOAuthClient::new(Arc::new(DummyVault)));
+        let transport = DirectAPITransport::new(oauth, &[]);
+        assert!(!transport.accepts_remote_id("Charkle/Typography/Serif Typography Poster.png"));
+        assert!(!transport.accepts_remote_id("mounted-path:Charkle/Inbox/demo.png"));
+        assert!(!transport.accepts_remote_id(".."));
+        assert!(!transport.accepts_remote_id(""));
+        assert!(transport.accepts_remote_id("1AbCdEfGhIjKlMnOpQrStUvWxYz_09-"));
+    }
+
+    #[test]
+    fn scaled_thumbnail_url_rewrites_size_and_enforces_google_https_hosts() {
+        let upgraded = DirectAPITransport::scaled_thumbnail_url(
+            "https://lh3.googleusercontent.com/drive-storage/abc123=s220",
+            640,
+        )
+        .expect("should allow googleusercontent");
+        assert_eq!(
+            upgraded.as_str(),
+            "https://lh3.googleusercontent.com/drive-storage/abc123=s640"
+        );
+
+        let with_query = DirectAPITransport::scaled_thumbnail_url(
+            "https://lh3.googleusercontent.com/drive-storage/abc123=s220?authuser=0",
+            2048,
+        )
+        .expect("should clamp to 1024 and keep query");
+        assert_eq!(
+            with_query.as_str(),
+            "https://lh3.googleusercontent.com/drive-storage/abc123=s1024?authuser=0"
+        );
+
+        assert!(DirectAPITransport::scaled_thumbnail_url(
+            "http://lh3.googleusercontent.com/drive-storage/abc123=s220",
+            640
+        )
+        .is_none());
+        assert!(DirectAPITransport::scaled_thumbnail_url(
+            "https://evil.example.com/googleusercontent.com/pic=s220",
+            640
+        )
+        .is_none());
     }
 }

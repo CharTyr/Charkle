@@ -124,6 +124,16 @@ pub struct MigrationRequeueCounts {
 }
 
 /// Thread-safe SQLite-backed library index and CRDT sync journal.
+#[derive(Debug, Clone)]
+pub struct RemoteLocationUpdate {
+    pub asset_id: Uuid,
+    pub drive_id: String,
+    pub new_filename: Option<String>,
+    pub new_folder_id: Option<Uuid>,
+    pub update_folder: bool,
+    pub clear_hidden: bool,
+}
+
 pub struct LibraryDatabase {
     conn: Mutex<Connection>,
 }
@@ -518,6 +528,179 @@ impl LibraryDatabase {
             }
         }
         Ok(out)
+    }
+
+    /// Lightweight single-query map of `asset_id -> created_at` (Cocoa seconds) so initial
+    /// thumbnail sync prioritizes newest / top-of-gallery cards first.
+    pub fn asset_created_at_by_id(&self) -> CoreResult<HashMap<Uuid, f64>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT id, created FROM assets")?;
+        let rows = stmt.query_map([], |r| {
+            let id_str: String = r.get(0)?;
+            let created_at: f64 = r.get(1)?;
+            Ok((id_str, created_at))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id_str, created_at) = row?;
+            if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                out.insert(uuid, created_at);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reconciles all remote folders inside ONE SQLite transaction (instead of one transaction
+    /// per folder), dramatically reducing fsync overhead during fresh Drive bootstrap.
+    pub fn reconcile_remote_folders_batch<F>(
+        &self,
+        ordered_folders: &[crate::models::sync::RemoteDriveFile],
+        previous: &BTreeMap<String, crate::models::sync::RemoteDriveFile>,
+        inbox_id: &str,
+        pending_folders: &HashSet<Uuid>,
+        stable_folder_uuid: F,
+    ) -> CoreResult<HashMap<String, Uuid>>
+    where
+        F: Fn(&str) -> Uuid,
+    {
+        self.with_transaction(|conn| {
+            let mut map: HashMap<String, Uuid> = HashMap::with_capacity(ordered_folders.len());
+            let mut folders = Self::fetch_folders_conn(conn)?;
+            for file in ordered_folders {
+                if file.id == inbox_id {
+                    continue;
+                }
+                let parent = file.parents.first().and_then(|pid| map.get(pid).copied());
+                let found_idx = folders
+                    .iter()
+                    .position(|f| f.drive_folder_id.as_deref() == Some(file.id.as_str()))
+                    .or_else(|| {
+                        folders
+                            .iter()
+                            .position(|f| f.parent_id == parent && f.name == file.name)
+                    });
+                let id = found_idx
+                    .map(|i| folders[i].id)
+                    .unwrap_or_else(|| stable_folder_uuid(&file.id));
+
+                if Self::is_tombstoned_conn(conn, "folder", id)? {
+                    continue;
+                }
+                let mut folder = Self::folder_by_id_conn(conn, id)?.unwrap_or_else(|| {
+                    let mut f = FolderRecord::new(&file.name, parent);
+                    f.id = id;
+                    f.sort_order = folders.len() as i32;
+                    f
+                });
+                let before = folder.clone();
+                let prev_remote = previous.get(&file.id);
+                if !pending_folders.contains(&id)
+                    && (prev_remote.map(|p| p.name.as_str()) != Some(file.name.as_str())
+                        || prev_remote.map(|p| &p.parents) != Some(&file.parents))
+                {
+                    folder.name = file.name.clone();
+                    folder.parent_id = parent;
+                }
+                let drive_binding_changed =
+                    folder.drive_folder_id.as_deref() != Some(file.id.as_str());
+                folder.drive_folder_id = Some(file.id.clone());
+                let needs_record = before.name != folder.name
+                    || before.parent_id != folder.parent_id
+                    || found_idx.is_none();
+                if needs_record {
+                    folder.updated_at = file.modified_time.unwrap_or_else(Utc::now);
+                    Self::record_conn(conn, SyncOperationChange::Folder(folder.clone()), false)?;
+                    if let Some(mut stored) = Self::folder_by_id_conn(conn, id)? {
+                        stored.drive_folder_id = Some(file.id.clone());
+                        Self::put_folder_conn(conn, &stored)?;
+                        folder = stored;
+                    } else {
+                        Self::put_folder_conn(conn, &folder)?;
+                    }
+                } else if drive_binding_changed {
+                    Self::put_folder_conn(conn, &folder)?;
+                }
+
+                map.insert(file.id.clone(), folder.id);
+                if let Some(i) = found_idx {
+                    folders[i] = folder;
+                } else {
+                    folders.push(folder);
+                }
+            }
+            Ok(map)
+        })
+    }
+
+    /// Applies genuine remote rename / folder-move / unhide updates in a single SQLite transaction.
+    pub fn apply_remote_location_updates_batch(
+        &self,
+        updates: &[RemoteLocationUpdate],
+    ) -> CoreResult<usize> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        self.with_transaction(|conn| {
+            let mut applied = 0usize;
+            for item in updates {
+                let Some(mut current) = Self::asset_by_id_conn(conn, item.asset_id)? else {
+                    continue;
+                };
+                if current.drive_file_id.as_deref() != Some(item.drive_id.as_str()) {
+                    continue;
+                }
+                let before = current.clone();
+                if let Some(ref filename) = item.new_filename {
+                    if current.file_name != *filename {
+                        let old_stem = Path::new(&current.file_name)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&current.file_name);
+                        if current.title == old_stem {
+                            current.title = Path::new(filename)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(filename)
+                                .to_string();
+                        }
+                        current.file_name = filename.clone();
+                    }
+                }
+                if item.update_folder {
+                    current.folder_id = item.new_folder_id;
+                }
+                if item.clear_hidden {
+                    let hidden_key = format!("remote.hidden.{}", item.drive_id);
+                    if Self::state_conn::<bool>(conn, &hidden_key)? == Some(true) {
+                        current.is_trashed = false;
+                        Self::set_state_conn::<bool>(conn, &hidden_key, None)?;
+                    }
+                }
+                if current != before {
+                    let delta = AssetChanges::diff(&current, Some(&before))?;
+                    if !delta.is_empty() {
+                        Self::record_conn(conn, SyncOperationChange::Asset(delta), false)?;
+                    } else {
+                        Self::put_asset_conn(conn, &current)?;
+                    }
+                    applied += 1;
+                }
+            }
+            Ok(applied)
+        })
+    }
+
+    /// Persists multiple `deleted.drive.<id> = true` markers in a single SQLite transaction.
+    pub fn mark_deleted_drive_markers_batch(&self, file_ids: &[String]) -> CoreResult<()> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        self.with_transaction(|conn| {
+            for fid in file_ids {
+                Self::set_state_conn(conn, &format!("deleted.drive.{fid}"), Some(&true))?;
+            }
+            Ok(())
+        })
     }
 
     pub fn assets_by_content_hash(&self, content_hash: &str) -> CoreResult<Vec<AssetRecord>> {

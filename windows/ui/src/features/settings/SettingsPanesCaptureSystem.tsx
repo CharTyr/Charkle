@@ -10,13 +10,21 @@ import {
   EyeOff16Regular,
   FolderOpen16Regular,
   HardDrive16Regular,
+  Open16Regular,
   Pin16Filled,
   Pin16Regular,
   WindowHeaderHorizontal20Regular,
 } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { CharkleBrandMark, CustomSelect, SegmentedControl } from '../../design-system';
-import { useCoordinatorStore, useLibraryStore, useSyncAIStore } from '../../stores';
+import {
+  formatByteCount,
+  formatRelativeCheckTime,
+  useAppUpdateStore,
+  useCoordinatorStore,
+  useLibraryStore,
+  useSyncAIStore,
+} from '../../stores';
 import type {
   DriveSyncConfig,
   DriveTransportMode,
@@ -1008,15 +1016,35 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
   const syncing = useSyncAIStore((s) => s.syncing);
   const rebuildingVisualIndex = useSyncAIStore((s) => s.rebuildingVisualIndex);
   const rebuildProgress = useSyncAIStore((s) => s.rebuildVisualIndexProgress);
+  const installingGDirect = useSyncAIStore((s) => s.installingGDirect);
+  const gdirectInstallProgress = useSyncAIStore((s) => s.gdirectInstallProgress);
   const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
   const syncNow = useSyncAIStore((s) => s.syncNow);
   const rebuildLocalVisualIndex = useSyncAIStore((s) => s.rebuildLocalVisualIndex);
+  const installGDirectCli = useSyncAIStore((s) => s.installGDirectCli);
   const openDirectoryInExplorer = useSyncAIStore((s) => s.openDirectoryInExplorer);
   const refreshSettingsData = useSyncAIStore((s) => s.refreshSettingsData);
+
+  const updateState = useAppUpdateStore((s) => s.state);
+  const updateCurrentVersion = useAppUpdateStore((s) => s.currentVersion);
+  const autoCheckUpdates = useAppUpdateStore((s) => s.autoCheckUpdates);
+  const lastUpdateCheckAtMs = useAppUpdateStore((s) => s.lastUpdateCheckAtMs);
+  const skippedVersion = useAppUpdateStore((s) => s.skippedVersion);
+  const loadUpdatePreferences = useAppUpdateStore((s) => s.loadPreferences);
+  const setAutoCheckUpdates = useAppUpdateStore((s) => s.setAutoCheckUpdates);
+  const clearSkippedVersion = useAppUpdateStore((s) => s.clearSkippedVersion);
+  const checkForUpdatesManually = useAppUpdateStore((s) => s.checkForUpdatesManually);
+  const openUpdateSheet = useAppUpdateStore((s) => s.openSheet);
+  const installAndRelaunch = useAppUpdateStore((s) => s.installAndRelaunch);
+  const openReleasePage = useAppUpdateStore((s) => s.openReleasePage);
 
   const [draftSync, setDraftSync] = useState<DriveSyncConfig>(syncConfig ?? DEFAULT_SYNC_CONFIG);
   const [showOAuthModal, setShowOAuthModal] = useState(false);
   const [showMountModal, setShowMountModal] = useState(false);
+
+  useEffect(() => {
+    void loadUpdatePreferences();
+  }, [loadUpdatePreferences]);
 
   useEffect(() => {
     if (syncConfig) setDraftSync(syncConfig);
@@ -1074,28 +1102,67 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
 
         <SettingsCardDivider />
 
-        <SettingsRow
-          title="网络受限时使用本机 gdirect 兜底"
-          subtitle={
-            !hasGDirectCli
-              ? '未检测到本机 gdirect CLI；安装后可在网络受限时自动回退优选节点'
-              : draftSync.useGDirectIPAcceleration
-                ? healthyNodeCount > 0
-                  ? `已开启 · 检测到 ${healthyNodeCount} 个健康节点（仅当标准 HTTPS 直连受阻时自动启用）`
-                  : '已开启 · 当无法直连 googleapis.com 时自动尝试本机 gdirect'
-                : '已关闭 · 仅使用标准 Google Drive HTTPS 直连'
-          }
-          disabled={!hasGDirectCli}
-        >
-          <SettingsSwitch
-            checked={draftSync.useGDirectIPAcceleration}
-            disabled={!hasGDirectCli}
-            ariaLabel="网络受限时使用本机 gdirect 兜底"
-            onChange={(useGDirectIPAcceleration) =>
-              persistSyncQuiet({ ...draftSync, useGDirectIPAcceleration })
+        <div>
+          <SettingsRow
+            title="网络受限时使用本机 gdirect 兜底"
+            subtitle={
+              installingGDirect && gdirectInstallProgress
+                ? `${gdirectInstallProgress.message}${gdirectInstallProgress.totalBytes > 0 ? `（${Math.round(Math.max(0, Math.min(1, gdirectInstallProgress.fraction)) * 100)}%）` : ''}`
+                : !hasGDirectCli
+                  ? '未检测到本机 gdirect CLI；可直接在应用内一键下载并校验安装，安装后可在网络受限时自动回退优选节点'
+                  : draftSync.useGDirectIPAcceleration
+                    ? `${gdirect?.cliVersion ? `已安装 v${gdirect.cliVersion}` : '已安装'} · ${healthyNodeCount > 0 ? `检测到 ${healthyNodeCount} 个健康节点（仅当标准 HTTPS 直连受阻时自动启用）` : '当无法直连 googleapis.com 时自动尝试本机 gdirect'}`
+                    : `${gdirect?.cliVersion ? `已安装 v${gdirect.cliVersion}` : '已安装'} · 已关闭（仅使用标准 Google Drive HTTPS 直连）`
             }
-          />
-        </SettingsRow>
+            subtitleTone={hasGDirectCli && draftSync.useGDirectIPAcceleration ? 'positive' : 'default'}
+          >
+            {!hasGDirectCli ? (
+              <SettingsButton
+                variant="accent"
+                loading={installingGDirect}
+                onClick={async () => {
+                  const res = await installGDirectCli();
+                  if (res && !draftSync.useGDirectIPAcceleration) {
+                    persistSyncQuiet({ ...draftSync, useGDirectIPAcceleration: true });
+                  }
+                }}
+              >
+                <ArrowDownload16Regular className="w-3.5 h-3.5 shrink-0" />
+                {installingGDirect ? '安装中…' : '一键安装 gdirect'}
+              </SettingsButton>
+            ) : (
+              <div className="flex items-center gap-2.5">
+                <SettingsButton
+                  variant="secondary"
+                  loading={installingGDirect}
+                  onClick={() => void installGDirectCli()}
+                >
+                  {installingGDirect ? '更新中…' : '更新 / 重装'}
+                </SettingsButton>
+                <SettingsSwitch
+                  checked={draftSync.useGDirectIPAcceleration}
+                  ariaLabel="网络受限时使用本机 gdirect 兜底"
+                  onChange={(useGDirectIPAcceleration) =>
+                    persistSyncQuiet({ ...draftSync, useGDirectIPAcceleration })
+                  }
+                />
+              </div>
+            )}
+          </SettingsRow>
+
+          {installingGDirect && gdirectInstallProgress && (
+            <div className="px-4 pb-3">
+              <div className="h-1.5 w-full rounded-full bg-[var(--settings-subtle)] overflow-hidden">
+                <div
+                  style={{
+                    transform: `scaleX(${Math.max(0.06, Math.min(1, gdirectInstallProgress.fraction))})`,
+                  }}
+                  className="h-full w-full origin-left rounded-full bg-[var(--accent)] transition-transform duration-150 motion-reduce:transition-none"
+                />
+              </div>
+            </div>
+          )}
+        </div>
 
         <SettingsCardDivider />
 
@@ -1200,7 +1267,120 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
         </SettingsRow>
       </SettingsSection>
 
-      {/* 3. About Charkle */}
+      {/* 3. Software Updates (GitHub Releases) */}
+      <SettingsSection title="软件更新">
+        <div>
+          <SettingsRow
+            title="检查软件更新"
+            subtitle={(() => {
+              const displayVer = diagnostics?.appVersion ?? updateCurrentVersion ?? '1.2.0';
+              switch (updateState.status) {
+                case 'checking':
+                  return '正在连接 GitHub Releases 检查最新版本…';
+                case 'upToDate':
+                  return `当前已是最新正式版本 v${displayVer} · 上次检查：${formatRelativeCheckTime(updateState.checkedAtMs)}`;
+                case 'available':
+                  return `发现新版本 v${updateState.update.version}（${formatByteCount(updateState.update.assetSizeBytes)}）· 点击右侧查看更新说明并下载`;
+                case 'downloading':
+                  return `正在下载 v${updateState.update.version}（${Math.round(Math.max(0, Math.min(1, updateState.progress.fraction)) * 100)}%）…`;
+                case 'verifying':
+                  return `正在校验 v${updateState.update.version} 安装包 SHA-256 完整性…`;
+                case 'readyToInstall':
+                  return `v${updateState.update.version} 安装包已通过校验，可随时安装并重启`;
+                case 'installing':
+                  return '正在退出并启动增量安装程序…';
+                case 'manualInstallRequired':
+                  return `已下载 v${updateState.update.version}，需要手动运行安装程序`;
+                case 'failed':
+                  return `检查或下载失败：${updateState.message}`;
+                default:
+                  return `当前版本 v${displayVer} · 上次检查：${formatRelativeCheckTime(lastUpdateCheckAtMs)}`;
+              }
+            })()}
+            subtitleTone={
+              updateState.status === 'available' || updateState.status === 'readyToInstall'
+                ? 'positive'
+                : updateState.status === 'failed'
+                  ? 'destructive'
+                  : 'default'
+            }
+          >
+            <div className="flex items-center gap-2">
+              {updateState.status === 'readyToInstall' ? (
+                <>
+                  <SettingsButton variant="secondary" onClick={openUpdateSheet}>
+                    查看详情
+                  </SettingsButton>
+                  <SettingsButton variant="primary" onClick={() => void installAndRelaunch()}>
+                    安装并重启
+                  </SettingsButton>
+                </>
+              ) : updateState.status === 'available' ||
+                updateState.status === 'downloading' ||
+                updateState.status === 'verifying' ||
+                updateState.status === 'manualInstallRequired' ? (
+                <SettingsButton variant="primary" onClick={openUpdateSheet}>
+                  <ArrowDownload16Regular className="w-3.5 h-3.5 shrink-0" />
+                  {updateState.status === 'downloading' ? '查看下载进度' : '查看更新'}
+                </SettingsButton>
+              ) : (
+                <SettingsButton
+                  variant="standard"
+                  loading={updateState.status === 'checking'}
+                  onClick={() => void checkForUpdatesManually({ presentSheet: false })}
+                >
+                  <ArrowSync16Regular
+                    className={`w-3.5 h-3.5 shrink-0 ${updateState.status === 'checking' ? 'animate-spin motion-reduce:animate-none' : ''}`}
+                  />
+                  {updateState.status === 'checking' ? '检查中…' : '立即检查更新'}
+                </SettingsButton>
+              )}
+            </div>
+          </SettingsRow>
+
+          {updateState.status === 'downloading' && (
+            <div className="px-4 pb-3">
+              <div className="h-1.5 w-full rounded-full bg-[var(--settings-subtle)] overflow-hidden">
+                <div
+                  style={{
+                    transform: `scaleX(${Math.max(0.04, Math.min(1, updateState.progress.fraction))})`,
+                  }}
+                  className="h-full w-full origin-left rounded-full bg-[var(--accent)] transition-transform duration-150 motion-reduce:transition-none"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="启动时自动检查更新"
+          subtitle="仅在启动 4 秒后延迟检查一次（6 小时节流），无后台常驻定时器"
+        >
+          <SettingsSwitch
+            checked={autoCheckUpdates}
+            ariaLabel="启动时自动检查更新"
+            onChange={(checked) => void setAutoCheckUpdates(checked)}
+          />
+        </SettingsRow>
+
+        {skippedVersion && (
+          <>
+            <SettingsCardDivider />
+            <SettingsRow
+              title={`已跳过版本 v${skippedVersion.replace(/^v/i, '')}`}
+              subtitle="自动检查时将不再提醒此版本；手动点击「立即检查更新」仍可随时获取"
+            >
+              <SettingsButton variant="secondary" onClick={() => void clearSkippedVersion()}>
+                取消跳过
+              </SettingsButton>
+            </SettingsRow>
+          </>
+        )}
+      </SettingsSection>
+
+      {/* 4. About Charkle */}
       <SettingsSection title="关于 Charkle">
         <div className="px-4 py-3.5 flex items-center gap-3.5">
           <CharkleBrandMark size={44} />
@@ -1208,13 +1388,17 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="text-[14px] font-semibold text-[var(--text-primary)]">Charkle</span>
               <span className="text-[11px] font-medium charkle-mono text-[var(--text-secondary)] charkle-tabular">
-                v{diagnostics?.appVersion ?? '1.2.0'}
+                v{diagnostics?.appVersion ?? updateCurrentVersion ?? '1.2.0'}
               </span>
             </div>
             <span className="text-[12px] text-[var(--text-secondary)]">
               面向设计师的视觉素材库与 10 秒情绪板创作台 · 本机离线视觉引擎 + 可读云端存储
             </span>
           </div>
+          <SettingsButton variant="standard" onClick={() => void openReleasePage()}>
+            <Open16Regular className="w-3.5 h-3.5 shrink-0" />
+            Release 页面
+          </SettingsButton>
         </div>
       </SettingsSection>
 
@@ -1320,14 +1504,30 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           </div>
         </label>
 
-        <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] px-3 py-2 flex items-center justify-between text-[12px]">
+        <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] px-3 py-2 flex items-center justify-between gap-2 text-[12px]">
           <span className="text-[var(--text-secondary)]">
             当前卷状态：{isMountActive ? '卷已就绪' : '未检测到活跃挂载路径'}
           </span>
-          <SettingsStatusBadge
-            text={hasGDirectCli ? 'gdirect 已安装' : 'gdirect 未安装'}
-            tone={hasGDirectCli ? 'positive' : 'neutral'}
-          />
+          <div className="flex items-center gap-2 shrink-0">
+            <SettingsStatusBadge
+              text={
+                hasGDirectCli
+                  ? `gdirect ${gdirect?.cliVersion ? `v${gdirect.cliVersion}` : '已安装'}`
+                  : 'gdirect 未安装'
+              }
+              tone={hasGDirectCli ? 'positive' : 'neutral'}
+            />
+            {!hasGDirectCli && (
+              <SettingsButton
+                variant="accent"
+                loading={installingGDirect}
+                onClick={() => void installGDirectCli()}
+              >
+                <ArrowDownload16Regular className="w-3.5 h-3.5 shrink-0" />
+                {installingGDirect ? '安装中…' : '一键安装'}
+              </SettingsButton>
+            )}
+          </div>
         </div>
       </SettingsSubModal>
     </div>

@@ -327,7 +327,11 @@ export interface LibraryState {
   loading: boolean;
   bootstrapped: boolean;
   error: string | null;
+  mediaRevision: number;
+  thumbnailRevisions: Record<string, number>;
 
+  bumpMediaRevision: () => void;
+  bumpThumbnailRevisions: (assetIds: string[]) => void;
   bootstrap: (destination: SidebarDestination) => Promise<void>;
   refreshAll: (destination: SidebarDestination) => Promise<void>;
   refreshAssets: (destination: SidebarDestination) => Promise<void>;
@@ -548,6 +552,23 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
   loading: false,
   bootstrapped: false,
   error: null,
+  mediaRevision: 0,
+  thumbnailRevisions: {},
+
+  bumpMediaRevision() {
+    set((s) => ({ mediaRevision: s.mediaRevision + 1 }));
+  },
+
+  bumpThumbnailRevisions(assetIds) {
+    if (!assetIds || assetIds.length === 0) return;
+    set((s) => {
+      const next = { ...s.thumbnailRevisions };
+      for (const id of assetIds) {
+        next[id] = (next[id] ?? 0) + 1;
+      }
+      return { thumbnailRevisions: next };
+    });
+  },
 
   async bootstrap(destination) {
     if (get().bootstrapped) return;

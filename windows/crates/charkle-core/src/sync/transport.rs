@@ -106,6 +106,13 @@ pub trait DriveTransport: Send + Sync {
         false
     }
 
+    /// Returns true if `id` is syntactically compatible with this transport's remote ID space.
+    /// Prevents path-based IDs from `LocalFolderTransport` / `WebDAVTransport` (containing `/`)
+    /// or `mounted-path:` IDs from being sent to opaque-ID APIs such as Google Drive v3.
+    fn accepts_remote_id(&self, id: &str) -> bool {
+        !id.is_empty() && !id.starts_with("mounted-")
+    }
+
     async fn account_info(&self) -> CoreResult<DriveAccountInfo>;
     async fn fetch_start_page_token(&self) -> CoreResult<String>;
     async fn list_changes(&self, page_token: &str) -> CoreResult<DriveChangePage>;
@@ -117,6 +124,16 @@ pub trait DriveTransport: Send + Sync {
     async fn list_files(&self, folder_id: &str) -> CoreResult<Vec<RemoteDriveFile>>;
     async fn download_data(&self, file_id: &str) -> CoreResult<Vec<u8>>;
     async fn download_file(&self, file_id: &str, destination: &Path) -> CoreResult<()>;
+
+    /// Optional fast server-side thumbnail fetch (e.g. Google Drive `thumbnailLink`) used when
+    /// `.charkle/thumbnails/<uuid>.jpg` is absent, avoiding multi-MB original downloads.
+    async fn download_thumbnail_data(
+        &self,
+        _file: &RemoteDriveFile,
+        _max_pixel_size: u32,
+    ) -> CoreResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
 
     async fn download_remote_file(
         &self,

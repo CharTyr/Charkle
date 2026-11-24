@@ -150,6 +150,9 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
   const folders = useLibraryStore((s) => s.folders);
+  const mediaRevision = useLibraryStore((s) => s.mediaRevision);
+  const cardThumbRevision = useLibraryStore((s) => s.thumbnailRevisions[asset.id] ?? 0);
+  const effectiveThumbRev = mediaRevision + cardThumbRevision;
   const updateAssets = useLibraryStore((s) => s.updateAssets);
   const permanentlyDeleteAssets = useLibraryStore((s) => s.permanentlyDeleteAssets);
 
@@ -164,7 +167,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
     setImgFailed(false);
     setHoverPreviewFailed(false);
     setHoverMediaReady(false);
-  }, [asset.id, asset.updatedAt]);
+  }, [asset.id, asset.updatedAt, effectiveThumbRev]);
 
   useEffect(() => {
     return () => {
@@ -190,11 +193,17 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
 
   const transport = getTransport();
   const rawThumbUrl = transport.thumbnailUrl(asset.id, 'grid520');
+  const thumbVersion =
+    effectiveThumbRev > 0
+      ? `${asset.updatedAt ?? ''}-${effectiveThumbRev}`
+      : asset.updatedAt
+        ? String(asset.updatedAt)
+        : '';
   const thumbUrl =
-    asset.updatedAt &&
+    thumbVersion &&
     !rawThumbUrl.startsWith('data:') &&
     !rawThumbUrl.startsWith('blob:')
-      ? `${rawThumbUrl}${rawThumbUrl.includes('?') ? '&' : '?'}v=${encodeURIComponent(String(asset.updatedAt))}`
+      ? `${rawThumbUrl}${rawThumbUrl.includes('?') ? '&' : '?'}v=${encodeURIComponent(thumbVersion)}`
       : rawThumbUrl;
 
   const gh = asset.richMetadata?.githubRepo;

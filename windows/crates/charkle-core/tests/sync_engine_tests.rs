@@ -556,3 +556,140 @@ async fn live_engine_broadcasts_events_and_handles_batch_patch_and_folder_ops() 
     assert_eq!(remaining[0].id, f_child.id);
     assert_eq!(remaining[0].parent_id, None);
 }
+
+#[tokio::test]
+async fn cloud_sync_ignores_stale_local_path_ids_and_downloads_remote_thumbnails() {
+    use charkle_core::models::media::ThumbnailTier;
+    use charkle_core::models::sync::SyncOperationChange;
+
+    let tmp = tempdir().unwrap();
+    let cloud = Arc::new(InMemoryDriveTransport::new("cloud@example.invalid", 200));
+    let drive_cfg = DriveSyncConfig {
+        mode: DriveTransportMode::DirectApiWithGDirect,
+        root_folder_name: "Charkle".to_string(),
+        sync_thumbnails: true,
+        ..DriveSyncConfig::default()
+    };
+
+    // Device 1 uploads one real asset + its `.charkle/thumbnails/<uuid>.jpg`
+    let dev1 = make_device_engine(&tmp.path().join("dev1"), cloud.clone());
+    let created = dev1
+        .ingest(
+            vec![CaptureInput::ImageData {
+                data: sample_png([240, 80, 70, 255]),
+                suggested_name: "poster.png".to_string(),
+                source_url: None,
+            }],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let asset = created[0].clone();
+    dev1.sync_now().await.unwrap();
+
+    // Device 2 previously had a local-folder sync leaving a slash-path delete op + folder path ID
+    let dev2_dir = tmp.path().join("dev2");
+    let db2 = Arc::new(LibraryDatabase::open(&dev2_dir.join("Library.sqlite3")).unwrap());
+    let media2 = MediaPipeline::new(&dev2_dir).unwrap();
+    let mut stale_folder = charkle_core::models::core::FolderRecord::new("Typography", None);
+    stale_folder.drive_folder_id = Some("Charkle/Typography".to_string());
+    db2.upsert_folder(&stale_folder).unwrap();
+    db2.record(
+        SyncOperationChange::DeleteAsset {
+            id: uuid::Uuid::new_v4(),
+            drive_id: Some("Charkle/Typography/Serif Typography Poster.png".to_string()),
+        },
+        true,
+    )
+    .unwrap();
+
+    // Syncing Device 2 against opaque-ID cloud must ignore the slash-path ID and fetch thumbnails!
+    let sync2 = DriveSyncEngine::new(Arc::clone(&db2), media2.clone());
+    let report = sync2.sync(cloud.as_ref(), &drive_cfg, false).await.unwrap();
+
+    assert!(report.downloaded_ops > 0);
+    assert!(report.downloaded_thumbnails >= 1);
+    assert!(report.has_visible_library_changes());
+    assert!(db2.asset(asset.id).unwrap().is_some());
+    assert!(
+        media2
+            .thumbnail_url(asset.id, ThumbnailTier::Grid520)
+            .is_some(),
+        "remote thumbnail must be cached on disk after sync"
+    );
+}
+
+#[tokio::test]
+async fn fast_initial_sync_emits_progressive_metadata_then_thumbnails_newest_first() {
+    use std::sync::Mutex as StdMutex;
+
+    use charkle_core::models::media::ThumbnailTier;
+    use charkle_core::sync::SyncProgressiveEvent;
+
+    let tmp = tempdir().unwrap();
+    let cloud = Arc::new(InMemoryDriveTransport::new("fast@example.invalid", 300));
+    let drive_cfg = DriveSyncConfig {
+        mode: DriveTransportMode::DirectApiWithGDirect,
+        root_folder_name: "Charkle".to_string(),
+        sync_thumbnails: true,
+        ..DriveSyncConfig::default()
+    };
+
+    // Device 1 creates 3 assets with distinct creation order and syncs to cloud
+    let dev1 = make_device_engine(&tmp.path().join("dev1"), cloud.clone());
+    let mut created_ids = Vec::new();
+    for idx in 0..3u8 {
+        let created = dev1
+            .ingest(
+                vec![CaptureInput::ImageData {
+                    data: sample_png([40 + idx * 60, 120, 200, 255]),
+                    suggested_name: format!("card-{idx}.png"),
+                    source_url: None,
+                }],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        created_ids.push(created[0].id);
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    dev1.sync_now().await.unwrap();
+
+    // Fresh Device 2 records progressive events while bootstrapping
+    let dev2_dir = tmp.path().join("dev2");
+    let db2 = Arc::new(LibraryDatabase::open(&dev2_dir.join("Library.sqlite3")).unwrap());
+    let media2 = MediaPipeline::new(&dev2_dir).unwrap();
+    let recorded: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let recorded_cb = Arc::clone(&recorded);
+    let sync2 = DriveSyncEngine::with_callbacks(
+        Arc::clone(&db2),
+        media2.clone(),
+        Arc::new(|_| {}),
+        Arc::new(move |evt| {
+            let mut guard = recorded_cb.lock().unwrap();
+            match evt {
+                SyncProgressiveEvent::Metadata { .. } => guard.push("metadata".to_string()),
+                SyncProgressiveEvent::Thumbnails { asset_ids } => {
+                    guard.push(format!("thumbnails:{}", asset_ids.len()));
+                }
+            }
+        }),
+    );
+
+    let report = sync2.sync(cloud.as_ref(), &drive_cfg, false).await.unwrap();
+    assert!(report.downloaded_ops > 0);
+    assert_eq!(report.downloaded_thumbnails, 3);
+    for id in &created_ids {
+        assert!(media2.thumbnail_url(*id, ThumbnailTier::Grid520).is_some());
+    }
+
+    let events = recorded.lock().unwrap().clone();
+    assert!(
+        events.len() >= 2,
+        "expected progressive metadata and thumbnail events, got {events:?}"
+    );
+    assert_eq!(events[0], "metadata");
+    assert!(events.iter().any(|e| e.starts_with("thumbnails:")));
+}

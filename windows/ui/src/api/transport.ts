@@ -11,6 +11,7 @@ import {
   type AIConnectionTestResult,
   type AIProviderConfig,
   type AIProviderStateDto,
+  type AppReleaseUpdate,
   type AssetBatchPatch,
   type AssetRecord,
   type CacheStats,
@@ -33,6 +34,8 @@ import {
   type FilterCriteria,
   type FolderRecord,
   type FolderSuggestion,
+  type GDirectInstallProgress,
+  type GDirectInstallResult,
   type HotkeyConfig,
   type InboxTriageRecommendation,
   type MoodboardAgentStep,
@@ -59,6 +62,10 @@ import {
   type TypeSafeExperimentalConfig,
   type TypeSafeStateDto,
   type TypeSafeTestResultDto,
+  type UpdateCheckResponseDto,
+  type UpdateDownloadProgress,
+  type UpdatePreferencesDto,
+  type VerifiedUpdateInstaller,
   type WebdavTestResultDto,
   type WindowSurfaceState,
 } from '../types/domain';
@@ -66,6 +73,8 @@ import {
 export interface CharkleEventHandlers {
   onLibraryChanged?: () => void;
   onSyncStatus?: (status: SyncStatus) => void;
+  onSyncProgressiveMetadata?: (payload: { hasBoards: boolean }) => void;
+  onSyncProgressiveThumbnails?: (assetIds: string[]) => void;
   onAssetEnriched?: (assetId: string) => void;
   onBoardUpdated?: (boardId: string) => void;
   onClipboardChanged?: (preview: ClipboardPreview) => void;
@@ -89,6 +98,10 @@ export interface CharkleEventHandlers {
   onDeepLinkNavigate?: (payload: DeepLinkPayload) => void;
   onMoodboardAgentStep?: (step: MoodboardAgentStep) => void;
   onSurfaceState?: (state: WindowSurfaceState) => void;
+  onUpdateProgress?: (progress: UpdateDownloadProgress) => void;
+  onUpdatePhase?: (phase: string) => void;
+  onMainCheckUpdates?: () => void;
+  onGDirectInstallProgress?: (progress: GDirectInstallProgress) => void;
 }
 
 export interface CharkleTransport {
@@ -256,6 +269,7 @@ export interface CharkleTransport {
     webdavPassword?: string | null,
   ): Promise<StorageMigrationReport>;
   getSystemDiagnostics(): Promise<SystemDiagnosticsDto>;
+  installGDirectCli(): Promise<GDirectInstallResult>;
   exportFigmaPluginBundle(destinationDir: string): Promise<string>;
 
   // Browser Extension Bridge
@@ -264,6 +278,18 @@ export interface CharkleTransport {
   setExtensionAutoPair(allowLocalAutoPair: boolean): Promise<ExtensionBridgeStateDto>;
   regenerateExtensionBridgeToken(): Promise<ExtensionBridgeStateDto>;
   revealBundledBrowserExtension(): Promise<string>;
+
+  // Native GitHub Releases In-App Updater
+  getUpdatePreferences(): Promise<UpdatePreferencesDto>;
+  setAutoCheckUpdates(enabled: boolean): Promise<UpdatePreferencesDto>;
+  skipUpdateVersion(version: string): Promise<UpdatePreferencesDto>;
+  clearSkippedUpdateVersion(): Promise<UpdatePreferencesDto>;
+  checkForUpdates(manual?: boolean): Promise<UpdateCheckResponseDto>;
+  downloadAndVerifyUpdate(update: AppReleaseUpdate): Promise<VerifiedUpdateInstaller>;
+  cancelUpdateDownload(): Promise<void>;
+  installAndRelaunchUpdate(installerPath: string): Promise<void>;
+  openUpdateInstaller(installerPath: string): Promise<void>;
+  revealUpdateInstaller(installerPath: string): Promise<void>;
 
   // Live Events
   subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void>;
@@ -795,6 +821,10 @@ export class TauriTransport implements CharkleTransport {
     return invoke('get_system_diagnostics');
   }
 
+  installGDirectCli(): Promise<GDirectInstallResult> {
+    return invoke('install_gdirect_cli');
+  }
+
   exportFigmaPluginBundle(destinationDir: string): Promise<string> {
     return invoke('export_figma_plugin_bundle', { destinationDir });
   }
@@ -817,6 +847,46 @@ export class TauriTransport implements CharkleTransport {
 
   revealBundledBrowserExtension(): Promise<string> {
     return invoke('reveal_bundled_browser_extension');
+  }
+
+  getUpdatePreferences(): Promise<UpdatePreferencesDto> {
+    return invoke('get_update_preferences');
+  }
+
+  setAutoCheckUpdates(enabled: boolean): Promise<UpdatePreferencesDto> {
+    return invoke('set_auto_check_updates', { enabled });
+  }
+
+  skipUpdateVersion(version: string): Promise<UpdatePreferencesDto> {
+    return invoke('skip_update_version', { version });
+  }
+
+  clearSkippedUpdateVersion(): Promise<UpdatePreferencesDto> {
+    return invoke('clear_skipped_update_version');
+  }
+
+  checkForUpdates(manual = true): Promise<UpdateCheckResponseDto> {
+    return invoke('check_for_updates', { manual });
+  }
+
+  downloadAndVerifyUpdate(update: AppReleaseUpdate): Promise<VerifiedUpdateInstaller> {
+    return invoke('download_and_verify_update', { update });
+  }
+
+  cancelUpdateDownload(): Promise<void> {
+    return invoke('cancel_update_download');
+  }
+
+  installAndRelaunchUpdate(installerPath: string): Promise<void> {
+    return invoke('install_and_relaunch_update', { installerPath });
+  }
+
+  openUpdateInstaller(installerPath: string): Promise<void> {
+    return invoke('open_update_installer', { installerPath });
+  }
+
+  revealUpdateInstaller(installerPath: string): Promise<void> {
+    return invoke('reveal_update_installer', { installerPath });
   }
 
   async subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void> {
@@ -846,6 +916,20 @@ export class TauriTransport implements CharkleTransport {
       registrations.push(() =>
         listen<SyncStatus>('sync:status', (e) => {
           if (!disposed) handlers.onSyncStatus?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onSyncProgressiveMetadata) {
+      registrations.push(() =>
+        listen<{ hasBoards: boolean }>('sync:progressive-metadata', (e) => {
+          if (!disposed) handlers.onSyncProgressiveMetadata?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onSyncProgressiveThumbnails) {
+      registrations.push(() =>
+        listen<string[]>('sync:progressive-thumbnails', (e) => {
+          if (!disposed) handlers.onSyncProgressiveThumbnails?.(e.payload);
         }),
       );
     }
@@ -950,6 +1034,34 @@ export class TauriTransport implements CharkleTransport {
       registrations.push(() =>
         listen<WindowSurfaceState>('charkle://surface-changed', (e) => {
           if (!disposed) handlers.onSurfaceState?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onUpdateProgress) {
+      registrations.push(() =>
+        listen<UpdateDownloadProgress>('updater:progress', (e) => {
+          if (!disposed) handlers.onUpdateProgress?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onUpdatePhase) {
+      registrations.push(() =>
+        listen<string>('updater:phase', (e) => {
+          if (!disposed) handlers.onUpdatePhase?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onMainCheckUpdates) {
+      registrations.push(() =>
+        listen('main:check-updates', () => {
+          if (!disposed) handlers.onMainCheckUpdates?.();
+        }),
+      );
+    }
+    if (handlers.onGDirectInstallProgress) {
+      registrations.push(() =>
+        listen<GDirectInstallProgress>('gdirect:install-progress', (e) => {
+          if (!disposed) handlers.onGDirectInstallProgress?.(e.payload);
         }),
       );
     }
@@ -2571,8 +2683,8 @@ export class InMemoryMockTransport implements CharkleTransport {
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
       gdirect: {
-        cliPath: null,
-        cliVersion: null,
+        cliPath: this.mockGDirectCliPath,
+        cliVersion: this.mockGDirectCliVersion,
         appVersion: null,
         hasVersionMismatch: false,
         rclonePath: null,
@@ -2685,14 +2797,185 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async setShelfAllowActivate(): Promise<void> {}
 
+  // Native GitHub Releases Updater mock state
+  private mockUpdatePrefs: UpdatePreferencesDto = {
+    currentVersion: '1.2.0',
+    autoCheckUpdates: true,
+    lastUpdateCheckAtMs: null,
+    skippedVersion: null,
+    releasesPageUrl: 'https://github.com/CharTyr/Charkle/releases',
+  };
+  public mockAvailableUpdate: AppReleaseUpdate | null = null;
+  public mockCheckError: string | null = null;
+  public mockInstallError: string | null = null;
+  public mockInstalledPaths: string[] = [];
+  public mockOpenedInstallerPaths: string[] = [];
+  public mockRevealedInstallerPaths: string[] = [];
+  private updateProgressListeners = new Set<(progress: UpdateDownloadProgress) => void>();
+  private updatePhaseListeners = new Set<(phase: string) => void>();
+
+  async getUpdatePreferences(): Promise<UpdatePreferencesDto> {
+    return { ...this.mockUpdatePrefs };
+  }
+
+  async setAutoCheckUpdates(enabled: boolean): Promise<UpdatePreferencesDto> {
+    this.mockUpdatePrefs = { ...this.mockUpdatePrefs, autoCheckUpdates: enabled };
+    return { ...this.mockUpdatePrefs };
+  }
+
+  async skipUpdateVersion(version: string): Promise<UpdatePreferencesDto> {
+    this.mockUpdatePrefs = {
+      ...this.mockUpdatePrefs,
+      skippedVersion: version.trim() || null,
+    };
+    return { ...this.mockUpdatePrefs };
+  }
+
+  async clearSkippedUpdateVersion(): Promise<UpdatePreferencesDto> {
+    this.mockUpdatePrefs = { ...this.mockUpdatePrefs, skippedVersion: null };
+    return { ...this.mockUpdatePrefs };
+  }
+
+  async checkForUpdates(manual = true): Promise<UpdateCheckResponseDto> {
+    if (this.mockCheckError) {
+      throw new Error(this.mockCheckError);
+    }
+    const now = Date.now();
+    this.mockUpdatePrefs = { ...this.mockUpdatePrefs, lastUpdateCheckAtMs: now };
+    if (this.mockAvailableUpdate) {
+      const skipped = this.mockUpdatePrefs.skippedVersion;
+      const isSkipped =
+        Boolean(skipped) &&
+        (skipped === this.mockAvailableUpdate.version ||
+          skipped === this.mockAvailableUpdate.tagName);
+      return {
+        currentVersion: this.mockUpdatePrefs.currentVersion,
+        outcome: { kind: 'updateAvailable', update: this.mockAvailableUpdate },
+        checkedAtMs: now,
+        shouldNotify: manual || !isSkipped,
+        preferences: { ...this.mockUpdatePrefs },
+      };
+    }
+    return {
+      currentVersion: this.mockUpdatePrefs.currentVersion,
+      outcome: { kind: 'upToDate', latestVersion: this.mockUpdatePrefs.currentVersion },
+      checkedAtMs: now,
+      shouldNotify: false,
+      preferences: { ...this.mockUpdatePrefs },
+    };
+  }
+
+  async downloadAndVerifyUpdate(update: AppReleaseUpdate): Promise<VerifiedUpdateInstaller> {
+    const total = update.assetSizeBytes || 20_000_000;
+    for (const listener of this.updateProgressListeners) {
+      listener({
+        tagName: update.tagName,
+        downloadedBytes: Math.round(total * 0.5),
+        totalBytes: total,
+        fraction: 0.5,
+      });
+      listener({
+        tagName: update.tagName,
+        downloadedBytes: total,
+        totalBytes: total,
+        fraction: 1,
+      });
+    }
+    for (const listener of this.updatePhaseListeners) {
+      listener('verifying');
+    }
+    return {
+      tagName: update.tagName,
+      version: update.version,
+      installerPath: `C:\\Temp\\charkle-updater\\${update.assetName}`,
+      fileName: update.assetName,
+      verifiedSha256:
+        update.expectedSha256 ??
+        '1dc089f37e073529daeb95cb4709896132ebe045b557bb03ac8326c3ee00620b',
+      sizeBytes: total,
+      checksumVerifiedAgainstRelease: Boolean(update.expectedSha256),
+    };
+  }
+
+  async cancelUpdateDownload(): Promise<void> {}
+
+  async installAndRelaunchUpdate(installerPath: string): Promise<void> {
+    if (this.mockInstallError) {
+      throw new Error(this.mockInstallError);
+    }
+    this.mockInstalledPaths.push(installerPath);
+  }
+
+  async openUpdateInstaller(installerPath: string): Promise<void> {
+    this.mockOpenedInstallerPaths.push(installerPath);
+  }
+
+  async revealUpdateInstaller(installerPath: string): Promise<void> {
+    this.mockRevealedInstallerPaths.push(installerPath);
+  }
+
+  private mockGDirectCliPath: string | null = null;
+  private mockGDirectCliVersion: string | null = null;
+  private gdirectProgressListeners = new Set<(progress: GDirectInstallProgress) => void>();
+
+  async installGDirectCli(): Promise<GDirectInstallResult> {
+    for (const listener of this.gdirectProgressListeners) {
+      listener({
+        phase: 'downloading',
+        message: '正在下载 gdirect-0.13.2-x86_64-pc-windows-gnu.zip…',
+        downloadedBytes: 6_800_000,
+        totalBytes: 13_600_000,
+        fraction: 0.5,
+      });
+      listener({
+        phase: 'done',
+        message: '已安装 gdirect v0.13.2',
+        downloadedBytes: 13_600_000,
+        totalBytes: 13_600_000,
+        fraction: 1,
+      });
+    }
+    this.mockGDirectCliPath = 'C:\\Users\\demo\\AppData\\Local\\Charkle\\bin\\gdirect.exe';
+    this.mockGDirectCliVersion = '0.13.2';
+    return {
+      tagName: 'v0.13.2',
+      version: '0.13.2',
+      cliPath: this.mockGDirectCliPath,
+      assetName: 'gdirect-0.13.2-x86_64-pc-windows-gnu.zip',
+      verifiedSha256: '006b409608bf0681045fee71430006876f4332625bd8403014f4d21756838b73',
+      sizeBytes: 13_624_719,
+    };
+  }
+
   async subscribeEvents(handlers?: CharkleEventHandlers): Promise<() => void> {
     const surfaceHandler = handlers?.onSurfaceState;
     if (surfaceHandler) {
       this.surfaceListeners.add(surfaceHandler);
     }
+    const progressHandler = handlers?.onUpdateProgress;
+    if (progressHandler) {
+      this.updateProgressListeners.add(progressHandler);
+    }
+    const phaseHandler = handlers?.onUpdatePhase;
+    if (phaseHandler) {
+      this.updatePhaseListeners.add(phaseHandler);
+    }
+    const gdirectHandler = handlers?.onGDirectInstallProgress;
+    if (gdirectHandler) {
+      this.gdirectProgressListeners.add(gdirectHandler);
+    }
     return () => {
       if (surfaceHandler) {
         this.surfaceListeners.delete(surfaceHandler);
+      }
+      if (progressHandler) {
+        this.updateProgressListeners.delete(progressHandler);
+      }
+      if (phaseHandler) {
+        this.updatePhaseListeners.delete(phaseHandler);
+      }
+      if (gdirectHandler) {
+        this.gdirectProgressListeners.delete(gdirectHandler);
       }
     };
   }

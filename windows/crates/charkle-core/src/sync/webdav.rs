@@ -346,6 +346,7 @@ impl WebDAVTransport {
                 parents: vec![parent_id.to_string()],
                 trashed: false,
                 web_view_link: None,
+                thumbnail_link: None,
             });
         }
 
@@ -460,6 +461,7 @@ impl DriveTransport for WebDAVTransport {
             parents: vec![parent_id.to_string()],
             trashed: false,
             web_view_link: None,
+            thumbnail_link: None,
         })
     }
 
@@ -544,6 +546,7 @@ impl DriveTransport for WebDAVTransport {
             parents: vec![parent_id.to_string()],
             trashed: false,
             web_view_link: None,
+            thumbnail_link: None,
         })
     }
 
@@ -595,6 +598,7 @@ impl DriveTransport for WebDAVTransport {
             parents: vec![to_parent_id.to_string()],
             trashed: false,
             web_view_link: None,
+            thumbnail_link: None,
         })
     }
 

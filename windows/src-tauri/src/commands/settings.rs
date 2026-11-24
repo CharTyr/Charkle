@@ -23,11 +23,14 @@ use charkle_core::models::media::{
 use charkle_core::models::sync::{
     DriveSyncConfig, GDirectEnvironmentSnapshot, StorageMigrationReport,
 };
+use charkle_core::sync::gdirect::{
+    install_gdirect_cli_windows, probe_gdirect_environment, GDirectInstallResult,
+};
 use charkle_platform_win::mount::{detect_gdirect_binary, inspect_mount};
 use charkle_platform_win::{probe_ocr_diagnostics, OcrDiagnostics};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -907,24 +910,49 @@ pub async fn run_storage_migration(
 }
 
 #[tauri::command]
-pub fn get_system_diagnostics(state: State<'_, AppState>) -> SystemDiagnosticsDto {
+pub async fn get_system_diagnostics(state: State<'_, AppState>) -> IpcResult<SystemDiagnosticsDto> {
     let sync_cfg = state.engine.sync_config();
-    let mount_info = inspect_mount(Path::new(&sync_cfg.mount_path));
-    let gdirect = GDirectEnvironmentSnapshot {
-        cli_path: detect_gdirect_binary().map(|p| p.display().to_string()),
-        mount_path: sync_cfg.mount_path,
-        is_mount_active: mount_info.available,
-        ..Default::default()
-    };
-    let ocr = probe_ocr_diagnostics();
-    SystemDiagnosticsDto {
-        app_version: "1.2.0".to_string(),
+    let mount_path = sync_cfg.mount_path.clone();
+    let data_dir = state.data_dir.clone();
+
+    let (gdirect, ocr) = tokio::task::spawn_blocking(move || {
+        let mount_info = inspect_mount(Path::new(&mount_path));
+        let gdirect =
+            probe_gdirect_environment(detect_gdirect_binary(), mount_path, mount_info.available);
+        let ocr = probe_ocr_diagnostics();
+        (gdirect, ocr)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        (
+            GDirectEnvironmentSnapshot {
+                mount_path: sync_cfg.mount_path,
+                ..Default::default()
+            },
+            probe_ocr_diagnostics(),
+        )
+    });
+
+    Ok(SystemDiagnosticsDto {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version: 2,
-        data_dir: state.data_dir.display().to_string(),
-        database_path: state.data_dir.join("Library.sqlite3").display().to_string(),
+        data_dir: data_dir.display().to_string(),
+        database_path: data_dir.join("Library.sqlite3").display().to_string(),
         gdirect,
         ocr,
-    }
+    })
+}
+
+/// Downloads, SHA-256 verifies, and installs the official Windows `gdirect` CLI binary into
+/// `%LOCALAPPDATA%\Charkle\bin\gdirect.exe` with live progress events (`gdirect:install-progress`).
+#[tauri::command]
+pub async fn install_gdirect_cli(app: tauri::AppHandle) -> IpcResult<GDirectInstallResult> {
+    let app_for_progress = app.clone();
+    install_gdirect_cli_windows(None, move |progress| {
+        let _ = app_for_progress.emit("gdirect:install-progress", &progress);
+    })
+    .await
+    .map_err(IpcError::from)
 }
 
 #[tauri::command]

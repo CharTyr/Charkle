@@ -1115,6 +1115,55 @@ export interface GDirectEnvironmentSnapshot {
   bypassTunEnabled: boolean;
 }
 
+export interface GDirectInstallProgress {
+  phase: 'checking' | 'downloading' | 'verifying' | 'done' | string;
+  message: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  fraction: number;
+}
+
+export interface GDirectInstallResult {
+  tagName: string;
+  version: string;
+  cliPath: string;
+  assetName: string;
+  verifiedSha256: string;
+  sizeBytes: number;
+}
+
+/**
+ * Allowlist check: returns true only when `account` represents an actual Google Drive Direct API
+ * OAuth account (never a local directory path, mounted drive, WebDAV, or gdirect fallback).
+ */
+export function isDirectGoogleDriveAccount(
+  account?: DriveAccountInfo | null,
+): account is DriveAccountInfo {
+  if (!account) return false;
+  const email = (account.email ?? '').trim();
+  if (!email || !email.includes('@')) return false;
+  if (/^[a-z]:[\\/]/i.test(email) || email.startsWith('\\\\') || email.startsWith('/')) {
+    return false;
+  }
+  const source = (account.source ?? '').trim().toLowerCase();
+  if (
+    source === 'webdav' ||
+    source === 'local folder' ||
+    source === '本地文件夹' ||
+    source === 'mounted drive' ||
+    source === 'gdirect' ||
+    source === 'gdirect mount'
+  ) {
+    return false;
+  }
+  return (
+    source.includes('google') ||
+    source === 'in-memory drive' ||
+    source === 'directapi' ||
+    source === 'direct api'
+  );
+}
+
 export interface SystemDiagnosticsDto {
   appVersion: string;
   schemaVersion: number;
@@ -1166,3 +1215,74 @@ export interface ExtensionBridgeStateDto {
   bundledExtensionDir?: string | null;
   bundledExtensionManifestPath?: string | null;
 }
+
+// =========================================================================
+// Native GitHub Releases In-App Updater
+// =========================================================================
+
+export interface AppReleaseUpdate {
+  tagName: string;
+  version: string;
+  title: string;
+  releaseNotes: string;
+  htmlUrl: string;
+  publishedAt?: string | null;
+  assetName: string;
+  downloadUrl: string;
+  assetSizeBytes: number;
+  expectedSha256?: string | null;
+}
+
+export type UpdateCheckOutcome =
+  | { kind: 'upToDate'; latestVersion: string }
+  | { kind: 'updateAvailable'; update: AppReleaseUpdate };
+
+export interface UpdatePreferencesDto {
+  currentVersion: string;
+  autoCheckUpdates: boolean;
+  lastUpdateCheckAtMs?: number | null;
+  skippedVersion?: string | null;
+  releasesPageUrl: string;
+}
+
+export interface UpdateCheckResponseDto {
+  currentVersion: string;
+  outcome: UpdateCheckOutcome;
+  checkedAtMs: number;
+  shouldNotify: boolean;
+  preferences: UpdatePreferencesDto;
+}
+
+export interface UpdateDownloadProgress {
+  tagName: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  fraction: number;
+}
+
+export interface VerifiedUpdateInstaller {
+  tagName: string;
+  version: string;
+  installerPath: string;
+  fileName: string;
+  verifiedSha256: string;
+  sizeBytes: number;
+  checksumVerifiedAgainstRelease: boolean;
+}
+
+export type AppUpdateState =
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'upToDate'; checkedAtMs: number; latestVersion: string }
+  | { status: 'available'; update: AppReleaseUpdate }
+  | { status: 'downloading'; update: AppReleaseUpdate; progress: UpdateDownloadProgress }
+  | { status: 'verifying'; update: AppReleaseUpdate }
+  | { status: 'readyToInstall'; update: AppReleaseUpdate; installer: VerifiedUpdateInstaller }
+  | { status: 'installing'; update: AppReleaseUpdate; installer: VerifiedUpdateInstaller }
+  | {
+      status: 'manualInstallRequired';
+      update: AppReleaseUpdate;
+      installer: VerifiedUpdateInstaller;
+      reason: string;
+    }
+  | { status: 'failed'; message: string; update?: AppReleaseUpdate | null };

@@ -153,6 +153,61 @@ pub async fn handle_xhs_proxy_request(
     }
 }
 
+/// Returns `true` when the incoming `charkle-media://` request targets `/original/{id}` without
+/// `?cachedOnly=1` so the async protocol handler can download cloud originals on demand.
+pub fn parse_on_demand_original_uuid(request: &Request<Vec<u8>>) -> Option<Uuid> {
+    if request.method() == "OPTIONS" {
+        return None;
+    }
+    let query = request.uri().query().unwrap_or("");
+    if query.split('&').any(|pair| pair == "cachedOnly=1") {
+        return None;
+    }
+    let segments: Vec<&str> = request
+        .uri()
+        .path()
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let ["original", id_str] = segments.as_slice() {
+        return Uuid::parse_str(id_str).ok();
+    }
+    None
+}
+
+/// Handles `/original/{id}` with automatic on-demand cloud download when the file is not cached
+/// locally yet (used by Quick Look and full-resolution viewers; never triggered for `?cachedOnly=1`).
+pub async fn handle_on_demand_original_request(
+    engine: &Arc<LiveCharkleEngine>,
+    asset_id: Uuid,
+    request: &Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
+    let Ok(Some(asset)) = engine.fetch_asset(asset_id) else {
+        return error_response(StatusCode::NOT_FOUND, "Asset not found");
+    };
+    let mime = if !asset.mime_type.is_empty() && asset.mime_type != "application/octet-stream" {
+        asset.mime_type.clone()
+    } else {
+        MediaPipeline::mime_type(&asset.file_name).to_string()
+    };
+
+    if let Some(cached) = engine.cached_original_path(&asset) {
+        return serve_file_with_range(request, &cached, &mime, "public, max-age=300");
+    }
+
+    if asset.drive_file_id.is_none() {
+        return error_response(StatusCode::NOT_FOUND, "Media file not cached locally");
+    }
+
+    match engine.original_path_or_download(asset_id).await {
+        Ok(path) => serve_file_with_range(request, &path, &mime, "public, max-age=300"),
+        Err(err) => {
+            tracing::warn!(%asset_id, %err, "On-demand cloud original download failed");
+            error_response(StatusCode::NOT_FOUND, "Media file not cached locally")
+        }
+    }
+}
+
 /// Handles a `charkle-media://` request synchronously from disk or ephemeral capture frame
 /// store without copying whole large files when a `Range` header is supplied.
 pub fn handle_media_request(

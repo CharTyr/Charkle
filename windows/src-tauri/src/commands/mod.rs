@@ -8,6 +8,7 @@ pub mod native;
 pub mod query;
 pub mod settings;
 pub mod sync;
+pub mod updater;
 pub mod window;
 
 use std::path::PathBuf;
@@ -24,11 +25,13 @@ use charkle_platform_win::wake::LibraryWakeHandle;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::commands::updater::UpdaterRuntimeState;
 use crate::desktop::{CaptureFrameStore, HotkeyConfig, ShelfSettings};
 
 pub struct AppState {
     pub engine: Arc<LiveCharkleEngine>,
     pub extension_bridge: Arc<LocalExtensionBridgeServer>,
+    pub updater: Arc<UpdaterRuntimeState>,
     pub data_dir: PathBuf,
     pub usage_store: Arc<CloudAIUsageStore>,
     pub capture_frames: Arc<CaptureFrameStore>,

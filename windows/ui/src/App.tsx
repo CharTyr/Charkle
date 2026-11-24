@@ -17,9 +17,11 @@ import { OnboardingStudio } from './features/onboarding/OnboardingStudio';
 import { QuickLookOverlay } from './features/quicklook/QuickLookOverlay';
 import { SettingsOverlay } from './features/settings/SettingsOverlay';
 import { SidebarView } from './features/sidebar/SidebarView';
+import { AppUpdateModal } from './features/updates/AppUpdateModal';
 import {
   isPlainWebBookmark,
   type QuickLookOriginRect,
+  useAppUpdateStore,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
@@ -441,10 +443,27 @@ export const App: React.FC = () => {
           useCoordinatorStore.getState().applySurfaceState(surface);
         },
         onLibraryChanged: () => {
+          useLibraryStore.getState().bumpMediaRevision();
           void refreshAll(useCoordinatorStore.getState().destination);
         },
         onSyncStatus: (status) => {
+          const prevPhase = useSyncAIStore.getState().syncStatus?.phase;
+          const wasSyncing =
+            prevPhase !== undefined && prevPhase !== 'idle' && !(typeof prevPhase === 'object' && 'error' in prevPhase);
           setSyncStatus(status);
+          if (wasSyncing && status.phase === 'idle') {
+            useLibraryStore.getState().bumpMediaRevision();
+            void refreshAll(useCoordinatorStore.getState().destination);
+          }
+        },
+        onSyncProgressiveMetadata: ({ hasBoards }) => {
+          void refreshAll(useCoordinatorStore.getState().destination);
+          if (hasBoards) {
+            void fetchBoards();
+          }
+        },
+        onSyncProgressiveThumbnails: (assetIds) => {
+          useLibraryStore.getState().bumpThumbnailRevisions(assetIds);
         },
         onAssetEnriched: (assetId) => {
           void getTransport()
@@ -541,13 +560,42 @@ export const App: React.FC = () => {
         onMoodboardAgentStep: (step) => {
           pushAgentStep(step);
         },
+        onUpdateProgress: (progress) => {
+          useAppUpdateStore.getState().handleProgressEvent(progress);
+        },
+        onUpdatePhase: (phase) => {
+          useAppUpdateStore.getState().handlePhaseEvent(phase);
+        },
+        onMainCheckUpdates: () => {
+          void useAppUpdateStore.getState().checkForUpdatesManually({ presentSheet: true });
+        },
+        onGDirectInstallProgress: (progress) => {
+          useSyncAIStore.getState().setGDirectInstallProgress(progress);
+        },
       })
       .then((fn) => {
         unlisten = fn;
       })
       .catch(() => {});
 
+    // Single deferred one-shot GitHub Releases check (4s delay, 6h throttle, zero idle timers).
+    let cancelLaunchUpdateCheck: (() => void) | null = null;
+    if (isTauriRuntime()) {
+      cancelLaunchUpdateCheck = useAppUpdateStore
+        .getState()
+        .scheduleDeferredLaunchCheck((update) => {
+          useCoordinatorStore.getState().pushToast({
+            message: `发现新版本 v${update.version}`,
+            tone: 'info',
+            durationMs: 8000,
+            actionLabel: '查看更新',
+            onAction: () => useAppUpdateStore.getState().openSheet(),
+          });
+        }, 4000);
+    }
+
     return () => {
+      cancelLaunchUpdateCheck?.();
       unlisten?.();
     };
   }, [
@@ -1096,6 +1144,7 @@ export const App: React.FC = () => {
         onClose={() => setMoodboardGeneratorOpen(false)}
       />
       <SettingsOverlay />
+      <AppUpdateModal />
       <OnboardingStudio />
       <ModalShell
         open={pendingTrashDeleteIds.length > 0}

@@ -53,7 +53,7 @@ use crate::traits::{
     BasicVolumeMountInspector, InMemorySecretVault, NativeOcrProvider, NoopOcrProvider,
     SecretVault, VolumeMountInspector,
 };
-use crate::wire::swift_codec::{format_swift_uuid, upper_uuid};
+use crate::wire::swift_codec::{format_swift_uuid, upper_uuid, upper_uuid_vec};
 
 const WEBDAV_PASSWORD_VAULT_KEY: &str = "sync.webdav.password";
 
@@ -62,6 +62,8 @@ const WEBDAV_PASSWORD_VAULT_KEY: &str = "sync.webdav.password";
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum EngineEvent {
     SyncStatus(SyncStatus),
+    SyncProgressiveMetadata { has_boards: bool },
+    SyncProgressiveThumbnails(#[serde(with = "upper_uuid_vec")] Vec<Uuid>),
     LibraryChanged,
     AssetEnriched(#[serde(with = "upper_uuid")] Uuid),
     BoardUpdated(#[serde(with = "upper_uuid")] Uuid),
@@ -106,13 +108,24 @@ impl LiveCharkleEngine {
         mount_inspector: Arc<dyn VolumeMountInspector>,
         injected_transport: Option<Arc<dyn DriveTransport>>,
     ) -> Self {
-        let (events, _) = broadcast::channel(128);
+        let (events, _) = broadcast::channel(256);
         let events_for_sync = events.clone();
-        let sync = Arc::new(DriveSyncEngine::with_status_callback(
+        let events_for_progressive = events.clone();
+        let sync = Arc::new(DriveSyncEngine::with_callbacks(
             Arc::clone(&db),
             media.clone(),
             Arc::new(move |status| {
                 let _ = events_for_sync.send(EngineEvent::SyncStatus(status));
+            }),
+            Arc::new(move |prog| match prog {
+                crate::sync::SyncProgressiveEvent::Metadata { has_boards } => {
+                    let _ = events_for_progressive
+                        .send(EngineEvent::SyncProgressiveMetadata { has_boards });
+                }
+                crate::sync::SyncProgressiveEvent::Thumbnails { asset_ids } => {
+                    let _ = events_for_progressive
+                        .send(EngineEvent::SyncProgressiveThumbnails(asset_ids));
+                }
             }),
         ));
         let oauth = Arc::new(GoogleOAuthClient::new(Arc::clone(&vault)));
@@ -1517,7 +1530,26 @@ impl LiveCharkleEngine {
             ));
         }
         config.auto_sync_interval_seconds = config.auto_sync_interval_seconds.max(0);
-        self.db.set_state("driveConfig", Some(&config))
+        let previous_mode = self.sync_config().mode;
+        self.db.set_state("driveConfig", Some(&config))?;
+
+        // Prevent a stale account from another backend (such as LocalFolderTransport's
+        // local directory path) from leaking across mode switches.
+        if previous_mode != config.mode {
+            self.sync.clear_mismatched_account_if_idle(config.mode);
+            if let Ok(Some(mut persisted)) = self.db.state::<SyncStatus>("lastSyncStatus") {
+                persisted.active_mode = config.mode;
+                if persisted
+                    .account
+                    .as_ref()
+                    .is_some_and(|acc| !acc.matches_mode(config.mode))
+                {
+                    persisted.account = None;
+                }
+                let _ = self.db.set_state("lastSyncStatus", Some(&persisted));
+            }
+        }
+        Ok(())
     }
 
     pub async fn sync_status(&self) -> SyncStatus {
@@ -1533,6 +1565,17 @@ impl LiveCharkleEngine {
         let config = self.sync_config();
         if matches!(status.phase, crate::models::sync::SyncPhase::Idle) {
             status.active_mode = config.mode;
+        }
+        if status
+            .account
+            .as_ref()
+            .is_some_and(|acc| !acc.matches_mode(config.mode))
+        {
+            status.account = None;
+            if matches!(status.phase, crate::models::sync::SyncPhase::Idle) {
+                self.sync.restore_status(status.clone()).await;
+                let _ = self.db.set_state("lastSyncStatus", Some(&status));
+            }
         }
         status
     }

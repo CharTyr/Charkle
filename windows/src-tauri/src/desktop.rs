@@ -1732,6 +1732,8 @@ pub fn setup_system_tray(app: &AppHandle) -> Result<(), String> {
     let sep1 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let sync_item = MenuItem::with_id(app, "tray:sync", "立即同步素材库", true, None::<&str>)
         .map_err(|e| e.to_string())?;
+    let update_item = MenuItem::with_id(app, "tray:check-updates", "检查更新…", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
     let sep2 = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let quit_item = MenuItem::with_id(app, "tray:quit", "退出 Charkle", true, None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -1746,6 +1748,7 @@ pub fn setup_system_tray(app: &AppHandle) -> Result<(), String> {
             &clip_item,
             &sep1,
             &sync_item,
+            &update_item,
             &sep2,
             &quit_item,
         ],
@@ -1787,6 +1790,12 @@ pub fn setup_system_tray(app: &AppHandle) -> Result<(), String> {
                     let state = handle.state::<AppState>();
                     let _ = state.engine.sync_now().await;
                 });
+            }
+            "tray:check-updates" => {
+                show_or_focus_main_window_with_event(
+                    app_handle,
+                    Some(("main:check-updates", serde_json::json!({}))),
+                );
             }
             "tray:quit" => {
                 let state = app_handle.state::<AppState>();

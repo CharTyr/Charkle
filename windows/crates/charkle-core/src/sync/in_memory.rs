@@ -37,6 +37,7 @@ impl Entry {
             parents: vec![self.parent.clone()],
             trashed: self.trashed,
             web_view_link: None,
+            thumbnail_link: None,
         }
     }
 }
@@ -115,6 +116,14 @@ impl InMemoryDriveTransport {
 impl DriveTransport for InMemoryDriveTransport {
     fn display_name(&self) -> &str {
         "In-memory Drive"
+    }
+
+    fn accepts_remote_id(&self, id: &str) -> bool {
+        !id.is_empty()
+            && !id.starts_with("mounted-")
+            && !id.contains('/')
+            && !id.contains('\\')
+            && !id.contains("..")
     }
 
     async fn account_info(&self) -> CoreResult<DriveAccountInfo> {

@@ -14,4 +14,5 @@ pub mod media;
 pub mod models;
 pub mod sync;
 pub mod traits;
+pub mod updater;
 pub mod wire;

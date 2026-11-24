@@ -27,12 +27,13 @@ import {
   type ThemeMode,
 } from '../../design-system';
 import { useCoordinatorStore, useSyncAIStore } from '../../stores';
-import type {
-  DriveSyncConfig,
-  DriveTransportMode,
-  GalleryLayoutMode,
-  StorageMigrationReport,
-  SyncStatus,
+import {
+  isDirectGoogleDriveAccount,
+  type DriveSyncConfig,
+  type DriveTransportMode,
+  type GalleryLayoutMode,
+  type StorageMigrationReport,
+  type SyncStatus,
 } from '../../types/domain';
 import {
   activeStorageLocationSummary,
@@ -478,9 +479,7 @@ export const StorageLocationWizardModal: React.FC<{
     draft.mode === 'gdirectMount' ? 'directAPIWithGDirect' : draft.mode;
 
   const hasReadyGoogleAccount =
-    (syncStatus?.account != null &&
-      syncStatus.account.source !== 'WebDAV' &&
-      syncStatus.account.source !== '本地文件夹') ||
+    isDirectGoogleDriveAccount(syncStatus?.account) ||
     Boolean(diagnostics?.gdirect.defaultAccount) ||
     (diagnostics?.gdirect.accounts.length ?? 0) > 0;
 
@@ -1254,14 +1253,9 @@ export const SyncSettingsPane: React.FC = () => {
   const isSyncingNow = syncing || isSyncPhaseBusy(syncStatus);
   const hasGDirect = Boolean(diagnostics?.gdirect.cliPath);
 
-  const directAccount =
-    syncStatus?.account &&
-    syncStatus.account.source !== 'WebDAV' &&
-    syncStatus.account.source !== '本地文件夹' &&
-    syncStatus.account.source !== 'gdirect' &&
-    syncStatus.account.source !== 'gdirect mount'
-      ? syncStatus.account
-      : null;
+  const directAccount = isDirectGoogleDriveAccount(syncStatus?.account)
+    ? syncStatus.account
+    : null;
 
   const gdirectEmail =
     draft.selectedGDirectAccount ??

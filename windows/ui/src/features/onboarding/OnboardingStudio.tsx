@@ -22,15 +22,16 @@ import {
   type ThemeMode,
 } from '../../design-system';
 import { useCoordinatorStore, useLibraryStore, useSyncAIStore } from '../../stores';
-import type {
-  AIProviderConfig,
-  CloudAIProviderKind,
-  CustomAIEndpointFormat,
-  DriveSyncConfig,
-  DriveTransportMode,
-  GalleryLayoutMode,
-  HotkeyConfig,
-  ShelfSettings,
+import {
+  isDirectGoogleDriveAccount,
+  type AIProviderConfig,
+  type CloudAIProviderKind,
+  type CustomAIEndpointFormat,
+  type DriveSyncConfig,
+  type DriveTransportMode,
+  type GalleryLayoutMode,
+  type HotkeyConfig,
+  type ShelfSettings,
 } from '../../types/domain';
 import {
   ChatGPTBrandMark,
@@ -694,12 +695,9 @@ export const OnboardingStudio: React.FC = () => {
   const isGoogleStorage = activeStorageMode === 'directAPIWithGDirect';
   const isWebDAVStorage = activeStorageMode === 'webDAV';
 
-  const directAccount =
-    syncStatus?.account &&
-    syncStatus.account.source !== 'WebDAV' &&
-    syncStatus.account.source !== '本地文件夹'
-      ? syncStatus.account
-      : null;
+  const directAccount = isDirectGoogleDriveAccount(syncStatus?.account)
+    ? syncStatus.account
+    : null;
 
   const isLocalAI = draftAI.provider === 'disabled';
   const isChatGPTAI = draftAI.provider === 'chatGPTSubscription';

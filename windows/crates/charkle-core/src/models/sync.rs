@@ -60,6 +60,67 @@ fn default_drive_source() -> String {
     "Google Drive".to_string()
 }
 
+fn looks_like_filesystem_path(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    trimmed.starts_with("\\\\") || trimmed.starts_with('/')
+}
+
+impl DriveAccountInfo {
+    /// Returns true only when this account represents a real Google Drive Direct API OAuth
+    /// session (or test in-memory drive), never a local folder path, mounted drive, or WebDAV.
+    pub fn is_google_direct_api(&self) -> bool {
+        let email = self.email.trim();
+        if email.is_empty() || !email.contains('@') || looks_like_filesystem_path(email) {
+            return false;
+        }
+        let source = self.source.trim().to_ascii_lowercase();
+        if matches!(
+            source.as_str(),
+            "webdav"
+                | "local folder"
+                | "本地文件夹"
+                | "mounted drive"
+                | "gdirect"
+                | "gdirect mount"
+        ) {
+            return false;
+        }
+        source.contains("google")
+            || source == "in-memory drive"
+            || source == "directapi"
+            || source == "direct api"
+    }
+
+    /// Returns true if this account belongs to the requested `DriveTransportMode`.
+    pub fn matches_mode(&self, mode: DriveTransportMode) -> bool {
+        let source = self.source.trim().to_ascii_lowercase();
+        match mode {
+            DriveTransportMode::DirectApiWithGDirect => self.is_google_direct_api(),
+            DriveTransportMode::WebDav => {
+                source == "webdav" || source.contains("webdav") || source == "in-memory drive"
+            }
+            DriveTransportMode::GDirectMount => {
+                source == "mounted drive"
+                    || source == "gdirect mount"
+                    || source == "gdirect"
+                    || source.contains("mount")
+            }
+            DriveTransportMode::LocalOnly => source == "local folder" || source == "本地文件夹",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GDirectEndpoint {
@@ -395,6 +456,8 @@ pub struct SyncReport {
     #[serde(default)]
     pub reconciled_renames: usize,
     #[serde(default)]
+    pub downloaded_thumbnails: usize,
+    #[serde(default)]
     pub duration_seconds: f64,
 }
 
@@ -404,6 +467,7 @@ impl SyncReport {
             || self.downloaded_ops > 0
             || self.reconciled_renames > 0
             || self.updated_boards > 0
+            || self.downloaded_thumbnails > 0
     }
 }
 
@@ -429,6 +493,8 @@ pub struct RemoteDriveFile {
     pub trashed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_view_link: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_link: Option<String>,
 }
 
 impl RemoteDriveFile {
@@ -880,4 +946,47 @@ pub struct SyncManifest {
     pub root_folder_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directories: Option<BTreeMap<String, String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_account_mode_isolation_rejects_local_path_for_google_drive() {
+        let local_path_account = DriveAccountInfo {
+            email: r"C:\Users\demo\Pictures".to_string(),
+            display_name: Some(r"C:\Users\demo\Pictures".to_string()),
+            storage_used_bytes: None,
+            storage_limit_bytes: None,
+            source: "Local Folder".to_string(),
+        };
+        assert!(!local_path_account.is_google_direct_api());
+        assert!(!local_path_account.matches_mode(DriveTransportMode::DirectApiWithGDirect));
+        assert!(!local_path_account.matches_mode(DriveTransportMode::WebDav));
+        assert!(local_path_account.matches_mode(DriveTransportMode::LocalOnly));
+
+        let mounted_account = DriveAccountInfo {
+            email: r"G:\My Drive".to_string(),
+            display_name: Some(r"G:\My Drive".to_string()),
+            storage_used_bytes: None,
+            storage_limit_bytes: None,
+            source: "Mounted Drive".to_string(),
+        };
+        assert!(!mounted_account.is_google_direct_api());
+        assert!(!mounted_account.matches_mode(DriveTransportMode::DirectApiWithGDirect));
+        assert!(mounted_account.matches_mode(DriveTransportMode::GDirectMount));
+
+        let google_account = DriveAccountInfo {
+            email: "designer@example.com".to_string(),
+            display_name: Some("Designer".to_string()),
+            storage_used_bytes: Some(1024),
+            storage_limit_bytes: Some(10240),
+            source: "Google Drive API v3".to_string(),
+        };
+        assert!(google_account.is_google_direct_api());
+        assert!(google_account.matches_mode(DriveTransportMode::DirectApiWithGDirect));
+        assert!(!google_account.matches_mode(DriveTransportMode::LocalOnly));
+        assert!(!google_account.matches_mode(DriveTransportMode::WebDav));
+    }
 }

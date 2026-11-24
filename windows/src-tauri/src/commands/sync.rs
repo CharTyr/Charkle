@@ -129,17 +129,15 @@ pub async fn sign_in_google_drive(state: State<'_, AppState>) -> IpcResult<SyncS
         .await
         .map_err(IpcError::from)?;
 
-    let mut status = state.engine.sync_status().await;
     let transport = DirectAPITransport::new(Arc::clone(state.engine.oauth()), &[]);
     if let Ok(info) = transport.account_info().await {
-        status.account = Some(info);
         state
             .engine
             .sync_engine()
-            .restore_status(status.clone())
+            .update_signed_in_account(Some(info), sync_cfg.mode)
             .await;
     }
-    Ok(status)
+    Ok(state.engine.sync_status().await)
 }
 
 #[tauri::command]
@@ -150,14 +148,13 @@ pub async fn sign_out_google_drive(state: State<'_, AppState>) -> IpcResult<Sync
         .sign_out()
         .await
         .map_err(IpcError::from)?;
-    let mut status = state.engine.sync_status().await;
-    status.account = None;
+    let sync_cfg = state.engine.sync_config();
     state
         .engine
         .sync_engine()
-        .restore_status(status.clone())
+        .update_signed_in_account(None, sync_cfg.mode)
         .await;
-    Ok(status)
+    Ok(state.engine.sync_status().await)
 }
 
 #[tauri::command]

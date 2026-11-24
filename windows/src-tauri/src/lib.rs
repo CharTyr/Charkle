@@ -36,6 +36,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_deep_link::DeepLinkExt;
 
+use crate::commands::updater::UpdaterRuntimeState;
 use crate::commands::AppState;
 use crate::desktop::{
     configure_main_window, ensure_shelf_window, handle_deep_link_url, hide_shelf_window,
@@ -152,6 +153,14 @@ pub fn run() {
                     &request,
                 );
                 responder.respond(response);
+            } else if let Some(asset_id) = protocol::parse_on_demand_original_uuid(&request) {
+                let engine = Arc::clone(&app.state::<AppState>().engine);
+                tauri::async_runtime::spawn(async move {
+                    let response =
+                        protocol::handle_on_demand_original_request(&engine, asset_id, &request)
+                            .await;
+                    responder.respond(response);
+                });
             } else {
                 // Offload all disk I/O, range reads, and SQLite lookups off the Win32 WebView2 UI
                 // thread so opening the Drop Shelf or fast-scrolling never stalls message pumping.
@@ -325,9 +334,12 @@ pub fn run() {
                 }
             });
 
+            let updater = Arc::new(UpdaterRuntimeState::load(&data_dir));
+
             app.manage(AppState {
                 engine: Arc::clone(&engine),
                 extension_bridge,
+                updater,
                 data_dir,
                 usage_store,
                 capture_frames: Arc::new(CaptureFrameStore::default()),
@@ -504,12 +516,24 @@ pub fn run() {
             commands::settings::save_webdav_password,
             commands::settings::run_storage_migration,
             commands::settings::get_system_diagnostics,
+            commands::settings::install_gdirect_cli,
             commands::settings::export_figma_plugin_bundle,
             commands::settings::get_extension_bridge_state,
             commands::settings::set_extension_bridge_enabled,
             commands::settings::set_extension_auto_pair,
             commands::settings::regenerate_extension_bridge_token,
             commands::settings::reveal_bundled_browser_extension,
+            // Native GitHub Releases In-App Updater
+            commands::updater::get_update_preferences,
+            commands::updater::set_auto_check_updates,
+            commands::updater::skip_update_version,
+            commands::updater::clear_skipped_update_version,
+            commands::updater::check_for_updates,
+            commands::updater::download_and_verify_update,
+            commands::updater::cancel_update_download,
+            commands::updater::install_and_relaunch_update,
+            commands::updater::open_update_installer,
+            commands::updater::reveal_update_installer,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Charkle desktop application")

@@ -5,11 +5,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use image::codecs::jpeg::JpegEncoder;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
@@ -18,7 +22,7 @@ use uuid::Uuid;
 use crate::db::{stable_uuid, LibraryDatabase};
 use crate::error::{CoreError, CoreResult};
 use crate::media::MediaPipeline;
-use crate::models::core::{AssetRecord, FilterCriteria, FolderRecord, MediaKind};
+use crate::models::core::{AssetRecord, FilterCriteria, MediaKind};
 use crate::models::media::ThumbnailTier;
 use crate::models::sync::{
     DeletedAssetFingerprint, DriveAccountInfo, DriveSyncConfig, DriveTransportMode,
@@ -90,7 +94,105 @@ struct ReconcileOutcome {
     removed_file_ids: HashSet<String>,
 }
 
+/// Progressive UI hydration notifications emitted during cloud sync so fresh installs
+/// paint folders, metadata, and newest-first thumbnails within seconds.
+#[derive(Debug, Clone)]
+pub enum SyncProgressiveEvent {
+    Metadata { has_boards: bool },
+    Thumbnails { asset_ids: Vec<Uuid> },
+}
+
 type StatusCallback = Arc<dyn Fn(SyncStatus) + Send + Sync>;
+type ProgressiveCallback = Arc<dyn Fn(SyncProgressiveEvent) + Send + Sync>;
+
+/// Safe sliding-window bounded concurrency executor over borrowed async futures (zero `unsafe`,
+/// zero `'static` requirement, saturates HTTP/2 connection pools cleanly).
+async fn run_bounded_stream<'a, I, T, F, Fut, C>(
+    items: Vec<I>,
+    max_concurrent: usize,
+    mut make_fut: F,
+    mut on_complete: C,
+) where
+    F: FnMut(I) -> Fut,
+    Fut: Future<Output = T> + 'a,
+    C: FnMut(T),
+{
+    let limit = max_concurrent.max(1);
+    let mut iter = items.into_iter();
+    let mut in_flight: Vec<Pin<Box<Fut>>> = Vec::with_capacity(limit);
+
+    std::future::poll_fn(|cx| loop {
+        while in_flight.len() < limit {
+            if let Some(item) = iter.next() {
+                in_flight.push(Box::pin(make_fut(item)));
+            } else {
+                break;
+            }
+        }
+
+        if in_flight.is_empty() {
+            return Poll::Ready(());
+        }
+
+        let mut made_progress = false;
+        let mut idx = 0;
+        while idx < in_flight.len() {
+            match in_flight[idx].as_mut().poll(cx) {
+                Poll::Ready(val) => {
+                    in_flight.swap_remove(idx);
+                    on_complete(val);
+                    made_progress = true;
+                }
+                Poll::Pending => {
+                    idx += 1;
+                }
+            }
+        }
+
+        if !made_progress {
+            return Poll::Pending;
+        }
+    })
+    .await;
+}
+
+async fn run_bounded<'a, I, T, F, Fut>(items: Vec<I>, max_concurrent: usize, make_fut: F) -> Vec<T>
+where
+    F: FnMut(I) -> Fut,
+    Fut: Future<Output = T> + 'a,
+{
+    let mut out = Vec::with_capacity(items.len());
+    run_bounded_stream(items, max_concurrent, make_fut, |val| out.push(val)).await;
+    out
+}
+
+fn concurrency_limit(transport: &dyn DriveTransport, direct_default: usize) -> usize {
+    if transport.is_mounted_volume() {
+        2
+    } else {
+        direct_default.max(1)
+    }
+}
+
+/// Validates raw image bytes returned by a server-side thumbnail endpoint (`thumbnailLink`)
+/// and normalizes them into a compact `<= max_pixel` JPEG for `.grid520` caching.
+fn normalized_thumbnail_jpeg(raw: &[u8], max_pixel: u32) -> Option<Vec<u8>> {
+    if raw.is_empty() {
+        return None;
+    }
+    let decoded = image::load_from_memory(raw).ok()?;
+    let target = max_pixel.clamp(200, 1024);
+    let resized = if decoded.width() > target || decoded.height() > target {
+        decoded.thumbnail(target, target)
+    } else {
+        decoded
+    };
+    let rgb = resized.to_rgb8();
+    let mut out = Vec::with_capacity(24 * 1024);
+    let mut encoder = JpegEncoder::new_with_quality(&mut out, 84);
+    encoder.encode_image(&rgb).ok()?;
+    (!out.is_empty()).then_some(out)
+}
 
 /// Asynchronous bidirectional `/.charkle/` sync engine.
 pub struct DriveSyncEngine {
@@ -99,6 +201,7 @@ pub struct DriveSyncEngine {
     status: Arc<RwLock<SyncStatus>>,
     run_guard: Arc<Mutex<()>>,
     on_status: Option<StatusCallback>,
+    on_progressive: Option<ProgressiveCallback>,
 }
 
 impl DriveSyncEngine {
@@ -109,6 +212,7 @@ impl DriveSyncEngine {
             status: Arc::new(RwLock::new(SyncStatus::default())),
             run_guard: Arc::new(Mutex::new(())),
             on_status: None,
+            on_progressive: None,
         }
     }
 
@@ -123,6 +227,38 @@ impl DriveSyncEngine {
             status: Arc::new(RwLock::new(SyncStatus::default())),
             run_guard: Arc::new(Mutex::new(())),
             on_status: Some(on_status),
+            on_progressive: None,
+        }
+    }
+
+    pub fn with_callbacks(
+        db: Arc<LibraryDatabase>,
+        media: MediaPipeline,
+        on_status: StatusCallback,
+        on_progressive: ProgressiveCallback,
+    ) -> Self {
+        Self {
+            db,
+            media,
+            status: Arc::new(RwLock::new(SyncStatus::default())),
+            run_guard: Arc::new(Mutex::new(())),
+            on_status: Some(on_status),
+            on_progressive: Some(on_progressive),
+        }
+    }
+
+    fn notify_progressive_metadata(&self, has_boards: bool) {
+        if let Some(ref cb) = self.on_progressive {
+            cb(SyncProgressiveEvent::Metadata { has_boards });
+        }
+    }
+
+    fn notify_progressive_thumbnails(&self, asset_ids: Vec<Uuid>) {
+        if asset_ids.is_empty() {
+            return;
+        }
+        if let Some(ref cb) = self.on_progressive {
+            cb(SyncProgressiveEvent::Thumbnails { asset_ids });
         }
     }
 
@@ -138,6 +274,21 @@ impl DriveSyncEngine {
         if self.run_guard.try_lock().is_ok() {
             let mut guard = self.status.write().await;
             *guard = persisted;
+        }
+    }
+
+    /// Synchronously clears any in-memory `account` that does not belong to `active_mode`
+    /// when switching storage modes (e.g. `LocalOnly` -> `DirectApiWithGDirect`).
+    pub fn clear_mismatched_account_if_idle(&self, active_mode: DriveTransportMode) {
+        if let Ok(mut guard) = self.status.try_write() {
+            if matches!(guard.phase, SyncPhase::Idle | SyncPhase::Error(_)) {
+                guard.active_mode = active_mode;
+                if let Some(ref account) = guard.account {
+                    if !account.matches_mode(active_mode) {
+                        guard.account = None;
+                    }
+                }
+            }
         }
     }
 
@@ -258,28 +409,31 @@ impl DriveSyncEngine {
         transport: &dyn DriveTransport,
         config: &DriveSyncConfig,
     ) -> CoreResult<SyncReport> {
-        let account = transport.account_info().await?;
-        {
-            let mut s = self.status.write().await;
-            s.account = Some(account.clone());
-        }
-
-        self.update_progress(
-            Some(SyncPhase::Scanning),
-            Some("正在检查云端目录结构…".to_string()),
-            Some(0.10),
-        )
-        .await;
-
         let shared_root_id = if config.mode == DriveTransportMode::DirectApiWithGDirect {
             config.resolved_shared_folder_id()
         } else {
             None
         };
         let root_path = Self::resolved_root_path(config);
-        let (layout, existing_manifest) = self
-            .make_layout(transport, &root_path, shared_root_id.as_deref())
-            .await?;
+
+        self.update_progress(
+            Some(SyncPhase::Scanning),
+            Some(format!(
+                "正在连接{}并检查目录…",
+                config.mode.localized_label()
+            )),
+            Some(0.06),
+        )
+        .await;
+
+        let (account, (layout, existing_manifest)) = tokio::try_join!(
+            transport.account_info(),
+            self.make_layout(transport, &root_path, shared_root_id.as_deref()),
+        )?;
+        {
+            let mut s = self.status.write().await;
+            s.account = Some(account.clone());
+        }
 
         let scope = format!(
             "remote.{}",
@@ -291,9 +445,6 @@ impl DriveSyncEngine {
             )))
         );
 
-        self.update_manifest(&layout, existing_manifest.as_ref(), &scope, transport)
-            .await?;
-
         let mut report = SyncReport::default();
 
         self.update_progress(
@@ -301,15 +452,80 @@ impl DriveSyncEngine {
                 completed: 0,
                 total: 0,
             }),
-            Some("正在拉取其他设备的变更记录…".to_string()),
-            Some(0.16),
+            Some("正在并行拉取元数据与目录结构…".to_string()),
+            Some(0.12),
         )
         .await;
 
-        let (pulled_count, mut changed_boards) = self
-            .pull_ops(&layout, transport, &scope, config.sync_embeddings)
-            .await?;
+        // Run folder inventory crawl concurrently alongside Stage 1 (manifest + thumbnail list +
+        // parallel ops pull) AND Stage 2 (newest-first 12-way thumbnail hydration) so a fresh
+        // install surfaces folders, metadata, and crisp top-of-gallery thumbnails within seconds.
+        let inventory_fut =
+            self.fetch_inventory(&layout, transport, &scope, shared_root_id.is_some());
+        let stage12_fut = async {
+            let (manifest_res, remote_thumbs_res, pulled_res) = tokio::join!(
+                self.update_manifest(&layout, existing_manifest.as_ref(), &scope, transport),
+                async {
+                    if config.sync_thumbnails {
+                        Ok(keyed_by_name(
+                            &transport.list_files(&layout.thumbnails).await?,
+                        ))
+                    } else {
+                        Ok::<HashMap<String, RemoteDriveFile>, CoreError>(HashMap::new())
+                    }
+                },
+                self.pull_ops(&layout, transport, &scope, config.sync_embeddings),
+            );
+            manifest_res?;
+            let remote_thumbnails = remote_thumbs_res?;
+            let (pulled_count, changed_boards) = pulled_res?;
+            if pulled_count > 0 {
+                // Immediately surface folders, tags, titles, dimensions, dominant colors, and
+                // moodboards in the UI before waiting on inventory crawls or any original bytes.
+                self.notify_progressive_metadata(!changed_boards.is_empty());
+            }
+
+            // Stage 2 (Thumbnail-First Fast Hydration): download missing remote thumbnails BEFORE
+            // reconcile's heavy original downloads, uploads, or pinned-original fetches.
+            let (prefetched_stamps, stage2_thumb_count) =
+                if config.sync_thumbnails && !remote_thumbnails.is_empty() {
+                    let (stamps, dl_count) = self
+                        .download_missing_remote_thumbnails(
+                            &remote_thumbnails,
+                            None,
+                            &scope,
+                            transport,
+                            0.22,
+                            0.22,
+                            None,
+                        )
+                        .await?;
+                    (Some(stamps), dl_count)
+                } else {
+                    (None, 0)
+                };
+
+            Ok::<_, CoreError>((
+                remote_thumbnails,
+                pulled_count,
+                changed_boards,
+                prefetched_stamps,
+                stage2_thumb_count,
+            ))
+        };
+
+        let (inventory_res, stage12_res) = tokio::join!(inventory_fut, stage12_fut);
+        let inventory = inventory_res?;
+        let (
+            remote_thumbnails,
+            pulled_count,
+            mut changed_boards,
+            prefetched_stamps,
+            stage2_thumb_count,
+        ) = stage12_res?;
+
         report.downloaded_ops += pulled_count;
+        report.downloaded_thumbnails += stage2_thumb_count;
 
         let pending = self.db.pending_ops::<SyncOperation>(10_000)?;
         {
@@ -318,26 +534,9 @@ impl DriveSyncEngine {
         }
 
         self.update_progress(
-            Some(SyncPhase::Scanning),
-            Some("正在扫描云端文件变更…".to_string()),
-            Some(0.26),
-        )
-        .await;
-
-        let inventory = self
-            .fetch_inventory(&layout, transport, &scope, shared_root_id.is_some())
-            .await?;
-
-        let remote_thumbnails = if config.sync_thumbnails {
-            keyed_by_name(&transport.list_files(&layout.thumbnails).await?)
-        } else {
-            HashMap::new()
-        };
-
-        self.update_progress(
             Some(SyncPhase::Merging),
             Some("正在比对云端与本地目录…".to_string()),
-            Some(0.32),
+            Some(0.46),
         )
         .await;
 
@@ -377,7 +576,7 @@ impl DriveSyncEngine {
                     total: pending.len(),
                 }),
                 Some("准备上传本地新增与变更…".to_string()),
-                Some(0.62),
+                Some(0.68),
             )
             .await;
 
@@ -469,8 +668,27 @@ impl DriveSyncEngine {
             .await?;
 
         if config.sync_thumbnails {
-            self.sync_thumbnails(&layout, transport, &scope, Some(&remote_thumbnails))
+            self.upload_dirty_thumbnails(&layout, transport, Some(&remote_thumbnails))
                 .await?;
+            let (_, straggler_count) = self
+                .download_missing_remote_thumbnails(
+                    &remote_thumbnails,
+                    None,
+                    &scope,
+                    transport,
+                    0.91,
+                    0.03,
+                    prefetched_stamps,
+                )
+                .await?;
+            report.downloaded_thumbnails += straggler_count;
+        }
+
+        if report.discovered_remote_assets > 0
+            || report.reconciled_renames > 0
+            || !changed_boards.is_empty()
+        {
+            self.notify_progressive_metadata(!changed_boards.is_empty());
         }
 
         // Cross-platform safety: vectors already propagate losslessly via `ops/*.jsonl`.
@@ -506,6 +724,7 @@ impl DriveSyncEngine {
         let remote = asset
             .drive_file_id
             .clone()
+            .filter(|id| transport.accepts_remote_id(id))
             .ok_or_else(|| CoreError::NotFound(format_swift_uuid(&asset_id)))?;
 
         let staged = self.media.staging.join(format!(
@@ -776,59 +995,122 @@ impl DriveSyncEngine {
 
         let cursor_key = format!("{scope}.deviceCursors");
         let mut cursors: BTreeMap<String, i64> = self.db.state(&cursor_key)?.unwrap_or_default();
+        let pending_entries: Vec<(String, i64, RemoteDriveFile)> = shards
+            .into_iter()
+            .filter(|(device, end_seq, _)| *end_seq > cursors.get(device).copied().unwrap_or(0))
+            .collect();
+
         let mut downloaded = 0usize;
         let mut changed_boards = HashSet::new();
 
-        for (device, end_seq, file) in shards {
-            let previous = cursors.get(&device).copied().unwrap_or(0);
-            if end_seq <= previous {
-                continue;
-            }
-            let bytes = transport.download_data(&file.id).await?;
-            let text = String::from_utf8(bytes).map_err(|_| {
-                CoreError::InvalidPayload(format!("Malformed UTF-8 in sync shard {}", file.name))
-            })?;
-            let lines = decode_ops_jsonl(&text)?;
-            let seq_monotonic = lines.windows(2).all(|w| w[0].seq < w[1].seq);
-            let all_same_device = lines.iter().all(|l| l.operation.stamp.device == device);
-            let ends_right = lines.last().map(|l| l.seq) == Some(end_seq);
-            if lines.is_empty() || !ends_right || !all_same_device || !seq_monotonic {
-                return Err(CoreError::InvalidPayload(format!(
-                    "Malformed sync operation shard {}.",
-                    file.name
-                )));
-            }
+        if !pending_entries.is_empty() {
+            let concurrency = concurrency_limit(transport, 10);
+            let total_shards = pending_entries.len();
+            let mut completed_shards = 0usize;
+            const CHUNK_SIZE: usize = 40;
 
-            let mut ops_to_apply = Vec::new();
-            let mut disabled_vectors = Vec::new();
-            let mut unseen_count = 0usize;
-            for line in lines.into_iter().filter(|l| l.seq > previous) {
-                unseen_count += 1;
-                match &line.operation.change {
-                    SyncOperationChange::Board(delta) => {
-                        changed_boards.insert(delta.id);
+            for (chunk_idx, chunk) in pending_entries.chunks(CHUNK_SIZE).enumerate() {
+                let indexed: Vec<(usize, &(String, i64, RemoteDriveFile))> =
+                    chunk.iter().enumerate().collect();
+
+                let raw_results = run_bounded(indexed, concurrency, |(idx, entry)| async move {
+                    let (ref device, end_seq, ref file) = *entry;
+                    let bytes = transport.download_data(&file.id).await?;
+                    let text = String::from_utf8(bytes).map_err(|_| {
+                        CoreError::InvalidPayload(format!(
+                            "Malformed UTF-8 in sync shard {}",
+                            file.name
+                        ))
+                    })?;
+                    let lines = decode_ops_jsonl(&text)?;
+                    let seq_monotonic = lines.windows(2).all(|w| w[0].seq < w[1].seq);
+                    let all_same_device = lines.iter().all(|l| l.operation.stamp.device == *device);
+                    let ends_right = lines.last().map(|l| l.seq) == Some(end_seq);
+                    if lines.is_empty() || !ends_right || !all_same_device || !seq_monotonic {
+                        return Err(CoreError::InvalidPayload(format!(
+                            "Malformed sync operation shard {}.",
+                            file.name
+                        )));
                     }
-                    SyncOperationChange::DeleteBoard(id) => {
-                        changed_boards.insert(*id);
-                    }
-                    _ => {}
+                    Ok::<_, CoreError>((idx, device.clone(), end_seq, lines))
+                })
+                .await;
+
+                let mut parsed_shards = Vec::with_capacity(raw_results.len());
+                for res in raw_results {
+                    parsed_shards.push(res?);
                 }
-                if matches!(line.operation.change, SyncOperationChange::Vector { .. })
-                    && !sync_embeddings
-                {
-                    disabled_vectors.push((
-                        format!("disabled.vector.{device}.{}", line.seq),
-                        line.operation,
-                    ));
+                parsed_shards.sort_by_key(|(idx, _, _, _)| *idx);
+
+                let mut ops_batch: Vec<SyncOperation> = Vec::with_capacity(400);
+                let mut disabled_batch: Vec<(String, SyncOperation)> = Vec::new();
+                let mut chunk_boards = HashSet::new();
+
+                for (_, device, end_seq, lines) in parsed_shards {
+                    let previous = cursors.get(&device).copied().unwrap_or(0);
+                    for line in lines.into_iter().filter(|l| l.seq > previous) {
+                        downloaded += 1;
+                        match &line.operation.change {
+                            SyncOperationChange::Board(delta) => {
+                                changed_boards.insert(delta.id);
+                                chunk_boards.insert(delta.id);
+                            }
+                            SyncOperationChange::DeleteBoard(id) => {
+                                changed_boards.insert(*id);
+                                chunk_boards.insert(*id);
+                            }
+                            _ => {}
+                        }
+                        if matches!(line.operation.change, SyncOperationChange::Vector { .. })
+                            && !sync_embeddings
+                        {
+                            disabled_batch.push((
+                                format!("disabled.vector.{device}.{}", line.seq),
+                                line.operation,
+                            ));
+                        } else {
+                            ops_batch.push(line.operation);
+                        }
+                    }
+                    cursors.insert(device, end_seq);
+                    completed_shards += 1;
+
+                    if ops_batch.len() + disabled_batch.len() >= 400 {
+                        self.db.apply_op_shard(
+                            &ops_batch,
+                            &disabled_batch,
+                            &cursor_key,
+                            &cursors,
+                        )?;
+                        ops_batch.clear();
+                        disabled_batch.clear();
+                    }
+                }
+
+                if !ops_batch.is_empty() || !disabled_batch.is_empty() {
+                    self.db
+                        .apply_op_shard(&ops_batch, &disabled_batch, &cursor_key, &cursors)?;
                 } else {
-                    ops_to_apply.push(line.operation);
+                    self.db.set_state(&cursor_key, Some(&cursors))?;
+                }
+
+                let ratio = 0.12 + 0.10 * (completed_shards as f64 / total_shards.max(1) as f64);
+                self.update_progress(
+                    Some(SyncPhase::Downloading {
+                        completed: completed_shards,
+                        total: total_shards,
+                    }),
+                    Some(format!(
+                        "拉取素材元数据 ({completed_shards}/{total_shards})"
+                    )),
+                    Some(ratio),
+                )
+                .await;
+
+                if total_shards > CHUNK_SIZE && (chunk_idx + 1) * CHUNK_SIZE < total_shards {
+                    self.notify_progressive_metadata(!chunk_boards.is_empty());
                 }
             }
-
-            cursors.insert(device, end_seq);
-            self.db
-                .apply_op_shard(&ops_to_apply, &disabled_vectors, &cursor_key, &cursors)?;
-            downloaded += unseen_count;
         }
 
         if sync_embeddings {
@@ -1151,72 +1433,16 @@ impl DriveSyncEngine {
             }
         }
 
-        // 1. Reconcile remote folders
-        let mut folder_ids: HashMap<String, Uuid> = HashMap::new();
-        let mut folders = self.db.fetch_folders()?;
-        for file in &update.ordered_folders {
-            if file.id == layout.inbox {
-                continue;
-            }
-            let parent = file
-                .parents
-                .first()
-                .and_then(|pid| folder_ids.get(pid).copied());
-            let found_idx = folders
-                .iter()
-                .position(|f| f.drive_folder_id.as_deref() == Some(file.id.as_str()))
-                .or_else(|| {
-                    folders
-                        .iter()
-                        .position(|f| f.parent_id == parent && f.name == file.name)
-                });
-            let id = found_idx
-                .map(|i| folders[i].id)
-                .unwrap_or_else(|| stable_uuid(&format!("folder:{}", file.id)));
+        // 1. Reconcile all remote folders in ONE batched SQLite transaction.
+        let folder_ids = self.db.reconcile_remote_folders_batch(
+            &update.ordered_folders,
+            &update.previous,
+            &layout.inbox,
+            &pending_folders,
+            |fid| stable_uuid(&format!("folder:{fid}")),
+        )?;
 
-            if self.db.is_tombstoned("folder", id)? {
-                continue;
-            }
-            let mut folder = self.db.folder(id)?.unwrap_or_else(|| {
-                let mut f = FolderRecord::new(&file.name, parent);
-                f.id = id;
-                f.sort_order = folders.len() as i32;
-                f
-            });
-            let before = folder.clone();
-            let prev_remote = update.previous.get(&file.id);
-            if !pending_folders.contains(&id)
-                && (prev_remote.map(|p| p.name.as_str()) != Some(file.name.as_str())
-                    || prev_remote.map(|p| &p.parents) != Some(&file.parents))
-            {
-                folder.name = file.name.clone();
-                folder.parent_id = parent;
-            }
-            folder.drive_folder_id = Some(file.id.clone());
-            if before.name != folder.name
-                || before.parent_id != folder.parent_id
-                || found_idx.is_none()
-            {
-                folder.updated_at = file.modified_time.unwrap_or_else(Utc::now);
-                self.db
-                    .record(SyncOperationChange::Folder(folder.clone()), false)?;
-            }
-            if let Some(mut stored) = self.db.folder(id)? {
-                stored.drive_folder_id = Some(file.id.clone());
-                self.db.upsert_folder(&stored)?;
-                folder = stored;
-            } else {
-                self.db.upsert_folder(&folder)?;
-            }
-            folder_ids.insert(file.id.clone(), folder.id);
-            if let Some(i) = found_idx {
-                folders[i] = folder;
-            } else {
-                folders.push(folder);
-            }
-        }
-
-        // 2. Reconcile visible files
+        // 2. Reconcile visible files using 4 bulk preloads instead of O(N) per-file SQLite queries.
         let mut discovered = 0usize;
         let mut discovered_ids = Vec::new();
         let mut renames = 0usize;
@@ -1247,26 +1473,59 @@ impl DriveSyncEngine {
             .collect();
         visible.sort_by(|a, b| a.id.cmp(&b.id));
 
+        let all_local_assets = self.db.fetch_assets(
+            &FilterCriteria {
+                include_trashed: true,
+                ..FilterCriteria::default()
+            },
+            None,
+        )?;
+        let assets_by_id: HashMap<Uuid, AssetRecord> =
+            all_local_assets.into_iter().map(|a| (a.id, a)).collect();
+
+        let deleted_drive_ids: HashSet<String> = self
+            .db
+            .states_with_prefix::<bool>("deleted.drive.")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                v.then(|| k.strip_prefix("deleted.drive.").map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+        let deleted_md5s: HashMap<String, DeletedAssetFingerprint> = self
+            .db
+            .states_with_prefix::<DeletedAssetFingerprint>("deleted.md5.")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, fp)| k.strip_prefix("deleted.md5.").map(|m| (m.to_string(), fp)))
+            .collect();
+        let remote_hidden_ids: HashSet<String> = self
+            .db
+            .states_with_prefix::<bool>("remote.hidden.")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                v.then(|| k.strip_prefix("remote.hidden.").map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+
         let mut download_jobs: Vec<(&RemoteDriveFile, Option<Uuid>, Option<AssetRecord>)> =
             Vec::new();
+        let mut thumbnail_link_jobs: Vec<(&RemoteDriveFile, Option<Uuid>, AssetRecord)> =
+            Vec::new();
+        let mut location_updates: Vec<crate::db::library_db::RemoteLocationUpdate> = Vec::new();
+        let mut remote_trash_from_deleted: Vec<(String, bool)> = Vec::new();
 
         for file in visible {
             if pending_deleted_drive_ids.contains(&file.id) {
                 removed_file_ids.insert(file.id.clone());
                 continue;
             }
-            if self
-                .db
-                .state::<bool>(&format!("deleted.drive.{}", file.id))?
-                == Some(true)
-            {
-                let compatible = if is_mounted {
-                    file.id.starts_with("mounted-")
-                } else {
-                    !file.id.starts_with("mounted-")
-                };
-                if compatible {
-                    Self::trash_if_present(&file.id, transport).await?;
+            if deleted_drive_ids.contains(&file.id) {
+                if transport.accepts_remote_id(&file.id) {
+                    remote_trash_from_deleted.push((file.id.clone(), false));
                 }
                 removed_file_ids.insert(file.id.clone());
                 continue;
@@ -1281,23 +1540,19 @@ impl DriveSyncEngine {
                 .parents
                 .first()
                 .and_then(|pid| folder_ids.get(pid).copied());
-            let existing = match linked.get(&file.id) {
-                Some(&aid) => self.db.asset(aid)?,
-                None => None,
-            };
+            let existing = linked
+                .get(&file.id)
+                .and_then(|aid| assets_by_id.get(aid))
+                .cloned();
 
             if existing.is_none() {
                 if let Some(ref md5) = file.md5_checksum {
                     if !md5.is_empty() {
-                        if let Some(deleted) = self
-                            .db
-                            .state::<DeletedAssetFingerprint>(&format!("deleted.md5.{md5}"))?
-                        {
+                        if let Some(deleted) = deleted_md5s.get(md5) {
                             if self.db.assets_by_content_hash(&deleted.sha256)?.is_empty() {
-                                Self::trash_if_present(&file.id, transport).await?;
-                                let _ = self
-                                    .db
-                                    .set_state(&format!("deleted.drive.{}", file.id), Some(&true));
+                                if transport.accepts_remote_id(&file.id) {
+                                    remote_trash_from_deleted.push((file.id.clone(), true));
+                                }
                                 removed_file_ids.insert(file.id.clone());
                                 continue;
                             }
@@ -1309,17 +1564,28 @@ impl DriveSyncEngine {
             let changed_content = content_changed(previous, file);
             if let Some(ref existing_asset) = existing {
                 if !changed_content || previous.is_none() {
-                    if (previous != Some(file)
-                        || (existing_asset.folder_id.is_none() && folder_id.is_some()))
-                        && self.reconcile_location(
-                            file,
-                            previous,
-                            existing_asset,
-                            folder_id,
-                            pending_moves.contains(&existing_asset.id),
-                        )?
+                    if !pending_moves.contains(&existing_asset.id)
+                        && (previous != Some(file)
+                            || (existing_asset.folder_id.is_none() && folder_id.is_some()))
                     {
-                        renames += 1;
+                        let remote_name = original_name(file);
+                        let name_needs_update = previous.map(|p| p.name.as_str())
+                            != Some(file.name.as_str())
+                            && existing_asset.file_name != remote_name;
+                        let folder_needs_update = previous.map(|p| &p.parents)
+                            != Some(&file.parents)
+                            && existing_asset.folder_id != folder_id;
+                        let unhide_needs_update = remote_hidden_ids.contains(&file.id);
+                        if name_needs_update || folder_needs_update || unhide_needs_update {
+                            location_updates.push(crate::db::library_db::RemoteLocationUpdate {
+                                asset_id: existing_asset.id,
+                                drive_id: file.id.clone(),
+                                new_filename: name_needs_update.then_some(remote_name),
+                                new_folder_id: folder_id,
+                                update_folder: folder_needs_update,
+                                clear_hidden: unhide_needs_update,
+                            });
+                        }
                     }
                     let thumb_key = format!("{}.jpg", existing_asset.id.hyphenated());
                     if existing_asset.is_trashed
@@ -1345,80 +1611,210 @@ impl DriveSyncEngine {
                         )?;
                         continue;
                     }
+                    // Fast-path for already-synced assets missing `.charkle/thumbnails/<uuid>.jpg`:
+                    // fetch Google Drive's server-generated thumbnail (~40ms) instead of multi-MB original.
+                    if file.thumbnail_link.is_some() {
+                        thumbnail_link_jobs.push((file, folder_id, existing_asset.clone()));
+                        continue;
+                    }
                 }
             }
             download_jobs.push((file, folder_id, existing));
         }
 
-        // Phase 2: download & process remote files
-        let total_downloads = download_jobs.len();
-        for (idx, (file, folder_id, existing)) in download_jobs.into_iter().enumerate() {
-            let ratio = 0.34 + 0.26 * ((idx + 1) as f64 / total_downloads.max(1) as f64);
-            self.update_progress(
-                Some(SyncPhase::Downloading {
-                    completed: idx,
-                    total: total_downloads,
-                }),
-                Some(format!("拉取：{}", file.name)),
-                Some(ratio),
+        if !remote_trash_from_deleted.is_empty() {
+            let trash_concurrency = concurrency_limit(transport, 6);
+            let trash_results = run_bounded(
+                remote_trash_from_deleted,
+                trash_concurrency,
+                |(file_id, persist_marker)| async move {
+                    Self::trash_if_present(&file_id, transport).await?;
+                    Ok::<_, CoreError>(persist_marker.then_some(file_id))
+                },
+            )
+            .await;
+            let mut markers_to_save = Vec::new();
+            for res in trash_results {
+                if let Some(fid) = res? {
+                    markers_to_save.push(fid);
+                }
+            }
+            let _ = self.db.mark_deleted_drive_markers_batch(&markers_to_save);
+        }
+
+        if !location_updates.is_empty() {
+            renames += self
+                .db
+                .apply_remote_location_updates_batch(&location_updates)?;
+        }
+
+        // Phase 1.5: fast 12-way parallel Google Drive `thumbnailLink` hydration for already-synced
+        // assets lacking `.charkle/thumbnails/<uuid>.jpg`.
+        if !thumbnail_link_jobs.is_empty() {
+            let thumb_concurrency = concurrency_limit(transport, 12);
+            let fallback_results = run_bounded(
+                thumbnail_link_jobs,
+                thumb_concurrency,
+                |(file, folder_id, existing_asset)| async move {
+                    let ok = match transport.download_thumbnail_data(file, 640).await {
+                        Ok(Some(raw_bytes)) => {
+                            if let Some(jpeg) = normalized_thumbnail_jpeg(&raw_bytes, 520) {
+                                self.media
+                                    .write_thumbnail_bytes(
+                                        existing_asset.id,
+                                        ThumbnailTier::Grid520,
+                                        &jpeg,
+                                    )
+                                    .is_ok()
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+                    (file, folder_id, existing_asset, ok)
+                },
             )
             .await;
 
-            let stage_dir = self.media.staging.join(format!(
-                "remote-{}-{}",
-                format_swift_uuid(&stable_uuid(&file.id)),
-                &Uuid::new_v4().simple().to_string()[..8]
-            ));
-            let res = self
-                .download_and_ingest_remote(
-                    file,
-                    folder_id,
-                    existing.as_ref(),
-                    &update.current,
-                    transport,
-                    config,
-                    &stage_dir,
-                )
-                .await;
-            let _ = fs::remove_dir_all(&stage_dir);
-
-            match res {
-                Ok(RemoteIngestOutcome::Saved {
-                    saved,
-                    had_existing,
-                    previous_file_name,
-                    previous_folder_id,
-                }) => {
-                    linked.insert(file.id.clone(), saved.id);
-                    if !had_existing
-                        && (saved.id == stable_uuid(&format!("asset:{}", file.id))
-                            || file.id.starts_with(MOUNTED_PATH_ID_PREFIX))
-                    {
-                        discovered += 1;
-                        discovered_ids.push(saved.id);
-                    }
-                    if had_existing
-                        && (previous_file_name.as_deref() != Some(saved.file_name.as_str())
-                            || previous_folder_id != saved.folder_id)
-                    {
-                        renames += 1;
-                    }
-                }
-                Ok(RemoteIngestOutcome::Skipped) => {}
-                Ok(RemoteIngestOutcome::DeletedLocally) => {
-                    Self::trash_if_present(&file.id, transport).await?;
-                    let _ = self
-                        .db
-                        .set_state(&format!("deleted.drive.{}", file.id), Some(&true));
-                    removed_file_ids.insert(file.id.clone());
-                }
-                Err(err) => {
-                    if is_fatal_sync_error(&err) {
-                        return Err(err);
-                    }
-                    deferred_file_ids.insert(file.id.clone());
+            let mut hydrated_ids = Vec::new();
+            for (file, folder_id, existing_asset, ok) in fallback_results {
+                if ok {
+                    hydrated_ids.push(existing_asset.id);
+                } else {
+                    download_jobs.push((file, folder_id, Some(existing_asset)));
                 }
             }
+            if !hydrated_ids.is_empty() {
+                self.notify_progressive_thumbnails(hydrated_ids);
+            }
+        }
+
+        // Phase 2: bounded parallel remote download + thumbnail rendering (up to 6 concurrent)
+        if !download_jobs.is_empty() {
+            let dl_concurrency = concurrency_limit(transport, 6);
+            let total_downloads = download_jobs.len();
+            self.update_progress(
+                Some(SyncPhase::Downloading {
+                    completed: 0,
+                    total: total_downloads,
+                }),
+                Some(format!("并行拉取 {total_downloads} 项素材…")),
+                Some(0.48),
+            )
+            .await;
+
+            let mut completed_downloads = 0usize;
+            let mut since_last_progressive = 0usize;
+            let mut last_progressive_at = Instant::now();
+            let mut fatal_error: Option<CoreError> = None;
+            let mut pending_deleted_locally: Vec<String> = Vec::new();
+            let current_inv = &update.current;
+
+            run_bounded_stream(
+                download_jobs,
+                dl_concurrency,
+                |(file, folder_id, existing)| async move {
+                    let stage_dir = self.media.staging.join(format!(
+                        "remote-{}-{}",
+                        format_swift_uuid(&stable_uuid(&file.id)),
+                        &Uuid::new_v4().simple().to_string()[..8]
+                    ));
+                    let res = self
+                        .download_and_ingest_remote(
+                            file,
+                            folder_id,
+                            existing.as_ref(),
+                            current_inv,
+                            transport,
+                            config,
+                            &stage_dir,
+                        )
+                        .await;
+                    let _ = fs::remove_dir_all(&stage_dir);
+                    (file, res)
+                },
+                |(file, res)| {
+                    if fatal_error.is_some() {
+                        return;
+                    }
+                    completed_downloads += 1;
+                    match res {
+                        Ok(RemoteIngestOutcome::Saved {
+                            saved,
+                            had_existing,
+                            previous_file_name,
+                            previous_folder_id,
+                        }) => {
+                            linked.insert(file.id.clone(), saved.id);
+                            if !had_existing
+                                && (saved.id == stable_uuid(&format!("asset:{}", file.id))
+                                    || file.id.starts_with(MOUNTED_PATH_ID_PREFIX))
+                            {
+                                discovered += 1;
+                                discovered_ids.push(saved.id);
+                            }
+                            if had_existing
+                                && (previous_file_name.as_deref() != Some(saved.file_name.as_str())
+                                    || previous_folder_id != saved.folder_id)
+                            {
+                                renames += 1;
+                            }
+                            since_last_progressive += 1;
+                            let now = Instant::now();
+                            if since_last_progressive >= 12
+                                || now.duration_since(last_progressive_at)
+                                    >= Duration::from_millis(800)
+                            {
+                                since_last_progressive = 0;
+                                last_progressive_at = now;
+                                self.notify_progressive_metadata(false);
+                            }
+                        }
+                        Ok(RemoteIngestOutcome::Skipped) => {}
+                        Ok(RemoteIngestOutcome::DeletedLocally) => {
+                            pending_deleted_locally.push(file.id.clone());
+                            removed_file_ids.insert(file.id.clone());
+                        }
+                        Err(err) => {
+                            if is_fatal_sync_error(&err) {
+                                fatal_error = Some(err);
+                            } else {
+                                deferred_file_ids.insert(file.id.clone());
+                            }
+                        }
+                    }
+                },
+            )
+            .await;
+
+            if let Some(err) = fatal_error {
+                return Err(err);
+            }
+            if !pending_deleted_locally.is_empty() {
+                for fid in &pending_deleted_locally {
+                    if transport.accepts_remote_id(fid) {
+                        Self::trash_if_present(fid, transport).await?;
+                    }
+                }
+                let _ = self
+                    .db
+                    .mark_deleted_drive_markers_batch(&pending_deleted_locally);
+            }
+            if since_last_progressive > 0 {
+                self.notify_progressive_metadata(false);
+            }
+            self.update_progress(
+                Some(SyncPhase::Downloading {
+                    completed: completed_downloads,
+                    total: total_downloads,
+                }),
+                Some(format!(
+                    "已完成素材拉取 ({completed_downloads}/{total_downloads})"
+                )),
+                Some(0.66),
+            )
+            .await;
         }
 
         // Phase 3: soft-trash assets whose remote files disappeared
@@ -1618,49 +2014,6 @@ impl DriveSyncEngine {
         Ok(Some(saved))
     }
 
-    fn reconcile_location(
-        &self,
-        file: &RemoteDriveFile,
-        previous: Option<&RemoteDriveFile>,
-        existing: &AssetRecord,
-        folder_id: Option<Uuid>,
-        pending_move: bool,
-    ) -> CoreResult<bool> {
-        if pending_move {
-            return Ok(false);
-        }
-        let filename = original_name(file);
-        let Some(mut current) = self.db.asset(existing.id)? else {
-            return Ok(false);
-        };
-        if current.drive_file_id.as_deref() != Some(file.id.as_str()) {
-            return Ok(false);
-        }
-        let before = current.clone();
-        if previous.map(|p| p.name.as_str()) != Some(file.name.as_str())
-            && current.file_name != filename
-        {
-            if current.title == file_stem_or_full(&current.file_name) {
-                current.title = file_stem_or_full(&filename);
-            }
-            current.file_name = filename;
-        }
-        if previous.map(|p| &p.parents) != Some(&file.parents) {
-            current.folder_id = folder_id;
-        }
-        let hidden_key = format!("remote.hidden.{}", file.id);
-        if self.db.state::<bool>(&hidden_key)? == Some(true) {
-            current.is_trashed = false;
-            self.db.set_state::<bool>(&hidden_key, None)?;
-        }
-        if current != before {
-            let _ = self.db.save_asset_locally(&current, false)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     async fn upload_physical(
         &self,
         operations: &[SyncOperation],
@@ -1779,11 +2132,10 @@ impl DriveSyncEngine {
                 continue;
             }
 
-            let needs_upload = asset.drive_file_id.is_none()
-                || asset
-                    .drive_file_id
-                    .as_deref()
-                    .is_some_and(|s| s.starts_with("mounted-"));
+            let needs_upload = asset
+                .drive_file_id
+                .as_deref()
+                .is_none_or(|s| !transport.accepts_remote_id(s));
             if !needs_upload {
                 continue;
             }
@@ -1887,13 +2239,7 @@ impl DriveSyncEngine {
 
         let compatible_removed_files: HashSet<String> = removed_files
             .into_iter()
-            .filter(|id| {
-                if is_mounted {
-                    id.starts_with("mounted-")
-                } else {
-                    !id.starts_with("mounted-")
-                }
-            })
+            .filter(|id| transport.accepts_remote_id(id))
             .collect();
         for id in &compatible_removed_files {
             Self::trash_if_present(id, transport).await?;
@@ -1901,13 +2247,7 @@ impl DriveSyncEngine {
 
         let compatible_removed_folders: Vec<String> = removed_folders
             .into_iter()
-            .filter(|id| {
-                if is_mounted {
-                    id.starts_with("mounted-")
-                } else {
-                    !id.starts_with("mounted-")
-                }
-            })
+            .filter(|id| transport.accepts_remote_id(id))
             .collect();
         for id in compatible_removed_folders {
             match transport.list_files(&id).await {
@@ -2016,7 +2356,11 @@ impl DriveSyncEngine {
             };
             path.remove(&id);
 
-            let remote = if let Some(ref known) = folder.drive_folder_id {
+            let remote = if let Some(known) = folder
+                .drive_folder_id
+                .as_deref()
+                .filter(|id| transport.accepts_remote_id(id))
+            {
                 match transport
                     .move_file(known, None, &parent_remote, Some(&folder.name))
                     .await
@@ -2108,13 +2452,18 @@ impl DriveSyncEngine {
         Ok(())
     }
 
-    async fn sync_thumbnails(
+    async fn upload_dirty_thumbnails(
         &self,
         layout: &Layout,
         transport: &dyn DriveTransport,
-        scope: &str,
         prefetched: Option<&HashMap<String, RemoteDriveFile>>,
     ) -> CoreResult<()> {
+        let dirty: BTreeMap<String, String> =
+            self.db.state("projection.thumbnails")?.unwrap_or_default();
+        if dirty.is_empty() {
+            return Ok(());
+        }
+
         let fetched_owned;
         let files = match prefetched {
             Some(map) => map,
@@ -2124,10 +2473,6 @@ impl DriveSyncEngine {
             }
         };
 
-        let dirty: BTreeMap<String, String> =
-            self.db.state("projection.thumbnails")?.unwrap_or_default();
-
-        // 1. Upload or remove dirty local thumbnails
         let mut cleared = Vec::new();
         for (id_upper, ver) in &dirty {
             let Ok(uuid) = Uuid::parse_str(id_upper) else {
@@ -2155,24 +2500,68 @@ impl DriveSyncEngine {
             cleared.push((id_upper.clone(), ver.clone()));
         }
         self.db.clear_projections("thumbnails", &cleared)?;
+        Ok(())
+    }
 
-        // 2. Download missing or updated remote thumbnails
+    /// Downloads missing or updated `.grid520` remote thumbnails in newest-first (`created_at DESC`)
+    /// priority order with 12-way sliding-window HTTP/2 concurrency and progressive UI painting
+    /// notifications (flushing first 12 immediately, then every 32 / 500ms).
+    #[allow(clippy::too_many_arguments)]
+    async fn download_missing_remote_thumbnails(
+        &self,
+        files: &HashMap<String, RemoteDriveFile>,
+        dirty_override: Option<&BTreeMap<String, String>>,
+        scope: &str,
+        transport: &dyn DriveTransport,
+        progress_start: f64,
+        progress_span: f64,
+        initial_stamps: Option<BTreeMap<String, String>>,
+    ) -> CoreResult<(BTreeMap<String, String>, usize)> {
+        let dirty_owned;
+        let dirty = match dirty_override {
+            Some(map) => map,
+            None => {
+                dirty_owned = self
+                    .db
+                    .state::<BTreeMap<String, String>>("projection.thumbnails")?
+                    .unwrap_or_default();
+                &dirty_owned
+            }
+        };
+
+        let created_at_by_id = self.db.asset_created_at_by_id()?;
         let stamps_key = format!("{scope}.thumbnails");
-        let mut stamps: BTreeMap<String, String> = self.db.state(&stamps_key)?.unwrap_or_default();
+        let mut stamps: BTreeMap<String, String> = match initial_stamps {
+            Some(existing) => existing,
+            None => self.db.state(&stamps_key)?.unwrap_or_default(),
+        };
         let mut stamps_dirty = false;
 
+        struct ThumbJob {
+            uuid: Uuid,
+            id_upper: String,
+            file_id: String,
+            stamp: String,
+            created_at: f64,
+        }
+
+        let mut jobs: Vec<ThumbJob> = Vec::with_capacity(files.len().min(created_at_by_id.len()));
         for (name, file) in files {
-            if file.is_folder() {
+            if file.is_folder() || !transport.accepts_remote_id(&file.id) {
                 continue;
             }
-            let Some(stem) = name.strip_suffix(".jpg") else {
+            let lower_name = name.to_ascii_lowercase();
+            let Some(stem) = lower_name.strip_suffix(".jpg") else {
                 continue;
             };
             let Ok(uuid) = Uuid::parse_str(stem) else {
                 continue;
             };
+            let Some(&created_at) = created_at_by_id.get(&uuid) else {
+                continue;
+            };
             let id_upper = format_swift_uuid(&uuid);
-            if dirty.contains_key(&id_upper) || self.db.asset(uuid)?.is_none() {
+            if dirty.contains_key(&id_upper) {
                 continue;
             }
             let stamp = file.md5_checksum.clone().unwrap_or_else(|| {
@@ -2198,17 +2587,119 @@ impl DriveSyncEngine {
                 }
             }
 
-            let data = transport.download_data(&file.id).await?;
-            self.media
-                .write_thumbnail_bytes(uuid, ThumbnailTier::Grid520, &data)?;
-            stamps.insert(id_upper, stamp);
-            stamps_dirty = true;
+            jobs.push(ThumbJob {
+                uuid,
+                id_upper,
+                file_id: file.id.clone(),
+                stamp,
+                created_at,
+            });
+        }
+
+        // Prioritize newest / top-of-gallery assets first so the visible viewport populates immediately.
+        jobs.sort_by(|a, b| {
+            b.created_at
+                .total_cmp(&a.created_at)
+                .then_with(|| a.id_upper.cmp(&b.id_upper))
+        });
+
+        let total = jobs.len();
+        let mut downloaded_count = 0usize;
+
+        if total > 0 {
+            let concurrency = concurrency_limit(transport, 12);
+            let mut completed = 0usize;
+            let mut unsaved_count = 0usize;
+            let mut pending_notify_ids: Vec<Uuid> = Vec::with_capacity(32);
+            let mut did_initial_paint_flush = false;
+            let mut last_notify_at = Instant::now();
+            let mut last_progress_at = Instant::now();
+
+            self.update_progress(
+                Some(SyncPhase::Downloading {
+                    completed: 0,
+                    total,
+                }),
+                Some(format!("优先拉取缩略图 (0/{total})")),
+                Some(progress_start),
+            )
+            .await;
+
+            run_bounded_stream(
+                jobs,
+                concurrency,
+                |job| async move {
+                    let dl = transport.download_data(&job.file_id).await;
+                    (job, dl)
+                },
+                |(job, dl)| {
+                    completed += 1;
+                    match dl {
+                        Ok(data) if !data.is_empty() => {
+                            if self
+                                .media
+                                .write_thumbnail_bytes(job.uuid, ThumbnailTier::Grid520, &data)
+                                .is_ok()
+                            {
+                                stamps.insert(job.id_upper, job.stamp);
+                                stamps_dirty = true;
+                                downloaded_count += 1;
+                                unsaved_count += 1;
+                                pending_notify_ids.push(job.uuid);
+                            }
+                        }
+                        Ok(_) => {
+                            tracing::warn!(file_id = %job.file_id, "Skipping empty remote thumbnail payload");
+                        }
+                        Err(err) => {
+                            tracing::warn!(file_id = %job.file_id, %err, "Failed to download remote thumbnail; continuing");
+                        }
+                    }
+
+                    let now = Instant::now();
+                    let flush_threshold = if did_initial_paint_flush { 32 } else { 12 };
+                    if pending_notify_ids.len() >= flush_threshold
+                        || (!pending_notify_ids.is_empty()
+                            && now.duration_since(last_notify_at) >= Duration::from_millis(500))
+                    {
+                        let batch = std::mem::replace(&mut pending_notify_ids, Vec::with_capacity(32));
+                        did_initial_paint_flush = true;
+                        last_notify_at = now;
+                        self.notify_progressive_thumbnails(batch);
+                    }
+
+                    if unsaved_count >= 100 {
+                        unsaved_count = 0;
+                        let _ = self.db.set_state(&stamps_key, Some(&stamps));
+                        stamps_dirty = false;
+                    }
+
+                    if now.duration_since(last_progress_at) >= Duration::from_millis(250)
+                        || completed == total
+                    {
+                        last_progress_at = now;
+                        let ratio =
+                            progress_start + progress_span * (completed as f64 / total.max(1) as f64);
+                        if let Ok(mut s) = self.status.try_write() {
+                            s.phase = SyncPhase::Downloading { completed, total };
+                            s.current_detail = Some(format!("拉取缩略图 ({completed}/{total})"));
+                            s.progress_fraction = Some(ratio.clamp(0.0, 1.0));
+                            self.broadcast(&s);
+                        }
+                    }
+                },
+            )
+            .await;
+
+            if !pending_notify_ids.is_empty() {
+                self.notify_progressive_thumbnails(pending_notify_ids);
+            }
         }
 
         if stamps_dirty {
             self.db.set_state(&stamps_key, Some(&stamps))?;
         }
-        Ok(())
+        Ok((stamps, downloaded_count))
     }
 
     async fn remote_file_matches_sha256(
