@@ -350,6 +350,125 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return current
     }
 
+    /// Automatically migrates previously imported Xiaohongshu social-bookmark assets whose covers
+    /// were rendered with legacy dimensions (`800x920`, `800x620`, or footer-less `900x1200`) to the
+    /// native Xiaohongshu feed card (`900x1440`: vertical 3:4 `900x1200` cover + bold title/author footer).
+    /// Idempotent and zero-overhead once migrated; skips media-bearing notes when offline rather than degrading covers.
+    public func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID] {
+        guard let allAssets = try? await database.fetchAssets(matching: FilterCriteria(includeTrashed: true)) else {
+            return []
+        }
+
+        let candidates = allAssets.filter { asset in
+            guard asset.richMetadata?.socialPost?.platform == .xiaohongshu else { return false }
+            return asset.pixelWidth != 900 || asset.pixelHeight != 1_440
+        }
+        guard !candidates.isEmpty else { return [] }
+
+        let stagingDir = media.staging.appending(path: "xhs-cover-upgrade-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        var upgradedIDs: [UUID] = []
+        for var asset in candidates {
+            guard var meta = asset.richMetadata?.socialPost else { continue }
+            var embeddedPoster: CGImage?
+
+            let hasDeclaredMedia = !meta.effectiveAttachments.isEmpty || !meta.mediaURLs.isEmpty || !meta.mediaThumbnailURLs.isEmpty
+
+            // 1. Try existing attachment cover URLs first (fast CDN fetch with Xiaohongshu Referer).
+            let candidateURLs: [URL] = {
+                var urls: [URL] = []
+                if let firstPhoto = meta.effectiveAttachments.first(where: { $0.kind == .photo }),
+                   let u = URL(string: firstPhoto.url) {
+                    urls.append(u)
+                }
+                if let thumb = meta.effectiveAttachments.first?.thumbnailURL.flatMap(URL.init(string:)) {
+                    urls.append(thumb)
+                }
+                for raw in meta.mediaURLs + meta.mediaThumbnailURLs {
+                    if let u = URL(string: raw), !urls.contains(u) {
+                        urls.append(u)
+                    }
+                }
+                return urls
+            }()
+
+            for photoURL in candidateURLs {
+                if photoURL.isFileURL {
+                    embeddedPoster = MediaPipeline.raster(photoURL)?.poster
+                } else {
+                    let item = XPostMedia(kind: .photo, url: photoURL)
+                    if let file = await XPostResolver.downloadMedia(
+                        item,
+                        to: stagingDir,
+                        baseName: "XHSUpgrade-\(asset.id.uuidString.prefix(8))"
+                    ) {
+                        embeddedPoster = MediaPipeline.raster(file)?.poster
+                    }
+                }
+                if embeddedPoster != nil { break }
+            }
+
+            // 2. Fallback to cached local video/image original if present.
+            if embeddedPoster == nil {
+                let originalFile = media.originalPath(for: asset)
+                if FileManager.default.fileExists(atPath: originalFile.path) {
+                    let ext = originalFile.pathExtension.lowercased()
+                    if ["mp4", "mov", "m4v", "webm", "jpg", "jpeg", "png", "webp", "heic"].contains(ext) {
+                        embeddedPoster = MediaPipeline.raster(originalFile)?.poster
+                    }
+                }
+            }
+
+            // 3. If CDN URL expired, re-resolve the original Xiaohongshu URL once to obtain a fresh cover.
+            if embeddedPoster == nil,
+               hasDeclaredMedia,
+               let srcStr = asset.sourceURL ?? Optional(meta.originalURL),
+               let srcURL = URL(string: srcStr),
+               let ref = SocialPostURLParser.parse(srcURL),
+               let live = await SocialPostResolver.resolve(ref) {
+                meta = Self.mergeSocialPostMetadata(preferredLive: live.metadata, fallbackSupplied: meta)
+                if let freshURL = live.primaryThumbnailURL ?? live.primaryMediaDownloadURL {
+                    let item = XPostMedia(kind: .photo, url: freshURL)
+                    if let file = await XPostResolver.downloadMedia(
+                        item,
+                        to: stagingDir,
+                        baseName: "XHSFresh-\(asset.id.uuidString.prefix(8))"
+                    ) {
+                        embeddedPoster = MediaPipeline.raster(file)?.poster
+                    }
+                }
+            }
+
+            // Never degrade a media-bearing note to a text-only fallback if offline / temporarily unreachable.
+            if hasDeclaredMedia && embeddedPoster == nil {
+                continue
+            }
+
+            let authorAvatar = await SocialPostResolver.fetchAvatarImage(from: meta.authorAvatarURL)
+
+            guard let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) else {
+                continue
+            }
+
+            var rich = asset.richMetadata ?? AssetRichMetadata()
+            rich.socialPost = meta
+            asset.richMetadata = rich
+            do {
+                try media.writeCustomPoster(card, for: &asset)
+                let saved = asset
+                _ = try await database.transaction { store in
+                    try store.saveAssetLocally(saved)
+                }
+                upgradedIDs.append(saved.id)
+            } catch {
+                continue
+            }
+        }
+        return upgradedIDs
+    }
+
     public func ingest(_ inputs: [CaptureInput], targetFolderID: UUID?, targetBoardID: UUID?) async throws -> [AssetRecord] {
         if let targetFolderID, try await database.folder(id: targetFolderID) == nil {
             throw DriveTransportError.fileNotFound(targetFolderID.uuidString)
@@ -602,6 +721,14 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     private func prepareExpanded(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
+        if case .socialBookmark(let suppliedPost, let coverImageData, let extraTags) = input {
+            return try await preparePreExtractedSocialBookmark(
+                suppliedPost,
+                coverImageData: coverImageData,
+                extraTags: extraTags,
+                folderID: folderID
+            )
+        }
         if case .webURL(let url, let suppliedTitle, let suppliedNotes) = input {
             if let repoRef = GitHubRepoURLParser.parse(url) {
                 return try await prepareGitHubRepo(repoRef, folderID: folderID)
@@ -780,7 +907,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         prepared.asset.notes = meta.bodyText
         prepared.asset.ocrText = meta.bodyText.isEmpty ? prepared.asset.ocrText : meta.bodyText
         prepared.asset.sourceURL = meta.originalURL
-        prepared.asset.sourceDomain = ref.canonicalURL.host() ?? (meta.platform == .x ? "x.com" : meta.platform == .bluesky ? "bsky.app" : "threads.net")
+        prepared.asset.sourceDomain = ref.canonicalURL.host() ?? defaultSocialDomain(for: meta.platform)
         prepared.asset.richMetadata = AssetRichMetadata(socialPost: meta)
 
         let platformTag = meta.platform.displayName
@@ -792,6 +919,172 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             try? media.writeCustomPoster(card, for: &prepared.asset)
         }
         return prepared
+    }
+
+    private func defaultSocialDomain(for platform: SocialPlatform) -> String {
+        switch platform {
+        case .x: "x.com"
+        case .bluesky: "bsky.app"
+        case .threads: "threads.net"
+        case .xiaohongshu: "xiaohongshu.com"
+        }
+    }
+
+    /// Saves a rich social bookmark pre-extracted by the browser extension (X / Xiaohongshu batch sync),
+    /// optionally enriching with live resolver data while never degrading if the remote site throttles.
+    private func preparePreExtractedSocialBookmark(
+        _ supplied: SocialPostMetadata,
+        coverImageData: Data?,
+        extraTags: [String],
+        folderID: UUID?
+    ) async throws -> PreparedAsset {
+        var meta = supplied
+
+        // Opportunistically enrich X posts (for full video MP4 / quoted tweets / articles) or sparse XHS cards.
+        let needsLiveEnrich: Bool = {
+            if supplied.platform == .x {
+                return supplied.effectiveAttachments.isEmpty || supplied.hasVideo || supplied.bodyText.isEmpty
+            }
+            if supplied.platform == .xiaohongshu {
+                let bodyMatchesTitle = supplied.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == (supplied.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+                return supplied.effectiveAttachments.count <= 1 && (supplied.bodyText.isEmpty || bodyMatchesTitle)
+            }
+            return false
+        }()
+
+        var resolvedVideoDownloadURL: URL?
+        if needsLiveEnrich,
+           let url = URL(string: supplied.originalURL),
+           let ref = SocialPostURLParser.parse(url),
+           let live = await SocialPostResolver.resolve(ref) {
+            meta = Self.mergeSocialPostMetadata(preferredLive: live.metadata, fallbackSupplied: supplied)
+            if live.primaryMediaKind == .video || live.primaryMediaKind == .gif {
+                resolvedVideoDownloadURL = live.primaryMediaDownloadURL
+            }
+        }
+
+        let stagingDir = media.staging.appending(path: "social-ext-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+
+        let avatarURLString = meta.authorAvatarURL
+        async let avatarTask = SocialPostResolver.fetchAvatarImage(from: avatarURLString)
+
+        var downloadedVideoFile: URL?
+        var embeddedPoster: CGImage?
+        var mediaFailed = false
+
+        if let coverImageData,
+           let src = CGImageSourceCreateWithData(coverImageData as CFData, nil) {
+            embeddedPoster = MediaPipeline.raster(src)?.poster
+        }
+
+        let effectiveAttachments = meta.effectiveAttachments
+        if let videoURL = resolvedVideoDownloadURL ?? meta.videoURL.flatMap(URL.init(string:)) {
+            let videoItem = XPostMedia(
+                kind: .video,
+                url: videoURL,
+                thumbnailURL: effectiveAttachments.first?.thumbnailURL.flatMap(URL.init(string:))
+            )
+            if let file = await XPostResolver.downloadMedia(videoItem, to: stagingDir, baseName: "Social-\(meta.platform.rawValue)") {
+                downloadedVideoFile = file
+            }
+        }
+
+        if embeddedPoster == nil {
+            let firstPhoto = effectiveAttachments.first(where: { $0.kind == .photo })
+            let photoURL = firstPhoto.flatMap { URL(string: $0.url) }
+                ?? effectiveAttachments.first?.thumbnailURL.flatMap(URL.init(string:))
+                ?? meta.mediaThumbnailURLs.first.flatMap(URL.init(string:))
+                ?? meta.mediaURLs.first.flatMap(URL.init(string:))
+            if let photoURL {
+                let item = XPostMedia(kind: .photo, url: photoURL)
+                if let file = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: "SocialPhoto-\(meta.platform.rawValue)") {
+                    embeddedPoster = MediaPipeline.raster(file)?.poster
+                } else {
+                    mediaFailed = true
+                }
+            }
+        }
+
+        let authorAvatar = await avatarTask
+        meta.mediaFetchFailed = mediaFailed && embeddedPoster == nil && downloadedVideoFile == nil
+
+        let resolved = ResolvedSocialPost(
+            metadata: meta,
+            primaryMediaDownloadURL: nil,
+            primaryMediaKind: nil,
+            primaryThumbnailURL: nil
+        )
+
+        var prepared: PreparedAsset
+        if let downloadedVideoFile {
+            prepared = try await prepare(.fileURL(downloadedVideoFile), folderID: folderID)
+        } else {
+            prepared = try await prepare(
+                .textSnippet(title: resolved.shortTitle, text: resolved.markdownDocument, sourceURL: meta.originalURL),
+                folderID: folderID
+            )
+        }
+
+        prepared.asset.mediaKind = .webBookmark
+        prepared.asset.title = resolved.shortTitle
+        prepared.asset.notes = meta.bodyText
+        prepared.asset.ocrText = meta.bodyText.isEmpty ? prepared.asset.ocrText : meta.bodyText
+        prepared.asset.sourceURL = meta.originalURL
+        prepared.asset.sourceDomain = URL(string: meta.originalURL)?.host() ?? defaultSocialDomain(for: meta.platform)
+        prepared.asset.richMetadata = AssetRichMetadata(socialPost: meta)
+
+        var mergedTags = Set(prepared.asset.tags)
+        mergedTags.insert(meta.platform.displayName)
+        for tag in extraTags {
+            let clean = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty { mergedTags.insert(clean) }
+        }
+        prepared.asset.tags = mergedTags.sorted()
+
+        if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
+            try? media.writeCustomPoster(card, for: &prepared.asset)
+        }
+        return prepared
+    }
+
+    private static func mergeSocialPostMetadata(
+        preferredLive live: SocialPostMetadata,
+        fallbackSupplied supplied: SocialPostMetadata
+    ) -> SocialPostMetadata {
+        let pickAttachments = live.effectiveAttachments.count >= supplied.effectiveAttachments.count
+            ? live.effectiveAttachments
+            : supplied.effectiveAttachments
+        let liveBody = live.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suppliedBody = supplied.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bestBody = liveBody.count >= suppliedBody.count ? live.bodyText : supplied.bodyText
+
+        let liveName = live.authorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let useLiveAuthor = !liveName.isEmpty && liveName != "小红书笔记" && liveName != "小红书用户"
+        return SocialPostMetadata(
+            platform: supplied.platform,
+            authorName: useLiveAuthor ? live.authorName : supplied.authorName,
+            authorHandle: (useLiveAuthor && !live.authorHandle.isEmpty) ? live.authorHandle : supplied.authorHandle,
+            authorAvatarURL: live.authorAvatarURL ?? supplied.authorAvatarURL,
+            publishedAtText: live.publishedAtText ?? supplied.publishedAtText,
+            bodyText: bestBody,
+            quotedAuthor: live.quotedAuthor ?? supplied.quotedAuthor,
+            quotedText: live.quotedText ?? supplied.quotedText,
+            articleTitle: live.articleTitle ?? supplied.articleTitle,
+            mediaURLs: pickAttachments.map(\.url),
+            mediaThumbnailURLs: pickAttachments.compactMap { $0.thumbnailURL ?? ($0.kind == .photo ? $0.url : nil) },
+            attachments: pickAttachments,
+            hasVideo: live.hasVideo || supplied.hasVideo,
+            videoURL: live.videoURL ?? supplied.videoURL,
+            replyCount: live.replyCount ?? supplied.replyCount,
+            repostCount: live.repostCount ?? supplied.repostCount,
+            likeCount: live.likeCount ?? supplied.likeCount,
+            viewCount: live.viewCount ?? supplied.viewCount,
+            originalURL: supplied.originalURL.isEmpty ? live.originalURL : supplied.originalURL,
+            mediaFetchFailed: false
+        )
     }
 
     private static func commit(_ prepared: PreparedAsset, in store: isolated LibraryDatabase,

@@ -109,6 +109,15 @@ public final class LibraryStore {
         do {
             _ = try await engine.seedSampleLibraryIfEmpty()
             await refreshAll()
+            Task { [weak self] in
+                guard let self else { return }
+                let upgradedIDs = await self.engine.upgradeLegacyXiaohongshuCoversIfNeeded()
+                guard !upgradedIDs.isEmpty else { return }
+                for id in upgradedIDs {
+                    self.thumbnailLoader.invalidate(assetID: id)
+                }
+                await self.refreshAll()
+            }
         } catch {
             lastError = error.localizedDescription
             libraryStoreLogger.error("Bootstrap failed: \(error.localizedDescription, privacy: .public)")
@@ -438,13 +447,20 @@ public final class LibraryStore {
 
             guard let standalone = created.first else { return nil }
 
+            let authorAttribution: String = {
+                if let handleLine = post.displayHandleLine {
+                    return "\(post.authorName) (\(handleLine))"
+                }
+                return post.authorName
+            }()
             let attributionNotes = [
-                "来源推文：\(post.authorName) (@\(post.authorHandle)) · \(post.platform.displayName)",
+                "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)",
                 post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines),
-                "原推文链接：\(post.originalURL)"
+                "原链接：\(post.originalURL)"
             ].filter { !$0.isEmpty }.joined(separator: "\n\n")
 
-            let extractedTitle = "@\(post.authorHandle) \(attachment.kind.localizedLabel) #\(index + 1)"
+            let titleAuthor = post.platform == .xiaohongshu ? post.authorName : "@\(post.authorHandle)"
+            let extractedTitle = "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
             let patched = try await engine.updateAssets(
                 AssetBatchPatch(
                     assetIDs: [standalone.id],

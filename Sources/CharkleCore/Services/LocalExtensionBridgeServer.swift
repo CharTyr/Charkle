@@ -1,0 +1,1086 @@
+import Foundation
+import Network
+import Security
+import Synchronization
+
+/// Local loopback HTTP bridge (`http://127.0.0.1:41937`) speaking the Charkle `/api/v1/*`
+/// extension protocol so Chrome, Arc, Edge, Brave, and Safari extensions can connect directly
+/// to Charkle macOS with zero idle CPU usage and constant-time Bearer token protection.
+public actor LocalExtensionBridgeServer {
+    public enum MutationKind: String, Sendable {
+        case ingest
+        case folderCreate
+    }
+
+    public struct StatusSnapshot: Equatable, Sendable {
+        public let isRunning: Bool
+        public let port: UInt16
+        public let baseURL: String
+
+        public init(isRunning: Bool, port: UInt16) {
+            self.isRunning = isRunning
+            self.port = port
+            self.baseURL = port > 0 ? "http://127.0.0.1:\(port)" : ""
+        }
+    }
+
+    public static let defaultPort: UInt16 = 41937
+    public static let fallbackPortCount: UInt16 = 10
+    private static let maxRequestBodyBytes = 48 * 1024 * 1024
+
+    private let engine: any CharkleEngineProtocol
+    private var token: String
+    private var allowLocalAutoPair: Bool
+    private var listener: NWListener?
+    private var boundPort: UInt16 = 0
+    private let preferredPort: UInt16
+    private let allowEphemeralPort: Bool
+    private let ioQueue = DispatchQueue(label: "com.charkle.extension.bridge.io", qos: .userInitiated)
+    private let onLibraryMutated: (@Sendable (MutationKind, Int, UUID?, UUID?) -> Void)?
+
+    public init(
+        engine: any CharkleEngineProtocol,
+        token: String,
+        allowLocalAutoPair: Bool = true,
+        preferredPort: UInt16 = LocalExtensionBridgeServer.defaultPort,
+        allowEphemeralPort: Bool = false,
+        onLibraryMutated: (@Sendable (MutationKind, Int, UUID?, UUID?) -> Void)? = nil
+    ) {
+        self.engine = engine
+        self.token = token
+        self.allowLocalAutoPair = allowLocalAutoPair
+        self.preferredPort = preferredPort
+        self.allowEphemeralPort = allowEphemeralPort
+        self.onLibraryMutated = onLibraryMutated
+    }
+
+    public static func generateToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 24)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status == errSecSuccess {
+            return bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
+    }
+
+    public func updateToken(_ newToken: String) {
+        self.token = newToken.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func updateAutoPairEnabled(_ enabled: Bool) {
+        self.allowLocalAutoPair = enabled
+    }
+
+    public func status() -> StatusSnapshot {
+        StatusSnapshot(isRunning: listener != nil && boundPort > 0, port: boundPort)
+    }
+
+    @discardableResult
+    public func start() async throws -> StatusSnapshot {
+        if listener != nil && boundPort > 0 {
+            return StatusSnapshot(isRunning: true, port: boundPort)
+        }
+
+        let candidatePorts: [NWEndpoint.Port]
+        if allowEphemeralPort && preferredPort == 0 {
+            candidatePorts = [.any]
+        } else {
+            let startPort = preferredPort == 0 ? Self.defaultPort : preferredPort
+            candidatePorts = (0..<Self.fallbackPortCount).compactMap { offset in
+                NWEndpoint.Port(rawValue: startPort &+ offset)
+            }
+        }
+
+        var lastError: Error?
+        for candidatePort in candidatePorts {
+            do {
+                let (startedListener, actualPort) = try await bindListener(on: candidatePort)
+                self.listener = startedListener
+                self.boundPort = actualPort
+                return StatusSnapshot(isRunning: true, port: actualPort)
+            } catch {
+                lastError = error
+            }
+        }
+
+        throw lastError ?? NSError(
+            domain: "com.charkle.extension.bridge",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "无法在 127.0.0.1 绑定本地扩展桥接端口。"]
+        )
+    }
+
+    public func stop() {
+        listener?.cancel()
+        listener = nil
+        boundPort = 0
+    }
+
+    private func bindListener(on port: NWEndpoint.Port) async throws -> (NWListener, UInt16) {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+        let created = try NWListener(using: params)
+
+        let actualPort: UInt16 = try await withCheckedThrowingContinuation { cont in
+            let settled = Mutex(false)
+            created.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    let shouldResume = settled.withLock { flag -> Bool in
+                        guard !flag else { return false }
+                        flag = true
+                        return true
+                    }
+                    if shouldResume {
+                        if let rawPort = created.port?.rawValue, rawPort > 0 {
+                            cont.resume(returning: rawPort)
+                        } else {
+                            created.cancel()
+                            cont.resume(throwing: NSError(
+                                domain: "com.charkle.extension.bridge",
+                                code: 2,
+                                userInfo: [NSLocalizedDescriptionKey: "桥接服务未能分配端口。"]
+                            ))
+                        }
+                    }
+                case .failed(let error):
+                    let shouldResume = settled.withLock { flag -> Bool in
+                        guard !flag else { return false }
+                        flag = true
+                        return true
+                    }
+                    if shouldResume {
+                        created.cancel()
+                        cont.resume(throwing: error)
+                    }
+                case .cancelled:
+                    let shouldResume = settled.withLock { flag -> Bool in
+                        guard !flag else { return false }
+                        flag = true
+                        return true
+                    }
+                    if shouldResume {
+                        cont.resume(throwing: CancellationError())
+                    }
+                default:
+                    break
+                }
+            }
+            created.newConnectionHandler = { [weak self] connection in
+                guard let self else {
+                    connection.cancel()
+                    return
+                }
+                let session = HTTPConnectionSession(
+                    connection: connection,
+                    queue: self.ioQueue,
+                    maxBodyBytes: Self.maxRequestBodyBytes
+                ) { [weak self] request in
+                    guard let self else {
+                        return HTTPResponse.json(status: 503, body: ["error": "服务已停止"])
+                    }
+                    return await self.handle(request: request)
+                }
+                session.start()
+            }
+            created.start(queue: self.ioQueue)
+        }
+
+        // Clear startup handler once bound while keeping connection handler active.
+        created.stateUpdateHandler = { [weak self] state in
+            if case .failed = state {
+                Task { await self?.handleListenerFailure() }
+            }
+        }
+        return (created, actualPort)
+    }
+
+    private func handleListenerFailure() {
+        listener?.cancel()
+        listener = nil
+        boundPort = 0
+    }
+
+    // MARK: - HTTP Router
+
+    private func handle(request: HTTPRequest) async -> HTTPResponse {
+        let corsHeaders = buildCORSHeaders(for: request.headers["origin"])
+
+        if request.method == "OPTIONS" {
+            return HTTPResponse(status: 204, headers: corsHeaders, body: Data())
+        }
+
+        let path = request.pathWithoutQuery
+
+        // Public minimal liveness probe (no sensitive user or library data exposed).
+        if request.method == "GET" && path == "/api/v1/health" {
+            return HTTPResponse.json(
+                status: 200,
+                extraHeaders: corsHeaders,
+                body: [
+                    "ok": true,
+                    "app": "charkle-macos",
+                    "name": "Charkle macOS",
+                    "port": Int(boundPort),
+                    "autoPair": allowLocalAutoPair
+                ]
+            )
+        }
+
+        // Zero-config same-machine pairing for Charkle's Safari & Chrome browser extensions.
+        // Strictly gated to browser-extension origins (`chrome-extension://`, `safari-web-extension://`,
+        // `moz-extension://`) plus custom non-simple header `X-Charkle-Extension: 1`, so arbitrary
+        // websites (including localhost web pages) can never pair or obtain the bridge token.
+        if request.method == "POST" && path == "/api/v1/auth/local-pair" {
+            return handleLocalAutoPair(request: request, corsHeaders: corsHeaders)
+        }
+
+        let isAuthorized = validateBearerToken(header: request.headers["authorization"])
+
+        // Matches Charkle Web `GET /api/v1/auth/status` contract so the extension handles auth identically.
+        if request.method == "GET" && path == "/api/v1/auth/status" {
+            if isAuthorized {
+                return HTTPResponse.json(
+                    status: 200,
+                    extraHeaders: corsHeaders,
+                    body: [
+                        "initialized": true,
+                        "authenticated": true,
+                        "app": "charkle-macos",
+                        "user": [
+                            "id": "local-macos",
+                            "username": "desktop",
+                            "displayName": "Charkle macOS",
+                            "role": "owner"
+                        ],
+                        "sessionCount": 1
+                    ]
+                )
+            } else {
+                return HTTPResponse.json(
+                    status: 200,
+                    extraHeaders: corsHeaders,
+                    body: [
+                        "initialized": true,
+                        "authenticated": false,
+                        "app": "charkle-macos",
+                        "user": NSNull(),
+                        "sessionCount": 0
+                    ]
+                )
+            }
+        }
+
+        guard isAuthorized else {
+            return HTTPResponse.json(
+                status: 401,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "访问令牌无效或已更新，请在 Charkle 桌面端「设置 → 插件与扩展」重新复制。",
+                    "code": "UNAUTHORIZED"
+                ]
+            )
+        }
+
+        do {
+            switch (request.method, path) {
+            case ("GET", "/api/v1/folders"):
+                return try await handleGetFolders(corsHeaders: corsHeaders)
+
+            case ("POST", "/api/v1/folders"):
+                return try await handleCreateFolder(request: request, corsHeaders: corsHeaders)
+
+            case ("GET", "/api/v1/boards"):
+                return try await handleGetBoards(corsHeaders: corsHeaders)
+
+            case ("GET", "/api/v1/assets/existing-sources"):
+                return try await handleGetExistingSources(corsHeaders: corsHeaders)
+
+            case ("POST", "/api/v1/assets/ingest"):
+                return try await handleIngest(request: request, corsHeaders: corsHeaders)
+
+            case ("POST", "/api/v1/assets/upload"):
+                return try await handleMultipartUpload(request: request, corsHeaders: corsHeaders)
+
+            default:
+                return HTTPResponse.json(
+                    status: 404,
+                    extraHeaders: corsHeaders,
+                    body: ["error": "接口不存在。", "code": "NOT_FOUND"]
+                )
+            }
+        } catch {
+            return HTTPResponse.json(
+                status: 500,
+                extraHeaders: corsHeaders,
+                body: ["error": error.localizedDescription, "code": "INTERNAL_ERROR"]
+            )
+        }
+    }
+
+    // MARK: - Route Handlers
+
+    private func handleGetFolders(corsHeaders: [String: String]) async throws -> HTTPResponse {
+        let folders = try await engine.fetchFolders()
+        let assets = try await engine.fetchAssets(matching: FilterCriteria())
+        var counts: [UUID: Int] = [:]
+        for asset in assets {
+            if let fid = asset.folderID {
+                counts[fid, default: 0] += 1
+            }
+        }
+        let serialized: [[String: Any]] = folders.map { f in
+            var dict: [String: Any] = [
+                "id": f.id.uuidString,
+                "name": f.name,
+                "sortOrder": f.sortOrder,
+                "assetCount": counts[f.id] ?? 0
+            ]
+            dict["parentID"] = f.parentID?.uuidString ?? NSNull()
+            return dict
+        }
+        return HTTPResponse.json(status: 200, extraHeaders: corsHeaders, body: ["folders": serialized])
+    }
+
+    private func handleCreateFolder(request: HTTPRequest, corsHeaders: [String: String]) async throws -> HTTPResponse {
+        guard let obj = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else {
+            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "请求内容格式不正确。", "code": "INVALID_JSON"])
+        }
+        let rawName = (obj["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawName.isEmpty else {
+            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "请填写文件夹名称。", "code": "INVALID_NAME"])
+        }
+        let parentID = (obj["parentID"] as? String).flatMap(UUID.init(uuidString:))
+        let reuseExisting = (obj["reuseExisting"] as? Bool) ?? false
+
+        if reuseExisting {
+            let existing = try await engine.fetchFolders()
+            if let matched = existing.first(where: {
+                $0.parentID == parentID && $0.name.caseInsensitiveCompare(rawName) == .orderedSame
+            }) {
+                var dict: [String: Any] = [
+                    "id": matched.id.uuidString,
+                    "name": matched.name,
+                    "sortOrder": matched.sortOrder,
+                    "assetCount": 0
+                ]
+                dict["parentID"] = matched.parentID?.uuidString ?? NSNull()
+                return HTTPResponse.json(status: 200, extraHeaders: corsHeaders, body: ["folder": dict, "reused": true])
+            }
+        }
+
+        let created = try await engine.createFolder(name: rawName, parentID: parentID)
+        onLibraryMutated?(.folderCreate, 1, created.id, nil)
+        var dict: [String: Any] = [
+            "id": created.id.uuidString,
+            "name": created.name,
+            "sortOrder": created.sortOrder,
+            "assetCount": 0
+        ]
+        dict["parentID"] = created.parentID?.uuidString ?? NSNull()
+        return HTTPResponse.json(status: 201, extraHeaders: corsHeaders, body: ["folder": dict, "reused": false])
+    }
+
+    private func handleGetBoards(corsHeaders: [String: String]) async throws -> HTTPResponse {
+        let boards = try await engine.fetchBoards()
+        let serialized: [[String: Any]] = boards.map { b in
+            [
+                "id": b.id.uuidString,
+                "title": b.title,
+                "itemCount": b.itemCount
+            ]
+        }
+        return HTTPResponse.json(status: 200, extraHeaders: corsHeaders, body: ["boards": serialized])
+    }
+
+    private func handleGetExistingSources(corsHeaders: [String: String]) async throws -> HTTPResponse {
+        let (sources, keys) = try await fetchExistingSourceKeys()
+        return HTTPResponse.json(
+            status: 200,
+            extraHeaders: corsHeaders,
+            body: [
+                "count": keys.count,
+                "sources": Array(sources),
+                "canonicalKeys": Array(keys)
+            ]
+        )
+    }
+
+    private func handleIngest(request: HTTPRequest, corsHeaders: [String: String]) async throws -> HTTPResponse {
+        guard let body = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+              let rawInputs = body["inputs"] as? [[String: Any]], !rawInputs.isEmpty else {
+            return HTTPResponse.json(
+                status: 400,
+                extraHeaders: corsHeaders,
+                body: ["error": "请提供至少一个待导入项。", "code": "INVALID_INPUT"]
+            )
+        }
+
+        let targetFolderID = (body["targetFolderID"] as? String).flatMap(UUID.init(uuidString:))
+        let targetBoardID = (body["targetBoardID"] as? String).flatMap(UUID.init(uuidString:))
+        let skipDuplicates = (body["skipDuplicates"] as? Bool) ?? false
+
+        var knownKeys: Set<String> = []
+        if skipDuplicates {
+            knownKeys = (try? await fetchExistingSourceKeys().keys) ?? []
+        }
+
+        var parsedInputs: [CaptureInput] = []
+        var skipped = 0
+
+        for item in rawInputs {
+            guard let type = item["type"] as? String else { continue }
+            switch type {
+            case "webURL":
+                guard let urlStr = (item["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      let url = URL(string: urlStr),
+                      WebBookmark.isWebURL(url) else {
+                    continue
+                }
+                if skipDuplicates, let key = SocialPostResolver.canonicalDedupKey(for: url.absoluteString) {
+                    if !knownKeys.insert(key).inserted {
+                        skipped += 1
+                        continue
+                    }
+                }
+                let title = (item["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let notes = (item["notes"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                parsedInputs.append(.webURL(
+                    url,
+                    title: (title?.isEmpty == false) ? title : nil,
+                    notes: (notes?.isEmpty == false) ? notes : nil
+                ))
+
+            case "imageData":
+                guard let rawBase64 = item["base64Data"] as? String,
+                      let imageData = Self.decodeBase64Payload(rawBase64),
+                      !imageData.isEmpty else {
+                    continue
+                }
+                let name = (item["suggestedName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let sourceURL = (item["sourceURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                parsedInputs.append(.imageData(
+                    imageData,
+                    suggestedName: (name?.isEmpty == false) ? name! : "Clip.png",
+                    sourceURL: (sourceURL?.isEmpty == false) ? sourceURL : nil
+                ))
+
+            case "textSnippet":
+                let text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                let title = (item["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let sourceURL = (item["sourceURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                parsedInputs.append(.textSnippet(
+                    title: (title?.isEmpty == false) ? title! : "文字灵感",
+                    text: text,
+                    sourceURL: (sourceURL?.isEmpty == false) ? sourceURL : nil
+                ))
+
+            case "colorSwatch":
+                guard let hex = (item["hex"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !hex.isEmpty else {
+                    continue
+                }
+                let title = (item["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                parsedInputs.append(.colorSwatch(hex: hex, title: (title?.isEmpty == false) ? title : nil))
+
+            case "socialBookmark":
+                guard let (meta, coverData, tags) = Self.parseSocialBookmarkPayload(item) else { continue }
+                if skipDuplicates, let key = SocialPostResolver.canonicalDedupKey(for: meta.originalURL) {
+                    if !knownKeys.insert(key).inserted {
+                        skipped += 1
+                        continue
+                    }
+                }
+                parsedInputs.append(.socialBookmark(meta, coverImageData: coverData, tags: tags))
+
+            default:
+                continue
+            }
+        }
+
+        if parsedInputs.isEmpty && skipped > 0 {
+            return HTTPResponse.json(
+                status: 200,
+                extraHeaders: corsHeaders,
+                body: [
+                    "assets": [],
+                    "created": 0,
+                    "skipped": skipped
+                ]
+            )
+        }
+
+        guard !parsedInputs.isEmpty else {
+            return HTTPResponse.json(
+                status: 400,
+                extraHeaders: corsHeaders,
+                body: ["error": "未找到有效的待导入素材。", "code": "INVALID_INPUT"]
+            )
+        }
+
+        let created = try await engine.ingest(parsedInputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+        if !created.isEmpty {
+            onLibraryMutated?(.ingest, created.count, targetFolderID, targetBoardID)
+        }
+
+        let serializedAssets: [[String: Any]] = created.map { asset in
+            var dict: [String: Any] = [
+                "id": asset.id.uuidString,
+                "title": asset.title,
+                "mediaKind": asset.mediaKind.rawValue
+            ]
+            if let sourceURL = asset.sourceURL { dict["sourceURL"] = sourceURL }
+            if let folderID = asset.folderID { dict["folderID"] = folderID.uuidString }
+            return dict
+        }
+
+        return HTTPResponse.json(
+            status: 201,
+            extraHeaders: corsHeaders,
+            body: [
+                "assets": serializedAssets,
+                "created": created.count,
+                "skipped": skipped
+            ]
+        )
+    }
+
+    private func handleMultipartUpload(request: HTTPRequest, corsHeaders: [String: String]) async throws -> HTTPResponse {
+        guard let contentType = request.headers["content-type"],
+              let boundary = Self.extractMultipartBoundary(from: contentType) else {
+            return HTTPResponse.json(
+                status: 400,
+                extraHeaders: corsHeaders,
+                body: ["error": "上传内容格式不正确。", "code": "INVALID_MULTIPART"]
+            )
+        }
+
+        let parts = Self.parseMultipartFormData(body: request.body, boundary: boundary)
+        var targetFolderID: UUID?
+        var targetBoardID: UUID?
+        var sourceURL: String?
+        var files: [(name: String, data: Data)] = []
+
+        for part in parts {
+            if let fileName = part.fileName, !part.data.isEmpty {
+                files.append((fileName, part.data))
+            } else {
+                let textValue = String(decoding: part.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                switch part.name {
+                case "targetFolderID": targetFolderID = UUID(uuidString: textValue)
+                case "targetBoardID": targetBoardID = UUID(uuidString: textValue)
+                case "sourceURL": sourceURL = textValue.isEmpty ? nil : textValue
+                default: break
+                }
+            }
+        }
+
+        guard !files.isEmpty else {
+            return HTTPResponse.json(
+                status: 400,
+                extraHeaders: corsHeaders,
+                body: ["error": "未检测到上传文件。", "code": "NO_FILES"]
+            )
+        }
+
+        let inputs = files.map { CaptureInput.imageData($0.data, suggestedName: $0.name, sourceURL: sourceURL) }
+        let created = try await engine.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+        if !created.isEmpty {
+            onLibraryMutated?(.ingest, created.count, targetFolderID, targetBoardID)
+        }
+        let serializedAssets: [[String: Any]] = created.map { asset in
+            [
+                "id": asset.id.uuidString,
+                "title": asset.title,
+                "mediaKind": asset.mediaKind.rawValue
+            ]
+        }
+        return HTTPResponse.json(status: 201, extraHeaders: corsHeaders, body: ["assets": serializedAssets])
+    }
+
+    // MARK: - Helpers
+
+    private func fetchExistingSourceKeys() async throws -> (sources: Set<String>, keys: Set<String>) {
+        let assets = try await engine.fetchAssets(matching: FilterCriteria())
+        var sources = Set<String>()
+        var keys = Set<String>()
+        for asset in assets {
+            if let src = asset.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines), !src.isEmpty {
+                sources.insert(src)
+                if let key = SocialPostResolver.canonicalDedupKey(for: src) {
+                    keys.insert(key)
+                }
+            }
+            if let orig = asset.richMetadata?.socialPost?.originalURL.trimmingCharacters(in: .whitespacesAndNewlines),
+               !orig.isEmpty {
+                sources.insert(orig)
+                if let key = SocialPostResolver.canonicalDedupKey(for: orig) {
+                    keys.insert(key)
+                }
+            }
+        }
+        return (sources, keys)
+    }
+
+    private func validateBearerToken(header: String?) -> Bool {
+        guard !token.isEmpty, let header else { return false }
+        let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("bearer ") else { return false }
+        let supplied = String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.constantTimeEquals(supplied, token)
+    }
+
+    private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let lhs = Array(a.utf8)
+        let rhs = Array(b.utf8)
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<lhs.count {
+            diff |= lhs[i] ^ rhs[i]
+        }
+        return diff == 0
+    }
+
+    private static func isBrowserExtensionOrigin(_ origin: String?) -> Bool {
+        guard let raw = origin?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return false
+        }
+        let lower = raw.lowercased()
+        return lower.hasPrefix("chrome-extension://")
+            || lower.hasPrefix("safari-web-extension://")
+            || lower.hasPrefix("moz-extension://")
+    }
+
+    private func handleLocalAutoPair(request: HTTPRequest, corsHeaders: [String: String]) -> HTTPResponse {
+        guard allowLocalAutoPair else {
+            return HTTPResponse.json(
+                status: 403,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "已在 Charkle 设置中关闭同机自动配对，请开启或手动粘贴访问令牌。",
+                    "code": "AUTO_PAIR_DISABLED"
+                ]
+            )
+        }
+
+        let origin = request.headers["origin"]
+        guard Self.isBrowserExtensionOrigin(origin) else {
+            // Never echo CORS allow-origin for rejected non-extension origins.
+            var strictHeaders = corsHeaders
+            strictHeaders.removeValue(forKey: "Access-Control-Allow-Origin")
+            return HTTPResponse.json(
+                status: 403,
+                extraHeaders: strictHeaders,
+                body: [
+                    "error": "仅允许本机已安装的浏览器扩展自动配对。",
+                    "code": "INVALID_ORIGIN"
+                ]
+            )
+        }
+
+        let extMarker = (request.headers["x-charkle-extension"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard extMarker == "1" else {
+            return HTTPResponse.json(
+                status: 403,
+                extraHeaders: corsHeaders,
+                body: [
+                    "error": "缺少扩展握手标识头。",
+                    "code": "MISSING_EXTENSION_HEADER"
+                ]
+            )
+        }
+
+        return HTTPResponse.json(
+            status: 200,
+            extraHeaders: corsHeaders,
+            body: [
+                "ok": true,
+                "app": "charkle-macos",
+                "name": "Charkle macOS",
+                "port": Int(boundPort),
+                "serverUrl": "http://127.0.0.1:\(boundPort)",
+                "token": token
+            ]
+        )
+    }
+
+    private func buildCORSHeaders(for origin: String?) -> [String: String] {
+        var headers: [String: String] = [
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, X-Charkle-Extension",
+            "Access-Control-Allow-Private-Network": "true",
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin"
+        ]
+        if let origin = origin?.trimmingCharacters(in: .whitespacesAndNewlines), !origin.isEmpty {
+            let lower = origin.lowercased()
+            let allowed = lower.hasPrefix("chrome-extension://")
+                || lower.hasPrefix("safari-web-extension://")
+                || lower.hasPrefix("moz-extension://")
+                || lower.hasPrefix("http://127.0.0.1")
+                || lower.hasPrefix("http://localhost")
+            if allowed {
+                headers["Access-Control-Allow-Origin"] = origin
+            }
+        }
+        return headers
+    }
+
+    private static func decodeBase64Payload(_ raw: String) -> Data? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let comma = trimmed.firstIndex(of: ","), trimmed.lowercased().hasPrefix("data:") {
+            let payload = String(trimmed[trimmed.index(after: comma)...])
+            return Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
+        }
+        return Data(base64Encoded: trimmed, options: .ignoreUnknownCharacters)
+    }
+
+    private static func parseSocialBookmarkPayload(_ item: [String: Any]) -> (SocialPostMetadata, Data?, [String])? {
+        guard let rawURL = (item["originalURL"] as? String ?? item["url"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: rawURL),
+              WebBookmark.isWebURL(url) else {
+            return nil
+        }
+
+        let rawPlatform = (item["platform"] as? String ?? "").lowercased()
+        let platform: SocialPlatform = {
+            if let parsed = SocialPlatform(rawValue: rawPlatform) { return parsed }
+            if let ref = SocialPostURLParser.parse(url) { return ref.platform }
+            return .x
+        }()
+
+        let authorName = ((item["authorName"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let authorHandle = ((item["authorHandle"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveName = authorName.isEmpty ? (authorHandle.isEmpty ? platform.displayName : authorHandle) : authorName
+        let effectiveHandle = authorHandle.isEmpty ? effectiveName : authorHandle
+
+        let articleTitle = (item["articleTitle"] as? String ?? item["title"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyText = (item["bodyText"] as? String ?? item["notes"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var attachments: [SocialMediaAttachment] = []
+        if let rawAttachments = item["attachments"] as? [[String: Any]] {
+            for att in rawAttachments {
+                guard let u = (att["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !u.isEmpty else {
+                    continue
+                }
+                let kindStr = (att["kind"] as? String ?? "photo").lowercased()
+                let kind: SocialMediaAttachment.Kind = switch kindStr {
+                case "video": .video
+                case "gif": .gif
+                default: .photo
+                }
+                let thumb = (att["thumbnailURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                attachments.append(SocialMediaAttachment(kind: kind, url: u, thumbnailURL: (thumb?.isEmpty == false) ? thumb : nil))
+            }
+        }
+
+        let mediaURLs = (item["mediaURLs"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let mediaThumbs = (item["mediaThumbnailURLs"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+        if attachments.isEmpty && !mediaURLs.isEmpty {
+            for (idx, u) in mediaURLs.enumerated() {
+                let thumb = idx < mediaThumbs.count ? mediaThumbs[idx] : u
+                attachments.append(SocialMediaAttachment(kind: .photo, url: u, thumbnailURL: thumb))
+            }
+        }
+
+        let videoURL = (item["videoURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasVideo = (item["hasVideo"] as? Bool) ?? (videoURL?.isEmpty == false)
+        let avatarURL = (item["authorAvatarURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publishedAt = (item["publishedAtText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quotedAuthor = (item["quotedAuthor"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quotedText = (item["quotedText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let meta = SocialPostMetadata(
+            platform: platform,
+            authorName: effectiveName,
+            authorHandle: effectiveHandle,
+            authorAvatarURL: (avatarURL?.isEmpty == false) ? avatarURL : nil,
+            publishedAtText: (publishedAt?.isEmpty == false) ? publishedAt : nil,
+            bodyText: bodyText.isEmpty ? (articleTitle ?? rawURL) : bodyText,
+            quotedAuthor: (quotedAuthor?.isEmpty == false) ? quotedAuthor : nil,
+            quotedText: (quotedText?.isEmpty == false) ? quotedText : nil,
+            articleTitle: (articleTitle?.isEmpty == false) ? articleTitle : nil,
+            mediaURLs: attachments.isEmpty ? mediaURLs : attachments.map(\.url),
+            mediaThumbnailURLs: attachments.isEmpty ? mediaThumbs : attachments.compactMap { $0.thumbnailURL ?? $0.url },
+            attachments: attachments,
+            hasVideo: hasVideo,
+            videoURL: (videoURL?.isEmpty == false) ? videoURL : nil,
+            replyCount: intValue(item["replyCount"]),
+            repostCount: intValue(item["repostCount"]),
+            likeCount: intValue(item["likeCount"]),
+            viewCount: intValue(item["viewCount"]),
+            originalURL: rawURL,
+            mediaFetchFailed: false
+        )
+
+        let coverData = (item["coverDataUrl"] as? String).flatMap(Self.decodeBase64Payload)
+        let tags = (item["tags"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return (meta, coverData, tags)
+    }
+
+    private static func intValue(_ raw: Any?) -> Int? {
+        if let i = raw as? Int { return i }
+        if let n = raw as? NSNumber { return n.intValue }
+        if let s = raw as? String { return XiaohongshuPostResolver.parseChineseMetricCount(s) }
+        return nil
+    }
+
+    // MARK: - Minimal Multipart Form-Data Parser
+
+    private struct MultipartPart {
+        let name: String
+        let fileName: String?
+        let data: Data
+    }
+
+    private static func extractMultipartBoundary(from contentType: String) -> String? {
+        for segment in contentType.split(separator: ";") {
+            let trimmed = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.lowercased().hasPrefix("boundary=") {
+                var value = String(trimmed.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2 {
+                    value = String(value.dropFirst().dropLast())
+                }
+                return value.isEmpty ? nil : value
+            }
+        }
+        return nil
+    }
+
+    private static func parseMultipartFormData(body: Data, boundary: String) -> [MultipartPart] {
+        let delimiter = Data("--\(boundary)".utf8)
+        let headerSep = Data("\r\n\r\n".utf8)
+        var parts: [MultipartPart] = []
+
+        var searchRange = body.startIndex..<body.endIndex
+        guard let firstBoundary = body.range(of: delimiter, in: searchRange) else { return [] }
+        var cursor = firstBoundary.upperBound
+
+        while cursor < body.endIndex {
+            // Check closing `--`
+            if body.distance(from: cursor, to: body.endIndex) >= 2 {
+                let nextTwo = body[cursor..<body.index(cursor, offsetBy: 2)]
+                if nextTwo == Data("--".utf8) { break }
+            }
+            // Skip CRLF after boundary
+            if body.distance(from: cursor, to: body.endIndex) >= 2,
+               body[cursor..<body.index(cursor, offsetBy: 2)] == Data("\r\n".utf8) {
+                cursor = body.index(cursor, offsetBy: 2)
+            }
+            searchRange = cursor..<body.endIndex
+            guard let nextBoundary = body.range(of: delimiter, in: searchRange) else { break }
+            let chunkEnd = nextBoundary.lowerBound
+            let chunk = body[cursor..<chunkEnd]
+            cursor = nextBoundary.upperBound
+
+            guard let sep = chunk.range(of: headerSep) else { continue }
+            let headerText = String(decoding: chunk[chunk.startIndex..<sep.lowerBound], as: UTF8.self)
+            var payload = Data(chunk[sep.upperBound..<chunk.endIndex])
+            if payload.count >= 2 && payload.suffix(2) == Data("\r\n".utf8) {
+                payload.removeLast(2)
+            }
+
+            var partName = ""
+            var fileName: String?
+            for line in headerText.components(separatedBy: "\r\n") {
+                if line.lowercased().hasPrefix("content-disposition:") {
+                    if let nameMatch = extractQuotedParam("name", in: line) {
+                        partName = nameMatch
+                    }
+                    fileName = extractQuotedParam("filename", in: line)
+                }
+            }
+            if !partName.isEmpty {
+                parts.append(MultipartPart(name: partName, fileName: fileName, data: payload))
+            }
+        }
+        return parts
+    }
+
+    private static func extractQuotedParam(_ key: String, in headerLine: String) -> String? {
+        let needle = "\(key)=\""
+        guard let start = headerLine.range(of: needle, options: .caseInsensitive) else { return nil }
+        let rest = headerLine[start.upperBound...]
+        guard let end = rest.firstIndex(of: "\"") else { return nil }
+        return String(rest[..<end])
+    }
+}
+
+// MARK: - HTTP Wire Primitives
+
+private nonisolated struct HTTPRequest: Sendable {
+    let method: String
+    let rawTarget: String
+    let headers: [String: String]
+    let body: Data
+
+    var pathWithoutQuery: String {
+        if let q = rawTarget.firstIndex(of: "?") {
+            return String(rawTarget[..<q])
+        }
+        return rawTarget
+    }
+}
+
+private nonisolated struct HTTPResponse: Sendable {
+    let status: Int
+    let headers: [String: String]
+    let body: Data
+
+    static func json(status: Int, extraHeaders: [String: String] = [:], body: [String: Any]) -> HTTPResponse {
+        let data = (try? JSONSerialization.data(withJSONObject: body, options: [])) ?? Data("{}".utf8)
+        var headers = extraHeaders
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        return HTTPResponse(status: status, headers: headers, body: data)
+    }
+
+    func serialize() -> Data {
+        let reason: String = switch status {
+        case 200: "OK"
+        case 201: "Created"
+        case 204: "No Content"
+        case 400: "Bad Request"
+        case 401: "Unauthorized"
+        case 404: "Not Found"
+        case 413: "Payload Too Large"
+        case 503: "Service Unavailable"
+        default: "Internal Server Error"
+        }
+        var lines = ["HTTP/1.1 \(status) \(reason)"]
+        lines.append("Content-Length: \(body.count)")
+        lines.append("Connection: close")
+        for (k, v) in headers {
+            lines.append("\(k): \(v)")
+        }
+        lines.append("")
+        lines.append("")
+        var out = Data(lines.joined(separator: "\r\n").utf8)
+        out.append(body)
+        return out
+    }
+}
+
+private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
+    private let connection: NWConnection
+    private let queue: DispatchQueue
+    private let maxBodyBytes: Int
+    private let handler: @Sendable (HTTPRequest) async -> HTTPResponse
+
+    private var buffer = Data()
+    private var parsedHeaderEnd: Int?
+    private var expectedBodyLength: Int = 0
+    private var method: String = ""
+    private var rawTarget: String = ""
+    private var headers: [String: String] = [:]
+    private var completed = false
+
+    init(
+        connection: NWConnection,
+        queue: DispatchQueue,
+        maxBodyBytes: Int,
+        handler: @escaping @Sendable (HTTPRequest) async -> HTTPResponse
+    ) {
+        self.connection = connection
+        self.queue = queue
+        self.maxBodyBytes = maxBodyBytes
+        self.handler = handler
+    }
+
+    func start() {
+        connection.start(queue: queue)
+        receiveNextChunk()
+    }
+
+    private func receiveNextChunk() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [self] data, _, isComplete, error in
+            if completed { return }
+            if let data, !data.isEmpty {
+                buffer.append(data)
+            }
+
+            if parsedHeaderEnd == nil {
+                let sep = Data("\r\n\r\n".utf8)
+                if let range = buffer.range(of: sep) {
+                    let headerData = buffer[buffer.startIndex..<range.lowerBound]
+                    let headerStr = String(decoding: headerData, as: UTF8.self)
+                    let lines = headerStr.components(separatedBy: "\r\n")
+                    guard let requestLine = lines.first else {
+                        finishWithResponse(HTTPResponse.json(status: 400, body: ["error": "无效请求。"]))
+                        return
+                    }
+                    let parts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
+                    guard parts.count >= 2 else {
+                        finishWithResponse(HTTPResponse.json(status: 400, body: ["error": "无效请求行。"]))
+                        return
+                    }
+                    method = String(parts[0]).uppercased()
+                    rawTarget = String(parts[1])
+                    for line in lines.dropFirst() {
+                        if let colon = line.firstIndex(of: ":") {
+                            let k = line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                            let v = line[line.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !k.isEmpty { headers[k] = v }
+                        }
+                    }
+                    expectedBodyLength = max(0, Int(headers["content-length"] ?? "0") ?? 0)
+                    if expectedBodyLength > maxBodyBytes {
+                        finishWithResponse(HTTPResponse.json(status: 413, body: ["error": "请求体积超出上限。"]))
+                        return
+                    }
+                    parsedHeaderEnd = range.upperBound
+                } else if buffer.count > 65_536 {
+                    finishWithResponse(HTTPResponse.json(status: 400, body: ["error": "请求头过长。"]))
+                    return
+                }
+            }
+
+            if let headerEnd = parsedHeaderEnd {
+                let currentBodyLen = buffer.count - headerEnd
+                if currentBodyLen >= expectedBodyLength {
+                    let bodySlice = buffer[headerEnd..<min(buffer.count, headerEnd + expectedBodyLength)]
+                    let req = HTTPRequest(
+                        method: method,
+                        rawTarget: rawTarget,
+                        headers: headers,
+                        body: Data(bodySlice)
+                    )
+                    completed = true
+                    Task { [self] in
+                        let response = await self.handler(req)
+                        self.send(response)
+                    }
+                    return
+                }
+            }
+
+            if isComplete || error != nil {
+                completed = true
+                connection.cancel()
+                return
+            }
+
+            receiveNextChunk()
+        }
+    }
+
+    private func finishWithResponse(_ response: HTTPResponse) {
+        completed = true
+        send(response)
+    }
+
+    private func send(_ response: HTTPResponse) {
+        let payload = response.serialize()
+        connection.send(content: payload, completion: .contentProcessed { [connection] _ in
+            connection.cancel()
+        })
+    }
+}

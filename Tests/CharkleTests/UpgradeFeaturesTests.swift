@@ -1,5 +1,5 @@
 import CharkleCanvas
-import CharkleCore
+@testable import CharkleCore
 import Foundation
 import Testing
 
@@ -464,8 +464,8 @@ struct UpgradeFeaturesTests {
         #expect(params.step == 198)
         #expect(abs(params.radius - 693.2789) < 0.01)
         #expect(params.perspective == 1500)
-        #expect(params.depthBlur == 14)
-        #expect(params.farFade == 0.50)
+        #expect(params.depthBlur == 2)
+        #expect(params.farFade == 0.96)
         #expect(params.cornerRadius == 32)
         #expect(GalleryLayoutMode(rawValue: "ringGallery") == .ringGallery)
 
@@ -657,5 +657,289 @@ struct UpgradeFeaturesTests {
         #expect(MoodboardDockLayoutTier.resolve(forWidth: 680) == .medium)
         #expect(MoodboardDockLayoutTier.resolve(forWidth: 560) == .medium)
         #expect(MoodboardDockLayoutTier.resolve(forWidth: 440) == .compact)
+    }
+
+    @Test("Xiaohongshu URL parsing, __INITIAL_STATE__ resolution, OG fallback, and canonical dedup keys")
+    func xiaohongshuLinkAndResolverParsing() async throws {
+        // 1. Standard explore / discovery / profile note URLs preserve xsec_token & share token-independent dedupKey
+        let exploreURL = try #require(URL(string: "https://www.xiaohongshu.com/explore/66a1b2c3d4e5f60718293a4b?xsec_token=TOKEN_A&xsec_source=pc_collect"))
+        let exploreRef = try #require(XiaohongshuURLParser.parse(exploreURL))
+        #expect(exploreRef.noteID == "66a1b2c3d4e5f60718293a4b")
+        #expect(exploreRef.xsecToken == "TOKEN_A")
+        #expect(exploreRef.xsecSource == "pc_collect")
+        #expect(exploreRef.canonicalURL.absoluteString.contains("xsec_token=TOKEN_A"))
+        #expect(exploreRef.dedupKey == "xhs:66a1b2c3d4e5f60718293a4b")
+
+        let profileNoteURL = try #require(URL(string: "https://www.xiaohongshu.com/user/profile/5f00112233445566778899aa/66a1b2c3d4e5f60718293a4b?xsec_token=TOKEN_B"))
+        let profileRef = try #require(XiaohongshuURLParser.parse(profileNoteURL))
+        #expect(profileRef.dedupKey == exploreRef.dedupKey)
+        #expect(SocialPostResolver.canonicalDedupKey(for: exploreURL.absoluteString) == SocialPostResolver.canonicalDedupKey(for: profileNoteURL.absoluteString))
+
+        // Short share link & raw mobile app share copy extraction
+        let shareCopy = "67 某某发布了一篇小红书笔记，快来看吧！ http://xhslink.com/a/K8xYz123 复制本条信息，打开【小红书】App查看精彩内容！"
+        let extractedShort = try #require(SocialPostURLParser.extractPostURL(from: shareCopy))
+        #expect(extractedShort.host()?.lowercased() == "xhslink.com")
+        if case .xiaohongshu(let shortRef) = SocialPostURLParser.parse(extractedShort) {
+            #expect(shortRef.isShortLink)
+        } else {
+            Issue.record("Expected xhslink.com to parse as .xiaohongshu")
+        }
+
+        // Profile page without noteID should NOT parse as a note
+        let profileRoot = try #require(URL(string: "https://www.xiaohongshu.com/user/profile/5f00112233445566778899aa?tab=collect"))
+        #expect(XiaohongshuURLParser.parse(profileRoot) == nil)
+
+        // 2. JS `undefined` sanitization & Chinese metric counts
+        let sanitized = XiaohongshuPostResolver.sanitizeJSUndefined(in: #"{"a":undefined,"b":"keep undefined","c":[undefined,1]}"#)
+        #expect(sanitized == #"{"a":null,"b":"keep undefined","c":[null,1]}"#)
+        #expect(XiaohongshuPostResolver.parseChineseMetricCount("1.2万") == 12_000)
+        #expect(XiaohongshuPostResolver.parseChineseMetricCount("3.5千") == 3_500)
+        #expect(XiaohongshuPostResolver.parseChineseMetricCount("10万+") == 100_000)
+        #expect(XiaohongshuPostResolver.parseChineseMetricCount("456") == 456)
+
+        // 3. __INITIAL_STATE__ multi-image note parsing
+        let ssrHTML = """
+        <html><body><script>
+        window.__INITIAL_STATE__={"note":{"noteDetailMap":{"66a1b2c3d4e5f60718293a4b":{"note":{
+          "noteId":"66a1b2c3d4e5f60718293a4b",
+          "type":"normal",
+          "title":"工作台光影构图参考",
+          "desc":"自然窗光与低饱和木质桌面 #摄影[话题]# #光影[话题]#",
+          "time":1730000000000,
+          "ignored":undefined,
+          "user":{"nickname":"安禾","userId":"5f00112233445566778899aa","avatar":"http://sns-avatar-qc.xhscdn.com/a.jpg"},
+          "interactInfo":{"likedCount":"2.4万","commentCount":"120","collectedCount":"5.1千"},
+          "imageList":[
+            {"infoList":[{"imageScene":"WB_PRV","url":"http://sns-webpic-qc.xhscdn.com/img1_prv"},{"imageScene":"WB_DFT","url":"http://sns-webpic-qc.xhscdn.com/img1_dft"}]},
+            {"urlDefault":"http://sns-webpic-qc.xhscdn.com/img2_dft"}
+          ]
+        }}}}}
+        </script></body></html>
+        """
+        let resolved = try #require(XiaohongshuPostResolver.parseInitialState(html: ssrHTML, ref: exploreRef))
+        #expect(resolved.metadata.platform == .xiaohongshu)
+        #expect(resolved.metadata.authorName == "安禾")
+        #expect(resolved.metadata.displayHandleLine == nil) // hides internal 24-hex userId
+        #expect(resolved.metadata.articleTitle == "工作台光影构图参考")
+        #expect(resolved.metadata.bodyText == "自然窗光与低饱和木质桌面 #摄影 #光影")
+        #expect(resolved.metadata.likeCount == 24_000)
+        #expect(resolved.metadata.replyCount == 120)
+        #expect(resolved.metadata.repostCount == 5_100)
+        #expect(resolved.metadata.attachments.count == 2)
+        #expect(resolved.metadata.attachments[0].url == "https://sns-webpic-qc.xhscdn.com/img1_dft")
+        #expect(resolved.shortTitle == "安禾 · 工作台光影构图参考")
+
+        // 4. Multi-og:image fallback & interstitial rejection
+        let ogHTML = """
+        <html><head>
+          <meta name="og:title" content="色彩搭配笔记 - 小红书" />
+          <meta name="og:description" content="暖灰与钴蓝配色方案" />
+          <meta name="og:image" content="http://sns-webpic-qc.xhscdn.com/c1.jpg" />
+          <meta name="og:image" content="http://sns-webpic-qc.xhscdn.com/c2.jpg" />
+        </head><body></body></html>
+        """
+        let ogResolved = try #require(XiaohongshuPostResolver.parseMetaFallback(html: ogHTML, ref: exploreRef))
+        #expect(ogResolved.metadata.articleTitle == "色彩搭配笔记")
+        #expect(ogResolved.metadata.attachments.count == 2)
+
+        let blockedHTML = "<html><head><title>你访问的页面不见了 - 小红书</title></head><body></body></html>"
+        #expect(XiaohongshuPostResolver.parseMetaFallback(html: blockedHTML, ref: exploreRef) == nil)
+    }
+
+    @Test("LocalExtensionBridgeServer serves auth, folders, socialBookmark ingest, and incremental deduplication over 127.0.0.1")
+    func localExtensionBridgeServerRoundTripAndDedup() async throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = try BackendFixture.makeEngine(dir)
+
+        let token = LocalExtensionBridgeServer.generateToken()
+        let server = LocalExtensionBridgeServer(
+            engine: engine,
+            token: token,
+            preferredPort: 0,
+            allowEphemeralPort: true
+        )
+        let status = try await server.start()
+        defer { Task { await server.stop() } }
+        #expect(status.isRunning)
+        #expect(status.port > 0)
+
+        let baseURL = status.baseURL
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+
+        // 1. Public health probe exposes autoPair capability without leaking token
+        let (healthData, healthResp) = try await session.data(from: try #require(URL(string: "\(baseURL)/api/v1/health")))
+        #expect((healthResp as? HTTPURLResponse)?.statusCode == 200)
+        let healthJSON = try #require(JSONSerialization.jsonObject(with: healthData) as? [String: Any])
+        #expect(healthJSON["ok"] as? Bool == true)
+        #expect(healthJSON["app"] as? String == "charkle-macos")
+        #expect(healthJSON["autoPair"] as? Bool == true)
+        #expect(healthJSON["token"] == nil)
+
+        // 1b. Zero-config local auto-pair enforces strict extension Origin + X-Charkle-Extension header
+        func sendLocalPair(origin: String?, includeHeader: Bool) async throws -> (Int, [String: Any]) {
+            var req = URLRequest(url: try #require(URL(string: "\(baseURL)/api/v1/auth/local-pair")))
+            req.httpMethod = "POST"
+            if let origin { req.setValue(origin, forHTTPHeaderField: "Origin") }
+            if includeHeader { req.setValue("1", forHTTPHeaderField: "X-Charkle-Extension") }
+            let (data, resp) = try await session.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            return (code, json)
+        }
+
+        // Rejects external website, localhost webpage, missing origin, and missing custom header
+        let (webRejectCode, _) = try await sendLocalPair(origin: "https://evil.example", includeHeader: true)
+        #expect(webRejectCode == 403)
+        let (localhostRejectCode, _) = try await sendLocalPair(origin: "http://127.0.0.1:3000", includeHeader: true)
+        #expect(localhostRejectCode == 403)
+        let (noOriginCode, _) = try await sendLocalPair(origin: nil, includeHeader: true)
+        #expect(noOriginCode == 403)
+        let (noHeaderCode, _) = try await sendLocalPair(origin: "safari-web-extension://TEST-UUID", includeHeader: false)
+        #expect(noHeaderCode == 403)
+
+        // Accepts Safari & Chrome browser extension origins with custom handshake header
+        let (safariPairCode, safariPairJSON) = try await sendLocalPair(origin: "safari-web-extension://TEST-UUID", includeHeader: true)
+        #expect(safariPairCode == 200)
+        #expect(safariPairJSON["ok"] as? Bool == true)
+        #expect(safariPairJSON["token"] as? String == token)
+
+        let (chromePairCode, chromePairJSON) = try await sendLocalPair(origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop", includeHeader: true)
+        #expect(chromePairCode == 200)
+        #expect(chromePairJSON["token"] as? String == token)
+
+        // Respects disabling auto-pair in Settings
+        await server.updateAutoPairEnabled(false)
+        let (disabledPairCode, disabledPairJSON) = try await sendLocalPair(origin: "safari-web-extension://TEST-UUID", includeHeader: true)
+        #expect(disabledPairCode == 403)
+        #expect(disabledPairJSON["code"] as? String == "AUTO_PAIR_DISABLED")
+        await server.updateAutoPairEnabled(true)
+
+        // 2. Auth enforcement (wrong token rejected with 401 on protected routes, authenticated: false on /auth/status)
+        var unauthFoldersReq = URLRequest(url: try #require(URL(string: "\(baseURL)/api/v1/folders")))
+        unauthFoldersReq.setValue("Bearer wrong-token", forHTTPHeaderField: "Authorization")
+        let (_, unauthResp) = try await session.data(for: unauthFoldersReq)
+        #expect((unauthResp as? HTTPURLResponse)?.statusCode == 401)
+
+        var authStatusReq = URLRequest(url: try #require(URL(string: "\(baseURL)/api/v1/auth/status")))
+        authStatusReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (authData, authResp) = try await session.data(for: authStatusReq)
+        #expect((authResp as? HTTPURLResponse)?.statusCode == 200)
+        let authJSON = try #require(JSONSerialization.jsonObject(with: authData) as? [String: Any])
+        #expect(authJSON["authenticated"] as? Bool == true)
+
+        // 3. Create + reuse folder idempotently
+        func postJSON(_ path: String, payload: [String: Any]) async throws -> (Int, [String: Any]) {
+            var req = URLRequest(url: try #require(URL(string: "\(baseURL)\(path)")))
+            req.httpMethod = "POST"
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            let (data, resp) = try await session.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            return (code, json)
+        }
+
+        let (fCode1, fJson1) = try await postJSON("/api/v1/folders", payload: ["name": "小红书收藏", "reuseExisting": true])
+        #expect(fCode1 == 201)
+        let folderID = try #require((fJson1["folder"] as? [String: Any])?["id"] as? String)
+
+        let (fCode2, fJson2) = try await postJSON("/api/v1/folders", payload: ["name": "小红书收藏", "reuseExisting": true])
+        #expect(fCode2 == 200)
+        #expect(((fJson2["folder"] as? [String: Any])?["id"] as? String) == folderID)
+
+        // 4. Ingest pre-extracted Xiaohongshu socialBookmark with inline cover image (zero external network needed)
+        let coverDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        let xhsPayload: [String: Any] = [
+            "type": "socialBookmark",
+            "platform": "xiaohongshu",
+            "originalURL": "https://www.xiaohongshu.com/explore/66a1b2c3d4e5f60718293a4b?xsec_token=FIRST_TOKEN",
+            "authorName": "林清",
+            "authorHandle": "5f00112233445566778899aa",
+            "articleTitle": "工作室灵感配色",
+            "bodyText": "低饱和暖灰与钴蓝的组合非常耐看",
+            "attachments": [
+                ["kind": "photo", "url": "https://sns-webpic-qc.xhscdn.com/p1.webp"],
+                ["kind": "photo", "url": "https://sns-webpic-qc.xhscdn.com/p2.webp"]
+            ],
+            "coverDataUrl": coverDataURL,
+            "tags": ["小红书", "配色"]
+        ]
+
+        let (ingestCode, ingestJson) = try await postJSON(
+            "/api/v1/assets/ingest",
+            payload: [
+                "inputs": [xhsPayload],
+                "targetFolderID": folderID,
+                "skipDuplicates": true
+            ]
+        )
+        #expect(ingestCode == 201)
+        #expect(ingestJson["created"] as? Int == 1)
+        #expect(ingestJson["skipped"] as? Int == 0)
+
+        // 5. Existing sources endpoint returns token-independent canonical key & second import skips duplicate cleanly
+        var existReq = URLRequest(url: try #require(URL(string: "\(baseURL)/api/v1/assets/existing-sources")))
+        existReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (existData, existResp) = try await session.data(for: existReq)
+        #expect((existResp as? HTTPURLResponse)?.statusCode == 200)
+        let existJSON = try #require(JSONSerialization.jsonObject(with: existData) as? [String: Any])
+        let canonicalKeys = existJSON["canonicalKeys"] as? [String] ?? []
+        #expect(canonicalKeys.contains("xhs:66a1b2c3d4e5f60718293a4b"))
+
+        var rotatedTokenPayload = xhsPayload
+        rotatedTokenPayload["originalURL"] = "https://www.xiaohongshu.com/explore/66a1b2c3d4e5f60718293a4b?xsec_token=ROTATED_TOKEN"
+        let (dupCode, dupJson) = try await postJSON(
+            "/api/v1/assets/ingest",
+            payload: [
+                "inputs": [rotatedTokenPayload],
+                "targetFolderID": folderID,
+                "skipDuplicates": true
+            ]
+        )
+        #expect(dupCode == 200)
+        #expect(dupJson["created"] as? Int == 0)
+        #expect(dupJson["skipped"] as? Int == 1)
+
+        // Verify persisted AssetRecord metadata & native Xiaohongshu card (3:4 900x1200 cover + 240px title footer = 900x1440)
+        let assets = try await engine.fetchAssets(matching: FilterCriteria())
+        let savedXHS = try #require(assets.first(where: { $0.richMetadata?.socialPost?.platform == .xiaohongshu }))
+        #expect(savedXHS.folderID == UUID(uuidString: folderID))
+        #expect(savedXHS.displayTypeLabel == "小红书 笔记")
+        #expect(savedXHS.richMetadata?.socialPost?.attachments.count == 2)
+        #expect(!savedXHS.isExternalWebLink)
+        #expect(savedXHS.pixelWidth == 900)
+        #expect(savedXHS.pixelHeight == 1_440)
+        #expect(abs(savedXHS.aspectRatio - 0.625) < 0.001)
+
+        // 6. Verify automatic legacy Xiaohongshu cover migration upgrades old 800x920 records to 900x1440 idempotently
+        let localCoverFile = dir.appending(path: "legacy-xhs-cover.png")
+        let pngBytes = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+        try pngBytes.write(to: localCoverFile)
+        var legacy = savedXHS
+        legacy.pixelWidth = 800
+        legacy.pixelHeight = 920
+        if var post = legacy.richMetadata?.socialPost {
+            post.attachments = [SocialMediaAttachment(kind: .photo, url: localCoverFile.absoluteString)]
+            post.mediaURLs = [localCoverFile.absoluteString]
+            legacy.richMetadata?.socialPost = post
+        }
+        let legacySnapshot = legacy
+        _ = try await engine.database.transaction { store in
+            try store.saveAssetLocally(legacySnapshot)
+        }
+
+        let upgradedFirst = await engine.upgradeLegacyXiaohongshuCoversIfNeeded()
+        #expect(upgradedFirst == [savedXHS.id])
+        let migratedXHS = try #require(try await engine.fetchAsset(id: savedXHS.id))
+        #expect(migratedXHS.pixelWidth == 900)
+        #expect(migratedXHS.pixelHeight == 1_440)
+        #expect(abs(migratedXHS.aspectRatio - 0.625) < 0.001)
+
+        // Second pass is an instant no-op
+        let upgradedSecond = await engine.upgradeLegacyXiaohongshuCoversIfNeeded()
+        #expect(upgradedSecond.isEmpty)
     }
 }

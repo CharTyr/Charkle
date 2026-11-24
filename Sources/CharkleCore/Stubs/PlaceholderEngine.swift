@@ -166,6 +166,18 @@ public actor PlaceholderCharkleEngine: CharkleEngineProtocol {
                     mediaKind: .document,
                     dominantColors: [LabColor.fromHex(hex)]
                 )
+            case .socialBookmark(let post, _, let tags):
+                record = AssetRecord(
+                    title: post.articleTitle ?? post.authorName,
+                    fileName: "\(post.platform.rawValue)-bookmark.md",
+                    folderID: targetFolderID,
+                    mediaKind: .webBookmark,
+                    sourceURL: post.originalURL,
+                    sourceDomain: URL(string: post.originalURL)?.host,
+                    notes: post.bodyText,
+                    tags: Array(Set(tags + [post.platform.displayName])).sorted(),
+                    richMetadata: AssetRichMetadata(socialPost: post)
+                )
             }
             assets[record.id] = record
             created.append(record)

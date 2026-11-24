@@ -66,7 +66,7 @@
   - 基准圆环周长 `C = 22 * 198 = 4356`，半径 `R = C / (2π) ≈ 693.28`，统一卡片高度 `cardHeight = 300`，间距 `gap = 18`，圆角超椭圆指数 `4`（`cornerRadius = 32px`）。
   - **沿用横向瀑布流不等宽排布（横图零裁切）**：每张卡片固定高度 `300`，宽度按真实宽高比动态计算 `cardWidth = round(cardHeight * clamp(aspect, 0.52, 2.25))`（竖图 `180`、方图 `300`、4:3 `400`、16:9 `533`），通过前缀和弧长轨道（`RingCardTrack`）保证任意相邻卡片沿弧间距恒为 `18`，支持 `O(log N)` 最近卡吸附、无限虚拟循环与背面接缝平滑淡出。
   - **双向自适应铺满窗口**：依据精确外部投影半宽 `halfW_1x = R·P / √(P² + 2PR)` 计算动态缩放系数 `cardScale = clamp(min(targetHalfW / halfW_1x, usableH * 0.78 / cardHeight), 0.34, 2.8)`，横向自动铺满约 `94%` 视口宽度并随窗口缩放实时重绘；拖拽位移、惯性速度与滚轮增量同步除以 `cardScale` 保持 1:1 跟手；中央景深清晰区宽度 `sharpHalf = min(halfW * 0.78, max(110, frontCardW * 0.54) * cardScale)` 随当前居中卡片宽度平滑插值，确保横图整幅锐利不糊边。
-  - 透视距离 `perspective = 1500px`（可调 `900–2400`），景深模糊 `depthBlur = 14px`（可调 `0–30`），远侧淡出 `farFade = 50%`（可调 `0–100%`），圆角 `cornerRadius = 32px`（可调 `0–60`）。
+  - 透视距离 `perspective = 1500px`（可调 `900–2400`），景深模糊 `depthBlur = 2px`（可调 `0–30`），远侧淡出 `farFade = 96%`（可调 `0–100%`），圆角 `cornerRadius = 32px`（可调 `0–60`）。
   - 曲率放置：`c = -1 / R`，`a = s * c`，`x = sin(a) / c`，`z = (1 - cos(a)) / c`；透视投影 `x * P / (P - z) * cardScale`，近裁剪 `P - z < 140` 跳过。
   - 逐像素解析景深模糊（盒式边缘覆盖 alpha + 纹理 Mipmap LOD 采样，避免 CSS `backdrop-filter` 在运动时的闪烁）+ 远侧向浅/深背景色（`#F6F6F5` / `#141517`）平滑淡出；无投影、无反光、无背光发灰。
 - **交互与调参面板**：

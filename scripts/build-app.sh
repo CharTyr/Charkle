@@ -67,6 +67,25 @@ PY
         "$STAGE_BUNDLE/Contents/Resources/FigmaPlugin/"
 fi
 
+# Embed Chrome / Arc / Edge / Brave unpacked Browser Extension
+if [[ -f "$ROOT_DIR/Resources/BrowserExtension/manifest.json" ]]; then
+  mkdir -p "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/icons" \
+           "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/lib"
+  for f in manifest.json background.js content.js popup.html popup.css popup.js options.html options.css options.js README.md; do
+    if [[ -f "$ROOT_DIR/Resources/BrowserExtension/$f" ]]; then
+      cp -X "$ROOT_DIR/Resources/BrowserExtension/$f" "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/$f"
+    fi
+  done
+  cp -X "$ROOT_DIR/Resources/BrowserExtension"/lib/*.js "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/lib/"
+  cp -X "$ROOT_DIR/Resources/BrowserExtension"/icons/* "$STAGE_BUNDLE/Contents/Resources/BrowserExtension/icons/"
+fi
+
+# Build & embed native macOS Safari Web Extension (.appex) into Contents/PlugIns/
+if [[ -x "$ROOT_DIR/scripts/build-safari-extension.sh" || -f "$ROOT_DIR/scripts/build-safari-extension.sh" ]]; then
+  mkdir -p "$STAGE_BUNDLE/Contents/PlugIns"
+  bash "$ROOT_DIR/scripts/build-safari-extension.sh" "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex"
+fi
+
 # Embed app-level Google Desktop OAuth client for zero-setup end-user Google Sign-In if present
 if [[ -f "$ROOT_DIR/Resources/GoogleOAuthClient.json" ]]; then
   cp -X "$ROOT_DIR/Resources/GoogleOAuthClient.json" "$STAGE_BUNDLE/Contents/Resources/GoogleOAuthClient.json"
@@ -110,10 +129,20 @@ fi
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "==> Signing $APP_NAME.app with stable code-signing certificate..."
+  if [[ -d "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex" ]]; then
+    codesign --force --sign "$SIGN_IDENTITY" \
+      --entitlements "$ROOT_DIR/Resources/SafariExtension/CharkleSafariExtension.entitlements" \
+      "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex"
+  fi
   codesign --force --sign "$SIGN_IDENTITY" "$STAGE_BUNDLE/Contents/Helpers/charkle"
   codesign --force --sign "$SIGN_IDENTITY" "$STAGE_BUNDLE"
 else
   echo "==> No signing certificate found; falling back to ad-hoc signing (-)"
+  if [[ -d "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex" ]]; then
+    codesign --force --sign - \
+      --entitlements "$ROOT_DIR/Resources/SafariExtension/CharkleSafariExtension.entitlements" \
+      "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex" >/dev/null 2>&1 || true
+  fi
   codesign --force --deep --sign - "$STAGE_BUNDLE" >/dev/null 2>&1 || true
 fi
 

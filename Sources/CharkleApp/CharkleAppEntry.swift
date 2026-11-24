@@ -17,6 +17,7 @@ public final class CharkleRuntime {
     public let library: LibraryStore
     public let moodboards: MoodboardStore
     public let syncAndAI: SyncAndAIStore
+    public let extensionBridge: ExtensionBridgeController
 
     private var notchController: NotchShelfController?
     private let hotkeyManager = GlobalHotkeyManager()
@@ -56,9 +57,26 @@ public final class CharkleRuntime {
 
         self.engine = resolvedEngine
         self.coordinator = AppCoordinatorStore()
-        self.library = LibraryStore(engine: resolvedEngine)
-        self.moodboards = MoodboardStore(engine: resolvedEngine)
-        self.syncAndAI = SyncAndAIStore(engine: resolvedEngine)
+        let libraryStore = LibraryStore(engine: resolvedEngine)
+        let moodboardStore = MoodboardStore(engine: resolvedEngine)
+        let syncStore = SyncAndAIStore(engine: resolvedEngine)
+        self.library = libraryStore
+        self.moodboards = moodboardStore
+        self.syncAndAI = syncStore
+        let coordinatorStore = self.coordinator
+        self.extensionBridge = ExtensionBridgeController(engine: resolvedEngine) { createdCount, targetBoardID in
+            await libraryStore.refreshAll()
+            if targetBoardID != nil {
+                await moodboardStore.refreshBoards()
+            }
+            if createdCount > 0 {
+                coordinatorStore.showToast(
+                    "浏览器扩展已导入 \(createdCount) 项素材",
+                    icon: "safari",
+                    tone: .success
+                )
+            }
+        }
 
         // IMPORTANT (macOS 15 compatibility):
         // Never instantiate `NSHostingView` / `NSPanel` (NotchShelfController) or touch `NSApp`
@@ -101,6 +119,7 @@ public final class CharkleRuntime {
         setupRemoteSyncObservers()
         setupOnboardingFocusObserver()
         setupWindowCloseObserver()
+        extensionBridge.startIfEnabled()
         CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
         if coordinator.isMinimalCaptureMode || coordinator.launchInMinimalCaptureMode {
             applyMinimalCaptureMode(announce: false)
@@ -109,6 +128,7 @@ public final class CharkleRuntime {
 
     public func markTerminating() {
         isTerminating = true
+        extensionBridge.stop()
     }
 
     private func isMainWorkspaceWindow(_ window: NSWindow) -> Bool {

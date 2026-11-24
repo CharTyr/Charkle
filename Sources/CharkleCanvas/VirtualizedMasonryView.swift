@@ -334,7 +334,9 @@ public nonisolated enum MasonryLayoutEngine {
         case .audio: 1.55
         case .webBookmark:
             if asset.isSocialPost {
-                asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.12
+                asset.pixelWidth > 0 && asset.pixelHeight > 0
+                    ? CGFloat(asset.aspectRatio)
+                    : (asset.richMetadata?.socialPost?.platform == .xiaohongshu ? 0.625 : 1.12)
             } else if asset.isGitHubRepo {
                 asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.32
             } else {
@@ -1064,7 +1066,7 @@ private enum MasonryStaticLayerAssets {
                     ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 3))
                     let badge: String = {
                         if asset.isGitHubRepo { return "GITHUB" }
-                        if let post = asset.richMetadata?.socialPost { return "@\(post.authorHandle)" }
+                        if let post = asset.richMetadata?.socialPost { return post.displayHandleLine ?? post.authorName }
                         if asset.mediaKind == .model3D { return "3D · \(asset.richMetadata?.model3DFormat ?? "MODEL")" }
                         return asset.mediaKind == .webBookmark
                             ? (asset.sourceDomain ?? "web.link")

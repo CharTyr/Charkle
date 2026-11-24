@@ -1,0 +1,12 @@
+{
+  "id": "11-24-web-windows-xhs-and-bookmark-sync-extension",
+  "name": "web-windows-xhs-and-bookmark-sync-extension",
+  "title": "Web & Windows 同步：小红书链接解析、桌面扩展本地桥接与 X/小红书一键批量导入收藏",
+  "status": "open",
+  "priority": "P1",
+  "created_at": "2026-11-24",
+  "platforms": ["web", "windows"],
+  "spec_refs": [
+    ".trellis/spec/cross-platform/index.md"
+  ]
+}

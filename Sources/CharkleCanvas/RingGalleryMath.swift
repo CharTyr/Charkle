@@ -10,8 +10,8 @@ public struct RingGalleryParameters: Equatable, Sendable {
     public var cardHeight: Double = 300
     public var cardGap: Double = 18
     public var perspective: Double = 1500
-    public var depthBlur: Double = 14
-    public var farFade: Double = 0.50
+    public var depthBlur: Double = 2
+    public var farFade: Double = 0.96
     public var cornerRadius: Double = 32
     public var nearPlane: Double = 140
 
@@ -21,8 +21,8 @@ public struct RingGalleryParameters: Equatable, Sendable {
         cardHeight: Double = 300,
         cardGap: Double = 18,
         perspective: Double = 1500,
-        depthBlur: Double = 14,
-        farFade: Double = 0.50,
+        depthBlur: Double = 2,
+        farFade: Double = 0.96,
         cornerRadius: Double = 32,
         nearPlane: Double = 140
     ) {

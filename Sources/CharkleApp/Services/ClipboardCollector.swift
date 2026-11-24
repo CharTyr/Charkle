@@ -18,12 +18,15 @@ public enum ClipboardDetectedLink: Equatable, Sendable {
 
     public var notchHintLabel: String {
         switch self {
-        case .social:
-            "检测到剪贴板推文链接 · 点击或按 ⌘V 立即保存"
+        case .social(let url):
+            if let ref = SocialPostURLParser.parse(url), ref.platform == .xiaohongshu {
+                return "检测到剪贴板小红书笔记链接 · 点击或按 ⌘V 立即保存"
+            }
+            return "检测到剪贴板推文链接 · 点击或按 ⌘V 立即保存"
         case .github:
-            "检测到剪贴板 GitHub 链接 · 点击或按 ⌘V 立即保存"
+            return "检测到剪贴板 GitHub 链接 · 点击或按 ⌘V 立即保存"
         case .web(_, let domain):
-            "检测到网页链接 (\(domain)) · 点击或按 ⌘V 立即保存"
+            return "检测到网页链接 (\(domain)) · 点击或按 ⌘V 立即保存"
         }
     }
 }

@@ -61,13 +61,27 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
     case x
     case threads
     case bluesky
+    case xiaohongshu
 
     public var displayName: String {
         switch self {
         case .x: "X"
         case .threads: "Threads"
         case .bluesky: "Bluesky"
+        case .xiaohongshu: "小红书"
         }
+    }
+
+    public var postNoun: String {
+        switch self {
+        case .x: "推文"
+        case .xiaohongshu: "笔记"
+        case .threads, .bluesky: "贴文"
+        }
+    }
+
+    public var postTypeLabel: String {
+        "\(displayName) \(postNoun)"
     }
 
     public var openActionLabel: String {
@@ -75,6 +89,7 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .x: "在 X 打开"
         case .threads: "在 Threads 打开"
         case .bluesky: "在 Bluesky 打开"
+        case .xiaohongshu: "在小红书打开"
         }
     }
 }
@@ -250,6 +265,20 @@ public struct SocialPostMetadata: Codable, Hashable, Sendable {
         self.viewCount = try c.decodeIfPresent(Int.self, forKey: .viewCount)
         self.originalURL = try c.decode(String.self, forKey: .originalURL)
         self.mediaFetchFailed = try c.decodeIfPresent(Bool.self, forKey: .mediaFetchFailed) ?? false
+    }
+
+    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs for cleaner typography).
+    public var displayHandleLine: String? {
+        let trimmed = authorHandle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if platform == .xiaohongshu {
+            let isInternalHex = trimmed.count == 24 && trimmed.allSatisfy(\.isHexDigit)
+            if isInternalHex || trimmed.lowercased() == "xiaohongshu" || trimmed == authorName {
+                return nil
+            }
+            return "小红书号 \(trimmed)"
+        }
+        return "@\(trimmed)"
     }
 
     /// Unified typed attachment list across both newly saved posts and legacy saved social posts.
@@ -687,7 +716,7 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
 
     public var displayTypeLabel: String {
         if let post = richMetadata?.socialPost {
-            return "\(post.platform.displayName) 推文"
+            return post.platform.postTypeLabel
         }
         if isGitHubRepo {
             return "GitHub 仓库"

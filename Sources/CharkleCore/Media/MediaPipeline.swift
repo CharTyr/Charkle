@@ -187,6 +187,18 @@ public nonisolated struct MediaPipeline: Sendable {
                 throw LibraryDatabaseError("Could not render color swatch.")
             }
             try data.write(to: file)
+        case .socialBookmark(let post, _, _):
+            let resolved = ResolvedSocialPost(
+                metadata: post,
+                primaryMediaDownloadURL: nil,
+                primaryMediaKind: nil,
+                primaryThumbnailURL: nil
+            )
+            title = resolved.shortTitle
+            notes = post.bodyText
+            source = URL(string: post.originalURL)
+            file = temp.appending(path: Self.cleanName(resolved.shortTitle) + ".md")
+            try Data(resolved.markdownDocument.utf8).write(to: file)
         }
 
         let mime = Self.mimeType(fileName: file.lastPathComponent)

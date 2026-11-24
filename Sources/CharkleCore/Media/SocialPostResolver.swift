@@ -1,17 +1,19 @@
 import Foundation
 import ImageIO
 
-/// Parsed identity of a supported social media post URL (X/Twitter, Threads, Bluesky).
+/// Parsed identity of a supported social media post URL (X/Twitter, Threads, Bluesky, Xiaohongshu).
 public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
     case x(XPostReference)
     case threads(handle: String, postID: String, canonicalURL: URL)
     case bluesky(handle: String, rkey: String, canonicalURL: URL)
+    case xiaohongshu(XiaohongshuNoteReference)
 
     public var platform: SocialPlatform {
         switch self {
         case .x: .x
         case .threads: .threads
         case .bluesky: .bluesky
+        case .xiaohongshu: .xiaohongshu
         }
     }
 
@@ -20,11 +22,22 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .x(let ref): ref.canonicalURL
         case .threads(_, _, let url): url
         case .bluesky(_, _, let url): url
+        case .xiaohongshu(let ref): ref.canonicalURL
+        }
+    }
+
+    /// Stable cross-platform deduplication key independent of query params (`xsec_token`, `s=20`, etc.).
+    public var dedupKey: String {
+        switch self {
+        case .x(let ref): "x:\(ref.tweetID)"
+        case .threads(_, let postID, _): "threads:\(postID)"
+        case .bluesky(let handle, let rkey, _): "bsky:\(handle.lowercased()):\(rkey)"
+        case .xiaohongshu(let ref): ref.dedupKey
         }
     }
 }
 
-/// Detects social post URLs across X/Twitter, Threads, and Bluesky.
+/// Detects social post URLs across X/Twitter, Threads, Bluesky, and Xiaohongshu.
 public nonisolated enum SocialPostURLParser {
     private static let threadsHosts: Set<String> = [
         "threads.net", "www.threads.net",
@@ -38,6 +51,9 @@ public nonisolated enum SocialPostURLParser {
     public static func parse(_ url: URL) -> SocialPostReference? {
         if let xRef = XPostURLParser.parse(url) {
             return .x(xRef)
+        }
+        if let xhsRef = XiaohongshuURLParser.parse(url) {
+            return .xiaohongshu(xhsRef)
         }
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host()?.lowercased() else {
@@ -110,18 +126,29 @@ public nonisolated struct ResolvedSocialPost: Equatable, Sendable {
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .nilIfEmpty
+        let authorPrefix: String = {
+            if metadata.platform == .xiaohongshu {
+                return metadata.authorName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "小红书"
+            }
+            return "@\(metadata.authorHandle)"
+        }()
         if let headline = candidate {
             let trimmed = String(headline.prefix(44))
-            return "@\(metadata.authorHandle) · \(trimmed)"
+            return "\(authorPrefix) · \(trimmed)"
         }
-        return "@\(metadata.authorHandle) · \(metadata.platform.displayName)"
+        return "\(authorPrefix) · \(metadata.platform.displayName)"
     }
 
     public var markdownDocument: String {
         var lines: [String] = []
-        let display = metadata.authorName.isEmpty
-            ? "@\(metadata.authorHandle)"
-            : "\(metadata.authorName) (@\(metadata.authorHandle))"
+        let display: String = {
+            if let handleLine = metadata.displayHandleLine {
+                return metadata.authorName.isEmpty
+                    ? handleLine
+                    : "\(metadata.authorName) (\(handleLine))"
+            }
+            return metadata.authorName.isEmpty ? metadata.platform.displayName : metadata.authorName
+        }()
         lines.append("# \(display)")
         var sub: [String] = [metadata.platform.displayName]
         if let date = metadata.publishedAtText, !date.isEmpty { sub.append(date) }
@@ -150,7 +177,7 @@ public nonisolated struct ResolvedSocialPost: Equatable, Sendable {
     }
 }
 
-/// Resolves full social post payloads across X, Bluesky, and Threads.
+/// Resolves full social post payloads across X, Bluesky, Threads, and Xiaohongshu.
 public nonisolated enum SocialPostResolver {
     public static func resolve(_ ref: SocialPostReference) async -> ResolvedSocialPost? {
         switch ref {
@@ -160,7 +187,19 @@ public nonisolated enum SocialPostResolver {
             return await resolveBluesky(handle: handle, rkey: rkey, canonicalURL: canonicalURL)
         case .threads(let handle, _, let canonicalURL):
             return await resolveThreads(handle: handle, canonicalURL: canonicalURL)
+        case .xiaohongshu(let xhsRef):
+            return await XiaohongshuPostResolver.resolve(xhsRef)
         }
+    }
+
+    /// Computes a stable cross-platform deduplication key for any social or generic URL string.
+    public static func canonicalDedupKey(for rawURLString: String) -> String? {
+        let trimmed = rawURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed) else { return nil }
+        if let ref = SocialPostURLParser.parse(url) {
+            return ref.dedupKey
+        }
+        return "url:\(trimmed.lowercased())"
     }
 
     /// Downloads the author's profile avatar (upgrading tiny `_normal` X avatars to `_400x400` when applicable)
@@ -184,7 +223,12 @@ public nonisolated enum SocialPostResolver {
         for candidate in candidates {
             guard let url = URL(string: candidate) else { continue }
             var req = URLRequest(url: url, timeoutInterval: 6)
-            req.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+            if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
+                req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+                req.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+            } else {
+                req.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+            }
             req.setValue("image/webp,image/png,image/jpeg,image/*", forHTTPHeaderField: "Accept")
             guard let (data, response) = try? await session.data(for: req),
                   let http = response as? HTTPURLResponse,

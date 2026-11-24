@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Charkle</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Compact Studio Header -->
+    <header class="topbar">
+      <div class="brand-group">
+        <picture class="brand-mark">
+          <source media="(prefers-color-scheme: dark)" srcset="icons/charkle-dark.svg" />
+          <img src="icons/charkle-light.svg" alt="Charkle" width="22" height="22" />
+        </picture>
+        <span class="brand-name">Charkle</span>
+        <span id="conn-pill" class="conn-pill" data-state="idle" title="连接状态">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span id="conn-label" class="conn-label">未连接</span>
+        </span>
+      </div>
+      <div class="topbar-actions">
+        <button
+          id="btn-open-web"
+          type="button"
+          class="icon-btn pressable"
+          title="打开 Charkle"
+          aria-label="打开 Charkle"
+          hidden
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M6.5 3.5H3.8C3.08 3.5 2.5 4.08 2.5 4.8V12.2C2.5 12.92 3.08 13.5 3.8 13.5H11.2C11.92 13.5 12.5 12.92 12.5 12.2V9.5M9.5 2.5H13.5M13.5 2.5V6.5M13.5 2.5L7.5 8.5" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button
+          id="btn-open-options"
+          type="button"
+          class="icon-btn pressable"
+          title="扩展设置"
+          aria-label="打开扩展设置"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.45" />
+            <path d="M8 2.2V3.6M8 12.4V13.8M2.2 8H3.6M12.4 8H13.8M3.9 3.9L4.9 4.9M11.1 11.1L12.1 12.1M12.1 3.9L11.1 4.9M4.9 11.1L3.9 12.1" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- View A: Desktop-First Zero-Config Auto-Pair & Foolproof Fallback -->
+    <main id="view-onboarding" class="content-area" hidden>
+      <section class="surface-card onboarding-card">
+        <div class="onboarding-head-row">
+          <h1>连接本机 Charkle</h1>
+          <span class="onboard-pill">免配置直连</span>
+        </div>
+
+        <p class="onboard-lead">
+          同一台电脑安装插件后无需填写地址或令牌，打开 Charkle 桌面端即可自动连接。
+        </p>
+
+        <ol class="onboard-checklist">
+          <li>确认已打开 Mac 上的 <strong>Charkle</strong> 应用</li>
+          <li>确认「设置 → 插件与扩展」中的本地连接桥接处于开启状态</li>
+        </ol>
+
+        <p id="onboard-info" class="inline-info" hidden></p>
+        <p id="onboard-error" class="inline-error" role="alert" hidden></p>
+
+        <button id="btn-onboard-detect" type="button" class="btn-primary pressable">
+          一键自动连接本机 Charkle
+        </button>
+
+        <details id="onboard-manual-details" class="manual-disclosure">
+          <summary>连接自建网页服务或手动填写令牌</summary>
+          <div class="manual-disclosure-body stack-md">
+            <div class="segmented-control cols-2" role="radiogroup" aria-label="连接目标">
+              <button type="button" class="seg-btn pressable" role="radio" data-onboard-mode="desktop" aria-checked="true">
+                本机桌面端
+              </button>
+              <button type="button" class="seg-btn pressable" role="radio" data-onboard-mode="web" aria-checked="false">
+                网页服务
+              </button>
+            </div>
+
+            <form id="onboarding-form" class="stack-md" novalidate>
+              <div class="field-group">
+                <label for="onboard-server">服务地址</label>
+                <input
+                  id="onboard-server"
+                  type="url"
+                  class="input-control"
+                  placeholder="http://127.0.0.1:41937"
+                  autocomplete="url"
+                  required
+                />
+              </div>
+
+              <div class="field-group">
+                <label for="onboard-token">访问令牌</label>
+                <div class="token-row">
+                  <input
+                    id="onboard-token"
+                    type="password"
+                    class="input-control"
+                    placeholder="粘贴访问令牌"
+                    autocomplete="off"
+                    spellcheck="false"
+                    required
+                  />
+                  <button
+                    id="btn-toggle-onboard-token"
+                    type="button"
+                    class="icon-btn-subtle pressable"
+                    aria-label="显示或隐藏令牌"
+                    title="显示/隐藏令牌"
+                  >
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path d="M1.8 8C3.1 5.3 5.3 4 8 4C10.7 4 12.9 5.3 14.2 8C12.9 10.7 10.7 12 8 12C5.3 12 3.1 10.7 1.8 8Z" stroke="currentColor" stroke-width="1.35" />
+                      <circle cx="8" cy="8" r="1.8" stroke="currentColor" stroke-width="1.35" />
+                    </svg>
+                  </button>
+                </div>
+                <p class="field-hint">
+                  可在 Charkle「设置 → 插件与扩展 → 高级」中查看访问令牌
+                </p>
+              </div>
+
+              <button id="btn-onboard-save" type="submit" class="btn-secondary pressable">
+                测试并保存手动配置
+              </button>
+            </form>
+          </div>
+        </details>
+      </section>
+    </main>
+
+    <!-- View B: Connected Compact Workbench -->
+    <main id="view-workbench" class="content-area" hidden>
+      <!-- Persistent Target Bar -->
+      <section class="surface-card target-card" aria-label="收藏目标">
+        <div class="target-header">
+          <span class="section-label">收藏目标</span>
+          <button
+            id="btn-refresh-targets"
+            type="button"
+            class="ghost-mini-btn pressable"
+            title="刷新文件夹与情绪板列表"
+          >
+            <svg id="icon-refresh-targets" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M13.2 8A5.2 5.2 0 1 1 11.7 4.3M13.2 2.8V5.6H10.4" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <span>同步</span>
+          </button>
+        </div>
+
+        <div class="segmented-control" role="radiogroup" aria-label="收藏目标类型">
+          <button type="button" class="seg-btn pressable" role="radio" data-target-mode="inbox" aria-checked="true">
+            收件箱
+          </button>
+          <button type="button" class="seg-btn pressable" role="radio" data-target-mode="folder" aria-checked="false">
+            指定文件夹
+          </button>
+          <button type="button" class="seg-btn pressable" role="radio" data-target-mode="board" aria-checked="false">
+            当前情绪板
+          </button>
+        </div>
+
+        <div id="target-folder-wrap" class="target-select-wrap" hidden>
+          <select id="select-folder" class="select-control" aria-label="选择文件夹"></select>
+        </div>
+        <div id="target-board-wrap" class="target-select-wrap" hidden>
+          <select id="select-board" class="select-control" aria-label="选择情绪板"></select>
+        </div>
+      </section>
+
+      <!-- 5 Action Tabs -->
+      <nav class="tab-bar tab-bar-5" role="tablist" aria-label="剪藏模式">
+        <button type="button" id="tab-page" class="tab-btn pressable" role="tab" aria-selected="true" aria-controls="panel-page" data-tab="page">
+          网页
+        </button>
+        <button type="button" id="tab-bookmarks" class="tab-btn pressable" role="tab" aria-selected="false" aria-controls="panel-bookmarks" data-tab="bookmarks">
+          收藏导入
+        </button>
+        <button type="button" id="tab-images" class="tab-btn pressable" role="tab" aria-selected="false" aria-controls="panel-images" data-tab="images">
+          抓图
+        </button>
+        <button type="button" id="tab-text" class="tab-btn pressable" role="tab" aria-selected="false" aria-controls="panel-text" data-tab="text">
+          文字
+        </button>
+        <button type="button" id="tab-color" class="tab-btn pressable" role="tab" aria-selected="false" aria-controls="panel-color" data-tab="color">
+          色卡
+        </button>
+      </nav>
+
+      <!-- Tab 1: Page & Visible Screenshot -->
+      <section id="panel-page" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-page">
+        <div class="page-meta-row">
+          <img id="page-favicon" class="page-favicon" src="" alt="" width="16" height="16" hidden />
+          <span id="page-host" class="page-host">—</span>
+          <span id="source-badge" class="source-badge" data-kind="web">网页书签</span>
+        </div>
+
+        <div class="stack-sm">
+          <div class="field-group">
+            <label for="page-title-input">标题</label>
+            <input id="page-title-input" type="text" class="input-control" placeholder="网页标题" />
+          </div>
+          <div class="field-group">
+            <label for="page-notes-input">备注（可选）</label>
+            <textarea
+              id="page-notes-input"
+              class="textarea-control"
+              rows="2"
+              placeholder="添加备注…"
+            ></textarea>
+          </div>
+        </div>
+
+        <div id="screenshot-preview-wrap" class="screenshot-preview" hidden>
+          <img id="screenshot-preview-img" alt="已截取画面预览" />
+          <span class="screenshot-badge">已入库截屏</span>
+        </div>
+
+        <div class="action-row">
+          <button id="btn-save-page" type="button" class="btn-primary pressable">
+            收藏当前网页
+          </button>
+          <button id="btn-capture-visible" type="button" class="btn-secondary pressable" title="截取当前标签页可见画面并上传">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M2.5 5.2C2.5 4.4 3.1 3.8 3.9 3.8H5.2L6.1 2.5H9.9L10.8 3.8H12.1C12.9 3.8 13.5 4.4 13.5 5.2V11.8C13.5 12.6 12.9 13.2 12.1 13.2H3.9C3.1 13.2 2.5 12.6 2.5 11.8V5.2Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" />
+              <circle cx="8" cy="8.4" r="2.2" stroke="currentColor" stroke-width="1.35" />
+            </svg>
+            <span>截取画面</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Tab 2: One-Click Batch Bookmarks Import (X & Xiaohongshu) -->
+      <section id="panel-bookmarks" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-bookmarks" hidden>
+        <div id="bm-supported-block" class="stack-sm" hidden>
+          <div class="bm-detect-row">
+            <span id="bm-platform-badge" class="source-badge" data-kind="x">X 书签</span>
+            <span id="bm-page-label" class="bm-page-label">已识别收藏列表</span>
+            <button id="btn-bm-quick-folder" type="button" class="ghost-mini-btn pressable" title="一键新建并选中专属文件夹">
+              + 专属文件夹
+            </button>
+          </div>
+
+          <div class="bm-options-box">
+            <label class="checkbox-row">
+              <input id="bm-opt-skip-dups" type="checkbox" checked />
+              <span>跳过已导入条目（自动去重）</span>
+            </label>
+            <label class="checkbox-row">
+              <input id="bm-opt-stop-streak" type="checkbox" checked />
+              <span>遇到连续已导入项时自动停止（增量同步）</span>
+            </label>
+            <label id="bm-opt-xhs-row" class="checkbox-row" hidden>
+              <input id="bm-opt-xhs-detail" type="checkbox" checked />
+              <span>自动拉取小红书完整多图、正文与标签</span>
+            </label>
+            <div class="bm-limit-row">
+              <label for="bm-opt-max-count">单次导入上限</label>
+              <select id="bm-opt-max-count" class="select-control select-compact">
+                <option value="0">不限（导入全部）</option>
+                <option value="30">最多 30 条</option>
+                <option value="100">最多 100 条</option>
+                <option value="300">最多 300 条</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Live Job Progress Card -->
+          <div id="bm-progress-card" class="bm-progress-card" hidden>
+            <div id="bm-progress-phase" class="bm-progress-phase">准备中…</div>
+            <div class="bm-bar"><div id="bm-bar-fill" class="bm-bar-fill"></div></div>
+            <div id="bm-progress-stats" class="bm-progress-stats">发现 0 · 导入 0 · 跳过 0</div>
+            <div id="bm-progress-last" class="bm-progress-last"></div>
+            <div id="bm-progress-controls" class="action-row-equal" hidden>
+              <button id="btn-bm-pause" type="button" class="btn-secondary pressable">暂停</button>
+              <button id="btn-bm-stop" type="button" class="btn-secondary btn-danger-text pressable">停止并保存</button>
+            </div>
+          </div>
+
+          <button id="btn-bm-start" type="button" class="btn-primary pressable">
+            一键扫描并批量导入
+          </button>
+        </div>
+
+        <div id="bm-guide-block" class="stack-sm">
+          <div class="bm-guide-copy">
+            <strong>一键批量导入 X 书签与小红书收藏</strong>
+            <p>
+              请先打开对应平台的收藏页面，再点击一键导入。系统会自动滚动采集、增量去重，关闭本弹窗也不中断。
+            </p>
+          </div>
+          <div class="action-row-equal">
+            <button id="btn-goto-x-bookmarks" type="button" class="btn-secondary pressable">
+              打开 X 书签
+            </button>
+            <button id="btn-goto-xhs-collect" type="button" class="btn-secondary pressable">
+              打开小红书
+            </button>
+          </div>
+          <p class="field-hint">
+            提示：在小红书打开「我的」个人主页并切至「收藏」标签，或打开任意收藏专辑页即可一键导入。
+          </p>
+        </div>
+      </section>
+
+      <!-- Tab 3: Batch Image Grabber -->
+      <section id="panel-images" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-images" hidden>
+        <div class="images-toolbar">
+          <span id="images-summary" class="images-summary">正在扫描页面图片…</span>
+          <div class="images-toolbar-actions">
+            <button id="btn-select-large" type="button" class="ghost-mini-btn pressable">全选大图</button>
+            <button id="btn-clear-images" type="button" class="ghost-mini-btn pressable">清空</button>
+            <button id="btn-rescan-images" type="button" class="ghost-mini-btn pressable" title="重新扫描">重扫</button>
+          </div>
+        </div>
+
+        <div id="images-empty" class="empty-state" hidden>
+          <p id="images-empty-text">未发现图片</p>
+        </div>
+
+        <div id="images-grid" class="images-grid charkle-scroll" role="list"></div>
+
+        <div class="images-footer">
+          <button id="btn-save-images" type="button" class="btn-primary pressable" disabled>
+            收藏所选 (0)
+          </button>
+        </div>
+      </section>
+
+      <!-- Tab 4: Text Snippet -->
+      <section id="panel-text" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-text" hidden>
+        <div class="stack-sm">
+          <div class="field-group">
+            <label for="text-title-input">标题</label>
+            <input id="text-title-input" type="text" class="input-control" placeholder="文字灵感标题" />
+          </div>
+          <div class="field-group">
+            <div class="label-row">
+              <label for="text-body-input">正文内容</label>
+              <span id="text-char-count" class="char-count">0 字</span>
+            </div>
+            <textarea
+              id="text-body-input"
+              class="textarea-control textarea-tall"
+              rows="5"
+              placeholder="输入或粘贴文字内容…"
+            ></textarea>
+          </div>
+          <label class="checkbox-row">
+            <input id="text-include-source" type="checkbox" checked />
+            <span id="text-source-label">附带当前网页来源链接</span>
+          </label>
+        </div>
+        <button id="btn-save-text" type="button" class="btn-primary pressable">
+          收藏文字灵感
+        </button>
+      </section>
+
+      <!-- Tab 5: Color Swatch & EyeDropper -->
+      <section id="panel-color" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-color" hidden>
+        <div id="color-swatch-stage" class="color-swatch-stage" style="background-color: #2A60E0;">
+          <span id="color-swatch-hex" class="swatch-hex-display">#2A60E0</span>
+        </div>
+
+        <div class="color-picker-row">
+          <button id="btn-eyedropper" type="button" class="btn-secondary pressable">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M11.6 2.4C12.3 1.7 13.4 1.7 14.1 2.4C14.8 3.1 14.8 4.2 14.1 4.9L11.7 7.3L12.5 8.1L11.5 9.1L10.3 7.9L5.5 12.7C5.1 13.1 4.6 13.3 4.1 13.3H2.6V11.8C2.6 11.3 2.8 10.8 3.2 10.4L8 5.6L6.8 4.4L7.8 3.4L8.6 4.2L11.6 2.4Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+            </svg>
+            <span>屏幕取色</span>
+          </button>
+
+          <label class="native-color-wrap" title="颜色选择器">
+            <input id="color-native-input" type="color" value="#2A60E0" aria-label="选择颜色" />
+            <span id="color-native-dot" class="native-color-dot" style="background-color: #2A60E0;"></span>
+          </label>
+
+          <input
+            id="color-hex-input"
+            type="text"
+            class="input-control hex-input"
+            value="#2A60E0"
+            maxlength="7"
+            spellcheck="false"
+            aria-label="HEX 色值"
+            placeholder="#2A60E0"
+          />
+        </div>
+
+        <div class="field-group">
+          <label for="color-title-input">色卡名称（可选）</label>
+          <input id="color-title-input" type="text" class="input-control" placeholder="色卡名称" />
+        </div>
+
+        <button id="btn-save-color" type="button" class="btn-primary pressable">
+          收藏色卡
+        </button>
+      </section>
+
+      <!-- Non-intrusive Status Bar -->
+      <div id="status-banner" class="status-banner" role="status" aria-live="polite" hidden>
+        <span id="status-banner-dot" class="status-banner-dot" aria-hidden="true"></span>
+        <span id="status-banner-text" class="status-banner-text"></span>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
