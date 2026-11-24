@@ -243,6 +243,7 @@ public struct MainWindowView: View {
                         }
                     }
                 )
+                .ignoresSafeArea(.all)
                 .zIndex(200)
                 .transition(.opacity)
             }
@@ -926,12 +927,11 @@ public struct MainWindowView: View {
         let isUltraCompact = galleryViewportWidth < 600
         let showContextTitle = galleryViewportWidth >= 680
         let supportsDensity = coordinator.galleryLayoutMode == .verticalMasonry || coordinator.galleryLayoutMode == .horizontalJustified
-        let showDensitySlider = galleryViewportWidth >= 840 && supportsDensity
-        let showSortLabel = galleryViewportWidth >= 1040
-        let showFullSyncLabel = galleryViewportWidth >= 1040
-        let showFilterText = galleryViewportWidth >= 980
+        let showDensitySlider = galleryViewportWidth >= 960 && supportsDensity
+        let showFilterText = galleryViewportWidth >= 1180
+        let showFullSyncLabel = galleryViewportWidth >= 1280
+        let showSortLabel = galleryViewportWidth >= 1320
         let barSpacing: CGFloat = isUltraCompact ? 6 : 8
-        let contextMaxWidth: CGFloat = galleryViewportWidth >= 1160 ? 250 : (galleryViewportWidth >= 920 ? 190 : 136)
 
         return CharkleGlassContainer(spacing: barSpacing) {
             HStack(spacing: barSpacing) {
@@ -940,9 +940,7 @@ public struct MainWindowView: View {
                         activeFolderID: activeFolderID,
                         showInlineSubfolderButton: activeFolderID != nil && !showFolderSubbar
                     )
-                    .frame(maxWidth: contextMaxWidth, alignment: .leading)
-
-                    Spacer(minLength: 4)
+                    .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Island 1: Unified Token Search & Filter Popover
@@ -992,63 +990,9 @@ public struct MainWindowView: View {
     private func topContextHeader(activeFolderID: UUID?, showInlineSubfolderButton: Bool) -> some View {
         if let folderID = activeFolderID {
             let crumbs = library.folderBreadcrumbs(for: folderID)
-            let visibleCrumbs = Array(crumbs.suffix(2))
-            let hiddenAncestors = crumbs.count > 2 ? Array(crumbs.dropLast(2)) : []
 
             HStack(spacing: 5) {
-                if !hiddenAncestors.isEmpty {
-                    Menu {
-                        ForEach(hiddenAncestors) { ancestor in
-                            Button(ancestor.name) {
-                                navigate(to: .folder(ancestor.id))
-                            }
-                        }
-                    } label: {
-                        Text("…")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
-                            .frame(width: 18, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-
-                ForEach(Array(visibleCrumbs.enumerated()), id: \.element.id) { index, crumb in
-                    let isCurrent = crumb.id == folderID
-                    if index > 0 {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Button {
-                        navigate(to: .folder(crumb.id))
-                    } label: {
-                        HStack(spacing: 5) {
-                            if isCurrent {
-                                CharkleFolderIcon(
-                                    colorHex: crumb.colorHex,
-                                    customSymbol: crumb.customSymbol,
-                                    size: 15,
-                                    isActive: true
-                                )
-                            }
-                            Text(crumb.name)
-                                .font(.system(size: isCurrent ? 15 : 13, weight: isCurrent ? .semibold : .medium))
-                                .tracking(isCurrent ? -0.2 : 0)
-                                .foregroundStyle(isCurrent ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .layoutPriority(isCurrent ? 1 : 0)
-                }
+                folderBreadcrumbPath(folderID: folderID, crumbs: crumbs)
 
                 Text("\(library.assets.count)")
                     .font(.system(size: 12, weight: .medium))
@@ -1075,6 +1019,7 @@ public struct MainWindowView: View {
                 }
             }
             .padding(.leading, 2)
+            .help(library.folderDisplayPath(for: folderID))
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(currentDestinationTitle)
@@ -1092,6 +1037,133 @@ public struct MainWindowView: View {
             }
             .padding(.leading, 2)
         }
+    }
+
+    @ViewBuilder
+    private func folderBreadcrumbPath(folderID: UUID, crumbs: [FolderRecord]) -> some View {
+        if let current = crumbs.last {
+            if crumbs.count == 1 {
+                currentFolderCrumbButton(current, fixedFullWidth: false)
+            } else {
+                let parent = crumbs[crumbs.count - 2]
+                let hiddenAncestors = crumbs.count > 2 ? Array(crumbs.dropLast(2)) : []
+                let allAncestors = Array(crumbs.dropLast())
+
+                // Adaptive 3-tier breadcrumb: never crushes ancestor folder names down to clipped half-glyphs.
+                ViewThatFits(in: .horizontal) {
+                    // Tier 1: Full untruncated path ([… >] Parent > 📁 Current)
+                    HStack(spacing: 5) {
+                        if !hiddenAncestors.isEmpty {
+                            ancestorBreadcrumbMenu(hiddenAncestors)
+                            breadcrumbChevron
+                        }
+                        parentFolderCrumbButton(parent, maxWidth: nil)
+                            .fixedSize(horizontal: true, vertical: false)
+                        breadcrumbChevron
+                        currentFolderCrumbButton(current, fixedFullWidth: true)
+                    }
+
+                    // Tier 2: Readable bounded parent (<= 96pt) + generous tail-truncated current folder
+                    HStack(spacing: 5) {
+                        if !hiddenAncestors.isEmpty {
+                            ancestorBreadcrumbMenu(hiddenAncestors)
+                            breadcrumbChevron
+                        }
+                        parentFolderCrumbButton(parent, maxWidth: 96)
+                            .layoutPriority(1)
+                        breadcrumbChevron
+                        currentFolderCrumbButton(current, fixedFullWidth: false)
+                            .frame(minWidth: 96, idealWidth: 132, alignment: .leading)
+                    }
+
+                    // Tier 3: Narrow fallback — tuck all ancestors into clickable path menu so current title breathes
+                    HStack(spacing: 5) {
+                        ancestorBreadcrumbMenu(allAncestors)
+                        breadcrumbChevron
+                        currentFolderCrumbButton(current, fixedFullWidth: false)
+                    }
+                }
+            }
+        } else {
+            Text(currentDestinationTitle)
+                .font(.system(size: 15, weight: .semibold))
+                .tracking(-0.2)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    private var breadcrumbChevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .fixedSize()
+    }
+
+    private func ancestorBreadcrumbMenu(_ ancestors: [FolderRecord]) -> some View {
+        let fullAncestorPath = ancestors.map(\.name).joined(separator: " / ")
+        return Menu {
+            ForEach(ancestors) { ancestor in
+                Button(ancestor.name) {
+                    navigate(to: .folder(ancestor.id))
+                }
+            }
+        } label: {
+            Text("…")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                .frame(minWidth: 20, minHeight: 22, maxHeight: 22)
+                .background(
+                    Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.055),
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("上级路径：\(fullAncestorPath)")
+    }
+
+    private func parentFolderCrumbButton(_ crumb: FolderRecord, maxWidth: CGFloat?) -> some View {
+        Button {
+            navigate(to: .folder(crumb.id))
+        } label: {
+            Text(crumb.name)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: maxWidth, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func currentFolderCrumbButton(_ crumb: FolderRecord, fixedFullWidth: Bool) -> some View {
+        Button {
+            navigate(to: .folder(crumb.id))
+        } label: {
+            HStack(spacing: 5) {
+                CharkleFolderIcon(
+                    colorHex: crumb.colorHex,
+                    customSymbol: crumb.customSymbol,
+                    size: 15,
+                    isActive: true
+                )
+                .fixedSize()
+                Text(crumb.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(-0.2)
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: fixedFullWidth, vertical: false)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var activeFilterTokens: [CharkleFilterToken] {
@@ -1234,17 +1306,16 @@ public struct MainWindowView: View {
             }
         }
         .frame(
-            minWidth: isUltraCompact ? 110 : 168,
+            minWidth: isUltraCompact ? 110 : 152,
             idealWidth: tokens.isEmpty
-                ? (galleryViewportWidth >= 1120 ? 260 : 206)
-                : (galleryViewportWidth >= 1120 ? 340 : 250),
+                ? (galleryViewportWidth >= 1280 ? 240 : 196)
+                : (galleryViewportWidth >= 1280 ? 310 : 240),
             maxWidth: isUltraCompact
                 ? .infinity
                 : (tokens.isEmpty
-                    ? (galleryViewportWidth >= 1200 ? 320 : 248)
-                    : (galleryViewportWidth >= 1200 ? 420 : 310))
+                    ? (galleryViewportWidth >= 1320 ? 272 : 224)
+                    : (galleryViewportWidth >= 1320 ? 370 : 290))
         )
-        .layoutPriority(isUltraCompact ? 0 : 1)
     }
 
     private func viewSortDensityIsland(
@@ -1430,11 +1501,11 @@ public struct MainWindowView: View {
     }
 
     private func actionSyncInspectorIsland(isUltraCompact: Bool, showFullSyncLabel: Bool) -> some View {
-        let ctaLabel: String? = if galleryViewportWidth >= 1180 {
+        let ctaLabel: String? = if galleryViewportWidth >= 1360 {
             "快速生成情绪板"
-        } else if galleryViewportWidth >= 1020 {
+        } else if galleryViewportWidth >= 1180 {
             "生成情绪板"
-        } else if galleryViewportWidth >= 740 {
+        } else if galleryViewportWidth >= 900 {
             "生成"
         } else {
             nil
@@ -2140,27 +2211,30 @@ public struct MainWindowView: View {
         return HStack(spacing: 10) {
             if showInlineBreadcrumb {
                 // Compact breadcrumb path when top context title is hidden on narrow viewports
-                HStack(spacing: 4) {
-                    ForEach(Array(crumbs.enumerated()), id: \.element.id) { index, crumb in
-                        if index > 0 {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        Button {
-                            navigate(to: .folder(crumb.id))
-                        } label: {
-                            HStack(spacing: 4) {
-                                if index == 0 {
-                                    CharkleFolderIcon(colorHex: crumb.colorHex, customSymbol: crumb.customSymbol, size: 15, isActive: true)
-                                }
-                                Text(crumb.name)
-                                    .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
-                                    .foregroundStyle(crumb.id == folderID ? Color.primary : Color.secondary)
-                                    .lineLimit(1)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(Array(crumbs.enumerated()), id: \.element.id) { index, crumb in
+                            if index > 0 {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
                             }
+                            Button {
+                                navigate(to: .folder(crumb.id))
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if index == 0 {
+                                        CharkleFolderIcon(colorHex: crumb.colorHex, customSymbol: crumb.customSymbol, size: 15, isActive: true)
+                                    }
+                                    Text(crumb.name)
+                                        .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
+                                        .foregroundStyle(crumb.id == folderID ? Color.primary : Color.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize(horizontal: true, vertical: false)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }

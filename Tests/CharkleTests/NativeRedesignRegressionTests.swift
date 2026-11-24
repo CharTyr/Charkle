@@ -81,6 +81,8 @@ struct NativeRedesignRegressionTests {
         #expect(mainWindow.contains("CharkleSegmentedControl("))
         #expect(mainWindow.contains("FloatingSyncStatusPill("))
         #expect(!mainWindow.contains("floatingVisualFilterBar"))
+        #expect(!mainWindow.contains("contextMaxWidth"))
+        #expect(mainWindow.contains("ViewThatFits(in: .horizontal)"))
         #expect(mainWindow.contains("sideChromeWidth: sideChromeWidth"))
         #expect(mainWindow.contains("WindowKeyEventBridge"))
         #expect(mainWindow.contains(".intersection([.command, .option, .control, .shift])"))
@@ -166,6 +168,10 @@ struct NativeRedesignRegressionTests {
         #expect(quickLook.contains("MasonryCardGeometryRegistry.shared.visibleCardRectInWindow(for:"))
         #expect(quickLook.contains("CharkleMotion.gestureSpring"))
         #expect(quickLook.contains("CharkleMotion.exitSm"))
+        #expect(quickLook.contains(".ignoresSafeArea(.container, edges: .top)"))
+        #expect(quickLook.contains(".padding(.leading, 88)"))
+        #expect(quickLook.contains(".menuIndicator(.hidden)"))
+        #expect(!quickLook.contains("rectangle.3.group.badge.plus"))
     }
 
     @Test("Zero-flicker canvas invariants and zero-violet color discipline remain intact across redesigned UI files")

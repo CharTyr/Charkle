@@ -217,19 +217,22 @@ public struct QuickLookOverlayView: View {
 
                 // Hero Media Stage
                 VStack(spacing: 0) {
-                    // Top minimal title bar (fades in after 45% hero continuity)
+                    // Top minimal title bar (clears macOS window traffic lights on the leading edge
+                    // and aligns vertically with Quick Look's right-hand Inspector header)
                     HStack(spacing: 10) {
                         Text(asset.title)
                             .font(.system(size: 13.5, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.94))
                             .lineLimit(1)
+                            .truncationMode(.middle)
 
                         Text("\(asset.pixelWidth) × \(asset.pixelHeight) · \(asset.mediaKind.localizedLabel)")
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .monospacedDigit()
                             .foregroundStyle(.white.opacity(0.62))
+                            .fixedSize(horizontal: true, vertical: false)
 
-                        Spacer()
+                        Spacer(minLength: 12)
 
                         Button {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
@@ -259,8 +262,13 @@ public struct QuickLookOverlayView: View {
                         .buttonStyle(CharkleTactileButtonStyle())
                         .help("关闭预览 (Space / Esc)")
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 18)
+                    .padding(.leading, 88)
+                    .padding(.trailing, 20)
+                    .padding(.top, 10)
+                    .frame(minHeight: 44)
+                    .background {
+                        CharkleWindowDragArea()
+                    }
                     .opacity(showSecondaryControls ? 1 : 0)
 
                     Spacer(minLength: 12)
@@ -335,10 +343,11 @@ public struct QuickLookOverlayView: View {
                 }
             }
             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea(.container, edges: .top)
             .clipped()
             .layoutPriority(0)
 
-            // Full-Height 300pt Inspector (1:1 parity in size, cards, editing, and Similar tab with main window InspectorView)
+            // Full-Height 300pt Inspector (1:1 parity in size, top alignment, cards, editing, and Similar tab with main window InspectorView)
             InspectorView(
                 coordinator: coordinator,
                 library: library,
@@ -366,9 +375,11 @@ public struct QuickLookOverlayView: View {
             .disabled(!coordinator.isInspectorVisible)
             .accessibilityHidden(!coordinator.isInspectorVisible)
             .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
+            .ignoresSafeArea(.container, edges: .top)
             .clipped()
             .layoutPriority(1)
         }
+        .ignoresSafeArea(.container, edges: .top)
         .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
         .task(id: asset.id) {
             let assetID = asset.id
@@ -935,13 +946,23 @@ public struct QuickLookOverlayView: View {
                                 }
                             }
                         }
+                        if moodboards.boards.isEmpty {
+                            Button("新建情绪板并加入…") {
+                                library.selectedAssetIDs = [asset.id]
+                                onClose()
+                                coordinator.presentMoodboardGenerator(entry: .selection)
+                            }
+                        }
                     } label: {
-                        Image(systemName: "rectangle.3.group.badge.plus")
+                        Image(systemName: "rectangle.3.group")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.white.opacity(0.9))
                             .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
                     .help("加入情绪板")
                 }
 
