@@ -16,6 +16,7 @@ private struct RingCardGPUUniforms {
     var slice: SIMD4<Float>     // x: uMax, y: isFarSide, z: verticalOffsetPt, w: cardScale
     var bgColor: SIMD4<Float>   // rgba of page ground
     var tintColor: SIMD4<Float> // rgba fallback placeholder color while decoding
+    var extra: SIMD4<Float>     // x: sharpHalfPt, y: seamAlpha, z: 0, w: 0
 }
 
 // MARK: - Runtime-Compiled Metal Shaders (96-Column Curved Strip + Superellipse-4 + Zero-Shimmer DoF)
@@ -33,6 +34,7 @@ struct RingCardUniforms {
     float4 slice;     // x: uMax, y: isFarSide, z: verticalOffsetPt, w: cardScale
     float4 bgColor;   // page background RGB
     float4 tintColor; // placeholder RGB while texture decodes
+    float4 extra;     // x: sharpHalfPt, y: seamAlpha, z: 0, w: 0
 };
 
 struct RingVertexOut {
@@ -108,10 +110,11 @@ fragment float4 ring_card_fragment(
     texture2d<float> cardTex [[texture(0)]],
     sampler texSampler [[sampler(0)]]
 ) {
-    // 1. Per-pixel depth-of-field blur radius (screen points)
+    // 1. Per-pixel depth-of-field blur radius (screen points), adapting sharp inner zone to front card width
     float halfW = max(120.0, u.screen1.y);
+    float sharpHalf = max(48.0, min(halfW - 12.0, u.extra.x));
     float back = clamp(-in.worldZ / (2.0 * max(1.0, u.geom1.w)), 0.0, 1.0);
-    float sideBlur = u.screen0.w * pow(smoothstep(110.0, halfW, abs(in.screenPos.x)), 1.4);
+    float sideBlur = u.screen0.w * pow(smoothstep(sharpHalf, halfW, abs(in.screenPos.x)), 1.4);
     float depthBlur = u.screen0.w * pow(smoothstep(0.25, 0.8, back), 1.2);
     float b = max(sideBlur, depthBlur);
     float bEff = max(b, 0.75);
@@ -137,7 +140,7 @@ fragment float4 ring_card_fragment(
     float distScreenPt = distLocal / gradPerPoint;
     float cornerAlpha = smoothstep(bEff, -bEff, distScreenPt);
 
-    float alpha = min(boxAlpha, cornerAlpha);
+    float alpha = min(boxAlpha, cornerAlpha) * u.extra.y;
     if (alpha < 0.002) {
         discard_fragment();
     }
@@ -378,6 +381,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
     // Continuous arc offset (px along the ring)
     private var offset: Double = 0
+    private var cardTrack: RingCardTrack = RingCardTrack(cardWidths: [], cardHeight: 300, cardGap: 18)
     private var lastReportedFrontAssetID: UUID?
 
     // Cubic-bezier offset animation
@@ -475,6 +479,25 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
     public override var acceptsFirstResponder: Bool { true }
 
+    public override func layout() {
+        super.layout()
+        requestFrame()
+    }
+
+    private func currentLayoutMetrics() -> (cardScale: Double, verticalBiasPt: Double) {
+        let cardScale = RingGalleryMath.adaptiveCardScale(
+            viewportSize: bounds.size,
+            topSafeInset: Double(topSafeInset),
+            bottomSafeInset: 72.0,
+            params: params
+        )
+        let verticalBias = RingGalleryMath.verticalCenterBias(
+            topSafeInset: Double(topSafeInset),
+            bottomSafeInset: 72.0
+        )
+        return (cardScale, verticalBias)
+    }
+
     private func installKeyMonitorIfNeeded() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -555,12 +578,18 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         let listChanged = oldAssetIDs != newAssetIDs
 
         let oldParams = self.params
+        let newTrack = RingCardTrack.build(from: assets, params: params)
+        let trackGeometryChanged = newTrack != self.cardTrack
         let appearanceChanged = (self.isDarkMode != isDarkMode)
             || (self.topSafeInset != topSafeInset)
             || (oldParams != params)
+            || trackGeometryChanged
+
+        let previousFrontVirtual = cardTrack.isEmpty ? 0 : cardTrack.nearestVirtualIndex(to: offset)
 
         self.assets = assets
         self.params = params
+        self.cardTrack = newTrack
         self.isDarkMode = isDarkMode
         self.reduceMotion = reduceMotion
         self.isOverlayPresented = isOverlayPresented
@@ -570,24 +599,30 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         if listChanged {
             offsetAnim = nil
             if let selectedAssetID, let idx = assets.firstIndex(where: { $0.id == selectedAssetID }) {
-                offset = Double(idx) * params.step
+                offset = cardTrack.centerArc(forVirtualIndex: idx)
             } else {
                 offset = 0
             }
             reportFrontAssetIfChanged(force: true)
             prefetchAroundCurrentOffset()
             requestFrame()
-        } else if let selectedAssetID,
-                  selectedAssetID != lastReportedFrontAssetID,
-                  !isDragging,
-                  offsetAnim == nil,
-                  let idx = assets.firstIndex(where: { $0.id == selectedAssetID }) {
-            // External selection change (e.g., clicked Similar item in Inspector) -> glide shortest path
-            rotateToAssetIndex(idx, duration: reduceMotion ? 0.18 : 0.76)
+        } else {
+            if trackGeometryChanged && !isDragging && offsetAnim == nil && !cardTrack.isEmpty {
+                // Keep the exact same card centered if an asset's natural aspect dimensions refreshed.
+                offset = cardTrack.centerArc(forVirtualIndex: previousFrontVirtual)
+            }
+            if let selectedAssetID,
+               selectedAssetID != lastReportedFrontAssetID,
+               !isDragging,
+               offsetAnim == nil,
+               let idx = assets.firstIndex(where: { $0.id == selectedAssetID }) {
+                // External selection change (e.g., clicked Similar item in Inspector) -> glide shortest path
+                rotateToAssetIndex(idx, duration: reduceMotion ? 0.18 : 0.76)
+            }
         }
 
         if oldParams != params {
-            // Moving any live tuning slider stops ongoing demo/glide motion and updates immediately (Section 8)
+            // Moving any live tuning slider stops ongoing demo/glide motion and updates immediately
             offsetAnim = nil
             requestFrame()
         } else if appearanceChanged {
@@ -596,24 +631,24 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     public func step(by delta: Int) {
-        guard !assets.isEmpty else { return }
+        guard !assets.isEmpty, !cardTrack.isEmpty else { return }
         let baseIdx: Int
         if let anim = offsetAnim {
-            baseIdx = RingGalleryMath.frontVirtualIndex(offset: anim.to, step: params.step)
+            baseIdx = cardTrack.nearestVirtualIndex(to: anim.to)
         } else {
-            baseIdx = RingGalleryMath.frontVirtualIndex(offset: offset, step: params.step)
+            baseIdx = cardTrack.nearestVirtualIndex(to: offset)
         }
         var targetIdx = baseIdx + delta
         if assets.count <= 3 {
             targetIdx = max(0, min(assets.count - 1, targetIdx))
         }
-        let targetOffset = Double(targetIdx) * params.step
+        let targetOffset = cardTrack.centerArc(forVirtualIndex: targetIdx)
         startOffsetAnimation(to: targetOffset, duration: reduceMotion ? 0.16 : 0.56)
     }
 
     private func rotateToAssetIndex(_ targetAssetIdx: Int, duration: Double) {
-        guard !assets.isEmpty else { return }
-        let currentVirtual = RingGalleryMath.frontVirtualIndex(offset: offset, step: params.step)
+        guard !assets.isEmpty, !cardTrack.isEmpty else { return }
+        let currentVirtual = cardTrack.nearestVirtualIndex(to: offset)
         let currentAsset = RingGalleryMath.positiveMod(currentVirtual, count: assets.count)
         var delta = targetAssetIdx - currentAsset
         if assets.count > 3 {
@@ -622,7 +657,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             if delta < -half { delta += assets.count }
         }
         let targetVirtual = currentVirtual + delta
-        startOffsetAnimation(to: Double(targetVirtual) * params.step, duration: duration)
+        startOffsetAnimation(to: cardTrack.centerArc(forVirtualIndex: targetVirtual), duration: duration)
     }
 
     private func startOffsetAnimation(to target: Double, duration: Double) {
@@ -686,7 +721,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     private func screenCoordinates(from event: NSEvent) -> (sx: Double, sy: Double) {
         let local = convert(event.locationInWindow, from: nil)
         let sx = Double(local.x - bounds.midX)
-        let verticalBias = -Double(topSafeInset) * 0.28
+        let (_, verticalBias) = currentLayoutMetrics()
         let sy = Double(local.y - bounds.midY) - verticalBias
         return (sx, sy)
     }
@@ -734,10 +769,12 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             startPressAnimation(virtualIndex: pv, toScale: 1.0, duration: 0.320, curve: .pressOut)
         }
 
-        // 1:1 pointer follow (dragging left increases offset so ring turns forward)
-        offset = dragStartOffset - Double(x - dragStartWindowX)
-        if assets.count <= 3 {
-            let maxOff = Double(max(0, assets.count - 1)) * params.step
+        // 1:1 pointer follow in screen points (compensated by live adaptive cardScale)
+        let (cardScale, _) = currentLayoutMetrics()
+        let arcDelta = Double(x - dragStartWindowX) / max(0.25, cardScale)
+        offset = dragStartOffset - arcDelta
+        if assets.count <= 3, !cardTrack.isEmpty {
+            let maxOff = cardTrack.centerArc(forVirtualIndex: max(0, assets.count - 1))
             offset = RingGalleryMath.clamp(offset, -params.step * 0.35, maxOff + params.step * 0.35)
         }
 
@@ -762,44 +799,46 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
         if dragMovedTotal < 5 {
             // Tap / Click on a card
-            if let hit = hitTestCard(at: event) {
-                let frontVirtual = RingGalleryMath.frontVirtualIndex(offset: offset, step: params.step)
+            if let hit = hitTestCard(at: event), !cardTrack.isEmpty {
+                let frontVirtual = cardTrack.nearestVirtualIndex(to: offset)
                 if hit.virtualIndex == frontVirtual {
                     if event.clickCount >= 2, hit.assetIndex < assets.count {
                         callbacks?.onOpenQuickLook(assets[hit.assetIndex])
                     } else {
                         // Snap tightly to exact center
-                        startOffsetAnimation(to: Double(frontVirtual) * params.step, duration: 0.32)
+                        startOffsetAnimation(to: cardTrack.centerArc(forVirtualIndex: frontVirtual), duration: 0.32)
                     }
                 } else {
-                    // Bring clicked side card to front center in 760ms (Section 7)
-                    startOffsetAnimation(to: Double(hit.virtualIndex) * params.step, duration: 0.760)
+                    // Bring clicked side card to front center in 760ms
+                    startOffsetAnimation(to: cardTrack.centerArc(forVirtualIndex: hit.virtualIndex), duration: 0.760)
                 }
-            } else {
-                let snapped = (offset / params.step).rounded() * params.step
-                startOffsetAnimation(to: snapped, duration: 0.42)
+            } else if !cardTrack.isEmpty {
+                let snappedIdx = cardTrack.nearestVirtualIndex(to: offset)
+                startOffsetAnimation(to: cardTrack.centerArc(forVirtualIndex: snappedIdx), duration: 0.42)
             }
             return
         }
 
-        // Compute release pointer velocity (px/s)
+        // Compute release pointer velocity (arc units/s compensated by live cardScale)
         let now = CACurrentMediaTime()
-        var velocity: Double = 0
+        let (cardScale, _) = currentLayoutMetrics()
+        var velocityScreen: Double = 0
         if let first = velocitySamples.first(where: { now - $0.time <= 0.10 }),
            let last = velocitySamples.last,
            last.time - first.time > 0.005 {
-            velocity = Double(last.x - first.x) / (last.time - first.time)
+            velocityScreen = Double(last.x - first.x) / (last.time - first.time)
         }
         velocitySamples.removeAll()
+        let velocityArc = velocityScreen / max(0.25, cardScale)
 
         var (target, duration) = RingGalleryMath.releaseGlide(
             offset: offset,
-            velocity: velocity,
-            step: params.step,
+            velocityArcPerSec: velocityArc,
+            track: cardTrack,
             reducedMotion: reduceMotion
         )
-        if assets.count <= 3 {
-            let maxOff = Double(max(0, assets.count - 1)) * params.step
+        if assets.count <= 3, !cardTrack.isEmpty {
+            let maxOff = cardTrack.centerArc(forVirtualIndex: max(0, assets.count - 1))
             target = RingGalleryMath.clamp(target, 0, maxOff)
         }
         startOffsetAnimation(to: target, duration: duration)
@@ -821,14 +860,15 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         scrollSnapWorkItem?.cancel()
 
         // Support both horizontal trackpad swipes AND vertical mouse wheel scrolling
+        let (cardScale, _) = currentLayoutMetrics()
         let rawDelta: Double = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
             ? Double(event.scrollingDeltaX)
             : Double(event.scrollingDeltaY)
         let scale: Double = event.hasPreciseScrollingDeltas ? 1.15 : 18.0
-        offset -= rawDelta * scale
+        offset -= (rawDelta * scale) / max(0.35, cardScale)
 
-        if assets.count <= 3 {
-            let maxOff = Double(max(0, assets.count - 1)) * params.step
+        if assets.count <= 3, !cardTrack.isEmpty {
+            let maxOff = cardTrack.centerArc(forVirtualIndex: max(0, assets.count - 1))
             offset = RingGalleryMath.clamp(offset, -params.step * 0.25, maxOff + params.step * 0.25)
         }
 
@@ -840,11 +880,9 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         let isEnded = event.momentumPhase == .ended || (event.phase == .ended && event.momentumPhase.isEmpty)
         let delay: TimeInterval = isEnded ? 0.04 : 0.16
         let item = DispatchWorkItem { [weak self] in
-            guard let self, !self.isDragging else { return }
-            var snapped = (self.offset / self.params.step).rounded() * self.params.step
-            if self.assets.count <= 3 {
-                snapped = RingGalleryMath.clamp(snapped, 0, Double(max(0, self.assets.count - 1)) * self.params.step)
-            }
+            guard let self, !self.isDragging, !self.cardTrack.isEmpty else { return }
+            let snapIdx = self.cardTrack.nearestVirtualIndex(to: self.offset)
+            let snapped = self.cardTrack.centerArc(forVirtualIndex: snapIdx)
             if abs(snapped - self.offset) > 0.4 {
                 self.startOffsetAnimation(to: snapped, duration: self.reduceMotion ? 0.15 : 0.42)
             }
@@ -854,20 +892,17 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     private func reportFrontAssetIfChanged(force: Bool = false) {
-        guard !assets.isEmpty else {
+        guard !assets.isEmpty, !cardTrack.isEmpty else {
             if lastReportedFrontAssetID != nil || force {
                 lastReportedFrontAssetID = nil
                 callbacks?.onFrontAssetChanged(nil)
             }
             return
         }
-        let frontIdx: Int
-        if assets.count <= 3 {
-            frontIdx = Int(RingGalleryMath.clamp(Double(RingGalleryMath.frontVirtualIndex(offset: offset, step: params.step)), 0, Double(assets.count - 1)).rounded())
-        } else {
-            let vIdx = RingGalleryMath.frontVirtualIndex(offset: offset, step: params.step)
-            frontIdx = RingGalleryMath.positiveMod(vIdx, count: assets.count)
-        }
+        let vIdx = cardTrack.nearestVirtualIndex(to: offset)
+        let frontIdx: Int = assets.count <= 3
+            ? max(0, min(assets.count - 1, vIdx))
+            : RingGalleryMath.positiveMod(vIdx, count: assets.count)
         let asset = assets[frontIdx]
         if force || asset.id != lastReportedFrontAssetID {
             lastReportedFrontAssetID = asset.id
@@ -876,8 +911,8 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     private func prefetchAroundCurrentOffset() {
-        guard !assets.isEmpty, let pool = texturePool else { return }
-        let centerVirtual = RingGalleryMath.frontVirtualIndex(offset: offset, step: params.step)
+        guard !assets.isEmpty, !cardTrack.isEmpty, let pool = texturePool else { return }
+        let centerVirtual = cardTrack.nearestVirtualIndex(to: offset)
         let radiusSlots = min(assets.count, params.slotCount / 2 + 4)
         var batch: [AssetRecord] = []
         batch.reserveCapacity(radiusSlots * 2 + 1)
@@ -952,13 +987,11 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
         let viewportPts = bounds.size
         let retinaScale = Float(max(1.0, window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0))
-        let usableH = max(240.0, Double(viewportPts.height) - Double(topSafeInset) - 56.0)
-        // Exact 1:1 desktop scale whenever height >= 360pt; smoothly scales down only on ultra-short windows
-        let cardScale = min(1.0, max(0.62, usableH / 380.0))
-        let verticalBiasPt = Float(-Double(topSafeInset) * 0.28)
+        let (cardScale, verticalBias) = currentLayoutMetrics()
+        let verticalBiasPt = Float(verticalBias)
 
         let projected = RingGalleryMath.visibleOutsideCards(
-            assetCount: assets.count,
+            track: cardTrack,
             offset: offset,
             params: params,
             viewportSize: viewportPts,
@@ -975,7 +1008,10 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
         let halfW = Float(max(1.0, viewportPts.width * 0.5))
         let halfH = Float(max(1.0, viewportPts.height * 0.5))
-        let blurPad = Float(params.depthBlur + 4.0)
+        let effectiveBlur = Float(params.depthBlur * RingGalleryMath.clamp(cardScale, 0.72, 1.38))
+        let blurPad = effectiveBlur + 4.0
+        let frontCardW = cardTrack.interpolatedFrontCardWidth(at: offset)
+        let sharpHalfPt = Float(min(Double(halfW) * 0.78, max(110.0, frontCardW * 0.54) * cardScale))
 
         for card in projected {
             guard card.assetIndex < assets.count else { continue }
@@ -990,14 +1026,15 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             let placeholderRGB = Self.placeholderTint(for: asset, isDark: isDarkMode)
 
             var uniforms = RingCardGPUUniforms(
-                geom0: SIMD4<Float>(Float(card.arcS), Float(params.curvature), Float(params.perspective), Float(params.cardWidth)),
+                geom0: SIMD4<Float>(Float(card.arcS), Float(params.curvature), Float(params.perspective), Float(card.cardWidth)),
                 geom1: SIMD4<Float>(Float(params.cardHeight), Float(params.cornerRadius), pScale, Float(params.radius)),
-                screen0: SIMD4<Float>(Float(card.minScreenX), Float(card.maxScreenX), blurPad, Float(params.depthBlur)),
+                screen0: SIMD4<Float>(Float(card.minScreenX), Float(card.maxScreenX), blurPad, effectiveBlur),
                 screen1: SIMD4<Float>(Float(params.farFade), halfW, halfH, retinaScale),
                 media: SIMD4<Float>(imgAspect, hasTexture, card.isFarSide ? 1.0 : 0.0, Float(card.uMin)),
                 slice: SIMD4<Float>(Float(card.uMax), card.isFarSide ? 1.0 : 0.0, verticalBiasPt, Float(cardScale)),
                 bgColor: bgRGB,
-                tintColor: placeholderRGB
+                tintColor: placeholderRGB,
+                extra: SIMD4<Float>(sharpHalfPt, Float(card.seamAlpha), 0.0, 0.0)
             )
 
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<RingCardGPUUniforms>.stride, index: 0)

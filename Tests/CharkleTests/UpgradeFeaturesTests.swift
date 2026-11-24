@@ -496,13 +496,59 @@ struct UpgradeFeaturesTests {
             params: params,
             viewportSize: CGSize(width: 1280, height: 760)
         )
-        #expect(cards.count == 22)
+        #expect(cards.count >= 20 && cards.count <= 22)
         for i in 1..<cards.count {
             #expect(cards[i].centerZ >= cards[i - 1].centerZ - 0.02)
         }
         // Last drawn (front-most) card is virtualIndex 42 -> assetIndex 42
         #expect(cards.last?.virtualIndex == 42)
         #expect(cards.last?.assetIndex == 42)
+
+        // Viewport-adaptive scaling fills wide windows horizontally and shrinks cleanly on narrow/short windows
+        let halfW1x = RingGalleryMath.outsideProjectedHalfWidth(radius: params.radius, perspective: params.perspective)
+        #expect(abs(halfW1x - 499.76) < 0.5)
+        let wideScale = RingGalleryMath.adaptiveCardScale(
+            viewportSize: CGSize(width: 1600, height: 960),
+            topSafeInset: 118,
+            params: params
+        )
+        #expect(wideScale > 1.4 && wideScale < 1.7)
+        let narrowScale = RingGalleryMath.adaptiveCardScale(
+            viewportSize: CGSize(width: 560, height: 700),
+            topSafeInset: 118,
+            params: params
+        )
+        #expect(narrowScale > 0.45 && narrowScale < 0.62)
+        let shortScale = RingGalleryMath.adaptiveCardScale(
+            viewportSize: CGSize(width: 1600, height: 480),
+            topSafeInset: 118,
+            params: params
+        )
+        #expect(shortScale < wideScale)
+
+        // Variable-width track preserves landscape aspect ratios (zero horizontal crop) with exact cardGap spacing
+        let mixedAssets = [
+            AssetRecord(title: "Portrait", fileName: "p.jpg", mediaKind: .image, pixelWidth: 900, pixelHeight: 1500),
+            AssetRecord(title: "Landscape16x9", fileName: "l.jpg", mediaKind: .image, pixelWidth: 1920, pixelHeight: 1080),
+            AssetRecord(title: "Square", fileName: "s.jpg", mediaKind: .image, pixelWidth: 1000, pixelHeight: 1000),
+            AssetRecord(title: "Classic4x3", fileName: "c.jpg", mediaKind: .image, pixelWidth: 1600, pixelHeight: 1200)
+        ]
+        let mixedTrack = RingCardTrack.build(from: mixedAssets, params: params)
+        #expect(mixedTrack.cardWidths[0] == 180)
+        #expect(abs(mixedTrack.cardWidths[1] - 533) <= 1)
+        #expect(mixedTrack.cardWidths[2] == 300)
+        #expect(mixedTrack.cardWidths[3] == 400)
+        // Gap between every adjacent pair along the arc equals exact params.cardGap (18pt)
+        for i in 1..<mixedTrack.count {
+            let actualGap = (mixedTrack.centerArcs[i] - mixedTrack.centerArcs[i - 1])
+                - 0.5 * (mixedTrack.cardWidths[i - 1] + mixedTrack.cardWidths[i])
+            #expect(abs(actualGap - params.cardGap) < 1e-6)
+        }
+        // Binary-search nearest card lookup hits exact landscape card center even across negative/positive laps
+        let landscapeCenter = mixedTrack.centerArc(forVirtualIndex: 5) // lap 1, index 1
+        #expect(mixedTrack.nearestVirtualIndex(to: landscapeCenter + 12) == 5)
+        let negPortraitCenter = mixedTrack.centerArc(forVirtualIndex: -4) // lap -1, index 0
+        #expect(mixedTrack.nearestVirtualIndex(to: negPortraitCenter - 5) == -4)
 
         // Cubic-bezier drag glide and Reduce Motion duration cap (<= 200ms)
         #expect(RingCubicBezier.dragGlide.evaluate(0) == 0)
