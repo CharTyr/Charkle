@@ -730,7 +730,7 @@ async fn route_request(
                 "ok": true,
                 "app": "charkle-windows",
                 "name": "Charkle Windows",
-                "version": "1.2.0",
+                "version": env!("CARGO_PKG_VERSION"),
                 "port": bound_port,
                 "autoPair": allow_auto_pair,
             }),

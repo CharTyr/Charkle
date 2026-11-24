@@ -2678,7 +2678,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.2.0',
+      appVersion: '1.2.1',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -2799,7 +2799,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.2.0',
+    currentVersion: '1.2.1',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,

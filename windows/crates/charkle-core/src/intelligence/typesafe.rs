@@ -236,7 +236,7 @@ impl TypeSafeSystemOneClient {
             .map_err(|e| CoreError::InvalidOperation(format!("规范化 TypeSafe 地址失败：{e}")))?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(45))
-            .user_agent("Charkle-Windows/1.2.0")
+            .user_agent(concat!("Charkle-Windows/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
             client,

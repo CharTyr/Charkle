@@ -125,7 +125,7 @@ fn checked_embedding(values: Vec<f32>) -> CoreResult<Vec<f32>> {
 fn make_http_client() -> CoreResult<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
-        .user_agent("Charkle-Windows/1.2.0")
+        .user_agent(concat!("Charkle-Windows/", env!("CARGO_PKG_VERSION")))
         .build()?)
 }
 

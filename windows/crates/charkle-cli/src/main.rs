@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 #[derive(Debug, Parser)]
 #[command(
     name = "charkle-cli",
-    version = "1.2.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Charkle Windows Native CLI & MCP v2 Server"
 )]
 struct Cli {
@@ -308,7 +308,7 @@ async fn main() {
         let db_path = data_dir.join("Library.sqlite3");
         let status = json!({
             "name": "charkle-cli",
-            "version": "1.2.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
             "libraryDir": data_dir.display().to_string(),
             "databasePath": db_path.display().to_string(),
@@ -330,7 +330,8 @@ async fn main() {
             println!("{rendered}");
         } else {
             println!(
-                "charkle-cli 1.2.0 (MCP v2: {} read / {} write tools) | library={} | mcp={} | cli={} | access={:?}",
+                "charkle-cli {} (MCP v2: {} read / {} write tools) | library={} | mcp={} | cli={} | access={:?}",
+                env!("CARGO_PKG_VERSION"),
                 READ_TOOL_NAMES.len(),
                 WRITE_TOOL_NAMES.len(),
                 data_dir.display(),
