@@ -255,17 +255,20 @@ mod win_ole {
             fescapepressed: BOOL,
             _grfkeystate: MODIFIERKEYS_FLAGS,
         ) -> HRESULT {
-            let esc = fescapepressed.as_bool()
-                || ((unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } as u16) & 0x8000) != 0;
-            if esc {
-                return DRAGDROP_S_CANCEL;
-            }
-            // Query true physical mouse state via GetAsyncKeyState rather than `grfkeystate`
-            // because WebView2's child process received the original WM_LBUTTONDOWN.
-            if !is_primary_mouse_down() {
-                return DRAGDROP_S_DROP;
-            }
-            S_OK
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let esc = fescapepressed.as_bool()
+                    || ((unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } as u16) & 0x8000) != 0;
+                if esc {
+                    return DRAGDROP_S_CANCEL;
+                }
+                // Query true physical mouse state via GetAsyncKeyState rather than `grfkeystate`
+                // because WebView2's child process received the original WM_LBUTTONDOWN.
+                if !is_primary_mouse_down() {
+                    return DRAGDROP_S_DROP;
+                }
+                S_OK
+            }))
+            .unwrap_or(DRAGDROP_S_CANCEL)
         }
 
         fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
@@ -419,13 +422,16 @@ mod win_ole {
                 );
 
                 // Release any lingering mouse capture across foreground AND WebView2 child threads,
-                // then promote our UI thread to foreground so `ole32!DoDragDrop`'s internal
-                // `SetCapture` succeeds globally across all monitors. Always detach
-                // `AttachThreadInput` BEFORE `DoDragDrop` so drop targets never deadlock!
+                // then promote our UI thread to foreground when needed (e.g. non-activating Drop
+                // Shelf or when Charkle is already foreground). If the user ALREADY opened Alt+Tab
+                // / Win+Tab (a different app/switcher owns foreground for a main-window drag), do
+                // NOT steal foreground back so the task switcher stays open!
+                // Always detach `AttachThreadInput` BEFORE `DoDragDrop` so drop targets never deadlock.
                 let cur_tid = GetCurrentThreadId();
                 let mut remote_tids: Vec<u32> = Vec::new();
                 let fg = GetForegroundWindow();
-                if !fg.0.is_null() {
+                let should_promote_fg = is_shelf_window || fg == hwnd;
+                if should_promote_fg && !fg.0.is_null() {
                     let fg_tid = GetWindowThreadProcessId(fg, None);
                     if fg_tid != 0 && fg_tid != cur_tid {
                         remote_tids.push(fg_tid);
@@ -441,13 +447,17 @@ mod win_ole {
                 for &tid in &remote_tids {
                     let attached = AttachThreadInput(cur_tid, tid, true).as_bool();
                     let _ = ReleaseCapture();
-                    let _ = SetForegroundWindow(hwnd);
+                    if should_promote_fg {
+                        let _ = SetForegroundWindow(hwnd);
+                    }
                     if attached {
                         let _ = AttachThreadInput(cur_tid, tid, false);
                     }
                 }
                 let _ = ReleaseCapture();
-                let _ = SetForegroundWindow(hwnd);
+                if should_promote_fg {
+                    let _ = SetForegroundWindow(hwnd);
+                }
 
                 // Inform root and WebView2 child HWNDs cleanly to cancel internal pointer capture
                 let _ = PostMessageW(hwnd, WM_CANCELMODE, WPARAM(0), LPARAM(0));

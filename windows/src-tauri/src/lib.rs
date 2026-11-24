@@ -142,7 +142,7 @@ pub fn run() {
                     let response = protocol::handle_xhs_proxy_request(&data_dir, &request).await;
                     responder.respond(response);
                 });
-            } else {
+            } else if request.method() == "OPTIONS" {
                 let state = app.state::<AppState>();
                 let response = protocol::handle_media_request(
                     &state.engine,
@@ -150,6 +150,17 @@ pub fn run() {
                     &request,
                 );
                 responder.respond(response);
+            } else {
+                // Offload all disk I/O, range reads, and SQLite lookups off the Win32 WebView2 UI
+                // thread so opening the Drop Shelf or fast-scrolling never stalls message pumping.
+                let state = app.state::<AppState>();
+                let engine = Arc::clone(&state.engine);
+                let capture_frames = Arc::clone(&state.capture_frames);
+                tauri::async_runtime::spawn_blocking(move || {
+                    let response =
+                        protocol::handle_media_request(&engine, Some(&capture_frames), &request);
+                    responder.respond(response);
+                });
             }
         })
         .setup(|app| {

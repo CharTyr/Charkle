@@ -112,7 +112,7 @@ function fallbackWaveformPeaks(seedStr: string): number[] {
  * - Pointer-Event drag to Sidebar/Moodboards + Win32 OLE outbound drag
  * - Full macOS right-click context menu with Color HEX copy & irreversible delete confirmation
  */
-export const AssetCard: React.FC<AssetCardProps> = ({
+export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   asset,
   selected,
   spotlighted = false,
@@ -141,7 +141,6 @@ export const AssetCard: React.FC<AssetCardProps> = ({
   const [permDeleteIds, setPermDeleteIds] = useState<string[] | null>(null);
 
   const destination = useCoordinatorStore((s) => s.destination);
-  const selectedAssetIds = useCoordinatorStore((s) => s.selectedAssetIds);
   const selectAsset = useCoordinatorStore((s) => s.selectAsset);
   const setSelection = useCoordinatorStore((s) => s.setSelection);
   const clearSelection = useCoordinatorStore((s) => s.clearSelection);
@@ -157,9 +156,9 @@ export const AssetCard: React.FC<AssetCardProps> = ({
   const boards = useMoodboardStore((s) => s.boards);
   const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
 
-  const pointerDrag = useDndStore((s) => s.pointerDrag);
-  const isBeingDragged =
-    pointerDrag?.kind === 'assets' && pointerDrag.assetIds.includes(asset.id);
+  const isBeingDragged = useDndStore(
+    (s) => s.pointerDrag?.kind === 'assets' && s.pointerDrag.assetIds.includes(asset.id),
+  );
 
   useEffect(() => {
     setImgFailed(false);
@@ -219,9 +218,11 @@ export const AssetCard: React.FC<AssetCardProps> = ({
     ? transport.originalUrl(asset.id, { cachedOnly: true })
     : null;
 
-  const targetIds =
-    selected && selectedAssetIds.length > 1 ? selectedAssetIds : [asset.id];
-  const menuTargetIds = menuState?.targetIds ?? targetIds;
+  const resolveTargetIds = () => {
+    const latestSel = useCoordinatorStore.getState().selectedAssetIds;
+    return selected && latestSel.length > 1 ? latestSel : [asset.id];
+  };
+  const menuTargetIds = menuState?.targetIds ?? [asset.id];
   const menuCountSuffix = menuTargetIds.length > 1 ? ` (${menuTargetIds.length} 项)` : '';
 
   const pruneSelectionIds = (removedIds: readonly string[]) => {
@@ -468,7 +469,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
           if ((e.target as HTMLElement).closest('button')) return;
           beginPointerDrag(e, {
             kind: 'assets',
-            assetIds: targetIds,
+            assetIds: resolveTargetIds(),
             previewAssetId: asset.id,
             title: asset.title,
           });
@@ -1285,4 +1286,5 @@ export const AssetCard: React.FC<AssetCardProps> = ({
       </ModalShell>
     </>
   );
-};
+});
+AssetCard.displayName = 'AssetCard';

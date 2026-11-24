@@ -159,7 +159,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
     return () => {
       cancelled = true;
     };
-  }, [primaryAsset]);
+  }, [primaryAsset?.id, primaryAsset?.updatedAt, folders.length]);
 
   if (!primaryAsset) return null;
 
@@ -182,7 +182,11 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
     if (triageRunning) return;
     setTriageRunning(true);
     try {
-      const recs = await transport.runInboxSmartTriage();
+      const selectedInInbox = selectedAssetIds.filter((id) => assets.some((a) => a.id === id));
+      const recs = await transport.runInboxSmartTriage(
+        selectedInInbox.length > 0 ? selectedInInbox : undefined,
+        24,
+      );
       setTriageRecs(recs);
       setSelectedTriageIds(
         new Set(
@@ -200,6 +204,39 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
     } finally {
       setTriageRunning(false);
     }
+  };
+
+  const handleOverrideTriageFolder = (assetID: string, folderID: string) => {
+    const nextFolder = folderID ? folders.find((f) => f.id === folderID) ?? null : null;
+    setTriageRecs((prev) =>
+      prev.map((rec) => {
+        if (rec.assetID !== assetID) return rec;
+        if (!nextFolder) {
+          return {
+            ...rec,
+            recommendedFolderID: null,
+            recommendedFolderName: null,
+            confidence: 0,
+            fitProbability: 0,
+            reason: '已手动设为暂留收件箱',
+          };
+        }
+        return {
+          ...rec,
+          recommendedFolderID: nextFolder.id,
+          recommendedFolderName: nextFolder.name,
+          confidence: 1,
+          fitProbability: 1,
+          reason: `已手动指定归档至「${folderDisplayPath(nextFolder.id)}」`,
+        };
+      }),
+    );
+    setSelectedTriageIds((prev) => {
+      const next = new Set(prev);
+      if (nextFolder) next.add(assetID);
+      else next.delete(assetID);
+      return next;
+    });
   };
 
   const actionableRecs = triageRecs.filter((r) => Boolean(r.recommendedFolderID));
@@ -494,26 +531,35 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                     </div>
                   </div>
 
-                  {rec.recommendedFolderName ? (
-                    <span
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <select
+                      aria-label={`为「${rec.assetTitle}」选择目标目录`}
+                      value={rec.recommendedFolderID ?? ''}
+                      onChange={(e) => handleOverrideTriageFolder(rec.assetID, e.target.value)}
                       className={[
-                        'inline-flex items-center gap-1 px-2 py-1 rounded-[var(--win-radius-control)] text-[11.5px] font-medium shrink-0 charkle-tabular',
-                        rec.confidence >= 0.65
-                          ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                          : 'bg-[var(--bg-elevated)] text-[var(--text-primary)]',
+                        'h-7 max-w-[160px] rounded-[var(--win-radius-control)] border px-2 text-[11.5px] font-medium outline-none cursor-pointer transition-colors',
+                        rec.recommendedFolderID && rec.confidence >= 0.65
+                          ? 'border-[var(--accent)]/30 bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : rec.recommendedFolderID
+                            ? 'border-[var(--win-stroke-control)] bg-[var(--bg-elevated)] text-[var(--text-primary)]'
+                            : 'border-[var(--win-stroke-control)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]',
                       ].join(' ')}
                     >
-                      <Folder16Regular className="w-3 h-3" />
-                      <span>{rec.recommendedFolderName}</span>
-                      <span className="text-[10.5px] opacity-75">
+                      <option value="">留在收件箱</option>
+                      {flatFolders.map((node) => (
+                        <option key={node.folder.id} value={node.folder.id}>
+                          {node.depth > 0
+                            ? `${'\u00A0\u00A0'.repeat(node.depth)}↳ ${node.folder.name}`
+                            : node.folder.name}
+                        </option>
+                      ))}
+                    </select>
+                    {rec.recommendedFolderID && rec.confidence > 0 && rec.confidence < 1 && (
+                      <span className="text-[10.5px] text-[var(--text-tertiary)] charkle-tabular w-[30px] text-right">
                         {Math.round(rec.confidence * 100)}%
                       </span>
-                    </span>
-                  ) : (
-                    <span className="px-2 py-1 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[11.5px] text-[var(--text-secondary)] shrink-0">
-                      留在收件箱
-                    </span>
-                  )}
+                    )}
+                  </div>
                 </div>
               );
             })}

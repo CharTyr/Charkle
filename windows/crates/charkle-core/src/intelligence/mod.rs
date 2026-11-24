@@ -26,4 +26,7 @@ pub use typesafe::{
 pub use usage_tracker::{
     CloudAIUsageBucket, CloudAIUsageCategory, CloudAIUsageStore, CloudAIUsageSummary,
 };
-pub use visual_grounding::{offline_saliency_box, TypeSafeImagePreparer, VisualGroundingEngine};
+pub use visual_grounding::{
+    offline_saliency_box, FolderClassificationResult, FolderOptionInput, TypeSafeImagePreparer,
+    VisualGroundingEngine,
+};

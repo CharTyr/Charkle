@@ -466,6 +466,9 @@ pub fn configure_shelf_window_for_edge(
     let hwnd = HWND(hwnd_raw as *mut _);
     // SAFETY: Configuring Win32 popup styles & disabling Win11 DWM border on our own shelf HWND.
     unsafe {
+        if hwnd_raw == 0 || !windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() {
+            return Err("Shelf HWND is invalid or already destroyed".to_string());
+        }
         // 1. Strip any frame/caption/thickframe/border styles into a pure WS_POPUP window.
         let cur_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         let strip_style = (WS_CAPTION.0
@@ -552,12 +555,18 @@ pub fn configure_shelf_window(hwnd_raw: isize) -> Result<ShelfWindowPlacement, S
 pub fn show_shelf_no_activate(hwnd_raw: isize) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-        SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+        IsWindow, SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
     };
+    if hwnd_raw == 0 {
+        return;
+    }
     let hwnd = HWND(hwnd_raw as *mut _);
     // SAFETY: Showing & raising our owned topmost shelf window without stealing foreground focus.
     unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return;
+        }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(
             hwnd,
@@ -578,13 +587,16 @@ pub fn show_shelf_no_activate(_hwnd_raw: isize) {}
 #[cfg(target_os = "windows")]
 pub fn hide_shelf_native(hwnd_raw: isize) {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, ShowWindow, SW_HIDE};
     if hwnd_raw == 0 {
         return;
     }
     let hwnd = HWND(hwnd_raw as *mut _);
     // SAFETY: Hiding our owned shelf window.
     unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return;
+        }
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }
@@ -699,6 +711,9 @@ pub fn reposition_shelf_to_cursor_monitor_for_edge(
     let hwnd = HWND(hwnd_raw as *mut _);
     // SAFETY: Moves shelf window without activating it (no SWP_FRAMECHANGED storm).
     unsafe {
+        if hwnd_raw == 0 || !windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() {
+            return Err("Shelf HWND is invalid or already destroyed".to_string());
+        }
         let _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -918,6 +933,7 @@ where
             let mut hover_since: Option<Instant> = None;
             let mut outside_since: Option<Instant> = None;
             let mut stale_drag_since: Option<Instant> = None;
+            let mut open_cooldown_until: Option<Instant> = None;
 
             while !stop_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(35));
@@ -982,9 +998,12 @@ where
                         }
                     };
                     if lbutton_down && in_drag_strip {
-                        if !drag_triggered {
+                        if !drag_triggered
+                            && open_cooldown_until.is_none_or(|t| Instant::now() >= t)
+                        {
                             drag_triggered = true;
                             hover_since = None;
+                            open_cooldown_until = Some(Instant::now() + Duration::from_millis(450));
                             on_open();
                         }
                         continue;
@@ -1012,10 +1031,13 @@ where
                                     && (pt.y - work_center_y).abs() <= 140
                             }
                         };
-                        if in_hover_strip {
+                        if in_hover_strip && open_cooldown_until.is_none_or(|t| Instant::now() >= t)
+                        {
                             let started = hover_since.get_or_insert_with(Instant::now);
                             if started.elapsed() >= Duration::from_millis(180) {
                                 hover_since = None;
+                                open_cooldown_until =
+                                    Some(Instant::now() + Duration::from_millis(500));
                                 on_open();
                             }
                         } else {
@@ -1209,12 +1231,13 @@ mod drop_target {
         RevokeDragDrop, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
     use windows::Win32::UI::Shell::{
         DragQueryFileW, IShellItemArray, SHCreateShellItemArrayFromDataObject, HDROP,
         SIGDN_FILESYSPATH,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, GetClassNameW, GetPropW, IsWindow,
+        EnumChildWindows, GetClassNameW, GetPropW, GetWindowThreadProcessId, IsWindow,
     };
 
     static SHELF_DROP_CALLBACKS: OnceLock<Mutex<HashMap<isize, ShelfDropCallback>>> =
@@ -1243,6 +1266,13 @@ mod drop_target {
         fn drop(&mut self) {
             REFRESH_IN_PROGRESS.with(|flag| flag.set(false));
         }
+    }
+
+    fn is_own_thread_hwnd(hwnd: HWND, cur_pid: u32, cur_tid: u32) -> bool {
+        let mut pid = 0u32;
+        // SAFETY: Read-only Win32 thread/process ownership query.
+        let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        pid == cur_pid && tid == cur_tid
     }
 
     struct StgMediumGuard(STGMEDIUM);
@@ -1434,21 +1464,23 @@ mod drop_target {
             _pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
         ) -> windows::core::Result<()> {
-            self.enter_is_valid.set(false);
-            self.cursor_effect.set(DROPEFFECT_NONE);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.enter_is_valid.set(false);
+                self.cursor_effect.set(DROPEFFECT_NONE);
 
-            if let Some(payload) = extract_shelf_drop_payload(pdataobj) {
-                let count = payload.item_count();
-                self.enter_is_valid.set(true);
-                self.cursor_effect.set(DROPEFFECT_COPY);
-                if !pdweffect.is_null() {
-                    // SAFETY: Out-pointer validated non-null per COM `IDropTarget::DragEnter`.
-                    unsafe { *pdweffect = DROPEFFECT_COPY };
+                if let Some(payload) = extract_shelf_drop_payload(pdataobj) {
+                    let count = payload.item_count();
+                    self.enter_is_valid.set(true);
+                    self.cursor_effect.set(DROPEFFECT_COPY);
+                    if !pdweffect.is_null() {
+                        // SAFETY: Out-pointer validated non-null per COM `IDropTarget::DragEnter`.
+                        unsafe { *pdweffect = DROPEFFECT_COPY };
+                    }
+                    (self.callback)(ShelfDropEvent::Enter { count });
+                } else if !pdweffect.is_null() {
+                    unsafe { *pdweffect = DROPEFFECT_NONE };
                 }
-                (self.callback)(ShelfDropEvent::Enter { count });
-            } else if !pdweffect.is_null() {
-                unsafe { *pdweffect = DROPEFFECT_NONE };
-            }
+            }));
             Ok(())
         }
 
@@ -1458,23 +1490,27 @@ mod drop_target {
             _pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
         ) -> windows::core::Result<()> {
-            if self.enter_is_valid.get() {
-                if !pdweffect.is_null() {
-                    unsafe { *pdweffect = self.cursor_effect.get() };
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if self.enter_is_valid.get() {
+                    if !pdweffect.is_null() {
+                        unsafe { *pdweffect = self.cursor_effect.get() };
+                    }
+                    (self.callback)(ShelfDropEvent::Over);
+                } else if !pdweffect.is_null() {
+                    unsafe { *pdweffect = DROPEFFECT_NONE };
                 }
-                (self.callback)(ShelfDropEvent::Over);
-            } else if !pdweffect.is_null() {
-                unsafe { *pdweffect = DROPEFFECT_NONE };
-            }
+            }));
             Ok(())
         }
 
         fn DragLeave(&self) -> windows::core::Result<()> {
-            let was_valid = self.enter_is_valid.replace(false);
-            self.cursor_effect.set(DROPEFFECT_NONE);
-            if was_valid {
-                (self.callback)(ShelfDropEvent::Leave);
-            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let was_valid = self.enter_is_valid.replace(false);
+                self.cursor_effect.set(DROPEFFECT_NONE);
+                if was_valid {
+                    (self.callback)(ShelfDropEvent::Leave);
+                }
+            }));
             Ok(())
         }
 
@@ -1485,20 +1521,22 @@ mod drop_target {
             _pt: &POINTL,
             pdweffect: *mut DROPEFFECT,
         ) -> windows::core::Result<()> {
-            self.enter_is_valid.set(false);
-            self.cursor_effect.set(DROPEFFECT_NONE);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.enter_is_valid.set(false);
+                self.cursor_effect.set(DROPEFFECT_NONE);
 
-            if let Some(payload) = extract_shelf_drop_payload(pdataobj) {
-                if !pdweffect.is_null() {
-                    unsafe { *pdweffect = DROPEFFECT_COPY };
+                if let Some(payload) = extract_shelf_drop_payload(pdataobj) {
+                    if !pdweffect.is_null() {
+                        unsafe { *pdweffect = DROPEFFECT_COPY };
+                    }
+                    (self.callback)(ShelfDropEvent::Drop(payload));
+                } else {
+                    if !pdweffect.is_null() {
+                        unsafe { *pdweffect = DROPEFFECT_NONE };
+                    }
+                    (self.callback)(ShelfDropEvent::Leave);
                 }
-                (self.callback)(ShelfDropEvent::Drop(payload));
-            } else {
-                if !pdweffect.is_null() {
-                    unsafe { *pdweffect = DROPEFFECT_NONE };
-                }
-                (self.callback)(ShelfDropEvent::Leave);
-            }
+            }));
             Ok(())
         }
     }
@@ -1540,16 +1578,23 @@ mod drop_target {
 
         ensure_sta_ole_initialized();
 
+        let cur_pid = unsafe { GetCurrentProcessId() };
+        let cur_tid = unsafe { GetCurrentThreadId() };
         let root_hwnd = HWND(shelf_hwnd_raw as *mut _);
-        if !unsafe { IsWindow(root_hwnd) }.as_bool() {
+        if !unsafe { IsWindow(root_hwnd) }.as_bool()
+            || !is_own_thread_hwnd(root_hwnd, cur_pid, cur_tid)
+        {
             return 0;
         }
 
-        // Collect the shelf root HWND plus ALL descendant HWNDs (including WebView2's
-        // `Chrome_WidgetWin_0`, `Chrome_WidgetWin_1`, and `Chrome_RenderWidgetHostHWND`)
-        // mirroring `wry`'s `DragDropController`. WebView2's child render HWND covers 100%
-        // of the shelf surface and intercepts OLE `WindowFromPoint`, so skipping it causes
-        // WebView2's disabled `AllowExternalDrop(false)` target to reject every drop!
+        // Collect the shelf root HWND plus descendants, then STRICTLY filter to HWNDs owned by
+        // our own process & STA UI thread (`root_hwnd`, `WRY_WEBVIEW`, `Chrome_WidgetWin_0`).
+        // NEVER call `RevokeDragDrop` / `RegisterDragDrop` on cross-process `msedgewebview2.exe`
+        // HWNDs (`Chrome_RenderWidgetHostHWND` / `Intermediate D3D Window` / `Chrome_WidgetWin_1`):
+        // Win32 OLE requires same-thread ownership, and cross-process revocation corrupts WebView2
+        // input/COM state and causes crashes when opening the shelf. Because `wry` sets
+        // `SetAllowExternalDrop(false)` on WebView2, OLE bubbles drops cleanly up to our
+        // own-thread `Chrome_WidgetWin_0` / `root_hwnd` target.
         let mut all_hwnds: Vec<HWND> = vec![root_hwnd];
         unsafe extern "system" fn collect_child(child: HWND, lparam: LPARAM) -> BOOL {
             let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
@@ -1565,7 +1610,9 @@ mod drop_target {
         }
         let valid_hwnds: Vec<HWND> = all_hwnds
             .into_iter()
-            .filter(|&h| unsafe { IsWindow(h) }.as_bool())
+            .filter(|&h| {
+                unsafe { IsWindow(h) }.as_bool() && is_own_thread_hwnd(h, cur_pid, cur_tid)
+            })
             .collect();
 
         // Snapshot tracked HWND -> installed `OleDropTargetInterface` pointer under a SHORT
@@ -1653,9 +1700,11 @@ mod drop_target {
                 .and_then(|mut root_map| root_map.remove(&shelf_hwnd_raw))
         });
         if let Some(targets) = drained {
+            let cur_pid = unsafe { GetCurrentProcessId() };
+            let cur_tid = unsafe { GetCurrentThreadId() };
             for (h_raw, _entry) in targets {
                 let h = HWND(h_raw as *mut _);
-                if unsafe { IsWindow(h) }.as_bool() {
+                if unsafe { IsWindow(h) }.as_bool() && is_own_thread_hwnd(h, cur_pid, cur_tid) {
                     let _ = unsafe { RevokeDragDrop(h) };
                 }
             }
@@ -1919,5 +1968,63 @@ mod tests {
         assert!(should_reinstall_drop_target(Some(0xABCD), 0));
         // Recorded zero prop -> must reinstall
         assert!(should_reinstall_drop_target(Some(0), 0));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn install_and_refresh_drop_target_on_real_own_thread_hwnd_is_idempotent() {
+        use windows::core::w;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetPropW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+        };
+
+        let hinst = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("CharkleShelfDropTest"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                hinst,
+                None,
+            )
+        }
+        .expect("create message window");
+        let raw = hwnd.0 as isize;
+
+        let installed = install_shelf_drop_target(raw, Arc::new(|_| {}));
+        assert_eq!(
+            installed, 1,
+            "first install must register our own-thread HWND"
+        );
+
+        let prop_after =
+            unsafe { GetPropW(HWND(raw as *mut _), w!("OleDropTargetInterface")) }.0 as usize;
+        assert_ne!(
+            prop_after, 0,
+            "OLE RegisterDragDrop must set non-zero OleDropTargetInterface property"
+        );
+
+        // Second refresh must be a zero-churn no-op
+        let second = refresh_shelf_drop_targets(raw);
+        assert_eq!(second, 0, "idempotent refresh must not revoke/re-register");
+
+        cleanup_shelf_drop_targets(raw);
+        let prop_cleaned =
+            unsafe { GetPropW(HWND(raw as *mut _), w!("OleDropTargetInterface")) }.0 as usize;
+        assert_eq!(
+            prop_cleaned, 0,
+            "cleanup must cleanly revoke OleDropTargetInterface"
+        );
+
+        let _ = unsafe { DestroyWindow(hwnd) };
     }
 }

@@ -646,189 +646,203 @@ mod win32_impl {
         uid_subclass: usize,
         _ref_data: usize,
     ) -> LRESULT {
-        let hwnd_key = hwnd.0 as isize;
-        match msg {
-            WM_STYLECHANGING if wparam.0 as i32 == GWL_STYLE.0 => {
-                // Prevent the windowing layer from re-adding WS_SYSMENU on maximize/restore
-                // or window state diffs.
-                let ss = lparam.0 as *mut STYLESTRUCT;
-                if !ss.is_null() {
-                    (*ss).styleNew = strip_native_caption_menu_style((*ss).styleNew);
-                }
-            }
-            WM_NCCALCSIZE => {
-                // When maximized, forward to `tao`'s WM_NCCALCSIZE so monitor_info.rcWork and
-                // auto-hide taskbar clamping run unchanged (zero edge overhang).
-                // When restored/normal, return 0 directly so client_rect == window_rect on ALL 4
-                // sides — eliminating `tao`'s ~7px left/right/bottom non-client margin that DWM
-                // paints solid light-gray when the window loses focus, while preserving Win11
-                // rounded corners, subtle 1px theme border, DWM drop shadow, and live Mica Alt!
-                if !IsZoomed(hwnd).as_bool() {
-                    return LRESULT(0);
-                }
-            }
-            WM_ERASEBKGND => {
-                // Keep the parent HWND's GDI backing surface pure transparent black (`0x00000000`)
-                // whenever DWM extended glass (`Mica Alt`) is active so legacy GDI pixels never bleed.
-                if is_glass_surface_active(hwnd_key) {
-                    let hdc = HDC(wparam.0 as *mut c_void);
-                    if !hdc.is_invalid() {
-                        let mut rc = RECT::default();
-                        if GetClientRect(hwnd, &mut rc).is_ok() {
-                            let black_brush = HBRUSH(GetStockObject(BLACK_BRUSH).0);
-                            let _ = FillRect(hdc, &rc, black_brush);
+        let handled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<LRESULT> {
+                let hwnd_key = hwnd.0 as isize;
+                match msg {
+                    WM_STYLECHANGING if wparam.0 as i32 == GWL_STYLE.0 => {
+                        // Prevent the windowing layer from re-adding WS_SYSMENU on maximize/restore
+                        // or window state diffs.
+                        let ss = lparam.0 as *mut STYLESTRUCT;
+                        if !ss.is_null() {
+                            (*ss).styleNew = strip_native_caption_menu_style((*ss).styleNew);
                         }
                     }
-                    return LRESULT(1);
-                }
-            }
-            WM_NCACTIVATE => {
-                // Forward lParam = -1 so the windowing layer preserves exact active/focus state
-                // (inspecting wParam) while DefWindowProcW skips all non-client caption redraws,
-                // then immediately clear any stray GDI redirection pixels back to glass alpha 0.
-                let res =
-                    DefSubclassProc(hwnd, msg, wparam, LPARAM(nc_activate_no_repaint_lparam()));
-                clear_window_glass_surface(hwnd);
-                return res;
-            }
-            m if should_suppress_nc_paint_message(m) => {
-                // Suppress legacy GDI WM_NCPAINT and uxtheme WM_NCUAHDRAWCAPTION (0x00AE) /
-                // WM_NCUAHDRAWFRAME (0x00AF) painting over the frameless Mica Alt surface.
-                clear_window_glass_surface(hwnd);
-                return LRESULT(0);
-            }
-            WM_SIZE | WM_WINDOWPOSCHANGED => {
-                // Wipe any synchronous uxtheme non-client redraws produced during maximize <->
-                // restored transitions or resize frame adjustments before DWM composites.
-                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                clear_window_glass_surface(hwnd);
-                return res;
-            }
-            WM_SETTEXT | WM_SETICON => {
-                // Suppress DefWindowProcW's non-client caption redraw on title/icon updates while
-                // visible (temporarily strip WS_VISIBLE without SWP_FRAMECHANGED, forward to
-                // DefSubclassProc, then restore WS_VISIBLE).
-                let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-                if (style & WS_VISIBLE.0) != 0 {
-                    let _ = SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_VISIBLE.0) as i32);
-                    let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                    let after = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-                    let _ = SetWindowLongW(hwnd, GWL_STYLE, (after | WS_VISIBLE.0) as i32);
-                    clear_window_glass_surface(hwnd);
-                    return res;
-                }
-            }
-            WM_SYSKEYDOWN if wparam.0 == usize::from(VK_F4.0) && (lparam.0 & (1 << 29)) != 0 => {
-                // Keep Alt+F4 working cleanly without WS_SYSMENU; WM_CLOSE routes through
-                // Tauri's CloseRequested handler (including Minimal Background Shelf Mode).
-                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-                return LRESULT(0);
-            }
-            WM_SYSCOMMAND if (wparam.0 & 0xFFF0) == SC_CLOSE as usize => {
-                // Keep Taskbar Close working cleanly without WS_SYSMENU.
-                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-                return LRESULT(0);
-            }
-            WM_SYSCOMMAND => {
-                // SC_RESTORE / SC_MAXIMIZE / SC_MINIMIZE can invoke DefWindowProcW's internal
-                // DrawFrame path; clear the GDI glass backing surface right after completion.
-                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                clear_window_glass_surface(hwnd);
-                return res;
-            }
-            WM_NCHITTEST => {
-                // Extract signed 16-bit screen coordinates (supports multi-monitor negative X/Y)
-                let x = (lparam.0 as i32 & 0xFFFF) as i16 as i32;
-                let y = ((lparam.0 as i32 >> 16) & 0xFFFF) as i16 as i32;
-                let mut pt = POINT { x, y };
-                if ScreenToClient(hwnd, &mut pt).as_bool() {
-                    let zoomed = IsZoomed(hwnd).as_bool();
-                    let dpi = {
-                        let d = GetDpiForWindow(hwnd);
-                        if d == 0 {
-                            96
-                        } else {
-                            d
-                        }
-                    };
-                    let side_border = ((6.0 * dpi as f64) / 96.0).round().max(5.0) as i32;
-                    let top_border = ((4.0 * dpi as f64) / 96.0).round().max(4.0) as i32;
-
-                    let maybe_rect = max_button_rects()
-                        .lock()
-                        .ok()
-                        .and_then(|map| map.get(&hwnd_key).copied());
-                    if let Some(rect) = maybe_rect {
-                        let allow_max_hit = zoomed || pt.y >= top_border;
-                        if allow_max_hit && rect.contains(pt.x, pt.y) {
-                            return LRESULT(HTMAXBUTTON as isize);
+                    WM_NCCALCSIZE => {
+                        // When maximized, forward to `tao`'s WM_NCCALCSIZE so monitor_info.rcWork and
+                        // auto-hide taskbar clamping run unchanged (zero edge overhang).
+                        // When restored/normal, return 0 directly so client_rect == window_rect on ALL 4
+                        // sides — eliminating `tao`'s ~7px left/right/bottom non-client margin that DWM
+                        // paints solid light-gray when the window loses focus, while preserving Win11
+                        // rounded corners, subtle 1px theme border, DWM drop shadow, and live Mica Alt!
+                        if !IsZoomed(hwnd).as_bool() {
+                            return Some(LRESULT(0));
                         }
                     }
+                    WM_ERASEBKGND => {
+                        // Keep the parent HWND's GDI backing surface pure transparent black (`0x00000000`)
+                        // whenever DWM extended glass (`Mica Alt`) is active so legacy GDI pixels never bleed.
+                        if is_glass_surface_active(hwnd_key) {
+                            let hdc = HDC(wparam.0 as *mut c_void);
+                            if !hdc.is_invalid() {
+                                let mut rc = RECT::default();
+                                if GetClientRect(hwnd, &mut rc).is_ok() {
+                                    let black_brush = HBRUSH(GetStockObject(BLACK_BRUSH).0);
+                                    let _ = FillRect(hdc, &rc, black_brush);
+                                }
+                            }
+                            return Some(LRESULT(1));
+                        }
+                    }
+                    WM_NCACTIVATE => {
+                        // Forward lParam = -1 so the windowing layer preserves exact active/focus state
+                        // (inspecting wParam) while DefWindowProcW skips all non-client caption redraws,
+                        // then immediately clear any stray GDI redirection pixels back to glass alpha 0.
+                        let res = DefSubclassProc(
+                            hwnd,
+                            msg,
+                            wparam,
+                            LPARAM(nc_activate_no_repaint_lparam()),
+                        );
+                        clear_window_glass_surface(hwnd);
+                        return Some(res);
+                    }
+                    m if should_suppress_nc_paint_message(m) => {
+                        // Suppress legacy GDI WM_NCPAINT and uxtheme WM_NCUAHDRAWCAPTION (0x00AE) /
+                        // WM_NCUAHDRAWFRAME (0x00AF) painting over the frameless Mica Alt surface.
+                        clear_window_glass_surface(hwnd);
+                        return Some(LRESULT(0));
+                    }
+                    WM_SIZE | WM_WINDOWPOSCHANGED => {
+                        // Wipe any synchronous uxtheme non-client redraws produced during maximize <->
+                        // restored transitions or resize frame adjustments before DWM composites.
+                        let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                        clear_window_glass_surface(hwnd);
+                        return Some(res);
+                    }
+                    WM_SETTEXT | WM_SETICON => {
+                        // Suppress DefWindowProcW's non-client caption redraw on title/icon updates while
+                        // visible (temporarily strip WS_VISIBLE without SWP_FRAMECHANGED, forward to
+                        // DefSubclassProc, then restore WS_VISIBLE).
+                        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                        if (style & WS_VISIBLE.0) != 0 {
+                            let _ = SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_VISIBLE.0) as i32);
+                            let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                            let after = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                            let _ = SetWindowLongW(hwnd, GWL_STYLE, (after | WS_VISIBLE.0) as i32);
+                            clear_window_glass_surface(hwnd);
+                            return Some(res);
+                        }
+                    }
+                    WM_SYSKEYDOWN
+                        if wparam.0 == usize::from(VK_F4.0) && (lparam.0 & (1 << 29)) != 0 =>
+                    {
+                        // Keep Alt+F4 working cleanly without WS_SYSMENU; WM_CLOSE routes through
+                        // Tauri's CloseRequested handler (including Minimal Background Shelf Mode).
+                        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                        return Some(LRESULT(0));
+                    }
+                    WM_SYSCOMMAND if (wparam.0 & 0xFFF0) == SC_CLOSE as usize => {
+                        // Keep Taskbar Close working cleanly without WS_SYSMENU.
+                        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                        return Some(LRESULT(0));
+                    }
+                    WM_SYSCOMMAND => {
+                        // SC_RESTORE / SC_MAXIMIZE / SC_MINIMIZE can invoke DefWindowProcW's internal
+                        // DrawFrame path; clear the GDI glass backing surface right after completion.
+                        let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                        clear_window_glass_surface(hwnd);
+                        return Some(res);
+                    }
+                    WM_NCHITTEST => {
+                        // Extract signed 16-bit screen coordinates (supports multi-monitor negative X/Y)
+                        let x = (lparam.0 as i32 & 0xFFFF) as i16 as i32;
+                        let y = ((lparam.0 as i32 >> 16) & 0xFFFF) as i16 as i32;
+                        let mut pt = POINT { x, y };
+                        if ScreenToClient(hwnd, &mut pt).as_bool() {
+                            let zoomed = IsZoomed(hwnd).as_bool();
+                            let dpi = {
+                                let d = GetDpiForWindow(hwnd);
+                                if d == 0 {
+                                    96
+                                } else {
+                                    d
+                                }
+                            };
+                            let side_border = ((6.0 * dpi as f64) / 96.0).round().max(5.0) as i32;
+                            let top_border = ((4.0 * dpi as f64) / 96.0).round().max(4.0) as i32;
 
-                    if !zoomed {
-                        let mut rc = RECT::default();
-                        if GetClientRect(hwnd, &mut rc).is_ok() {
-                            let width = rc.right - rc.left;
-                            let height = rc.bottom - rc.top;
-                            if let Some(hit) = resolve_borderless_resize_hittest(
-                                pt.x,
-                                pt.y,
-                                width,
-                                height,
-                                side_border,
-                                top_border,
-                            ) {
-                                return LRESULT(hit);
+                            let maybe_rect = max_button_rects()
+                                .lock()
+                                .ok()
+                                .and_then(|map| map.get(&hwnd_key).copied());
+                            if let Some(rect) = maybe_rect {
+                                let allow_max_hit = zoomed || pt.y >= top_border;
+                                if allow_max_hit && rect.contains(pt.x, pt.y) {
+                                    return Some(LRESULT(HTMAXBUTTON as isize));
+                                }
+                            }
+
+                            if !zoomed {
+                                let mut rc = RECT::default();
+                                if GetClientRect(hwnd, &mut rc).is_ok() {
+                                    let width = rc.right - rc.left;
+                                    let height = rc.bottom - rc.top;
+                                    if let Some(hit) = resolve_borderless_resize_hittest(
+                                        pt.x,
+                                        pt.y,
+                                        width,
+                                        height,
+                                        side_border,
+                                        top_border,
+                                    ) {
+                                        return Some(LRESULT(hit));
+                                    }
+                                }
                             }
                         }
                     }
+                    WM_NCLBUTTONDOWN if wparam.0 == HTMAXBUTTON as usize => {
+                        // Consume down event so Windows doesn't trigger legacy non-client drag/flicker
+                        return Some(LRESULT(0));
+                    }
+                    WM_NCLBUTTONUP if wparam.0 == HTMAXBUTTON as usize => {
+                        let cmd = if IsZoomed(hwnd).as_bool() {
+                            SW_RESTORE
+                        } else {
+                            SW_MAXIMIZE
+                        };
+                        let _ = ShowWindow(hwnd, cmd);
+                        return Some(LRESULT(0));
+                    }
+                    m if should_refresh_surface_on_message(m) => {
+                        // Let the windowing layer process the OS notification first, then re-sync DWM
+                        // Mica Alt + immersive dark mode and broadcast the fresh surface state (theme,
+                        // transparency, animation, and system accent color) to registered listeners.
+                        let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                        let is_dark = window_dark_modes()
+                            .lock()
+                            .ok()
+                            .and_then(|map| map.get(&hwnd_key).copied())
+                            .unwrap_or(false);
+                        let mut surface = apply_window_chrome(hwnd_key, is_dark);
+                        if m == WM_DWMCOLORIZATIONCOLORCHANGED_MSG
+                            && surface.system_accent_hex.is_none()
+                            && wparam.0 != 0
+                        {
+                            surface.system_accent_hex =
+                                Some(parse_dwm_argb_to_hex(wparam.0 as u32));
+                        }
+                        notify_surface_change_callback(hwnd_key, surface);
+                        return Some(res);
+                    }
+                    WM_NCDESTROY => {
+                        update_maximize_button_rect(hwnd_key, None);
+                        unregister_surface_change_callback(hwnd_key);
+                        if let Ok(mut modes) = window_dark_modes().lock() {
+                            modes.remove(&hwnd_key);
+                        }
+                        if let Ok(mut glass_map) = window_glass_surfaces().lock() {
+                            glass_map.remove(&hwnd_key);
+                        }
+                        let _ = RemoveWindowSubclass(hwnd, Some(snap_subclass_proc), uid_subclass);
+                    }
+                    _ => {}
                 }
-            }
-            WM_NCLBUTTONDOWN if wparam.0 == HTMAXBUTTON as usize => {
-                // Consume down event so Windows doesn't trigger legacy non-client drag/flicker
-                return LRESULT(0);
-            }
-            WM_NCLBUTTONUP if wparam.0 == HTMAXBUTTON as usize => {
-                let cmd = if IsZoomed(hwnd).as_bool() {
-                    SW_RESTORE
-                } else {
-                    SW_MAXIMIZE
-                };
-                let _ = ShowWindow(hwnd, cmd);
-                return LRESULT(0);
-            }
-            m if should_refresh_surface_on_message(m) => {
-                // Let the windowing layer process the OS notification first, then re-sync DWM
-                // Mica Alt + immersive dark mode and broadcast the fresh surface state (theme,
-                // transparency, animation, and system accent color) to registered listeners.
-                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
-                let is_dark = window_dark_modes()
-                    .lock()
-                    .ok()
-                    .and_then(|map| map.get(&hwnd_key).copied())
-                    .unwrap_or(false);
-                let mut surface = apply_window_chrome(hwnd_key, is_dark);
-                if m == WM_DWMCOLORIZATIONCOLORCHANGED_MSG
-                    && surface.system_accent_hex.is_none()
-                    && wparam.0 != 0
-                {
-                    surface.system_accent_hex = Some(parse_dwm_argb_to_hex(wparam.0 as u32));
-                }
-                notify_surface_change_callback(hwnd_key, surface);
-                return res;
-            }
-            WM_NCDESTROY => {
-                update_maximize_button_rect(hwnd_key, None);
-                unregister_surface_change_callback(hwnd_key);
-                if let Ok(mut modes) = window_dark_modes().lock() {
-                    modes.remove(&hwnd_key);
-                }
-                if let Ok(mut glass_map) = window_glass_surfaces().lock() {
-                    glass_map.remove(&hwnd_key);
-                }
-                let _ = RemoveWindowSubclass(hwnd, Some(snap_subclass_proc), uid_subclass);
-            }
-            _ => {}
+                None
+            }));
+        if let Ok(Some(res)) = handled {
+            return res;
         }
         DefSubclassProc(hwnd, msg, wparam, lparam)
     }

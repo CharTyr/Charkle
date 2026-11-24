@@ -4,16 +4,17 @@
 //! Combines TypeSafe System One (`Jev`) spatial/semantic primitives (`Noul`, `Box`, `Choice`, `Score`)
 //! with deterministic offline luminance/gradient saliency fallback whenever Jev is disabled or unreachable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Arc;
 
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::error::{CoreError, CoreResult};
+use crate::intelligence::cloud_ai::CloudAIProvider;
 use crate::intelligence::typesafe::{
     TypeSafeAnswer, TypeSafeImageAttachment, TypeSafeQuestion, TypeSafeSystemOneClient,
 };
@@ -25,6 +26,26 @@ use crate::models::media::{
     TypeSafeExperimentalConfig, VisualRegionResult, VisualRegionSource,
 };
 use crate::models::moodboard::NormalizedCropRect;
+
+/// Closed-set candidate folder metadata fed into visual & cloud AI Inbox Smart Triage.
+#[derive(Debug, Clone)]
+pub struct FolderOptionInput {
+    pub id: Uuid,
+    pub name: String,
+    pub display_path: String,
+    pub sample_tags: Vec<String>,
+    pub sample_titles: Vec<String>,
+}
+
+/// Structured output of a single-asset closed-set folder classification call.
+#[derive(Debug, Clone)]
+pub struct FolderClassificationResult {
+    pub folder_id: Option<Uuid>,
+    pub confidence: f64,
+    pub fit_probability: f64,
+    pub reason: String,
+    pub source: VisualRegionSource,
+}
 
 /// Prepares any image into an upright JPEG strictly satisfying `280 <= width, height <= 1568`
 /// required by TypeSafe System One (avoiding HTTP 400 dimension rejections).
@@ -424,7 +445,332 @@ impl VisualGroundingEngine {
         }
     }
 
-    /// 5. Batch Inbox smart triage recommending folders by tag/title/keyword affinity (and Jev Choice when online).
+    /// 5. Closed-set Inbox Folder Classification via TypeSafe System One (`Choice` + companion `Noul`).
+    ///
+    /// Mirrors `VisualGroundingEngine.swift:classifyIntoFolders`: prevents hallucinated folder names
+    /// and abstains (`folder_id: None`) when `fits_any` probability is below `min_presence_probability`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn classify_into_folders(
+        &self,
+        asset_title: &str,
+        asset_tags: &[String],
+        asset_notes: &str,
+        image_jpeg: Option<&[u8]>,
+        folders: &[FolderOptionInput],
+        config: &TypeSafeExperimentalConfig,
+        api_key: &str,
+    ) -> CoreResult<FolderClassificationResult> {
+        if folders.is_empty() {
+            return Ok(FolderClassificationResult {
+                folder_id: None,
+                confidence: 0.0,
+                fit_probability: 0.0,
+                reason: "素材库暂无目标文件夹".to_string(),
+                source: VisualRegionSource::TypeSafeJev,
+            });
+        }
+        let key = api_key.trim();
+        if !config.enabled || key.is_empty() {
+            return Err(CoreError::InvalidOperation(
+                "Inbox 智能分拣需要开启 TypeSafe (Jev) 实验档并配置 API 密钥。".to_string(),
+            ));
+        }
+
+        let client = TypeSafeSystemOneClient::new(&config.base_url, key, Arc::clone(&self.usage))?;
+        let capped = &folders[..folders.len().min(32)];
+
+        let mut criteria = HashMap::new();
+        let mut by_key: HashMap<String, &FolderOptionInput> = HashMap::new();
+        for (idx, folder) in capped.iter().enumerate() {
+            let option_key = format!("f_{idx}");
+            by_key.insert(option_key.clone(), folder);
+            let tags_hint = if folder.sample_tags.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (typical themes/tags: {})",
+                    folder
+                        .sample_tags
+                        .iter()
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            criteria.insert(
+                option_key,
+                format!("Folder \"{}\"{tags_hint}", folder.display_path),
+            );
+        }
+
+        let mut state = json!({
+            "title": asset_title.chars().take(120).collect::<String>(),
+            "tags": asset_tags.iter().take(10).cloned().collect::<Vec<_>>(),
+            "notes": asset_notes.chars().take(240).collect::<String>(),
+        });
+        let mut attachments = Vec::new();
+        if let Some(jpeg) = image_jpeg.filter(|b| !b.is_empty()) {
+            let photo_ref = format!("inbox-{}", Uuid::new_v4().simple());
+            state["photo"] = json!(photo_ref);
+            attachments.push(TypeSafeImageAttachment {
+                reference_key: photo_ref,
+                part_name: "inbox_photo".to_string(),
+                format: "jpg".to_string(),
+                data: jpeg.to_vec(),
+            });
+        }
+
+        let folder_names_list = capped
+            .iter()
+            .map(|f| f.display_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let target_desc = if attachments.is_empty() {
+            "this design asset's metadata"
+        } else {
+            "`photo` and its metadata"
+        };
+
+        let mut questions = HashMap::new();
+        questions.insert(
+            "fits_any".to_string(),
+            TypeSafeQuestion::Noul {
+                instructions: format!(
+                    "Does {target_desc} clearly belong in one of these design reference folders ({folder_names_list})?"
+                ),
+                true_criteria: Some(
+                    "The visual subject, medium, or design style clearly matches at least one listed folder."
+                        .to_string(),
+                ),
+                false_criteria: Some(
+                    "None of the listed folders fit well; it should stay uncategorized in Inbox."
+                        .to_string(),
+                ),
+            },
+        );
+        questions.insert(
+            "folder".to_string(),
+            TypeSafeQuestion::Choice {
+                instructions: format!("Which folder best fits {target_desc}?"),
+                criteria,
+            },
+        );
+
+        let resp = client
+            .system_one(&config.model, state, questions, attachments)
+            .await?;
+
+        let raw_fit = match resp.answers.get("fits_any") {
+            Some(TypeSafeAnswer::Noul { noul }) if noul.is_finite() => noul.clamp(0.0, 1.0),
+            _ => 0.5,
+        };
+
+        let (chosen, effective_conf) = match resp.answers.get("folder") {
+            Some(TypeSafeAnswer::Choice {
+                choice,
+                confidence,
+                probabilities,
+            }) => {
+                let Some(&folder) = by_key.get(choice) else {
+                    return Ok(FolderClassificationResult {
+                        folder_id: None,
+                        confidence: 0.0,
+                        fit_probability: raw_fit,
+                        reason: "未能确定合适目录，建议暂留收件箱".to_string(),
+                        source: VisualRegionSource::TypeSafeJev,
+                    });
+                };
+                let top_prob = probabilities
+                    .get(choice)
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(raw_fit)
+                    .clamp(0.0, 1.0);
+                let conf = confidence
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(top_prob)
+                    .clamp(0.0, 1.0);
+                (folder, conf)
+            }
+            _ => {
+                return Ok(FolderClassificationResult {
+                    folder_id: None,
+                    confidence: 0.0,
+                    fit_probability: raw_fit,
+                    reason: "未能确定合适目录，建议暂留收件箱".to_string(),
+                    source: VisualRegionSource::TypeSafeJev,
+                });
+            }
+        };
+
+        let min_fit = if config.min_presence_probability.is_finite() {
+            config.min_presence_probability.clamp(0.35, 0.85)
+        } else {
+            0.5
+        };
+        if raw_fit < min_fit {
+            return Ok(FolderClassificationResult {
+                folder_id: None,
+                confidence: effective_conf,
+                fit_probability: raw_fit,
+                reason: format!(
+                    "匹配度偏低（{}%），建议暂留收件箱（最接近：{}）",
+                    (raw_fit * 100.0).round() as i32,
+                    chosen.name
+                ),
+                source: VisualRegionSource::TypeSafeJev,
+            });
+        }
+
+        Ok(FolderClassificationResult {
+            folder_id: Some(chosen.id),
+            confidence: effective_conf,
+            fit_probability: raw_fit,
+            reason: format!(
+                "Jev 视觉归类（匹配度 {}% · 置信度 {}%）",
+                (raw_fit * 100.0).round() as i32,
+                (effective_conf * 100.0).round() as i32
+            ),
+            source: VisualRegionSource::TypeSafeJev,
+        })
+    }
+
+    /// Closed-set Inbox Folder Classification via any configured Cloud AI provider
+    /// (Gemini, OpenAI Compatible, Anthropic Messages, or ChatGPT Subscription).
+    ///
+    /// Inspects the prepared thumbnail JPEG (when `send_thumbnails_to_cloud` is enabled on the provider)
+    /// alongside asset metadata and existing folder examples, and abstains honestly when no folder fits.
+    pub async fn classify_into_folders_cloud_ai(
+        provider: &dyn CloudAIProvider,
+        asset: &AssetRecord,
+        image_jpeg: Option<&[u8]>,
+        folders: &[FolderOptionInput],
+    ) -> CoreResult<FolderClassificationResult> {
+        if folders.is_empty() {
+            return Ok(FolderClassificationResult {
+                folder_id: None,
+                confidence: 0.0,
+                fit_probability: 0.0,
+                reason: "素材库暂无目标文件夹".to_string(),
+                source: VisualRegionSource::AppleVisionSaliency,
+            });
+        }
+
+        let capped = &folders[..folders.len().min(32)];
+        let mut by_key: HashMap<String, &FolderOptionInput> = HashMap::new();
+        let mut folder_lines = Vec::with_capacity(capped.len());
+        for (idx, folder) in capped.iter().enumerate() {
+            let key = format!("f_{idx}");
+            by_key.insert(key.clone(), folder);
+            let mut details = Vec::new();
+            if !folder.sample_tags.is_empty() {
+                details.push(format!(
+                    "常见标签: {}",
+                    folder
+                        .sample_tags
+                        .iter()
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ));
+            }
+            if !folder.sample_titles.is_empty() {
+                details.push(format!(
+                    "示例素材: {}",
+                    folder
+                        .sample_titles
+                        .iter()
+                        .take(4)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ));
+            }
+            let suffix = if details.is_empty() {
+                String::new()
+            } else {
+                format!("（{}）", details.join("；"))
+            };
+            folder_lines.push(format!("- {key}: \"{}\"{suffix}", folder.display_path));
+        }
+
+        let palette_hex: Vec<String> = asset
+            .dominant_colors
+            .iter()
+            .take(4)
+            .map(|c| c.hex.to_uppercase())
+            .collect();
+        let combined_tags: Vec<String> = asset
+            .tags
+            .iter()
+            .chain(asset.suggested_tags.iter())
+            .take(12)
+            .cloned()
+            .collect();
+
+        let instructions = concat!(
+            "You are a careful visual reference librarian for Charkle. ",
+            "Decide whether the given asset clearly belongs in ONE of the listed existing folders. ",
+            "NEVER force a bad match: if none of the folders clearly fits the asset's visual subject, design medium, or theme, set fits_any to false and folder_key to null. ",
+            "Return ONLY valid JSON with exact keys: ",
+            "{\"fits_any\": boolean, \"folder_key\": \"f_0\" | null, \"confidence\": 0.0..1.0, \"reason\": \"1 concise Chinese sentence explaining why\"}."
+        );
+
+        let prompt = format!(
+            "Existing folders (closed set — choose ONLY a listed folder_key or null):\n{}\n\nAsset to classify:\n- title: {}\n- fileName: {}\n- mediaKind: {:?}\n- tags: {}\n- notes: {}\n- aiDescription: {}\n- ocrText: {}\n- dominantColors: {}\n{}",
+            folder_lines.join("\n"),
+            asset.title.chars().take(120).collect::<String>(),
+            asset.file_name.chars().take(100).collect::<String>(),
+            asset.media_kind,
+            if combined_tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                combined_tags.join(", ")
+            },
+            asset.notes.chars().take(200).collect::<String>(),
+            asset
+                .ai_description
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(240)
+                .collect::<String>(),
+            asset
+                .ocr_text
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect::<String>(),
+            if palette_hex.is_empty() {
+                "(none)".to_string()
+            } else {
+                palette_hex.join(", ")
+            },
+            if image_jpeg.is_some() {
+                "An image preview of this asset is attached. Base your judgment primarily on what you see in the image."
+            } else {
+                "No image preview is attached; judge strictly from the metadata above."
+            }
+        );
+
+        let images = image_jpeg
+            .filter(|b| !b.is_empty())
+            .map(|b| vec![b.to_vec()])
+            .unwrap_or_default();
+
+        let raw = provider
+            .complete_json(instructions, &prompt, &images)
+            .await?;
+        let parsed = parse_cloud_triage_json(&raw, &by_key, provider.provider_label());
+        Ok(parsed)
+    }
+
+    /// Lightweight standalone keyword triage (honestly abstains with `None` when nothing matches;
+    /// full desktop Inbox Triage runs through `LiveCharkleEngine::suggest_folders_for_assets` plus
+    /// TypeSafe Jev / Cloud AI when configured).
     pub fn recommend_inbox_triage(
         inbox_assets: &[AssetRecord],
         folders: &[FolderRecord],
@@ -436,47 +782,168 @@ impl VisualGroundingEngine {
             .iter()
             .map(|asset| {
                 let hay = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     asset.title,
                     asset.notes,
                     asset.tags.join(" "),
+                    asset.suggested_tags.join(" "),
                     asset.ai_description.as_deref().unwrap_or("")
                 )
-                .to_ascii_lowercase();
+                .to_lowercase();
+                let hay_words = ascii_word_set(&hay);
+
                 let mut best: Option<(&FolderRecord, f64)> = None;
                 for f in folders {
-                    let fname = f.name.to_ascii_lowercase();
-                    let score = if hay.contains(&fname) {
+                    let fname = f.name.trim().to_lowercase();
+                    if fname.is_empty() {
+                        continue;
+                    }
+                    let f_words = ascii_word_set(&fname);
+                    let score = if !fname.is_ascii() && hay.contains(&fname) {
                         0.88
-                    } else if fname
-                        .split_whitespace()
-                        .any(|w| w.len() >= 2 && hay.contains(w))
+                    } else if !f_words.is_empty() && f_words.iter().all(|w| hay_words.contains(w)) {
+                        0.86
+                    } else if !f_words.is_empty()
+                        && f_words.iter().any(|w| {
+                            (w.len() >= 3 || w == "ui" || w == "ux" || w == "3d")
+                                && hay_words.contains(w)
+                        })
                     {
-                        0.68
+                        0.66
                     } else {
-                        0.32
+                        0.0
                     };
-                    if best.is_none_or(|(_, bs)| score > bs) {
+                    if score > 0.0 && best.is_none_or(|(_, bs)| score > bs) {
                         best = Some((f, score));
                     }
                 }
-                let (folder, conf) = best.unwrap_or((&folders[0], 0.32));
-                InboxTriageRecommendation {
-                    asset_id: asset.id,
-                    asset_title: asset.title.clone(),
-                    recommended_folder_id: Some(folder.id),
-                    recommended_folder_name: Some(folder.name.clone()),
-                    confidence: conf,
-                    fit_probability: conf,
-                    reason: if conf >= 0.65 {
-                        format!("标题与标签与「{}」主题高度吻合", folder.name)
-                    } else {
-                        format!("建议归档至「{}」以便进一步整理", folder.name)
-                    },
-                    source: VisualRegionSource::AppleVisionSaliency,
+
+                if let Some((folder, conf)) = best {
+                    InboxTriageRecommendation {
+                        asset_id: asset.id,
+                        asset_title: asset.title.clone(),
+                        recommended_folder_id: Some(folder.id),
+                        recommended_folder_name: Some(folder.name.clone()),
+                        confidence: conf,
+                        fit_probability: conf,
+                        reason: format!("标题或标签与目录「{}」主题吻合", folder.name),
+                        source: VisualRegionSource::AppleVisionSaliency,
+                    }
+                } else {
+                    InboxTriageRecommendation {
+                        asset_id: asset.id,
+                        asset_title: asset.title.clone(),
+                        recommended_folder_id: None,
+                        recommended_folder_name: None,
+                        confidence: 0.0,
+                        fit_probability: 0.0,
+                        reason: "离线未匹配到明确目录，建议暂留收件箱".to_string(),
+                        source: VisualRegionSource::AppleVisionSaliency,
+                    }
                 }
             })
             .collect()
+    }
+}
+
+fn ascii_word_set(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            buf.push(ch.to_ascii_lowercase());
+        } else if !buf.is_empty() {
+            if buf.len() >= 2 {
+                out.insert(std::mem::take(&mut buf));
+            } else {
+                buf.clear();
+            }
+        }
+    }
+    if buf.len() >= 2 {
+        out.insert(buf);
+    }
+    out
+}
+
+fn parse_cloud_triage_json(
+    raw: &str,
+    by_key: &HashMap<String, &FolderOptionInput>,
+    provider_label: &str,
+) -> FolderClassificationResult {
+    let trimmed = raw.trim();
+    let cleaned = match (trimmed.find('{'), trimmed.rfind('}')) {
+        (Some(start), Some(end)) if start <= end => &trimmed[start..=end],
+        _ => trimmed,
+    };
+    let Ok(val) = serde_json::from_str::<Value>(cleaned) else {
+        return FolderClassificationResult {
+            folder_id: None,
+            confidence: 0.0,
+            fit_probability: 0.0,
+            reason: format!("{provider_label} 未返回可解析的分类结果，建议暂留收件箱"),
+            source: VisualRegionSource::AppleVisionSaliency,
+        };
+    };
+
+    let fits_any = val
+        .get("fits_any")
+        .or_else(|| val.get("fitsAny"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let conf = val
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .unwrap_or(if fits_any { 0.72 } else { 0.25 })
+        .clamp(0.0, 1.0);
+    let model_reason = val
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(120).collect::<String>());
+    let key = val
+        .get("folder_key")
+        .or_else(|| val.get("folderKey"))
+        .and_then(Value::as_str)
+        .map(str::trim);
+
+    if !fits_any || conf < 0.45 {
+        return FolderClassificationResult {
+            folder_id: None,
+            confidence: conf,
+            fit_probability: conf,
+            reason: model_reason.unwrap_or_else(|| {
+                format!("{provider_label} 判断暂无明确匹配目录，建议暂留收件箱")
+            }),
+            source: VisualRegionSource::AppleVisionSaliency,
+        };
+    }
+
+    if let Some(folder) = key.and_then(|k| by_key.get(k).copied()) {
+        FolderClassificationResult {
+            folder_id: Some(folder.id),
+            confidence: conf,
+            fit_probability: conf,
+            reason: model_reason.unwrap_or_else(|| {
+                format!(
+                    "{provider_label} 推荐归档至「{}」（置信度 {}%）",
+                    folder.name,
+                    (conf * 100.0).round() as i32
+                )
+            }),
+            source: VisualRegionSource::AppleVisionSaliency,
+        }
+    } else {
+        FolderClassificationResult {
+            folder_id: None,
+            confidence: 0.0,
+            fit_probability: 0.0,
+            reason: model_reason
+                .unwrap_or_else(|| format!("{provider_label} 未匹配到已有目录，建议暂留收件箱")),
+            source: VisualRegionSource::AppleVisionSaliency,
+        }
     }
 }
 
@@ -524,5 +991,72 @@ mod tests {
         assert!(region.found);
         assert_eq!(region.source, VisualRegionSource::AppleVisionSaliency);
         assert!(region.crop.width > 0.2 && region.crop.width < 0.7);
+    }
+
+    #[test]
+    fn recommend_inbox_triage_abstains_instead_of_blindly_picking_first_folder() {
+        let f_ui = FolderRecord::new("UI Inspiration", None);
+        let f_arch = FolderRecord::new("Architecture", None);
+        let unrelated = AssetRecord::new("GCqrsxJbUAAbbdB", "GCqrsxJbUAAbbdB.jpg");
+        let building = AssetRecord::new("building_facade", "building_facade.png");
+        let matched = AssetRecord::new("Brutalist Architecture", "arch.png");
+
+        let recs = VisualGroundingEngine::recommend_inbox_triage(
+            &[unrelated, building, matched],
+            &[f_ui, f_arch.clone()],
+        );
+        assert_eq!(recs.len(), 3);
+        assert!(
+            recs[0].recommended_folder_id.is_none(),
+            "Unmatched asset must stay in Inbox, not blindly pick folders[0]"
+        );
+        assert!(
+            recs[1].recommended_folder_id.is_none(),
+            "'building_facade' must NOT match 'UI' via substring"
+        );
+        assert_eq!(recs[2].recommended_folder_id, Some(f_arch.id));
+    }
+
+    #[test]
+    fn cloud_triage_json_parser_enforces_closed_set_and_abstention() {
+        let f0 = FolderOptionInput {
+            id: Uuid::new_v4(),
+            name: "UI Inspiration".to_string(),
+            display_path: "UI Inspiration".to_string(),
+            sample_tags: vec!["移动端".to_string()],
+            sample_titles: vec![],
+        };
+        let f1 = FolderOptionInput {
+            id: Uuid::new_v4(),
+            name: "Editorial".to_string(),
+            display_path: "Editorial".to_string(),
+            sample_tags: vec!["杂志排版".to_string()],
+            sample_titles: vec![],
+        };
+        let mut by_key = HashMap::new();
+        by_key.insert("f_0".to_string(), &f0);
+        by_key.insert("f_1".to_string(), &f1);
+
+        let good = parse_cloud_triage_json(
+            r#"{"fits_any": true, "folder_key": "f_1", "confidence": 0.91, "reason": "杂志网格排版风格"}"#,
+            &by_key,
+            "Google Gemini",
+        );
+        assert_eq!(good.folder_id, Some(f1.id));
+        assert!((good.confidence - 0.91).abs() < 1e-6);
+
+        let abstain = parse_cloud_triage_json(
+            r#"{"fits_any": false, "folder_key": "f_0", "confidence": 0.30, "reason": "与现有目录不符"}"#,
+            &by_key,
+            "Google Gemini",
+        );
+        assert!(abstain.folder_id.is_none());
+
+        let hallucinated = parse_cloud_triage_json(
+            r#"{"fits_any": true, "folder_key": "f_99", "confidence": 0.95, "reason": "幻觉目录"}"#,
+            &by_key,
+            "Google Gemini",
+        );
+        assert!(hallucinated.folder_id.is_none());
     }
 }

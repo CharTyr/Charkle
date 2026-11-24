@@ -1,20 +1,24 @@
 //! M5 Settings, Hybrid Cloud AI, TypeSafe Jev, External Agent, Storage Migration & Diagnostics IPC commands.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use charkle_core::agent::{ExternalAgentConfigStore, READ_TOOL_NAMES, WRITE_TOOL_NAMES};
 use charkle_core::bridge::ExtensionBridgeStatus;
 use charkle_core::intelligence::{
-    test_cloud_ai_connection, AIConnectionTestResult, ChatGPTSignInClient, CloudAIUsageCategory,
-    CloudAIUsageSummary, TypeSafeSystemOneClient, VisualGroundingEngine, AI_API_KEY_SECRET_KEY,
+    build_cloud_ai_provider, test_cloud_ai_connection, AIConnectionTestResult, ChatGPTSignInClient,
+    CloudAIProvider, CloudAIUsageCategory, CloudAIUsageSummary, FolderOptionInput,
+    TypeSafeSystemOneClient, VisualGroundingEngine, AI_API_KEY_SECRET_KEY,
     TYPESAFE_API_KEY_SECRET_KEY,
 };
 use charkle_core::models::agent::{ExternalAgentAccessLevel, ExternalAgentConfig};
-use charkle_core::models::core::{FilterCriteria, MediaKind};
+use charkle_core::models::core::{
+    AssetRecord, FilterCriteria, FolderRecord, FolderSuggestion, MediaKind,
+};
 use charkle_core::models::media::{
     AIProviderConfig, ChatGPTAccountSession, CloudAIProviderKind, InboxTriageRecommendation,
-    TypeSafeExperimentalConfig, TypeSafeModelInfo,
+    TypeSafeExperimentalConfig, TypeSafeModelInfo, VisualRegionSource,
 };
 use charkle_core::models::sync::{
     DriveSyncConfig, GDirectEnvironmentSnapshot, StorageMigrationReport,
@@ -24,9 +28,11 @@ use charkle_platform_win::{probe_ocr_diagnostics, OcrDiagnostics};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::State;
+use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use super::media::open_validated_http_url;
-use super::{AppState, IpcError, IpcResult};
+use super::{parse_uuid, AppState, IpcError, IpcResult};
 
 const AI_CONFIG_FILE: &str = "ai-provider.json";
 const TYPESAFE_CONFIG_FILE: &str = "typesafe-config.json";
@@ -387,21 +393,344 @@ pub async fn test_typesafe_connection(
     }
 }
 
-#[tauri::command]
-pub fn run_inbox_smart_triage(
-    state: State<'_, AppState>,
-) -> IpcResult<Vec<InboxTriageRecommendation>> {
-    let inbox = state
-        .engine
-        .fetch_assets(&FilterCriteria {
-            only_inbox: true,
-            ..Default::default()
+fn build_folder_triage_options(
+    folders: &[FolderRecord],
+    all_assets: &[AssetRecord],
+) -> Vec<FolderOptionInput> {
+    let by_id: HashMap<Uuid, &FolderRecord> = folders.iter().map(|f| (f.id, f)).collect();
+    let mut tags_by_folder: HashMap<Uuid, HashMap<String, usize>> = HashMap::new();
+    let mut titles_by_folder: HashMap<Uuid, Vec<String>> = HashMap::new();
+
+    for asset in all_assets {
+        let Some(fid) = asset.folder_id else {
+            continue;
+        };
+        let entry = tags_by_folder.entry(fid).or_default();
+        for tag in asset.tags.iter().chain(asset.suggested_tags.iter()) {
+            let trimmed = tag.trim();
+            if !trimmed.is_empty() {
+                *entry.entry(trimmed.to_string()).or_insert(0) += 1;
+            }
+        }
+        let titles = titles_by_folder.entry(fid).or_default();
+        if titles.len() < 4 && !asset.title.trim().is_empty() {
+            titles.push(asset.title.trim().chars().take(48).collect());
+        }
+    }
+
+    folders
+        .iter()
+        .map(|folder| {
+            let mut parts = Vec::new();
+            let mut visited = HashSet::new();
+            let mut cur = Some(folder);
+            while let Some(node) = cur {
+                if !visited.insert(node.id) {
+                    break;
+                }
+                parts.push(node.name.as_str());
+                cur = node.parent_id.and_then(|pid| by_id.get(&pid).copied());
+            }
+            parts.reverse();
+            let display_path = parts.join(" / ");
+
+            let mut tag_vec: Vec<(String, usize)> = tags_by_folder
+                .remove(&folder.id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            tag_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let sample_tags = tag_vec.into_iter().take(6).map(|(t, _)| t).collect();
+            let sample_titles = titles_by_folder.remove(&folder.id).unwrap_or_default();
+
+            FolderOptionInput {
+                id: folder.id,
+                name: folder.name.clone(),
+                display_path,
+                sample_tags,
+                sample_titles,
+            }
         })
-        .map_err(IpcError::from)?;
+        .collect()
+}
+
+fn offline_triage_recommendation(
+    asset: &AssetRecord,
+    suggestion: Option<&FolderSuggestion>,
+) -> InboxTriageRecommendation {
+    if let Some(sug) = suggestion {
+        InboxTriageRecommendation {
+            asset_id: asset.id,
+            asset_title: asset.title.clone(),
+            recommended_folder_id: Some(sug.folder_id),
+            recommended_folder_name: Some(sug.folder_name.clone()),
+            confidence: sug.confidence,
+            fit_probability: sug.confidence,
+            reason: sug.reason.clone(),
+            source: VisualRegionSource::AppleVisionSaliency,
+        }
+    } else {
+        InboxTriageRecommendation {
+            asset_id: asset.id,
+            asset_title: asset.title.clone(),
+            recommended_folder_id: None,
+            recommended_folder_name: None,
+            confidence: 0.0,
+            fit_probability: 0.0,
+            reason: "离线未匹配到明确目录，建议暂留收件箱".to_string(),
+            source: VisualRegionSource::AppleVisionSaliency,
+        }
+    }
+}
+
+fn sort_triage_recommendations(recs: &mut [InboxTriageRecommendation]) {
+    recs.sort_by(|a, b| {
+        let a_has = a.recommended_folder_id.is_some();
+        let b_has = b.recommended_folder_id.is_some();
+        b_has
+            .cmp(&a_has)
+            .then_with(|| {
+                if (a.confidence - b.confidence).abs() > 0.005 {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    b.fit_probability
+                        .partial_cmp(&a.fit_probability)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            })
+            .then_with(|| a.asset_title.cmp(&b.asset_title))
+    });
+}
+
+#[tauri::command]
+pub async fn run_inbox_smart_triage(
+    state: State<'_, AppState>,
+    asset_ids: Option<Vec<String>>,
+    max_count: Option<usize>,
+) -> IpcResult<Vec<InboxTriageRecommendation>> {
     let folders = state.engine.fetch_folders().map_err(IpcError::from)?;
-    Ok(VisualGroundingEngine::recommend_inbox_triage(
-        &inbox, &folders,
-    ))
+    if folders.is_empty() {
+        return Err(IpcError {
+            code: "NO_FOLDERS",
+            message: "请先在左侧栏创建至少一个目标文件夹，再使用智能分拣。".to_string(),
+        });
+    }
+
+    let limit = max_count.unwrap_or(24).clamp(1, 64);
+    let targets: Vec<AssetRecord> = match asset_ids {
+        Some(ids) if !ids.is_empty() => {
+            let mut loaded = Vec::with_capacity(ids.len().min(limit));
+            for raw in ids.into_iter().take(limit) {
+                let uuid = parse_uuid(&raw)?;
+                if let Some(asset) = state.engine.fetch_asset(uuid).map_err(IpcError::from)? {
+                    if !asset.is_trashed {
+                        loaded.push(asset);
+                    }
+                }
+            }
+            loaded
+        }
+        _ => state
+            .engine
+            .fetch_assets(&FilterCriteria {
+                only_inbox: true,
+                ..Default::default()
+            })
+            .map_err(IpcError::from)?
+            .into_iter()
+            .take(limit)
+            .collect(),
+    };
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Compute local multi-signal visual/palette/tag suggestions once (used both offline and as error fallback)
+    let offline_map: HashMap<Uuid, Option<FolderSuggestion>> = state
+        .engine
+        .suggest_folders_for_assets(&targets)
+        .map_err(IpcError::from)?
+        .into_iter()
+        .collect();
+    let folder_name_by_id: HashMap<Uuid, String> =
+        folders.iter().map(|f| (f.id, f.name.clone())).collect();
+
+    // Tier 1: TypeSafe System One (Jev) closed-set Choice + companion Noul
+    let ts_config: TypeSafeExperimentalConfig =
+        load_json_or_default(&state.data_dir.join(TYPESAFE_CONFIG_FILE));
+    let ts_key = read_vault_utf8(&state, TYPESAFE_API_KEY_SECRET_KEY).await;
+    if ts_config.enabled && ts_config.enable_inbox_smart_triage {
+        if let Some(key) = ts_key {
+            let all_assets = state
+                .engine
+                .fetch_assets(&FilterCriteria {
+                    include_trashed: false,
+                    ..Default::default()
+                })
+                .unwrap_or_default();
+            let options = Arc::new(build_folder_triage_options(&folders, &all_assets));
+            let grounding = Arc::new(VisualGroundingEngine::new(Arc::clone(&state.usage_store)));
+            let sem = Arc::new(Semaphore::new(4));
+            let mut handles = Vec::with_capacity(targets.len());
+
+            for asset in targets {
+                let jpeg = state.engine.prepare_visual_grounding_jpeg(&asset, 384);
+                let offline_fb = offline_triage_recommendation(
+                    &asset,
+                    offline_map.get(&asset.id).and_then(|o| o.as_ref()),
+                );
+                let grounding = Arc::clone(&grounding);
+                let options = Arc::clone(&options);
+                let sem = Arc::clone(&sem);
+                let cfg = ts_config.clone();
+                let key = key.clone();
+                let folder_names = folder_name_by_id.clone();
+
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await;
+                    let tags: Vec<String> = asset
+                        .tags
+                        .iter()
+                        .chain(asset.suggested_tags.iter())
+                        .cloned()
+                        .collect();
+                    let notes = format!(
+                        "{} {}",
+                        asset.notes,
+                        asset.ai_description.as_deref().unwrap_or("")
+                    );
+                    match grounding
+                        .classify_into_folders(
+                            &asset.title,
+                            &tags,
+                            &notes,
+                            jpeg.as_deref(),
+                            &options,
+                            &cfg,
+                            &key,
+                        )
+                        .await
+                    {
+                        Ok(res) => InboxTriageRecommendation {
+                            asset_id: asset.id,
+                            asset_title: asset.title,
+                            recommended_folder_id: res.folder_id,
+                            recommended_folder_name: res
+                                .folder_id
+                                .and_then(|fid| folder_names.get(&fid).cloned()),
+                            confidence: res.confidence,
+                            fit_probability: res.fit_probability,
+                            reason: res.reason,
+                            source: res.source,
+                        },
+                        Err(_) => offline_fb,
+                    }
+                }));
+            }
+
+            let mut recs = Vec::with_capacity(handles.len());
+            for handle in handles {
+                if let Ok(rec) = handle.await {
+                    recs.push(rec);
+                }
+            }
+            sort_triage_recommendations(&mut recs);
+            return Ok(recs);
+        }
+    }
+
+    // Tier 2: Configured Cloud AI provider (Gemini, OpenAI Compatible, Anthropic, ChatGPT Subscription)
+    let ai_config: AIProviderConfig = load_json_or_default(&state.data_dir.join(AI_CONFIG_FILE));
+    if ai_config.provider != CloudAIProviderKind::Disabled {
+        let secret = if ai_config.provider == CloudAIProviderKind::ChatGptSubscription {
+            let client = ChatGPTSignInClient::new(Arc::clone(state.engine.vault()));
+            client.valid_access_token().await.ok()
+        } else {
+            read_vault_utf8(&state, AI_API_KEY_SECRET_KEY).await
+        };
+        if let Ok(Some(provider)) =
+            build_cloud_ai_provider(&ai_config, secret, Arc::clone(&state.usage_store))
+        {
+            let provider: Arc<dyn CloudAIProvider> = Arc::from(provider);
+            let all_assets = state
+                .engine
+                .fetch_assets(&FilterCriteria {
+                    include_trashed: false,
+                    ..Default::default()
+                })
+                .unwrap_or_default();
+            let options = Arc::new(build_folder_triage_options(&folders, &all_assets));
+            let sem = Arc::new(Semaphore::new(4));
+            let send_thumbs = ai_config.send_thumbnails_to_cloud;
+            let mut handles = Vec::with_capacity(targets.len());
+
+            for asset in targets {
+                let jpeg = if send_thumbs {
+                    state.engine.prepare_visual_grounding_jpeg(&asset, 384)
+                } else {
+                    None
+                };
+                let offline_fb = offline_triage_recommendation(
+                    &asset,
+                    offline_map.get(&asset.id).and_then(|o| o.as_ref()),
+                );
+                let provider = Arc::clone(&provider);
+                let options = Arc::clone(&options);
+                let sem = Arc::clone(&sem);
+                let folder_names = folder_name_by_id.clone();
+
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await;
+                    match VisualGroundingEngine::classify_into_folders_cloud_ai(
+                        provider.as_ref(),
+                        &asset,
+                        jpeg.as_deref(),
+                        &options,
+                    )
+                    .await
+                    {
+                        Ok(res) => InboxTriageRecommendation {
+                            asset_id: asset.id,
+                            asset_title: asset.title,
+                            recommended_folder_id: res.folder_id,
+                            recommended_folder_name: res
+                                .folder_id
+                                .and_then(|fid| folder_names.get(&fid).cloned()),
+                            confidence: res.confidence,
+                            fit_probability: res.fit_probability,
+                            reason: res.reason,
+                            source: res.source,
+                        },
+                        Err(_) => offline_fb,
+                    }
+                }));
+            }
+
+            let mut recs = Vec::with_capacity(handles.len());
+            for handle in handles {
+                if let Ok(rec) = handle.await {
+                    recs.push(rec);
+                }
+            }
+            sort_triage_recommendations(&mut recs);
+            return Ok(recs);
+        }
+    }
+
+    // Tier 3: Offline Local Multi-Signal Visual + Palette + Tag + Name Matching (never forces folders[0])
+    let mut recs: Vec<InboxTriageRecommendation> = targets
+        .iter()
+        .map(|asset| {
+            offline_triage_recommendation(
+                asset,
+                offline_map.get(&asset.id).and_then(|o| o.as_ref()),
+            )
+        })
+        .collect();
+    sort_triage_recommendations(&mut recs);
+    Ok(recs)
 }
 
 #[tauri::command]
@@ -525,6 +854,9 @@ pub async fn rebuild_local_visual_index(
 
     for asset in eligible {
         let mut touched = false;
+        if state.engine.index_local_visual_descriptor(&asset) {
+            touched = true;
+        }
         let has_rich = asset
             .rich_metadata
             .as_ref()

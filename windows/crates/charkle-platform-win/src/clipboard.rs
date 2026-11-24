@@ -434,6 +434,193 @@ pub fn read_current_clipboard() -> Result<Option<ClipboardSnapshot>, String> {
     Ok(None)
 }
 
+/// Parses `(width, height)` directly from a `CF_DIB` `BITMAPINFOHEADER` (40 bytes) without
+/// copying pixel buffers or running PNG compression.
+pub fn parse_dib_dimensions(dib: &[u8]) -> Option<(u32, u32)> {
+    if dib.len() < 40 {
+        return None;
+    }
+    let header_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    let width_i = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
+    let height_i = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+    if header_size < 40 || width_i <= 0 || height_i == 0 {
+        return None;
+    }
+    let width = width_i as u32;
+    let height = height_i.unsigned_abs();
+    if width > 16_384 || height > 16_384 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// Parses `(width, height)` directly from a 24-byte PNG signature + IHDR chunk without copying pixels.
+pub fn parse_png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
+    if png.len() < 24 || &png[0..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    if width == 0 || height == 0 || width > 16_384 || height > 16_384 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// Fast zero-encode preview probe of the Windows clipboard (`CF_HDROP` -> `"PNG"` header ->
+/// `CF_DIB` header -> `CF_UNICODETEXT`). Avoids allocating/compressing multi-megabyte screenshots
+/// whenever the Top Drop Shelf opens or `WM_CLIPBOARDUPDATE` fires.
+#[cfg(target_os = "windows")]
+pub fn read_current_clipboard_preview() -> Result<Option<ClipboardPreview>, String> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{HGLOBAL, HWND};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    struct GlobalLockGuard(HGLOBAL);
+    impl Drop for GlobalLockGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = GlobalUnlock(self.0);
+            }
+        }
+    }
+
+    // SAFETY: Standard Win32 clipboard lock guarded by RAII `ClipboardGuard`.
+    unsafe {
+        if OpenClipboard(HWND::default()).is_err() {
+            return Ok(None);
+        }
+        let _clip_guard = ClipboardGuard;
+
+        // 1. File drop list (CF_HDROP) — only query count + first filename
+        if IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() {
+            if let Ok(handle) = GetClipboardData(CF_HDROP.0 as u32) {
+                let hdrop = HDROP(handle.0);
+                let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None) as usize;
+                if count > 0 {
+                    let label = if count == 1 {
+                        let needed = DragQueryFileW(hdrop, 0, None) as usize;
+                        if needed > 0 {
+                            let mut buf = vec![0u16; needed + 1];
+                            let written = DragQueryFileW(hdrop, 0, Some(&mut buf)) as usize;
+                            PathBuf::from(String::from_utf16_lossy(&buf[..written]))
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "1 个文件".to_string())
+                        } else {
+                            "1 个文件".to_string()
+                        }
+                    } else {
+                        format!("{count} 个剪贴板文件")
+                    };
+                    return Ok(Some(ClipboardPreview {
+                        kind: "files".to_string(),
+                        label,
+                        url: None,
+                        hex: None,
+                        file_count: count,
+                        is_social_or_github_url: false,
+                    }));
+                }
+            }
+        }
+
+        // 2. Registered "PNG" header only (24 bytes, zero allocation / zero copy)
+        let png_fmt = RegisterClipboardFormatW(w!("PNG"));
+        if png_fmt != 0 && IsClipboardFormatAvailable(png_fmt).is_ok() {
+            if let Ok(handle) = GetClipboardData(png_fmt) {
+                let hglobal = HGLOBAL(handle.0);
+                let size = GlobalSize(hglobal);
+                if size >= 24 {
+                    let ptr = GlobalLock(hglobal);
+                    if !ptr.is_null() {
+                        let _lock = GlobalLockGuard(hglobal);
+                        let header = std::slice::from_raw_parts(ptr as *const u8, size.min(32));
+                        if let Some((width, height)) = parse_png_dimensions(header) {
+                            return Ok(Some(ClipboardPreview {
+                                kind: "image".to_string(),
+                                label: format!("剪贴板图片 ({width} × {height})"),
+                                url: None,
+                                hex: None,
+                                file_count: 0,
+                                is_social_or_github_url: false,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Bitmap header only (40 bytes BITMAPINFOHEADER, zero pixel decode / zero PNG encode)
+        if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
+            if let Ok(handle) = GetClipboardData(CF_DIB.0 as u32) {
+                let hglobal = HGLOBAL(handle.0);
+                let size = GlobalSize(hglobal);
+                if size >= 40 {
+                    let ptr = GlobalLock(hglobal);
+                    if !ptr.is_null() {
+                        let _lock = GlobalLockGuard(hglobal);
+                        let header = std::slice::from_raw_parts(ptr as *const u8, size.min(48));
+                        if let Some((width, height)) = parse_dib_dimensions(header) {
+                            return Ok(Some(ClipboardPreview {
+                                kind: "image".to_string(),
+                                label: format!("剪贴板图片 ({width} × {height})"),
+                                url: None,
+                                hex: None,
+                                file_count: 0,
+                                is_social_or_github_url: false,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Unicode text / URL / Hex color (bounded to 16 KiB for preview classification)
+        const MAX_PREVIEW_UTF16_BYTES: usize = 16 * 1024;
+        if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_ok() {
+            if let Ok(handle) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
+                let hglobal = HGLOBAL(handle.0);
+                let size = GlobalSize(hglobal);
+                if size >= 2 {
+                    let bounded_bytes = size.min(MAX_PREVIEW_UTF16_BYTES);
+                    let ptr = GlobalLock(hglobal);
+                    if !ptr.is_null() {
+                        let _lock = GlobalLockGuard(hglobal);
+                        let units =
+                            std::slice::from_raw_parts(ptr as *const u16, bounded_bytes / 2);
+                        let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+                        let text = String::from_utf16_lossy(&units[..len]);
+                        return Ok(classify_clipboard_text(&text).map(|s| s.to_preview()));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn read_current_clipboard_preview() -> Result<Option<ClipboardPreview>, String> {
+    Ok(None)
+}
+
 /// Converts PNG bytes into a Windows `CF_DIB` buffer (40-byte `BITMAPINFOHEADER` + bottom-up 32-bit BGRA).
 pub fn png_bytes_to_dib(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let rgba = image::load_from_memory(png_bytes)
@@ -574,33 +761,41 @@ where
                 wparam: WPARAM,
                 lparam: LPARAM,
             ) -> LRESULT {
-                match msg {
-                    WM_CLIPBOARDUPDATE => {
-                        let ptr =
-                            unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const CallbackBox;
-                        if !ptr.is_null() {
-                            if let Ok(Some(snap)) = read_current_clipboard() {
-                                let cb = unsafe { &*ptr };
-                                cb(snap.to_preview());
+                let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || -> Option<LRESULT> {
+                        match msg {
+                            WM_CLIPBOARDUPDATE => {
+                                let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) }
+                                    as *const CallbackBox;
+                                if !ptr.is_null() {
+                                    if let Ok(Some(preview)) = read_current_clipboard_preview() {
+                                        let cb = unsafe { &*ptr };
+                                        cb(preview);
+                                    }
+                                }
+                                return Some(LRESULT(0));
                             }
+                            WM_CLOSE => {
+                                let _ = unsafe { DestroyWindow(hwnd) };
+                                return Some(LRESULT(0));
+                            }
+                            WM_DESTROY => {
+                                let _ = unsafe { RemoveClipboardFormatListener(hwnd) };
+                                let ptr = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) }
+                                    as *mut CallbackBox;
+                                if !ptr.is_null() {
+                                    let _ = unsafe { Box::from_raw(ptr) };
+                                }
+                                unsafe { PostQuitMessage(0) };
+                                return Some(LRESULT(0));
+                            }
+                            _ => {}
                         }
-                        return LRESULT(0);
-                    }
-                    WM_CLOSE => {
-                        let _ = unsafe { DestroyWindow(hwnd) };
-                        return LRESULT(0);
-                    }
-                    WM_DESTROY => {
-                        let _ = unsafe { RemoveClipboardFormatListener(hwnd) };
-                        let ptr = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) }
-                            as *mut CallbackBox;
-                        if !ptr.is_null() {
-                            let _ = unsafe { Box::from_raw(ptr) };
-                        }
-                        unsafe { PostQuitMessage(0) };
-                        return LRESULT(0);
-                    }
-                    _ => {}
+                        None
+                    },
+                ));
+                if let Ok(Some(res)) = handled {
+                    return res;
                 }
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
@@ -857,5 +1052,9 @@ mod tests {
             .to_rgba8();
         assert_eq!(roundtripped.get_pixel(0, 0).0, [210, 88, 64, 255]);
         assert_eq!(roundtripped.get_pixel(3, 2).0, [42, 96, 224, 255]);
+        assert_eq!(parse_png_dimensions(&png_bytes), Some((4, 3)));
+        assert_eq!(parse_dib_dimensions(&dib), Some((4, 3)));
+        assert_eq!(parse_png_dimensions(&png_bytes[..10]), None);
+        assert_eq!(parse_dib_dimensions(&dib[..20]), None);
     }
 }

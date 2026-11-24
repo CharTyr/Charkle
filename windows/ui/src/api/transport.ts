@@ -245,7 +245,7 @@ export interface CharkleTransport {
     opts?: { apiKey?: string | null; clearApiKey?: boolean },
   ): Promise<TypeSafeStateDto>;
   testTypesafeConnection(): Promise<TypeSafeTestResultDto>;
-  runInboxSmartTriage(): Promise<InboxTriageRecommendation[]>;
+  runInboxSmartTriage(assetIds?: string[], maxCount?: number): Promise<InboxTriageRecommendation[]>;
   getExternalAgentState(): Promise<ExternalAgentStateDto>;
   saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto>;
   runExternalAgentSelfCheck(): Promise<ExternalAgentSelfCheckDto>;
@@ -751,8 +751,14 @@ export class TauriTransport implements CharkleTransport {
     return invoke('test_typesafe_connection');
   }
 
-  runInboxSmartTriage(): Promise<InboxTriageRecommendation[]> {
-    return invoke('run_inbox_smart_triage');
+  runInboxSmartTriage(
+    assetIds?: string[],
+    maxCount = 24,
+  ): Promise<InboxTriageRecommendation[]> {
+    return invoke('run_inbox_smart_triage', {
+      assetIds: assetIds && assetIds.length > 0 ? assetIds : null,
+      maxCount,
+    });
   }
 
   getExternalAgentState(): Promise<ExternalAgentStateDto> {
@@ -1564,22 +1570,95 @@ export class InMemoryMockTransport implements CharkleTransport {
   }
 
   async similarAssets(assetId: string, limit = 12): Promise<ScoredAsset[]> {
-    return this.assets
-      .filter((a) => a.id !== assetId && !a.isTrashed)
-      .slice(0, limit)
-      .map((asset, i) => ({ asset, score: Math.max(0.4, 0.9 - i * 0.1), matchReasons: ['相近色板'] }));
+    const anchor = this.assets.find((a) => a.id === assetId);
+    if (!anchor) return [];
+    const anchorTags = new Set(
+      [...anchor.tags, ...anchor.suggestedTags].map((t) => t.trim().toLowerCase()).filter(Boolean),
+    );
+    const anchorPrimary = anchor.dominantColors[0];
+    const scored: ScoredAsset[] = [];
+    for (const cand of this.assets) {
+      if (cand.id === assetId || cand.isTrashed) continue;
+      const reasons: string[] = [];
+      let score = 0;
+      const candTags = new Set(
+        [...cand.tags, ...cand.suggestedTags].map((t) => t.trim().toLowerCase()).filter(Boolean),
+      );
+      const shared = [...anchorTags].filter((t) => candTags.has(t));
+      if (shared.length > 0) {
+        const jaccard = shared.length / Math.max(1, new Set([...anchorTags, ...candTags]).size);
+        if (jaccard >= 0.18) {
+          score += jaccard * 0.55;
+          reasons.push(`相同标签：${shared.slice(0, 2).join('、')}`);
+        }
+      }
+      const candPrimary = cand.dominantColors[0];
+      if (anchorPrimary && candPrimary) {
+        const de = Math.hypot(
+          anchorPrimary.l - candPrimary.l,
+          anchorPrimary.a - candPrimary.a,
+          anchorPrimary.b - candPrimary.b,
+        );
+        if (de < 22) {
+          score += ((22 - de) / 22) * 0.45;
+          reasons.push('配色相近');
+        }
+      }
+      if (reasons.length > 0 && score >= 0.24) {
+        scored.push({ asset: cand, score: Math.min(1, score), matchReasons: reasons });
+      }
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit);
   }
 
   async suggestFolder(assetId: string): Promise<FolderSuggestion | null> {
     const asset = this.assets.find((a) => a.id === assetId);
-    const first = this.folders[0];
-    if (!asset || !first) return null;
-    return {
-      folderID: first.id,
-      folderName: first.name,
-      confidence: 0.78,
-      reason: '与该目录素材风格相近',
-    };
+    if (!asset || this.folders.length === 0) return null;
+    const hay = `${asset.title} ${asset.notes} ${asset.tags.join(' ')} ${asset.suggestedTags.join(' ')}`.toLowerCase();
+    const words = new Set(hay.match(/[a-z0-9]{2,}/g) ?? []);
+    const assetTags = new Set(
+      [...asset.tags, ...asset.suggestedTags].map((t) => t.trim().toLowerCase()).filter(Boolean),
+    );
+    let best: FolderSuggestion | null = null;
+    for (const folder of this.folders) {
+      if (folder.id === asset.folderID) continue;
+      let score = 0;
+      let reason = '';
+      const fname = folder.name.trim().toLowerCase();
+      const fWords = fname.match(/[a-z0-9]{2,}/g) ?? [];
+      if (fname && !/^[\x00-\x7f]+$/.test(fname) && hay.includes(fname)) {
+        score = 0.84;
+        reason = `标题或标签与目录「${folder.name}」主题吻合`;
+      } else if (fWords.length > 0 && fWords.every((w) => words.has(w))) {
+        score = 0.82;
+        reason = `标题或标签与目录「${folder.name}」主题吻合`;
+      }
+      const peers = this.assets.filter((a) => !a.isTrashed && a.folderID === folder.id && a.id !== asset.id);
+      let sharedTag: string | null = null;
+      for (const peer of peers) {
+        for (const tag of peer.tags) {
+          if (assetTags.has(tag.trim().toLowerCase())) {
+            sharedTag = tag;
+            break;
+          }
+        }
+        if (sharedTag) break;
+      }
+      if (sharedTag && score < 0.72) {
+        score = 0.72;
+        reason = `与「${folder.name}」中标签「${sharedTag}」一致`;
+      }
+      if (score >= 0.34 && (!best || score > best.confidence)) {
+        best = {
+          folderID: folder.id,
+          folderName: folder.name,
+          confidence: score,
+          reason,
+        };
+      }
+    }
+    return best;
   }
 
   async hydrateImageMetadata(id: string): Promise<AssetRecord | null> {
@@ -2364,19 +2443,45 @@ export class InMemoryMockTransport implements CharkleTransport {
     };
   }
 
-  async runInboxSmartTriage(): Promise<InboxTriageRecommendation[]> {
-    const inbox = this.assets.filter((a) => !a.isTrashed && !a.folderID);
-    const firstFolder = this.folders[0];
-    return inbox.map((a) => ({
-      assetID: a.id,
-      assetTitle: a.title,
-      recommendedFolderID: firstFolder?.id ?? null,
-      recommendedFolderName: firstFolder?.name ?? null,
-      confidence: 0.86,
-      fitProbability: 0.86,
-      reason: firstFolder ? `与「${firstFolder.name}」主题吻合` : '待建立分类文件夹',
-      source: 'appleVisionSaliency',
-    }));
+  async runInboxSmartTriage(
+    assetIds?: string[],
+    maxCount = 24,
+  ): Promise<InboxTriageRecommendation[]> {
+    const targets =
+      assetIds && assetIds.length > 0
+        ? this.assets
+            .filter((a) => !a.isTrashed && assetIds.includes(a.id))
+            .slice(0, maxCount)
+        : this.assets.filter((a) => !a.isTrashed && !a.folderID).slice(0, maxCount);
+    const recs: InboxTriageRecommendation[] = [];
+    for (const a of targets) {
+      const sug = await this.suggestFolder(a.id);
+      if (sug) {
+        recs.push({
+          assetID: a.id,
+          assetTitle: a.title,
+          recommendedFolderID: sug.folderID,
+          recommendedFolderName: sug.folderName,
+          confidence: sug.confidence,
+          fitProbability: sug.confidence,
+          reason: sug.reason,
+          source: 'appleVisionSaliency',
+        });
+      } else {
+        recs.push({
+          assetID: a.id,
+          assetTitle: a.title,
+          recommendedFolderID: null,
+          recommendedFolderName: null,
+          confidence: 0,
+          fitProbability: 0,
+          reason: '离线未匹配到明确目录，建议暂留收件箱',
+          source: 'appleVisionSaliency',
+        });
+      }
+    }
+    recs.sort((a, b) => Number(Boolean(b.recommendedFolderID)) - Number(Boolean(a.recommendedFolderID)) || b.confidence - a.confidence);
+    return recs;
   }
 
   async getExternalAgentState(): Promise<ExternalAgentStateDto> {

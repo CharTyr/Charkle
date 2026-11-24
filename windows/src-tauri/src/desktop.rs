@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use charkle_core::models::media::CaptureInput;
@@ -16,7 +16,7 @@ use charkle_platform_win::capture::{
     MonitorCaptureInfo, VirtualDesktopBounds,
 };
 use charkle_platform_win::clipboard::{
-    read_current_clipboard, ClipboardPreview, ClipboardSnapshot,
+    read_current_clipboard, read_current_clipboard_preview, ClipboardPreview, ClipboardSnapshot,
 };
 use charkle_platform_win::mount::detect_gdirect_binary;
 use charkle_platform_win::ocr::{probe_ocr_diagnostics, OcrDiagnostics};
@@ -417,8 +417,8 @@ fn emit_shelf_minimal_state(app: &AppHandle, state: &AppState) {
         "minimalMode": state.shelf_minimal_mode.load(Ordering::SeqCst),
         "dockEdge": edge.as_str(),
     });
-    let _ = app.emit("shelf:state", payload.clone());
-    let _ = app.emit_to("shelf", "shelf:state", payload);
+    // `app.emit` already broadcasts to all webviews ("main" + "shelf"); avoid emitting twice!
+    let _ = app.emit("shelf:state", payload);
 }
 
 /// Tears down the `"main"` WebviewWindow to release all gallery DOM/GPU/decoded-image memory
@@ -968,11 +968,27 @@ pub fn ensure_shelf_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+static SHELF_BUILD_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn shelf_build_lock() -> &'static tokio::sync::Mutex<()> {
+    SHELF_BUILD_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Async-safe version of [`ensure_shelf_window`] for Tokio worker threads / async IPC commands.
-/// Builds `"shelf"` off the Win32 UI thread (never deadlocking WebView2), then finishes Win32
-/// subclass, borderless chrome, and OLE `IDropTarget` registration on the main STA UI thread.
+/// Serialized by a single-flight async mutex so rapid hover/hotkey/tray opens can NEVER race to
+/// construct duplicate `"shelf"` WebView2 windows.
 /// Returns `Ok(true)` if the shelf window was freshly created, `Ok(false)` if it already existed.
 pub async fn ensure_shelf_window_async(app: &AppHandle) -> Result<bool, String> {
+    if let Some(existing) = app.get_webview_window("shelf") {
+        #[cfg(target_os = "windows")]
+        if let Ok(hwnd) = existing.hwnd() {
+            let state = app.state::<AppState>();
+            state.shelf_hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
+        }
+        return Ok(false);
+    }
+
+    let _guard = shelf_build_lock().lock().await;
     if let Some(existing) = app.get_webview_window("shelf") {
         #[cfg(target_os = "windows")]
         if let Ok(hwnd) = existing.hwnd() {
@@ -1034,19 +1050,15 @@ fn shelf_state_payload(app: &AppHandle, expanded: bool) -> serde_json::Value {
 
 pub fn emit_shelf_state_all(app: &AppHandle, expanded: bool) {
     let payload = shelf_state_payload(app, expanded);
-    let _ = app.emit("shelf:state", payload.clone());
-    let _ = app.emit_to("shelf", "shelf:state", payload);
+    // `app.emit` broadcasts to every open webview ("main" and "shelf") once — no duplicate delivery!
+    let _ = app.emit("shelf:state", payload);
 }
 
 #[cfg(target_os = "windows")]
 fn spawn_delayed_shelf_drop_target_refreshes(app: &AppHandle, raw: isize) {
     let app_for_refresh = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        let _ = app_for_refresh.run_on_main_thread(move || {
-            let _ = refresh_shelf_drop_targets(raw);
-        });
-        tokio::time::sleep(Duration::from_millis(450)).await;
+        tokio::time::sleep(Duration::from_millis(320)).await;
         let _ = app_for_refresh.run_on_main_thread(move || {
             let _ = refresh_shelf_drop_targets(raw);
         });
@@ -1151,7 +1163,9 @@ async fn show_shelf_window_inner_async(
                     let _ = tx.send(());
                 });
                 let _ = rx.await;
-                spawn_delayed_shelf_drop_target_refreshes(app, raw);
+                if freshly_created {
+                    spawn_delayed_shelf_drop_target_refreshes(app, raw);
+                }
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -1797,10 +1811,7 @@ pub fn build_desktop_status(app: &AppHandle, state: &AppState) -> DesktopIntegra
 }
 
 pub fn read_initial_clipboard_preview() -> Option<ClipboardPreview> {
-    read_current_clipboard()
-        .ok()
-        .flatten()
-        .map(|s| s.to_preview())
+    read_current_clipboard_preview().ok().flatten()
 }
 
 #[cfg(test)]

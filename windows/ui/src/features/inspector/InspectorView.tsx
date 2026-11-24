@@ -698,6 +698,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
       return;
     }
 
+    setSimilar([]);
     setLoadingSimilar(true);
     void getTransport()
       .similarAssets(asset.id, 12)
@@ -731,6 +732,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     };
   }, [
     asset?.id,
+    asset?.updatedAt,
     asset?.mediaKind,
     asset?.richMetadata?.photoExif,
     asset?.richMetadata?.aiGeneration,

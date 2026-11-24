@@ -273,6 +273,8 @@ const ShelfAssetThumb: React.FC<ShelfAssetThumbProps> = ({
     <img
       src={thumbSrc}
       alt={asset.title}
+      loading="lazy"
+      decoding="async"
       draggable={false}
       onError={() => setImgFailed(true)}
       className={fixedHeight ? 'w-full h-full object-cover' : 'w-full h-auto block object-cover'}
@@ -361,6 +363,10 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   const openingMainRef = useRef(false);
   const openingAssetRef = useRef(false);
   const startingCaptureRef = useRef(false);
+  const refreshInFlightRef = useRef(false);
+  const pendingRefreshRef = useRef(false);
+  const dirtyWhileHiddenRef = useRef(false);
+  const lastHitRectKeyRef = useRef<string | null>(null);
 
   // Pitfall 5: Atomic timer cancellation clearing AND nulling handles across every transition
   // (hover, drag, banner, pin, hide, blur) so an unpinned shelf can NEVER wedge open.
@@ -404,6 +410,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   }, [clearBannerTimer, cancelAutoCollapse]);
 
   const refreshData = useCallback(async () => {
+    if (refreshInFlightRef.current) {
+      pendingRefreshRef.current = true;
+      return;
+    }
+    refreshInFlightRef.current = true;
+    dirtyWhileHiddenRef.current = false;
     try {
       const [fetchedAssets, fetchedFolders, fetchedBoards, clip, inbox] =
         await Promise.all([
@@ -436,6 +448,16 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       });
     } catch {
       // Ignore transient background refresh errors
+    } finally {
+      refreshInFlightRef.current = false;
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        if (expandedRef.current) {
+          void refreshData();
+        } else {
+          dirtyWhileHiddenRef.current = true;
+        }
+      }
     }
   }, [transport]);
 
@@ -545,7 +567,10 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   const reportHitRectFor = useCallback(
     (isExpanded: boolean, isFullGallery: boolean, edge: ShelfDockEdge = dockEdgeRef.current) => {
       if (!isExpanded) {
-        void transport.setShelfHitRect(null).catch(() => {});
+        if (lastHitRectKeyRef.current !== 'null') {
+          lastHitRectKeyRef.current = 'null';
+          void transport.setShelfHitRect(null).catch(() => {});
+        }
         return;
       }
       const dpr = window.devicePixelRatio || 1;
@@ -603,14 +628,18 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
         });
       }
 
-      void transport
-        .setShelfHitRect({
-          x: Math.round(left * dpr),
-          y: Math.round(top * dpr),
-          width: Math.round(Math.max(1, right - left) * dpr),
-          height: Math.round(Math.max(1, bottom - top) * dpr),
-        })
-        .catch(() => {});
+      const rect = {
+        x: Math.round(left * dpr),
+        y: Math.round(top * dpr),
+        width: Math.round(Math.max(1, right - left) * dpr),
+        height: Math.round(Math.max(1, bottom - top) * dpr),
+      };
+      const key = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+      if (lastHitRectKeyRef.current === key) {
+        return;
+      }
+      lastHitRectKeyRef.current = key;
+      void transport.setShelfHitRect(rect).catch(() => {});
     },
     [transport],
   );
@@ -657,8 +686,15 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     let unlisten: (() => void) | null = null;
     void transport
       .subscribeEvents({
-        onLibraryChanged: () => void refreshData(),
-        onBoardUpdated: () => void refreshData(),
+        onLibraryChanged: () => {
+          // Never hammer full-library IPC while the shelf is hidden/collapsed; flush on next open.
+          if (expandedRef.current) void refreshData();
+          else dirtyWhileHiddenRef.current = true;
+        },
+        onBoardUpdated: () => {
+          if (expandedRef.current) void refreshData();
+          else dirtyWhileHiddenRef.current = true;
+        },
         onClipboardChanged: (preview) => setClipboard(preview),
         onShelfSettings: (cfg) => {
           shelfSettingsRef.current = cfg;
@@ -709,10 +745,17 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           }
           if (s.expanded) {
             // Set expanded directly (never inside requestAnimationFrame, which hidden WebView2 suspends!)
+            const wasExpanded = expandedRef.current;
+            expandedRef.current = true;
             setExpanded(true);
+            // Force a fresh hit-rect push when transitioning from hidden -> expanded
+            if (!wasExpanded) lastHitRectKeyRef.current = null;
             reportHitRectFor(true, nextFullGallery, nextEdge);
-            void refreshData();
+            if (!wasExpanded || dirtyWhileHiddenRef.current) {
+              void refreshData();
+            }
           } else {
+            expandedRef.current = false;
             clearBannerTimer();
             setExpanded(false);
             setFullGallery(false);

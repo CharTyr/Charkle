@@ -18,7 +18,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::export::{
     BoardImageExporter, FigmaBridgeExportReport, FigmaBridgeExporter, MoodboardExportOptions,
 };
-use crate::intelligence::MoodboardAgentHarness;
+use crate::intelligence::{MoodboardAgentHarness, TypeSafeImagePreparer};
 use crate::layout::{EditorialLayoutResult, EditorialLayoutSolver};
 use crate::media::artwork::MediaArtwork;
 use crate::media::metadata::ImageMetadataExtractor;
@@ -27,13 +27,15 @@ use crate::media::resolvers::{
     WebBookmarkResolver,
 };
 use crate::media::xiaohongshu::XiaohongshuURLParser;
-use crate::media::{MediaPipeline, SampleLibrarySeeder};
+use crate::media::{LocalVisualDescriptor, MediaPipeline, SampleLibrarySeeder};
 use crate::models::core::{
-    AssetBatchPatch, AssetRecord, FilterCriteria, FolderRecord, FolderSuggestion, MediaKind,
-    QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind, SocialPlatform,
-    TagCount,
+    AssetBatchPatch, AssetRecord, FilterCriteria, FolderRecord, FolderSuggestion, LabColor,
+    MediaKind, QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind,
+    SocialPlatform, TagCount,
 };
-use crate::models::media::{cosine_similarity, CacheStats, CaptureInput, ThumbnailTier};
+use crate::models::media::{
+    cosine_similarity, AssetVector, CacheStats, CaptureInput, ThumbnailTier,
+};
 use crate::models::moodboard::{
     AutoLayoutConfig, BoardLayoutMode, BoardNode, BoardNodeKind, BoardRect, MoodboardAgentStep,
     MoodboardCurationRequest, MoodboardDocument, MoodboardProposal, MoodboardSummary,
@@ -237,6 +239,7 @@ impl LiveCharkleEngine {
             if config.sync_thumbnails {
                 self.db.mark_projection("thumbnails", saved.id)?;
             }
+            let _ = self.index_local_visual_descriptor(&saved);
             committed.push(saved);
         }
 
@@ -480,8 +483,102 @@ impl LiveCharkleEngine {
             .search_by_embedding(query_embedding, limit, min_score)
     }
 
-    /// Computes local similarity rankings using available embeddings, CIELAB dominant color
-    /// harmony, tag overlap, and media kind affinity.
+    /// Extracts and caches a strictly local perceptual visual descriptor for `asset`
+    /// from its `Grid520.jpg` thumbnail (or cached original image if no thumbnail exists).
+    pub fn index_local_visual_descriptor(&self, asset: &AssetRecord) -> bool {
+        let Some(path) = self.visual_descriptor_source_path(asset) else {
+            return false;
+        };
+        let Some(desc) = LocalVisualDescriptor::extract_from_path(&path) else {
+            return false;
+        };
+        let fp = visual_descriptor_fingerprint(asset);
+        self.db
+            .save_local_visual_descriptor(asset.id, &fp, &desc.to_bytes())
+            .is_ok()
+    }
+
+    fn visual_descriptor_source_path(&self, asset: &AssetRecord) -> Option<PathBuf> {
+        if let Some(thumb) = self.media.thumbnail_url(asset.id, ThumbnailTier::Grid520) {
+            return Some(thumb);
+        }
+        if matches!(
+            asset.media_kind,
+            MediaKind::Image | MediaKind::AnimatedImage | MediaKind::DesignFile
+        ) {
+            return self.media.cached_original(asset);
+        }
+        None
+    }
+
+    /// Loads and resizes an asset's preview into a TypeSafe-compliant upright JPEG (`280..=1568px`)
+    /// for visual grounding or cloud AI Inbox triage.
+    pub fn prepare_visual_grounding_jpeg(
+        &self,
+        asset: &AssetRecord,
+        target_long_side: u32,
+    ) -> Option<Vec<u8>> {
+        let path = self.visual_descriptor_source_path(asset)?;
+        let img = image::open(&path).ok()?;
+        TypeSafeImagePreparer::prepare_jpeg(&img, target_long_side).ok()
+    }
+
+    fn ensure_visual_descriptors(
+        &self,
+        assets: &[AssetRecord],
+        priority_ids: &[Uuid],
+        max_compute: usize,
+    ) -> HashMap<Uuid, LocalVisualDescriptor> {
+        let cached = self.db.local_visual_descriptors().unwrap_or_default();
+        let mut out = HashMap::with_capacity(assets.len());
+        let mut missing_priority: Vec<&AssetRecord> = Vec::new();
+        let mut missing_others: Vec<&AssetRecord> = Vec::new();
+        let priority_set: HashSet<Uuid> = priority_ids.iter().copied().collect();
+
+        for asset in assets {
+            let fp = visual_descriptor_fingerprint(asset);
+            if let Some((cached_fp, bytes)) = cached.get(&asset.id) {
+                if cached_fp == &fp {
+                    if let Some(desc) = LocalVisualDescriptor::from_bytes(bytes) {
+                        out.insert(asset.id, desc);
+                        continue;
+                    }
+                }
+            }
+            if priority_set.contains(&asset.id) {
+                missing_priority.push(asset);
+            } else {
+                missing_others.push(asset);
+            }
+        }
+
+        let mut computed = 0usize;
+        for asset in missing_priority.into_iter().chain(missing_others) {
+            if computed >= max_compute && !priority_set.contains(&asset.id) {
+                break;
+            }
+            let Some(path) = self.visual_descriptor_source_path(asset) else {
+                continue;
+            };
+            let Some(desc) = LocalVisualDescriptor::extract_from_path(&path) else {
+                continue;
+            };
+            let fp = visual_descriptor_fingerprint(asset);
+            let _ = self
+                .db
+                .save_local_visual_descriptor(asset.id, &fp, &desc.to_bytes());
+            out.insert(asset.id, desc);
+            computed += 1;
+        }
+        out
+    }
+
+    /// Computes multi-signal similarity rankings using cloud semantic embeddings, local
+    /// perceptual visual descriptors, symmetric weighted CIELAB palette harmony, tag overlap,
+    /// lexical content affinity, and MMR diversity reranking.
+    ///
+    /// Never pads unrelated assets with free `media_kind` or `folder_id` points; returns an
+    /// empty list honestly when no genuinely similar asset exists.
     pub fn similar_assets(&self, asset_id: Uuid, limit: usize) -> CoreResult<Vec<ScoredAsset>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -497,100 +594,56 @@ impl LiveCharkleEngine {
             None,
         )?;
         let vectors = self.db.vectors().unwrap_or_default();
-        let anchor_emb = vectors.get(&asset_id).and_then(|v| v.embedding.as_deref());
-        let anchor_tags: HashSet<String> = anchor
-            .tags
-            .iter()
-            .map(|t| search_text::normalize(t))
-            .filter(|t| !t.is_empty())
-            .collect();
+        let descriptors = self.ensure_visual_descriptors(&all, &[asset_id], 180);
 
-        let mut scored = Vec::new();
+        let anchor_ctx =
+            AssetMatchContext::new(&anchor, vectors.get(&asset_id), descriptors.get(&asset_id));
+
+        let mut matches = Vec::new();
         for cand in all {
             if cand.id == asset_id {
                 continue;
             }
-            let mut score = 0.0_f64;
-            let mut reasons = Vec::new();
-
-            if let (Some(a_emb), Some(c_emb)) = (
-                anchor_emb,
-                vectors.get(&cand.id).and_then(|v| v.embedding.as_deref()),
-            ) {
-                if let Some(sim) = cosine_similarity(a_emb, c_emb) {
-                    if sim > 0.25 {
-                        score += f64::from(sim) * 0.55;
-                        reasons.push("语义与视觉风格相近".to_string());
-                    }
-                }
-            }
-
-            if !anchor.dominant_colors.is_empty() && !cand.dominant_colors.is_empty() {
-                let mut best_de = f64::MAX;
-                for ac in anchor.dominant_colors.iter().take(3) {
-                    for cc in cand.dominant_colors.iter().take(3) {
-                        best_de = best_de.min(ac.delta_e_2000(cc));
-                    }
-                }
-                if best_de < 28.0 {
-                    let color_sim = (1.0 - (best_de / 28.0)).clamp(0.0, 1.0);
-                    score += color_sim * 0.35;
-                    reasons.push("相近色板".to_string());
-                }
-            }
-
-            if !anchor_tags.is_empty() && !cand.tags.is_empty() {
-                let shared: Vec<String> = cand
-                    .tags
-                    .iter()
-                    .filter(|t| anchor_tags.contains(&search_text::normalize(t)))
-                    .cloned()
-                    .collect();
-                if !shared.is_empty() {
-                    let ratio = shared.len() as f64 / anchor_tags.len().max(1) as f64;
-                    score += ratio.min(1.0) * 0.35;
-                    reasons.push(format!(
-                        "共同标签：{}",
-                        shared.into_iter().take(2).collect::<Vec<_>>().join("、")
-                    ));
-                }
-            }
-
-            if cand.media_kind == anchor.media_kind {
-                score += 0.08;
-            }
-            if anchor.folder_id.is_some() && cand.folder_id == anchor.folder_id {
-                score += 0.06;
-            }
-
-            if score >= 0.16 {
-                scored.push(ScoredAsset {
-                    asset: cand,
-                    score: score.min(1.0),
-                    match_reasons: reasons,
-                });
+            let scored = score_asset_pair(
+                &anchor_ctx,
+                cand,
+                vectors.get(&asset_id),
+                &vectors,
+                &descriptors,
+            );
+            if !scored.match_reasons.is_empty() && scored.score >= 0.24 {
+                matches.push(scored);
             }
         }
 
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.asset.created_at.cmp(&a.asset.created_at))
-        });
-        scored.truncate(limit);
-        Ok(scored)
+        Ok(rerank_similar_mmr(matches, &vectors, &descriptors, limit))
     }
 
-    /// Suggests the best-fitting existing folder for Inbox Triage using local tag, title,
-    /// and color-palette affinity.
+    /// Suggests the best-fitting existing folder for Inbox Triage using folder-name/path
+    /// word-boundary matching, IDF-weighted folder tag profiles, and multi-signal peer
+    /// similarity (local visual descriptors, embeddings, weighted palette harmony, shared tags).
+    ///
+    /// Returns `Ok(None)` honestly when no folder genuinely fits rather than forcing a fallback.
     pub fn suggest_folder(&self, asset_id: Uuid) -> CoreResult<Option<FolderSuggestion>> {
         let Some(asset) = self.db.asset(asset_id)? else {
             return Ok(None);
         };
+        let mut results = self.suggest_folders_for_assets(&[asset])?;
+        Ok(results.pop().and_then(|(_, suggestion)| suggestion))
+    }
+
+    /// Batch version of [`Self::suggest_folder`] that loads folders, peers, vectors, and local
+    /// visual descriptors once across all target assets.
+    pub fn suggest_folders_for_assets(
+        &self,
+        targets: &[AssetRecord],
+    ) -> CoreResult<Vec<(Uuid, Option<FolderSuggestion>)>> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
         let folders = self.db.fetch_folders()?;
         if folders.is_empty() {
-            return Ok(None);
+            return Ok(targets.iter().map(|a| (a.id, None)).collect());
         }
         let all_assets = self.db.fetch_assets(
             &FilterCriteria {
@@ -599,98 +652,208 @@ impl LiveCharkleEngine {
             },
             None,
         )?;
+        let vectors = self.db.vectors().unwrap_or_default();
+        let priority_ids: Vec<Uuid> = targets.iter().map(|a| a.id).collect();
+        let descriptors = self.ensure_visual_descriptors(&all_assets, &priority_ids, 220);
+
+        let folder_by_id: HashMap<Uuid, &FolderRecord> =
+            folders.iter().map(|f| (f.id, f)).collect();
+        let folder_paths: HashMap<Uuid, String> = folders
+            .iter()
+            .map(|f| (f.id, build_folder_display_path(f.id, &folder_by_id)))
+            .collect();
+
         let mut by_folder: HashMap<Uuid, Vec<&AssetRecord>> = HashMap::new();
         for item in &all_assets {
-            if item.id != asset_id {
-                if let Some(fid) = item.folder_id {
-                    by_folder.entry(fid).or_default().push(item);
-                }
+            if let Some(fid) = item.folder_id {
+                by_folder.entry(fid).or_default().push(item);
             }
         }
 
-        let asset_tags: HashSet<String> = asset
-            .tags
-            .iter()
-            .chain(asset.suggested_tags.iter())
-            .map(|t| search_text::normalize(t))
-            .filter(|t| !t.is_empty())
-            .collect();
-        let asset_text = search_text::normalize(&format!("{} {}", asset.title, asset.notes));
-
-        let mut best: Option<(f64, FolderSuggestion)> = None;
-        for folder in folders {
-            if Some(folder.id) == asset.folder_id {
-                continue;
-            }
-            let mut score = 0.0_f64;
-            let mut reason = String::new();
-            let folder_norm = search_text::normalize(&folder.name);
-            if !folder_norm.is_empty() && asset_text.contains(&folder_norm) {
-                score += 0.55;
-                reason = format!("标题或备注包含「{}」", folder.name);
-            }
-
-            if let Some(members) = by_folder.get(&folder.id) {
-                if !asset_tags.is_empty() {
-                    let mut shared_hits = 0usize;
-                    let mut sample_tag = None;
-                    for m in members {
-                        for t in &m.tags {
-                            if asset_tags.contains(&search_text::normalize(t)) {
-                                shared_hits += 1;
-                                if sample_tag.is_none() {
-                                    sample_tag = Some(t.clone());
-                                }
-                            }
-                        }
+        // Build per-folder tag frequency profiles and cross-folder document frequency (IDF)
+        let mut folder_tag_counts: HashMap<Uuid, HashMap<String, (usize, String)>> = HashMap::new();
+        let mut tag_folder_df: HashMap<String, usize> = HashMap::new();
+        for (&fid, members) in &by_folder {
+            let mut counts: HashMap<String, (usize, String)> = HashMap::new();
+            for m in members {
+                let mut seen_in_member = HashSet::new();
+                for raw_tag in m.tags.iter().chain(m.suggested_tags.iter()) {
+                    let norm = search_text::normalize(raw_tag);
+                    if norm.is_empty() || !seen_in_member.insert(norm.clone()) {
+                        continue;
                     }
-                    if shared_hits > 0 {
-                        let bonus = (0.35 + (shared_hits as f64 * 0.12)).min(0.82);
-                        if bonus > score {
-                            score = bonus;
-                            if let Some(tag) = sample_tag {
-                                reason = format!("与该目录中标签「{tag}」高度一致");
-                            }
-                        }
-                    }
-                }
-
-                if score < 0.45 && !asset.dominant_colors.is_empty() {
-                    let mut min_de = f64::MAX;
-                    for m in members.iter().take(24) {
-                        for ac in asset.dominant_colors.iter().take(2) {
-                            for mc in m.dominant_colors.iter().take(2) {
-                                min_de = min_de.min(ac.delta_e_2000(mc));
-                            }
-                        }
-                    }
-                    if min_de < 16.0 {
-                        let color_score = (0.42 + (16.0 - min_de) / 40.0).min(0.70);
-                        if color_score > score {
-                            score = color_score;
-                            reason = "色彩风格与该目录素材接近".to_string();
-                        }
-                    }
+                    counts
+                        .entry(norm)
+                        .and_modify(|(c, _)| *c += 1)
+                        .or_insert_with(|| (1, raw_tag.clone()));
                 }
             }
+            for norm in counts.keys() {
+                *tag_folder_df.entry(norm.clone()).or_insert(0) += 1;
+            }
+            folder_tag_counts.insert(fid, counts);
+        }
+        let non_empty_folder_count = by_folder.len().max(1) as f64;
 
-            if score >= 0.35 && best.as_ref().is_none_or(|(b, _)| score > *b) {
-                best = Some((
-                    score,
-                    FolderSuggestion {
-                        folder_id: folder.id,
-                        folder_name: folder.name,
-                        confidence: score.min(0.98),
-                        reason: if reason.is_empty() {
-                            "根据目录内容匹配推荐".to_string()
+        let mut output = Vec::with_capacity(targets.len());
+        for asset in targets {
+            let anchor_ctx =
+                AssetMatchContext::new(asset, vectors.get(&asset.id), descriptors.get(&asset.id));
+            let asset_full_text_norm = search_text::normalize(&format!(
+                "{} {} {} {} {} {} {}",
+                asset.title,
+                asset.file_name,
+                asset.notes,
+                asset.tags.join(" "),
+                asset.suggested_tags.join(" "),
+                asset.ai_description.as_deref().unwrap_or(""),
+                asset.ocr_text.as_deref().unwrap_or("")
+            ));
+
+            let mut best: Option<(f64, FolderSuggestion)> = None;
+            for folder in &folders {
+                if Some(folder.id) == asset.folder_id {
+                    continue;
+                }
+
+                // 1. Folder name / path match (word-boundary ASCII + CJK phrase match)
+                let path_str = folder_paths
+                    .get(&folder.id)
+                    .map(String::as_str)
+                    .unwrap_or(&folder.name);
+                let name_score = score_folder_name_match(
+                    &folder.name,
+                    path_str,
+                    &anchor_ctx.tags,
+                    &anchor_ctx.tokens,
+                    &asset_full_text_norm,
+                );
+
+                // 2. Folder characteristic tag profile match (IDF-weighted)
+                let mut tag_profile_score = 0.0_f64;
+                let mut top_matched_tag: Option<String> = None;
+                if let Some(tag_map) = folder_tag_counts.get(&folder.id) {
+                    let member_total = by_folder
+                        .get(&folder.id)
+                        .map(|v| v.len())
+                        .unwrap_or(1)
+                        .max(1) as f64;
+                    let mut best_idf = 0.0_f64;
+                    let mut accum = 0.0_f64;
+                    for (norm_tag, (cnt, display)) in tag_map {
+                        let asset_has_tag = anchor_ctx.tags.contains(norm_tag)
+                            || anchor_ctx.tokens.contains(norm_tag);
+                        if !asset_has_tag {
+                            continue;
+                        }
+                        let df = *tag_folder_df.get(norm_tag).unwrap_or(&1) as f64;
+                        let idf = ((non_empty_folder_count + 1.0) / (df + 0.5)).ln().max(0.35);
+                        let prevalence = (*cnt as f64 / member_total).clamp(0.15, 1.0);
+                        let contrib = (0.34 + 0.28 * prevalence) * (idf / 1.4).clamp(0.5, 1.35);
+                        accum += contrib;
+                        if contrib > best_idf {
+                            best_idf = contrib;
+                            top_matched_tag = Some(display.clone());
+                        }
+                    }
+                    tag_profile_score = accum.min(0.86);
+                }
+
+                // 3. Peer visual / embedding / palette / tag similarity against categorized members
+                let mut peer_affinity = 0.0_f64;
+                let mut matched_peer_count = 0usize;
+                let mut top_peer_reason: Option<String> = None;
+                if let Some(members) = by_folder.get(&folder.id) {
+                    let mut peer_scores: Vec<(f64, String)> = Vec::new();
+                    for &member in members {
+                        if member.id == asset.id {
+                            continue;
+                        }
+                        let scored = score_asset_pair(
+                            &anchor_ctx,
+                            member.clone(),
+                            vectors.get(&asset.id),
+                            &vectors,
+                            &descriptors,
+                        );
+                        if !scored.match_reasons.is_empty() && scored.score >= 0.24 {
+                            let primary_reason = scored
+                                .match_reasons
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "视觉风格相近".to_string());
+                            peer_scores.push((scored.score, primary_reason));
+                        }
+                    }
+                    peer_scores
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    matched_peer_count = peer_scores.len();
+                    if !peer_scores.is_empty() {
+                        let top_k = &peer_scores[..peer_scores.len().min(3)];
+                        let mean_top =
+                            top_k.iter().map(|(s, _)| *s).sum::<f64>() / (top_k.len() as f64);
+                        let support_bonus = if matched_peer_count >= 3 {
+                            0.08
+                        } else if matched_peer_count == 2 {
+                            0.04
                         } else {
-                            reason
+                            0.0
+                        };
+                        peer_affinity = (mean_top * 0.92 + support_bonus).min(0.92);
+                        top_peer_reason = Some(top_k[0].1.clone());
+                    }
+                }
+
+                // Combine independent evidence cleanly (never blindly fabricate a score when all 3 are 0)
+                let primary = name_score.max(tag_profile_score).max(peer_affinity);
+                if primary < 0.34 {
+                    continue;
+                }
+                let supporting =
+                    (name_score + tag_profile_score + peer_affinity - primary).min(0.45);
+                let combined = (primary + supporting * 0.28).min(0.98);
+
+                let reason = if name_score >= tag_profile_score && name_score >= peer_affinity {
+                    format!("标题或标签与目录「{}」主题吻合", folder.name)
+                } else if tag_profile_score >= peer_affinity {
+                    if let Some(tag) = top_matched_tag {
+                        format!("与「{}」中标签「{tag}」一致", folder.name)
+                    } else {
+                        format!("标签特征与「{}」高度一致", folder.name)
+                    }
+                } else if let Some(peer_reason) = top_peer_reason {
+                    if matched_peer_count >= 2 {
+                        format!(
+                            "与「{}」内 {matched_peer_count} 项素材{peer_reason}",
+                            folder.name
+                        )
+                    } else {
+                        format!("与「{}」内已有素材{peer_reason}", folder.name)
+                    }
+                } else {
+                    format!("与「{}」目录内容相近", folder.name)
+                };
+
+                let is_better = best.as_ref().is_none_or(|(b_score, b_sug)| {
+                    combined > *b_score + 1e-6
+                        || ((combined - *b_score).abs() <= 1e-6 && folder.name < b_sug.folder_name)
+                });
+                if is_better {
+                    best = Some((
+                        combined,
+                        FolderSuggestion {
+                            folder_id: folder.id,
+                            folder_name: folder.name.clone(),
+                            confidence: combined,
+                            reason,
                         },
-                    },
-                ));
+                    ));
+                }
             }
+            output.push((asset.id, best.map(|(_, s)| s)));
         }
-        Ok(best.map(|(_, s)| s))
+
+        Ok(output)
     }
 
     /// Re-extracts EXIF and AI prompt metadata from the cached original if absent.
@@ -1526,6 +1689,526 @@ fn ensure_unique_folder(
     Ok(())
 }
 
+fn visual_descriptor_fingerprint(asset: &AssetRecord) -> String {
+    if !asset.content_hash.is_empty() {
+        asset.content_hash.clone()
+    } else {
+        format!(
+            "{}:{}:{}",
+            asset.file_name, asset.pixel_width, asset.pixel_height
+        )
+    }
+}
+
+struct AssetMatchContext<'a> {
+    asset: &'a AssetRecord,
+    tags: HashSet<String>,
+    tokens: HashSet<String>,
+    descriptor: Option<&'a LocalVisualDescriptor>,
+    has_embedding: bool,
+}
+
+impl<'a> AssetMatchContext<'a> {
+    fn new(
+        asset: &'a AssetRecord,
+        vector: Option<&'a AssetVector>,
+        descriptor: Option<&'a LocalVisualDescriptor>,
+    ) -> Self {
+        let tags: HashSet<String> = asset
+            .tags
+            .iter()
+            .chain(asset.suggested_tags.iter())
+            .map(|t| search_text::normalize(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let tokens = extract_meaningful_tokens(&format!(
+            "{} {} {} {}",
+            asset.title,
+            asset.notes,
+            asset.ocr_text.as_deref().unwrap_or(""),
+            asset.ai_description.as_deref().unwrap_or("")
+        ));
+        let has_embedding = vector.and_then(|v| v.embedding.as_ref()).is_some();
+        Self {
+            asset,
+            tags,
+            tokens,
+            descriptor,
+            has_embedding,
+        }
+    }
+}
+
+fn score_asset_pair(
+    anchor: &AssetMatchContext<'_>,
+    cand: AssetRecord,
+    anchor_vector: Option<&AssetVector>,
+    vectors: &HashMap<Uuid, AssetVector>,
+    descriptors: &HashMap<Uuid, LocalVisualDescriptor>,
+) -> ScoredAsset {
+    // Tuple: (signal_value, weight, min_display_threshold, reason)
+    let mut signals: Vec<(f64, f64, f64, String)> = Vec::new();
+
+    // 1. Cloud semantic embedding cosine similarity (same model identity)
+    if anchor.has_embedding {
+        if let (Some(a_vec), Some(c_vec)) = (anchor_vector, vectors.get(&cand.id)) {
+            if let (Some(a_emb), Some(c_emb)) =
+                (a_vec.embedding.as_deref(), c_vec.embedding.as_deref())
+            {
+                if a_vec.embedding_model == c_vec.embedding_model {
+                    let cos = cosine_similarity(a_emb, c_emb)
+                        .map(f64::from)
+                        .unwrap_or(0.0)
+                        .clamp(0.0, 1.0);
+                    signals.push((cos, 0.40, 0.45, "语义接近".to_string()));
+                }
+            }
+        }
+    }
+
+    // 2. Local perceptual visual descriptor similarity (spatial CIELAB + chromatic mood + edge HOG)
+    if let (Some(a_desc), Some(c_desc)) = (anchor.descriptor, descriptors.get(&cand.id)) {
+        let vis = a_desc.similarity(c_desc);
+        signals.push((vis, 0.36, 0.24, "视觉特征接近".to_string()));
+    }
+
+    // 3. Symmetric proportion-weighted CIELAB palette harmony (avoids dark/white border false positives)
+    if !anchor.asset.dominant_colors.is_empty() && !cand.dominant_colors.is_empty() {
+        let sim = match symmetric_weighted_palette_distance(
+            &cand.dominant_colors,
+            &anchor.asset.dominant_colors,
+        ) {
+            Some(avg_de) if avg_de <= 6.0 => 1.0,
+            Some(avg_de) if avg_de < 22.0 => ((22.0 - avg_de) / 16.0).powf(1.1),
+            _ => 0.0,
+        };
+        signals.push((sim, 0.26, 0.35, "配色相近".to_string()));
+    }
+
+    // 4. Tag Jaccard overlap across confirmed + suggested tags
+    if !anchor.tags.is_empty() {
+        let mut cand_tags = HashSet::new();
+        let mut shared_display = Vec::new();
+        let mut seen_display = HashSet::new();
+        for raw in cand.tags.iter().chain(cand.suggested_tags.iter()) {
+            let norm = search_text::normalize(raw);
+            if norm.is_empty() {
+                continue;
+            }
+            if anchor.tags.contains(&norm) && seen_display.insert(norm.clone()) {
+                shared_display.push(raw.clone());
+            }
+            cand_tags.insert(norm);
+        }
+        let overlap = if cand_tags.is_empty() {
+            0.0
+        } else {
+            let inter = anchor.tags.intersection(&cand_tags).count();
+            let union = anchor.tags.union(&cand_tags).count().max(1);
+            inter as f64 / union as f64
+        };
+        let label = if shared_display.is_empty() {
+            "相同标签".to_string()
+        } else {
+            format!(
+                "相同标签：{}",
+                shared_display
+                    .into_iter()
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        };
+        signals.push((overlap, 0.20, 0.18, label));
+    }
+
+    // 5. Lexical keyword affinity (title / notes / OCR / AI description)
+    if !anchor.tokens.is_empty() {
+        let cand_tokens = extract_meaningful_tokens(&format!(
+            "{} {} {} {}",
+            cand.title,
+            cand.notes,
+            cand.ocr_text.as_deref().unwrap_or(""),
+            cand.ai_description.as_deref().unwrap_or("")
+        ));
+        if !cand_tokens.is_empty() {
+            let inter = anchor.tokens.intersection(&cand_tokens).count();
+            if inter > 0 {
+                let denom = anchor.tokens.len().min(cand_tokens.len()).max(1) as f64;
+                let lexical = (inter as f64 / denom).clamp(0.0, 1.0);
+                signals.push((lexical, 0.14, 0.28, "主题相近".to_string()));
+            }
+        }
+    }
+
+    let weighted_sum: f64 = signals.iter().map(|(v, w, _, _)| v * w).sum();
+    let capacity: f64 = signals.iter().map(|(_, w, _, _)| *w).sum::<f64>().max(0.35);
+    let base_score = (weighted_sum / capacity).clamp(0.0, 1.0);
+
+    let mut qualified: Vec<(f64, String)> = signals
+        .into_iter()
+        .filter(|(v, _, threshold, _)| *v >= *threshold)
+        .map(|(v, w, _, reason)| (v * w, reason))
+        .collect();
+    qualified.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let match_reasons: Vec<String> = qualified.into_iter().map(|(_, r)| r).collect();
+
+    // Only apply a subtle rating tie-break when at least one real similarity signal matched.
+    let rating = f64::from(cand.rating.clamp(0, 5)) / 5.0;
+    let final_score = if match_reasons.is_empty() {
+        base_score
+    } else {
+        (0.96 * base_score + 0.04 * rating).min(1.0)
+    };
+
+    ScoredAsset {
+        asset: cand,
+        score: final_score,
+        match_reasons,
+    }
+}
+
+fn rerank_similar_mmr(
+    mut pool: Vec<ScoredAsset>,
+    vectors: &HashMap<Uuid, AssetVector>,
+    descriptors: &HashMap<Uuid, LocalVisualDescriptor>,
+    limit: usize,
+) -> Vec<ScoredAsset> {
+    pool.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.asset.rating.cmp(&a.asset.rating))
+            .then_with(|| b.asset.id.cmp(&a.asset.id))
+    });
+    let count = limit.min(pool.len());
+    if count == 0 {
+        return Vec::new();
+    }
+    let pool_cap = (count.saturating_mul(6)).max(120);
+    pool.truncate(pool_cap);
+
+    let mut redundancy = vec![0.0_f64; pool.len()];
+    let mut available = vec![true; pool.len()];
+    let mut results = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let mut best_idx = None;
+        let mut best_rank = f64::NEG_INFINITY;
+        for i in 0..pool.len() {
+            if !available[i] {
+                continue;
+            }
+            let rank = 0.70 * pool[i].score - 0.30 * redundancy[i];
+            if rank > best_rank {
+                best_rank = rank;
+                best_idx = Some(i);
+            }
+        }
+        let Some(chosen) = best_idx else {
+            break;
+        };
+        available[chosen] = false;
+        let chosen_asset = pool[chosen].asset.clone();
+        results.push(pool[chosen].clone());
+        if results.len() < count {
+            for i in 0..pool.len() {
+                if available[i] {
+                    let red =
+                        pairwise_redundancy(&chosen_asset, &pool[i].asset, vectors, descriptors);
+                    if red > redundancy[i] {
+                        redundancy[i] = red;
+                    }
+                }
+            }
+        }
+    }
+    results
+}
+
+fn pairwise_redundancy(
+    lhs: &AssetRecord,
+    rhs: &AssetRecord,
+    vectors: &HashMap<Uuid, AssetVector>,
+    descriptors: &HashMap<Uuid, LocalVisualDescriptor>,
+) -> f64 {
+    if !lhs.content_hash.is_empty() && lhs.content_hash == rhs.content_hash {
+        return 1.0;
+    }
+    let mut red = 0.0_f64;
+    if let (Some(lv), Some(rv)) = (vectors.get(&lhs.id), vectors.get(&rhs.id)) {
+        if lv.embedding_model == rv.embedding_model {
+            if let (Some(le), Some(re)) = (lv.embedding.as_deref(), rv.embedding.as_deref()) {
+                if let Some(cos) = cosine_similarity(le, re) {
+                    red = red.max((f64::from(cos) * 0.92).clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+    if let (Some(ld), Some(rd)) = (descriptors.get(&lhs.id), descriptors.get(&rhs.id)) {
+        red = red.max(ld.similarity(rd));
+    }
+    if let Some(de) = symmetric_weighted_palette_distance(
+        &lhs.dominant_colors[..lhs.dominant_colors.len().min(2)],
+        &rhs.dominant_colors[..rhs.dominant_colors.len().min(2)],
+    ) {
+        red = red.max(0.55 * (-de / 17.0).exp());
+    }
+    red
+}
+
+fn significant_swatches(colors: &[LabColor], max_count: usize) -> Vec<&LabColor> {
+    let valid: Vec<&LabColor> = colors
+        .iter()
+        .filter(|c| c.l.is_finite() && c.a.is_finite() && c.b.is_finite())
+        .collect();
+    let has_proportions = valid.iter().any(|c| c.proportion > 0.001);
+    if has_proportions {
+        let major: Vec<&LabColor> = valid
+            .iter()
+            .copied()
+            .filter(|c| c.proportion >= 0.08)
+            .collect();
+        if !major.is_empty() {
+            return major.into_iter().take(max_count).collect();
+        }
+    }
+    valid.into_iter().take(max_count).collect()
+}
+
+fn directed_weighted_palette_distance(src: &[&LabColor], dst: &[&LabColor]) -> Option<f64> {
+    if src.is_empty() || dst.is_empty() {
+        return None;
+    }
+    let mut weighted_sum = 0.0_f64;
+    let mut total_weight = 0.0_f64;
+    for s in src {
+        let nearest = dst
+            .iter()
+            .map(|d| s.delta_e_2000(d))
+            .filter(|d| d.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        if !nearest.is_finite() {
+            continue;
+        }
+        let w = if s.proportion > 0.001 {
+            s.proportion
+        } else {
+            1.0
+        };
+        weighted_sum += nearest * w;
+        total_weight += w;
+    }
+    (total_weight > 0.0).then_some(weighted_sum / total_weight)
+}
+
+fn symmetric_weighted_palette_distance(a: &[LabColor], b: &[LabColor]) -> Option<f64> {
+    let sa = significant_swatches(a, 3);
+    let sb = significant_swatches(b, 4);
+    let dab = directed_weighted_palette_distance(&sa, &sb)?;
+    let dba = directed_weighted_palette_distance(&sb, &sa)?;
+    Some(0.5 * (dab + dba))
+}
+
+fn is_generic_stopword(tok: &str) -> bool {
+    matches!(
+        tok,
+        "img"
+            | "image"
+            | "photo"
+            | "pic"
+            | "picture"
+            | "screenshot"
+            | "screen"
+            | "shot"
+            | "capture"
+            | "untitled"
+            | "file"
+            | "asset"
+            | "copy"
+            | "final"
+            | "new"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "svg"
+            | "mp4"
+            | "mov"
+            | "pdf"
+            | "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "that"
+            | "this"
+            | "http"
+            | "https"
+            | "www"
+            | "com"
+            | "net"
+            | "org"
+            | "截图"
+            | "图片"
+            | "未命名"
+            | "素材"
+    )
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF | 0x3040..=0x30FF | 0xAC00..=0xD7AF
+    )
+}
+
+/// Extracts meaningful ASCII word tokens (word-boundary, skipping filename noise & pure digits)
+/// and CJK terms (`>= 2` chars, plus bigrams for longer runs) for honest lexical matching.
+fn extract_meaningful_tokens(text: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let lower = text.to_lowercase();
+    let mut ascii_buf = String::new();
+    let mut cjk_buf: Vec<char> = Vec::new();
+
+    let flush_ascii = |buf: &mut String, set: &mut HashSet<String>| {
+        if buf.len() >= 2 && !buf.chars().all(|c| c.is_ascii_digit()) && !is_generic_stopword(buf) {
+            set.insert(buf.clone());
+        }
+        buf.clear();
+    };
+    let flush_cjk = |buf: &mut Vec<char>, set: &mut HashSet<String>| {
+        if buf.len() >= 2 {
+            let full: String = buf.iter().collect();
+            if !is_generic_stopword(&full) {
+                set.insert(full);
+            }
+            if buf.len() > 2 && buf.len() <= 16 {
+                for w in buf.windows(2) {
+                    let bi: String = w.iter().collect();
+                    if !is_generic_stopword(&bi) {
+                        set.insert(bi);
+                    }
+                }
+            }
+        }
+        buf.clear();
+    };
+
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() {
+            flush_cjk(&mut cjk_buf, &mut out);
+            ascii_buf.push(ch);
+        } else if is_cjk(ch) {
+            flush_ascii(&mut ascii_buf, &mut out);
+            cjk_buf.push(ch);
+        } else {
+            flush_ascii(&mut ascii_buf, &mut out);
+            flush_cjk(&mut cjk_buf, &mut out);
+        }
+    }
+    flush_ascii(&mut ascii_buf, &mut out);
+    flush_cjk(&mut cjk_buf, &mut out);
+    out
+}
+
+fn score_folder_name_match(
+    folder_name: &str,
+    folder_path: &str,
+    asset_tags: &HashSet<String>,
+    asset_tokens: &HashSet<String>,
+    asset_full_text_norm: &str,
+) -> f64 {
+    let folder_norm = search_text::normalize(folder_name);
+    if folder_norm.is_empty() {
+        return 0.0;
+    }
+
+    // Exact tag match against folder name (highest confidence)
+    if asset_tags.contains(&folder_norm) {
+        return 0.88;
+    }
+
+    // Full folder name match: word-boundary for pure ASCII, direct phrase for CJK (>= 2 chars)
+    let is_ascii_folder = folder_norm.is_ascii();
+    if !is_ascii_folder
+        && folder_norm.chars().count() >= 2
+        && asset_full_text_norm.contains(&folder_norm)
+    {
+        return 0.82;
+    }
+
+    // Token-level word-boundary match (prevents "ui" from matching "building" or "fluid")
+    let name_tokens = extract_meaningful_tokens(folder_name);
+    if !name_tokens.is_empty() {
+        let tag_hits = name_tokens
+            .iter()
+            .filter(|t| asset_tags.contains(*t))
+            .count();
+        let text_hits = name_tokens
+            .iter()
+            .filter(|t| asset_tokens.contains(*t) || asset_tags.contains(*t))
+            .count();
+
+        if text_hits == name_tokens.len() {
+            return if tag_hits > 0 { 0.86 } else { 0.78 };
+        }
+        if tag_hits > 0 {
+            return (0.52 + 0.24 * (tag_hits as f64 / name_tokens.len() as f64)).min(0.80);
+        }
+        if text_hits > 0 {
+            let ratio = text_hits as f64 / name_tokens.len() as f64;
+            // Require strong ratio or an informative token (>= 3 chars or CJK) so single generic words don't over-trigger
+            let has_strong_token = name_tokens.iter().any(|t| {
+                (asset_tokens.contains(t))
+                    && (!t.is_ascii() || t.len() >= 3 || t == "ui" || t == "ux" || t == "3d")
+            });
+            if has_strong_token && ratio >= 0.5 {
+                return (0.44 + 0.22 * ratio).min(0.68);
+            }
+        }
+    }
+
+    // Hierarchical parent path token match (weaker than leaf folder name)
+    if folder_path != folder_name {
+        let path_tokens = extract_meaningful_tokens(folder_path);
+        let hits = path_tokens
+            .iter()
+            .filter(|t| asset_tags.contains(*t) || asset_tokens.contains(*t))
+            .count();
+        if hits > 0 && !path_tokens.is_empty() {
+            let ratio = hits as f64 / path_tokens.len() as f64;
+            if ratio >= 0.5 {
+                return (0.36 + 0.16 * ratio).min(0.52);
+            }
+        }
+    }
+
+    let _ = is_ascii_folder;
+    0.0
+}
+
+fn build_folder_display_path(
+    folder_id: Uuid,
+    folder_by_id: &HashMap<Uuid, &FolderRecord>,
+) -> String {
+    let mut parts = Vec::new();
+    let mut visited = HashSet::new();
+    let mut cur = folder_by_id.get(&folder_id).copied();
+    while let Some(folder) = cur {
+        if !visited.insert(folder.id) {
+            break;
+        }
+        parts.push(folder.name.as_str());
+        cur = folder
+            .parent_id
+            .and_then(|pid| folder_by_id.get(&pid).copied());
+    }
+    parts.reverse();
+    parts.join(" / ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1631,5 +2314,215 @@ mod tests {
         // Second run is idempotent for already-migrated text asset
         let second_run = engine.upgrade_legacy_xiaohongshu_covers_if_needed().await;
         assert!(second_run.is_empty());
+    }
+
+    fn write_test_card_png(dir: &Path, name: &str, bg: [u8; 3], accent: [u8; 3]) -> PathBuf {
+        let mut img =
+            image::RgbaImage::from_pixel(160, 160, image::Rgba([bg[0], bg[1], bg[2], 255]));
+        // Shared dark outer border (the exact pattern that fooled old single-min color matching)
+        for x in 0..160 {
+            for b in 0..8 {
+                img.put_pixel(x, b, image::Rgba([16, 18, 22, 255]));
+                img.put_pixel(x, 159 - b, image::Rgba([16, 18, 22, 255]));
+            }
+        }
+        for y in 0..160 {
+            for b in 0..8 {
+                img.put_pixel(b, y, image::Rgba([16, 18, 22, 255]));
+                img.put_pixel(159 - b, y, image::Rgba([16, 18, 22, 255]));
+            }
+        }
+        for y in 36..112 {
+            for x in 56..132 {
+                let dx = x as i32 - 94;
+                let dy = y as i32 - 74;
+                if dx * dx + dy * dy <= 34 * 34 {
+                    img.put_pixel(x, y, image::Rgba([accent[0], accent[1], accent[2], 255]));
+                }
+            }
+        }
+        let path = dir.join(name);
+        img.save(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn similar_assets_returns_distinct_visual_matches_and_abstains_for_outliers() {
+        let tmp = tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let engine = LiveCharkleEngine::open(tmp.path().join("lib")).unwrap();
+
+        let p_emerald_a =
+            write_test_card_png(&src_dir, "emerald_a.png", [16, 46, 36], [22, 186, 118]);
+        let p_emerald_b =
+            write_test_card_png(&src_dir, "emerald_b.png", [20, 54, 42], [28, 174, 110]);
+        let p_mustard_a =
+            write_test_card_png(&src_dir, "mustard_a.png", [228, 168, 26], [214, 44, 34]);
+        let p_mustard_b =
+            write_test_card_png(&src_dir, "mustard_b.png", [218, 158, 22], [204, 52, 38]);
+        let p_beige =
+            write_test_card_png(&src_dir, "beige_unique.png", [210, 198, 182], [116, 98, 82]);
+
+        let ingested = engine
+            .ingest(
+                vec![
+                    CaptureInput::FilePath(p_emerald_a),
+                    CaptureInput::FilePath(p_emerald_b),
+                    CaptureInput::FilePath(p_mustard_a),
+                    CaptureInput::FilePath(p_mustard_b),
+                    CaptureInput::FilePath(p_beige),
+                ],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let emerald_a = ingested[0].id;
+        let emerald_b = ingested[1].id;
+        let mustard_a = ingested[2].id;
+        let mustard_b = ingested[3].id;
+        let beige = ingested[4].id;
+
+        let sim_emerald = engine.similar_assets(emerald_a, 8).unwrap();
+        assert_eq!(
+            sim_emerald.first().map(|s| s.asset.id),
+            Some(emerald_b),
+            "Emerald card should rank matching Emerald card #1, got: {:?}",
+            sim_emerald
+                .iter()
+                .map(|s| (&s.asset.title, s.score, &s.match_reasons))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !sim_emerald
+                .iter()
+                .any(|s| s.asset.id == mustard_a || s.asset.id == beige),
+            "Emerald card should not falsely match unrelated mustard or beige cards"
+        );
+
+        let sim_mustard = engine.similar_assets(mustard_a, 8).unwrap();
+        assert_eq!(
+            sim_mustard.first().map(|s| s.asset.id),
+            Some(mustard_b),
+            "Mustard card should rank matching Mustard card #1"
+        );
+        assert!(
+            !sim_mustard
+                .iter()
+                .any(|s| s.asset.id == emerald_a || s.asset.id == beige),
+            "Mustard card should not falsely match unrelated emerald or beige cards"
+        );
+
+        let sim_beige = engine.similar_assets(beige, 8).unwrap();
+        assert!(
+            sim_beige.is_empty(),
+            "Unique outlier card should return empty similar list instead of forced picks, got: {:?}",
+            sim_beige.iter().map(|s| (&s.asset.title, s.score, &s.match_reasons)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn suggest_folder_matches_by_visual_peers_and_abstains_instead_of_picking_first() {
+        let tmp = tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let engine = LiveCharkleEngine::open(tmp.path().join("lib")).unwrap();
+
+        let f_ui = engine.create_folder("UI Inspiration", None).unwrap();
+        let f_arch = engine.create_folder("Architecture", None).unwrap();
+        let f_editorial = engine.create_folder("Editorial", None).unwrap();
+
+        // Populate Architecture with warm mustard visual reference + tag, and Editorial with emerald reference
+        let p_arch_peer =
+            write_test_card_png(&src_dir, "arch_peer.png", [228, 168, 26], [214, 44, 34]);
+        let p_ed_peer = write_test_card_png(&src_dir, "ed_peer.png", [16, 46, 36], [22, 186, 118]);
+        let arch_ingested = engine
+            .ingest(
+                vec![CaptureInput::FilePath(p_arch_peer)],
+                Some(f_arch.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let _ = engine
+            .update_assets(&AssetBatchPatch {
+                asset_ids: vec![arch_ingested[0].id],
+                add_tags: vec!["建筑".to_string(), "光影".to_string()],
+                ..AssetBatchPatch::default()
+            })
+            .unwrap();
+        let ed_ingested = engine
+            .ingest(
+                vec![CaptureInput::FilePath(p_ed_peer)],
+                Some(f_editorial.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let _ = engine
+            .update_assets(&AssetBatchPatch {
+                asset_ids: vec![ed_ingested[0].id],
+                add_tags: vec!["杂志排版".to_string()],
+                ..AssetBatchPatch::default()
+            })
+            .unwrap();
+
+        // 1. Visually similar inbox image (no tags, generic filename) should route to Editorial, NOT folders[0] (UI Inspiration)!
+        let p_inbox_ed = write_test_card_png(
+            &src_dir,
+            "GCqrsxJbUAAbbdB.png",
+            [20, 54, 42],
+            [28, 174, 110],
+        );
+        // 2. Unrelated beige image named "building_sketch.png" must NOT falsely match "UI Inspiration" via "ui" inside "building",
+        //    and must abstain honestly (None)!
+        let p_inbox_unrelated = write_test_card_png(
+            &src_dir,
+            "building_sketch.png",
+            [210, 198, 182],
+            [116, 98, 82],
+        );
+        // 3. Explicit UI asset should match UI Inspiration
+        let p_inbox_ui = write_test_card_png(
+            &src_dir,
+            "mobile_ui_kit.png",
+            [210, 198, 182],
+            [116, 98, 82],
+        );
+
+        let inbox = engine
+            .ingest(
+                vec![
+                    CaptureInput::FilePath(p_inbox_ed),
+                    CaptureInput::FilePath(p_inbox_unrelated),
+                    CaptureInput::FilePath(p_inbox_ui),
+                ],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let sug_ed = engine.suggest_folder(inbox[0].id).unwrap();
+        assert_eq!(
+            sug_ed.as_ref().map(|s| s.folder_id),
+            Some(f_editorial.id),
+            "Inbox image visually matching Editorial peer should recommend Editorial, got: {sug_ed:?}"
+        );
+
+        let sug_unrelated = engine.suggest_folder(inbox[1].id).unwrap();
+        assert!(
+            sug_unrelated.is_none(),
+            "Unrelated 'building_sketch.png' must abstain (None) instead of falsely matching 'UI' or picking folders[0], got: {sug_unrelated:?}"
+        );
+
+        let sug_ui = engine.suggest_folder(inbox[2].id).unwrap();
+        assert_eq!(
+            sug_ui.as_ref().map(|s| s.folder_id),
+            Some(f_ui.id),
+            "Asset with word-boundary 'ui' token should match UI Inspiration, got: {sug_ui:?}"
+        );
     }
 }

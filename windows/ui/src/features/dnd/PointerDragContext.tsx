@@ -232,7 +232,11 @@ export function beginPointerDrag(
     if (!active) {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
       active = true;
-      if (opts?.forceOutboundOleOnDrag && payload.kind === 'assets') {
+      const allowOle = opts?.allowOutboundOle !== false && payload.kind === 'assets';
+      if (
+        allowOle &&
+        (opts?.forceOutboundOleOnDrag || (isTauriRuntime() && (ev.altKey || ev.metaKey)))
+      ) {
         launchOleDragOut();
         return;
       }
@@ -312,11 +316,40 @@ export function beginPointerDrag(
     cleanup();
   };
 
+  const onWindowBlur = () => {
+    // Switching windows via Alt+Tab / Win+Tab / Win+D while holding a dragged asset blurs the
+    // WebView before pointer coordinates reach the window edge: hand off to native Win32 OLE
+    // DoDragDrop instead of cancelling (drag_out.rs verifies physical LBUTTON via GetAsyncKeyState).
+    if (
+      active &&
+      opts?.allowOutboundOle !== false &&
+      payload.kind === 'assets' &&
+      isTauriRuntime()
+    ) {
+      launchOleDragOut();
+      return;
+    }
+    onCancel();
+  };
+
   const onKeyDown = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape') {
       ev.preventDefault();
       if (active) lastDragEndedAt = Date.now();
       cleanup();
+      return;
+    }
+    // Pressing Alt (before Alt+Tab) or Meta (before Win+Tab / Win+D) while dragging an asset
+    // hands off immediately to native Win32 OLE DoDragDrop so the OS task switcher carries the
+    // dragged file cleanly into the destination window.
+    if (
+      active &&
+      opts?.allowOutboundOle !== false &&
+      payload.kind === 'assets' &&
+      isTauriRuntime() &&
+      (ev.key === 'Alt' || ev.key === 'Meta' || (ev.altKey && ev.key === 'Tab'))
+    ) {
+      launchOleDragOut();
     }
   };
 
@@ -324,7 +357,7 @@ export function beginPointerDrag(
   window.addEventListener('pointerup', onUp, true);
   window.addEventListener('pointercancel', onCancel, true);
   window.addEventListener('keydown', onKeyDown, true);
-  window.addEventListener('blur', onCancel);
+  window.addEventListener('blur', onWindowBlur);
   window.addEventListener('contextmenu', onCancel, true);
   captureRoot?.addEventListener('pointerleave', onLeaveViewport);
   captureRoot?.addEventListener('mouseleave', onLeaveViewport);

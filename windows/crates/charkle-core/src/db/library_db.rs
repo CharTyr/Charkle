@@ -167,6 +167,14 @@ impl LibraryDatabase {
                      PRAGMA user_version = 2;",
                 )?;
             }
+            // Strictly local visual descriptor cache (never synced into cross-platform asset_vectors.feature_print)
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS local_visual_descriptors (
+                    asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+                    fingerprint TEXT NOT NULL,
+                    descriptor BLOB NOT NULL
+                );",
+            )?;
             Ok(())
         })();
 
@@ -1560,6 +1568,43 @@ impl LibraryDatabase {
             embedding_model,
             precision,
         })
+    }
+
+    /// Saves a strictly local perceptual visual descriptor blob keyed by `fingerprint`.
+    /// Never emits a sync op or mutates `asset_vectors.feature_print`.
+    pub fn save_local_visual_descriptor(
+        &self,
+        id: Uuid,
+        fingerprint: &str,
+        descriptor: &[u8],
+    ) -> CoreResult<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO local_visual_descriptors (asset_id, fingerprint, descriptor) VALUES (?1, ?2, ?3)",
+            params![format_swift_uuid(&id), fingerprint, descriptor],
+        )?;
+        Ok(())
+    }
+
+    /// Loads all cached local perceptual visual descriptors as `asset_id -> (fingerprint, bytes)`.
+    pub fn local_visual_descriptors(&self) -> CoreResult<HashMap<Uuid, (String, Vec<u8>)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt =
+            conn.prepare("SELECT asset_id, fingerprint, descriptor FROM local_visual_descriptors")?;
+        let rows = stmt.query_map([], |r| {
+            let id_str: String = r.get(0)?;
+            let fingerprint: String = r.get(1)?;
+            let bytes: Vec<u8> = r.get(2)?;
+            Ok((id_str, fingerprint, bytes))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id_str, fingerprint, bytes) = row?;
+            if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                out.insert(uuid, (fingerprint, bytes));
+            }
+        }
+        Ok(out)
     }
 
     /// Returns top `limit` non-trashed assets ranked by embedding cosine similarity above `min_score`.

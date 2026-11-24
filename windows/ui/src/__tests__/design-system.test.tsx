@@ -14,7 +14,8 @@ import { computeMasonryLayout } from '../features/gallery/VerticalMasonryView';
 import { computeJustifiedLayout } from '../features/gallery/HorizontalJustifiedView';
 import { TopFilterCapsule } from '../features/gallery/TopFilterCapsule';
 import { FolderTree } from '../features/sidebar/FolderTree';
-import { isPastOutboundBoundary } from '../features/dnd/PointerDragContext';
+import { beginPointerDrag, isPastOutboundBoundary } from '../features/dnd/PointerDragContext';
+import { InMemoryMockTransport, setTransport } from '../api/transport';
 import { useCoordinatorStore } from '../stores';
 import type { AssetRecord, FolderRecord } from '../types/domain';
 
@@ -197,6 +198,54 @@ describe('Charkle Design System & Layout Algorithms', () => {
     expect(isPastOutboundBoundary(6, 300, 1360, 860, true)).toBe(false);
     // Interior drag stays internal
     expect(isPastOutboundBoundary(400, 400, 1360, 860, false)).toBe(false);
+  });
+
+  it('hands off active asset drag to native OLE DoDragDrop on Alt keydown and window blur (Alt+Tab switch)', () => {
+    const mock = new InMemoryMockTransport();
+    setTransport(mock);
+    const win = window as unknown as { __TAURI_INTERNALS__?: Record<string, unknown> };
+    const prevTauri = win.__TAURI_INTERNALS__;
+    win.__TAURI_INTERNALS__ = {};
+    try {
+      // Case 1: Pressing Alt during an active interior drag hands off before Tab switches windows
+      beginPointerDrag(
+        { button: 0, pointerId: 1, clientX: 400, clientY: 300 } as React.PointerEvent,
+        {
+          kind: 'assets',
+          assetIds: ['asset-alt-tab-1'],
+          previewAssetId: 'asset-alt-tab-1',
+          title: 'AltTab Test',
+        },
+      );
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 420, clientY: 300, buttons: 1 }),
+      );
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Alt', altKey: true }));
+      expect(mock.lastOutboundDragIds).toEqual(['asset-alt-tab-1']);
+
+      // Case 2: Fast Alt+Tab / Win+D window blur during active drag also hands off instead of cancelling
+      mock.lastOutboundDragIds = [];
+      beginPointerDrag(
+        { button: 0, pointerId: 2, clientX: 400, clientY: 300 } as React.PointerEvent,
+        {
+          kind: 'assets',
+          assetIds: ['asset-blur-2'],
+          previewAssetId: 'asset-blur-2',
+          title: 'Blur Test',
+        },
+      );
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 420, clientY: 300, buttons: 1 }),
+      );
+      window.dispatchEvent(new Event('blur'));
+      expect(mock.lastOutboundDragIds).toEqual(['asset-blur-2']);
+    } finally {
+      if (prevTauri === undefined) {
+        delete win.__TAURI_INTERNALS__;
+      } else {
+        win.__TAURI_INTERNALS__ = prevTauri;
+      }
+    }
   });
 
   it('keeps FolderTree "..." action button laid out while its menu is open and uses acrylic filter bar', () => {

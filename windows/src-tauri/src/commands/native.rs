@@ -15,9 +15,8 @@ use charkle_platform_win::drag_out::{
 use charkle_platform_win::ocr::{probe_ocr_diagnostics, OcrDiagnostics};
 use charkle_platform_win::shelf_win::{
     apply_shelf_no_activate_style, default_compact_capsule_rect_for_edge,
-    refresh_shelf_drop_targets, reposition_shelf_to_cursor_monitor_for_edge,
-    set_shelf_allow_activate_state_only, set_shelf_hit_rect as win_set_shelf_hit_rect,
-    ShelfDockEdge,
+    reposition_shelf_to_cursor_monitor_for_edge, set_shelf_allow_activate_state_only,
+    set_shelf_hit_rect as win_set_shelf_hit_rect, ShelfDockEdge,
 };
 use charkle_platform_win::windowing::ClientRect;
 use tauri::{AppHandle, Emitter, State};
@@ -82,7 +81,15 @@ pub async fn start_outbound_drag(
 
     // Decode & resize the optional floating drag preview thumbnail OFF the Win32 UI thread so
     // `DoDragDrop` setup never stalls the UI message pump on disk or image decoding.
-    let preview_source = preview_path.or_else(|| paths.first().cloned());
+    // Skip very large (>8 MiB) fallback originals so Alt+Tab handoff enters DoDragDrop in <5ms.
+    let preview_source = preview_path.or_else(|| {
+        paths.first().and_then(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() <= 8 * 1024 * 1024)
+                .map(|_| p.clone())
+        })
+    });
     let decoded_preview = tokio::task::spawn_blocking(move || {
         preview_source
             .as_deref()
@@ -134,11 +141,7 @@ pub async fn start_outbound_drag(
 }
 
 #[tauri::command]
-pub fn set_shelf_hit_rect(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    rect: Option<ClientRect>,
-) -> IpcResult<()> {
+pub fn set_shelf_hit_rect(state: State<'_, AppState>, rect: Option<ClientRect>) -> IpcResult<()> {
     // Never let a stale collapsed initial React render wipe the frame-0 pre-seeded hit rect
     // while the shelf is already marked expanded on the Rust side.
     if rect.is_none() && state.shelf_expanded.load(Ordering::SeqCst) {
@@ -147,11 +150,6 @@ pub fn set_shelf_hit_rect(
     let raw = state.shelf_hwnd.load(Ordering::SeqCst);
     if raw != 0 {
         win_set_shelf_hit_rect(raw, rect);
-        if rect.is_some() {
-            let _ = app.run_on_main_thread(move || {
-                let _ = refresh_shelf_drop_targets(raw);
-            });
-        }
     }
     Ok(())
 }
