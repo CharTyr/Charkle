@@ -920,11 +920,27 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   async ingestFiles(paths, targetFolderId = null, destination) {
     if (paths.length === 0) return [];
+    const prevFolderIds = new Set(get().folders.map((f) => f.id));
     const created = await getTransport().ingestFiles(paths, targetFolderId, null);
     const dest = destination ?? useCoordinatorStore.getState().destination;
     await get().refreshAll(dest);
+    const newFolders = get().folders.filter((f) => !prevFolderIds.has(f.id));
+    let message: string;
+    if (newFolders.length > 0 && created.length > 0) {
+      message =
+        newFolders.length === 1
+          ? `已建文件夹「${newFolders[0].name}」并导入 ${created.length} 项素材`
+          : `已建 ${newFolders.length} 个文件夹并导入 ${created.length} 项素材`;
+    } else if (newFolders.length > 0) {
+      message =
+        newFolders.length === 1
+          ? `已建立文件夹「${newFolders[0].name}」`
+          : `已建立 ${newFolders.length} 个文件夹`;
+    } else {
+      message = `已导入 ${created.length} 项素材`;
+    }
     useCoordinatorStore.getState().pushToast({
-      message: `已导入 ${created.length} 项素材`,
+      message,
       tone: 'success',
     });
     return created;

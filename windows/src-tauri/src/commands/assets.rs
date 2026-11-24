@@ -24,55 +24,6 @@ pub fn fetch_asset(state: State<'_, AppState>, id: String) -> IpcResult<Option<A
     state.engine.fetch_asset(uuid).map_err(Into::into)
 }
 
-pub(crate) fn collect_ingestable_paths(raw_paths: Vec<String>) -> Vec<PathBuf> {
-    fn is_ignored_name(name: &str) -> bool {
-        let lower = name.to_ascii_lowercase();
-        lower.starts_with('.')
-            || lower == "thumbs.db"
-            || lower == "desktop.ini"
-            || lower == "__macosx"
-    }
-
-    fn walk(path: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
-        if depth > 8 || out.len() >= 500 {
-            return;
-        }
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !is_ignored_name(name) {
-                    out.push(path.to_path_buf());
-                }
-            }
-            return;
-        }
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if depth > 0 && is_ignored_name(name) {
-                    return;
-                }
-            }
-            if let Ok(entries) = std::fs::read_dir(path) {
-                let mut children: Vec<PathBuf> =
-                    entries.filter_map(|e| e.ok().map(|v| v.path())).collect();
-                children.sort();
-                for child in children {
-                    walk(&child, out, depth + 1);
-                    if out.len() >= 500 {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    let mut collected = Vec::new();
-    for raw in raw_paths {
-        let p = PathBuf::from(raw);
-        walk(&p, &mut collected, 0);
-    }
-    collected
-}
-
 #[tauri::command]
 pub async fn ingest_files(
     state: State<'_, AppState>,
@@ -82,18 +33,12 @@ pub async fn ingest_files(
 ) -> IpcResult<Vec<AssetRecord>> {
     let folder = parse_optional_uuid(target_folder_id)?;
     let board = parse_optional_uuid(target_board_id)?;
-    let expanded_paths = tokio::task::spawn_blocking(move || collect_ingestable_paths(paths))
-        .await
-        .unwrap_or_default();
-    let inputs: Vec<CaptureInput> = expanded_paths
-        .into_iter()
-        .map(CaptureInput::FilePath)
-        .collect();
-    state
+    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    let report = state
         .engine
-        .ingest(inputs, folder, board)
-        .await
-        .map_err(Into::into)
+        .ingest_local_paths(path_bufs, folder, board)
+        .await?;
+    Ok(report.assets)
 }
 
 #[tauri::command]

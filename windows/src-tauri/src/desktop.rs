@@ -21,11 +21,12 @@ use charkle_platform_win::clipboard::{
 use charkle_platform_win::mount::detect_gdirect_binary;
 use charkle_platform_win::ocr::{probe_ocr_diagnostics, OcrDiagnostics};
 use charkle_platform_win::shelf_win::{
-    apply_shelf_no_activate_style, configure_shelf_window_for_edge,
+    active_shelf_screen_rect, apply_shelf_no_activate_style, configure_shelf_window_for_edge,
     default_compact_capsule_rect_for_edge, hide_shelf_native, install_shelf_drop_target,
-    install_shelf_subclass, is_shelf_window_visible, refresh_shelf_drop_targets,
-    reposition_shelf_to_cursor_monitor_for_edge, set_shelf_allow_activate_state_only,
-    set_shelf_hit_rect, show_shelf_no_activate, ShelfDockEdge, ShelfDropEvent, ShelfDropPayload,
+    install_shelf_subclass, is_external_drag_active, is_shelf_window_visible,
+    refresh_shelf_drop_targets, reposition_shelf_to_cursor_monitor_for_edge,
+    set_shelf_allow_activate_state_only, set_shelf_hit_rect, show_shelf_no_activate,
+    sync_shelf_drop_catcher, ShelfDockEdge, ShelfDropEvent, ShelfDropPayload,
 };
 use charkle_platform_win::windowing::{
     apply_window_chrome, install_snap_layout_subclass, BackdropKind,
@@ -725,40 +726,12 @@ fn ingest_shelf_dropped_files(
 
     let handle = drop_app.clone();
     tauri::async_runtime::spawn(async move {
-        let expanded_paths = tokio::task::spawn_blocking(move || {
-            crate::commands::assets::collect_ingestable_paths(raw_paths)
-        })
-        .await
-        .unwrap_or_default();
-
         let state = handle.state::<AppState>();
-        if expanded_paths.is_empty() {
-            state.shelf_busy.store(false, Ordering::SeqCst);
-            state
-                .shelf_hold_until_ms
-                .store(now_epoch_ms().saturating_add(2400), Ordering::SeqCst);
-            let _ = handle.emit_to(
-                "shelf",
-                "shelf:drop-status",
-                serde_json::json!({
-                    "phase": "error",
-                    "message": "未检测到可导入的文件"
-                }),
-            );
-            return;
-        }
-
         let (target_folder_id, target_board_id, dest_label) = resolve_shelf_target(&state);
-
-        let total_files = expanded_paths.len();
-        let inputs: Vec<CaptureInput> = expanded_paths
-            .into_iter()
-            .map(CaptureInput::FilePath)
-            .collect();
 
         let res = state
             .engine
-            .ingest(inputs, target_folder_id, target_board_id)
+            .ingest_local_paths(paths, target_folder_id, target_board_id)
             .await;
         state.shelf_busy.store(false, Ordering::SeqCst);
         state
@@ -766,10 +739,63 @@ fn ingest_shelf_dropped_files(
             .store(now_epoch_ms().saturating_add(2600), Ordering::SeqCst);
 
         match res {
-            Ok(created) => {
-                let count = created.len().max(total_files);
+            Ok(report)
+                if report.assets.is_empty()
+                    && report.created_folders.is_empty()
+                    && report.matched_folder_names.is_empty() =>
+            {
+                let _ = handle.emit_to(
+                    "shelf",
+                    "shelf:drop-status",
+                    serde_json::json!({
+                        "phase": "error",
+                        "message": "未检测到可导入的文件或文件夹"
+                    }),
+                );
+            }
+            Ok(report) => {
+                let count = report.assets.len();
+                let message = if !report.created_folders.is_empty() {
+                    if count == 0 {
+                        if report.created_folders.len() == 1 {
+                            format!("已建立文件夹「{}」", report.created_folders[0].name)
+                        } else {
+                            format!("已建立 {} 个文件夹", report.created_folders.len())
+                        }
+                    } else if report.matched_folder_names.len() == 1
+                        && report.created_folders.len() == 1
+                    {
+                        format!(
+                            "已建文件夹「{}」并导入 {} 项",
+                            report.matched_folder_names[0], count
+                        )
+                    } else {
+                        format!(
+                            "已建 {} 个文件夹并导入 {} 项",
+                            report.created_folders.len(),
+                            count
+                        )
+                    }
+                } else if !report.matched_folder_names.is_empty() {
+                    if report.matched_folder_names.len() == 1 {
+                        format!(
+                            "已导入至文件夹「{}」({} 项)",
+                            report.matched_folder_names[0], count
+                        )
+                    } else {
+                        format!(
+                            "已导入至 {} 个文件夹 ({} 项)",
+                            report.matched_folder_names.len(),
+                            count
+                        )
+                    }
+                } else {
+                    format!("已收入「{dest_label}」({count} 项)")
+                };
                 tracing::info!(
                     count,
+                    created_folders = report.created_folders.len(),
+                    skipped_files = report.skipped_files,
                     destination = %dest_label,
                     "Drop Shelf ingested dropped items"
                 );
@@ -778,7 +804,7 @@ fn ingest_shelf_dropped_files(
                     "shelf:drop-status",
                     serde_json::json!({
                         "phase": "done",
-                        "message": format!("已收入「{dest_label}」({count} 项)")
+                        "message": message
                     }),
                 );
             }
@@ -1115,6 +1141,9 @@ pub fn show_shelf_window(app: &AppHandle, pinned: bool) -> Result<(), String> {
                 }
                 show_shelf_no_activate(raw);
                 let _ = refresh_shelf_drop_targets(raw);
+                if is_external_drag_active() {
+                    sync_shelf_drop_catcher(raw, active_shelf_screen_rect(raw));
+                }
             });
             spawn_delayed_shelf_drop_target_refreshes(app, raw);
         }
@@ -1160,6 +1189,9 @@ async fn show_shelf_window_inner_async(
                     }
                     show_shelf_no_activate(raw);
                     let _ = refresh_shelf_drop_targets(raw);
+                    if is_external_drag_active() {
+                        sync_shelf_drop_catcher(raw, active_shelf_screen_rect(raw));
+                    }
                     let _ = tx.send(());
                 });
                 let _ = rx.await;
@@ -1198,6 +1230,7 @@ pub fn hide_shelf_window_immediate(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if raw != 0 {
+            sync_shelf_drop_catcher(raw, None);
             apply_shelf_no_activate_style(raw, false);
             set_shelf_hit_rect(raw, None);
             hide_shelf_native(raw);
@@ -1226,6 +1259,7 @@ async fn hide_shelf_window_immediate_async(app: &AppHandle) -> bool {
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let _ = app.run_on_main_thread(move || {
         if raw != 0 {
+            sync_shelf_drop_catcher(raw, None);
             apply_shelf_no_activate_style(raw, false);
             set_shelf_hit_rect(raw, None);
             hide_shelf_native(raw);
@@ -1249,9 +1283,10 @@ pub fn hide_shelf_window(app: &AppHandle) {
 
     let raw = state.shelf_hwnd.load(Ordering::SeqCst);
     if raw != 0 {
-        // Update shared flag synchronously; ALWAYS dispatch SetWindowLongPtrW to the main UI thread!
+        // Update shared flag synchronously; ALWAYS dispatch Win32 style/window ops to the main UI thread!
         set_shelf_allow_activate_state_only(raw, false);
         let _ = app.run_on_main_thread(move || {
+            sync_shelf_drop_catcher(raw, None);
             apply_shelf_no_activate_style(raw, false);
         });
     }
@@ -1463,27 +1498,16 @@ pub async fn collect_clipboard_into_library(
             source_url: None,
         },
         ClipboardSnapshot::FilePaths { paths } => {
-            let raw_paths: Vec<String> = paths
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            let expanded = tokio::task::spawn_blocking(move || {
-                crate::commands::assets::collect_ingestable_paths(raw_paths)
-            })
-            .await
-            .unwrap_or_default();
-            let inputs: Vec<CaptureInput> =
-                expanded.into_iter().map(CaptureInput::FilePath).collect();
-            if inputs.is_empty() {
+            if paths.is_empty() {
                 return Ok(0);
             }
             let state = app.state::<AppState>();
-            let created = state
+            let report = state
                 .engine
-                .ingest(inputs, target_folder_id, target_board_id)
+                .ingest_local_paths(paths, target_folder_id, target_board_id)
                 .await
                 .map_err(|e| e.to_string())?;
-            let count = created.len();
+            let count = report.assets.len().max(report.created_folders.len());
             let _ = app.emit("clipboard:collected", count);
             return Ok(count);
         }

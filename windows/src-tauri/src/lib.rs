@@ -25,7 +25,9 @@ use charkle_core::intelligence::CloudAIUsageStore;
 use charkle_core::media::MediaPipeline;
 use charkle_core::wire::swift_codec::format_swift_uuid;
 use charkle_platform_win::clipboard::start_clipboard_listener;
-use charkle_platform_win::shelf_win::{start_top_edge_monitor, ShelfDockEdge, ShelfMonitorConfig};
+use charkle_platform_win::shelf_win::{
+    start_top_edge_monitor_with_catcher, sync_shelf_drop_catcher, ShelfDockEdge, ShelfMonitorConfig,
+};
 use charkle_platform_win::wake::start_library_wake_listener;
 use charkle_platform_win::{
     WinCredentialVault, WinRtOcrProvider, WinShellThumbnailProvider, WinVolumeMountInspector,
@@ -218,10 +220,12 @@ pub fn run() {
                 let _ = app_for_clip.emit("clipboard:changed", preview);
             });
 
-            // Top-edge drag & hover detector + unpinned auto-collapse monitor
+            // Top-edge drag & hover detector + unpinned auto-collapse monitor + Drop Catcher sync
             let app_for_edge_open = app.handle().clone();
             let app_for_edge_close = app.handle().clone();
-            let top_edge_monitor = start_top_edge_monitor(
+            let app_for_catcher = app.handle().clone();
+            let shelf_hwnd_for_catcher = Arc::clone(&shelf_hwnd);
+            let top_edge_monitor = start_top_edge_monitor_with_catcher(
                 ShelfMonitorConfig {
                     enabled: Arc::clone(&shelf_enabled),
                     hover_trigger_enabled: Arc::clone(&shelf_hover_trigger),
@@ -246,6 +250,14 @@ pub fn run() {
                     let _ = app_for_edge_close.run_on_main_thread(move || {
                         hide_shelf_window(&handle);
                     });
+                },
+                move |rect| {
+                    let raw = shelf_hwnd_for_catcher.load(std::sync::atomic::Ordering::SeqCst);
+                    if raw != 0 {
+                        let _ = app_for_catcher.run_on_main_thread(move || {
+                            sync_shelf_drop_catcher(raw, rect);
+                        });
+                    }
                 },
             );
 

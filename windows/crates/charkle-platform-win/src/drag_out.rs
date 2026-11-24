@@ -549,6 +549,39 @@ mod win_ole {
             Ok(DragOutOutcome::Cancelled)
         }
     }
+
+    #[cfg(test)]
+    pub fn build_hdrop_data_object(paths: &[PathBuf]) -> Result<IDataObject, String> {
+        let mut pidls = PidlList(Vec::with_capacity(paths.len()));
+        for path in paths {
+            let clean = normalize_shell_path(path);
+            let wide: Vec<u16> = clean
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let pidl = unsafe { ILCreateFromPathW(PCWSTR(wide.as_ptr())) };
+            if !pidl.is_null() {
+                pidls.0.push(pidl);
+            }
+        }
+        if pidls.0.is_empty() {
+            return Err("No valid Shell PIDLs".to_string());
+        }
+        let const_pidls: Vec<*const ITEMIDLIST> = pidls.0.iter().map(|p| p.cast_const()).collect();
+        let item_array: IShellItemArray =
+            unsafe { SHCreateShellItemArrayFromIDLists(&const_pidls) }
+                .map_err(|e| format!("SHCreateShellItemArrayFromIDLists failed: {e}"))?;
+        unsafe { item_array.BindToHandler(None, &BHID_DataObject) }
+            .map_err(|e| format!("BindToHandler(BHID_DataObject) failed: {e}"))
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) fn build_hdrop_data_object_for_test(
+    paths: &[PathBuf],
+) -> Result<windows::Win32::System::Com::IDataObject, String> {
+    win_ole::build_hdrop_data_object(paths)
 }
 
 #[cfg(test)]

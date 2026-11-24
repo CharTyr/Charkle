@@ -296,6 +296,152 @@ impl LiveCharkleEngine {
         Ok(committed)
     }
 
+    /// Ingests raw OS file and/or folder paths, mirroring any dropped directories as Charkle
+    /// folders (and nested subfolders) under `target_folder_id`, reusing case-insensitively
+    /// matching sibling folders when present, and importing loose files directly into
+    /// `target_folder_id`.
+    ///
+    /// Unlike single-batch `ingest`, per-file failures inside dropped directories are skipped
+    /// with a warning rather than rolling back valid siblings, and empty dropped folders still
+    /// create their corresponding library folder(s).
+    pub async fn ingest_local_paths(
+        &self,
+        raw_paths: Vec<PathBuf>,
+        target_folder_id: Option<Uuid>,
+        target_board_id: Option<Uuid>,
+    ) -> CoreResult<IngestPathsReport> {
+        if let Some(fid) = target_folder_id {
+            if self.db.folder(fid)?.is_none() {
+                return Err(CoreError::NotFound(format_swift_uuid(&fid)));
+            }
+        }
+        if let Some(bid) = target_board_id {
+            if self.db.board(bid)?.is_none() {
+                return Err(CoreError::NotFound(format_swift_uuid(&bid)));
+            }
+        }
+        if raw_paths.is_empty() {
+            return Ok(IngestPathsReport::default());
+        }
+
+        let plan = tokio::task::spawn_blocking(move || plan_local_path_ingest(raw_paths))
+            .await
+            .map_err(|e| CoreError::Media(format!("Path scan task failed: {e}")))?;
+
+        let mut report = IngestPathsReport::default();
+        let mut folders_snapshot = self.db.fetch_folders()?;
+        let mut ingest_groups: Vec<(Option<Uuid>, Vec<PathBuf>)> = Vec::new();
+
+        if !plan.loose_files.is_empty() {
+            ingest_groups.push((target_folder_id, plan.loose_files));
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn materialize_folder_tree(
+            engine: &LiveCharkleEngine,
+            node: PlannedFolderNode,
+            parent_id: Option<Uuid>,
+            is_top_level: bool,
+            folders_snapshot: &mut Vec<FolderRecord>,
+            created_folders: &mut Vec<FolderRecord>,
+            matched_folder_names: &mut Vec<String>,
+            ingest_groups: &mut Vec<(Option<Uuid>, Vec<PathBuf>)>,
+        ) -> CoreResult<()> {
+            let folder = ensure_or_create_import_folder(
+                engine,
+                &node.name,
+                parent_id,
+                folders_snapshot,
+                created_folders,
+            )?;
+            if is_top_level {
+                matched_folder_names.push(folder.name.clone());
+            }
+            if !node.files.is_empty() {
+                ingest_groups.push((Some(folder.id), node.files));
+            }
+            for child in node.children {
+                materialize_folder_tree(
+                    engine,
+                    child,
+                    Some(folder.id),
+                    false,
+                    folders_snapshot,
+                    created_folders,
+                    matched_folder_names,
+                    ingest_groups,
+                )?;
+            }
+            Ok(())
+        }
+
+        for root_node in plan.root_folders {
+            materialize_folder_tree(
+                self,
+                root_node,
+                target_folder_id,
+                true,
+                &mut folders_snapshot,
+                &mut report.created_folders,
+                &mut report.matched_folder_names,
+                &mut ingest_groups,
+            )?;
+        }
+
+        let total_planned_files: usize = ingest_groups.iter().map(|(_, files)| files.len()).sum();
+        let mut last_error: Option<CoreError> = None;
+
+        for (group_folder_id, files) in ingest_groups {
+            if total_planned_files == 1 && report.matched_folder_names.is_empty() {
+                // Single loose file: preserve strict error propagation.
+                let created = self
+                    .ingest(
+                        files.into_iter().map(CaptureInput::FilePath).collect(),
+                        group_folder_id,
+                        target_board_id,
+                    )
+                    .await?;
+                report.assets.extend(created);
+                continue;
+            }
+
+            // Multi-file or folder drop: ingest resiliently per file so one unreadable/locked
+            // file inside an OS folder never rolls back the rest of the folder import.
+            for file_path in files {
+                match self
+                    .ingest(
+                        vec![CaptureInput::FilePath(file_path.clone())],
+                        group_folder_id,
+                        target_board_id,
+                    )
+                    .await
+                {
+                    Ok(created) => report.assets.extend(created),
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %file_path.display(),
+                            %err,
+                            "Skipped uningestable file during folder/batch drop"
+                        );
+                        report.skipped_files += 1;
+                        last_error = Some(err);
+                    }
+                }
+            }
+        }
+
+        if report.assets.is_empty()
+            && report.created_folders.is_empty()
+            && report.matched_folder_names.is_empty()
+        {
+            if let Some(err) = last_error {
+                return Err(err);
+            }
+        }
+
+        Ok(report)
+    }
+
     /// Applies an `AssetBatchPatch` atomically across one or more assets with CRDT delta recording.
     pub fn update_assets(&self, patch: &AssetBatchPatch) -> CoreResult<Vec<AssetRecord>> {
         let changed = self.db.update_assets_locally(patch)?;
@@ -1689,6 +1835,185 @@ fn ensure_unique_folder(
     Ok(())
 }
 
+/// Summary returned by [`LiveCharkleEngine::ingest_local_paths`].
+#[derive(Debug, Clone, Default)]
+pub struct IngestPathsReport {
+    pub assets: Vec<AssetRecord>,
+    pub created_folders: Vec<FolderRecord>,
+    pub matched_folder_names: Vec<String>,
+    pub skipped_files: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedFolderNode {
+    name: String,
+    files: Vec<PathBuf>,
+    children: Vec<PlannedFolderNode>,
+}
+
+#[derive(Debug, Default)]
+struct LocalPathIngestPlan {
+    loose_files: Vec<PathBuf>,
+    root_folders: Vec<PlannedFolderNode>,
+}
+
+fn is_ignored_import_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with('.')
+        || lower.starts_with("~$")
+        || lower == "thumbs.db"
+        || lower == "desktop.ini"
+        || lower == "__macosx"
+}
+
+fn is_ignored_import_dir_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with('.')
+        || lower == "__macosx"
+        || lower == "node_modules"
+        || lower == "$recycle.bin"
+        || lower == "system volume information"
+}
+
+fn sanitize_import_folder_name(raw: &str, parent: Option<Uuid>) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let no_dots = cleaned.trim().trim_start_matches('.').trim();
+    let truncated: String = no_dots.chars().take(120).collect();
+    let base = truncated.trim();
+    if base.is_empty() {
+        return "导入文件夹".to_string();
+    }
+    if parent.is_none() && base.eq_ignore_ascii_case("Inbox") {
+        return "Inbox (导入)".to_string();
+    }
+    base.to_string()
+}
+
+fn ensure_or_create_import_folder(
+    engine: &LiveCharkleEngine,
+    raw_name: &str,
+    parent_id: Option<Uuid>,
+    folders_snapshot: &mut Vec<FolderRecord>,
+    created_folders: &mut Vec<FolderRecord>,
+) -> CoreResult<FolderRecord> {
+    let clean = sanitize_import_folder_name(raw_name, parent_id);
+    if let Some(existing) = folders_snapshot
+        .iter()
+        .find(|f| f.parent_id == parent_id && f.name.eq_ignore_ascii_case(&clean))
+    {
+        return Ok(existing.clone());
+    }
+    let created = engine.create_folder(&clean, parent_id)?;
+    folders_snapshot.push(created.clone());
+    created_folders.push(created.clone());
+    Ok(created)
+}
+
+fn plan_local_path_ingest(raw_paths: Vec<PathBuf>) -> LocalPathIngestPlan {
+    const MAX_DEPTH: usize = 8;
+    const MAX_FILES: usize = 500;
+    const MAX_FOLDERS: usize = 100;
+
+    fn walk_dir(
+        dir: &Path,
+        depth: usize,
+        total_files: &mut usize,
+        total_folders: &mut usize,
+    ) -> Option<PlannedFolderNode> {
+        if depth > MAX_DEPTH || *total_folders >= MAX_FOLDERS {
+            return None;
+        }
+        let raw_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("导入文件夹");
+        if depth > 0 && is_ignored_import_dir_name(raw_name) {
+            return None;
+        }
+
+        *total_folders += 1;
+        let mut node = PlannedFolderNode {
+            name: raw_name.to_string(),
+            files: Vec::new(),
+            children: Vec::new(),
+        };
+
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut entries_vec: Vec<(PathBuf, std::fs::FileType)> = entries
+                .filter_map(|e| {
+                    let entry = e.ok()?;
+                    let ft = entry.file_type().ok()?;
+                    Some((entry.path(), ft))
+                })
+                .collect();
+            entries_vec.sort_by(|a, b| a.0.cmp(&b.0));
+
+            for (child_path, ft) in entries_vec {
+                // Skip symlinks to prevent directory traversal cycles.
+                if ft.is_symlink() {
+                    continue;
+                }
+                if ft.is_file() {
+                    if *total_files >= MAX_FILES {
+                        continue;
+                    }
+                    if let Some(name) = child_path.file_name().and_then(|n| n.to_str()) {
+                        if !is_ignored_import_file_name(name) {
+                            node.files.push(child_path);
+                            *total_files += 1;
+                        }
+                    }
+                } else if ft.is_dir() && depth < MAX_DEPTH && *total_folders < MAX_FOLDERS {
+                    if let Some(child_node) =
+                        walk_dir(&child_path, depth + 1, total_files, total_folders)
+                    {
+                        node.children.push(child_node);
+                    }
+                }
+            }
+        }
+
+        Some(node)
+    }
+
+    let mut plan = LocalPathIngestPlan::default();
+    let mut total_files = 0usize;
+    let mut total_folders = 0usize;
+
+    for raw in raw_paths {
+        let Ok(meta) = std::fs::metadata(&raw) else {
+            continue;
+        };
+        if meta.is_file() {
+            if total_files < MAX_FILES {
+                if let Some(name) = raw.file_name().and_then(|n| n.to_str()) {
+                    if !is_ignored_import_file_name(name) {
+                        plan.loose_files.push(raw);
+                        total_files += 1;
+                    }
+                }
+            }
+        } else if meta.is_dir() {
+            if let Some(node) = walk_dir(&raw, 0, &mut total_files, &mut total_folders) {
+                plan.root_folders.push(node);
+            }
+        }
+    }
+
+    plan
+}
+
 fn visual_descriptor_fingerprint(asset: &AssetRecord) -> String {
     if !asset.content_hash.is_empty() {
         asset.content_hash.clone()
@@ -2523,6 +2848,119 @@ mod tests {
             sug_ui.as_ref().map(|s| s.folder_id),
             Some(f_ui.id),
             "Asset with word-boundary 'ui' token should match UI Inspiration, got: {sug_ui:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_local_paths_mirrors_nested_folders_reuses_existing_and_handles_empty_or_reserved(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = LiveCharkleEngine::open(tmp.path().join("lib")).unwrap();
+
+        let drop_root = tmp.path().join("drop_src");
+        let brand_dir = drop_root.join("BrandKit");
+        let icons_dir = brand_dir.join("Icons");
+        let ignored_git = brand_dir.join(".git");
+        let empty_dir = drop_root.join("EmptyMood");
+        let reserved_inbox_dir = drop_root.join("Inbox");
+        std::fs::create_dir_all(&icons_dir).unwrap();
+        std::fs::create_dir_all(&ignored_git).unwrap();
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::fs::create_dir_all(&reserved_inbox_dir).unwrap();
+
+        let loose_file =
+            write_test_card_png(&drop_root, "loose.png", [40, 80, 160], [220, 220, 240]);
+        let _brand_cover =
+            write_test_card_png(&brand_dir, "cover.png", [20, 50, 40], [30, 180, 110]);
+        let _icon_one =
+            write_test_card_png(&icons_dir, "arrow.png", [210, 198, 182], [116, 98, 82]);
+        // Hidden / noise files that must be skipped
+        std::fs::write(brand_dir.join(".DS_Store"), b"noise").unwrap();
+        std::fs::write(brand_dir.join("Thumbs.db"), b"noise").unwrap();
+        std::fs::write(ignored_git.join("HEAD"), b"ref: refs/heads/main").unwrap();
+
+        // 1. Mixed drop (loose file + nested folder + empty folder + reserved root "Inbox" folder)
+        let report = engine
+            .ingest_local_paths(
+                vec![
+                    loose_file.clone(),
+                    brand_dir.clone(),
+                    empty_dir.clone(),
+                    reserved_inbox_dir.clone(),
+                ],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.assets.len(), 3);
+        assert_eq!(report.created_folders.len(), 4); // BrandKit, Icons, EmptyMood, Inbox (导入)
+        let folders = engine.fetch_folders().unwrap();
+        let f_brand = folders
+            .iter()
+            .find(|f| f.name == "BrandKit" && f.parent_id.is_none())
+            .expect("BrandKit root folder created");
+        let f_icons = folders
+            .iter()
+            .find(|f| f.name == "Icons" && f.parent_id == Some(f_brand.id))
+            .expect("Icons child folder created under BrandKit");
+        let f_empty = folders
+            .iter()
+            .find(|f| f.name == "EmptyMood" && f.parent_id.is_none())
+            .expect("EmptyMood root folder created");
+        assert!(folders
+            .iter()
+            .any(|f| f.name == "Inbox (导入)" && f.parent_id.is_none()));
+        assert!(!folders.iter().any(|f| f.name == ".git"));
+
+        let loose_asset = report
+            .assets
+            .iter()
+            .find(|a| a.file_name.to_ascii_lowercase().contains("loose"))
+            .unwrap();
+        assert_eq!(loose_asset.folder_id, None);
+        let cover_asset = report
+            .assets
+            .iter()
+            .find(|a| a.file_name.to_ascii_lowercase().contains("cover"))
+            .unwrap();
+        assert_eq!(cover_asset.folder_id, Some(f_brand.id));
+        let icon_asset = report
+            .assets
+            .iter()
+            .find(|a| a.file_name.to_ascii_lowercase().contains("arrow"))
+            .unwrap();
+        assert_eq!(icon_asset.folder_id, Some(f_icons.id));
+
+        // 2. Re-dropping BrandKit with a new file reuses existing BrandKit & Icons folders (no AlreadyExists error)
+        let _extra = write_test_card_png(&brand_dir, "extra.png", [220, 60, 40], [250, 200, 30]);
+        let report2 = engine
+            .ingest_local_paths(vec![brand_dir.clone()], None, None)
+            .await
+            .unwrap();
+        assert!(
+            report2.created_folders.is_empty(),
+            "Existing folders must be reused rather than duplicated"
+        );
+        assert_eq!(report2.matched_folder_names, vec!["BrandKit".to_string()]);
+        assert_eq!(report2.assets.len(), 3);
+
+        // 3. Dropping a folder INTO an existing parent folder (EmptyMood) nests it as a child folder
+        let sub_drop = drop_root.join("SubDrop");
+        std::fs::create_dir_all(&sub_drop).unwrap();
+        let _sub_img = write_test_card_png(&sub_drop, "sub.png", [15, 25, 35], [100, 160, 240]);
+        let report3 = engine
+            .ingest_local_paths(vec![sub_drop], Some(f_empty.id), None)
+            .await
+            .unwrap();
+        assert_eq!(report3.created_folders.len(), 1);
+        assert_eq!(report3.created_folders[0].name, "SubDrop");
+        assert_eq!(report3.created_folders[0].parent_id, Some(f_empty.id));
+        assert_eq!(report3.assets.len(), 1);
+        assert_eq!(
+            report3.assets[0].folder_id,
+            Some(report3.created_folders[0].id)
         );
     }
 }

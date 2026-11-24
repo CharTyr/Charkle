@@ -275,6 +275,7 @@ export const App: React.FC = () => {
       if (target?.kind === 'moodboardCanvas' && mb.activeBoard) {
         try {
           const created = await transport.ingestFiles(paths, null, null);
+          void lib.refreshAll(coord.destination);
           if (created.length > 0) {
             window.dispatchEvent(
               new CustomEvent('charkle:canvas-file-drop', {
@@ -285,7 +286,6 @@ export const App: React.FC = () => {
                 },
               }),
             );
-            void lib.refreshAll(coord.destination);
             coord.pushToast({
               message: `已导入并上板 ${created.length} 项素材`,
               tone: 'success',
