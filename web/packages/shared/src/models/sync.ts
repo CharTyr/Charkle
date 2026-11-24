@@ -29,7 +29,7 @@ export function driveTransportModeLocalizedLabel(
     case 'webDAV':
       return 'WebDAV 云盘';
     case 'gdirectMount':
-      return 'gdirect 本地挂载';
+      return '本地挂载目录';
     case 'localOnly':
       return runtimeMode === 'cloudflare' ? '内置云存储' : '纯本地文件夹';
   }
@@ -351,33 +351,58 @@ export function externalAgentAccessLevelTitle(level: ExternalAgentAccessLevel): 
 export function externalAgentAccessLevelSummary(level: ExternalAgentAccessLevel): string {
   switch (level) {
     case 'readOnly':
-      return '外部 Agent 可检索素材、查看视觉联系表、读取情绪板与导出高清图，无法修改或写入素材库。';
+      return '仅可查看与搜索，无法修改';
     case 'readWriteOrganize':
-      return '外部 Agent 可整理文件夹与标签、导入素材、生成或更新情绪板，并仅可将素材移入回收站（永不允许彻底删除）。';
+      return '可整理与生成情绪板，不可彻底删除';
   }
 }
 
+export type ExternalAgentChannel = 'mcp' | 'cli';
+
+export const EXTERNAL_AGENT_CHANNELS: readonly ExternalAgentChannel[] = ['mcp', 'cli'] as const;
+
+export function externalAgentChannelTitle(channel: ExternalAgentChannel): string {
+  return channel === 'mcp' ? 'MCP 服务' : 'CLI 命令行服务';
+}
+
 export interface ExternalAgentConfig {
+  /** Aggregate toggle (`mcpEnabled || cliEnabled`); kept for backward-compatible persistence. */
   enabled: boolean;
+  mcpEnabled: boolean;
+  cliEnabled: boolean;
   accessLevel: ExternalAgentAccessLevel;
 }
 
 export function createDefaultExternalAgentConfig(
   overrides: Partial<ExternalAgentConfig> = {},
 ): ExternalAgentConfig {
+  const legacyEnabled = overrides.enabled ?? true;
+  const mcpEnabled = overrides.mcpEnabled ?? legacyEnabled;
+  const cliEnabled = overrides.cliEnabled ?? legacyEnabled;
   return {
-    enabled: true,
-    accessLevel: 'readOnly',
-    ...overrides,
+    enabled: mcpEnabled || cliEnabled,
+    mcpEnabled,
+    cliEnabled,
+    accessLevel: overrides.accessLevel ?? 'readOnly',
   };
 }
 
-export function externalAgentAllowsRead(config: ExternalAgentConfig): boolean {
-  return config.enabled;
+export function externalAgentAllowsRead(
+  config: ExternalAgentConfig,
+  channel?: ExternalAgentChannel,
+): boolean {
+  const mcp = config.mcpEnabled ?? config.enabled;
+  const cli = config.cliEnabled ?? config.enabled;
+  if (channel === 'mcp') return Boolean(mcp);
+  if (channel === 'cli') return Boolean(cli);
+  return Boolean(mcp || cli);
 }
 
-export function externalAgentAllowsWrite(config: ExternalAgentConfig): boolean {
-  return config.enabled && config.accessLevel === 'readWriteOrganize';
+export function externalAgentAllowsWrite(
+  config: ExternalAgentConfig,
+  channel?: ExternalAgentChannel,
+): boolean {
+  return externalAgentAllowsRead(config, channel) && config.accessLevel === 'readWriteOrganize';
 }
 
 // MARK: - Sync Operation Log & Manifest Contracts (/.charkle/)

@@ -76,13 +76,10 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
         }}
       />
 
-      {/* Title & Audio Format */}
+      {/* Title & Audio Controls */}
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[11px] font-mono uppercase tracking-wider text-[var(--text-tertiary)]">
-            AUDIO STUDIO
-          </div>
-          <h3 className="text-[16px] font-semibold text-[var(--text-primary)] truncate mt-0.5">
+          <h3 className="text-[16px] font-semibold text-[var(--text-primary)] truncate">
             {asset.title}
           </h3>
         </div>

@@ -4,6 +4,7 @@ import {
   type SocialPlatform,
   type SocialPostMetadata,
 } from '@charkle/shared';
+import { sniffImageMimeType } from '../../runtime/workers-image.js';
 
 const X_HOSTS = new Set([
   'x.com',
@@ -99,17 +100,19 @@ export function parseSocialPostURL(rawUrl: string): ParsedSocialPostURL | null {
     return null;
   }
 
-  // Threads
+  // Threads (supports /@handle/post/code, /handle/post/code, and /t/code)
   if (THREADS_HOSTS.has(host)) {
-    if (parts.length >= 3 && parts[0].startsWith('@') && parts[1] === 'post') {
-      const handle = parts[0].slice(1);
+    if (parts.length >= 3 && parts[1] === 'post' && parts[0].length > 0) {
+      const handle = parts[0].replace(/^@/, '');
       const shortcode = parts[2];
-      return {
-        platform: 'threads',
-        handle,
-        postID: shortcode,
-        canonicalURL: `https://www.threads.net/@${handle}/post/${shortcode}`,
-      };
+      if (handle.length > 0 && shortcode.length > 0) {
+        return {
+          platform: 'threads',
+          handle,
+          postID: shortcode,
+          canonicalURL: `https://www.threads.net/@${handle}/post/${shortcode}`,
+        };
+      }
     }
     if (parts.length >= 2 && parts[0] === 't') {
       const shortcode = parts[1];
@@ -145,30 +148,65 @@ export interface ResolvedSocialPost {
   markdownArchive: string;
   coverImageBuffer: Buffer | null;
   primaryVideoBuffer: Buffer | null;
+  authorAvatarBytes: Uint8Array | null;
 }
 
-export async function downloadBoundedBuffer(
+const MAX_SOCIAL_AVATAR_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Downloads the author's profile avatar, upgrading tiny `_normal.` X avatars to `_400x400.` first.
+ * Validates image magic bytes. 100% Workers-safe.
+ */
+export async function fetchSocialAvatarBytes(
+  rawURL?: string | null,
+): Promise<Uint8Array | null> {
+  const trimmed = rawURL?.trim();
+  if (!trimmed) return null;
+  const candidates: string[] = [];
+  if (trimmed.includes('pbs.twimg.com/profile_images/') && trimmed.includes('_normal.')) {
+    candidates.push(trimmed.replace('_normal.', '_400x400.'));
+  }
+  candidates.push(trimmed);
+
+  for (const urlStr of candidates) {
+    const buf = await downloadBoundedBuffer(urlStr, MAX_SOCIAL_AVATAR_BYTES, 6_000);
+    if (!buf || buf.byteLength < 16) continue;
+    const bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+    const mime = sniffImageMimeType(bytes, '');
+    if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
+      return bytes;
+    }
+  }
+  return null;
+}
+
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15';
+
+export async function downloadBoundedBufferWithFinalURL(
   urlStr: string,
   maxBytes: number,
   timeoutMs = 15_000,
-): Promise<Buffer | null> {
+  userAgent = 'CharkleWeb/1.0 (+https://charkle.app)',
+): Promise<{ buffer: Buffer; finalURL: string } | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(urlStr, {
       signal: controller.signal,
       headers: {
-        'User-Agent': 'CharkleWeb/1.0 (+https://charkle.app)',
+        'User-Agent': userAgent,
       },
     });
     if (!res.ok) return null;
     const contentLength = Number(res.headers.get('content-length') ?? '0');
     if (contentLength > maxBytes) return null;
 
+    const finalURL = res.url || urlStr;
     const reader = res.body?.getReader();
     if (!reader) {
       const arr = Buffer.from(await res.arrayBuffer());
-      return arr.length <= maxBytes ? arr : null;
+      return arr.length <= maxBytes ? { buffer: arr, finalURL } : null;
     }
     const chunks: Buffer[] = [];
     let total = 0;
@@ -183,12 +221,22 @@ export async function downloadBoundedBuffer(
       }
       chunks.push(Buffer.from(value));
     }
-    return Buffer.concat(chunks, total);
+    return { buffer: Buffer.concat(chunks, total), finalURL };
   } catch {
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function downloadBoundedBuffer(
+  urlStr: string,
+  maxBytes: number,
+  timeoutMs = 15_000,
+  userAgent?: string,
+): Promise<Buffer | null> {
+  const res = await downloadBoundedBufferWithFinalURL(urlStr, maxBytes, timeoutMs, userAgent);
+  return res?.buffer ?? null;
 }
 
 async function fetchJsonSafe(urlStr: string, timeoutMs = 10_000): Promise<Record<string, unknown> | null> {
@@ -238,13 +286,26 @@ export function extractOpenGraphFromHtml(html: string): {
 }
 
 function decodeHtmlEntities(input: string): string {
-  return input
-    .replace(/&amp;/g, '&')
+  const withNumeric = input.replace(/&#(x?[0-9a-fA-F]+);/g, (full, token: string) => {
+    const cp =
+      token.startsWith('x') || token.startsWith('X')
+        ? Number.parseInt(token.slice(1), 16)
+        : Number.parseInt(token, 10);
+    if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) return full;
+    try {
+      return String.fromCodePoint(cp);
+    } catch {
+      return full;
+    }
+  });
+  return withNumeric
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
     .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'");
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
 }
 
 async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMetadata> {
@@ -268,7 +329,7 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
       const urlRaw = String(rawItem.url ?? '');
       if (!urlRaw) return;
       const kind: SocialMediaAttachment['kind'] =
-        type === 'video' ? 'video' : type === 'gif' ? 'gif' : 'photo';
+        type === 'video' ? 'video' : type === 'gif' || type === 'animated_gif' ? 'gif' : 'photo';
       const url = kind === 'photo' ? upgradeTwimgPhotoURL(urlRaw) : urlRaw;
       const thumb = typeof rawItem.thumbnail_url === 'string' ? rawItem.thumbnail_url : null;
       attachments.push({ id: `${kind}:${url}`, kind, url, thumbnailURL: thumb });
@@ -286,7 +347,10 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
       }
       if (Array.isArray(media.videos)) {
         for (const v of media.videos) {
-          if (v && typeof v === 'object') pushItem({ ...(v as Record<string, unknown>), type: 'video' });
+          if (v && typeof v === 'object') {
+            const vRec = v as Record<string, unknown>;
+            pushItem({ ...vRec, type: vRec.type ?? 'video' });
+          }
         }
       }
       if (attachments.length === 0) {
@@ -300,9 +364,23 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
       }
       if (attachments.length === 0 && quote?.media && typeof quote.media === 'object') {
         const qm = quote.media as Record<string, unknown>;
-        if (Array.isArray(qm.all)) {
+        if (Array.isArray(qm.all) && qm.all.length > 0) {
           for (const item of qm.all) {
             if (item && typeof item === 'object') pushItem(item as Record<string, unknown>);
+          }
+        } else {
+          if (Array.isArray(qm.photos)) {
+            for (const p of qm.photos) {
+              if (p && typeof p === 'object') pushItem({ ...(p as Record<string, unknown>), type: 'photo' });
+            }
+          }
+          if (Array.isArray(qm.videos)) {
+            for (const v of qm.videos) {
+              if (v && typeof v === 'object') {
+                const vRec = v as Record<string, unknown>;
+                pushItem({ ...vRec, type: vRec.type ?? 'video' });
+              }
+            }
           }
         }
       }
@@ -310,6 +388,13 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
 
     const firstVideo = attachments.find((a) => a.kind === 'video' || a.kind === 'gif');
     const quoteAuthor = quote?.author as Record<string, unknown> | undefined;
+    const quoteRawText = quote?.raw_text as Record<string, unknown> | undefined;
+    const quoteText =
+      typeof quoteRawText?.text === 'string'
+        ? quoteRawText.text
+        : typeof quote?.text === 'string'
+          ? quote.text
+          : null;
 
     return {
       platform: 'x',
@@ -319,7 +404,7 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
       publishedAtText: typeof tweet.created_at === 'string' ? tweet.created_at : null,
       bodyText,
       quotedAuthor: quoteAuthor ? String(quoteAuthor.name ?? quoteAuthor.screen_name ?? '') || null : null,
-      quotedText: typeof quote?.text === 'string' ? quote.text : null,
+      quotedText: quoteText,
       articleTitle: typeof article.title === 'string' ? article.title : null,
       mediaURLs: attachments.map((a) => a.url),
       mediaThumbnailURLs: attachments.map((a) => a.thumbnailURL ?? a.url),
@@ -339,7 +424,7 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
   const vx = await fetchJsonSafe(`https://api.vxtwitter.com/${parsed.handle}/status/${parsed.postID}`);
   if (vx) {
     const attachments: SocialMediaAttachment[] = [];
-    if (Array.isArray(vx.media_extended)) {
+    if (Array.isArray(vx.media_extended) && vx.media_extended.length > 0) {
       for (const m of vx.media_extended) {
         if (!m || typeof m !== 'object') continue;
         const rec = m as Record<string, unknown>;
@@ -347,12 +432,13 @@ async function resolveXPost(parsed: ParsedSocialPostURL): Promise<SocialPostMeta
         if (!rawUrl) continue;
         const type = String(rec.type ?? 'image').toLowerCase();
         const kind: SocialMediaAttachment['kind'] =
-          type === 'video' ? 'video' : type === 'gif' ? 'gif' : 'photo';
+          type === 'video' ? 'video' : type === 'gif' || type === 'animated_gif' ? 'gif' : 'photo';
         const url = kind === 'photo' ? upgradeTwimgPhotoURL(rawUrl) : rawUrl;
         const thumb = typeof rec.thumbnail_url === 'string' ? rec.thumbnail_url : null;
         attachments.push({ id: `${kind}:${url}`, kind, url, thumbnailURL: thumb });
       }
-    } else if (Array.isArray(vx.mediaURLs)) {
+    }
+    if (attachments.length === 0 && Array.isArray(vx.mediaURLs)) {
       for (const rawUrl of vx.mediaURLs) {
         if (typeof rawUrl !== 'string') continue;
         const isVid = rawUrl.toLowerCase().includes('.mp4');
@@ -440,12 +526,25 @@ async function resolveBlueskyPost(parsed: ParsedSocialPostURL): Promise<SocialPo
           thumbnailURL: typeof rec.thumb === 'string' ? rec.thumb : full,
         });
       }
-      if (typeof embed.playlist === 'string') {
+      const embedMedia = embed.media as Record<string, unknown> | undefined;
+      const playlist =
+        typeof embed.playlist === 'string'
+          ? embed.playlist
+          : typeof embedMedia?.playlist === 'string'
+            ? embedMedia.playlist
+            : null;
+      const playlistThumb =
+        typeof embed.thumbnail === 'string'
+          ? embed.thumbnail
+          : typeof embedMedia?.thumbnail === 'string'
+            ? embedMedia.thumbnail
+            : null;
+      if (playlist) {
         attachments.push({
-          id: `video:${embed.playlist}`,
+          id: `video:${playlist}`,
           kind: 'video',
-          url: embed.playlist,
-          thumbnailURL: typeof embed.thumbnail === 'string' ? embed.thumbnail : null,
+          url: playlist,
+          thumbnailURL: playlistThumb,
         });
       }
       const firstVideo = attachments.find((a) => a.kind === 'video');
@@ -476,7 +575,12 @@ async function resolveBlueskyPost(parsed: ParsedSocialPostURL): Promise<SocialPo
 }
 
 async function resolveSocialOpenGraphFallback(parsed: ParsedSocialPostURL): Promise<SocialPostMetadata> {
-  const htmlBuf = await downloadBoundedBuffer(parsed.canonicalURL, MAX_HTML_BYTES, 10_000);
+  const htmlBuf = await downloadBoundedBuffer(
+    parsed.canonicalURL,
+    MAX_HTML_BYTES,
+    10_000,
+    BROWSER_USER_AGENT,
+  );
   if (!htmlBuf) {
     return {
       platform: parsed.platform,
@@ -532,15 +636,36 @@ export async function resolveSocialPost(rawUrl: string): Promise<ResolvedSocialP
       break;
   }
 
-  // Download cover thumbnail image for poster card & optional primary MP4 video for offline caching
+  // Download cover thumbnail image, author avatar, & optional primary MP4 video for offline caching
   let coverImageBuffer: Buffer | null = null;
   let primaryVideoBuffer: Buffer | null = null;
 
+  const downloadCoverWithFallback = async (rawCoverUrl: string | null): Promise<Buffer | null> => {
+    if (!rawCoverUrl) return null;
+    const primary = await downloadBoundedBuffer(rawCoverUrl, MAX_SOCIAL_PHOTO_BYTES, 12_000);
+    if (primary) return primary;
+    try {
+      const u = new URL(rawCoverUrl);
+      if (u.hostname.toLowerCase() === 'pbs.twimg.com' && u.searchParams.get('name') === 'orig') {
+        u.searchParams.set('name', 'large');
+        const fallback = await downloadBoundedBuffer(u.toString(), MAX_SOCIAL_PHOTO_BYTES, 12_000);
+        if (fallback) return fallback;
+        u.searchParams.delete('name');
+        return downloadBoundedBuffer(u.toString(), MAX_SOCIAL_PHOTO_BYTES, 12_000);
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  };
+
   const firstAtt = metadata.attachments[0];
   const coverUrl = firstAtt?.thumbnailURL ?? (firstAtt?.kind === 'photo' ? firstAtt.url : null);
-  if (coverUrl) {
-    coverImageBuffer = await downloadBoundedBuffer(coverUrl, MAX_SOCIAL_PHOTO_BYTES, 12_000);
-  }
+  const [downloadedCover, authorAvatarBytes] = await Promise.all([
+    downloadCoverWithFallback(coverUrl),
+    fetchSocialAvatarBytes(metadata.authorAvatarURL),
+  ]);
+  coverImageBuffer = downloadedCover;
   if (metadata.hasVideo && metadata.videoURL && !metadata.videoURL.toLowerCase().includes('.m3u8')) {
     primaryVideoBuffer = await downloadBoundedBuffer(metadata.videoURL, MAX_SOCIAL_VIDEO_BYTES, 20_000);
     if (!primaryVideoBuffer && !coverImageBuffer) {
@@ -572,5 +697,6 @@ export async function resolveSocialPost(rawUrl: string): Promise<ResolvedSocialP
     markdownArchive: mdLines.join('\n'),
     coverImageBuffer,
     primaryVideoBuffer,
+    authorAvatarBytes,
   };
 }

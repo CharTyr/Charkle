@@ -132,13 +132,143 @@ nonisolated enum MediaArtwork {
         return ctx.makeImage()
     }
 
-    /// Clean social post card (X / Threads / Bluesky) optionally compositing an embedded photo/video poster
-    /// and the author's real circular avatar.
+    /// Editorial browser bookmark card fallback for arbitrary websites without an OpenGraph preview or WebKit snapshot.
+    static func webPageCard(
+        title: String,
+        domain: String,
+        siteName: String? = nil,
+        description: String? = nil,
+        urlString: String? = nil,
+        themeColorHex: String? = nil,
+        favicon: CGImage? = nil
+    ) -> CGImage? {
+        let width = 1200
+        let height = 750
+        guard let ctx = context(width: width, height: height) else { return nil }
+
+        let accentHex = resolveWebCardAccentHex(themeColorHex: themeColorHex, domain: domain)
+
+        // Subtle warm paper-studio backdrop matching Charkle gallery light surface
+        ctx.setFillColor(color(0xF5F5F3))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Main elevated browser card
+        let cardRect = CGRect(x: 34, y: 34, width: width - 68, height: height - 68)
+        ctx.setFillColor(color(0xFFFFFF))
+        fillRoundedRect(cardRect, radius: 28, in: ctx)
+        ctx.setStrokeColor(color(0xE5E7EB))
+        ctx.setLineWidth(2)
+        addRoundedRectPath(cardRect, radius: 28, in: ctx)
+        ctx.strokePath()
+
+        // Top accent ribbon clipped inside card top edge
+        ctx.saveGState()
+        addRoundedRectPath(cardRect, radius: 28, in: ctx)
+        ctx.clip()
+        ctx.setFillColor(color(accentHex))
+        ctx.fill(CGRect(x: cardRect.minX, y: cardRect.maxY - 12, width: cardRect.width, height: 12))
+        ctx.restoreGState()
+
+        // Browser-style header bar with favicon + site name / domain
+        let headerY = 612.0
+        let iconRect = CGRect(x: 78, y: headerY, width: 52, height: 52)
+        if let favicon {
+            ctx.saveGState()
+            addRoundedRectPath(iconRect, radius: 13, in: ctx)
+            ctx.clip()
+            ctx.setFillColor(color(0xF3F4F6))
+            ctx.fill(iconRect)
+            drawAspectFill(favicon, in: iconRect.insetBy(dx: 4, dy: 4), ctx: ctx)
+            ctx.restoreGState()
+            ctx.setStrokeColor(color(0x000000, alpha: 0.08))
+            ctx.setLineWidth(1.5)
+            addRoundedRectPath(iconRect, radius: 13, in: ctx)
+            ctx.strokePath()
+        } else {
+            ctx.setFillColor(color(accentHex, alpha: 0.14))
+            fillRoundedRect(iconRect, radius: 13, in: ctx)
+            let initial = String((domain.first ?? "W")).uppercased()
+            draw(initial, in: ctx, at: CGPoint(x: 95, y: headerY + 15), size: 25, ink: accentHex, width: 32, bold: true)
+        }
+
+        let cleanSite = siteName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let primaryHeader = (cleanSite?.isEmpty == false) ? cleanSite! : domain
+        draw(primaryHeader, in: ctx, at: CGPoint(x: 148, y: headerY + 26), size: 22, ink: 0x111827, width: 760, bold: true)
+        draw(domain, in: ctx, at: CGPoint(x: 148, y: headerY + 2), size: 17, ink: 0x6B7280, width: 760, bold: false)
+
+        // Top-right WEB badge pill
+        ctx.setFillColor(color(accentHex, alpha: 0.12))
+        fillRoundedRect(CGRect(x: 1018, y: headerY + 8, width: 104, height: 36), radius: 18, in: ctx)
+        draw("WEB", in: ctx, at: CGPoint(x: 1046, y: headerY + 18), size: 17, ink: accentHex, width: 64, bold: true)
+
+        // Subtle divider below header
+        ctx.setFillColor(color(0xF0F1F4))
+        ctx.fill(CGRect(x: 78, y: 582, width: 1044, height: 2))
+
+        // Main webpage title (up to 3 lines)
+        let displayTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? domain : title
+        let titleLines = wrapText(displayTitle, maxCharsPerLine: 26, maxLines: 3)
+        var cursorY = 506.0
+        for line in titleLines {
+            draw(line, in: ctx, at: CGPoint(x: 78, y: cursorY), size: 46, ink: 0x111827, width: 1044, bold: true)
+            cursorY -= 62
+        }
+
+        // Meta description excerpt (up to 3 lines)
+        let cleanDesc = description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanDesc.isEmpty {
+            let descLines = wrapText(cleanDesc, maxCharsPerLine: 44, maxLines: 3)
+            var descY = min(cursorY - 10, 326.0)
+            for line in descLines {
+                draw(line, in: ctx, at: CGPoint(x: 78, y: descY), size: 24, ink: 0x4B5563, width: 1044)
+                descY -= 38
+            }
+        }
+
+        // Footer bar with full URL & browser-open indicator
+        ctx.setFillColor(color(0xF0F1F4))
+        ctx.fill(CGRect(x: 78, y: 128, width: 1044, height: 2))
+
+        let footerURL = urlString ?? "https://\(domain)"
+        draw(footerURL, in: ctx, at: CGPoint(x: 78, y: 76), size: 19, ink: 0x6B7280, width: 790)
+
+        ctx.setFillColor(color(0x111827))
+        fillRoundedRect(CGRect(x: 912, y: 62, width: 210, height: 44), radius: 22, in: ctx)
+        draw("↗ 默认浏览器打开", in: ctx, at: CGPoint(x: 938, y: 76), size: 18, ink: 0xFFFFFF, width: 170, bold: true)
+
+        return ctx.makeImage()
+    }
+
+    private static func resolveWebCardAccentHex(themeColorHex: String?, domain: String) -> UInt32 {
+        if let raw = themeColorHex?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.hasPrefix("#"),
+           let parsed = UInt32(raw.dropFirst(), radix: 16) {
+            let r = Int((parsed >> 16) & 255)
+            let g = Int((parsed >> 8) & 255)
+            let b = Int(parsed & 255)
+            let lum = (r * 299 + g * 587 + b * 114) / 1000
+            // Avoid near-white theme colors disappearing against the white card.
+            if lum < 215 && lum > 22 {
+                return parsed
+            }
+        }
+        let palette: [UInt32] = [0x2563EB, 0x0F766E, 0x4F46E5, 0xB45309, 0x0369A1, 0x7C3AED, 0xBE123C, 0x334155]
+        let hash = domain.utf8.reduce(5381) { (($0 << 5) &+ $0) &+ Int($1) }
+        return palette[abs(hash) % palette.count]
+    }
+
+    /// Clean social post card (X / Threads / Bluesky / Xiaohongshu).
+    /// Xiaohongshu notes render as native 3:4 cover posters (`900x1200`) matching the platform's default cover ratio;
+    /// X / Threads / Bluesky keep the text-first card layout.
     static func socialPostCard(
         _ post: SocialPostMetadata,
         embeddedMedia: CGImage? = nil,
         authorAvatar: CGImage? = nil
     ) -> CGImage? {
+        if post.platform == .xiaohongshu {
+            return xiaohongshuPostCard(post, embeddedMedia: embeddedMedia, authorAvatar: authorAvatar)
+        }
+
         let hasMedia = embeddedMedia != nil
         let width = 800
         let height = hasMedia ? 920 : 620
@@ -173,21 +303,39 @@ nonisolated enum MediaArtwork {
         }
 
         // Leave clean breathing room on the top-right where the gallery's floating platform badge sits
-        // (avoids colliding double "X" badges on masonry thumbnails).
+        // (avoids colliding double badges on masonry thumbnails).
         draw(post.authorName, in: ctx, at: CGPoint(x: 112, y: headerY + 26), size: 24, ink: 0x111827, width: 540, bold: true)
-        var handleLine = "@\(post.authorHandle)"
-        if let date = post.publishedAtText, !date.isEmpty {
-            handleLine += " · \(String(date.prefix(16)))"
+        var handleParts: [String] = []
+        if let handleLine = post.displayHandleLine {
+            handleParts.append(handleLine)
+        } else {
+            handleParts.append(post.platform.displayName)
         }
-        draw(handleLine, in: ctx, at: CGPoint(x: 112, y: headerY + 2), size: 17, ink: 0x6B7280, width: 560)
+        if let date = post.publishedAtText, !date.isEmpty {
+            handleParts.append(String(date.prefix(16)))
+        }
+        draw(handleParts.joined(separator: " · "), in: ctx, at: CGPoint(x: 112, y: headerY + 2), size: 17, ink: 0x6B7280, width: 560)
 
-        // Body text
-        let bodyMaxLines = hasMedia ? 4 : 9
-        let bodyLines = wrapText(post.bodyText, maxCharsPerLine: 34, maxLines: bodyMaxLines)
+        // Optional bold article/note headline + Body text
         var cursorY = headerY - 46
-        for line in bodyLines {
-            draw(line, in: ctx, at: CGPoint(x: 44, y: cursorY), size: 25, ink: 0x1F2937, width: 712)
-            cursorY -= 38
+        var remainingBodyLines = hasMedia ? 4 : 9
+        if let headline = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !headline.isEmpty {
+            let headLines = wrapText(headline, maxCharsPerLine: 26, maxLines: 2)
+            for line in headLines {
+                draw(line, in: ctx, at: CGPoint(x: 44, y: cursorY), size: 27, ink: 0x111827, width: 712, bold: true)
+                cursorY -= 38
+                remainingBodyLines = max(1, remainingBodyLines - 1)
+            }
+            cursorY -= 4
+        }
+        let bodySource = post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldDrawBody = !bodySource.isEmpty && bodySource != post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if shouldDrawBody {
+            let bodyLines = wrapText(bodySource, maxCharsPerLine: 34, maxLines: remainingBodyLines)
+            for line in bodyLines {
+                draw(line, in: ctx, at: CGPoint(x: 44, y: cursorY), size: 24, ink: 0x1F2937, width: 712)
+                cursorY -= 36
+            }
         }
 
         // Embedded media preview (rounded aspect-fill)
@@ -223,6 +371,181 @@ nonisolated enum MediaArtwork {
         if let v = post.viewCount { metrics.append("\(formatMetric(v)) 浏览") }
         let footerText = metrics.isEmpty ? post.platform.openActionLabel : metrics.joined(separator: "   ")
         draw(footerText, in: ctx, at: CGPoint(x: 44, y: 30), size: 17, ink: 0x6B7280, width: 712)
+
+        return ctx.makeImage()
+    }
+
+    /// Native Xiaohongshu feed card (`900x1440`):
+    /// - Top: strict vertical 3:4 (`900x1200`) full-bleed cover image with multi-image / video indicators.
+    /// - Bottom (`240px`): crisp paper-white footer preserving the bold note title (up to 2 lines),
+    ///   author circular avatar + name, and right-aligned like count.
+    private static func xiaohongshuPostCard(
+        _ post: SocialPostMetadata,
+        embeddedMedia: CGImage?,
+        authorAvatar: CGImage?
+    ) -> CGImage? {
+        let width = 900
+        let coverHeight = 1_200 // Strict 3:4 vertical cover (900 x 1200)
+        let footerHeight = 240
+        let height = coverHeight + footerHeight // 900 x 1440 (ratio 0.625, unclipped in masonry)
+        guard let ctx = context(width: width, height: height) else { return nil }
+
+        let canvasRect = CGRect(x: 0, y: 0, width: width, height: height)
+        ctx.setFillColor(color(0xFFFFFF))
+        ctx.fill(canvasRect)
+
+        if let media = embeddedMedia {
+            // 1. Top strict 3:4 cover photo (y = 240 ... 1440)
+            let coverRect = CGRect(x: 0, y: footerHeight, width: width, height: coverHeight)
+            ctx.saveGState()
+            ctx.clip(to: coverRect)
+            ctx.setFillColor(color(0xF5F5F3))
+            ctx.fill(coverRect)
+            drawAspectFill(media, in: coverRect, ctx: ctx)
+            ctx.restoreGState()
+
+            // Multi-image indicator pill on top-left (leaves top-right clear for Charkle's floating platform badge)
+            let mediaCount = post.effectiveAttachments.count
+            if mediaCount > 1 && !post.hasVideo {
+                let label = "\(mediaCount) 图"
+                let pillRect = CGRect(x: 24, y: Double(height - 72), width: 96, height: 44)
+                ctx.setFillColor(color(0x111827, alpha: 0.66))
+                fillRoundedRect(pillRect, radius: 22, in: ctx)
+                draw(label, in: ctx, at: CGPoint(x: 44, y: Double(height - 58)), size: 20, ink: 0xFFFFFF, width: 68, bold: true)
+            }
+
+            if post.hasVideo {
+                ctx.setFillColor(color(0x000000, alpha: 0.58))
+                ctx.fillEllipse(in: CGRect(x: coverRect.midX - 44, y: coverRect.midY - 44, width: 88, height: 88))
+                ctx.setFillColor(color(0xFFFFFF))
+                ctx.beginPath()
+                ctx.move(to: CGPoint(x: coverRect.midX - 12, y: coverRect.midY - 20))
+                ctx.addLine(to: CGPoint(x: coverRect.midX - 12, y: coverRect.midY + 20))
+                ctx.addLine(to: CGPoint(x: coverRect.midX + 22, y: coverRect.midY))
+                ctx.closePath()
+                ctx.fillPath()
+            }
+
+            // Hairline divider separating light cover photos from the white title footer
+            ctx.setFillColor(color(0xEFEFEF))
+            ctx.fill(CGRect(x: 0, y: Double(footerHeight) - 1.5, width: Double(width), height: 1.5))
+
+            // 2. Bottom Xiaohongshu title + author + likes footer (y = 0 ... 240)
+            let rawTitle = (post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+                ?? post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayTitle = rawTitle.isEmpty ? "\(post.authorName) 的小红书笔记" : rawTitle
+            let titleLines = wrapText(displayTitle, maxCharsPerLine: 25, maxLines: 2)
+            var titleY = titleLines.count > 1 ? 182.0 : 158.0
+            for line in titleLines {
+                draw(line, in: ctx, at: CGPoint(x: 34, y: titleY), size: 32, ink: 0x18191C, width: 832, bold: true)
+                titleY -= 46
+            }
+
+            // Author avatar + nickname + right-aligned likes row
+            let avatarRect = CGRect(x: 34, y: 34, width: 42, height: 42)
+            if let authorAvatar {
+                ctx.saveGState()
+                ctx.addEllipse(in: avatarRect)
+                ctx.clip()
+                drawAspectFill(authorAvatar, in: avatarRect, ctx: ctx)
+                ctx.restoreGState()
+                ctx.setStrokeColor(color(0x000000, alpha: 0.08))
+                ctx.setLineWidth(1.2)
+                ctx.strokeEllipse(in: avatarRect.insetBy(dx: 0.6, dy: 0.6))
+            } else {
+                ctx.setFillColor(color(0xFF2442, alpha: 0.14))
+                ctx.fillEllipse(in: avatarRect)
+                let initial = String((post.authorName.first ?? "小")).uppercased()
+                draw(initial, in: ctx, at: CGPoint(x: 46, y: 46), size: 20, ink: 0xFF2442, width: 24, bold: true)
+            }
+
+            var rightLabelWidth = 0.0
+            if let likes = post.likeCount {
+                let likesText = "♥ \(formatMetric(likes))"
+                rightLabelWidth = drawRightAligned(likesText, in: ctx, rightX: Double(width - 34), baselineY: 46, size: 22, ink: 0x6B7280, maxWidth: 180)
+            }
+
+            let authorMaxW = max(240, Double(width - 34) - 90 - (rightLabelWidth > 0 ? rightLabelWidth + 20 : 0))
+            draw(post.authorName, in: ctx, at: CGPoint(x: 90, y: 46), size: 23, ink: 0x5C6069, width: authorMaxW)
+
+            // Crisp outer hairline border so white footer edges stay distinct on light canvas
+            ctx.setStrokeColor(color(0xE5E7EB))
+            ctx.setLineWidth(2)
+            ctx.stroke(CGRect(x: 1, y: 1, width: width - 2, height: height - 2))
+
+            return ctx.makeImage()
+        }
+
+        // Clean 900x1440 editorial fallback card when cover media is unavailable
+        ctx.setFillColor(color(0xFF2442))
+        ctx.fill(CGRect(x: 0, y: Double(height - 12), width: Double(width), height: 12))
+
+        ctx.setStrokeColor(color(0xE5E7EB))
+        ctx.setLineWidth(2)
+        ctx.stroke(CGRect(x: 1, y: 1, width: width - 2, height: height - 2))
+
+        let headerY = Double(height - 118)
+        let avatarRect = CGRect(x: 52, y: headerY, width: 58, height: 58)
+        if let authorAvatar {
+            ctx.saveGState()
+            ctx.addEllipse(in: avatarRect)
+            ctx.clip()
+            drawAspectFill(authorAvatar, in: avatarRect, ctx: ctx)
+            ctx.restoreGState()
+            ctx.setStrokeColor(color(0x000000, alpha: 0.08))
+            ctx.setLineWidth(1.5)
+            ctx.strokeEllipse(in: avatarRect.insetBy(dx: 0.75, dy: 0.75))
+        } else {
+            ctx.setFillColor(color(0xFF2442))
+            ctx.fillEllipse(in: avatarRect)
+            let initial = String((post.authorName.first ?? "小")).uppercased()
+            draw(initial, in: ctx, at: CGPoint(x: 68, y: headerY + 18), size: 26, ink: 0xFFFFFF, width: 36, bold: true)
+        }
+
+        draw(post.authorName, in: ctx, at: CGPoint(x: 128, y: headerY + 30), size: 27, ink: 0x111827, width: 590, bold: true)
+        var subParts: [String] = []
+        if let handleLine = post.displayHandleLine {
+            subParts.append(handleLine)
+        } else {
+            subParts.append(post.platform.displayName)
+        }
+        if let date = post.publishedAtText, !date.isEmpty {
+            subParts.append(String(date.prefix(16)))
+        }
+        draw(subParts.joined(separator: " · "), in: ctx, at: CGPoint(x: 128, y: headerY + 2), size: 19, ink: 0x6B7280, width: 620)
+
+        ctx.setFillColor(color(0xF3F4F6))
+        ctx.fill(CGRect(x: 52, y: headerY - 26, width: 796, height: 2))
+
+        var cursorY = headerY - 82
+        if let headline = post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !headline.isEmpty {
+            let headLines = wrapText(headline, maxCharsPerLine: 22, maxLines: 3)
+            for line in headLines {
+                draw(line, in: ctx, at: CGPoint(x: 52, y: cursorY), size: 36, ink: 0x111827, width: 796, bold: true)
+                cursorY -= 50
+            }
+            cursorY -= 12
+        }
+
+        let bodySource = post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldDrawBody = !bodySource.isEmpty && bodySource != post.articleTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if shouldDrawBody {
+            let bodyLines = wrapText(bodySource, maxCharsPerLine: 30, maxLines: 16)
+            for line in bodyLines {
+                if cursorY < 130 { break }
+                draw(line, in: ctx, at: CGPoint(x: 52, y: cursorY), size: 26, ink: 0x374151, width: 796)
+                cursorY -= 42
+            }
+        }
+
+        ctx.setFillColor(color(0xF3F4F6))
+        ctx.fill(CGRect(x: 52, y: 84, width: 796, height: 2))
+        var metrics: [String] = []
+        if let l = post.likeCount { metrics.append("\(formatMetric(l)) 赞") }
+        if let rt = post.repostCount { metrics.append("\(formatMetric(rt)) 收藏") }
+        if let r = post.replyCount { metrics.append("\(formatMetric(r)) 评论") }
+        let footerText = metrics.isEmpty ? post.platform.openActionLabel : metrics.joined(separator: "   ")
+        draw(footerText, in: ctx, at: CGPoint(x: 52, y: 38), size: 20, ink: 0x6B7280, width: 796)
 
         return ctx.makeImage()
     }
@@ -303,6 +626,33 @@ nonisolated enum MediaArtwork {
         let visible = CTLineCreateTruncatedLine(line, width, .end, ellipsis) ?? line
         ctx.textPosition = position
         CTLineDraw(visible, ctx)
+    }
+
+    @discardableResult
+    private static func drawRightAligned(
+        _ text: String,
+        in ctx: CGContext,
+        rightX: Double,
+        baselineY: Double,
+        size: Double,
+        ink: UInt32,
+        maxWidth: Double,
+        bold: Bool = false
+    ) -> Double {
+        let uiType: CTFontUIFontType = bold ? .emphasizedSystem : .system
+        let font = CTFontCreateUIFontForLanguage(uiType, size, nil)
+            ?? CTFontCreateWithName("Helvetica Neue" as CFString, size, nil)
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color(ink)
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+        let ellipsis = CTLineCreateWithAttributedString(NSAttributedString(string: "…", attributes: attributes))
+        let visible = CTLineCreateTruncatedLine(line, maxWidth, .end, ellipsis) ?? line
+        let lineWidth = CTLineGetTypographicBounds(visible, nil, nil, nil)
+        ctx.textPosition = CGPoint(x: rightX - lineWidth, y: baselineY)
+        CTLineDraw(visible, ctx)
+        return lineWidth
     }
 
     private static func fillRoundedRect(_ rect: CGRect, radius: Double, in ctx: CGContext) {

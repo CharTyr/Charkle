@@ -295,14 +295,14 @@ struct BoardAssetNodeView: View {
                         }
                         Spacer()
                         Button(action: onOpenQuickLook) {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            Image(systemName: asset?.isExternalWebLink == true ? "safari" : "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .padding(5)
                                 .background(Color.black.opacity(0.54), in: RoundedRectangle(cornerRadius: innerBadgeRadius, style: .continuous))
                         }
                         .buttonStyle(.plain)
-                        .help("快速预览 (Space)")
+                        .help(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)")
                     }
                     .padding(6)
                 }
@@ -331,7 +331,7 @@ struct BoardAssetNodeView: View {
             }
         }
         .contextMenu {
-            Button("快速预览 (Space)") { onOpenQuickLook() }
+            Button(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)") { onOpenQuickLook() }
             if asset != nil {
                 Button {
                     onRevealInLibrary()

@@ -98,14 +98,14 @@ async function requestJson(config, pathname, { method = 'GET', body, timeoutMs =
         code,
       });
     }
-    throw new CharkleApiError(serverMsg || `Charkle 服务返回错误（HTTP ${res.status}）。`, {
+    throw new CharkleApiError(serverMsg || `连接失败（${res.status}）`, {
       status: res.status,
       code,
     });
   }
 
   if (data === null) {
-    throw new CharkleApiError('服务响应格式异常，请确认填写的是 Charkle Web 服务地址。', {
+    throw new CharkleApiError('无法识别该服务地址，请检查设置', {
       status: res.status,
       code: 'INVALID_RESPONSE',
     });
@@ -180,7 +180,7 @@ export async function ingestUrl(
 ) {
   const cleanUrl = String(url ?? '').trim();
   if (!/^https?:\/\//i.test(cleanUrl)) {
-    throw new CharkleApiError('仅支持收藏 http:// 或 https:// 网页链接。', {
+    throw new CharkleApiError('仅支持普通网页链接', {
       code: 'INVALID_URL',
     });
   }
@@ -275,7 +275,7 @@ async function uploadImageBlobMultipart(
 
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    throw new CharkleApiError(data?.error || `上传图片失败（HTTP ${res.status}）。`, {
+    throw new CharkleApiError(data?.error || `上传图片失败（${res.status}）`, {
       status: res.status,
       code: data?.code || `HTTP_${res.status}`,
     });

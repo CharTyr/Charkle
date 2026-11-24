@@ -282,9 +282,11 @@ struct QuickLookSocialPostCard: View {
                         HStack(spacing: 6) {
                             Text(post.authorName)
                                 .font(.system(size: 14.5, weight: .bold))
-                            Text("@\(post.authorHandle)")
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(.secondary)
+                            if let handleLine = post.displayHandleLine {
+                                Text(handleLine)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         if let published = post.publishedAtText, !published.isEmpty {
                             Text(published)
@@ -346,7 +348,7 @@ struct QuickLookSocialPostCard: View {
                 if !attachments.isEmpty {
                     if attachments.count > 1, let onExtractAllMedia {
                         HStack(spacing: 8) {
-                            Text("推文内含 \(attachments.count) 个媒体")
+                            Text("\(post.platform.postNoun)内含 \(attachments.count) 个媒体")
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -488,21 +490,39 @@ struct QuickLookSocialPostCard: View {
                     extractMediaButton(attachment: attachment, index: index, pillStyle: false)
                 }
             } else {
-                let previewStr = attachment.thumbnailURL ?? attachment.url
+                let previewStr = attachment.kind == .photo ? attachment.url : (attachment.thumbnailURL ?? attachment.url)
+                let isXiaohongshuMultiGrid = post.platform == .xiaohongshu && attachments.count > 1
                 ZStack(alignment: .bottomTrailing) {
                     if let imgURL = URL(string: previewStr) {
-                        RemoteCachedImageView(
-                            url: imgURL,
-                            contentMode: .fit,
-                            maxHeight: attachments.count == 1 ? 420 : 240
-                        ) {
-                            ProgressView().frame(height: 180)
-                        } failurePlaceholder: {
-                            mediaFailedPlaceholder
+                        if isXiaohongshuMultiGrid {
+                            Color.primary.opacity(0.05)
+                                .aspectRatio(3.0 / 4.0, contentMode: .fit)
+                                .overlay {
+                                    RemoteCachedImageView(
+                                        url: imgURL,
+                                        contentMode: .fill
+                                    ) {
+                                        CharkleMediaPlaceholderSkeleton(height: 220, cornerRadius: 12)
+                                    } failurePlaceholder: {
+                                        mediaFailedPlaceholder
+                                    }
+                                }
+                                .clipped()
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        } else {
+                            RemoteCachedImageView(
+                                url: imgURL,
+                                contentMode: .fit,
+                                maxHeight: attachments.count == 1 ? (post.platform == .xiaohongshu ? 520 : 420) : 240
+                            ) {
+                                CharkleMediaPlaceholderSkeleton(height: 180, cornerRadius: 12)
+                            } failurePlaceholder: {
+                                mediaFailedPlaceholder
+                            }
+                            .frame(maxWidth: .infinity)
+                            .background(Color.primary.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
-                        .frame(maxWidth: .infinity)
-                        .background(Color.primary.opacity(0.05))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     } else {
                         mediaFailedPlaceholder
                     }
@@ -578,6 +598,7 @@ struct QuickLookSocialPostCard: View {
         case .x: Color(charkleHex: "#18181B")
         case .threads: Color(charkleHex: "#27272A")
         case .bluesky: Color(charkleHex: "#0284C7")
+        case .xiaohongshu: Color(charkleHex: "#FF2442")
         }
     }
 
@@ -849,7 +870,15 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
             let targetURL = url
             let fetched: NSImage? = await Task.detached(priority: .utility) {
                 var request = URLRequest(url: targetURL, timeoutInterval: 10)
-                request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+                if XiaohongshuURLParser.isXiaohongshuMediaHost(targetURL.host()) {
+                    request.setValue(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+                        forHTTPHeaderField: "User-Agent"
+                    )
+                    request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+                } else {
+                    request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+                }
                 request.setValue("image/svg+xml,image/webp,image/png,image/jpeg,image/gif,image/*", forHTTPHeaderField: "Accept")
                 guard let (data, response) = try? await URLSession.shared.data(for: request),
                       let http = response as? HTTPURLResponse,
@@ -1015,7 +1044,7 @@ private struct MarkdownBlockRowView: View {
         case .quote(_, let alertKind, let text):
             let accent = alertAccentColor(for: alertKind)
             HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 2)
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(accent)
                     .frame(width: 3)
                 VStack(alignment: .leading, spacing: 4) {
@@ -1037,7 +1066,7 @@ private struct MarkdownBlockRowView: View {
             .padding(.vertical, alertKind == nil ? 2 : 8)
             .background(
                 alertKind == nil ? Color.clear : accent.opacity(colorScheme == .dark ? 0.12 : 0.08),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
 
         case .listItem(_, let marker, let indent, let text):

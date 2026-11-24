@@ -17,6 +17,7 @@ public final class CharkleRuntime {
     public let library: LibraryStore
     public let moodboards: MoodboardStore
     public let syncAndAI: SyncAndAIStore
+    public let extensionBridge: ExtensionBridgeController
 
     private var notchController: NotchShelfController?
     private let hotkeyManager = GlobalHotkeyManager()
@@ -33,9 +34,17 @@ public final class CharkleRuntime {
     @ObservationIgnored
     private nonisolated(unsafe) var onboardingRequestObserver: NSObjectProtocol?
     @ObservationIgnored
+    private nonisolated(unsafe) var windowWillCloseObserver: NSObjectProtocol?
+    @ObservationIgnored
     private var lastForegroundSyncDate: Date = .distantPast
     @ObservationIgnored
     private var lastSystemWakeDate: Date = .distantPast
+    @ObservationIgnored
+    public var openMainWindowHandler: (() -> Void)?
+    @ObservationIgnored
+    private var isTerminating: Bool = false
+    @ObservationIgnored
+    private var isTransitioningMinimalMode: Bool = false
 
     public init() {
         let resolvedEngine: any CharkleEngineProtocol
@@ -48,9 +57,26 @@ public final class CharkleRuntime {
 
         self.engine = resolvedEngine
         self.coordinator = AppCoordinatorStore()
-        self.library = LibraryStore(engine: resolvedEngine)
-        self.moodboards = MoodboardStore(engine: resolvedEngine)
-        self.syncAndAI = SyncAndAIStore(engine: resolvedEngine)
+        let libraryStore = LibraryStore(engine: resolvedEngine)
+        let moodboardStore = MoodboardStore(engine: resolvedEngine)
+        let syncStore = SyncAndAIStore(engine: resolvedEngine)
+        self.library = libraryStore
+        self.moodboards = moodboardStore
+        self.syncAndAI = syncStore
+        let coordinatorStore = self.coordinator
+        self.extensionBridge = ExtensionBridgeController(engine: resolvedEngine) { createdCount, targetBoardID in
+            await libraryStore.refreshAll()
+            if targetBoardID != nil {
+                await moodboardStore.refreshBoards()
+            }
+            if createdCount > 0 {
+                coordinatorStore.showToast(
+                    "浏览器扩展已导入 \(createdCount) 项素材",
+                    icon: "safari",
+                    tone: .success
+                )
+            }
+        }
 
         // IMPORTANT (macOS 15 compatibility):
         // Never instantiate `NSHostingView` / `NSPanel` (NotchShelfController) or touch `NSApp`
@@ -76,6 +102,9 @@ public final class CharkleRuntime {
         if let observer = onboardingRequestObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = windowWillCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     /// Starts AppKit windows (`NotchShelfController`), Carbon hotkeys, notification observers,
@@ -89,7 +118,130 @@ public final class CharkleRuntime {
         setupExternalAgentLiveRefresh()
         setupRemoteSyncObservers()
         setupOnboardingFocusObserver()
+        setupWindowCloseObserver()
+        extensionBridge.startIfEnabled()
         CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
+        if coordinator.isMinimalCaptureMode || coordinator.launchInMinimalCaptureMode {
+            applyMinimalCaptureMode(announce: false)
+        }
+    }
+
+    public func markTerminating() {
+        isTerminating = true
+        extensionBridge.stop()
+    }
+
+    private func isMainWorkspaceWindow(_ window: NSWindow) -> Bool {
+        guard !(window is NSPanel) else { return false }
+        guard window.canBecomeMain else { return false }
+        let identifier = window.identifier?.rawValue.lowercased() ?? ""
+        if identifier.contains("statusbar") || identifier.contains("menubar") || identifier.contains("settings") {
+            return false
+        }
+        return true
+    }
+
+    private func setupWindowCloseObserver() {
+        windowWillCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(60))
+                guard let self, !self.isTerminating, !self.isTransitioningMinimalMode else { return }
+                guard self.coordinator.enterMinimalModeOnWindowClose,
+                      !self.coordinator.isMinimalCaptureMode else { return }
+                let hasRemainingMain = (NSApp?.windows ?? []).contains {
+                    ($0.isVisible || $0.isMiniaturized) && self.isMainWorkspaceWindow($0)
+                }
+                if !hasRemainingMain {
+                    self.enterMinimalCaptureMode()
+                }
+            }
+        }
+    }
+
+    public func enterMinimalCaptureMode() {
+        startAppKitServicesIfNeeded()
+        applyMinimalCaptureMode(announce: true)
+    }
+
+    private func applyMinimalCaptureMode(announce: Bool) {
+        if !coordinator.notchShelfEnabled {
+            coordinator.notchShelfEnabled = true
+        }
+        coordinator.isMinimalCaptureMode = true
+        coordinator.closeQuickLook()
+        coordinator.closeSettings()
+        coordinator.isJumpAnywherePresented = false
+        coordinator.isMoodboardGeneratorPresented = false
+        coordinator.isSmartFolderEditorPresented = false
+
+        notchController?.setMinimalCaptureMode(true)
+        library.enterMinimalCaptureMode()
+        moodboards.enterMinimalCaptureMode()
+        URLCache.shared.removeAllCachedResponses()
+
+        if let app = NSApp {
+            isTransitioningMinimalMode = true
+            for window in app.windows where isMainWorkspaceWindow(window) {
+                window.orderOut(nil)
+                window.close()
+            }
+            isTransitioningMinimalMode = false
+            app.setActivationPolicy(.accessory)
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.library.refreshMinimalMetadataOnly()
+            await self.moodboards.refreshBoards()
+        }
+
+        if announce {
+            notchController?.flashConfirmation("已切换至极简刘海模式 · 保留顶部采集与最近素材")
+        }
+    }
+
+    public func exitMinimalCaptureMode(openMainWindow: Bool = true) {
+        let wasMinimal = coordinator.isMinimalCaptureMode
+        coordinator.isMinimalCaptureMode = false
+        notchController?.setMinimalCaptureMode(false)
+        library.exitMinimalCaptureMode()
+
+        if let app = NSApp {
+            if app.activationPolicy() != .regular {
+                app.setActivationPolicy(.regular)
+                CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
+            }
+            app.activate(ignoringOtherApps: true)
+        }
+
+        if openMainWindow {
+            bringOrOpenMainWindow()
+        }
+
+        if wasMinimal {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.library.refreshAll()
+                await self.moodboards.refreshBoards()
+                await self.syncAndAI.loadAll()
+                if self.coordinator.activeMoodboardID == nil {
+                    self.coordinator.activeMoodboardID = self.moodboards.boards.first?.id
+                }
+            }
+        }
+    }
+
+    public func toggleMinimalCaptureMode() {
+        startAppKitServicesIfNeeded()
+        if coordinator.isMinimalCaptureMode {
+            exitMinimalCaptureMode(openMainWindow: true)
+        } else {
+            enterMinimalCaptureMode()
+        }
     }
 
     private func setupOnboardingFocusObserver() {
@@ -139,6 +291,11 @@ public final class CharkleRuntime {
             let boards = notification.userInfo?[CharkleSyncNotifications.updatedBoardsKey] as? Int ?? 0
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                if self.coordinator.isMinimalCaptureMode {
+                    await self.library.refreshMinimalMetadataOnly()
+                    await self.moodboards.refreshBoards()
+                    return
+                }
                 await self.library.refreshAll()
                 await self.moodboards.refreshBoards()
                 if let activeBoardID = self.moodboards.activeBoard?.id {
@@ -169,7 +326,7 @@ public final class CharkleRuntime {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, !self.coordinator.isMinimalCaptureMode else { return }
                 let now = Date()
                 // Avoid poking network/NFS mounts immediately upon Mac sleep wake
                 guard now.timeIntervalSince(self.lastSystemWakeDate) >= 15 else { return }
@@ -183,7 +340,7 @@ public final class CharkleRuntime {
         // Charkle was closed are automatically ingested without blocking first-paint.
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(2.5))
-            guard let self else { return }
+            guard let self, !self.coordinator.isMinimalCaptureMode else { return }
             self.lastForegroundSyncDate = Date()
             _ = await self.syncAndAI.syncQuietlyIfReady()
         }
@@ -201,6 +358,11 @@ public final class CharkleRuntime {
             let boardID = boardIDString.flatMap(UUID.init(uuidString:))
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                if self.coordinator.isMinimalCaptureMode {
+                    await self.library.refreshMinimalMetadataOnly()
+                    await self.moodboards.refreshBoards()
+                    return
+                }
                 await self.library.refreshAll()
                 await self.moodboards.refreshBoards()
                 if let boardID {
@@ -260,13 +422,34 @@ public final class CharkleRuntime {
     }
 
     public func activateMainWindow() {
+        startAppKitServicesIfNeeded()
+        if coordinator.isMinimalCaptureMode {
+            exitMinimalCaptureMode(openMainWindow: true)
+            return
+        }
         guard let app = NSApp else { return }
+        if app.activationPolicy() != .regular {
+            app.setActivationPolicy(.regular)
+            CharkleAppIconManager.shared.applyCurrentIcon(updateBundleFileIcon: false)
+        }
         app.activate(ignoringOtherApps: true)
-        if let window = app.windows.first(where: { $0.canBecomeMain && !$0.isMiniaturized }) {
+        bringOrOpenMainWindow()
+    }
+
+    private func bringOrOpenMainWindow() {
+        guard let app = NSApp else { return }
+        if let window = app.windows.first(where: { isMainWorkspaceWindow($0) && !$0.isMiniaturized }) {
             window.makeKeyAndOrderFront(nil)
-        } else if let miniaturized = app.windows.first(where: { $0.canBecomeMain && $0.isMiniaturized }) {
+        } else if let miniaturized = app.windows.first(where: { isMainWorkspaceWindow($0) && $0.isMiniaturized }) {
             miniaturized.deminiaturize(nil)
             miniaturized.makeKeyAndOrderFront(nil)
+        } else {
+            openMainWindowHandler?()
+            Task { @MainActor [weak self] in
+                guard let self, let app = NSApp else { return }
+                app.activate(ignoringOtherApps: true)
+                app.windows.first(where: { self.isMainWorkspaceWindow($0) })?.makeKeyAndOrderFront(nil)
+            }
         }
     }
 
@@ -276,7 +459,9 @@ public final class CharkleRuntime {
             let (folderID, boardID, destLabel) = currentCaptureTarget()
             let created = await library.ingest([.fileURL(url)], targetFolderID: folderID, targetBoardID: boardID)
             if let boardID {
-                await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                if !coordinator.isMinimalCaptureMode {
+                    await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                }
                 await moodboards.refreshBoards()
             }
             try? FileManager.default.removeItem(at: url)
@@ -292,25 +477,54 @@ public final class CharkleRuntime {
             coordinator.showToast("剪贴板暂无可收藏的图片、链接或文本", icon: "doc.on.clipboard", tone: .warning)
             return
         }
-        let hasXPost = inputs.contains { input in
-            if case .webURL(let url, _, _) = input { return XPostURLParser.parse(url) != nil }
+        let hasSocialPost = inputs.contains { input in
+            if case .webURL(let url, _, _) = input { return SocialPostURLParser.parse(url) != nil }
+            return false
+        }
+        let hasGitHubRepo = inputs.contains { input in
+            if case .webURL(let url, _, _) = input { return GitHubRepoURLParser.parse(url) != nil }
+            return false
+        }
+        let hasGenericWebURL = inputs.contains { input in
+            if case .webURL(let url, _, _) = input {
+                return SocialPostURLParser.parse(url) == nil && GitHubRepoURLParser.parse(url) == nil
+            }
             return false
         }
         let (folderID, boardID, destLabel) = currentCaptureTarget()
-        if hasXPost {
-            notchController?.showProcessing("正在保存 X 推文及媒体…")
+        if hasSocialPost {
+            notchController?.showProcessing("正在保存推文及媒体…")
+        } else if hasGitHubRepo {
+            notchController?.showProcessing("正在解析 GitHub 仓库…")
+        } else if hasGenericWebURL {
+            notchController?.showProcessing("正在解析网页缩略图…")
+            coordinator.showToast("正在解析网页缩略图…", icon: "safari")
         }
         Task {
             let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: boardID)
             if let boardID {
-                await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                if !coordinator.isMinimalCaptureMode {
+                    await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                }
                 await moodboards.refreshBoards()
             }
             let count = max(created.count, inputs.count)
-            let msg = hasXPost
-                ? "已保存 X 推文及媒体至「\(destLabel)」(\(count) 项)"
-                : "剪贴板已收入「\(destLabel)」(\(count) 项)"
-            coordinator.showToast(msg, icon: hasXPost ? "checkmark.circle.fill" : "doc.on.clipboard.fill", tone: .success)
+            let msg: String
+            let icon: String
+            if hasSocialPost {
+                msg = "已保存推文及媒体至「\(destLabel)」(\(count) 项)"
+                icon = "checkmark.circle.fill"
+            } else if hasGitHubRepo {
+                msg = "已收藏 GitHub 仓库至「\(destLabel)」(\(count) 项)"
+                icon = "checkmark.circle.fill"
+            } else if hasGenericWebURL {
+                msg = "已收藏网页书签至「\(destLabel)」(\(count) 项)"
+                icon = "safari"
+            } else {
+                msg = "剪贴板已收入「\(destLabel)」(\(count) 项)"
+                icon = "doc.on.clipboard.fill"
+            }
+            coordinator.showToast(msg, icon: icon, tone: .success)
             notchController?.flashConfirmation(msg)
         }
     }
@@ -335,12 +549,134 @@ public final class CharkleRuntime {
 }
 
 final class CharkleAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        if UserDefaults.standard.bool(forKey: "charkle.launchInMinimalCaptureMode") {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Defer Notch NSPanel / NSHostingView & Dock icon setup until the next MainActor turn,
         // strictly outside SwiftUI's AppGraph / AttributeGraph scene bootstrap transaction.
         Task { @MainActor in
             CharkleRuntime.shared.startAppKitServicesIfNeeded()
         }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        Task { @MainActor in
+            CharkleRuntime.shared.activateMainWindow()
+        }
+        return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Task { @MainActor in
+            CharkleRuntime.shared.markTerminating()
+        }
+    }
+}
+
+private struct MainWindowSceneHost: View {
+    @Environment(\.openWindow) private var openWindow
+    let runtime: CharkleRuntime
+
+    var body: some View {
+        MainWindowView(
+            coordinator: runtime.coordinator,
+            library: runtime.library,
+            moodboards: runtime.moodboards,
+            syncAndAI: runtime.syncAndAI,
+            onToggleNotch: { runtime.toggleNotchShelf() },
+            onCaptureArea: { runtime.captureRegionScreenshot() },
+            onCollectClipboard: { runtime.collectClipboard() },
+            onSyncHotkeysEnabled: { runtime.syncHotkeys(enabled: $0) },
+            onSyncDefaultNotchTarget: { runtime.syncDefaultNotchTarget($0) },
+            onEnterMinimalCaptureMode: { runtime.enterMinimalCaptureMode() },
+            onAppReady: { runtime.startAppKitServicesIfNeeded() }
+        )
+        .onAppear {
+            runtime.openMainWindowHandler = {
+                openWindow(id: "main")
+            }
+        }
+    }
+}
+
+private struct CharkleMenuBarContentView: View {
+    @Environment(\.openWindow) private var openWindow
+    let runtime: CharkleRuntime
+
+    private func registerWindowOpener() {
+        runtime.openMainWindowHandler = {
+            openWindow(id: "main")
+        }
+    }
+
+    var body: some View {
+        if runtime.coordinator.isMinimalCaptureMode {
+            Button("恢复 Charkle 主窗口（退出极简模式）") {
+                registerWindowOpener()
+                runtime.exitMinimalCaptureMode(openMainWindow: true)
+            }
+            Text("极简刘海模式运行中 · 最低资源占用")
+        } else {
+            Button("打开 Charkle 主窗口") {
+                registerWindowOpener()
+                runtime.activateMainWindow()
+            }
+            Button("切换至极简刘海模式（仅保留刘海采集）") {
+                registerWindowOpener()
+                runtime.enterMinimalCaptureMode()
+            }
+        }
+        Divider()
+        Button("展开 / 收起刘海浮窗 (⌥⇧S)") {
+            runtime.toggleNotchShelf()
+        }
+        Button("区域截图采集 (⌥⇧A)") {
+            runtime.captureRegionScreenshot()
+        }
+        Button("收藏当前剪贴板 (⌥⇧V)") {
+            runtime.collectClipboard()
+        }
+        Divider()
+        Button("快速生成情绪板…") {
+            registerWindowOpener()
+            runtime.activateMainWindow()
+            runtime.coordinator.presentMoodboardGenerator(entry: .prompt)
+        }
+        Button("立即同步 Google Drive") {
+            Task {
+                _ = await runtime.syncAndAI.syncNow()
+                if runtime.coordinator.isMinimalCaptureMode {
+                    await runtime.library.refreshMinimalMetadataOnly()
+                } else {
+                    await runtime.library.refreshAll()
+                }
+                await runtime.moodboards.refreshBoards()
+            }
+        }
+        Button("重新运行首次引导…") {
+            registerWindowOpener()
+            runtime.activateMainWindow()
+            runtime.rerunOnboarding()
+        }
+        Button("设置…") {
+            registerWindowOpener()
+            runtime.activateMainWindow()
+            runtime.coordinator.openSettings()
+        }
+        Divider()
+        Button("退出 Charkle") {
+            runtime.markTerminating()
+            NSApplication.shared.terminate(nil)
+        }
+        .keyboardShortcut("q", modifiers: .command)
     }
 }
 
@@ -350,20 +686,9 @@ struct CharkleApp: App {
     private let runtime = CharkleRuntime.shared
 
     var body: some Scene {
-        WindowGroup("Charkle") {
-            MainWindowView(
-                coordinator: runtime.coordinator,
-                library: runtime.library,
-                moodboards: runtime.moodboards,
-                syncAndAI: runtime.syncAndAI,
-                onToggleNotch: { runtime.toggleNotchShelf() },
-                onCaptureArea: { runtime.captureRegionScreenshot() },
-                onCollectClipboard: { runtime.collectClipboard() },
-                onSyncHotkeysEnabled: { runtime.syncHotkeys(enabled: $0) },
-                onSyncDefaultNotchTarget: { runtime.syncDefaultNotchTarget($0) },
-                onAppReady: { runtime.startAppKitServicesIfNeeded() }
-            )
-            .frame(minWidth: 1020, minHeight: 660)
+        WindowGroup("Charkle", id: "main") {
+            MainWindowSceneHost(runtime: runtime)
+                .frame(minWidth: 1020, minHeight: 660)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1360, height: 860)
@@ -378,17 +703,20 @@ struct CharkleApp: App {
 
             CommandGroup(after: .help) {
                 Button("重新运行首次使用引导…") {
+                    runtime.activateMainWindow()
                     runtime.rerunOnboarding()
                 }
             }
 
             CommandGroup(replacing: .newItem) {
                 Button("快速生成情绪板…") {
+                    runtime.activateMainWindow()
                     runtime.coordinator.presentMoodboardGenerator(entry: .prompt)
                 }
                 .keyboardShortcut("n", modifiers: .command)
 
                 Button("新建空白情绪板") {
+                    runtime.activateMainWindow()
                     Task {
                         if let doc = await runtime.moodboards.createBlankBoard(title: "未命名情绪板") {
                             runtime.coordinator.openMoodboard(doc.id)
@@ -449,47 +777,20 @@ struct CharkleApp: App {
                     runtime.toggleNotchShelf()
                 }
                 .keyboardShortcut("s", modifiers: [.option, .shift])
+
+                Divider()
+
+                Button(runtime.coordinator.isMinimalCaptureMode ? "恢复完整主窗口" : "切换至极简刘海模式（最低占用）") {
+                    runtime.toggleMinimalCaptureMode()
+                }
+                .keyboardShortcut("m", modifiers: [.option, .shift])
             }
         }
 
-        MenuBarExtra("Charkle", systemImage: "rectangle.3.group") {
-            Button("打开 Charkle 主窗口") {
-                runtime.activateMainWindow()
-            }
-            Divider()
-            Button("展开 / 收起刘海浮窗 (⌥⇧S)") {
-                runtime.toggleNotchShelf()
-            }
-            Button("区域截图采集 (⌥⇧A)") {
-                runtime.captureRegionScreenshot()
-            }
-            Button("收藏当前剪贴板 (⌥⇧V)") {
-                runtime.collectClipboard()
-            }
-            Divider()
-            Button("快速生成情绪板…") {
-                runtime.activateMainWindow()
-                runtime.coordinator.presentMoodboardGenerator(entry: .prompt)
-            }
-            Button("立即同步 Google Drive") {
-                Task {
-                    _ = await runtime.syncAndAI.syncNow()
-                    await runtime.library.refreshAll()
-                    await runtime.moodboards.refreshBoards()
-                }
-            }
-            Button("重新运行首次引导…") {
-                runtime.rerunOnboarding()
-            }
-            Button("设置…") {
-                runtime.activateMainWindow()
-                runtime.coordinator.openSettings()
-            }
-            Divider()
-            Button("退出 Charkle") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q", modifiers: .command)
+        MenuBarExtra {
+            CharkleMenuBarContentView(runtime: runtime)
+        } label: {
+            Image(nsImage: CharkleMenuBarIcon.templateImage())
         }
     }
 }

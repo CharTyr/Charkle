@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Module metadata for CharkleCanvas.
 public struct CharkleCanvasModuleInfo: Sendable {
-    public static let version = "1.0.1"
+    public static let version = "1.1.0"
 }
 
 /// Canonical pasteboard/drag prefixes so NotchShelfController can distinguish
@@ -175,18 +175,6 @@ public enum CanvasMotion {
 
     public static func accessible(_ animation: Animation, reduced: Bool) -> Animation {
         reduced ? reducedFade : animation
-    }
-
-    /// Drag-ripple neighbor displacement offset: `A * pow(0.7, n)`.
-    public static func rippleOffset(distance: Int, amplitude: CGFloat = 8) -> CGFloat {
-        guard distance >= 0 else { return 0 }
-        return amplitude * pow(0.7, CGFloat(distance))
-    }
-
-    /// Drag-ripple outward stagger delay: `24ms * n`.
-    public static func rippleDelay(distance: Int) -> Double {
-        guard distance > 0 else { return 0 }
-        return 0.024 * Double(min(distance, 8))
     }
 }
 
@@ -583,7 +571,13 @@ public struct StageInteractiveBridge: NSViewRepresentable {
                     }
                     let sameWindow = (event.window === hostWindow) || (event.window?.parent === hostWindow)
                     guard sameWindow else { return event }
-                    return self.onKeyDown?(event) ?? event
+                    // IMPORTANT: Unwrap `onKeyDown` explicitly rather than using `onKeyDown?(event) ?? event` —
+                    // Swift optional chaining flattens `((NSEvent) -> NSEvent?)?`, which would silently turn
+                    // an intentional `nil` return (event consumed!) back into `event`.
+                    if let onKeyDown = self.onKeyDown {
+                        return onKeyDown(event)
+                    }
+                    return event
                 }
             }
         }
@@ -679,7 +673,12 @@ public struct WindowKeyEventBridge: NSViewRepresentable {
                 guard let self, let hostWindow = self.window else { return event }
                 let belongsToWindow = (event.window === hostWindow) || (event.window?.parent === hostWindow)
                 guard belongsToWindow else { return event }
-                return self.onKeyDown?(event, hostWindow) ?? event
+                // IMPORTANT: Unwrap `onKeyDown` explicitly; `onKeyDown?(...) ?? event` would turn a
+                // consumed `nil` result back into `event`, causing Spacebar Quick Look to immediately re-open.
+                if let onKeyDown = self.onKeyDown {
+                    return onKeyDown(event, hostWindow)
+                }
+                return event
             }
         }
 

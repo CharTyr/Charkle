@@ -15,10 +15,17 @@ import {
   type LibraryDatabase,
 } from '../src/db/library-database.js';
 import { wrapLines } from '../src/media/artwork-renderer.js';
-import { MediaPipeline } from '../src/media/media-pipeline.js';
+import { buildGitHubRepoSvg, buildSocialPostSvg } from '../src/media/artwork-svg.js';
+import { extractWebBookmarkURL, MediaPipeline } from '../src/media/media-pipeline.js';
+import { isWebURL, resolveWebBookmark } from '../src/media/resolvers/bookmark.js';
+import { resolveSocialPost } from '../src/media/resolvers/social.js';
 import { seedSampleLibrary } from '../src/media/sample-seeder.js';
+import { encodeBinaryPlist } from '../src/runtime/bplist.js';
 import { NodeBlobStore } from '../src/runtime/node-blob.js';
-import { NodeImageProcessor } from '../src/runtime/node-image.js';
+import {
+  extractCroppedDominantColorsWithSharp,
+  NodeImageProcessor,
+} from '../src/runtime/node-image.js';
 import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
 
 const tempDirs: string[] = [];
@@ -216,7 +223,7 @@ describe('MediaPipeline (All 8 MediaKinds, Rich Resolvers, Seeder & Pinned LRU E
     }
   });
 
-  it('evicts oldest unpinned originals by LRU while strictly protecting pinned assets and pinned boards', async () => {
+  it('evicts oldest unpinned remote-backed originals by LRU while strictly protecting pinned assets, pinned boards, AND unbacked local-only originals (P0-03)', async () => {
     const { db, media } = makeTempEnv();
     try {
       const payload = Buffer.alloc(600 * 1024, 0x42); // 600 KB each
@@ -225,11 +232,14 @@ describe('MediaPipeline (All 8 MediaKinds, Rich Resolvers, Seeder & Pinned LRU E
       const r2 = await media.ingestUploadedFile(payload, 'pinned-asset.bin', 'application/octet-stream');
       const r3 = await media.ingestUploadedFile(payload, 'board-pinned.bin', 'application/octet-stream');
       const r4 = await media.ingestUploadedFile(payload, 'recent-unpinned.bin', 'application/octet-stream');
+      const r5 = await media.ingestUploadedFile(payload, 'local-only-unbacked.bin', 'application/octet-stream');
 
-      db.saveAssetLocally(r1.asset);
-      db.saveAssetLocally({ ...r2.asset, pinnedOffline: true });
-      db.saveAssetLocally(r3.asset);
-      db.saveAssetLocally(r4.asset);
+      // r1..r4 are backed on remote Drive; r5 is local-only (driveFileID: null) -> MUST NEVER be evicted!
+      db.saveAssetLocally({ ...r1.asset, driveFileID: 'drv-r1' });
+      db.saveAssetLocally({ ...r2.asset, driveFileID: 'drv-r2', pinnedOffline: true });
+      db.saveAssetLocally({ ...r3.asset, driveFileID: 'drv-r3' });
+      db.saveAssetLocally({ ...r4.asset, driveFileID: 'drv-r4' });
+      db.saveAssetLocally({ ...r5.asset, driveFileID: null });
 
       // Pin a moodboard referencing r3
       db.saveBoardLocally(
@@ -254,29 +264,35 @@ describe('MediaPipeline (All 8 MediaKinds, Rich Resolvers, Seeder & Pinned LRU E
         }),
       );
 
-      // Set explicit LRU timestamps: r1 oldest, r4 newest
+      // Set explicit LRU timestamps: r5 oldest (but unbacked!), r1 oldest backed, r4 newest
+      db.touchOriginal(r5.asset.id, new Date('2025-12-01T00:00:00Z'));
       db.touchOriginal(r1.asset.id, new Date('2026-01-01T00:00:00Z'));
       db.touchOriginal(r2.asset.id, new Date('2026-01-02T00:00:00Z'));
       db.touchOriginal(r3.asset.id, new Date('2026-01-03T00:00:00Z'));
       db.touchOriginal(r4.asset.id, new Date('2026-11-01T00:00:00Z'));
 
-      // Total originals = 2.4 MB; set budget to 1.8 MB (fits 3 files -> must evict ONLY r1!)
-      media.setCacheBudgetBytes(1_850_000);
+      // Total originals = 5 * 600 KB = 3.0 MB; set budget to 2.5 MB -> must evict ONLY r1 (oldest backed unpinned)!
+      media.setCacheBudgetBytes(2_500_000);
       const stats = await media.evictCacheNow(db);
 
-      expect(media.getOriginalPath(r1.asset)).toBeNull(); // Oldest unpinned evicted!
+      expect(media.getOriginalPath(r1.asset)).toBeNull(); // Oldest backed unpinned evicted!
       expect(db.getAsset(r1.asset.id)?.isLocalOriginalCached).toBe(false);
       expect(media.getOriginalPath(r2.asset)).not.toBeNull(); // Pinned asset protected!
       expect(media.getOriginalPath(r3.asset)).not.toBeNull(); // Pinned board asset protected!
       expect(media.getOriginalPath(r4.asset)).not.toBeNull(); // Newer unpinned retained!
-      expect(stats.cachedOriginalCount).toBe(3);
+      expect(media.getOriginalPath(r5.asset)).not.toBeNull(); // Unbacked local-only NEVER evicted!
+      expect(stats.cachedOriginalCount).toBe(4);
+      // P2-04: originalCacheBytes includes ALL cached originals (pinned + unpinned), matching Swift MediaPipeline+Cache
+      expect(stats.originalCacheBytes).toBe(4 * payload.byteLength);
+      expect(stats.pinnedOfflineBytes).toBe(2 * payload.byteLength);
 
-      // Even if budget drops below pinned size (1 MiB), pinned assets MUST NEVER be evicted
-      media.setCacheBudgetBytes(1024 * 1024);
+      // Even if budget drops to 0, pinned assets AND unbacked local-only r5 MUST NEVER be evicted
+      media.setCacheBudgetBytes(0);
       await media.evictCacheNow(db);
       expect(media.getOriginalPath(r4.asset)).toBeNull();
       expect(media.getOriginalPath(r2.asset)).not.toBeNull();
       expect(media.getOriginalPath(r3.asset)).not.toBeNull();
+      expect(media.getOriginalPath(r5.asset)).not.toBeNull();
     } finally {
       db.close();
     }
@@ -306,7 +322,7 @@ describe('MediaPipeline (All 8 MediaKinds, Rich Resolvers, Seeder & Pinned LRU E
 
   it('wraps English descriptions on word boundaries without mid-word breaks', () => {
     const desc =
-      'Neutral Gallery-First surfaces, concentric radii, CIELAB palettes, and calibrated motion curves for visual curation tools.';
+      'Neutral studio surfaces, concentric radii, CIELAB palettes, and calibrated motion curves for visual curation tools.';
     const lines = wrapLines(desc, 44, 4);
     expect(lines.length).toBeGreaterThanOrEqual(2);
     expect(lines.length).toBeLessThanOrEqual(4);
@@ -320,5 +336,257 @@ describe('MediaPipeline (All 8 MediaKinds, Rich Resolvers, Seeder & Pinned LRU E
     const longToken = wrapLines('https://example.com/' + 'a'.repeat(80), 30, 3);
     expect(longToken.length).toBe(3);
     expect(longToken[2].endsWith('…')).toBe(true);
+  });
+
+  it('parses XML .webloc (never capturing Apple DTD), binary bplist00 .webloc, and Windows .url files (P0-04)', () => {
+    const xmlWebloc = Buffer.from(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>URL</key>
+  <string>https://example.com/design?a=1&amp;b=2</string>
+</dict>
+</plist>`,
+      'utf8',
+    );
+    expect(extractWebBookmarkURL(xmlWebloc)).toBe('https://example.com/design?a=1&b=2');
+
+    // DTD-only XML without <key>URL</key> must return null, NOT the Apple DTD URL!
+    const dtdOnly = Buffer.from(
+      `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist><dict></dict></plist>`,
+      'utf8',
+    );
+    expect(extractWebBookmarkURL(dtdOnly)).toBeNull();
+
+    // Binary plist bplist00 .webloc
+    const bplistBuf = Buffer.from(
+      encodeBinaryPlist({ URL: 'https://studio.example.org/work/poster-01' }),
+    );
+    expect(bplistBuf.subarray(0, 8).toString('ascii')).toBe('bplist00');
+    expect(extractWebBookmarkURL(bplistBuf)).toBe('https://studio.example.org/work/poster-01');
+
+    // Windows .url INI shortcut
+    const winUrl = Buffer.from('[InternetShortcut]\r\nURL=https://fonts.example.com/serif\r\n', 'utf8');
+    expect(extractWebBookmarkURL(winUrl)).toBe('https://fonts.example.com/serif');
+  });
+
+  it('crops EXIF-rotated orientation-6 portrait JPEGs in upright space without Sharp extract errors (P0-05)', async () => {
+    // Raw sensor pixels are 300x100 (landscape), EXIF orientation 6 rotates 90° CW -> upright 100x300 (portrait).
+    // Top half in upright portrait is left half of raw sensor (red); bottom half is right half (blue).
+    const rawSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="100">
+      <rect x="0" y="0" width="150" height="100" fill="#E63946"/>
+      <rect x="150" y="0" width="150" height="100" fill="#1D4ED8"/>
+    </svg>`;
+    const rotatedJpeg = await sharp(Buffer.from(rawSvg))
+      .withMetadata({ orientation: 6 })
+      .jpeg({ quality: 95 })
+      .toBuffer();
+
+    // Crop bottom half of the upright portrait (y=0.55..0.95) -> must extract blue (#1D4ED8), not fail or pick red!
+    const bottomColors = await extractCroppedDominantColorsWithSharp(
+      rotatedJpeg,
+      { x: 0.1, y: 0.55, width: 0.8, height: 0.4 },
+      3,
+    );
+    expect(bottomColors.length).toBeGreaterThan(0);
+    // Blue has negative b* in CIELAB
+    expect(bottomColors[0].b).toBeLessThan(-20);
+
+    // Crop top half of the upright portrait (y=0.05..0.45) -> must extract red (#E63946)
+    const topColors = await extractCroppedDominantColorsWithSharp(
+      rotatedJpeg,
+      { x: 0.1, y: 0.05, width: 0.8, height: 0.4 },
+      3,
+    );
+    expect(topColors.length).toBeGreaterThan(0);
+    // Red has strongly positive a* in CIELAB
+    expect(topColors[0].a).toBeGreaterThan(30);
+  });
+
+  it('validates bookmark userinfo rejection, redirect og:image resolution, social edge cases, imageData ext normalization, and SVG artwork badges (P1-09, P2-03)', async () => {
+    // Bookmark URL rejects credentials (user:pass@)
+    expect(isWebURL('https://user:secret@example.com/page')).toBe(false);
+    expect(isWebURL('https://example.com/page')).toBe(true);
+
+    // Bookmark resolves relative og:image against final redirected URL
+    const sampleImg = await sharp({
+      create: { width: 120, height: 80, channels: 3, background: { r: 40, g: 120, b: 200 } },
+    })
+      .png()
+      .toBuffer();
+    let requestedOgUrl = '';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const u = String(input);
+        if (u === 'https://short.example.com/go') {
+          const res = new Response(
+            '<html><head><title>Final Page</title><meta property="og:image" content="hero.png"/></head></html>',
+            { status: 200, headers: { 'Content-Type': 'text/html' } },
+          );
+          Object.defineProperty(res, 'url', { value: 'https://final.example.com/articles/post-1/' });
+          return res;
+        }
+        requestedOgUrl = u;
+        return new Response(new Uint8Array(sampleImg), {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' },
+        });
+      }),
+    );
+    const bm = await resolveWebBookmark('https://short.example.com/go');
+    expect(requestedOgUrl).toBe('https://final.example.com/articles/post-1/hero.png');
+    expect(bm.coverImageData).not.toBeNull();
+
+    // Social resolver: fxtwitter animated_gif + quote photos/raw_text, vxtwitter empty media_extended fallback, Threads without @ + numeric HTML entities, Bluesky video embed
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const u = String(input);
+        if (u.includes('api.fxtwitter.com/fx_studio/status/111')) {
+          return new Response(
+            JSON.stringify({
+              tweet: {
+                author: { name: 'FX Studio', screen_name: 'fx_studio' },
+                text: 'Short text',
+                raw_text: { text: 'Full raw text from fxtwitter' },
+                media: {
+                  videos: [
+                    {
+                      type: 'animated_gif',
+                      url: 'https://video.twimg.com/tweet_video/loop.mp4',
+                      thumbnail_url: 'https://pbs.twimg.com/tweet_video_thumb/loop.jpg',
+                    },
+                  ],
+                },
+                quote: {
+                  author: { name: 'Quoted', screen_name: 'quoted_studio' },
+                  raw_text: { text: 'Quoted raw_text body' },
+                },
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (u.includes('api.vxtwitter.com/motion_lab/status/999')) {
+          return new Response(
+            JSON.stringify({
+              user_name: 'Motion Lab',
+              user_screen_name: 'motion_lab',
+              text: 'VX fallback test',
+              media_extended: [],
+              mediaURLs: ['https://pbs.twimg.com/media/fallback.jpg'],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (u.includes('com.atproto.identity.resolveHandle')) {
+          return new Response(JSON.stringify({ did: 'did:plc:studio123' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (u.includes('public.api.bsky.app')) {
+          return new Response(
+            JSON.stringify({
+              thread: {
+                post: {
+                  author: { handle: 'studio.bsky.social', displayName: 'Studio Bsky' },
+                  record: { text: 'Video preview test' },
+                  embed: {
+                    media: {
+                      playlist: 'https://video.bsky.app/watch/clip.m3u8',
+                      thumbnail: 'https://video.bsky.app/watch/thumb.jpg',
+                    },
+                  },
+                },
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (u.includes('threads.net/@design_handle/post/ABC123') || u.includes('threads.net/design_handle/post/ABC123')) {
+          return new Response(
+            '<html><head><meta property="og:description" content="Threads &#39;post&#39; &#8212; &#x2728; body"/></head></html>',
+            { status: 200, headers: { 'Content-Type': 'text/html' } },
+          );
+        }
+        if (u.includes('api.fxtwitter.com')) {
+          return new Response('not found', { status: 404 });
+        }
+        return new Response(new Uint8Array(sampleImg), {
+          status: 200,
+          headers: { 'Content-Type': 'image/png' },
+        });
+      }),
+    );
+
+    const fxRes = await resolveSocialPost('https://x.com/fx_studio/status/111');
+    expect(fxRes?.metadata.bodyText).toBe('Full raw text from fxtwitter');
+    expect(fxRes?.metadata.quotedText).toBe('Quoted raw_text body');
+    expect(fxRes?.metadata.attachments.some((a) => a.kind === 'gif')).toBe(true);
+
+    const vxRes = await resolveSocialPost('https://x.com/motion_lab/status/999');
+    expect(vxRes?.metadata.attachments.some((a) => a.url.includes('fallback.jpg'))).toBe(true);
+
+    const bskyRes = await resolveSocialPost('https://bsky.app/profile/studio.bsky.social/post/3kxyz');
+    expect(bskyRes?.metadata.attachments[0]?.kind).toBe('video');
+    expect(bskyRes?.metadata.attachments[0]?.thumbnailURL).toContain('thumb.jpg');
+
+    const threadsRes = await resolveSocialPost('https://www.threads.net/design_handle/post/ABC123');
+    expect(threadsRes?.metadata.platform).toBe('threads');
+    expect(threadsRes?.metadata.authorHandle).toBe('design_handle');
+    expect(threadsRes?.metadata.bodyText).toContain("'post' — ✨ body");
+
+    // imageData mismatched extension normalization (PNG bytes with .jpg suggestedName -> .png)
+    const { db, media } = makeTempEnv();
+    try {
+      const ing = await media.ingest({
+        type: 'imageData',
+        base64Data: sampleImg.toString('base64'),
+        suggestedName: 'clipboard.jpg',
+      });
+      expect(ing.asset.fileName).toBe('clipboard.png');
+    } finally {
+      db.close();
+    }
+
+    // SVG artwork badges: GitHub README pill & social engagement footer
+    const ghSvg = buildGitHubRepoSvg({
+      owner: 'acme',
+      repo: 'kit',
+      fullName: 'acme/kit',
+      description: 'Design primitives',
+      stars: 1500,
+      forks: 42,
+      language: 'TypeScript',
+      topics: ['ui'],
+      defaultBranch: 'main',
+      readmeMarkdown: '# Kit',
+      fetchedAt: new Date().toISOString(),
+    });
+    expect(ghSvg.svg).toContain('README');
+
+    const socSvg = buildSocialPostSvg({
+      platform: 'x',
+      postID: '1',
+      postURL: 'https://x.com/a/status/1',
+      authorName: 'A',
+      authorHandle: 'a',
+      authorAvatarURL: null,
+      bodyText: 'Hello',
+      publishedAt: null,
+      attachments: [],
+      mediaURLs: [],
+      mediaThumbnailURLs: [],
+      hasVideo: false,
+      mediaFetchFailed: false,
+      likeCount: 1200,
+      replyCount: 15,
+      repostCount: 80,
+      fetchedAt: new Date().toISOString(),
+    });
+    expect(socSvg.svg).toContain('♥ 1.2K');
   });
 });

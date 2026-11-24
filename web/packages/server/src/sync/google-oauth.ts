@@ -42,6 +42,7 @@ export class GoogleOAuthClient {
   private readonly stateStore?: OAuthStateStoreLike;
   private readonly env?: RuntimeEnv;
   private readonly pendingStates = new Map<string, PendingPkceState>();
+  private inFlightRefresh: Promise<string> | null = null;
 
   constructor(vault: SecretVault, options: { stateStore?: OAuthStateStoreLike; env?: RuntimeEnv } = {}) {
     this.vault = vault;
@@ -71,9 +72,16 @@ export class GoogleOAuthClient {
     if (!cleanID) {
       throw new DriveTransportError('Google OAuth Client ID 不能为空。', 'INVALID_CONFIG');
     }
+    const previousID = this.vault.get(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_ID);
+    if (previousID && previousID !== cleanID) {
+      this.clearTokens();
+    }
     this.vault.set(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_ID, cleanID);
-    if (clientSecret.trim()) {
-      this.vault.set(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_SECRET, clientSecret.trim());
+    const cleanSecret = clientSecret.trim();
+    if (cleanSecret) {
+      this.vault.set(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_SECRET, cleanSecret);
+    } else {
+      this.vault.delete(SECRET_KEYS.GOOGLE_OAUTH_CLIENT_SECRET);
     }
   }
 
@@ -206,6 +214,9 @@ export class GoogleOAuthClient {
     if (Date.now() < tokens.expiresAtMs) {
       return tokens.accessToken;
     }
+    if (this.inFlightRefresh) {
+      return this.inFlightRefresh;
+    }
     if (!tokens.refreshToken) {
       throw new DriveTransportError('Google Drive 登录已过期，请重新授权。', 'UNAUTHORIZED');
     }
@@ -214,29 +225,46 @@ export class GoogleOAuthClient {
     if (!creds) {
       throw new DriveTransportError('缺少 Google OAuth Client ID，无法刷新令牌。', 'NOT_CONFIGURED');
     }
-    const body = new URLSearchParams({
-      client_id: creds.clientID,
-      refresh_token: tokens.refreshToken,
-      grant_type: 'refresh_token',
-    });
-    if (creds.clientSecret) body.set('client_secret', creds.clientSecret);
 
-    const res = await fetch(GOOGLE_TOKEN_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-    });
-    if (!res.ok) {
-      throw new DriveTransportError('刷新 Google Drive 访问令牌失败，请重新登录。', 'UNAUTHORIZED');
+    const refreshTask = (async () => {
+      const body = new URLSearchParams({
+        client_id: creds.clientID,
+        refresh_token: tokens.refreshToken!,
+        grant_type: 'refresh_token',
+      });
+      if (creds.clientSecret) body.set('client_secret', creds.clientSecret);
+
+      const res = await fetch(GOOGLE_TOKEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+      if (!res.ok) {
+        throw new DriveTransportError('刷新 Google Drive 访问令牌失败，请重新登录。', 'UNAUTHORIZED');
+      }
+      const json = (await res.json()) as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in?: number;
+      };
+      const refreshed: GoogleOAuthTokens = {
+        ...tokens,
+        accessToken: json.access_token,
+        refreshToken: json.refresh_token ?? tokens.refreshToken,
+        expiresAtMs: Date.now() + Math.max(60, (json.expires_in ?? 3600) - 60) * 1000,
+      };
+      this.saveTokens(refreshed);
+      return refreshed.accessToken;
+    })();
+
+    this.inFlightRefresh = refreshTask;
+    try {
+      return await refreshTask;
+    } finally {
+      if (this.inFlightRefresh === refreshTask) {
+        this.inFlightRefresh = null;
+      }
     }
-    const json = (await res.json()) as { access_token: string; expires_in?: number };
-    const refreshed: GoogleOAuthTokens = {
-      ...tokens,
-      accessToken: json.access_token,
-      expiresAtMs: Date.now() + Math.max(60, (json.expires_in ?? 3600) - 60) * 1000,
-    };
-    this.saveTokens(refreshed);
-    return refreshed.accessToken;
   }
 
   async fetchAccountInfo(accessToken?: string): Promise<DriveAccountInfo> {

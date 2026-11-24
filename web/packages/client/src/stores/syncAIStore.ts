@@ -18,6 +18,7 @@ import type {
   CloudAIUsageSummary,
   DriveSyncConfig,
   ExternalAgentConfig,
+  ExternalAgentDiagnosticsResponse,
   RuntimeFeatures,
   RuntimeMode,
   StorageMigrationReport,
@@ -67,6 +68,8 @@ interface SyncAIState {
 
   cacheStats: CacheStats;
   externalAgentConfig: ExternalAgentConfig;
+  externalAgentDiagnostics: ExternalAgentDiagnosticsResponse | null;
+  isRunningAgentDiagnostics: boolean;
 
   setSSEConnected: (connected: boolean) => void;
   setSyncStatus: (status: SyncStatus) => void;
@@ -108,6 +111,7 @@ interface SyncAIState {
 
   loadExternalAgentConfig: () => Promise<void>;
   saveExternalAgentConfig: (config: ExternalAgentConfig) => Promise<void>;
+  runExternalAgentDiagnostics: () => Promise<ExternalAgentDiagnosticsResponse>;
 }
 
 export const useSyncAIStore = create<SyncAIState>((set, get) => ({
@@ -121,7 +125,7 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   syncConfig: null,
   hasGoogleOAuthConfig: false,
   hasWebDAVPassword: false,
-  activeStorageSummary: '.charkle-data/library',
+  activeStorageSummary: '',
   isSyncingNow: false,
   lastSyncReport: null,
 
@@ -146,6 +150,8 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
 
   cacheStats: createDefaultCacheStats(),
   externalAgentConfig: createDefaultExternalAgentConfig(),
+  externalAgentDiagnostics: null,
+  isRunningAgentDiagnostics: false,
 
   setSSEConnected: (connected) => set({ sseConnected: connected }),
   setSyncStatus: (status) => set({ syncStatus: status }),
@@ -385,5 +391,17 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   saveExternalAgentConfig: async (config) => {
     const res = await apiClient.saveExternalAgentConfig({ config });
     set({ externalAgentConfig: res.config });
+  },
+
+  runExternalAgentDiagnostics: async () => {
+    set({ isRunningAgentDiagnostics: true });
+    try {
+      const report = await apiClient.getExternalAgentDiagnostics();
+      set({ externalAgentDiagnostics: report, isRunningAgentDiagnostics: false });
+      return report;
+    } catch (err) {
+      set({ isRunningAgentDiagnostics: false });
+      throw err;
+    }
   },
 }));

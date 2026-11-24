@@ -191,12 +191,13 @@ export function createCoreApp(
   });
   app.use('/api/v1/*', createAuthMiddleware(ctx));
 
+  let aiRuntime: ReturnType<typeof registerAIRoutes> | undefined;
   if (typeof options.registerAI === 'function') {
     options.registerAI(app, ctx);
   } else if (options.registerAI !== false) {
-    registerAIRoutes(app, ctx, options.aiOptions);
+    aiRuntime = registerAIRoutes(app, ctx, options.aiOptions);
   }
-  registerCoreRoutes(app, ctx, { rateLimiter: options.rateLimiter });
+  registerCoreRoutes(app, ctx, { rateLimiter: options.rateLimiter, aiRuntime });
 
   app.all('/api/*', (c) => c.json({ error: 'API 端点不存在。', code: 'NOT_FOUND' }, 404));
 

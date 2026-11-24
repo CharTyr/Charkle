@@ -23,7 +23,7 @@ public struct AdvancedAboutSettingsPane: View {
     public var body: some View {
         let snap = syncAndAI.gdirectSnapshot
         let healthyNodeCount = snap.endpoints.filter(\.healthy).count
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1"
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
         let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "2"
 
         VStack(alignment: .leading, spacing: 22) {

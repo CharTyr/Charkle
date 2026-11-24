@@ -319,6 +319,10 @@ public struct QuickLookOverlayView: View {
             library.refreshInspectorContext(for: assetID)
         }
         .onAppear {
+            // Prevent newly mounted Inspector TextFields from stealing firstResponder and blocking Spacebar dismiss.
+            if let keyWindow = NSApp.keyWindow, isEditingText(in: keyWindow) {
+                keyWindow.makeFirstResponder(nil)
+            }
             stageAppeared = true
             if reduceMotion {
                 showSecondaryControls = true
@@ -327,19 +331,6 @@ public struct QuickLookOverlayView: View {
                     showSecondaryControls = true
                 }
             }
-        }
-        .alert("彻底删除此素材？", isPresented: $confirmPermanentDelete) {
-            Button("取消", role: .cancel) {}
-            Button("彻底删除", role: .destructive) {
-                let id = asset.id
-                onClose()
-                Task {
-                    await library.permanentlyDeleteAssets([id])
-                    coordinator.showToast("已彻底删除素材", icon: "trash.slash")
-                }
-            }
-        } message: {
-            Text("彻底删除后将无法恢复。")
         }
     }
 
@@ -535,43 +526,80 @@ public struct QuickLookOverlayView: View {
     }
 
     private var webBookmarkDetailCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
-                    .frame(width: 12, height: 12)
-                Text(asset.sourceDomain ?? "网页书签")
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottomTrailing) {
+                Group {
+                    if let img = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                    } else {
+                        AssetThumbnailSurface(
+                            asset: asset,
+                            loader: library.thumbnailLoader,
+                            tier: .preview1400,
+                            cornerRadius: 0,
+                            contentMode: .fit,
+                            enableHoverPlayback: false
+                        )
+                    }
+                }
+                .frame(maxWidth: 780, maxHeight: 460)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if let url = asset.externalWebURL {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+
+                if let url = asset.externalWebURL {
                     Button {
                         NSWorkspace.shared.open(url)
                     } label: {
-                        Label("在浏览器中打开", systemImage: "safari")
+                        Label("在默认浏览器中打开", systemImage: "safari")
                             .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
+                    .padding(16)
                 }
             }
-            Text(asset.title)
-                .font(.system(size: 20, weight: .semibold))
-            if let urlStr = asset.sourceURL {
-                Text(urlStr)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
+                        .frame(width: 10, height: 10)
+                    Text(asset.sourceDomain ?? "网页书签")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                Text(asset.title)
+                    .font(.system(size: 18, weight: .semibold))
+                if let urlStr = asset.sourceURL {
+                    Text(urlStr)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+                if !asset.notes.isEmpty {
+                    Divider()
+                    Text(asset.notes)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+                        .lineLimit(4)
+                }
             }
-            if !asset.notes.isEmpty {
-                Divider()
-                Text(asset.notes)
-                    .font(.system(size: 13.5))
-                    .lineSpacing(5)
-            }
+            .padding(22)
+            .frame(maxWidth: 780, alignment: .leading)
+            .background(CharkleTheme.surfaceElevated(for: colorScheme))
         }
-        .padding(26)
-        .frame(maxWidth: 620)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.38), radius: 26, y: 12)
     }
 
@@ -679,7 +707,7 @@ public struct QuickLookOverlayView: View {
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
                             .help("还原旋转与翻转")
-                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                            .transition(CharkleMotion.originTransition(anchor: .trailing, scale: 0.94, reduced: reduceMotion))
                         }
                     }
                     .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: hasActiveVisualTransform)
@@ -733,6 +761,20 @@ public struct QuickLookOverlayView: View {
                             .padding(.vertical, 4)
                     }
                     .buttonStyle(CharkleTactileButtonStyle())
+                    .charklePopconfirm(
+                        isPresented: $confirmPermanentDelete,
+                        title: "彻底删除此素材？",
+                        message: "彻底删除后将无法从废纸篓恢复。",
+                        confirmTitle: "彻底删除",
+                        arrowEdge: .top
+                    ) {
+                        let id = asset.id
+                        onClose()
+                        Task {
+                            await library.permanentlyDeleteAssets([id])
+                            coordinator.showToast("已彻底删除素材", icon: "trash.slash")
+                        }
+                    }
                 } else {
                     hudIconButton(
                         asset.pinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle",

@@ -3,12 +3,37 @@ import { Copy, ExternalLink } from 'lucide-react';
 import { labFromHex, parseHex } from '@charkle/shared';
 import type { AssetRecord } from '@charkle/shared';
 import { apiClient } from '../../api/client';
+import { SkeletonBlock, useDelayedFlag } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { getCardEffectiveAspectRatio, isColorSwatchAsset } from '../gallery/assetCardUtils';
 
 export const LazyModel3DViewer = React.lazy(() =>
   import('./Model3DViewer').then((m) => ({ default: m.Model3DViewer })),
 );
+
+export const Delayed3DStagePlaceholder: React.FC<{ className?: string }> = ({
+  className = 'w-[min(860px,88vw)] h-full max-h-[560px]',
+}) => {
+  const visible = useDelayedFlag(true, 300, 500);
+  if (!visible) return <div className={className} />;
+  return (
+    <div
+      className={`${className} rounded-[var(--radius-dock-outer)] bg-[#181A20] border border-white/10 flex flex-col items-center justify-center gap-3 text-white/80 text-[13px]`}
+    >
+      <SkeletonBlock className="h-14 w-14 rounded-2xl bg-white/10" />
+      <span>正在加载 3D 模型…</span>
+    </div>
+  );
+};
+
+export function isTallStripDimensions(width: number, height: number): boolean {
+  return width > 0 && height >= 1600 && height / width >= 2.2;
+}
+
+export function computeDynamicMaxZoom(width: number, height: number): number {
+  const maxDim = Math.max(width, height);
+  return Math.max(6, Math.min(16, maxDim / 550));
+}
 
 export type AssetViewerKind =
   | 'githubRepo'

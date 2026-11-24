@@ -115,11 +115,16 @@ export async function extractCroppedDominantColorsWithSharp(
 ): Promise<LabColor[]> {
   if (count <= 0) return [];
   try {
-    let pipeline = sharp(toBuffer(imageBuffer)).rotate();
-    const meta = await pipeline.metadata();
-    const imgW = meta.width ?? 0;
-    const imgH = meta.height ?? 0;
+    // Materialize upright pixels BEFORE reading width/height & extracting crop
+    // (Sharp `.rotate().metadata()` reports pre-EXIF dimensions, breaking EXIF 5-8 portrait crops).
+    const oriented = await sharp(toBuffer(imageBuffer))
+      .rotate()
+      .toBuffer({ resolveWithObject: true });
+    const imgW = oriented.info.width ?? 0;
+    const imgH = oriented.info.height ?? 0;
     if (imgW <= 0 || imgH <= 0) return [];
+
+    let pipeline = sharp(oriented.data);
 
     if (
       crop &&
@@ -414,11 +419,12 @@ export class NodeImageProcessor implements IImageProcessor {
     bytes: Uint8Array,
   ): Promise<{ width: number; height: number; format?: string } | null> {
     try {
-      const meta = await sharp(toBuffer(bytes), { animated: false }).rotate().metadata();
+      const meta = await sharp(toBuffer(bytes), { animated: false }).metadata();
       if (!meta.width || !meta.height) return null;
+      const swapped = meta.orientation != null && meta.orientation >= 5 && meta.orientation <= 8;
       return {
-        width: meta.width,
-        height: meta.height,
+        width: swapped ? meta.height : meta.width,
+        height: swapped ? meta.width : meta.height,
         format: meta.format,
       };
     } catch {
@@ -428,9 +434,10 @@ export class NodeImageProcessor implements IImageProcessor {
 
   async generateThumbnails(bytes: Uint8Array): Promise<GeneratedThumbnailsResult> {
     const buf = toBuffer(bytes);
-    const meta = await sharp(buf, { animated: false }).rotate().metadata();
-    const width = meta.width ?? 800;
-    const height = meta.height ?? 600;
+    const meta = await sharp(buf, { animated: false }).metadata();
+    const swapped = meta.orientation != null && meta.orientation >= 5 && meta.orientation <= 8;
+    const width = (swapped ? meta.height : meta.width) ?? 800;
+    const height = (swapped ? meta.width : meta.height) ?? 600;
     const maxSide = Math.max(width, height);
 
     const gridBuf = await sharp(buf, { animated: false })
@@ -499,6 +506,7 @@ export class NodeImageProcessor implements IImageProcessor {
         pngBuf = await renderSocialPostCard(
           input.post,
           input.coverImageBytes ? toBuffer(input.coverImageBytes) : null,
+          input.authorAvatarBytes ? toBuffer(input.authorAvatarBytes) : null,
         );
         break;
       case 'webBookmark':

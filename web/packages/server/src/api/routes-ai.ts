@@ -67,16 +67,31 @@ export interface AIRouteOptions {
   usageTracker?: CloudAIUsageTracker;
 }
 
-function errorStatusFor(err: unknown): 400 | 401 | 403 | 404 | 429 | 500 | 502 {
+function errorStatusFor(err: unknown): 400 | 401 | 403 | 404 | 429 | 500 | 501 | 502 | 504 {
+  if (
+    err instanceof Error &&
+    (err.name === 'ClientExportRequiredError' ||
+      (err as { code?: unknown }).code === 'CLIENT_EXPORT_REQUIRED')
+  ) {
+    return 501;
+  }
   if (err instanceof CloudAIError || err instanceof TypeSafeError) {
     if (err.status === 401) return 401;
     if (err.status === 403) return 403;
     if (err.status === 429) return 429;
+    if (err.status === 504) return 504;
     if (err.status && err.status >= 500) return 502;
     return 400;
   }
   if (err instanceof Error && err.name === 'FigmaBridgeExportError') return 400;
   return 500;
+}
+
+function errorCodeFor(err: unknown): string | undefined {
+  if (err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string') {
+    return (err as { code: string }).code;
+  }
+  return undefined;
 }
 
 function errorMessage(err: unknown): string {
@@ -178,9 +193,11 @@ export function createAIRuntime(ctx: ServerContext, options: AIRouteOptions = {}
     media: ctx.media,
     configStore: ctx.configStore,
     events: ctx.events,
+    runtimeMode: ctx.runtimeMode,
     getCloudAIProvider: resolveProvider,
     getTypeSafeAPIKey: getTypeSafeKey,
     grounding: groundingEngine,
+    groundingService,
     localFs: ctx.localFs,
   });
 
@@ -218,6 +235,79 @@ export function createAIRuntime(ctx: ServerContext, options: AIRouteOptions = {}
   };
 }
 
+export type AIRuntime = ReturnType<typeof createAIRuntime>;
+
+/**
+ * Shared Cloud AI enrichment helper used by both `POST /api/v1/ai/analyze`
+ * and `autoAnalyzeOnImport` background analysis after ingest/upload.
+ */
+export async function enrichAssetsWithCloudAI(
+  ctx: ServerContext,
+  rt: AIRuntime,
+  ids: readonly UUID[],
+): Promise<AssetRecord[]> {
+  if (ids.length === 0) return [];
+  const aiCfg = ctx.configStore.getAIConfig();
+  const syncCfg = ctx.configStore.getSyncConfig();
+  const provider = rt.resolveProvider();
+  if (!provider) return [];
+
+  const existingLibraryTags = ctx.db.fetchTagCounts().map((t) => t.name);
+  const seen = new Set<UUID>();
+  const updatedAssets: AssetRecord[] = [];
+
+  for (const rawId of ids) {
+    const id = toSwiftUUID(rawId);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const before = ctx.db.getAsset(id);
+    if (!before) continue;
+    const hydrated = await ctx.media.hydrateImageMetadata(before).catch(() => null);
+    const effectiveBefore = hydrated ?? before;
+    const thumbBuf = aiCfg.sendThumbnailsToCloud
+      ? await ctx.media.readThumbnailBuffer(id, 'grid520')
+      : null;
+    const promptText = buildAssetEnrichmentText(effectiveBefore, existingLibraryTags);
+    const enrichment = await provider.enrich(promptText, thumbBuf);
+
+    const saved = ctx.db.transaction(() => {
+      const current = ctx.db.getAsset(id);
+      if (!current || current.contentHash !== before.contentHash) return null;
+      const latestTags = ctx.db.fetchTagCounts().map((t) => t.name);
+      const canonicalTags = CloudTagNormalizer.canonicalizeSuggestedTags(
+        enrichment.suggestedTags,
+        latestTags.length > 0 ? latestTags : existingLibraryTags,
+        current.tags,
+        CloudTagNormalizer.preferredLanguage(),
+        6,
+      );
+      const next: AssetRecord = {
+        ...current,
+        aiDescription: enrichment.description ?? current.aiDescription,
+        suggestedTags: canonicalTags,
+        richMetadata: hydrated?.richMetadata ?? current.richMetadata ?? null,
+      };
+      if (enrichment.embedding && enrichment.embedding.length > 0) {
+        const vec = {
+          featurePrint: null,
+          embedding: enrichment.embedding,
+          embeddingModel: provider.embeddingIdentity,
+          precision: 16 as const,
+        };
+        if (syncCfg.syncEmbeddings) ctx.db.recordSyncChange({ type: 'vector', id, vector: vec });
+        else ctx.db.saveVector(id, vec);
+      }
+      return ctx.db.saveAssetLocally(next);
+    });
+    if (saved) updatedAssets.push(saved);
+  }
+
+  if (updatedAssets.length > 0) {
+    ctx.events.emitLibraryEnriched(updatedAssets.map((a) => a.id));
+  }
+  return updatedAssets;
+}
+
 /**
  * Registers all AI, Visual Grounding (TypeSafe Jev), Moodboard Curation/Export,
  * Offline Lossless Figma Bridge, and External Agent MCP routes on the Hono app.
@@ -226,7 +316,7 @@ export function registerAIRoutes<E extends Env = Env>(
   app: Hono<E>,
   ctx: ServerContext,
   options: AIRouteOptions = {},
-): void {
+): AIRuntime {
   const rt = createAIRuntime(ctx, options);
 
   // =========================================================================
@@ -327,11 +417,15 @@ export function registerAIRoutes<E extends Env = Env>(
       const body = await safeJsonBody<{
         accessToken?: string;
         refreshToken?: string | null;
+        expiresAt?: string | null;
         email?: string | null;
         name?: string | null;
         subject?: string | null;
         sharingEnabled?: boolean;
         baseURL?: string | null;
+        tokenEndpoint?: string | null;
+        revocationEndpoint?: string | null;
+        clientId?: string | null;
       }>(c);
       if (!body.accessToken?.trim()) {
         return c.json({ error: '请提供 ChatGPT 订阅访问令牌。', code: 'MISSING_TOKEN' }, 400);
@@ -339,11 +433,15 @@ export function registerAIRoutes<E extends Env = Env>(
       const session = await rt.chatGPT.connectWithToken({
         accessToken: body.accessToken,
         refreshToken: body.refreshToken,
+        expiresAt: body.expiresAt,
         email: body.email,
         name: body.name,
         subject: body.subject,
         sharingEnabled: body.sharingEnabled ?? true,
         baseURL: body.baseURL,
+        tokenEndpoint: body.tokenEndpoint,
+        revocationEndpoint: body.revocationEndpoint,
+        clientId: body.clientId,
       });
       const currentCfg = ctx.configStore.getAIConfig();
       const updatedCfg = ctx.configStore.setAIConfig({
@@ -364,7 +462,8 @@ export function registerAIRoutes<E extends Env = Env>(
   });
 
   app.post('/api/v1/ai/chatgpt/disconnect', async (c) => {
-    await rt.chatGPT.disconnect();
+    const body = await safeJsonBody<{ resetRegistration?: boolean }>(c);
+    await rt.chatGPT.disconnect({ resetRegistration: Boolean(body.resetRegistration) });
     const session = await rt.chatGPT.currentSession();
     return c.json({ session });
   });
@@ -388,38 +487,47 @@ export function registerAIRoutes<E extends Env = Env>(
 
       const aiCfg = ctx.configStore.getAIConfig();
       const syncCfg = ctx.configStore.getSyncConfig();
-      const seen = new Set<UUID>();
-      const updatedAssets: AssetRecord[] = [];
 
       if (body.localOnly || aiCfg.provider === 'disabled') {
-        // Local-only visual color + perceptual fingerprint refresh
+        // Local-only visual color + perceptual fingerprint + EXIF/AI metadata refresh (single decode pass)
+        const seen = new Set<UUID>();
+        const updatedAssets: AssetRecord[] = [];
         for (const rawId of ids) {
           const id = toSwiftUUID(rawId);
           if (seen.has(id)) continue;
           seen.add(id);
           const before = ctx.db.getAsset(id);
           if (!before) continue;
+          const hydrated = await ctx.media.hydrateImageMetadata(before).catch(() => null);
           const thumbBuf = await ctx.media.readThumbnailBuffer(id, 'grid520');
           if (!thumbBuf) {
-            updatedAssets.push(before);
+            if (hydrated) {
+              const savedHydrated = ctx.db.saveAssetLocally(hydrated, false);
+              updatedAssets.push(savedHydrated);
+            } else {
+              updatedAssets.push(before);
+            }
             continue;
           }
-          const [colors, fp] = await Promise.all([
-            before.mediaKind === 'audio'
-              ? Promise.resolve(before.dominantColors)
-              : ctx.media.extractDominantColors(thumbBuf, 6),
-            ctx.media.computeVisualFingerprint(thumbBuf),
-          ]);
+          const extracted = await ctx.images.extractColorsAndFingerprint(thumbBuf, undefined, {
+            count: 6,
+          });
+          const colors = before.mediaKind === 'audio' ? before.dominantColors : extracted.colors;
+          const fp = extracted.featurePrint ?? new Float32Array(0);
           const saved = ctx.db.transaction(() => {
             const current = ctx.db.getAsset(id);
             if (!current || current.contentHash !== before.contentHash) return null;
             const next: AssetRecord = {
               ...current,
-              dominantColors: colors.length > 0 && current.mediaKind !== 'audio' ? colors : current.dominantColors,
+              dominantColors:
+                colors.length > 0 && current.mediaKind !== 'audio'
+                  ? colors
+                  : current.dominantColors,
+              richMetadata: hydrated?.richMetadata ?? current.richMetadata ?? null,
             };
             if (fp.length > 0) {
               const vec = {
-                featurePrint: encodeFeaturePrintFloat32(fp),
+                featurePrint: encodeFeaturePrintFloat32(Array.from(fp)),
                 embedding: null,
                 embeddingModel: null,
                 precision: 16 as const,
@@ -431,59 +539,13 @@ export function registerAIRoutes<E extends Env = Env>(
           });
           if (saved) updatedAssets.push(saved);
         }
-      } else {
-        const provider = rt.resolveProvider();
-        if (!provider) {
-          return c.json({ assets: [] });
+        if (updatedAssets.length > 0) {
+          ctx.events.emitLibraryEnriched(updatedAssets.map((a) => a.id));
         }
-        const existingLibraryTags = ctx.db.fetchTagCounts().map((t) => t.name);
-        for (const rawId of ids) {
-          const id = toSwiftUUID(rawId);
-          if (seen.has(id)) continue;
-          seen.add(id);
-          const before = ctx.db.getAsset(id);
-          if (!before) continue;
-          const thumbBuf = aiCfg.sendThumbnailsToCloud
-            ? await ctx.media.readThumbnailBuffer(id, 'grid520')
-            : null;
-          const promptText = buildAssetEnrichmentText(before, existingLibraryTags);
-          const enrichment = await provider.enrich(promptText, thumbBuf);
-
-          const saved = ctx.db.transaction(() => {
-            const current = ctx.db.getAsset(id);
-            if (!current || current.contentHash !== before.contentHash) return null;
-            const latestTags = ctx.db.fetchTagCounts().map((t) => t.name);
-            const canonicalTags = CloudTagNormalizer.canonicalizeSuggestedTags(
-              enrichment.suggestedTags,
-              latestTags.length > 0 ? latestTags : existingLibraryTags,
-              current.tags,
-              CloudTagNormalizer.preferredLanguage(),
-              6,
-            );
-            const next: AssetRecord = {
-              ...current,
-              aiDescription: enrichment.description ?? current.aiDescription,
-              suggestedTags: canonicalTags,
-            };
-            if (enrichment.embedding && enrichment.embedding.length > 0) {
-              const vec = {
-                featurePrint: null,
-                embedding: enrichment.embedding,
-                embeddingModel: provider.embeddingIdentity,
-                precision: 16 as const,
-              };
-              if (syncCfg.syncEmbeddings) ctx.db.recordSyncChange({ type: 'vector', id, vector: vec });
-              else ctx.db.saveVector(id, vec);
-            }
-            return ctx.db.saveAssetLocally(next);
-          });
-          if (saved) updatedAssets.push(saved);
-        }
+        return c.json({ assets: updatedAssets });
       }
 
-      if (updatedAssets.length > 0) {
-        ctx.events.emitLibraryEnriched(updatedAssets.map((a) => a.id));
-      }
+      const updatedAssets = await enrichAssetsWithCloudAI(ctx, rt, ids);
       return c.json({ assets: updatedAssets });
     } catch (err) {
       return c.json({ error: errorMessage(err) }, errorStatusFor(err));
@@ -695,8 +757,18 @@ export function registerAIRoutes<E extends Env = Env>(
     const typeSafeConfig = ctx.configStore.getTypeSafeConfig();
     const typeSafeAPIKey = rt.getTypeSafeKey();
 
+    const reqSignal = c.req.raw.signal;
     if (wantsSSE) {
       return streamSSE(c, async (stream) => {
+        const ac = new AbortController();
+        const onReqAbort = () => ac.abort(reqSignal?.reason);
+        if (reqSignal) {
+          if (reqSignal.aborted) ac.abort(reqSignal.reason);
+          else reqSignal.addEventListener('abort', onReqAbort, { once: true });
+        }
+        stream.onAbort(() => {
+          ac.abort();
+        });
         try {
           const proposal = await rt.harness.curate({
             request,
@@ -704,7 +776,9 @@ export function registerAIRoutes<E extends Env = Env>(
             typeSafeConfig,
             typeSafeAPIKey,
             grounding: rt.groundingEngine,
+            signal: ac.signal,
             onStep: async (step) => {
+              if (ac.signal.aborted) return;
               ctx.events.emitAICurateStep(requestID, step);
               await stream.writeSSE({
                 event: 'step',
@@ -712,15 +786,21 @@ export function registerAIRoutes<E extends Env = Env>(
               });
             },
           });
-          await stream.writeSSE({
-            event: 'done',
-            data: JSON.stringify({ proposal }),
-          });
+          if (!ac.signal.aborted) {
+            await stream.writeSSE({
+              event: 'done',
+              data: JSON.stringify({ proposal }),
+            });
+          }
         } catch (err) {
-          await stream.writeSSE({
-            event: 'error',
-            data: JSON.stringify({ error: errorMessage(err) }),
-          });
+          if (!ac.signal.aborted) {
+            await stream.writeSSE({
+              event: 'error',
+              data: JSON.stringify({ error: errorMessage(err) }),
+            });
+          }
+        } finally {
+          if (reqSignal) reqSignal.removeEventListener('abort', onReqAbort);
         }
       });
     }
@@ -732,8 +812,11 @@ export function registerAIRoutes<E extends Env = Env>(
         typeSafeConfig,
         typeSafeAPIKey,
         grounding: rt.groundingEngine,
+        signal: reqSignal,
         onStep: (step) => {
-          ctx.events.emitAICurateStep(requestID, step);
+          if (!reqSignal?.aborted) {
+            ctx.events.emitAICurateStep(requestID, step);
+          }
         },
       });
       return c.json({ proposal });
@@ -782,7 +865,10 @@ export function registerAIRoutes<E extends Env = Env>(
 
       if (!ctx.images.exportMoodboardImage) {
         return c.json(
-          { error: '当前运行环境不支持服务端图片导出，请在浏览器端导出。', code: 'NOT_SUPPORTED' },
+          {
+            error: '当前运行环境不支持服务端图片导出，请在浏览器端导出。',
+            code: 'CLIENT_EXPORT_REQUIRED',
+          },
           501,
         );
       }
@@ -820,7 +906,11 @@ export function registerAIRoutes<E extends Env = Env>(
         },
       });
     } catch (err) {
-      return c.json({ error: errorMessage(err) }, errorStatusFor(err));
+      const code = errorCodeFor(err);
+      return c.json(
+        code ? { error: errorMessage(err), code } : { error: errorMessage(err) },
+        errorStatusFor(err),
+      );
     }
   });
 
@@ -845,7 +935,10 @@ export function registerAIRoutes<E extends Env = Env>(
 
       if (!ctx.images.exportFigmaBridgeZip) {
         return c.json(
-          { error: '当前运行环境不支持服务端离线打包导出，请在浏览器端导出。', code: 'NOT_SUPPORTED' },
+          {
+            error: '当前运行环境不支持服务端离线打包导出，请在浏览器端导出。',
+            code: 'CLIENT_EXPORT_REQUIRED',
+          },
           501,
         );
       }
@@ -878,7 +971,11 @@ export function registerAIRoutes<E extends Env = Env>(
         },
       });
     } catch (err) {
-      return c.json({ error: errorMessage(err) }, errorStatusFor(err));
+      const code = errorCodeFor(err);
+      return c.json(
+        code ? { error: errorMessage(err), code } : { error: errorMessage(err) },
+        errorStatusFor(err),
+      );
     }
   });
 
@@ -903,12 +1000,19 @@ export function registerAIRoutes<E extends Env = Env>(
     return c.json({ tools: ExternalAgentService.mcpToolDefinitions() });
   });
 
+  app.get('/api/v1/agent/diagnostics', async (c) => {
+    const report = await rt.agentService.runDiagnostics();
+    return c.json(report);
+  });
+
   app.post('/api/v1/mcp', async (c) => {
     const rawText = await c.req.text();
-    const response = await rt.agentService.handleJSONRPC(rawText);
+    const response = await rt.agentService.handleJSONRPC(rawText, 'mcp');
     if (response === null) {
       return c.body(null, 204);
     }
     return c.json(response, 200);
   });
+
+  return rt;
 }

@@ -25,9 +25,18 @@ export interface SecretVaultLike {
 
 export interface CloudAIProvider {
   readonly embeddingIdentity: string;
-  embed(text: string): Promise<number[]>;
-  enrich(text: string, thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult>;
-  completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string>;
+  embed(text: string, signal?: AbortSignal): Promise<number[]>;
+  enrich(
+    text: string,
+    thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult>;
+  completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string>;
 }
 
 export class CloudAIError extends Error {
@@ -408,8 +417,85 @@ export function resolveProviderBaseURL(
   }
   if (!url.pathname || url.pathname === '/') {
     url.pathname = `/${defaultPath.replace(/^\/+/, '')}`;
+  } else if (
+    host === 'openrouter.ai' &&
+    url.pathname.replace(/\/+$/, '') === '/api'
+  ) {
+    url.pathname = '/api/v1';
   }
   return url;
+}
+
+/**
+ * Guards multimodal LLM payloads against accidental SVG XML or empty buffers
+ * being mislabeled as `image/jpeg`.
+ */
+export function isSafeMultimodalImageBuffer(buf: Uint8Array | null | undefined): buf is Uint8Array {
+  if (!buf || buf.byteLength === 0) return false;
+  if (
+    (buf.byteLength >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) ||
+    (buf.byteLength >= 8 &&
+      buf[0] === 0x89 &&
+      buf[1] === 0x50 &&
+      buf[2] === 0x4e &&
+      buf[3] === 0x47) ||
+    (buf.byteLength >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) ||
+    (buf.byteLength >= 12 &&
+      buf[0] === 0x52 &&
+      buf[1] === 0x49 &&
+      buf[2] === 0x46 &&
+      buf[3] === 0x46)
+  ) {
+    return true;
+  }
+  const head = new TextDecoder()
+    .decode(buf.subarray(0, Math.min(256, buf.byteLength)))
+    .trimStart()
+    .toLowerCase();
+  if (
+    head.startsWith('<svg') ||
+    head.startsWith('<?xml') ||
+    head.startsWith('<!doctype') ||
+    head.startsWith('<html')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function createLinkedAbortSignal(
+  timeoutMs: number,
+  externalSignal?: AbortSignal,
+): {
+  signal: AbortSignal;
+  cleanup: () => void;
+  wasExternalAbort: () => boolean;
+} {
+  const controller = new AbortController();
+  let externallyAborted = false;
+  const onExternalAbort = () => {
+    externallyAborted = true;
+    controller.abort(externalSignal?.reason);
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      externallyAborted = true;
+      controller.abort(externalSignal.reason);
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
+    },
+    wasExternalAbort: () => externallyAborted,
+  };
 }
 
 function joinURL(base: URL, relativePath: string): string {
@@ -478,9 +564,12 @@ export class AIHTTPClient {
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
   }
 
-  async get(path: string, timeoutMs = 20_000): Promise<{ status: number; text: string }> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+  async get(
+    path: string,
+    timeoutMs = 20_000,
+    externalSignal?: AbortSignal,
+  ): Promise<{ status: number; text: string }> {
+    const linked = createLinkedAbortSignal(timeoutMs, externalSignal);
     try {
       const headers: Record<string, string> = {
         Accept: 'application/json',
@@ -492,12 +581,15 @@ export class AIHTTPClient {
       const res = await this.fetchFn(joinURL(this.base, path), {
         method: 'GET',
         headers,
-        signal: controller.signal,
+        signal: linked.signal,
       });
       const text = await res.text().catch(() => '');
       return { status: res.status, text };
     } catch (err) {
       if (err instanceof CloudAIError) throw err;
+      if (linked.wasExternalAbort()) {
+        throw new CloudAIError('请求已取消。', 'aborted', 499);
+      }
       if (err instanceof Error && err.name === 'AbortError') {
         throw new CloudAIError('连接超时，请检查网络或服务地址。', 'timeout', 504);
       }
@@ -507,13 +599,17 @@ export class AIHTTPClient {
         502,
       );
     } finally {
-      clearTimeout(timer);
+      linked.cleanup();
     }
   }
 
-  async postJSON<T>(path: string, body: unknown, timeoutMs = 45_000): Promise<T> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+  async postJSON<T>(
+    path: string,
+    body: unknown,
+    timeoutMs = 45_000,
+    externalSignal?: AbortSignal,
+  ): Promise<T> {
+    const linked = createLinkedAbortSignal(timeoutMs, externalSignal);
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -527,7 +623,7 @@ export class AIHTTPClient {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal: linked.signal,
       });
       if (!res.ok) {
         const snippet = (await res.text().catch(() => '')).slice(0, 240);
@@ -538,8 +634,21 @@ export class AIHTTPClient {
         );
       }
       return (await res.json()) as T;
+    } catch (err) {
+      if (err instanceof CloudAIError) throw err;
+      if (linked.wasExternalAbort()) {
+        throw new CloudAIError('请求已取消。', 'aborted', 499);
+      }
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new CloudAIError('连接超时，请检查网络或服务地址。', 'timeout', 504);
+      }
+      throw new CloudAIError(
+        `无法连接到服务地址：${err instanceof Error ? err.message : String(err)}`,
+        'network_error',
+        502,
+      );
     } finally {
-      clearTimeout(timer);
+      linked.cleanup();
     }
   }
 }
@@ -585,11 +694,13 @@ export class GeminiProvider implements CloudAIProvider {
     return trimmed.replace(/^models\//, '');
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     const model = this.normalizeModel(this.config.embeddingModel, 'gemini-embedding-001');
     const result = await this.api.postJSON<{ embedding?: { values?: number[] } }>(
       `models/${model}:embedContent`,
       { content: { parts: [{ text }] } },
+      45_000,
+      signal,
     );
     await this.usage?.record({
       category: 'standard',
@@ -600,13 +711,17 @@ export class GeminiProvider implements CloudAIProvider {
     return checkEmbeddingValues(result.embedding?.values);
   }
 
-  async enrich(text: string, thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult> {
+  async enrich(
+    text: string,
+    thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult> {
     const parts: Array<Record<string, unknown>> = [
       { text: `${enrichmentInstruction()}\n\nReference:\n${text}` },
     ];
-    if (thumbnailJPEG && this.config.sendThumbnailsToCloud) {
+    if (this.config.sendThumbnailsToCloud && isSafeMultimodalImageBuffer(thumbnailJPEG)) {
       parts.push({
-        inline_data: { mime_type: 'image/jpeg', data: thumbnailJPEG.toString('base64') },
+        inline_data: { mime_type: 'image/jpeg', data: Buffer.from(thumbnailJPEG).toString('base64') },
       });
     }
     const model = this.normalizeModel(this.config.chatModel, 'gemini-2.5-flash');
@@ -617,10 +732,15 @@ export class GeminiProvider implements CloudAIProvider {
         candidatesTokenCount?: number;
         totalTokenCount?: number;
       };
-    }>(`models/${model}:generateContent`, {
-      contents: [{ parts }],
-      generationConfig: { responseMimeType: 'application/json' },
-    });
+    }>(
+      `models/${model}:generateContent`,
+      {
+        contents: [{ parts }],
+        generationConfig: { responseMimeType: 'application/json' },
+      },
+      45_000,
+      signal,
+    );
 
     await this.usage?.record({
       category: 'standard',
@@ -638,7 +758,7 @@ export class GeminiProvider implements CloudAIProvider {
     let embedding: number[] | null = null;
     if (this.config.embeddingModel.trim()) {
       try {
-        embedding = await this.embed(`${text}\n${caption.description}`);
+        embedding = await this.embed(`${text}\n${caption.description}`, signal);
       } catch {
         embedding = null;
       }
@@ -650,14 +770,18 @@ export class GeminiProvider implements CloudAIProvider {
     };
   }
 
-  async completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string> {
+  async completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     const parts: Array<Record<string, unknown>> = [{ text: prompt }];
-    if (this.config.sendThumbnailsToCloud) {
-      for (const jpeg of imagesJPEG) {
-        parts.push({
-          inline_data: { mime_type: 'image/jpeg', data: jpeg.toString('base64') },
-        });
-      }
+    for (const jpeg of imagesJPEG) {
+      if (!isSafeMultimodalImageBuffer(jpeg)) continue;
+      parts.push({
+        inline_data: { mime_type: 'image/jpeg', data: Buffer.from(jpeg).toString('base64') },
+      });
     }
     const model = this.normalizeModel(this.config.chatModel, 'gemini-2.5-flash');
     const body: Record<string, unknown> = {
@@ -674,7 +798,7 @@ export class GeminiProvider implements CloudAIProvider {
         candidatesTokenCount?: number;
         totalTokenCount?: number;
       };
-    }>(`models/${model}:generateContent`, body, 90_000);
+    }>(`models/${model}:generateContent`, body, 90_000, signal);
 
     await this.usage?.record({
       category: 'standard',
@@ -717,12 +841,12 @@ export class OpenAICompatibleProvider implements CloudAIProvider {
     return `openai:${this.api.base.toString()}:${this.config.embeddingModel}`;
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     const model = this.config.embeddingModel.trim() || 'text-embedding-3-small';
     const result = await this.api.postJSON<{
       data?: Array<{ embedding?: number[] }>;
       usage?: { prompt_tokens?: number; total_tokens?: number };
-    }>('embeddings', { model, input: text });
+    }>('embeddings', { model, input: text }, 45_000, signal);
     await this.usage?.record({
       category: 'standard',
       providerLabel: 'OpenAI 兼容',
@@ -733,15 +857,19 @@ export class OpenAICompatibleProvider implements CloudAIProvider {
     return checkEmbeddingValues(result.data?.[0]?.embedding);
   }
 
-  async enrich(text: string, thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult> {
+  async enrich(
+    text: string,
+    thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult> {
     const prompt = `${enrichmentInstruction()}\n\nReference:\n${text}`;
     const content =
-      thumbnailJPEG && this.config.sendThumbnailsToCloud
+      this.config.sendThumbnailsToCloud && isSafeMultimodalImageBuffer(thumbnailJPEG)
         ? [
             { type: 'text', text: prompt },
             {
               type: 'image_url',
-              image_url: { url: `data:image/jpeg;base64,${thumbnailJPEG.toString('base64')}` },
+              image_url: { url: `data:image/jpeg;base64,${Buffer.from(thumbnailJPEG).toString('base64')}` },
             },
           ]
         : prompt;
@@ -750,10 +878,15 @@ export class OpenAICompatibleProvider implements CloudAIProvider {
     const response = await this.api.postJSON<{
       choices?: Array<{ message?: { content?: string | null } }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    }>('chat/completions', {
-      model,
-      messages: [{ role: 'user', content }],
-    });
+    }>(
+      'chat/completions',
+      {
+        model,
+        messages: [{ role: 'user', content }],
+      },
+      45_000,
+      signal,
+    );
 
     await this.usage?.record({
       category: 'standard',
@@ -768,7 +901,7 @@ export class OpenAICompatibleProvider implements CloudAIProvider {
     let embedding: number[] | null = null;
     if (this.config.embeddingModel.trim()) {
       try {
-        embedding = await this.embed(`${text}\n${caption.description}`);
+        embedding = await this.embed(`${text}\n${caption.description}`, signal);
       } catch {
         embedding = null;
       }
@@ -776,17 +909,23 @@ export class OpenAICompatibleProvider implements CloudAIProvider {
     return { description: caption.description, suggestedTags: caption.tags, embedding };
   }
 
-  async completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string> {
-    const includeImages = this.config.sendThumbnailsToCloud && imagesJPEG.length > 0;
-    const userContent = includeImages
-      ? [
-          { type: 'text', text: prompt },
-          ...imagesJPEG.map((jpeg) => ({
-            type: 'image_url',
-            image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` },
-          })),
-        ]
-      : prompt;
+  async completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const safeImages = imagesJPEG.filter((jpeg) => isSafeMultimodalImageBuffer(jpeg));
+    const userContent =
+      safeImages.length > 0
+        ? [
+            { type: 'text', text: prompt },
+            ...safeImages.map((jpeg) => ({
+              type: 'image_url',
+              image_url: { url: `data:image/jpeg;base64,${Buffer.from(jpeg).toString('base64')}` },
+            })),
+          ]
+        : prompt;
 
     const messages: Array<Record<string, unknown>> = [];
     if (instructions.trim()) {
@@ -798,7 +937,7 @@ export class OpenAICompatibleProvider implements CloudAIProvider {
     const response = await this.api.postJSON<{
       choices?: Array<{ message?: { content?: string | null } }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    }>('chat/completions', { model, messages }, 90_000);
+    }>('chat/completions', { model, messages }, 90_000, signal);
 
     await this.usage?.record({
       category: 'standard',
@@ -841,12 +980,12 @@ export class OpenAIResponsesProvider implements CloudAIProvider {
     return `openai-responses:${this.api.base.toString()}:${this.config.embeddingModel}`;
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     const model = this.config.embeddingModel.trim() || 'text-embedding-3-small';
     const result = await this.api.postJSON<{
       data?: Array<{ embedding?: number[] }>;
       usage?: { prompt_tokens?: number; total_tokens?: number };
-    }>('embeddings', { model, input: text });
+    }>('embeddings', { model, input: text }, 45_000, signal);
     await this.usage?.record({
       category: 'standard',
       providerLabel: 'OpenAI Responses',
@@ -871,13 +1010,17 @@ export class OpenAIResponsesProvider implements CloudAIProvider {
       .join('\n');
   }
 
-  async enrich(text: string, thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult> {
+  async enrich(
+    text: string,
+    thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult> {
     const prompt = `${enrichmentInstruction()}\n\nReference:\n${text}`;
     const contentParts: Array<Record<string, unknown>> = [{ type: 'input_text', text: prompt }];
-    if (thumbnailJPEG && this.config.sendThumbnailsToCloud) {
+    if (this.config.sendThumbnailsToCloud && isSafeMultimodalImageBuffer(thumbnailJPEG)) {
       contentParts.push({
         type: 'input_image',
-        image_url: `data:image/jpeg;base64,${thumbnailJPEG.toString('base64')}`,
+        image_url: `data:image/jpeg;base64,${Buffer.from(thumbnailJPEG).toString('base64')}`,
       });
     }
     const model = this.config.chatModel.trim() || 'gpt-4.1-mini';
@@ -885,10 +1028,15 @@ export class OpenAIResponsesProvider implements CloudAIProvider {
       output_text?: string | null;
       output?: Array<{ content?: Array<{ text?: string | null }> }>;
       usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
-    }>('responses', {
-      model,
-      input: [{ role: 'user', content: contentParts }],
-    });
+    }>(
+      'responses',
+      {
+        model,
+        input: [{ role: 'user', content: contentParts }],
+      },
+      45_000,
+      signal,
+    );
 
     await this.usage?.record({
       category: 'standard',
@@ -903,7 +1051,7 @@ export class OpenAIResponsesProvider implements CloudAIProvider {
     let embedding: number[] | null = null;
     if (this.config.embeddingModel.trim()) {
       try {
-        embedding = await this.embed(`${text}\n${caption.description}`);
+        embedding = await this.embed(`${text}\n${caption.description}`, signal);
       } catch {
         embedding = null;
       }
@@ -911,15 +1059,19 @@ export class OpenAIResponsesProvider implements CloudAIProvider {
     return { description: caption.description, suggestedTags: caption.tags, embedding };
   }
 
-  async completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string> {
+  async completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     const contentParts: Array<Record<string, unknown>> = [{ type: 'input_text', text: prompt }];
-    if (this.config.sendThumbnailsToCloud) {
-      for (const jpeg of imagesJPEG) {
-        contentParts.push({
-          type: 'input_image',
-          image_url: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
-        });
-      }
+    for (const jpeg of imagesJPEG) {
+      if (!isSafeMultimodalImageBuffer(jpeg)) continue;
+      contentParts.push({
+        type: 'input_image',
+        image_url: `data:image/jpeg;base64,${Buffer.from(jpeg).toString('base64')}`,
+      });
     }
     const model = this.config.chatModel.trim() || 'gpt-4.1-mini';
     const body: Record<string, unknown> = {
@@ -933,7 +1085,7 @@ export class OpenAIResponsesProvider implements CloudAIProvider {
       output_text?: string | null;
       output?: Array<{ content?: Array<{ text?: string | null }> }>;
       usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
-    }>('responses', body, 90_000);
+    }>('responses', body, 90_000, signal);
 
     await this.usage?.record({
       category: 'standard',
@@ -987,16 +1139,20 @@ export class AnthropicMessagesProvider implements CloudAIProvider {
     );
   }
 
-  async enrich(text: string, thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult> {
+  async enrich(
+    text: string,
+    thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult> {
     const prompt = `${enrichmentInstruction()}\n\nReference:\n${text}`;
     const blocks: Array<Record<string, unknown>> = [];
-    if (thumbnailJPEG && this.config.sendThumbnailsToCloud) {
+    if (this.config.sendThumbnailsToCloud && isSafeMultimodalImageBuffer(thumbnailJPEG)) {
       blocks.push({
         type: 'image',
         source: {
           type: 'base64',
           media_type: 'image/jpeg',
-          data: thumbnailJPEG.toString('base64'),
+          data: Buffer.from(thumbnailJPEG).toString('base64'),
         },
       });
     }
@@ -1006,11 +1162,16 @@ export class AnthropicMessagesProvider implements CloudAIProvider {
     const response = await this.api.postJSON<{
       content?: Array<{ type?: string; text?: string }>;
       usage?: { input_tokens?: number; output_tokens?: number };
-    }>('messages', {
-      model,
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: blocks }],
-    });
+    }>(
+      'messages',
+      {
+        model,
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: blocks }],
+      },
+      45_000,
+      signal,
+    );
 
     await this.usage?.record({
       category: 'standard',
@@ -1025,19 +1186,23 @@ export class AnthropicMessagesProvider implements CloudAIProvider {
     return { description: caption.description, suggestedTags: caption.tags, embedding: null };
   }
 
-  async completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string> {
+  async completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     const blocks: Array<Record<string, unknown>> = [];
-    if (this.config.sendThumbnailsToCloud) {
-      for (const jpeg of imagesJPEG) {
-        blocks.push({
-          type: 'image',
-          source: {
-            type: 'base64',
-            media_type: 'image/jpeg',
-            data: jpeg.toString('base64'),
-          },
-        });
-      }
+    for (const jpeg of imagesJPEG) {
+      if (!isSafeMultimodalImageBuffer(jpeg)) continue;
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/jpeg',
+          data: Buffer.from(jpeg).toString('base64'),
+        },
+      });
     }
     blocks.push({ type: 'text', text: prompt });
 
@@ -1054,7 +1219,7 @@ export class AnthropicMessagesProvider implements CloudAIProvider {
     const response = await this.api.postJSON<{
       content?: Array<{ type?: string; text?: string }>;
       usage?: { input_tokens?: number; output_tokens?: number };
-    }>('messages', body, 90_000);
+    }>('messages', body, 90_000, signal);
 
     await this.usage?.record({
       category: 'standard',
@@ -1071,8 +1236,10 @@ export class AnthropicMessagesProvider implements CloudAIProvider {
 // MARK: - ChatGPT Subscription Session & Provider
 
 export const CHATGPT_SESSION_STATE_KEY = 'ai.chatgpt.session.v1';
+export const CHATGPT_REGISTRATION_STATE_KEY = 'ai.chatgpt.registration.v1';
 export const CHATGPT_TOKEN_SECRET_KEY = SECRET_KEYS.CHATGPT_ACCESS_TOKEN;
 export const CHATGPT_RESOURCE_BASE_URL = 'https://api.openai.com/v1';
+export const CHATGPT_DEFAULT_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
 
 export const DEFAULT_CHATGPT_MODELS: ChatGPTModelInfo[] = [
   { slug: 'gpt-5.4-mini', displayName: 'GPT-5.4 Mini' },
@@ -1085,11 +1252,15 @@ export const DEFAULT_CHATGPT_MODELS: ChatGPTModelInfo[] = [
 export interface ChatGPTConnectOptions {
   accessToken: string;
   refreshToken?: string | null;
+  expiresAt?: string | null;
   email?: string | null;
   name?: string | null;
   subject?: string | null;
   sharingEnabled?: boolean;
   baseURL?: string | null;
+  tokenEndpoint?: string | null;
+  revocationEndpoint?: string | null;
+  clientId?: string | null;
 }
 
 export interface ChatGPTSessionStoreLike {
@@ -1105,6 +1276,144 @@ interface StoredChatGPTMetadata {
   subject?: string | null;
   lastUpdatedAt?: string | null;
   baseURL?: string | null;
+  expiresAt?: string | null;
+  tokenEndpoint?: string | null;
+  revocationEndpoint?: string | null;
+  clientId?: string | null;
+}
+
+interface ParsedResponsesPayload {
+  text: string;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number | null;
+  };
+}
+
+function extractChatGPTErrorCode(rawBody: string): { code: string; message: string } {
+  const trimmed = rawBody.trim();
+  if (!trimmed) return { code: '', message: '' };
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: string | { code?: string; type?: string; message?: string };
+      code?: string;
+      message?: string;
+    };
+    if (typeof parsed.error === 'string') {
+      return { code: parsed.error, message: parsed.message ?? parsed.error };
+    }
+    if (parsed.error && typeof parsed.error === 'object') {
+      return {
+        code: String(parsed.error.code ?? parsed.error.type ?? parsed.code ?? ''),
+        message: String(parsed.error.message ?? parsed.message ?? ''),
+      };
+    }
+    return {
+      code: String(parsed.code ?? ''),
+      message: String(parsed.message ?? ''),
+    };
+  } catch {
+    return { code: '', message: trimmed.slice(0, 240) };
+  }
+}
+
+function isChatGPTAuthRevoked403(code: string, message: string): boolean {
+  const lower = `${code} ${message}`.toLowerCase();
+  return (
+    lower.includes('invalid_token') ||
+    lower.includes('token_expired') ||
+    lower.includes('expired') ||
+    lower.includes('revoked') ||
+    lower.includes('reauth') ||
+    lower.includes('account_mismatch') ||
+    lower.includes('subscription_sharing_revoked')
+  );
+}
+
+function isUnsupportedImageError(status: number, code: string, message: string): boolean {
+  if (status === 400 || status === 422) return true;
+  const lower = `${code} ${message}`.toLowerCase();
+  return (
+    lower.includes('subscription_sharing_unsupported_capability') ||
+    lower.includes('unsupported_capability') ||
+    lower.includes('input_image') ||
+    lower.includes('image_url') ||
+    lower.includes('vision')
+  );
+}
+
+function extractResponsesObjectText(payload: {
+  output_text?: string | null;
+  output?: Array<{ content?: Array<{ text?: string | null }> }>;
+}): string {
+  if (typeof payload.output_text === 'string' && payload.output_text.length > 0) {
+    return payload.output_text;
+  }
+  return (payload.output ?? [])
+    .flatMap((item) => item.content ?? [])
+    .map((part) => part.text ?? '')
+    .filter(Boolean)
+    .join('\n');
+}
+
+function parseResponsesSSE(sseText: string): ParsedResponsesPayload {
+  const deltas: string[] = [];
+  let completedText = '';
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens: number | null = null;
+
+  const lines = sseText.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) continue;
+    const dataStr = line.slice(5).trim();
+    if (!dataStr || dataStr === '[DONE]') continue;
+
+    let evt: Record<string, unknown>;
+    try {
+      evt = JSON.parse(dataStr) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    const type = typeof evt.type === 'string' ? evt.type : '';
+    if (type === 'response.output_text.delta' && typeof evt.delta === 'string') {
+      deltas.push(evt.delta);
+    } else if (type === 'response.output_text.done' && typeof evt.text === 'string') {
+      if (deltas.length === 0) completedText = evt.text;
+    } else if (type === 'response.completed' || type === 'response.done') {
+      const resp = (evt.response ?? evt) as {
+        output_text?: string | null;
+        output?: Array<{ content?: Array<{ text?: string | null }> }>;
+        usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+      };
+      const text = extractResponsesObjectText(resp);
+      if (text) completedText = text;
+      if (resp.usage) {
+        inputTokens = resp.usage.input_tokens ?? inputTokens;
+        outputTokens = resp.usage.output_tokens ?? outputTokens;
+        totalTokens = resp.usage.total_tokens ?? totalTokens;
+      }
+    } else if (type === 'response.failed' || type === 'error') {
+      const errObj = (evt.error ?? (evt.response as Record<string, unknown> | undefined)?.error) as
+        | { code?: string; message?: string }
+        | string
+        | undefined;
+      const errCode = typeof errObj === 'object' && errObj?.code ? errObj.code : 'stream_error';
+      const errMsg =
+        typeof errObj === 'string'
+          ? errObj
+          : (errObj?.message ?? 'ChatGPT 流式响应失败。');
+      throw new CloudAIError(errMsg, errCode, 502);
+    }
+  }
+
+  return {
+    text: deltas.length > 0 ? deltas.join('') : completedText,
+    usage: { inputTokens, outputTokens, totalTokens },
+  };
 }
 
 export class ChatGPTSubscriptionClient {
@@ -1113,6 +1422,7 @@ export class ChatGPTSubscriptionClient {
   private readonly configStore: ChatGPTSessionStoreLike | null;
   private readonly usage: CloudAIUsageTracker | null;
   private readonly fetchFn: FetchLike;
+  private inFlightRefresh: Promise<string | null> | null = null;
 
   constructor(opts: {
     vault: SecretVaultLike;
@@ -1167,6 +1477,8 @@ export class ChatGPTSubscriptionClient {
     this.vault.set(CHATGPT_TOKEN_SECRET_KEY, token);
     if (opts.refreshToken?.trim()) {
       this.vault.set(SECRET_KEYS.CHATGPT_REFRESH_TOKEN, opts.refreshToken.trim());
+    } else if (opts.refreshToken === '') {
+      this.vault.delete(SECRET_KEYS.CHATGPT_REFRESH_TOKEN);
     }
     const meta: StoredChatGPTMetadata = {
       status: 'connected',
@@ -1176,6 +1488,10 @@ export class ChatGPTSubscriptionClient {
       subject: opts.subject?.trim() || null,
       lastUpdatedAt: now,
       baseURL: opts.baseURL?.trim() || CHATGPT_RESOURCE_BASE_URL,
+      expiresAt: opts.expiresAt?.trim() || null,
+      tokenEndpoint: opts.tokenEndpoint?.trim() || null,
+      revocationEndpoint: opts.revocationEndpoint?.trim() || null,
+      clientId: opts.clientId?.trim() || null,
     };
     await this.stateStore.setState(CHATGPT_SESSION_STATE_KEY, meta);
     const publicSession: ChatGPTAccountSession = {
@@ -1190,9 +1506,34 @@ export class ChatGPTSubscriptionClient {
     return publicSession;
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(opts: { resetRegistration?: boolean } = {}): Promise<void> {
+    const meta = await this.stateStore.getState<StoredChatGPTMetadata>(CHATGPT_SESSION_STATE_KEY);
+    const revokeToken =
+      this.vault.get(SECRET_KEYS.CHATGPT_REFRESH_TOKEN)?.trim() ||
+      this.vault.get(CHATGPT_TOKEN_SECRET_KEY)?.trim() ||
+      null;
+
+    if (meta?.revocationEndpoint && revokeToken) {
+      try {
+        const revokeURL = resolveProviderBaseURL(meta.revocationEndpoint, '', false);
+        const form = new URLSearchParams({ token: revokeToken });
+        if (meta.clientId) form.set('client_id', meta.clientId);
+        await this.fetchFn(revokeURL.toString(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: form.toString(),
+        });
+      } catch {
+        // Remote revocation is best-effort; always complete local disconnect.
+      }
+    }
+
     this.vault.delete(CHATGPT_TOKEN_SECRET_KEY);
     this.vault.delete(SECRET_KEYS.CHATGPT_REFRESH_TOKEN);
+    if (opts.resetRegistration) {
+      await this.stateStore.setState(CHATGPT_REGISTRATION_STATE_KEY, null);
+    }
+
     const disconnected: StoredChatGPTMetadata = {
       status: 'disconnected',
       sharingEnabled: false,
@@ -1230,45 +1571,248 @@ export class ChatGPTSubscriptionClient {
     });
   }
 
-  async listModels(): Promise<ChatGPTModelInfo[]> {
-    const token = this.vault.get(CHATGPT_TOKEN_SECRET_KEY)?.trim();
+  private async refreshAccessToken(
+    meta: StoredChatGPTMetadata | null,
+    externalSignal?: AbortSignal,
+  ): Promise<string | null> {
+    const refreshToken = this.vault.get(SECRET_KEYS.CHATGPT_REFRESH_TOKEN)?.trim();
+    if (!refreshToken) return null;
+
+    if (this.inFlightRefresh) {
+      return this.inFlightRefresh;
+    }
+
+    const task = (async () => {
+      const endpointRaw = meta?.tokenEndpoint?.trim() || CHATGPT_DEFAULT_TOKEN_ENDPOINT;
+      const tokenURL = resolveProviderBaseURL(endpointRaw, '', false);
+      const form = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+      });
+      if (meta?.clientId) {
+        form.set('client_id', meta.clientId);
+      }
+
+      const linked = createLinkedAbortSignal(20_000, externalSignal);
+      try {
+        const res = await this.fetchFn(tokenURL.toString(), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+          },
+          body: form.toString(),
+          signal: linked.signal,
+        });
+        const bodyText = await res.text().catch(() => '');
+        if (!res.ok) {
+          const { code } = extractChatGPTErrorCode(bodyText);
+          if (res.status === 400 || res.status === 401 || code === 'invalid_grant') {
+            await this.markReauthRequired();
+            throw new CloudAIError(
+              'ChatGPT 会话令牌已过期，请重新连接。',
+              'reauth_required',
+              401,
+            );
+          }
+          throw new CloudAIError(
+            `刷新 ChatGPT 令牌失败（HTTP ${res.status}）。`,
+            'refresh_failed',
+            res.status,
+          );
+        }
+
+        const data = JSON.parse(bodyText) as {
+          access_token?: string;
+          refresh_token?: string;
+          expires_in?: number;
+        };
+        const nextAccess = data.access_token?.trim();
+        if (!nextAccess) {
+          throw new CloudAIError('ChatGPT 刷新接口未返回有效的访问令牌。', 'refresh_failed', 502);
+        }
+        this.vault.set(CHATGPT_TOKEN_SECRET_KEY, nextAccess);
+        if (data.refresh_token?.trim()) {
+          this.vault.set(SECRET_KEYS.CHATGPT_REFRESH_TOKEN, data.refresh_token.trim());
+        }
+        const nextExpiresAt =
+          typeof data.expires_in === 'number' && Number.isFinite(data.expires_in) && data.expires_in > 0
+            ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+            : (meta?.expiresAt ?? null);
+        const updatedMeta: StoredChatGPTMetadata = {
+          ...(meta ?? { status: 'connected', sharingEnabled: true }),
+          status: 'connected',
+          expiresAt: nextExpiresAt,
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        await this.stateStore.setState(CHATGPT_SESSION_STATE_KEY, updatedMeta);
+        return nextAccess;
+      } catch (err) {
+        if (err instanceof CloudAIError) throw err;
+        if (linked.wasExternalAbort()) {
+          throw new CloudAIError('请求已取消。', 'aborted', 499);
+        }
+        throw new CloudAIError(
+          `刷新 ChatGPT 会话令牌时网络异常：${err instanceof Error ? err.message : String(err)}`,
+          'network_error',
+          502,
+        );
+      } finally {
+        linked.cleanup();
+      }
+    })();
+
+    this.inFlightRefresh = task;
+    try {
+      return await task;
+    } finally {
+      if (this.inFlightRefresh === task) {
+        this.inFlightRefresh = null;
+      }
+    }
+  }
+
+  private async resolveUsableAccessToken(
+    meta: StoredChatGPTMetadata | null,
+    externalSignal?: AbortSignal,
+  ): Promise<string | null> {
+    let token = this.vault.get(CHATGPT_TOKEN_SECRET_KEY)?.trim() || null;
+    if (!token) return null;
+    if (meta?.expiresAt) {
+      const expMs = Date.parse(meta.expiresAt);
+      if (Number.isFinite(expMs) && expMs <= Date.now() + 60_000) {
+        const refreshed = await this.refreshAccessToken(meta, externalSignal);
+        if (refreshed) token = refreshed;
+      }
+    }
+    return token;
+  }
+
+  async listModels(opts: { throwOnError?: boolean; signal?: AbortSignal } = {}): Promise<ChatGPTModelInfo[]> {
+    const meta = await this.stateStore.getState<StoredChatGPTMetadata>(CHATGPT_SESSION_STATE_KEY);
+    let token = await this.resolveUsableAccessToken(meta, opts.signal);
     if (!token) {
+      if (opts.throwOnError) {
+        throw new CloudAIError('ChatGPT 登录凭证缺失，请重新连接。', 'sign_in_required', 401);
+      }
       return DEFAULT_CHATGPT_MODELS;
     }
-    const meta = await this.stateStore.getState<StoredChatGPTMetadata>(CHATGPT_SESSION_STATE_KEY);
     const base = resolveProviderBaseURL(meta?.baseURL || CHATGPT_RESOURCE_BASE_URL, 'v1', false);
 
+    const requestModels = async (bearer: string): Promise<Response> => {
+      const linked = createLinkedAbortSignal(20_000, opts.signal);
+      try {
+        return await this.fetchFn(joinURL(base, 'models'), {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+            Accept: 'application/json',
+          },
+          signal: linked.signal,
+        });
+      } catch (err) {
+        if (linked.wasExternalAbort()) {
+          throw new CloudAIError('请求已取消。', 'aborted', 499);
+        }
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new CloudAIError('连接 ChatGPT 超时，请检查网络。', 'timeout', 504);
+        }
+        throw new CloudAIError(
+          `无法连接 ChatGPT 服务：${err instanceof Error ? err.message : String(err)}`,
+          'network_error',
+          502,
+        );
+      } finally {
+        linked.cleanup();
+      }
+    };
+
     try {
-      const res = await this.fetchFn(joinURL(base, 'models'), {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
-      });
-      if (res.status === 401 || res.status === 403) {
+      let res = await requestModels(token);
+      if (res.status === 401) {
+        const refreshed = await this.refreshAccessToken(meta, opts.signal);
+        if (refreshed) {
+          token = refreshed;
+          res = await requestModels(token);
+        }
+      }
+      if (res.status === 401) {
         await this.markReauthRequired();
-        throw new CloudAIError('ChatGPT 会话令牌已失效，请重新连接。', 'reauth_required', res.status);
+        throw new CloudAIError('ChatGPT 会话令牌已失效，请重新连接。', 'reauth_required', 401);
+      }
+      if (res.status === 403) {
+        const snippet = await res.text().catch(() => '');
+        const { code, message } = extractChatGPTErrorCode(snippet);
+        if (isChatGPTAuthRevoked403(code, message)) {
+          await this.markReauthRequired();
+          throw new CloudAIError('ChatGPT 会话令牌已失效，请重新连接。', 'reauth_required', 403);
+        }
+        throw new CloudAIError(
+          `ChatGPT 拒绝访问模型列表（HTTP 403）${message ? `：${message}` : '。'}`,
+          code || 'forbidden',
+          403,
+        );
       }
       if (!res.ok) {
+        if (opts.throwOnError) {
+          const snippet = (await res.text().catch(() => '')).slice(0, 240);
+          throw new CloudAIError(
+            `ChatGPT 服务返回 HTTP ${res.status}.${snippet ? ` ${snippet}` : ''}`,
+            'http_error',
+            res.status,
+          );
+        }
         return DEFAULT_CHATGPT_MODELS;
       }
+
       const data = (await res.json()) as {
-        data?: Array<{ id?: string; slug?: string; name?: string }>;
-        models?: Array<{ id?: string; slug?: string; displayName?: string; name?: string }>;
+        data?: Array<{
+          id?: string;
+          slug?: string;
+          display_name?: string;
+          displayName?: string;
+          name?: string;
+          visibility?: string;
+        }>;
+        models?: Array<{
+          id?: string;
+          slug?: string;
+          display_name?: string;
+          displayName?: string;
+          name?: string;
+          visibility?: string;
+        }>;
       };
       const rawList = data.models ?? data.data ?? [];
       const mapped = rawList
+        .filter((m) => !m.visibility || m.visibility === 'list')
         .map((m) => {
           const slug = (m.slug ?? m.id ?? '').trim();
           if (!slug) return null;
-          const displayName = ('displayName' in m && m.displayName) || m.name || slug;
+          const displayName = m.display_name || m.displayName || m.name || slug;
           return { slug, displayName };
         })
         .filter((m): m is ChatGPTModelInfo => m !== null && /^(gpt-|o[134]-|chatgpt-)/i.test(m.slug));
       return mapped.length > 0 ? mapped.slice(0, 24) : DEFAULT_CHATGPT_MODELS;
     } catch (err) {
-      if (err instanceof CloudAIError) throw err;
+      if (err instanceof CloudAIError) {
+        if (
+          opts.throwOnError ||
+          err.code === 'reauth_required' ||
+          err.code === 'forbidden' ||
+          err.code === 'aborted'
+        ) {
+          throw err;
+        }
+        return DEFAULT_CHATGPT_MODELS;
+      }
+      if (opts.throwOnError) {
+        throw new CloudAIError(
+          `无法连接 ChatGPT 服务：${err instanceof Error ? err.message : String(err)}`,
+          'network_error',
+          502,
+        );
+      }
       return DEFAULT_CHATGPT_MODELS;
     }
   }
@@ -1278,7 +1822,8 @@ export class ChatGPTSubscriptionClient {
     instructions: string;
     userText: string;
     imagesJPEG: Buffer[];
-    sendThumbnailsToCloud: boolean;
+    sendThumbnailsToCloud?: boolean;
+    signal?: AbortSignal;
   }): Promise<string> {
     const session = await this.currentSession();
     if (session.status !== 'connected') {
@@ -1287,73 +1832,169 @@ export class ChatGPTSubscriptionClient {
     if (!session.sharingEnabled) {
       throw new CloudAIError('已连接 ChatGPT，但尚未开启订阅额度共享权限。', 'sharing_not_enabled');
     }
-    const token = this.vault.get(CHATGPT_TOKEN_SECRET_KEY)?.trim();
+    const meta = await this.stateStore.getState<StoredChatGPTMetadata>(CHATGPT_SESSION_STATE_KEY);
+    let token = await this.resolveUsableAccessToken(meta, params.signal);
     if (!token) {
       throw new CloudAIError('ChatGPT 登录凭证缺失，请重新连接。', 'sign_in_required');
     }
-    const meta = await this.stateStore.getState<StoredChatGPTMetadata>(CHATGPT_SESSION_STATE_KEY);
     const base = resolveProviderBaseURL(meta?.baseURL || CHATGPT_RESOURCE_BASE_URL, 'v1', false);
+    const model = params.model.trim() || 'gpt-5.4-mini';
+    const allowImages = params.sendThumbnailsToCloud !== false;
+    const safeImages = allowImages
+      ? params.imagesJPEG.filter((jpeg) => isSafeMultimodalImageBuffer(jpeg))
+      : [];
 
-    const contentParts: Array<Record<string, unknown>> = [{ type: 'input_text', text: params.userText }];
-    if (params.sendThumbnailsToCloud) {
-      for (const jpeg of params.imagesJPEG) {
-        contentParts.push({
-          type: 'input_image',
-          image_url: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
+    const buildBody = (includeImages: boolean): Record<string, unknown> => {
+      const contentParts: Array<Record<string, unknown>> = [
+        { type: 'input_text', text: params.userText },
+      ];
+      if (includeImages) {
+        for (const jpeg of safeImages) {
+          contentParts.push({
+            type: 'input_image',
+            image_url: `data:image/jpeg;base64,${Buffer.from(jpeg).toString('base64')}`,
+          });
+        }
+      }
+      const body: Record<string, unknown> = {
+        model,
+        store: false,
+        stream: true,
+        input: [{ role: 'user', content: contentParts }],
+      };
+      if (params.instructions.trim()) {
+        body.instructions = params.instructions;
+      }
+      return body;
+    };
+
+    const sendOnce = async (bearer: string, includeImages: boolean): Promise<Response> => {
+      const linked = createLinkedAbortSignal(90_000, params.signal);
+      try {
+        return await this.fetchFn(joinURL(base, 'responses'), {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream, application/json',
+          },
+          body: JSON.stringify(buildBody(includeImages)),
+          signal: linked.signal,
         });
+      } catch (err) {
+        if (linked.wasExternalAbort()) {
+          throw new CloudAIError('请求已取消。', 'aborted', 499);
+        }
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new CloudAIError('ChatGPT 响应超时，请稍后重试。', 'timeout', 504);
+        }
+        throw new CloudAIError(
+          `无法连接 ChatGPT 服务：${err instanceof Error ? err.message : String(err)}`,
+          'network_error',
+          502,
+        );
+      } finally {
+        linked.cleanup();
+      }
+    };
+
+    let includeImages = safeImages.length > 0;
+    let res = await sendOnce(token, includeImages);
+
+    if (res.status === 401) {
+      const refreshed = await this.refreshAccessToken(meta, params.signal);
+      if (refreshed) {
+        token = refreshed;
+        res = await sendOnce(token, includeImages);
       }
     }
 
-    const model = params.model.trim() || 'gpt-5.4-mini';
-    const body: Record<string, unknown> = {
-      model,
-      store: false,
-      input: [{ role: 'user', content: contentParts }],
-    };
-    if (params.instructions.trim()) {
-      body.instructions = params.instructions;
+    if (!res.ok && includeImages) {
+      const errText = await res.text().catch(() => '');
+      const { code, message } = extractChatGPTErrorCode(errText);
+      if (isUnsupportedImageError(res.status, code, message)) {
+        includeImages = false;
+        res = await sendOnce(token, false);
+      } else {
+        if (res.status === 401) {
+          await this.markReauthRequired();
+          throw new CloudAIError('ChatGPT 会话已过期，请重新连接。', 'reauth_required', 401);
+        }
+        if (res.status === 403 && isChatGPTAuthRevoked403(code, message)) {
+          await this.markReauthRequired();
+          throw new CloudAIError('ChatGPT 会话已过期，请重新连接。', 'reauth_required', 403);
+        }
+        throw new CloudAIError(
+          `ChatGPT 返回错误 HTTP ${res.status}.${errText ? ` ${errText.slice(0, 240)}` : ''}`,
+          code || 'http_error',
+          res.status,
+        );
+      }
     }
 
-    const res = await this.fetchFn(joinURL(base, 'responses'), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       await this.markReauthRequired();
-      throw new CloudAIError('ChatGPT 会话已过期，请重新连接。', 'reauth_required', res.status);
+      throw new CloudAIError('ChatGPT 会话已过期，请重新连接。', 'reauth_required', 401);
+    }
+    if (res.status === 403) {
+      const errText = await res.text().catch(() => '');
+      const { code, message } = extractChatGPTErrorCode(errText);
+      if (isChatGPTAuthRevoked403(code, message)) {
+        await this.markReauthRequired();
+        throw new CloudAIError('ChatGPT 会话已过期，请重新连接。', 'reauth_required', 403);
+      }
+      throw new CloudAIError(
+        `ChatGPT 拒绝访问（HTTP 403）${message ? `：${message}` : '。'}`,
+        code || 'forbidden',
+        403,
+      );
     }
     if (!res.ok) {
       const snippet = (await res.text().catch(() => '')).slice(0, 240);
-      throw new CloudAIError(`ChatGPT 返回错误 HTTP ${res.status}.${snippet ? ` ${snippet}` : ''}`, 'http_error', res.status);
+      const { code } = extractChatGPTErrorCode(snippet);
+      throw new CloudAIError(
+        `ChatGPT 返回错误 HTTP ${res.status}.${snippet ? ` ${snippet}` : ''}`,
+        code || 'http_error',
+        res.status,
+      );
     }
 
-    const payload = (await res.json()) as {
-      output_text?: string | null;
-      output?: Array<{ content?: Array<{ text?: string | null }> }>;
-      usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
-    };
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    const rawBody = await res.text();
+    let parsed: ParsedResponsesPayload;
+
+    if (
+      contentType.includes('text/event-stream') ||
+      rawBody.trimStart().startsWith('event:') ||
+      rawBody.trimStart().startsWith('data:')
+    ) {
+      parsed = parseResponsesSSE(rawBody);
+    } else {
+      const payload = JSON.parse(rawBody) as {
+        output_text?: string | null;
+        output?: Array<{ content?: Array<{ text?: string | null }> }>;
+        usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+      };
+      parsed = {
+        text: extractResponsesObjectText(payload),
+        usage: {
+          inputTokens: payload.usage?.input_tokens ?? 0,
+          outputTokens: payload.usage?.output_tokens ?? 0,
+          totalTokens: payload.usage?.total_tokens ?? null,
+        },
+      };
+    }
 
     await this.usage?.record({
       category: 'standard',
       providerLabel: 'ChatGPT 订阅',
       model,
-      inputTokens: payload.usage?.input_tokens ?? 0,
-      outputTokens: payload.usage?.output_tokens ?? 0,
-      totalTokens: payload.usage?.total_tokens ?? null,
+      inputTokens: parsed.usage.inputTokens,
+      outputTokens: parsed.usage.outputTokens,
+      totalTokens: parsed.usage.totalTokens,
     });
 
-    if (payload.output_text) return payload.output_text;
-    return (payload.output ?? [])
-      .flatMap((item) => item.content ?? [])
-      .map((part) => part.text ?? '')
-      .filter(Boolean)
-      .join('\n');
+    return parsed.text;
   }
 }
 
@@ -1372,32 +2013,43 @@ export class ChatGPTSubscriptionProvider implements CloudAIProvider {
     return `chatgpt-subscription:${this.model}`;
   }
 
-  async embed(_text: string): Promise<number[]> {
+  async embed(_text: string, _signal?: AbortSignal): Promise<number[]> {
     throw new CloudAIError(
       'ChatGPT 订阅共享通道不提供独立向量端点，Charkle 将自动使用本机离线视觉特征与全文拼音检索。',
       'subscription_sharing_route_not_supported',
     );
   }
 
-  async enrich(text: string, thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult> {
+  async enrich(
+    text: string,
+    thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult> {
     const responseText = await this.client.invokeResponses({
       model: this.model,
       instructions: enrichmentInstruction(),
       userText: `Reference:\n${text}`,
       imagesJPEG: thumbnailJPEG ? [thumbnailJPEG] : [],
       sendThumbnailsToCloud: this.sendThumbnailsToCloud,
+      signal,
     });
     const caption = parseCaptionJSON(responseText);
     return { description: caption.description, suggestedTags: caption.tags, embedding: null };
   }
 
-  async completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string> {
+  async completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     return this.client.invokeResponses({
       model: this.model,
       instructions,
       userText: prompt,
       imagesJPEG,
-      sendThumbnailsToCloud: this.sendThumbnailsToCloud,
+      sendThumbnailsToCloud: true,
+      signal,
     });
   }
 }
@@ -1500,7 +2152,7 @@ export async function testCloudAIConnection(
     if (!session.sharingEnabled) {
       throw new CloudAIError('已登录 ChatGPT，但尚未开启订阅额度共享授权。', 'sharing_not_enabled', 400);
     }
-    const models = await chatGPTClient.listModels();
+    const models = await chatGPTClient.listModels({ throwOnError: true });
     return {
       summary: `ChatGPT 订阅连接正常（可用模型 ${models.length} 个）`,
       models,
@@ -1632,6 +2284,7 @@ export class FakeCloudAIProvider implements CloudAIProvider {
     instructions: string,
     prompt: string,
     imagesCount: number,
+    signal?: AbortSignal,
   ) => Promise<string> | string;
 
   constructor(opts: {
@@ -1642,6 +2295,7 @@ export class FakeCloudAIProvider implements CloudAIProvider {
       instructions: string,
       prompt: string,
       imagesCount: number,
+      signal?: AbortSignal,
     ) => Promise<string> | string;
   } = {}) {
     this.embeddingIdentity = opts.embeddingIdentity ?? 'fake';
@@ -1650,7 +2304,10 @@ export class FakeCloudAIProvider implements CloudAIProvider {
     this.jsonResponder = opts.jsonResponder;
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, signal?: AbortSignal): Promise<number[]> {
+    if (signal?.aborted) {
+      throw new CloudAIError('请求已取消。', 'aborted', 499);
+    }
     if (this.embeddings[text]) return this.embeddings[text];
     const bins = new Array<number>(32).fill(0);
     for (const word of tokenizeSearchText(normalizeSearchText(text))) {
@@ -1663,8 +2320,15 @@ export class FakeCloudAIProvider implements CloudAIProvider {
     return bins;
   }
 
-  async enrich(text: string, _thumbnailJPEG: Buffer | null): Promise<CloudEnrichmentResult> {
-    const embedding = this.enrichmentResult.embedding ?? (await this.embed(text));
+  async enrich(
+    text: string,
+    _thumbnailJPEG: Buffer | null,
+    signal?: AbortSignal,
+  ): Promise<CloudEnrichmentResult> {
+    if (signal?.aborted) {
+      throw new CloudAIError('请求已取消。', 'aborted', 499);
+    }
+    const embedding = this.enrichmentResult.embedding ?? (await this.embed(text, signal));
     return {
       description: this.enrichmentResult.description ?? null,
       suggestedTags: [...this.enrichmentResult.suggestedTags],
@@ -1672,9 +2336,17 @@ export class FakeCloudAIProvider implements CloudAIProvider {
     };
   }
 
-  async completeJSON(instructions: string, prompt: string, imagesJPEG: Buffer[]): Promise<string> {
+  async completeJSON(
+    instructions: string,
+    prompt: string,
+    imagesJPEG: Buffer[],
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (signal?.aborted) {
+      throw new CloudAIError('请求已取消。', 'aborted', 499);
+    }
     if (this.jsonResponder) {
-      return await this.jsonResponder(instructions, prompt, imagesJPEG.length);
+      return await this.jsonResponder(instructions, prompt, imagesJPEG.length, signal);
     }
     return '{}';
   }

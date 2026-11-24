@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownCircle,
   ArrowUpDown,
@@ -9,6 +9,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  Tag,
   Trash2,
 } from 'lucide-react';
 import {
@@ -20,6 +21,7 @@ import type { SidebarDestination, SmartFolderRecord, UUID } from '@charkle/share
 import {
   CharkleBrandMark,
   CharkleIcon,
+  ConfirmDialog,
   Popover,
 } from '../../design-system';
 import { useAuthStore } from '../../stores/authStore';
@@ -40,6 +42,13 @@ interface PrimaryNavItem {
   acceptDropInbox?: boolean;
 }
 
+interface ActivePillRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 export const SidebarView: React.FC = () => {
   const destination = useCoordinatorStore((s) => s.destination);
   const navigate = useCoordinatorStore((s) => s.navigate);
@@ -54,8 +63,10 @@ export const SidebarView: React.FC = () => {
   const presentOnboarding = useCoordinatorStore((s) => s.presentOnboarding);
   const openGeneratorModal = useCoordinatorStore((s) => s.openGeneratorModal);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+  const expandedSidebarFolderIDs = useCoordinatorStore((s) => s.expandedSidebarFolderIDs);
 
   const counts = useLibraryStore((s) => s.counts);
+  const folders = useLibraryStore((s) => s.folders);
   const smartFolders = useLibraryStore((s) => s.smartFolders);
   const tags = useLibraryStore((s) => s.tags);
   const assets = useLibraryStore((s) => s.assets);
@@ -81,8 +92,11 @@ export const SidebarView: React.FC = () => {
 
   const [smartFolderModalOpen, setSmartFolderModalOpen] = useState(false);
   const [editingSmartFolder, setEditingSmartFolder] = useState<SmartFolderRecord | null>(null);
+  const [confirmDeleteSmartFolder, setConfirmDeleteSmartFolder] =
+    useState<SmartFolderRecord | null>(null);
 
   const [allTagsOpen, setAllTagsOpen] = useState(false);
+  const [tagsExpanded, setTagsExpanded] = useState(true);
   const [allTagsSearch, setAllTagsSearch] = useState('');
   const [allTagsSort, setAllTagsSort] = useState<'count' | 'name'>('count');
   const allTagsBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -93,9 +107,20 @@ export const SidebarView: React.FC = () => {
   const [inboxDragOver, setInboxDragOver] = useState(false);
   const [boardDragOverID, setBoardDragOverID] = useState<UUID | null>(null);
 
+  // Unified travelling active pill across ALL Sidebar destinations (primary, moodboards, smart folders, folders, tags)
+  const navScrollRef = useRef<HTMLDivElement | null>(null);
+  const navContentRef = useRef<HTMLDivElement | null>(null);
+  const [activePill, setActivePill] = useState<ActivePillRect | null>(null);
+
   const primaryItems: PrimaryNavItem[] = useMemo(
     () => [
-      { key: 'allItems', label: '全部素材', icon: 'library', dest: { type: 'allItems' }, count: counts.total },
+      {
+        key: 'allItems',
+        label: '全部素材',
+        icon: 'library',
+        dest: { type: 'allItems' },
+        count: counts.total,
+      },
       {
         key: 'inbox',
         label: '收件箱',
@@ -104,20 +129,26 @@ export const SidebarView: React.FC = () => {
         count: counts.inbox,
         acceptDropInbox: true,
       },
-      { key: 'untagged', label: '未打标签', icon: 'untagged', dest: { type: 'untagged' }, count: counts.untagged },
+      {
+        key: 'untagged',
+        label: '未打标签',
+        icon: 'untagged',
+        dest: { type: 'untagged' },
+        count: counts.untagged,
+      },
       { key: 'recent', label: '最近使用', icon: 'recent', dest: { type: 'recent' } },
-      { key: 'trash', label: '回收站', icon: 'trash', dest: { type: 'trash' }, count: counts.trash },
+      {
+        key: 'trash',
+        label: '回收站',
+        icon: 'trash',
+        dest: { type: 'trash' },
+        count: counts.trash,
+      },
     ],
     [counts],
   );
 
-  // Travelling active indicator index for primary nav
-  const activePrimaryIndex = useMemo(
-    () => primaryItems.findIndex((item) => item.dest.type === destination.type),
-    [primaryItems, destination.type],
-  );
-
-  // Smart Capped Tags (5 recent-frequent + top 10 by count, matching PARITY_SPEC §4.2)
+  // Smart Capped Tags (5 recent-frequent + top 10 by count)
   const visibleTags = useMemo(() => {
     const scoreMap = new Map<string, number>();
     const recentSlice = assets.slice(0, 60);
@@ -136,7 +167,9 @@ export const SidebarView: React.FC = () => {
       .map((x) => x.name);
 
     const topTen = [...tags]
-      .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.name.localeCompare(b.name, 'zh-CN')))
+      .sort((a, b) =>
+        b.count !== a.count ? b.count - a.count : a.name.localeCompare(b.name, 'zh-CN'),
+      )
       .slice(0, 10)
       .map((t) => t.name);
 
@@ -164,6 +197,52 @@ export const SidebarView: React.FC = () => {
         : a.name.localeCompare(b.name, 'zh-CN'),
     );
   }, [tags, allTagsSearch, allTagsSort]);
+
+  useLayoutEffect(() => {
+    const measureActivePill = () => {
+      const container = navContentRef.current;
+      if (!container) {
+        setActivePill(null);
+        return;
+      }
+      const activeEl = container.querySelector<HTMLElement>('[data-sidebar-active="true"]');
+      if (!activeEl) {
+        setActivePill(null);
+        return;
+      }
+      const cRect = container.getBoundingClientRect();
+      const aRect = activeEl.getBoundingClientRect();
+      setActivePill({
+        left: Math.round(aRect.left - cRect.left),
+        top: Math.round(aRect.top - cRect.top),
+        width: Math.round(aRect.width),
+        height: Math.round(aRect.height),
+      });
+    };
+
+    measureActivePill();
+    const raf = requestAnimationFrame(measureActivePill);
+    if (typeof ResizeObserver === 'undefined' || !navContentRef.current) {
+      return () => cancelAnimationFrame(raf);
+    }
+    const ro = new ResizeObserver(measureActivePill);
+    ro.observe(navContentRef.current);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [
+    destination,
+    sidebarCollapsed,
+    boards.length,
+    smartFolders.length,
+    folders,
+    expandedSidebarFolderIDs,
+    tagsExpanded,
+    visibleTags.length,
+    folderSortMode,
+    creatingRootFolder,
+  ]);
 
   const handleCreateRootFolder = async () => {
     const trimmed = newRootFolderName.trim();
@@ -229,7 +308,9 @@ export const SidebarView: React.FC = () => {
       return;
     }
     if (e.dataTransfer.files?.length) {
-      const imported = await uploadFiles(Array.from(e.dataTransfer.files), { targetBoardID: boardID });
+      const imported = await uploadFiles(Array.from(e.dataTransfer.files), {
+        targetBoardID: boardID,
+      });
       pushToast({ tone: 'success', message: `已导入 ${imported.length} 项素材至「${boardTitle}」` });
     }
   };
@@ -240,13 +321,19 @@ export const SidebarView: React.FC = () => {
   return (
     <aside
       className={[
-        'h-full shrink-0 flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-hairline)]',
-        'transition-[width] duration-[var(--duration-drawer)] ease-[var(--ease-drawer)] select-none',
+        'h-full shrink-0 flex flex-col bg-[var(--bg-sidebar)] border-r border-[var(--border-hairline)] select-none overflow-hidden',
         sidebarCollapsed ? 'w-[58px]' : 'w-[240px]',
       ].join(' ')}
     >
-      {/* Top Brand + Collapse + Jump */}
-      <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-2 shrink-0">
+      {/* Top Brand + Collapse (stacks cleanly in collapsed 58px rail without overflow) */}
+      <div
+        className={[
+          'shrink-0 flex',
+          sidebarCollapsed
+            ? 'flex-col items-center gap-1.5 px-1.5 pt-3 pb-2'
+            : 'items-center justify-between gap-2 px-3 pt-3 pb-2',
+        ].join(' ')}
+      >
         <button
           type="button"
           onClick={() => navigate({ type: 'allItems' })}
@@ -272,7 +359,7 @@ export const SidebarView: React.FC = () => {
       </div>
 
       {/* Jump Anywhere Button */}
-      <div className="px-2.5 pb-2 shrink-0">
+      <div className={sidebarCollapsed ? 'px-2 pb-2 shrink-0' : 'px-2.5 pb-2 shrink-0'}>
         <button
           type="button"
           onClick={() => setJumpAnywhereOpen(true)}
@@ -294,363 +381,441 @@ export const SidebarView: React.FC = () => {
         </button>
       </div>
 
-      {/* Main Scrollable Navigation */}
-      <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll px-2 pb-3 flex flex-col gap-4">
-        {/* Section 1: Library Primary Destinations with Travelling Active Indicator */}
-        <div className="relative flex flex-col gap-0.5">
-          {activePrimaryIndex >= 0 && (
+      {/* Main Scrollable Navigation with Unified Travelling Active Pill */}
+      <div ref={navScrollRef} className="flex-1 min-h-0 overflow-y-auto charkle-scroll px-2 pb-3">
+        <div ref={navContentRef} className="relative flex flex-col gap-4">
+          {activePill && (
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute left-0 right-0 h-8 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] border border-[var(--border-hairline)]/60 transition-transform duration-[220ms] ease-[var(--ease-out-strong)]"
-              style={{ transform: `translateY(${activePrimaryIndex * 34}px)` }}
+              className="pointer-events-none absolute left-0 top-0 z-0 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] border border-[var(--border-hairline)]/60 transition-transform duration-[220ms] ease-[var(--ease-out-strong)]"
+              style={{
+                transform: `translate3d(${activePill.left}px, ${activePill.top}px, 0)`,
+                width: activePill.width,
+                height: activePill.height,
+              }}
             />
           )}
 
-          {primaryItems.map((item) => {
-            const active = destination.type === item.dest.type;
-            const isInboxDrop = item.acceptDropInbox && inboxDragOver;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => navigate(item.dest)}
-                onDragOver={
-                  item.acceptDropInbox
-                    ? (e) => {
-                        e.preventDefault();
-                        setInboxDragOver(true);
-                      }
-                    : undefined
-                }
-                onDragLeave={item.acceptDropInbox ? () => setInboxDragOver(false) : undefined}
-                onDrop={item.acceptDropInbox ? (e) => void handleDropOnInbox(e) : undefined}
-                title={sidebarCollapsed ? item.label : undefined}
-                className={[
-                  'charkle-pressable relative z-10 h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer transition-[box-shadow,background-color,color] duration-[var(--duration-press)] ease-[var(--ease-out)]',
-                  sidebarCollapsed ? 'justify-center px-0' : 'px-2.5',
-                  active
-                    ? 'text-[var(--text-primary)] font-medium'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/65',
-                  isInboxDrop ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-soft)]' : '',
-                ].join(' ')}
-              >
-                <CharkleIcon name={item.icon} size={18} isActive={active} />
-                {!sidebarCollapsed && (
-                  <>
-                    <span className="flex-1 text-left truncate">{item.label}</span>
-                    {typeof item.count === 'number' && item.count > 0 && (
-                      <span
-                        className={[
-                          'text-[11px] tabular-nums px-1.5 py-0.25 rounded-full',
-                          item.key === 'inbox'
-                            ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-semibold'
-                            : 'text-[var(--text-tertiary)]',
-                        ].join(' ')}
-                      >
-                        {item.count}
-                      </span>
-                    )}
-                  </>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Section 2: Moodboards */}
-        <div className="flex flex-col gap-1">
-          {!sidebarCollapsed && (
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
-              <span>情绪板</span>
-              <div className="flex items-center gap-0.5">
-                <button
-                  type="button"
-                  title="AI 智能策展情绪板"
-                  onClick={() => openGeneratorModal()}
-                  className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--accent)] cursor-pointer"
-                >
-                  <Sparkles size={12} />
-                </button>
-                <button
-                  type="button"
-                  title="新建空白情绪板"
-                  onClick={() => void handleCreateBlankBoard()}
-                  className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-                >
-                  <Plus size={13} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={() => navigate({ type: 'moodboardsHome' })}
-            title={sidebarCollapsed ? '全部情绪板' : undefined}
-            className={[
-              'charkle-pressable h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer',
-              sidebarCollapsed ? 'justify-center px-0' : 'px-2.5',
-              destination.type === 'moodboardsHome'
-                ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.06)]'
-                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
-            ].join(' ')}
-          >
-            <CharkleIcon
-              name="moodboard"
-              size={18}
-              isActive={destination.type === 'moodboardsHome'}
-            />
-            {!sidebarCollapsed && (
-              <>
-                <span className="flex-1 text-left truncate">全部情绪板</span>
-                <span className="text-[11px] tabular-nums text-[var(--text-tertiary)]">
-                  {boards.length}
-                </span>
-              </>
-            )}
-          </button>
-
-          {!sidebarCollapsed &&
-            boards.map((board) => {
-              const active = destination.type === 'moodboard' && destination.id === board.id;
-              const isTargetActive = activeBoardID === board.id;
-              const dragOver = boardDragOverID === board.id;
+          {/* Section 1: Library Primary Destinations */}
+          <div className="flex flex-col gap-0.5">
+            {primaryItems.map((item) => {
+              const active = destination.type === item.dest.type;
+              const isInboxDrop = item.acceptDropInbox && inboxDragOver;
               return (
-                <div
-                  key={board.id}
-                  onClick={() => openBoard(board.id)}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setBoardDragOverID(board.id);
-                  }}
-                  onDragLeave={() => {
-                    if (boardDragOverID === board.id) setBoardDragOverID(null);
-                  }}
-                  onDrop={(e) => void handleDropOnBoard(e, board.id, board.title)}
+                <button
+                  key={item.key}
+                  type="button"
+                  data-sidebar-active={active ? 'true' : undefined}
+                  onClick={() => navigate(item.dest)}
+                  onDragOver={
+                    item.acceptDropInbox
+                      ? (e) => {
+                          e.preventDefault();
+                          setInboxDragOver(true);
+                        }
+                      : undefined
+                  }
+                  onDragLeave={item.acceptDropInbox ? () => setInboxDragOver(false) : undefined}
+                  onDrop={item.acceptDropInbox ? (e) => void handleDropOnInbox(e) : undefined}
+                  title={sidebarCollapsed ? item.label : undefined}
                   className={[
-                    'group charkle-pressable h-7.5 flex items-center gap-2 pl-4 pr-2 rounded-[var(--radius-chip)] text-[12.5px] cursor-pointer transition-[box-shadow,background-color,color] duration-[var(--duration-press)] ease-[var(--ease-out)]',
+                    'charkle-pressable relative z-10 h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer transition-[box-shadow,background-color,color] duration-[var(--duration-press)] ease-[var(--ease-out)]',
+                    sidebarCollapsed ? 'justify-center px-0' : 'px-2.5',
                     active
-                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.05)]'
-                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/70',
-                    dragOver ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-soft)]' : '',
+                      ? 'text-[var(--text-primary)] font-medium'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/65',
+                    isInboxDrop ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-soft)]' : '',
                   ].join(' ')}
                 >
-                  <button
-                    type="button"
-                    title={isTargetActive ? '当前默认接收情绪板' : '设为当前活跃接收板'}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveBoardID(board.id);
-                      pushToast({ tone: 'info', message: `已设「${board.title}」为当前活跃情绪板` });
-                    }}
-                    className="h-3.5 w-3.5 inline-flex items-center justify-center shrink-0 cursor-pointer"
-                  >
-                    <span
-                      className={[
-                        'h-2 w-2 rounded-full transition-colors duration-150',
-                        isTargetActive
-                          ? 'bg-[var(--success)]'
-                          : 'bg-[var(--border-strong)] group-hover:bg-[var(--text-tertiary)]',
-                      ].join(' ')}
-                    />
-                  </button>
-                  <span className="flex-1 truncate">{board.title}</span>
-                  {board.pinnedOffline && (
-                    <ArrowDownCircle size={12} className="text-[var(--accent)] shrink-0" />
+                  <CharkleIcon name={item.icon} size={18} isActive={active} />
+                  {!sidebarCollapsed && (
+                    <>
+                      <span className="flex-1 text-left truncate">{item.label}</span>
+                      {typeof item.count === 'number' && item.count > 0 && (
+                        <span
+                          className={[
+                            'text-[11px] tabular-nums px-1.5 py-0.25 rounded-full',
+                            item.key === 'inbox'
+                              ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-semibold'
+                              : 'text-[var(--text-tertiary)]',
+                          ].join(' ')}
+                        >
+                          {item.count}
+                        </span>
+                      )}
+                    </>
                   )}
-                  <span className="text-[11px] tabular-nums text-[var(--text-tertiary)]">
-                    {board.itemCount}
-                  </span>
-                </div>
+                </button>
               );
             })}
-        </div>
+          </div>
 
-        {/* Section 3: Smart Folders */}
-        {!sidebarCollapsed && (
+          {/* Section 2: Moodboards */}
           <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
-              <span>智能文件夹</span>
-              <button
-                type="button"
-                title="新建智能文件夹"
-                onClick={() => {
-                  setEditingSmartFolder(null);
-                  setSmartFolderModalOpen(true);
-                }}
-                className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-              >
-                <Plus size={13} />
-              </button>
-            </div>
+            {!sidebarCollapsed && (
+              <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
+                <span>情绪板</span>
+                <div className="flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    title="AI 智能策展情绪板"
+                    onClick={() => openGeneratorModal()}
+                    className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--accent)] cursor-pointer"
+                  >
+                    <Sparkles size={12} />
+                  </button>
+                  <button
+                    type="button"
+                    title="新建空白情绪板"
+                    onClick={() => void handleCreateBlankBoard()}
+                    className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
+              </div>
+            )}
 
-            {smartFolders.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingSmartFolder(null);
-                  setSmartFolderModalOpen(true);
-                }}
-                className="mx-1 px-2 py-1.5 rounded-[var(--radius-chip)] text-[12px] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]/60 text-left cursor-pointer"
-              >
-                + 按规则自动聚合素材
-              </button>
-            ) : (
-              smartFolders.map((sf) => {
-                const active = destination.type === 'smartFolder' && destination.id === sf.id;
+            <button
+              type="button"
+              data-sidebar-active={destination.type === 'moodboardsHome' ? 'true' : undefined}
+              onClick={() => navigate({ type: 'moodboardsHome' })}
+              title={sidebarCollapsed ? '全部情绪板' : undefined}
+              className={[
+                'charkle-pressable relative z-10 h-8 flex items-center gap-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer',
+                sidebarCollapsed ? 'justify-center px-0' : 'px-2.5',
+                destination.type === 'moodboardsHome'
+                  ? 'text-[var(--text-primary)] font-medium'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
+              ].join(' ')}
+            >
+              <CharkleIcon
+                name="moodboard"
+                size={18}
+                isActive={destination.type === 'moodboardsHome'}
+              />
+              {!sidebarCollapsed && (
+                <>
+                  <span className="flex-1 text-left truncate">全部情绪板</span>
+                  <span className="text-[11px] tabular-nums text-[var(--text-tertiary)]">
+                    {boards.length}
+                  </span>
+                </>
+              )}
+            </button>
+
+            {!sidebarCollapsed &&
+              boards.map((board) => {
+                const active = destination.type === 'moodboard' && destination.id === board.id;
+                const isTargetActive = activeBoardID === board.id;
+                const dragOver = boardDragOverID === board.id;
                 return (
                   <div
-                    key={sf.id}
-                    onClick={() => navigate({ type: 'smartFolder', id: sf.id })}
+                    key={board.id}
+                    data-sidebar-active={active ? 'true' : undefined}
+                    onClick={() => openBoard(board.id)}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setBoardDragOverID(board.id);
+                    }}
+                    onDragLeave={() => {
+                      if (boardDragOverID === board.id) setBoardDragOverID(null);
+                    }}
+                    onDrop={(e) => void handleDropOnBoard(e, board.id, board.title)}
                     className={[
-                      'group h-8 flex items-center gap-2 px-2.5 rounded-[var(--radius-chip)] text-[13px] cursor-pointer',
+                      'group charkle-pressable relative z-10 h-7.5 flex items-center gap-2 pl-4 pr-2 rounded-[var(--radius-chip)] text-[12.5px] cursor-pointer transition-[box-shadow,background-color,color] duration-[var(--duration-press)] ease-[var(--ease-out)]',
                       active
-                        ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.05)]'
-                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
+                        ? 'text-[var(--text-primary)] font-medium'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/70',
+                      dragOver ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-soft)]' : '',
                     ].join(' ')}
                   >
-                    <CharkleIcon
-                      name="smart-folder"
-                      size={17}
-                      isActive={active}
-                      tintHex={sf.colorHex ?? null}
-                    />
-                    <span className="flex-1 truncate">{sf.name}</span>
-                    <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
-                      <button
-                        type="button"
-                        title="编辑规则"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingSmartFolder(sf);
-                          setSmartFolderModalOpen(true);
-                        }}
-                        className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--border-hairline)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] cursor-pointer"
-                      >
-                        <Pencil size={11} />
-                      </button>
-                      <button
-                        type="button"
-                        title="删除智能文件夹"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void deleteSmartFolder(sf.id);
-                        }}
-                        className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--danger-soft)] text-[var(--text-tertiary)] hover:text-[var(--danger)] cursor-pointer"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      title={isTargetActive ? '当前默认接收情绪板' : '设为当前活跃接收板'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveBoardID(board.id);
+                        pushToast({ tone: 'info', message: `已设「${board.title}」为当前活跃情绪板` });
+                      }}
+                      className="h-3.5 w-3.5 inline-flex items-center justify-center shrink-0 cursor-pointer"
+                    >
+                      <span
+                        className={[
+                          'h-2 w-2 rounded-full transition-colors duration-150',
+                          isTargetActive
+                            ? 'bg-[var(--success)]'
+                            : 'bg-[var(--border-strong)] group-hover:bg-[var(--text-tertiary)]',
+                        ].join(' ')}
+                      />
+                    </button>
+                    <span className="flex-1 truncate">{board.title}</span>
+                    {board.pinnedOffline && (
+                      <ArrowDownCircle size={12} className="text-[var(--accent)] shrink-0" />
+                    )}
+                    <span className="text-[11px] tabular-nums text-[var(--text-tertiary)]">
+                      {board.itemCount}
+                    </span>
                   </div>
                 );
-              })
-            )}
+              })}
           </div>
-        )}
 
-        {/* Section 4: Hierarchical Folders */}
-        <div className="flex flex-col gap-1">
-          {!sidebarCollapsed && (
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
-              <span>文件夹</span>
-              <div className="flex items-center gap-0.5">
+          {/* Section 3: Smart Folders (reachable in both expanded & collapsed rail) */}
+          {sidebarCollapsed ? (
+            smartFolders.length > 0 && (
+              <div className="flex flex-col gap-0.5">
+                {smartFolders.slice(0, 6).map((sf) => {
+                  const active = destination.type === 'smartFolder' && destination.id === sf.id;
+                  return (
+                    <button
+                      key={sf.id}
+                      type="button"
+                      data-sidebar-active={active ? 'true' : undefined}
+                      onClick={() => navigate({ type: 'smartFolder', id: sf.id })}
+                      title={sf.name}
+                      className={[
+                        'charkle-pressable relative z-10 h-8 flex items-center justify-center rounded-[var(--radius-chip)] cursor-pointer',
+                        active
+                          ? 'text-[var(--text-primary)]'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
+                      ].join(' ')}
+                    >
+                      <CharkleIcon
+                        name="smart-folder"
+                        size={17}
+                        isActive={active}
+                        tintHex={sf.colorHex ?? null}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            )
+          ) : (
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
+                <span>智能文件夹</span>
                 <button
                   type="button"
-                  title={
-                    folderSortMode === 'manual'
-                      ? '排序：手动（点击切换名称 A→Z）'
-                      : folderSortMode === 'name'
-                        ? '排序：名称 A→Z（点击切换数量）'
-                        : '排序：素材数量（点击切换手动）'
-                  }
-                  onClick={() =>
-                    setFolderSortMode((m) =>
-                      m === 'manual' ? 'name' : m === 'name' ? 'count' : 'manual',
-                    )
-                  }
-                  className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-                >
-                  <ArrowUpDown size={11} />
-                </button>
-                <button
-                  type="button"
-                  title="新建文件夹"
+                  title="新建智能文件夹"
                   onClick={() => {
-                    setCreatingRootFolder(true);
-                    setNewRootFolderName('');
+                    setEditingSmartFolder(null);
+                    setSmartFolderModalOpen(true);
                   }}
                   className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
                   <Plus size={13} />
                 </button>
               </div>
+
+              {smartFolders.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingSmartFolder(null);
+                    setSmartFolderModalOpen(true);
+                  }}
+                  className="mx-1 px-2 py-1.5 rounded-[var(--radius-chip)] text-[12px] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]/60 text-left cursor-pointer"
+                >
+                  + 新建智能文件夹
+                </button>
+              ) : (
+                smartFolders.map((sf) => {
+                  const active = destination.type === 'smartFolder' && destination.id === sf.id;
+                  return (
+                    <div
+                      key={sf.id}
+                      data-sidebar-active={active ? 'true' : undefined}
+                      onClick={() => navigate({ type: 'smartFolder', id: sf.id })}
+                      className={[
+                        'group relative z-10 h-8 flex items-center gap-2 px-2.5 rounded-[var(--radius-chip)] text-[13px] cursor-pointer',
+                        active
+                          ? 'text-[var(--text-primary)] font-medium'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
+                      ].join(' ')}
+                    >
+                      <CharkleIcon
+                        name="smart-folder"
+                        size={17}
+                        isActive={active}
+                        tintHex={sf.colorHex ?? null}
+                      />
+                      <span className="flex-1 truncate">{sf.name}</span>
+                      <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                        <button
+                          type="button"
+                          title="编辑规则"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingSmartFolder(sf);
+                            setSmartFolderModalOpen(true);
+                          }}
+                          className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--border-hairline)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] cursor-pointer"
+                        >
+                          <Pencil size={11} />
+                        </button>
+                        <button
+                          type="button"
+                          title="删除智能文件夹"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDeleteSmartFolder(sf);
+                          }}
+                          className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--danger-soft)] text-[var(--text-tertiary)] hover:text-[var(--danger)] cursor-pointer"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
 
-          <FolderTree sortMode={folderSortMode} collapsed={sidebarCollapsed} />
-
-          {!sidebarCollapsed && creatingRootFolder && (
-            <div className="flex items-center gap-1.5 h-8 px-2.5">
-              <CharkleIcon name="folder" size={17} />
-              <input
-                type="text"
-                autoFocus
-                placeholder="新文件夹名称…"
-                value={newRootFolderName}
-                onChange={(e) => setNewRootFolderName(e.target.value)}
-                onBlur={() => void handleCreateRootFolder()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleCreateRootFolder();
-                  if (e.key === 'Escape') {
-                    setCreatingRootFolder(false);
-                    setNewRootFolderName('');
-                  }
-                }}
-                className="flex-1 min-w-0 h-6 px-1.5 text-[12.5px] rounded bg-[var(--bg-elevated)] border border-[var(--accent)] text-[var(--text-primary)] focus:outline-none"
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Section 5: Smart Capped Tags */}
-        {!sidebarCollapsed && tags.length > 0 && (
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
-              <span>标签</span>
-              <button
-                ref={allTagsBtnRef}
-                type="button"
-                onClick={() => setAllTagsOpen((v) => !v)}
-                className="text-[11px] font-medium normal-case text-[var(--text-secondary)] hover:text-[var(--accent)] inline-flex items-center gap-0.5 cursor-pointer"
-              >
-                全部 ({tags.length})
-                <ChevronRight size={11} />
-              </button>
-            </div>
-
-            <div className="flex flex-wrap gap-1 px-1.5">
-              {visibleTags.map((tag) => {
-                const active = destination.type === 'tag' && destination.name === tag.name;
-                return (
+          {/* Section 4: Hierarchical Folders */}
+          <div className="flex flex-col gap-1">
+            {!sidebarCollapsed && (
+              <div className="flex items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
+                <span>文件夹</span>
+                <div className="flex items-center gap-0.5">
                   <button
-                    key={tag.name}
                     type="button"
-                    onClick={() => navigate({ type: 'tag', name: tag.name })}
-                    className={[
-                      'charkle-pressable inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-chip)] text-[12px] cursor-pointer max-w-full',
-                      active
-                        ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
-                        : 'bg-[var(--bg-subtle)]/80 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
-                    ].join(' ')}
+                    title={
+                      folderSortMode === 'manual'
+                        ? '排序：手动（点击切换名称 A→Z）'
+                        : folderSortMode === 'name'
+                          ? '排序：名称 A→Z（点击切换数量）'
+                          : '排序：素材数量（点击切换手动）'
+                    }
+                    onClick={() =>
+                      setFolderSortMode((m) =>
+                        m === 'manual' ? 'name' : m === 'name' ? 'count' : 'manual',
+                      )
+                    }
+                    className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
                   >
-                    <span className="truncate">#{tag.name}</span>
-                    <span className="text-[10.5px] opacity-65 tabular-nums">{tag.count}</span>
+                    <ArrowUpDown size={11} />
                   </button>
-                );
-              })}
-            </div>
+                  <button
+                    type="button"
+                    title="新建文件夹"
+                    onClick={() => {
+                      setCreatingRootFolder(true);
+                      setNewRootFolderName('');
+                    }}
+                    className="charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                  >
+                    <Plus size={13} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <FolderTree sortMode={folderSortMode} collapsed={sidebarCollapsed} />
+
+            {!sidebarCollapsed && creatingRootFolder && (
+              <div className="flex items-center gap-1.5 h-8 px-2.5">
+                <CharkleIcon name="folder" size={17} />
+                <input
+                  type="text"
+                  autoFocus
+                  placeholder="新文件夹名称…"
+                  value={newRootFolderName}
+                  onChange={(e) => setNewRootFolderName(e.target.value)}
+                  onBlur={() => void handleCreateRootFolder()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleCreateRootFolder();
+                    if (e.key === 'Escape') {
+                      setCreatingRootFolder(false);
+                      setNewRootFolderName('');
+                    }
+                  }}
+                  className="flex-1 min-w-0 h-6 px-1.5 text-[12.5px] rounded bg-[var(--bg-elevated)] border border-[var(--accent)] text-[var(--text-primary)] focus:outline-none"
+                />
+              </div>
+            )}
           </div>
-        )}
+
+          {/* Section 5: Smart Capped Tags & Collapsed Rail All-Tags Trigger */}
+          {tags.length > 0 &&
+            (sidebarCollapsed ? (
+              <div className="flex flex-col gap-0.5">
+                <button
+                  ref={allTagsBtnRef}
+                  type="button"
+                  data-sidebar-active={destination.type === 'tag' ? 'true' : undefined}
+                  onClick={() => setAllTagsOpen((v) => !v)}
+                  title={`全部标签 (${tags.length})`}
+                  className={[
+                    'charkle-pressable relative z-10 h-8 flex items-center justify-center rounded-[var(--radius-chip)] cursor-pointer',
+                    destination.type === 'tag'
+                      ? 'text-[var(--accent)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
+                  ].join(' ')}
+                >
+                  <Tag size={16} />
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-expanded={tagsExpanded}
+                    onClick={() => setTagsExpanded((v) => !v)}
+                    className="group flex-1 min-w-0 min-h-[28px] px-1.5 rounded-[var(--radius-chip)] hover:bg-[var(--bg-subtle)]/75 flex items-center gap-1 text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] cursor-pointer text-left transition-colors duration-[var(--duration-press)] ease-[var(--ease-out)]"
+                  >
+                    <span className="h-6 w-6 inline-flex items-center justify-center shrink-0">
+                      <ChevronRight
+                        size={12}
+                        className={[
+                          'transition-transform duration-[var(--duration-sm)] ease-[var(--ease-out-strong)]',
+                          tagsExpanded ? 'rotate-90' : 'rotate-0',
+                        ].join(' ')}
+                      />
+                    </span>
+                    <span className="truncate">标签</span>
+                  </button>
+                  <button
+                    ref={allTagsBtnRef}
+                    type="button"
+                    onClick={() => setAllTagsOpen((v) => !v)}
+                    className="min-h-[26px] px-1.5 rounded-[var(--radius-chip)] text-[11px] font-medium normal-case text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-subtle)]/75 inline-flex items-center gap-0.5 cursor-pointer shrink-0"
+                  >
+                    全部 ({tags.length})
+                    <ChevronRight size={11} />
+                  </button>
+                </div>
+
+                {tagsExpanded && (
+                  <div className="flex flex-wrap gap-1 px-1.5 pt-0.5">
+                    {visibleTags.map((tag) => {
+                      const active = destination.type === 'tag' && destination.name === tag.name;
+                      return (
+                        <button
+                          key={tag.name}
+                          type="button"
+                          data-sidebar-active={active ? 'true' : undefined}
+                          onClick={() => navigate({ type: 'tag', name: tag.name })}
+                          className={[
+                            'charkle-pressable relative z-10 inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-chip)] text-[12px] cursor-pointer max-w-full',
+                            active
+                              ? 'text-[var(--accent)] font-medium'
+                              : 'bg-[var(--bg-subtle)]/80 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+                          ].join(' ')}
+                        >
+                          <span className="truncate">#{tag.name}</span>
+                          <span className="text-[10.5px] opacity-65 tabular-nums">{tag.count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
+        </div>
       </div>
 
       {/* Bottom Sync Status Pill + User + Dedicated Bottom-Left Settings Entry */}
@@ -676,9 +841,7 @@ export const SidebarView: React.FC = () => {
                     : 'bg-[var(--text-tertiary)]',
             ].join(' ')}
           />
-          {!sidebarCollapsed && (
-            <span className="flex-1 text-left truncate">{syncLabel}</span>
-          )}
+          {!sidebarCollapsed && <span className="flex-1 text-left truncate">{syncLabel}</span>}
         </button>
 
         <div className="h-px bg-[var(--border-hairline)] mx-0.5" />
@@ -848,6 +1011,21 @@ export const SidebarView: React.FC = () => {
         open={smartFolderModalOpen}
         editingFolder={editingSmartFolder}
         onClose={() => setSmartFolderModalOpen(false)}
+      />
+
+      {/* Smart Folder Delete Confirmation */}
+      <ConfirmDialog
+        open={Boolean(confirmDeleteSmartFolder)}
+        onClose={() => setConfirmDeleteSmartFolder(null)}
+        title={`删除智能文件夹「${confirmDeleteSmartFolder?.name ?? ''}」`}
+        description="仅移除此筛选规则，不会删除素材库中的文件。"
+        confirmLabel="删除"
+        onConfirm={async () => {
+          if (!confirmDeleteSmartFolder) return;
+          const target = confirmDeleteSmartFolder;
+          await deleteSmartFolder(target.id);
+          pushToast({ tone: 'info', message: `已删除智能文件夹「${target.name}」` });
+        }}
       />
     </aside>
   );

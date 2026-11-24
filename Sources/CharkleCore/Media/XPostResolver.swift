@@ -506,7 +506,16 @@ public nonisolated enum XPostResolver {
         defer { session.invalidateAndCancel() }
 
         var request = URLRequest(url: url, timeoutInterval: 15)
-        request.setValue("Charkle/1.0", forHTTPHeaderField: "User-Agent")
+        if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
+            request.setValue(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+            request.setValue("image/webp,image/avif,image/png,image/jpeg,*/*", forHTTPHeaderField: "Accept")
+        } else {
+            request.setValue("Charkle/1.0", forHTTPHeaderField: "User-Agent")
+        }
 
         guard let (tempURL, response) = try? await session.download(for: request),
               let http = response as? HTTPURLResponse,

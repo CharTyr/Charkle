@@ -15,6 +15,7 @@ import type {
   MoodboardExportOptions,
 } from '@charkle/shared';
 import { apiClient } from '../../api/client';
+import { SegmentedControl } from '../../design-system';
 import { Button } from '../../design-system/Button';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { ModalShell } from '../../design-system/ModalShell';
@@ -34,6 +35,27 @@ export interface ExportBoardModalProps {
 }
 
 type ExportTab = 'image' | 'figma';
+
+const EXPORT_FORMAT_OPTIONS: ReadonlyArray<{ id: MoodboardExportFormat; label: string }> = [
+  { id: 'png', label: 'PNG' },
+  { id: 'jpeg', label: 'JPG' },
+];
+
+const EXPORT_SCALE_OPTIONS: ReadonlyArray<{ id: '1' | '2'; label: string }> = [
+  { id: '1', label: '1× 标准' },
+  { id: '2', label: '2× 高清' },
+];
+
+const EXPORT_BG_OPTIONS_PNG: ReadonlyArray<{ id: ExportBackgroundMode; label: string }> = [
+  { id: 'light', label: '浅色' },
+  { id: 'dark', label: '深色' },
+  { id: 'transparent', label: '透明' },
+];
+
+const EXPORT_BG_OPTIONS_JPG: ReadonlyArray<{ id: ExportBackgroundMode; label: string }> = [
+  { id: 'light', label: '浅色' },
+  { id: 'dark', label: '深色' },
+];
 
 function triggerDownloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -303,96 +325,40 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
           {tab === 'image' && (
             <>
               <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[13px] font-medium text-[var(--text-primary)]">输出格式</div>
-                  <div className="text-[11.5px] text-[var(--text-secondary)]">
-                    PNG 清晰度更高，JPG 文件更小
-                  </div>
-                </div>
-                <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                  {(['png', 'jpeg'] as const).map((fmt) => (
-                    <button
-                      key={fmt}
-                      type="button"
-                      onClick={() => setFormat(fmt)}
-                      className={[
-                        'px-3 py-1 rounded-[6px] text-[12px] font-medium uppercase cursor-pointer',
-                        format === fmt
-                          ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                          : 'text-[var(--text-secondary)]',
-                      ].join(' ')}
-                    >
-                      {fmt === 'jpeg' ? 'JPG' : 'PNG'}
-                    </button>
-                  ))}
-                </div>
+                <div className="text-[13px] font-medium text-[var(--text-primary)]">输出格式</div>
+                <SegmentedControl
+                  ariaLabel="输出格式"
+                  size="md"
+                  options={EXPORT_FORMAT_OPTIONS}
+                  value={format}
+                  onChange={setFormat}
+                />
               </div>
 
               <div className="border-t border-[var(--border-hairline)]" />
 
               <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[13px] font-medium text-[var(--text-primary)]">分辨率倍率</div>
-                  <div className="text-[11.5px] text-[var(--text-secondary)]">
-                    推荐使用 2× 高清倍率导出
-                  </div>
-                </div>
-                <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                  {([1, 2] as const).map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      onClick={() => setScale(s)}
-                      className={[
-                        'px-3 py-1 rounded-[6px] text-[12px] font-medium cursor-pointer tabular-nums',
-                        scale === s
-                          ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                          : 'text-[var(--text-secondary)]',
-                      ].join(' ')}
-                    >
-                      {s}× {s === 2 ? '高清' : '标准'}
-                    </button>
-                  ))}
-                </div>
+                <div className="text-[13px] font-medium text-[var(--text-primary)]">分辨率倍率</div>
+                <SegmentedControl
+                  ariaLabel="分辨率倍率"
+                  size="md"
+                  options={EXPORT_SCALE_OPTIONS}
+                  value={String(scale) as '1' | '2'}
+                  onChange={(next) => setScale(Number(next) as 1 | 2)}
+                />
               </div>
 
               <div className="border-t border-[var(--border-hairline)]" />
 
               <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[13px] font-medium text-[var(--text-primary)]">画布背景</div>
-                  <div className="text-[11.5px] text-[var(--text-secondary)]">
-                    PNG 支持透明背景，方便直接嵌入设计稿
-                  </div>
-                </div>
-                <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                  {(
-                    [
-                      { id: 'light', label: '浅色' },
-                      { id: 'dark', label: '深色' },
-                      { id: 'transparent', label: '透明' },
-                    ] as const
-                  ).map((bg) => {
-                    const disabled = bg.id === 'transparent' && format === 'jpeg';
-                    const active = effectiveImageBackground === bg.id;
-                    return (
-                      <button
-                        key={bg.id}
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => setBackgroundMode(bg.id)}
-                        className={[
-                          'px-3 py-1 rounded-[6px] text-[12px] font-medium cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed',
-                          active
-                            ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                            : 'text-[var(--text-secondary)]',
-                        ].join(' ')}
-                      >
-                        {bg.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                <div className="text-[13px] font-medium text-[var(--text-primary)]">画布背景</div>
+                <SegmentedControl
+                  ariaLabel="画布背景"
+                  size="md"
+                  options={format === 'jpeg' ? EXPORT_BG_OPTIONS_JPG : EXPORT_BG_OPTIONS_PNG}
+                  value={effectiveImageBackground}
+                  onChange={setBackgroundMode}
+                />
               </div>
 
               <div className="border-t border-[var(--border-hairline)]" />
@@ -450,13 +416,13 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
             </div>
             <div className="h-1.5 w-full rounded-full bg-[var(--bg-subtle)] overflow-hidden">
               <div
-                className="h-full bg-[var(--accent)] transition-[width] duration-200 ease-[var(--ease-out)]"
+                className="h-full w-full bg-[var(--accent)] origin-left transition-transform duration-200 ease-[var(--ease-out)]"
                 style={{
-                  width: `${
+                  transform: `scaleX(${
                     exportProgress.total > 0
-                      ? Math.max(8, Math.min(100, (exportProgress.completed / exportProgress.total) * 100))
-                      : 30
-                  }%`,
+                      ? Math.max(0.08, Math.min(1, exportProgress.completed / exportProgress.total))
+                      : 0.3
+                  })`,
                 }}
               />
             </div>
@@ -497,7 +463,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
                     Figma / FigJam 迁移包 (.charkleboard)
                   </div>
                   <p className="text-[12px] text-[var(--text-secondary)] mt-0.5 leading-relaxed">
-                    保留独立图片图层、动态 GIF、可编辑便签、分组框、箭头连线与手绘笔迹，支持离线导入 Figma / FigJam。
+                    导出可编辑图层、便签、连线与动图
                   </p>
                 </div>
               </div>
@@ -556,7 +522,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
             <div className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                 <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
-                  3 步导入 Figma / FigJam（随仓库内置插件 <code className="font-mono text-[11.5px] px-1.5 py-0.5 rounded bg-[var(--bg-subtle)]">figma-plugin/</code>）
+                  导入到 Figma / FigJam
                 </div>
                 <button
                   type="button"
@@ -575,13 +541,13 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
                     1
                   </span>
                   <span>
-                    在 Figma 桌面端打开菜单{' '}
+                    在设置 → 插件与扩展中下载并解压插件包，然后在 Figma 桌面端菜单选择{' '}
                     <strong className="text-[var(--text-primary)]">
                       Plugins → Development → Import plugin from manifest…
-                    </strong>
-                    ，选择本项目根目录下的{' '}
+                    </strong>{' '}
+                    导入{' '}
                     <code className="font-mono text-[11.5px] px-1 py-0.5 rounded bg-[var(--bg-subtle)] text-[var(--text-primary)]">
-                      figma-plugin/manifest.json
+                      manifest.json
                     </code>
                     。
                   </span>
@@ -601,8 +567,7 @@ export const ExportBoardModal: React.FC<ExportBoardModalProps> = ({
                     3
                   </span>
                   <span>
-                    将刚下载的 <code className="font-mono text-[11.5px]">.charkleboard</code>{' '}
-                    拖入插件窗口即可 1:1 还原全部可编辑图层与动图。
+                    将 <code className="font-mono text-[11.5px]">.charkleboard</code> 文件拖入插件窗口即可导入。
                   </span>
                 </li>
               </ol>

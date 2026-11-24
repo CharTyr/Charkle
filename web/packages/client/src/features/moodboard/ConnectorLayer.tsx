@@ -8,12 +8,24 @@ import type {
   ConnectorStyle,
   UUID,
 } from '@charkle/shared';
+import { SegmentedControl } from '../../design-system';
 import { Popover } from '../../design-system/Popover';
 import {
   buildConnectorGeometry,
   buildConnectorPathPoints,
 } from './geometry';
 import { CONNECTOR_SWATCHES } from './palettes';
+
+const CONNECTOR_STYLE_OPTIONS: ReadonlyArray<{ id: ConnectorStyle; label: string }> = [
+  { id: 'curved', label: '曲线' },
+  { id: 'elbow', label: '折线' },
+  { id: 'straight', label: '直线' },
+];
+
+const CONNECTOR_LINE_OPTIONS: ReadonlyArray<{ id: 'solid' | 'dashed'; label: string }> = [
+  { id: 'solid', label: '实线' },
+  { id: 'dashed', label: '虚线' },
+];
 
 export interface PendingConnectorPreview {
   fromNodeID: UUID;
@@ -30,6 +42,7 @@ export interface ConnectorLayerProps {
   nodesByID: ReadonlyMap<UUID, BoardNode>;
   selectedConnectorID: UUID | null;
   pendingConnector: PendingConnectorPreview | null;
+  exitingNodeIDs?: ReadonlySet<UUID>;
   zoom: number;
   interactive: boolean;
   onSelectConnector: (id: UUID | null) => void;
@@ -55,6 +68,7 @@ export const ConnectorLayer: React.FC<ConnectorLayerProps> = ({
   nodesByID,
   selectedConnectorID,
   pendingConnector,
+  exitingNodeIDs,
   zoom,
   interactive,
   onSelectConnector,
@@ -125,9 +139,18 @@ export const ConnectorLayer: React.FC<ConnectorLayerProps> = ({
         {rendered.map(({ conn, geom }) => {
           const isSelected = selectedConnectorID === conn.id;
           const color = conn.colorHex || '#5C6672';
+          const isExiting = Boolean(
+            exitingNodeIDs && (exitingNodeIDs.has(conn.fromNodeID) || exitingNodeIDs.has(conn.toNodeID)),
+          );
 
           return (
-            <g key={conn.id}>
+            <g
+              key={conn.id}
+              style={{
+                opacity: isExiting ? 0 : 1,
+                transition: 'opacity 150ms var(--ease-out)',
+              }}
+            >
               {/* Wide invisible hit target for easy selection */}
               <path
                 d={geom.d}
@@ -280,7 +303,11 @@ export const ConnectorLayer: React.FC<ConnectorLayerProps> = ({
         className="w-64 p-3"
       >
         {editingConnector && (
-          <div className="flex flex-col gap-3 text-[12px]">
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="flex flex-col gap-3 text-[12px]"
+          >
             <div className="flex items-center justify-between">
               <span className="font-semibold text-[var(--text-primary)]">编辑连线标注</span>
               <button
@@ -300,7 +327,7 @@ export const ConnectorLayer: React.FC<ConnectorLayerProps> = ({
               type="text"
               autoFocus
               value={editingConnector.label ?? ''}
-              placeholder="输入连线标签（如：构图呼应 / 色彩对比）"
+              placeholder="输入连线标签…"
               onChange={(e) =>
                 onUpdateConnector(editingConnector.id, { label: e.target.value || null })
               }
@@ -310,48 +337,27 @@ export const ConnectorLayer: React.FC<ConnectorLayerProps> = ({
             {/* Curve style */}
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] text-[var(--text-secondary)]">线型</span>
-              <div className="inline-flex rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] p-0.5">
-                {(
-                  [
-                    { id: 'curved', label: '曲线' },
-                    { id: 'elbow', label: '折线' },
-                    { id: 'straight', label: '直线' },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => onUpdateConnector(editingConnector.id, { style: opt.id })}
-                    className={[
-                      'px-2 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer',
-                      editingConnector.style === opt.id
-                        ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                        : 'text-[var(--text-secondary)]',
-                    ].join(' ')}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl
+                ariaLabel="连线线型"
+                size="sm"
+                options={CONNECTOR_STYLE_OPTIONS}
+                value={editingConnector.style}
+                onChange={(style) => onUpdateConnector(editingConnector.id, { style })}
+              />
             </div>
 
             {/* Dashed toggle */}
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] text-[var(--text-secondary)]">虚线样式</span>
-              <button
-                type="button"
-                onClick={() =>
-                  onUpdateConnector(editingConnector.id, { dashed: !editingConnector.dashed })
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-[var(--text-secondary)]">样式</span>
+              <SegmentedControl
+                ariaLabel="实线或虚线"
+                size="sm"
+                options={CONNECTOR_LINE_OPTIONS}
+                value={editingConnector.dashed ? 'dashed' : 'solid'}
+                onChange={(next) =>
+                  onUpdateConnector(editingConnector.id, { dashed: next === 'dashed' })
                 }
-                className={[
-                  'charkle-pressable px-2.5 py-0.5 rounded-[var(--radius-chip)] text-[11px] font-medium border cursor-pointer',
-                  editingConnector.dashed
-                    ? 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-ring)]'
-                    : 'bg-[var(--bg-subtle)] text-[var(--text-secondary)] border-[var(--border-hairline)]',
-                ].join(' ')}
-              >
-                {editingConnector.dashed ? '虚线' : '实线'}
-              </button>
+              />
             </div>
 
             {/* Color picker */}

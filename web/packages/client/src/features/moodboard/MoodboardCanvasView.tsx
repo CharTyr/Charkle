@@ -21,6 +21,8 @@ import type {
   UUID,
 } from '@charkle/shared';
 import { stopAllHoverPreviews } from '../../components/HoverMediaPreview';
+import { EmptyStateVignette, usePresence } from '../../design-system';
+import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { isEditableElement } from '../capture/captureUtils';
 import { ConnectorLayer } from './ConnectorLayer';
 import type { PendingConnectorPreview } from './ConnectorLayer';
@@ -48,6 +50,8 @@ import {
   hitTestInkStroke,
   rectsIntersect,
   screenToWorld,
+  segmentIntersectsInkStroke,
+  shortestArcRotation,
   snapRotationDegrees,
   zoomCameraAtScreenPoint,
 } from './geometry';
@@ -78,6 +82,7 @@ export interface MoodboardCanvasViewProps {
   onRedo: () => void;
   onTriggerSwap: (nodeID: UUID) => void;
   onOpenQuickLook: (asset: AssetRecord) => void;
+  onRevealInLibrary?: (assetID: UUID) => void;
   onCopyHex: (hex: string) => void;
   onSearchColor: (hex: string) => void;
   onOpenExport: () => void;
@@ -130,6 +135,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   onRedo,
   onTriggerSwap,
   onOpenQuickLook,
+  onRevealInLibrary,
   onCopyHex,
   onSearchColor,
   onOpenExport,
@@ -152,7 +158,26 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const [isDropTargeted, setIsDropTargeted] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   const spacePannedRef = useRef(false);
+  const spaceDownOnCanvasRef = useRef(false);
   const upgradedLegacyRef = useRef<Set<UUID>>(new Set());
+
+  const overlayPresented = useCoordinatorStore(
+    (s) =>
+      s.quickLookAssetID !== null ||
+      s.settingsOpen ||
+      s.jumpAnywhereOpen ||
+      s.showQuickCapture ||
+      s.generatorModalOpen ||
+      s.onboardingOpen,
+  );
+
+  useEffect(() => {
+    if (overlayPresented) {
+      spaceDownOnCanvasRef.current = false;
+      spacePannedRef.current = false;
+      setSpacePressed(false);
+    }
+  }, [overlayPresented]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return;
@@ -168,6 +193,8 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const [liveRotations, setLiveRotations] = useState<Record<UUID, number>>({});
   const [snapGuides, setSnapGuides] = useState<{ x: number[]; y: number[] }>({ x: [], y: [] });
   const [marqueeRect, setMarqueeRect] = useState<BoardRect | null>(null);
+  const [exitingNodeIDs, setExitingNodeIDs] = useState<Set<UUID>>(() => new Set());
+  const [rotatingAnimIDs, setRotatingAnimIDs] = useState<Set<UUID>>(() => new Set());
 
   // Connector tool & Ink pen state
   const [pendingConnector, setPendingConnector] = useState<PendingConnectorPreview | null>(null);
@@ -176,14 +203,23 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const [inkLineWidth, setInkLineWidth] = useState(3.5);
   const [inkOpacity, setInkOpacity] = useState(0.92);
   const [activeInkPoints, setActiveInkPoints] = useState<InkStrokePoint[]>([]);
+  const [pendingErasedStrokeIDs, setPendingErasedStrokeIDs] = useState<Set<UUID>>(() => new Set());
 
-  // Refs for active pointer gestures
+  // Refs for active pointer gestures & motion continuity
+  const exitTimersRef = useRef<Set<number>>(new Set());
+  const visualRotationsRef = useRef<Map<UUID, number>>(new Map());
+  const rotationHintRef = useRef<Map<UUID, number>>(new Map());
+  const rotateAnimTimersRef = useRef<Map<UUID, number>>(new Map());
   const panRef = useRef<{ startClientX: number; startClientY: number; startCam: CameraState } | null>(null);
   const nodeDragRef = useRef<{
     primaryID: UUID;
     movingIDs: UUID[];
     startFrames: Record<UUID, BoardRect>;
     startWorld: BoardPoint;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    captured: boolean;
   } | null>(null);
   const resizeRef = useRef<{
     node: BoardNode;
@@ -194,11 +230,36 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   const rotateRef = useRef<{
     node: BoardNode;
     centerWorld: BoardPoint;
-    startPointerAngle: number;
-    startDegrees: number;
+    lastPointerAngle: number;
+    accumulatedDegrees: number;
   } | null>(null);
   const marqueeRef = useRef<{ startWorld: BoardPoint } | null>(null);
   const inkDrawingRef = useRef(false);
+  const erasingRef = useRef<{
+    lastWorld: BoardPoint;
+    erasedIDs: Set<UUID>;
+    pointerId: number;
+  } | null>(null);
+
+  // Clean up pending exit & rotation animation timers on unmount
+  useEffect(() => {
+    const exitTimers = exitTimersRef.current;
+    const rotateTimers = rotateAnimTimersRef.current;
+    return () => {
+      for (const timer of exitTimers) window.clearTimeout(timer);
+      exitTimers.clear();
+      for (const timer of rotateTimers.values()) window.clearTimeout(timer);
+      rotateTimers.clear();
+    };
+  }, []);
+
+  // Reset visual angle cache when switching boards
+  useEffect(() => {
+    visualRotationsRef.current.clear();
+    rotationHintRef.current.clear();
+    setExitingNodeIDs(new Set());
+    setPendingErasedStrokeIDs(new Set());
+  }, [document.id]);
 
   // Measure viewport cleanly via ResizeObserver
   useEffect(() => {
@@ -324,22 +385,74 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     [onCommitDocument],
   );
 
+  const triggerRotateTransition = useCallback((ids: Iterable<UUID>, hintDelta?: number) => {
+    const idList = Array.from(ids);
+    if (idList.length === 0) return;
+    for (const id of idList) {
+      if (hintDelta !== undefined) {
+        rotationHintRef.current.set(id, hintDelta);
+      }
+      const existing = rotateAnimTimersRef.current.get(id);
+      if (existing !== undefined) window.clearTimeout(existing);
+      const timer = window.setTimeout(() => {
+        rotateAnimTimersRef.current.delete(id);
+        setRotatingAnimIDs((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }, 210);
+      rotateAnimTimersRef.current.set(id, timer);
+    }
+    setRotatingAnimIDs((prev) => {
+      const next = new Set(prev);
+      for (const id of idList) next.add(id);
+      return next;
+    });
+  }, []);
+
   const deleteNodes = useCallback(
     (ids: ReadonlySet<UUID>) => {
-      if (ids.size === 0) return;
-      onCommitDocument(
-        (doc) => ({
-          ...doc,
-          nodes: doc.nodes.filter((n) => !ids.has(n.id)),
-          connectors: doc.connectors.filter(
-            (c) => !ids.has(c.fromNodeID) && !ids.has(c.toNodeID),
-          ),
-        }),
-        { recordHistory: true, immediateSave: true },
-      );
+      const targetIDs = Array.from(ids).filter((id) => !exitingNodeIDs.has(id));
+      if (targetIDs.length === 0) return;
+      const targetSet = new Set(targetIDs);
+
       onClearSelection();
+      setExitingNodeIDs((prev) => {
+        const next = new Set(prev);
+        for (const id of targetSet) next.add(id);
+        return next;
+      });
+
+      const timer = window.setTimeout(() => {
+        exitTimersRef.current.delete(timer);
+        onCommitDocument(
+          (doc) => ({
+            ...doc,
+            nodes: doc.nodes.filter((n) => !targetSet.has(n.id)),
+            connectors: doc.connectors.filter(
+              (c) => !targetSet.has(c.fromNodeID) && !targetSet.has(c.toNodeID),
+            ),
+          }),
+          { recordHistory: true, immediateSave: true },
+        );
+        setExitingNodeIDs((prev) => {
+          const next = new Set(prev);
+          for (const id of targetSet) next.delete(id);
+          return next;
+        });
+        useCoordinatorStore.getState().pushToast({
+          tone: 'info',
+          message: targetSet.size === 1 ? '已从情绪板移除卡片' : `已从情绪板移除 ${targetSet.size} 个元素`,
+          actionLabel: '撤销',
+          durationMs: 5200,
+          onAction: () => onUndo(),
+        });
+      }, 150);
+      exitTimersRef.current.add(timer);
     },
-    [onCommitDocument, onClearSelection],
+    [exitingNodeIDs, onCommitDocument, onClearSelection, onUndo],
   );
 
   const rotateSelected = useCallback(
@@ -347,6 +460,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       const unlocked = selectedNodes.filter((n) => !n.isLocked);
       if (unlocked.length === 0) return;
       const ids = new Set(unlocked.map((n) => n.id));
+      triggerRotateTransition(ids, delta);
       onCommitDocument((doc) => ({
         ...doc,
         nodes: doc.nodes.map((n) =>
@@ -354,7 +468,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         ),
       }));
     },
-    [selectedNodes, onCommitDocument],
+    [selectedNodes, onCommitDocument, triggerRotateTransition],
   );
 
   const flipSelected = useCallback(
@@ -501,15 +615,16 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     setSelectedConnectorID(null);
   }, [spawnPoint, document.nodes, document.extractedPalette, onCommitDocument, onSelectNodes]);
 
-  // Keyboard shortcuts (instant state changes, zero sluggish animation)
+  // Keyboard shortcuts (instant state changes, suspended whenever Quick Look or any modal overlay is presented)
   useEffect(() => {
-    const hasOpenModalDialog = () =>
-      typeof window !== 'undefined' &&
-      Boolean(window.document.querySelector('[role="dialog"][aria-modal="true"]'));
+    const isOverlayActive = () =>
+      useCoordinatorStore.getState().isOverlayPresented() ||
+      (typeof window !== 'undefined' &&
+        Boolean(window.document.querySelector('[role="dialog"][aria-modal="true"]')));
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isEditableElement(e.target)) return;
-      if (hasOpenModalDialog()) return;
+      if (isOverlayActive()) return;
 
       const meta = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
@@ -564,8 +679,11 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         }
       }
 
-      if (e.code === 'Space' && !e.repeat) {
+      const isUnmodifiedSpace =
+        !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && (e.code === 'Space' || e.key === ' ');
+      if (isUnmodifiedSpace && !e.repeat) {
         e.preventDefault();
+        spaceDownOnCanvasRef.current = true;
         spacePannedRef.current = false;
         setSpacePressed(true);
         return;
@@ -594,7 +712,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
         }
       }
 
-      if (!meta && !e.shiftKey) {
+      if (!meta && !e.shiftKey && !e.altKey) {
         if (lower === 'v') setActiveTool('select');
         else if (lower === 'h') setActiveTool('pan');
         else if (lower === 'c') setActiveTool('connector');
@@ -604,9 +722,11 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (hasOpenModalDialog()) return;
-      if (e.code === 'Space') {
+      if (e.code === 'Space' || e.key === ' ') {
+        const startedOnCanvas = spaceDownOnCanvasRef.current;
+        spaceDownOnCanvasRef.current = false;
         setSpacePressed(false);
+        if (!startedOnCanvas || isOverlayActive()) return;
         if (
           !spacePannedRef.current &&
           selectedNodes.length === 1 &&
@@ -620,11 +740,19 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       }
     };
 
+    const onWindowBlur = () => {
+      spaceDownOnCanvasRef.current = false;
+      spacePannedRef.current = false;
+      setSpacePressed(false);
+    };
+
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
     };
   }, [
     activeTool,
@@ -646,38 +774,49 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     onOpenQuickLook,
   ]);
 
-  // Freeform Wheel / Pinch Zoom & Trackpad Pan
-  const handleWheel = useCallback(
-    (e: React.WheelEvent<HTMLDivElement>) => {
+  // Freeform Wheel / Pinch Zoom & Trackpad Pan (native non-passive listener blocks browser page zoom)
+  const wheelContextRef = useRef({ camera, viewport, onCameraChange });
+  wheelContextRef.current = { camera, viewport, onCameraChange };
+
+  useEffect(() => {
+    const stageEl = stageRef.current;
+    if (!stageEl) return;
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      if (useCoordinatorStore.getState().isOverlayPresented()) return;
       e.preventDefault();
       stopAllHoverPreviews();
-      const rect = stageRef.current?.getBoundingClientRect();
-      if (!rect) return;
+
+      const { camera: curCam, viewport: curViewport, onCameraChange: emitCamera } =
+        wheelContextRef.current;
+      const rect = stageEl.getBoundingClientRect();
       const pointerScreen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
       if (e.ctrlKey || e.metaKey) {
         const factor = Math.exp(-e.deltaY * 0.005);
         const next = zoomCameraAtScreenPoint(
-          camera,
-          camera.zoom * factor,
+          curCam,
+          curCam.zoom * factor,
           pointerScreen,
-          viewport.width,
-          viewport.height,
+          curViewport.width,
+          curViewport.height,
         );
-        onCameraChange(next, false);
+        emitCamera(next, false);
       } else {
-        onCameraChange(
+        emitCamera(
           {
-            ...camera,
-            centerX: camera.centerX + e.deltaX / camera.zoom,
-            centerY: camera.centerY + e.deltaY / camera.zoom,
+            ...curCam,
+            centerX: curCam.centerX + e.deltaX / curCam.zoom,
+            centerY: curCam.centerY + e.deltaY / curCam.zoom,
           },
           false,
         );
       }
-    },
-    [camera, viewport.width, viewport.height, onCameraChange],
-  );
+    };
+
+    stageEl.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => stageEl.removeEventListener('wheel', handleNativeWheel);
+  }, []);
 
   // Convert client pointer to Freeform world point
   const clientToWorld = useCallback(
@@ -695,7 +834,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     const targetEl = e.target instanceof Element ? e.target : null;
     if (
       targetEl?.closest(
-        'button, input, textarea, select, a, [role="toolbar"], [role="radiogroup"], [role="menu"], [data-canvas-hud="true"]',
+        'button, input, textarea, select, a, [role="dialog"], [role="toolbar"], [role="radiogroup"], [role="menu"], [data-canvas-hud="true"]',
       )
     ) {
       return;
@@ -730,15 +869,21 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
 
     if (activeTool === 'eraser') {
       e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
       const hitRadius = 18 / Math.max(0.25, camera.zoom);
-      const hitStroke = document.inkStrokes.find((s) =>
-        hitTestInkStroke(worldPt, s.points, hitRadius),
-      );
-      if (hitStroke) {
-        onCommitDocument((doc) => ({
-          ...doc,
-          inkStrokes: doc.inkStrokes.filter((s) => s.id !== hitStroke.id),
-        }));
+      const hitIDs = new Set<UUID>();
+      for (const stroke of document.inkStrokes) {
+        if (hitTestInkStroke(worldPt, stroke.points, hitRadius)) {
+          hitIDs.add(stroke.id);
+        }
+      }
+      erasingRef.current = {
+        lastWorld: worldPt,
+        erasedIDs: hitIDs,
+        pointerId: e.pointerId,
+      };
+      if (hitIDs.size > 0) {
+        setPendingErasedStrokeIDs(new Set(hitIDs));
       }
       return;
     }
@@ -788,9 +933,39 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 4. Node drag with smart alignment snap guides
+    // 3b. Continuous Eraser drag-sweep
+    if (erasingRef.current) {
+      const erase = erasingRef.current;
+      const hitRadius = 18 / Math.max(0.25, camera.zoom);
+      let added = false;
+      for (const stroke of document.inkStrokes) {
+        if (erase.erasedIDs.has(stroke.id)) continue;
+        if (segmentIntersectsInkStroke(erase.lastWorld, worldPt, stroke.points, hitRadius)) {
+          erase.erasedIDs.add(stroke.id);
+          added = true;
+        }
+      }
+      erase.lastWorld = worldPt;
+      if (added) {
+        setPendingErasedStrokeIDs(new Set(erase.erasedIDs));
+      }
+      return;
+    }
+
+    // 4. Node drag with smart alignment snap guides (deferred capture until 3px drag threshold so click/dblclick reach child nodes cleanly)
     if (nodeDragRef.current) {
       const drag = nodeDragRef.current;
+      if (!drag.captured) {
+        if (Math.hypot(e.clientX - drag.startClientX, e.clientY - drag.startClientY) < 3) {
+          return;
+        }
+        drag.captured = true;
+        try {
+          stageRef.current?.setPointerCapture(drag.pointerId);
+        } catch {
+          // Ignore if pointer was already released
+        }
+      }
       let dx = worldPt.x - drag.startWorld.x;
       let dy = worldPt.y - drag.startWorld.y;
 
@@ -850,14 +1025,18 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       return;
     }
 
-    // 6. Node rotation
+    // 6. Node rotation (continuous unwrapped delta across ±180° seam)
     if (rotateRef.current) {
       const rt = rotateRef.current;
       const angleNow =
         (Math.atan2(worldPt.y - rt.centerWorld.y, worldPt.x - rt.centerWorld.x) * 180) / Math.PI;
-      const raw = rt.startDegrees + (angleNow - rt.startPointerAngle);
-      const snapped = snapRotationDegrees(raw, e.shiftKey);
-      setLiveRotations({ [rt.node.id]: snapped });
+      const stepDelta = (((angleNow - rt.lastPointerAngle) % 360) + 540) % 360 - 180;
+      rt.lastPointerAngle = angleNow;
+      rt.accumulatedDegrees += stepDelta;
+      const snappedNormalized = snapRotationDegrees(rt.accumulatedDegrees, e.shiftKey);
+      const continuousSnapped = shortestArcRotation(rt.accumulatedDegrees, snappedNormalized);
+      visualRotationsRef.current.set(rt.node.id, continuousSnapped);
+      setLiveRotations({ [rt.node.id]: continuousSnapped });
       return;
     }
 
@@ -880,6 +1059,27 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     if (panRef.current) {
       panRef.current = null;
       onCameraChange(camera, true);
+      return;
+    }
+
+    if (erasingRef.current) {
+      const erase = erasingRef.current;
+      erasingRef.current = null;
+      try {
+        if (stageRef.current?.hasPointerCapture(erase.pointerId)) {
+          stageRef.current.releasePointerCapture(erase.pointerId);
+        }
+      } catch {
+        // Ignore release errors
+      }
+      const erased = erase.erasedIDs;
+      setPendingErasedStrokeIDs(new Set());
+      if (erased.size > 0) {
+        onCommitDocument((doc) => ({
+          ...doc,
+          inkStrokes: doc.inkStrokes.filter((s) => !erased.has(s.id)),
+        }));
+      }
       return;
     }
 
@@ -956,11 +1156,21 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     }
 
     if (nodeDragRef.current) {
+      const drag = nodeDragRef.current;
       nodeDragRef.current = null;
+      if (drag.captured) {
+        try {
+          if (stageRef.current?.hasPointerCapture(drag.pointerId)) {
+            stageRef.current.releasePointerCapture(drag.pointerId);
+          }
+        } catch {
+          // Ignore release errors
+        }
+      }
       const updates = { ...liveFrames };
       setLiveFrames({});
       setSnapGuides({ x: [], y: [] });
-      if (Object.keys(updates).length > 0) {
+      if (drag.captured && Object.keys(updates).length > 0) {
         onCommitDocument((doc) => ({
           ...doc,
           nodes: doc.nodes.map((n) => (updates[n.id] ? { ...n, frame: updates[n.id] } : n)),
@@ -989,9 +1199,11 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       if (Object.keys(updates).length > 0) {
         onCommitDocument((doc) => ({
           ...doc,
-          nodes: doc.nodes.map((n) =>
-            updates[n.id] !== undefined ? { ...n, rotationDegrees: updates[n.id] } : n,
-          ),
+          nodes: doc.nodes.map((n) => {
+            if (updates[n.id] === undefined) return n;
+            const normalized = snapRotationDegrees(updates[n.id], false);
+            return { ...n, rotationDegrees: normalized };
+          }),
         }));
       }
       return;
@@ -1006,6 +1218,8 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
   // Start dragging a node
   const handleNodePointerDown = (node: BoardNode, e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    const targetEl = e.target instanceof Element ? e.target : null;
+    if (targetEl?.closest('[role="dialog"], [role="menu"]')) return;
     if (spacePressed || activeTool === 'pan' || activeTool === 'pen' || activeTool === 'eraser') {
       return;
     }
@@ -1065,12 +1279,16 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
       if (target) startFrames[id] = { ...target.frame };
     }
 
-    stageRef.current?.setPointerCapture(e.pointerId);
+    // Defer pointer capture until pointer moves past 3px drag threshold so click / dblclick reach child AssetNodeView cleanly
     nodeDragRef.current = {
       primaryID: node.id,
       movingIDs: Array.from(movingIDs),
       startFrames,
       startWorld: clientToWorld(e.clientX, e.clientY),
+      pointerId: e.pointerId,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      captured: false,
     };
   };
 
@@ -1105,19 +1323,21 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     const startWorld = clientToWorld(e.clientX, e.clientY);
     const startPointerAngle =
       (Math.atan2(startWorld.y - centerWorld.y, startWorld.x - centerWorld.x) * 180) / Math.PI;
+    const currentVisualDeg = visualRotationsRef.current.get(node.id) ?? node.rotationDegrees;
     rotateRef.current = {
       node,
       centerWorld,
-      startPointerAngle,
-      startDegrees: node.rotationDegrees,
+      lastPointerAngle: startPointerAngle,
+      accumulatedDegrees: currentVisualDeg,
     };
   };
 
-  // External file drop & library asset drop directly onto world coordinates
+  // External file drop & library asset drop directly onto world coordinates (supports both MIME keys)
   const handleDragOver = (e: React.DragEvent) => {
     if (
       e.dataTransfer.types.includes('Files') ||
-      e.dataTransfer.types.includes('application/x-charkle-asset-ids')
+      e.dataTransfer.types.includes('application/x-charkle-asset-ids') ||
+      e.dataTransfer.types.includes('application/x-charkle-assets')
     ) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
@@ -1130,7 +1350,9 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
     setIsDropTargeted(false);
     const dropWorld = clientToWorld(e.clientX, e.clientY);
 
-    const rawAssetIDs = e.dataTransfer.getData('application/x-charkle-asset-ids');
+    const rawAssetIDs =
+      e.dataTransfer.getData('application/x-charkle-asset-ids') ||
+      e.dataTransfer.getData('application/x-charkle-assets');
     if (rawAssetIDs) {
       try {
         const ids = JSON.parse(rawAssetIDs) as UUID[];
@@ -1192,17 +1414,21 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
             onOpenQuickLook={() => {
               if (asset) onOpenQuickLook(asset);
             }}
+            onRevealInLibrary={
+              asset && onRevealInLibrary ? () => onRevealInLibrary(assetID) : undefined
+            }
             onSmartFocusSubject={() => onSmartFocusSubject(node.id, assetID)}
             onSemanticCropPrompt={() => onSemanticCropPrompt(node.id, assetID)}
             onVisualMatchCrop={() => onVisualMatchCrop(node.id, assetID)}
             onCleanContentCrop={() => onCleanContentCrop(node.id, assetID)}
             onPinpointAnnotate={() => onPinpointAnnotate(node.id, assetID)}
-            onRotateBy={(delta) =>
+            onRotateBy={(delta) => {
+              triggerRotateTransition([node.id], delta);
               mutateNode(node.id, (n) => ({
                 ...n,
                 rotationDegrees: ((n.rotationDegrees + delta) % 360 + 360) % 360,
-              }))
-            }
+              }));
+            }}
             onFlipHorizontal={() =>
               mutateNode(node.id, (n) => ({ ...n, flipHorizontal: !n.flipHorizontal }))
             }
@@ -1302,13 +1528,35 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
 
   const shouldAnimateTidy = tidyAnimating && !prefersReducedMotion;
 
+  const showConnectorBar =
+    activeTool !== 'pen' && selectedConnector !== null && selectedNodes.length === 0;
+  const connectorBarPresence = usePresence(showConnectorBar, 130);
+  const lastConnectorRef = useRef<BoardConnector | null>(null);
+  if (selectedConnector) lastConnectorRef.current = selectedConnector;
+  const displayConnector = selectedConnector ?? lastConnectorRef.current;
+
+  const showTransformBar = activeTool === 'select' && selectedNodes.length > 0;
+  const transformBarPresence = usePresence(showTransformBar, 130);
+  const lastTransformMetaRef = useRef({
+    selectedCount: 1,
+    allLocked: false,
+    hasCroppedAsset: false,
+  });
+  if (selectedNodes.length > 0) {
+    lastTransformMetaRef.current = {
+      selectedCount: selectedNodes.length,
+      allLocked: selectedNodes.every((n) => n.isLocked),
+      hasCroppedAsset: hasCroppedSelection,
+    };
+  }
+
   return (
     <div
       ref={stageRef}
-      onWheel={handleWheel}
       onPointerDown={handleStagePointerDown}
       onPointerMove={handleStagePointerMove}
       onPointerUp={handleStagePointerUp}
+      onPointerCancel={handleStagePointerUp}
       onDragOver={handleDragOver}
       onDragLeave={() => setIsDropTargeted(false)}
       onDrop={handleDrop}
@@ -1331,10 +1579,16 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
 
         {/* Empty canvas guidance */}
         {document.nodes.length === 0 && (
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-6">
-            <p className="text-[13.5px] font-medium text-[var(--text-secondary)]">
-              拖入图片、按 ⌘V 粘贴，或从右侧候选池添加素材
-            </p>
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-6 gap-3">
+            <EmptyStateVignette kind="emptyMoodboard" />
+            <div className="flex flex-col gap-1">
+              <p className="text-[14px] font-semibold text-[var(--text-primary)]">
+                画布还是空的
+              </p>
+              <p className="text-[12.5px] text-[var(--text-secondary)]">
+                拖入或粘贴图片添加素材
+              </p>
+            </div>
           </div>
         )}
 
@@ -1351,26 +1605,58 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           {/* Nodes */}
           {zSortedNodes.map((node, idx) => {
             const isSelected = selectedNodeIDs.has(node.id);
+            const isExiting = exitingNodeIDs.has(node.id);
+            const isDiscreteRotating =
+              !prefersReducedMotion && rotatingAnimIDs.has(node.id) && !liveRotations[node.id];
+
+            // Resolve shortest-arc continuous angle so 270° -> 0° never spins backwards
+            let renderRotation = node.rotationDegrees;
+            if (liveRotations[node.id] !== undefined) {
+              renderRotation = liveRotations[node.id];
+            } else {
+              const prevVisual = visualRotationsRef.current.get(node.id);
+              if (prevVisual === undefined) {
+                visualRotationsRef.current.set(node.id, node.rotationDegrees);
+              } else {
+                const hint = rotationHintRef.current.get(node.id);
+                renderRotation = shortestArcRotation(prevVisual, node.rotationDegrees, hint);
+                visualRotationsRef.current.set(node.id, renderRotation);
+                if (hint !== undefined) rotationHintRef.current.delete(node.id);
+              }
+            }
+
             const showTransformHandles =
               isSelected &&
+              !isExiting &&
               selectedNodeIDs.size === 1 &&
               !node.isLocked &&
               activeTool === 'select' &&
               croppingNodeID !== node.id;
 
+            const nodeTransition = isExiting
+              ? 'opacity 150ms var(--ease-out), scale 150ms var(--ease-out)'
+              : shouldAnimateTidy
+                ? 'transform var(--duration-move, 240ms) var(--ease-in-out)'
+                : isDiscreteRotating
+                  ? 'transform var(--duration-sm, 180ms) var(--ease-out)'
+                  : 'none';
+
             return (
               <div
                 key={node.id}
-                onPointerDown={(e) => handleNodePointerDown(node, e)}
+                onPointerDown={(e) => {
+                  if (!isExiting) handleNodePointerDown(node, e);
+                }}
                 className="absolute top-0 left-0"
                 style={{
                   width: node.frame.width,
                   height: node.frame.height,
                   zIndex: node.kind.type === 'groupFrame' ? 1 : 10 + idx,
-                  transform: `translate3d(${node.frame.x}px, ${node.frame.y}px, 0) rotate(${node.rotationDegrees}deg)`,
-                  transition: shouldAnimateTidy
-                    ? 'transform var(--duration-move, 240ms) var(--ease-in-out), width var(--duration-move, 240ms) var(--ease-in-out), height var(--duration-move, 240ms) var(--ease-in-out)'
-                    : 'none',
+                  opacity: isExiting ? 0 : 1,
+                  scale: isExiting ? (prefersReducedMotion ? '1' : '0.92') : '1',
+                  pointerEvents: isExiting ? 'none' : undefined,
+                  transform: `translate3d(${node.frame.x}px, ${node.frame.y}px, 0) rotate(${renderRotation}deg)`,
+                  transition: nodeTransition,
                 }}
               >
                 {renderNodeBody(node)}
@@ -1446,6 +1732,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
                       onPointerDown={(ev) => startRotate(node, ev)}
                       onDoubleClick={(ev) => {
                         ev.stopPropagation();
+                        triggerRotateTransition([node.id]);
                         mutateNode(node.id, (n) => ({ ...n, rotationDegrees: 0 }));
                       }}
                       title="拖动旋转（按住 Shift 吸附 15°，双击归零）"
@@ -1468,6 +1755,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
               nodesByID={effectiveNodesByID}
               selectedConnectorID={selectedConnectorID}
               pendingConnector={pendingConnector}
+              exitingNodeIDs={exitingNodeIDs}
               zoom={camera.zoom}
               interactive={activeTool === 'select' || activeTool === 'connector'}
               onSelectConnector={(cid) => {
@@ -1501,6 +1789,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
               activeLineWidth={inkLineWidth}
               activeOpacity={inkOpacity}
               eraserActive={activeTool === 'eraser'}
+              erasedStrokeIDs={pendingErasedStrokeIDs}
               onEraseStroke={(sid) => {
                 onCommitDocument((doc) => ({
                   ...doc,
@@ -1629,17 +1918,18 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           </div>
         )}
 
-        {activeTool !== 'pen' && selectedConnector && selectedNodes.length === 0 && (
+        {connectorBarPresence.rendered && displayConnector && (
           <div
             data-canvas-hud="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className="pointer-events-auto"
+            className={connectorBarPresence.state === 'closing' ? 'pointer-events-none' : 'pointer-events-auto'}
           >
             <SelectedConnectorBar
-              dashed={selectedConnector.dashed}
+              dashed={displayConnector.dashed}
+              presenceState={connectorBarPresence.state}
               onToggleDashed={() => {
-                const cid = selectedConnector.id;
-                const nextDashed = !selectedConnector.dashed;
+                const cid = displayConnector.id;
+                const nextDashed = !displayConnector.dashed;
                 onCommitDocument((doc) => ({
                   ...doc,
                   connectors: doc.connectors.map((c) =>
@@ -1650,7 +1940,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
                 }));
               }}
               onDelete={() => {
-                const cid = selectedConnector.id;
+                const cid = displayConnector.id;
                 setSelectedConnectorID(null);
                 onCommitDocument((doc) => ({
                   ...doc,
@@ -1661,16 +1951,17 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           </div>
         )}
 
-        {activeTool === 'select' && selectedNodes.length > 0 && (
+        {transformBarPresence.rendered && (
           <div
             data-canvas-hud="true"
             onPointerDown={(e) => e.stopPropagation()}
-            className="pointer-events-auto"
+            className={transformBarPresence.state === 'closing' ? 'pointer-events-none' : 'pointer-events-auto'}
           >
             <SelectedTransformBar
-              selectedCount={selectedNodes.length}
-              allLocked={selectedNodes.every((n) => n.isLocked)}
-              hasCroppedAsset={hasCroppedSelection}
+              selectedCount={lastTransformMetaRef.current.selectedCount}
+              allLocked={lastTransformMetaRef.current.allLocked}
+              hasCroppedAsset={lastTransformMetaRef.current.hasCroppedAsset}
+              presenceState={transformBarPresence.state}
               onRotateCCW={() => rotateSelected(-90)}
               onRotateCW={() => rotateSelected(90)}
               onFlipH={() => flipSelected('h')}
@@ -1716,7 +2007,7 @@ export const MoodboardCanvasView: React.FC<MoodboardCanvasViewProps> = ({
           className="pointer-events-none absolute inset-2.5 z-50 rounded-[16px] border-2 border-dashed border-[var(--accent)] bg-[var(--accent-soft)] flex items-center justify-center"
         >
           <span className="px-4 py-2 rounded-full bg-[var(--bg-elevated)] text-[var(--accent)] text-[13px] font-semibold shadow-md border border-[var(--accent-ring)]">
-            松开即可导入素材并插入当前画布位置
+            松开添加到画布
           </span>
         </div>
       )}

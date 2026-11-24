@@ -120,6 +120,20 @@ public final class AppCoordinatorStore {
         didSet { UserDefaults.standard.set(defaultNotchTargetMode.rawValue, forKey: Keys.defaultNotchTargetMode) }
     }
 
+    /// Runtime flag for Ultra-Low-Resource Minimal Capture Mode (closes main workspace, purges decoded
+    /// caches, hides Dock icon, and keeps only the top Notch Shelf capture + Menu Bar icon alive).
+    public var isMinimalCaptureMode: Bool = false
+
+    /// Persisted preference: launch directly into Minimal Capture Mode on startup.
+    public var launchInMinimalCaptureMode: Bool {
+        didSet { UserDefaults.standard.set(launchInMinimalCaptureMode, forKey: Keys.launchInMinimalCaptureMode) }
+    }
+
+    /// Persisted preference: closing the main window automatically transitions to Minimal Capture Mode.
+    public var enterMinimalModeOnWindowClose: Bool {
+        didSet { UserDefaults.standard.set(enterMinimalModeOnWindowClose, forKey: Keys.enterMinimalModeOnWindowClose) }
+    }
+
     /// User-customizable order of cards in the Single-Asset Inspector info tab.
     public var inspectorInfoSectionOrder: [InspectorInfoSection] {
         didSet {
@@ -150,6 +164,8 @@ public final class AppCoordinatorStore {
         static let notchHoverTriggerEnabled = "charkle.notchHoverTriggerEnabled"
         static let globalHotkeysEnabled = "charkle.globalHotkeysEnabled"
         static let defaultNotchTargetMode = "charkle.defaultNotchTargetMode"
+        static let launchInMinimalCaptureMode = "charkle.launchInMinimalCaptureMode"
+        static let enterMinimalModeOnWindowClose = "charkle.enterMinimalModeOnWindowClose"
         static let sidebarCollapsed = "charkle.sidebarCollapsed"
         static let galleryLayoutMode = "charkle.galleryLayoutMode"
         static let hasCompletedOnboarding = "charkle.hasCompletedOnboarding"
@@ -163,6 +179,10 @@ public final class AppCoordinatorStore {
         self.globalHotkeysEnabled = defaults.object(forKey: Keys.globalHotkeysEnabled) as? Bool ?? true
         self.defaultNotchTargetMode = defaults.string(forKey: Keys.defaultNotchTargetMode)
             .flatMap(NotchTargetMode.init(rawValue:)) ?? .inbox
+        let launchMinimal = defaults.object(forKey: Keys.launchInMinimalCaptureMode) as? Bool ?? false
+        self.launchInMinimalCaptureMode = launchMinimal
+        self.enterMinimalModeOnWindowClose = defaults.object(forKey: Keys.enterMinimalModeOnWindowClose) as? Bool ?? false
+        self.isMinimalCaptureMode = launchMinimal
         self.isSidebarCollapsed = defaults.object(forKey: Keys.sidebarCollapsed) as? Bool ?? false
         self.galleryLayoutMode = defaults.string(forKey: Keys.galleryLayoutMode)
             .flatMap(GalleryLayoutMode.init(rawValue:)) ?? .verticalMasonry

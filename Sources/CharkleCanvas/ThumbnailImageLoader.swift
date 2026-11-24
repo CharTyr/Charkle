@@ -90,6 +90,11 @@ public final class ThumbnailImageLoader {
     /// Increments ONLY on explicit invalidation / memory cache clear — never during normal image loads,
     /// so scrolling through thousands of cards triggers zero `@Observable` cascade invalidations.
     public private(set) var invalidationVersion: Int = 0
+    public private(set) var isLowResourceMode: Bool = false
+
+    public var currentCacheCountLimit: Int { cache.countLimit }
+    public var currentCacheCostLimit: Int { cache.totalCostLimit }
+    public var currentOriginalCacheCountLimit: Int { originalCache.countLimit }
 
     public init(engine: any CharkleEngineProtocol, maxCount: Int = 1_500, maxCostBytes: Int = 320 * 1024 * 1024) {
         self.engine = engine
@@ -267,6 +272,25 @@ public final class ThumbnailImageLoader {
         for task in prefetchTasks.values { task.cancel() }
         prefetchTasks.removeAll()
         invalidationVersion &+= 1
+    }
+
+    /// Switches between full workspace cache budget (1,500 thumbnails / 320 MB + 180 MB originals)
+    /// and Ultra-Low-Resource Minimal Capture Mode (purges full-library caches while keeping a tiny
+    /// 20-item / 12 MB budget exclusively for the Notch Shelf Recent Assets strip).
+    public func setLowResourceMode(_ enabled: Bool) {
+        isLowResourceMode = enabled
+        if enabled {
+            clearMemoryCache()
+            cache.countLimit = 20
+            cache.totalCostLimit = 12 * 1024 * 1024
+            originalCache.countLimit = 0
+            originalCache.totalCostLimit = 0
+        } else {
+            cache.countLimit = 1_500
+            cache.totalCostLimit = 320 * 1024 * 1024
+            originalCache.countLimit = 4
+            originalCache.totalCostLimit = 180 * 1024 * 1024
+        }
     }
 
     @concurrent
@@ -755,9 +779,9 @@ public struct ProceduralMediaFallbackCard: View {
                     .lineLimit(4)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
-                    RoundedRectangle(cornerRadius: 2).fill(Color.primary.opacity(0.10)).frame(height: 5)
-                    RoundedRectangle(cornerRadius: 2).fill(Color.primary.opacity(0.08)).frame(width: 96, height: 5)
-                    RoundedRectangle(cornerRadius: 2).fill(Color.primary.opacity(0.06)).frame(width: 72, height: 5)
+                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.10)).frame(height: 5)
+                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.08)).frame(width: 96, height: 5)
+                    RoundedRectangle(cornerRadius: 2, style: .continuous).fill(Color.primary.opacity(0.06)).frame(width: 72, height: 5)
                 }
                 .padding(.top, 4)
             }

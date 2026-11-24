@@ -55,6 +55,7 @@ export type {
   SqlParam,
 } from './runtime/types.js';
 export {
+  ClientExportRequiredError,
   WorkersImageProcessor,
   inspectImageHeader,
   sniffImageMimeType,
@@ -114,14 +115,48 @@ export {
   type RateLimitCheckResult,
 } from './auth/rate-limiter.js';
 
-// Media pipeline & sample library seeder
+// Media pipeline, pure-TS image metadata extractor & sample library seeder
 export {
   MediaPipeline,
   guessMimeType,
   sanitizeFileName,
   type MediaPipelineDeps,
 } from './media/media-pipeline.js';
+export {
+  extractImageMetadata,
+  extractPNGTextChunks,
+  formatExifDate,
+  formatExposureTime,
+  parseA1111Parameters,
+  parseComfyUIPromptJSON,
+  type ExtractedImageMetadata,
+} from './media/image-metadata-extractor.js';
 export { SampleLibrarySeeder, seedSampleLibrary } from './media/sample-seeder.js';
+
+// External Agent MCP v2 service, schema & stdio frame parser (100% Workers-safe)
+export {
+  ExternalAgentService,
+  type ExternalAgentServiceDeps,
+  type MCPToolContent,
+  type MCPToolOutput,
+} from './agent/external-agent-service.js';
+export {
+  MCP_DEFAULT_PROTOCOL_VERSION,
+  MCP_SERVER_VERSION,
+  MCP_SUPPORTED_PROTOCOL_VERSIONS,
+  MCP_WRITE_TOOL_NAMES,
+  mcpPromptDefinitions,
+  mcpResourceDefinitions,
+  mcpResourceTemplateDefinitions,
+  mcpToolDefinitions,
+  negotiateProtocolVersion,
+  renderPrompt,
+} from './agent/external-agent-schema.js';
+export {
+  MCPStdioFrameParser,
+  type MCPStdioFrameEvent,
+  type MCPStdioFraming,
+} from './mcp/stdio-frame-parser.js';
 
 // Sync engine, OAuth & streaming transports (Google Drive API v3, WebDAV, In-Memory)
 export { DriveSyncEngine } from './sync/drive-sync-engine.js';

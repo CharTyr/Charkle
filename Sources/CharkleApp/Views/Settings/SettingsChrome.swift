@@ -224,10 +224,10 @@ public struct InlineGuideDisclosure<Content: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     SettingsPalette.subtleFill(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(SettingsPalette.border(for: colorScheme).opacity(0.75), lineWidth: 0.75)
                 )
                 .padding(.horizontal, 16)
@@ -404,7 +404,7 @@ public struct SettingsCodeSnippet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 colorScheme == .dark ? Color.black.opacity(0.32) : Color.black.opacity(0.045),
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
     }
 }

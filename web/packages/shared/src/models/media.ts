@@ -129,7 +129,7 @@ export const CUSTOM_AI_ENDPOINT_FORMATS: readonly CustomAIEndpointFormat[] = [
 export function customAIEndpointLocalizedLabel(format: CustomAIEndpointFormat): string {
   switch (format) {
     case 'openAIChatCompletions':
-      return 'OpenAI 兼容 (Chat Completions)';
+      return 'OpenAI 兼容';
     case 'anthropicMessages':
       return 'Anthropic Messages';
     case 'openAIResponses':
@@ -336,7 +336,7 @@ export function visualRegionSourceLocalizedLabel(source: VisualRegionSource): st
     case 'typeSafeJev':
       return 'TypeSafe Jev Box';
     case 'appleVisionSaliency':
-      return '本机 Vision 主体识别';
+      return '本机视觉识别';
   }
 }
 

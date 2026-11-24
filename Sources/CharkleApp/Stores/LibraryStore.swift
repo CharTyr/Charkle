@@ -32,6 +32,7 @@ public final class LibraryStore {
     private var lastInternalPasteboardChangeCount: Int?
 
     public var similarAssets: [ScoredAsset] = []
+    public var isLoadingSimilarAssets: Bool = false
     public var suggestedFolder: FolderSuggestion?
 
     // Phase 2: Hybrid Semantic Search & Inbox Smart Batch Triage
@@ -48,6 +49,7 @@ public final class LibraryStore {
     }
 
     public var isLoading: Bool = false
+    public private(set) var isMinimalCaptureMode: Bool = false
     public var enrichingAssetIDs: Set<UUID> = []
     public var enrichCompletedCount: Int = 0
     public var enrichTotalCount: Int = 0
@@ -75,7 +77,8 @@ public final class LibraryStore {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.refreshAll()
+                guard let self, !self.isMinimalCaptureMode else { return }
+                await self.refreshAll()
             }
         }
     }
@@ -96,14 +99,93 @@ public final class LibraryStore {
     }
 
     public func bootstrap() async {
+        guard !isMinimalCaptureMode else {
+            // Minimal Capture Mode only needs tiny folder metadata for the Notch target picker.
+            await refreshMinimalMetadataOnly()
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         do {
             _ = try await engine.seedSampleLibraryIfEmpty()
             await refreshAll()
+            Task { [weak self] in
+                guard let self else { return }
+                let upgradedIDs = await self.engine.upgradeLegacyXiaohongshuCoversIfNeeded()
+                guard !upgradedIDs.isEmpty else { return }
+                for id in upgradedIDs {
+                    self.thumbnailLoader.invalidate(assetID: id)
+                }
+                await self.refreshAll()
+            }
         } catch {
             lastError = error.localizedDescription
             libraryStoreLogger.error("Bootstrap failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static let minimalRecentLimit: Int = 16
+
+    /// Drops heavy in-memory full-library asset lists, search results, metadata caches, and decoded image buffers
+    /// while keeping only the latest 16 recent items + folder titles so Notch Shelf capture & quick drag-out
+    /// remain instant at minimal RAM.
+    public func enterMinimalCaptureMode() {
+        isMinimalCaptureMode = true
+        inspectorContextTask?.cancel()
+        inspectorContextTask = nil
+        retagTask?.cancel()
+        retagTask = nil
+
+        let recentSnapshot = Array(recentActivityAssets(limit: Self.minimalRecentLimit))
+        assets = []
+        allAssetsByID = Dictionary(uniqueKeysWithValues: recentSnapshot.map { ($0.id, $0) })
+        cachedRecentActivityAssets = recentSnapshot
+        smartFolders = []
+        tagCounts = []
+        selectedAssetIDs = []
+        cutAssetIDs = []
+        copiedAssetIDs = []
+        similarAssets = []
+        isLoadingSimilarAssets = false
+        suggestedFolder = nil
+        semanticSearchReport = nil
+        inboxTriageRecommendations = []
+        imageMetadataCache.removeAll()
+        metadataHydrationAttemptedIDs.removeAll()
+        thumbnailLoader.setLowResourceMode(true)
+    }
+
+    /// Restores full cache budget synchronously when returning to the main studio window.
+    /// Call `await refreshAll()` right after to repopulate in-memory asset collections.
+    public func exitMinimalCaptureMode() {
+        isMinimalCaptureMode = false
+        thumbnailLoader.setLowResourceMode(false)
+    }
+
+    /// Lightweight metadata refresh used in Minimal Capture Mode (folders, inbox count, and latest 16 recent items only).
+    public func refreshMinimalMetadataOnly() async {
+        do {
+            async let folderList = engine.fetchFolders()
+            async let inbox = engine.inboxCount()
+            async let fetchedActive = engine.fetchAssets(matching: FilterCriteria(includeTrashed: false, sortBy: .newest))
+            let (f, i, active) = try await (folderList, inbox, fetchedActive)
+            folders = f
+            inboxCount = i
+            let topRecent = Array(
+                active
+                    .filter { !$0.isTrashed }
+                    .sorted { lhs, rhs in
+                        let ld = lhs.recentActivityDate
+                        let rd = rhs.recentActivityDate
+                        if ld != rd { return ld > rd }
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                    .prefix(Self.minimalRecentLimit)
+            )
+            cachedRecentActivityAssets = topRecent
+            allAssetsByID = Dictionary(uniqueKeysWithValues: topRecent.map { ($0.id, $0) })
+        } catch {
+            lastError = error.localizedDescription
         }
     }
 
@@ -365,13 +447,20 @@ public final class LibraryStore {
 
             guard let standalone = created.first else { return nil }
 
+            let authorAttribution: String = {
+                if let handleLine = post.displayHandleLine {
+                    return "\(post.authorName) (\(handleLine))"
+                }
+                return post.authorName
+            }()
             let attributionNotes = [
-                "来源推文：\(post.authorName) (@\(post.authorHandle)) · \(post.platform.displayName)",
+                "来源\(post.platform.postNoun)：\(authorAttribution) · \(post.platform.displayName)",
                 post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines),
-                "原推文链接：\(post.originalURL)"
+                "原链接：\(post.originalURL)"
             ].filter { !$0.isEmpty }.joined(separator: "\n\n")
 
-            let extractedTitle = "@\(post.authorHandle) \(attachment.kind.localizedLabel) #\(index + 1)"
+            let titleAuthor = post.platform == .xiaohongshu ? post.authorName : "@\(post.authorHandle)"
+            let extractedTitle = "\(titleAuthor) \(attachment.kind.localizedLabel) #\(index + 1)"
             let patched = try await engine.updateAssets(
                 AssetBatchPatch(
                     assetIDs: [standalone.id],
@@ -770,6 +859,18 @@ public final class LibraryStore {
         guard !inputs.isEmpty else { return [] }
         do {
             let created = try await engine.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+            if isMinimalCaptureMode {
+                // Stay strictly lightweight: prepend newly captured items into the bounded 16-item recent cache
+                // and refresh inbox count without hydrating the full library into RAM.
+                var nextRecent = created.filter { !$0.isTrashed }
+                let createdIDs = Set(nextRecent.map(\.id))
+                nextRecent.append(contentsOf: cachedRecentActivityAssets.filter { !createdIDs.contains($0.id) })
+                let trimmed = Array(nextRecent.prefix(Self.minimalRecentLimit))
+                cachedRecentActivityAssets = trimmed
+                allAssetsByID = Dictionary(uniqueKeysWithValues: trimmed.map { ($0.id, $0) })
+                inboxCount = (try? await engine.inboxCount()) ?? inboxCount
+                return created
+            }
             for item in created {
                 allAssetsByID[item.id] = item
             }
@@ -924,11 +1025,18 @@ public final class LibraryStore {
         inspectorContextTask?.cancel()
         guard let assetID else {
             similarAssets = []
+            isLoadingSimilarAssets = false
             suggestedFolder = nil
             return
         }
+        isLoadingSimilarAssets = true
         inspectorContextTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if !Task.isCancelled {
+                    self.isLoadingSimilarAssets = false
+                }
+            }
             do {
                 async let sim = self.engine.similarAssets(to: assetID, limit: 8)
                 async let suggestion = self.engine.suggestFolder(for: assetID)

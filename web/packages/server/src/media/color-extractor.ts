@@ -1,21 +1,16 @@
 import sharp from 'sharp';
 import {
-  deltaE2000,
-  labToHex,
+  deltaE76,
+  labFromHex,
+  sRGBToHex,
   sRGBToLab,
   type LabColor,
 } from '@charkle/shared';
 export { extractAudioWaveform } from './audio-waveform.js';
 
-interface PixelSample {
-  l: number;
-  a: number;
-  b: number;
-}
-
 /**
  * Extracts 5–7 perceptually dominant CIELAB swatches from an image buffer using k-means++
- * with deterministic initialization and ΔE2000 near-duplicate merging.
+ * aligned 1:1 with macOS `ColorExtractor.swift` (48×48, alpha >= 40, 8 iterations, mean sRGB, ΔE76 < 8.0).
  */
 export async function extractDominantColors(
   imageBuffer: Buffer,
@@ -24,81 +19,80 @@ export async function extractDominantColors(
   const k = Math.max(1, Math.min(8, Math.trunc(targetCount)));
   const { data, info } = await sharp(imageBuffer)
     .rotate()
-    .resize(64, 64, { fit: 'inside', withoutEnlargement: true })
+    .resize(48, 48, { fit: 'inside', withoutEnlargement: true })
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
 
-  const samples: PixelSample[] = [];
-  const totalPixels = info.width * info.height;
-  for (let i = 0; i < totalPixels; i++) {
-    const off = i * 4;
-    const alpha = data[off + 3];
-    if (alpha < 128) continue;
-    const r = data[off] / 255;
-    const g = data[off + 1] / 255;
-    const b = data[off + 2] / 255;
-    samples.push(sRGBToLab(r, g, b));
+  const pixels: Array<{ r: number; g: number; b: number }> = [];
+  for (let i = 0; i < data.length; i += info.channels) {
+    const alpha = data[i + 3] ?? 255;
+    if (alpha < 40) continue;
+    pixels.push({
+      r: data[i] / 255,
+      g: data[i + 1] / 255,
+      b: data[i + 2] / 255,
+    });
   }
 
-  if (samples.length === 0) return [];
+  if (pixels.length === 0) return [];
 
-  // Deterministic k-means++ centroid initialization
-  const centroids: PixelSample[] = [samples[Math.floor(samples.length / 2)]];
-  const distSq = new Float64Array(samples.length).fill(Infinity);
+  const labPixels = pixels.map((p) => sRGBToLab(p.r, p.g, p.b));
+  const targetK = Math.min(k, pixels.length);
+  const centroids: Array<{ l: number; a: number; b: number }> = [
+    labPixels[Math.floor(labPixels.length / 2)],
+  ];
 
-  while (centroids.length < k && centroids.length < samples.length) {
-    const last = centroids[centroids.length - 1];
-    let bestIdx = 0;
-    let maxDist = -1;
-    for (let i = 0; i < samples.length; i++) {
-      const s = samples[i];
-      const dl = s.l - last.l;
-      const da = s.a - last.a;
-      const db = s.b - last.b;
-      const d = dl * dl + da * da + db * db;
-      if (d < distSq[i]) distSq[i] = d;
-      if (distSq[i] > maxDist) {
-        maxDist = distSq[i];
-        bestIdx = i;
+  while (centroids.length < targetK) {
+    let farthestIndex = 0;
+    let maxMinDist = -1;
+    for (let idx = 0; idx < labPixels.length; idx++) {
+      const p = labPixels[idx];
+      let minDist = Number.POSITIVE_INFINITY;
+      for (const c of centroids) {
+        const dl = p.l - c.l;
+        const da = p.a - c.a;
+        const db = p.b - c.b;
+        const d = dl * dl + da * da + db * db;
+        if (d < minDist) minDist = d;
+      }
+      if (minDist > maxMinDist) {
+        maxMinDist = minDist;
+        farthestIndex = idx;
       }
     }
-    if (maxDist <= 1e-6) break;
-    centroids.push({ ...samples[bestIdx] });
+    if (maxMinDist <= 1.0) break;
+    centroids.push(labPixels[farthestIndex]);
   }
 
-  const assignments = new Int32Array(samples.length);
   const clusterCount = centroids.length;
+  const assignments = new Int32Array(labPixels.length);
 
-  for (let iter = 0; iter < 12; iter++) {
-    let changed = false;
+  for (let iter = 0; iter < 8; iter++) {
     const sumL = new Float64Array(clusterCount);
     const sumA = new Float64Array(clusterCount);
     const sumB = new Float64Array(clusterCount);
     const counts = new Int32Array(clusterCount);
 
-    for (let i = 0; i < samples.length; i++) {
-      const s = samples[i];
+    for (let i = 0; i < labPixels.length; i++) {
+      const p = labPixels[i];
       let bestC = 0;
-      let bestD = Infinity;
+      let bestD = Number.POSITIVE_INFINITY;
       for (let c = 0; c < clusterCount; c++) {
         const ctr = centroids[c];
-        const dl = s.l - ctr.l;
-        const da = s.a - ctr.a;
-        const db = s.b - ctr.b;
+        const dl = p.l - ctr.l;
+        const da = p.a - ctr.a;
+        const db = p.b - ctr.b;
         const d = dl * dl + da * da + db * db;
         if (d < bestD) {
           bestD = d;
           bestC = c;
         }
       }
-      if (assignments[i] !== bestC) {
-        assignments[i] = bestC;
-        changed = true;
-      }
-      sumL[bestC] += s.l;
-      sumA[bestC] += s.a;
-      sumB[bestC] += s.b;
+      assignments[i] = bestC;
+      sumL[bestC] += p.l;
+      sumA[bestC] += p.a;
+      sumB[bestC] += p.b;
       counts[bestC]++;
     }
 
@@ -111,57 +105,42 @@ export async function extractDominantColors(
         };
       }
     }
-    if (!changed) break;
   }
 
-  // Final counts
-  const finalCounts = new Int32Array(clusterCount);
-  for (let i = 0; i < samples.length; i++) {
-    finalCounts[assignments[i]]++;
+  const sumR = new Float64Array(clusterCount);
+  const sumG = new Float64Array(clusterCount);
+  const sumBl = new Float64Array(clusterCount);
+  const clusterSize = new Int32Array(clusterCount);
+
+  for (let i = 0; i < pixels.length; i++) {
+    const c = assignments[i];
+    sumR[c] += pixels[i].r;
+    sumG[c] += pixels[i].g;
+    sumBl[c] += pixels[i].b;
+    clusterSize[c] += 1;
   }
 
-  let rawSwatches: LabColor[] = [];
+  const rawSwatches: LabColor[] = [];
   for (let c = 0; c < clusterCount; c++) {
-    if (finalCounts[c] <= 0) continue;
-    const ctr = centroids[c];
-    rawSwatches.push({
-      hex: labToHex(ctr.l, ctr.a, ctr.b),
-      l: Math.round(ctr.l * 100) / 100,
-      a: Math.round(ctr.a * 100) / 100,
-      b: Math.round(ctr.b * 100) / 100,
-      proportion: finalCounts[c] / samples.length,
-    });
+    if (clusterSize[c] <= 0) continue;
+    const n = clusterSize[c];
+    const hex = sRGBToHex(sumR[c] / n, sumG[c] / n, sumBl[c] / n);
+    rawSwatches.push(labFromHex(hex, n / pixels.length));
   }
 
   rawSwatches.sort((a, b) => b.proportion - a.proportion);
-
-  // Merge perceptually near-identical clusters (ΔE2000 < 7.5)
   const merged: LabColor[] = [];
   for (const sw of rawSwatches) {
-    const existing = merged.find((m) => deltaE2000(m, sw) < 7.5);
-    if (existing) {
-      const totalProp = existing.proportion + sw.proportion;
-      const w1 = existing.proportion / totalProp;
-      const w2 = sw.proportion / totalProp;
-      existing.l = Math.round((existing.l * w1 + sw.l * w2) * 100) / 100;
-      existing.a = Math.round((existing.a * w1 + sw.a * w2) * 100) / 100;
-      existing.b = Math.round((existing.b * w1 + sw.b * w2) * 100) / 100;
-      existing.hex = labToHex(existing.l, existing.a, existing.b);
-      existing.proportion = totalProp;
-    } else {
-      merged.push({ ...sw });
+    if (!merged.some((m) => deltaE76(m, sw) < 8.0)) {
+      merged.push(sw);
     }
   }
 
-  // Normalize proportions
   const total = merged.reduce((acc, c) => acc + c.proportion, 0) || 1;
-  return merged
-    .sort((a, b) => b.proportion - a.proportion)
-    .slice(0, k)
-    .map((c) => ({
-      ...c,
-      proportion: Math.round((c.proportion / total) * 10000) / 10000,
-    }));
+  return merged.slice(0, k).map((c) => ({
+    ...c,
+    proportion: Math.round((c.proportion / total) * 10000) / 10000,
+  }));
 }
 
 /**

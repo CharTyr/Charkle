@@ -379,15 +379,28 @@ export const MoodboardExporter = {
     const inkPrimary = darkAppearance ? 'rgba(255,255,255,0.92)' : 'rgba(20,22,26,0.88)';
     const inkSecondary = darkAppearance ? 'rgba(255,255,255,0.56)' : 'rgba(20,22,26,0.50)';
 
-    const backdropSvgParts: string[] = [];
-    const foregroundSvgParts: string[] = [];
+    // Preserve exact Z-order interleaving across groupFrames, assetRefs, notes, paletteStrips & annotations
+    const overlays: OverlayOptions[] = [];
+    let pendingSvgParts: string[] = [];
+
+    const flushPendingSvg = (): void => {
+      if (pendingSvgParts.length === 0) return;
+      overlays.push({
+        input: Buffer.from(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${pixelW}" height="${pixelH}" viewBox="0 0 ${canvasW} ${canvasH}">${pendingSvgParts.join('')}</svg>`,
+        ),
+        left: 0,
+        top: 0,
+      });
+      pendingSvgParts = [];
+    };
 
     // Header title + subtitle + palette chips
-    backdropSvgParts.push(
+    pendingSvgParts.push(
       `<text x="${pad}" y="${(pad * 0.65 + 20).toFixed(1)}" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif" font-size="20" font-weight="600" fill="${inkPrimary}">${escapeXML(document.title || 'Charkle 情绪板')}</text>`,
     );
     if (document.subtitle.trim()) {
-      backdropSvgParts.push(
+      pendingSvgParts.push(
         `<text x="${pad}" y="${(pad * 0.65 + 42).toFixed(1)}" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="12" fill="${inkSecondary}">${escapeXML(document.subtitle.trim().slice(0, 120))}</text>`,
       );
     }
@@ -401,7 +414,7 @@ export const MoodboardExporter = {
       const sy = pad * 0.65 + 4;
       for (const sw of swatches) {
         const hex = safeHex(sw.hex, '#808080');
-        backdropSvgParts.push(
+        pendingSvgParts.push(
           `<rect x="${sx.toFixed(1)}" y="${sy.toFixed(1)}" width="${swW}" height="${swH}" rx="6" fill="${hex}" stroke="rgba(0,0,0,0.12)" stroke-width="0.75"/>`,
         );
         sx += swW + gap;
@@ -416,8 +429,6 @@ export const MoodboardExporter = {
       if (lhs.zIndex !== rhs.zIndex) return lhs.zIndex - rhs.zIndex;
       return lhs.editorialOrder - rhs.editorialOrder;
     });
-
-    const imageComposites: OverlayOptions[] = [];
 
     for (const node of orderedNodes) {
       const baseRect = resolvedFrames[node.id];
@@ -439,7 +450,7 @@ export const MoodboardExporter = {
       if (node.kind.type === 'groupFrame') {
         const tintColor = groupTintHex(node.kind.tint);
         const fillOpacity = darkAppearance ? '0.14' : '0.09';
-        backdropSvgParts.push(
+        pendingSvgParts.push(
           `${rotOpen}<rect x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" width="${rect.width.toFixed(1)}" height="${rect.height.toFixed(1)}" rx="16" fill="${tintColor}" fill-opacity="${fillOpacity}" stroke="${tintColor}" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="6 4"/>` +
             `<circle cx="${(rect.x + 16).toFixed(1)}" cy="${(rect.y + 18).toFixed(1)}" r="4" fill="${tintColor}"/>` +
             `<text x="${(rect.x + 28).toFixed(1)}" y="${(rect.y + 22).toFixed(1)}" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="13" font-weight="600" fill="${inkPrimary}">${escapeXML(node.kind.title || '分组区域')}</text>${rotClose}`,
@@ -470,7 +481,7 @@ export const MoodboardExporter = {
           textY += lineHeight;
         }
         linesParts.push(rotClose);
-        foregroundSvgParts.push(linesParts.join(''));
+        pendingSvgParts.push(linesParts.join(''));
       } else if (node.kind.type === 'paletteStrip') {
         const activeColors =
           node.kind.autoSyncWithBoard && document.extractedPalette.length > 0
@@ -494,7 +505,7 @@ export const MoodboardExporter = {
         parts.push(
           `</g><rect x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" width="${rect.width.toFixed(1)}" height="${rect.height.toFixed(1)}" rx="12" fill="none" stroke="rgba(0,0,0,0.12)" stroke-width="1"/>${rotClose}`,
         );
-        foregroundSvgParts.push(parts.join(''));
+        pendingSvgParts.push(parts.join(''));
       } else if (node.kind.type === 'assetRef') {
         const asset = lookupAsset(assetsByID, node.kind.assetID);
         const rawBuf =
@@ -507,10 +518,12 @@ export const MoodboardExporter = {
 
         if (rawBuf && rawBuf.length > 0) {
           try {
-            let pipe = sharp(rawBuf).rotate();
-            const meta = await pipe.metadata();
-            const imgW = meta.width ?? 0;
-            const imgH = meta.height ?? 0;
+            // Materialize upright pixels BEFORE reading width/height & calling .extract()
+            // so EXIF orientation 5-8 portrait photos never crop with swapped dimensions!
+            const oriented = await sharp(rawBuf).rotate().toBuffer({ resolveWithObject: true });
+            const imgW = oriented.info.width ?? 0;
+            const imgH = oriented.info.height ?? 0;
+            let pipe = sharp(oriented.data);
 
             const crop = node.kind.crop;
             if (
@@ -582,7 +595,9 @@ export const MoodboardExporter = {
                         .png()
                         .toBuffer()
                     : cardBuf;
-                imageComposites.push({
+                // Flush SVG nodes below this image so notes/palettes with lower zIndex stay behind!
+                flushPendingSvg();
+                overlays.push({
                   input: finalCard,
                   left: Math.max(0, leftPx),
                   top: Math.max(0, topPx),
@@ -601,7 +616,7 @@ export const MoodboardExporter = {
             darkAppearance ? '#2B2F36' : '#DFDDD7',
           );
           const titleColor = isLightHex(fallbackHex) ? 'rgba(20,20,24,0.78)' : 'rgba(255,255,255,0.88)';
-          backdropSvgParts.push(
+          pendingSvgParts.push(
             `${rotOpen}<rect x="${rect.x.toFixed(1)}" y="${rect.y.toFixed(1)}" width="${rect.width.toFixed(1)}" height="${rect.height.toFixed(1)}" rx="12" fill="${fallbackHex}"/>` +
               (asset?.title
                 ? `<text x="${(rect.x + 12).toFixed(1)}" y="${(rect.y + 26).toFixed(1)}" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="12" font-weight="500" fill="${titleColor}">${escapeXML(asset.title.slice(0, 28))}</text>`
@@ -612,7 +627,7 @@ export const MoodboardExporter = {
       }
     }
 
-    // Annotations layer (connectors + ink strokes)
+    // Annotations layer (connectors + ink strokes above all nodes)
     if (baseOpts.includeAnnotations) {
       for (const connector of document.connectors) {
         const fromBase = resolvedFrames[connector.fromNodeID];
@@ -630,36 +645,23 @@ export const MoodboardExporter = {
           width: toBase.width,
           height: toBase.height,
         };
-        foregroundSvgParts.push(renderConnectorSVG(connector, fromRect, toRect));
+        pendingSvgParts.push(renderConnectorSVG(connector, fromRect, toRect));
       }
 
       for (const stroke of document.inkStrokes) {
         if (stroke.points.length >= 2) {
-          foregroundSvgParts.push(renderInkStrokeSVG(stroke, offsetX, offsetY));
+          pendingSvgParts.push(renderInkStrokeSVG(stroke, offsetX, offsetY));
         }
       }
     }
 
-    const backdropSvg = Buffer.from(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${pixelW}" height="${pixelH}" viewBox="0 0 ${canvasW} ${canvasH}">${backdropSvgParts.join('')}</svg>`,
-    );
-    const foregroundSvg = Buffer.from(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${pixelW}" height="${pixelH}" viewBox="0 0 ${canvasW} ${canvasH}">${foregroundSvgParts.join('')}</svg>`,
-    );
+    flushPendingSvg();
 
     const bgRgba = isTransparent
       ? { r: 0, g: 0, b: 0, alpha: 0 }
       : darkAppearance
         ? { r: 20, g: 21, b: 23, alpha: 1 } // #141517
         : { r: 246, g: 246, b: 245, alpha: 1 }; // #F6F6F5
-
-    const overlays: OverlayOptions[] = [
-      { input: backdropSvg, left: 0, top: 0 },
-      ...imageComposites,
-    ];
-    if (foregroundSvgParts.length > 0) {
-      overlays.push({ input: foregroundSvg, left: 0, top: 0 });
-    }
 
     let canvas = sharp({
       create: {

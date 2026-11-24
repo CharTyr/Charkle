@@ -10,6 +10,7 @@ import {
   createCharkleClient,
   ingestImageUrl,
   ingestImageUrlsBatch,
+  ingestUrl,
   testConnection,
 } from '../lib/api.js';
 import {
@@ -146,9 +147,9 @@ test('CSS, HTML, and runtime UI files pass motion, token, CSP, DOM-ID, and clean
     }
   }
 
-  // Zero developer jargon / internal design-system terms across extension UI & runtime files
+  // Zero developer jargon / internal design-system terms / stale copy across extension UI & runtime files
   const forbiddenJargon =
-    /\b(Manifest V3|Bearer|PAT|Personal Access Token|Shadow DOM|CORS|Gallery-First|Liquid Glass|16-Grid|Layered|Duotone|scrypt|HttpOnly|FTS5)\b|唯一主角|零摩擦/i;
+    /\b(Manifest V3|Bearer|PAT|Personal Access Token|Shadow DOM|CORS|Gallery-First|Liquid Glass|16-Grid|Layered|Duotone|scrypt|HttpOnly|FTS5)\b|唯一主角|零摩擦|浏览器扩展与采集|chk_|http\/https|未知操作类型|扩展服务暂未响应|色卡预览|保存原图并记录来源|松手即可保存图片|将存入收件箱|请先连接服务或点击刷新列表|大于 64px/i;
   for (const rel of [
     'popup.html',
     'popup.css',
@@ -161,8 +162,16 @@ test('CSS, HTML, and runtime UI files pass motion, token, CSP, DOM-ID, and clean
   ]) {
     const text = fs.readFileSync(path.join(EXT_ROOT, rel), 'utf8');
     const hit = forbiddenJargon.exec(text);
-    assert.equal(hit, null, `${rel} contains forbidden developer jargon: ${hit?.[0]}`);
+    assert.equal(hit, null, `${rel} contains forbidden developer jargon or stale copy: ${hit?.[0]}`);
   }
+
+  // Verify updated Settings path and removed redundant cards/labels
+  const popupHtml = fs.readFileSync(path.join(EXT_ROOT, 'popup.html'), 'utf8');
+  const optionsHtml = fs.readFileSync(path.join(EXT_ROOT, 'options.html'), 'utf8');
+  assert.ok(popupHtml.includes('设置 → 插件与扩展'), 'popup.html should point to 设置 → 插件与扩展');
+  assert.ok(optionsHtml.includes('设置 → 插件与扩展'), 'options.html should point to 设置 → 插件与扩展');
+  assert.equal(optionsHtml.includes('menu-guide-list'), false, 'options.html must not contain redundant 右键菜单 card');
+  assert.equal(optionsHtml.includes('右键菜单'), false, 'options.html must not contain 右键菜单 helper copy');
 });
 
 // MARK: - 3. URL Detection, Color & Filename Utilities
@@ -181,7 +190,7 @@ test('detectSpecialSource matches X, Threads, Bluesky, GitHub repos, and generic
   assert.equal(detectSpecialSource('https://github.com/vercel/next.js/tree/canary').kind, 'github');
   assert.equal(detectSpecialSource('https://github.com/vercel/next.js/issues/123').kind, 'web');
   assert.equal(detectSpecialSource('https://github.com/settings/tokens').kind, 'web');
-  assert.equal(detectSpecialSource('https://example.com/channels/minimal').kind, 'web');
+  assert.equal(detectSpecialSource('https://example.org/channels/minimal').kind, 'web');
   assert.equal(detectSpecialSource('chrome://extensions').kind, 'unsupported');
 });
 
@@ -484,4 +493,49 @@ test('ingestImageUrlsBatch tolerates partial failures and reports live progress'
   assert.equal(summary.failed, 1);
   assert.equal(progressEvents.length, 2);
   assert.equal(progressEvents[1].completed, 2);
+});
+
+test('api error messages remain concise and free of raw HTTP/protocol jargon', async () => {
+  const cfg = { serverUrl: 'http://127.0.0.1:3417', apiToken: 'chk_err_test' };
+
+  await assert.rejects(
+    () => ingestUrl(cfg, 'chrome://settings'),
+    (err) => err instanceof CharkleApiError && err.message === '仅支持普通网页链接',
+  );
+
+  await assert.rejects(
+    () =>
+      testConnection(cfg, {
+        fetchImpl: async () => new Response('Bad Gateway', { status: 502 }),
+      }),
+    (err) => err instanceof CharkleApiError && err.message === '连接失败（502）',
+  );
+
+  await assert.rejects(
+    () =>
+      testConnection(cfg, {
+        fetchImpl: async () => new Response('<html>not charkle</html>', { status: 200 }),
+      }),
+    (err) => err instanceof CharkleApiError && err.message === '无法识别该服务地址，请检查设置',
+  );
+
+  const fakePng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+  await assert.rejects(
+    () =>
+      ingestImageUrl(cfg, 'https://cdn.site.example/big.png', null, 'big', null, null, {
+        fetchImpl: async (url) => {
+          if (url === 'https://cdn.site.example/big.png') {
+            return new Response(fakePng, { status: 200, headers: { 'content-type': 'image/png' } });
+          }
+          if (url.endsWith('/api/v1/assets/ingest')) {
+            return new Response('', { status: 413 });
+          }
+          if (url.endsWith('/api/v1/assets/upload')) {
+            return new Response('Internal Server Error', { status: 500 });
+          }
+          throw new Error(`Unexpected URL: ${url}`);
+        },
+      }),
+    (err) => err instanceof CharkleApiError && err.message === '上传图片失败（500）',
+  );
 });

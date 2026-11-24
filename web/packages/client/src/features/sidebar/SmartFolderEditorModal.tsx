@@ -8,7 +8,7 @@ import {
   smartFolderRuleHasAnyCondition,
 } from '@charkle/shared';
 import type { MediaKind, SmartFolderRecord, SmartFolderRule } from '@charkle/shared';
-import { Button, ModalShell, SMART_FOLDER_PRESET_COLORS } from '../../design-system';
+import { Button, ModalShell, SegmentedControl, SMART_FOLDER_PRESET_COLORS } from '../../design-system';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 
@@ -157,29 +157,22 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="例如：暖陶土高分海报 / React 灵感"
+              placeholder="智能文件夹名称"
               className="h-9 px-3 text-[13px] rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
             />
           </div>
           <div className="flex flex-col gap-1.5">
             <label className="text-[12px] font-medium text-[var(--text-secondary)]">匹配逻辑</label>
-            <div className="inline-flex p-0.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-              {(['all', 'any'] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setRule((r) => ({ ...r, matchMode: mode }))}
-                  className={[
-                    'charkle-pressable px-2.5 py-1 text-[12px] font-medium rounded-[6px] cursor-pointer',
-                    rule.matchMode === mode
-                      ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                      : 'text-[var(--text-secondary)]',
-                  ].join(' ')}
-                >
-                  {mode === 'all' ? '满足全部' : '满足任一'}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              ariaLabel="匹配逻辑"
+              size="md"
+              value={rule.matchMode}
+              onChange={(mode) => setRule((r) => ({ ...r, matchMode: mode }))}
+              options={[
+                { id: 'all', label: '满足全部' },
+                { id: 'any', label: '满足任一' },
+              ]}
+            />
           </div>
         </div>
 
@@ -250,7 +243,7 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
             type="text"
             value={rule.descriptionQuery}
             onChange={(e) => setRule((r) => ({ ...r, descriptionQuery: e.target.value }))}
-            placeholder="空格分隔多个词（全部命中）"
+            placeholder="输入关键词，空格分隔"
             className="h-9 px-3 text-[13px] rounded-[var(--radius-settings-inner)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
           />
         </div>

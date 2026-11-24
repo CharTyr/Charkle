@@ -13,6 +13,7 @@ public struct SettingsOverlayView: View {
     public let onToggleNotchPreview: () -> Void
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
+    public let onEnterMinimalCaptureMode: () -> Void
     public let onClose: () -> Void
 
     public init(
@@ -22,6 +23,7 @@ public struct SettingsOverlayView: View {
         onToggleNotchPreview: @escaping () -> Void,
         onSyncHotkeysEnabled: @escaping (Bool) -> Void,
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
+        onEnterMinimalCaptureMode: @escaping () -> Void = {},
         onClose: @escaping () -> Void
     ) {
         self.coordinator = coordinator
@@ -30,6 +32,7 @@ public struct SettingsOverlayView: View {
         self.onToggleNotchPreview = onToggleNotchPreview
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
+        self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
         self.onClose = onClose
     }
 
@@ -51,6 +54,7 @@ public struct SettingsOverlayView: View {
                     onToggleNotchPreview: onToggleNotchPreview,
                     onSyncHotkeysEnabled: onSyncHotkeysEnabled,
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
+                    onEnterMinimalCaptureMode: onEnterMinimalCaptureMode,
                     onClose: onClose
                 )
                 .frame(width: modalWidth, height: modalHeight)
@@ -98,6 +102,7 @@ public struct SettingsContentShell: View {
     public let onToggleNotchPreview: () -> Void
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
+    public let onEnterMinimalCaptureMode: () -> Void
     public let onClose: (() -> Void)?
 
     public init(
@@ -107,6 +112,7 @@ public struct SettingsContentShell: View {
         onToggleNotchPreview: @escaping () -> Void,
         onSyncHotkeysEnabled: @escaping (Bool) -> Void,
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
+        onEnterMinimalCaptureMode: @escaping () -> Void = {},
         onClose: (() -> Void)? = nil
     ) {
         self.coordinator = coordinator
@@ -115,6 +121,7 @@ public struct SettingsContentShell: View {
         self.onToggleNotchPreview = onToggleNotchPreview
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
+        self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
         self.onClose = onClose
     }
 
@@ -286,7 +293,8 @@ public struct SettingsContentShell: View {
             NotchShelfSettingsPane(
                 coordinator: coordinator,
                 onToggleNotchPreview: onToggleNotchPreview,
-                onSyncDefaultNotchTarget: onSyncDefaultNotchTarget
+                onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
+                onEnterMinimalCaptureMode: onEnterMinimalCaptureMode
             )
         case .captureShortcuts:
             CaptureShortcutsSettingsPane(

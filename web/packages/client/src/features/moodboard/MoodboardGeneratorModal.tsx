@@ -3,8 +3,6 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   Loader2,
   Lock,
   Send,
@@ -27,6 +25,12 @@ import type {
   UUID,
 } from '@charkle/shared';
 import { thumbnailURL } from '../../api/client';
+import {
+  DisclosureGroup,
+  EmptyStateVignette,
+  FolderHierarchyScopeTree,
+  SegmentedControl,
+} from '../../design-system';
 import { Button } from '../../design-system/Button';
 import { CharkleIcon } from '../../design-system/CharkleIcon';
 import { ModalShell } from '../../design-system/ModalShell';
@@ -43,12 +47,24 @@ import {
 
 type EntryMode = 'combined' | 'prompt' | 'seedAssets' | 'palette' | 'manualSelection';
 
-const ENTRY_MODE_TABS: ReadonlyArray<{ id: EntryMode; label: string; hint: string }> = [
-  { id: 'combined', label: '多条件组合', hint: '结合关键词、目录、参考图与色板' },
-  { id: 'prompt', label: '灵感词', hint: '用文字描述想要的风格与氛围' },
-  { id: 'seedAssets', label: '参考图', hint: '选择 1–4 张参考图匹配相近素材' },
-  { id: 'palette', label: '目标色板', hint: '按目标颜色与色差容差筛选素材' },
-  { id: 'manualSelection', label: '已选素材', hint: '直接使用所选素材生成情绪板' },
+const ENTRY_MODE_TABS: ReadonlyArray<{ id: EntryMode; label: string }> = [
+  { id: 'combined', label: '多条件组合' },
+  { id: 'prompt', label: '灵感词' },
+  { id: 'seedAssets', label: '参考图' },
+  { id: 'palette', label: '目标色板' },
+  { id: 'manualSelection', label: '已选素材' },
+];
+
+const LAYOUT_STYLE_OPTIONS: ReadonlyArray<{ id: EditorialStyle; label: string }> =
+  EDITORIAL_STYLES.map((style) => ({
+    id: style,
+    label: editorialStyleLocalizedLabel(style),
+  }));
+
+const PREFERRED_COUNT_OPTIONS: ReadonlyArray<{ id: '6' | '10' | '16'; label: string }> = [
+  { id: '6', label: '6 张' },
+  { id: '10', label: '10 张' },
+  { id: '16', label: '16 张' },
 ];
 
 export const MoodboardGeneratorModal: React.FC = () => {
@@ -99,6 +115,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
   const [excludedAssetIDs, setExcludedAssetIDs] = useState<Set<UUID>>(new Set());
   const [refinementInput, setRefinementInput] = useState('');
   const [boardTitle, setBoardTitle] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [traceExpanded, setTraceExpanded] = useState(true);
   const [applying, setApplying] = useState(false);
 
@@ -156,15 +173,6 @@ export const MoodboardGeneratorModal: React.FC = () => {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 30);
   }, [assetsByID]);
-
-  const toggleFolderScope = (id: UUID) => {
-    setScopeFolderIDs((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
 
   const toggleRequiredTag = (name: string) => {
     setRequiredTags((prev) => {
@@ -377,9 +385,6 @@ export const MoodboardGeneratorModal: React.FC = () => {
                 );
               })}
             </div>
-            <p className="text-[11px] text-[var(--text-tertiary)] mt-1.5">
-              {ENTRY_MODE_TABS.find((t) => t.id === entryMode)?.hint}
-            </p>
           </div>
 
           {/* 1. Prompt Input */}
@@ -392,7 +397,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                 rows={3}
                 value={promptText}
                 onChange={(e) => setPromptText(e.target.value)}
-                placeholder="描述想要的氛围、材质、光影或排除项（如：只要极简暖调陶艺与纸张肌理，不要暗色界面）…"
+                placeholder="描述想要的风格、材质或色调…"
                 className="w-full p-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none focus:border-[var(--accent)] resize-none"
               />
               <div className="flex flex-wrap gap-1.5">
@@ -443,7 +448,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                       type="button"
                       onClick={() => toggleSeedAsset(asset.id)}
                       title={asset.title}
-                      className="charkle-pressable relative aspect-square rounded-[7px] overflow-hidden bg-[var(--bg-subtle)] cursor-pointer"
+                      className="charkle-pressable relative aspect-square rounded-[var(--radius-settings-inner)] overflow-hidden bg-[var(--bg-subtle)] cursor-pointer"
                       style={{
                         boxShadow: picked ? '0 0 0 2px var(--accent)' : 'inset 0 0 0 1px var(--border-hairline)',
                       }}
@@ -486,7 +491,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                       type="button"
                       title={hex}
                       onClick={() => toggleSwatch(hex)}
-                      className="charkle-pressable w-7 h-7 rounded-[7px] cursor-pointer"
+                      className="charkle-pressable w-7 h-7 rounded-[var(--radius-chip)] cursor-pointer"
                       style={{
                         backgroundColor: hex,
                         boxShadow: active
@@ -500,7 +505,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                 })}
                 <label
                   title="添加自定义 HEX 颜色"
-                  className="inline-flex items-center gap-1 px-2 h-7 rounded-[7px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[11px] text-[var(--text-secondary)] cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2 h-7 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[11px] text-[var(--text-secondary)] cursor-pointer"
                 >
                   <input
                     type="color"
@@ -532,50 +537,23 @@ export const MoodboardGeneratorModal: React.FC = () => {
             </div>
           )}
 
-          {/* 4. Folder & Tag Scope Filters */}
+          {/* 4. Hierarchical Folder & Tag Scope Filters */}
           {entryMode !== 'manualSelection' && (
             <div className="flex flex-col gap-2.5 pt-2 border-t border-[var(--border-hairline)]">
               <div className="flex items-center justify-between">
                 <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                   目录与标签限定
                 </span>
-                <span className="text-[11px] text-[var(--text-tertiary)]">
-                  {scopeFolderIDs.size === 0 ? '全库检索' : `${scopeFolderIDs.size} 个目录`}
+                <span className="text-[11px] text-[var(--text-tertiary)] tabular-nums">
+                  {scopeFolderIDs.size === 0 ? '全库检索' : `已选 ${scopeFolderIDs.size} 个目录`}
                 </span>
               </div>
               {folders.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setScopeFolderIDs(new Set())}
-                    className={[
-                      'charkle-pressable px-2 py-0.5 rounded-[var(--radius-chip)] text-[11px] border cursor-pointer',
-                      scopeFolderIDs.size === 0
-                        ? 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-ring)] font-medium'
-                        : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] border-[var(--border-hairline)]',
-                    ].join(' ')}
-                  >
-                    全部素材
-                  </button>
-                  {folders.slice(0, 12).map((f) => {
-                    const active = scopeFolderIDs.has(f.id);
-                    return (
-                      <button
-                        key={f.id}
-                        type="button"
-                        onClick={() => toggleFolderScope(f.id)}
-                        className={[
-                          'charkle-pressable px-2 py-0.5 rounded-[var(--radius-chip)] text-[11px] border cursor-pointer',
-                          active
-                            ? 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-ring)] font-medium'
-                            : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] border-[var(--border-hairline)]',
-                        ].join(' ')}
-                      >
-                        {f.name}
-                      </button>
-                    );
-                  })}
-                </div>
+                <FolderHierarchyScopeTree
+                  folders={folders}
+                  selectedFolderIDs={scopeFolderIDs}
+                  onChange={setScopeFolderIDs}
+                />
               )}
 
               {tags.length > 0 && (
@@ -603,84 +581,80 @@ export const MoodboardGeneratorModal: React.FC = () => {
             </div>
           )}
 
-          {/* 5. Composition & Layout Options */}
-          <div className="flex flex-col gap-2.5 pt-2 border-t border-[var(--border-hairline)]">
-            <span className="text-[12px] font-semibold text-[var(--text-primary)]">版面与构成</span>
-
-            <div className="flex items-center justify-between gap-2 text-[11.5px]">
-              <span className="text-[var(--text-secondary)]">初始构图节奏</span>
-              <div className="inline-flex p-0.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                {EDITORIAL_STYLES.map((style) => (
-                  <button
-                    key={style}
-                    type="button"
-                    onClick={() => setLayoutStyle(style)}
-                    className={[
-                      'px-2 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer transition-colors duration-[var(--duration-press,120ms)] ease-[var(--ease-out)]',
-                      layoutStyle === style
-                        ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                    ].join(' ')}
-                  >
-                    {editorialStyleLocalizedLabel(style)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 text-[11.5px]">
-              <span className="text-[var(--text-secondary)]">数量上限</span>
-              <div className="inline-flex p-0.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)]">
-                {([6, 10, 16] as const).map((cnt) => (
-                  <button
-                    key={cnt}
-                    type="button"
-                    onClick={() => setPreferredCount(cnt)}
-                    className={[
-                      'px-2.5 py-0.5 rounded-[6px] text-[11px] font-medium cursor-pointer tabular-nums',
-                      preferredCount === cnt
-                        ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-xs'
-                        : 'text-[var(--text-secondary)]',
-                    ].join(' ')}
-                  >
-                    {cnt} 张
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <label className="inline-flex items-center gap-2 text-[11.5px] text-[var(--text-primary)] cursor-pointer pt-0.5">
-              <input
-                type="checkbox"
-                checked={includeCuratorNotes}
-                onChange={(e) => setIncludeCuratorNotes(e.target.checked)}
-                className="accent-[var(--accent)]"
-              />
-              附带视觉策展便签与分区标题
-            </label>
-
-            <label
-              title={
-                isTypeSafeReady
-                  ? '入选主图将自动定位局部细节并写入非破坏性裁切框'
-                  : '需在「设置 → 智能与搜索」中开启视觉定位引擎'
+          {/* 5. Collapsible Advanced Composition & Layout Options */}
+          <div className="pt-2 border-t border-[var(--border-hairline)]">
+            <DisclosureGroup
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
+              headerClassName="-mx-2 px-2"
+              label={
+                <>
+                  <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                    版面与高级选项
+                  </span>
+                  <span className="text-[11px] text-[var(--text-tertiary)] tabular-nums">
+                    {editorialStyleLocalizedLabel(layoutStyle)} · {preferredCount} 张
+                  </span>
+                </>
               }
-              className={[
-                'inline-flex items-center gap-2 text-[11.5px]',
-                isTypeSafeReady
-                  ? 'text-[var(--text-primary)] cursor-pointer'
-                  : 'text-[var(--text-tertiary)] cursor-not-allowed',
-              ].join(' ')}
             >
-              <input
-                type="checkbox"
-                checked={autoFocusDetailCrop}
-                disabled={!isTypeSafeReady}
-                onChange={(e) => setAutoFocusDetailCrop(e.target.checked)}
-                className="accent-[var(--accent)]"
-              />
-              自动裁切画面细节
-            </label>
+              <div className="flex flex-col gap-2.5 pt-1">
+                <div className="flex items-center justify-between gap-2 text-[11.5px]">
+                  <span className="text-[var(--text-secondary)] shrink-0">构图节奏</span>
+                  <SegmentedControl
+                    ariaLabel="初始构图节奏"
+                    size="sm"
+                    options={LAYOUT_STYLE_OPTIONS}
+                    value={layoutStyle}
+                    onChange={setLayoutStyle}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between gap-2 text-[11.5px]">
+                  <span className="text-[var(--text-secondary)] shrink-0">数量上限</span>
+                  <SegmentedControl
+                    ariaLabel="数量上限"
+                    size="sm"
+                    options={PREFERRED_COUNT_OPTIONS}
+                    value={String(preferredCount) as '6' | '10' | '16'}
+                    onChange={(next) => setPreferredCount(Number(next) as 6 | 10 | 16)}
+                  />
+                </div>
+
+                <label className="inline-flex items-center gap-2 text-[11.5px] text-[var(--text-primary)] cursor-pointer pt-0.5">
+                  <input
+                    type="checkbox"
+                    checked={includeCuratorNotes}
+                    onChange={(e) => setIncludeCuratorNotes(e.target.checked)}
+                    className="accent-[var(--accent)]"
+                  />
+                  附带视觉策展便签与分区标题
+                </label>
+
+                <label
+                  title={
+                    isTypeSafeReady
+                      ? '自动裁切画面焦点'
+                      : '需先在「设置 → AI 智能」中开启'
+                  }
+                  className={[
+                    'inline-flex items-center gap-2 text-[11.5px]',
+                    isTypeSafeReady
+                      ? 'text-[var(--text-primary)] cursor-pointer'
+                      : 'text-[var(--text-tertiary)] cursor-not-allowed',
+                  ].join(' ')}
+                >
+                  <input
+                    type="checkbox"
+                    checked={autoFocusDetailCrop}
+                    disabled={!isTypeSafeReady}
+                    onChange={(e) => setAutoFocusDetailCrop(e.target.checked)}
+                    className="accent-[var(--accent)]"
+                  />
+                  自动裁切画面细节
+                </label>
+              </div>
+            </DisclosureGroup>
           </div>
 
           {/* Primary Trigger */}
@@ -724,25 +698,23 @@ export const MoodboardGeneratorModal: React.FC = () => {
 
             {/* Live Progress Timeline */}
             {(isCurating || agentSteps.length > 0) && (
-              <div className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setTraceExpanded((v) => !v)}
-                  className="w-full px-3.5 py-2.5 flex items-center justify-between text-[12px] font-semibold text-[var(--text-primary)] cursor-pointer hover:bg-[var(--bg-subtle)]/50"
+              <div className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-gallery)] border border-[var(--border-hairline)] overflow-hidden p-1.5">
+                <DisclosureGroup
+                  open={traceExpanded}
+                  onOpenChange={setTraceExpanded}
+                  headerClassName="px-2 py-1.5"
+                  label={
+                    <span className="inline-flex items-center gap-2 text-[12px] font-semibold text-[var(--text-primary)]">
+                      {isCurating ? (
+                        <Loader2 size={13} className="animate-spin text-[var(--accent)]" />
+                      ) : (
+                        <CheckCircle2 size={13} className="text-[var(--success)]" />
+                      )}
+                      生成进度 ({agentSteps.length})
+                    </span>
+                  }
                 >
-                  <span className="inline-flex items-center gap-2">
-                    {isCurating ? (
-                      <Loader2 size={13} className="animate-spin text-[var(--accent)]" />
-                    ) : (
-                      <CheckCircle2 size={13} className="text-[var(--success)]" />
-                    )}
-                    生成进度 ({agentSteps.length})
-                  </span>
-                  {traceExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </button>
-
-                {traceExpanded && (
-                  <div className="px-3.5 pb-3 pt-1 flex flex-col gap-2 border-t border-[var(--border-hairline)]">
+                  <div className="px-2 pb-2 pt-2 flex flex-col gap-2 border-t border-[var(--border-hairline)]">
                     {agentSteps.length === 0 ? (
                       <div className="text-[12px] text-[var(--text-secondary)] py-1.5">
                         正在分析素材库…
@@ -766,7 +738,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                             </span>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2">
-                                <span className="px-1.5 py-0.5 rounded-[5px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-secondary)]">
+                                <span className="px-1.5 py-0.5 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[10px] font-medium text-[var(--text-secondary)]">
                                   {meta?.shortLabel ?? step.phase}
                                 </span>
                                 <span className="font-medium text-[var(--text-primary)]">
@@ -784,21 +756,18 @@ export const MoodboardGeneratorModal: React.FC = () => {
                       })
                     )}
                   </div>
-                )}
+                </DisclosureGroup>
               </div>
             )}
 
             {/* Empty workbench prompt */}
             {!proposal && !isCurating && (
               <div className="flex-1 min-h-[280px] flex flex-col items-center justify-center text-center max-w-sm mx-auto gap-3">
-                <CharkleIcon name="sparkle-board" style="layered" size={52} />
+                <EmptyStateVignette kind="emptyMoodboard" compact />
                 <div>
                   <div className="text-[14.5px] font-semibold text-[var(--text-primary)]">
                     准备生成情绪板
                   </div>
-                  <p className="text-[12.5px] text-[var(--text-secondary)] mt-1 leading-relaxed">
-                    在左侧设置条件后点击「开始生成」。
-                  </p>
                 </div>
               </div>
             )}
@@ -894,7 +863,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                                   className="w-full h-full object-cover"
                                 />
                                 {isHero && (
-                                  <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-[5px] bg-[var(--accent)] text-white text-[9.5px] font-semibold">
+                                  <span className="absolute top-1.5 left-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-[var(--radius-chip)] bg-[var(--accent)] text-white text-[9.5px] font-semibold">
                                     <Star size={9} fill="currentColor" /> 主图
                                   </span>
                                 )}
@@ -911,7 +880,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                                       })
                                     }
                                     className={[
-                                      'w-6 h-6 rounded-[5px] inline-flex items-center justify-center text-white cursor-pointer',
+                                      'w-6 h-6 rounded-[var(--radius-chip)] inline-flex items-center justify-center text-white cursor-pointer',
                                       isLocked ? 'bg-[var(--accent)]' : 'bg-black/60 hover:bg-black/80',
                                     ].join(' ')}
                                   >
@@ -929,7 +898,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                                       })
                                     }
                                     className={[
-                                      'w-6 h-6 rounded-[5px] inline-flex items-center justify-center text-white cursor-pointer',
+                                      'w-6 h-6 rounded-[var(--radius-chip)] inline-flex items-center justify-center text-white cursor-pointer',
                                       isExcluded ? 'bg-[var(--danger)]' : 'bg-black/60 hover:bg-black/80',
                                     ].join(' ')}
                                   >
@@ -979,7 +948,7 @@ export const MoodboardGeneratorModal: React.FC = () => {
                 type="text"
                 value={refinementInput}
                 onChange={(e) => setRefinementInput(e.target.value)}
-                placeholder="多轮微调指令（如：去掉偏暗的卡片、把陶瓷质感放为主图、补充两张留白构图）…"
+                placeholder="输入微调要求…"
                 className="flex-1 h-8 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none focus:border-[var(--accent)]"
               />
               <Button

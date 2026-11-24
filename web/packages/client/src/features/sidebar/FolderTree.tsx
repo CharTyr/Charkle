@@ -16,6 +16,7 @@ import {
   MACOS_FOLDER_COLORS,
   ModalShell,
   Popover,
+  prefersReducedMotion,
 } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
@@ -35,6 +36,10 @@ interface DropTargetState {
   position: DropPosition;
 }
 
+const ROW_RIPPLE_AMPLITUDE_PX = 6;
+const ROW_RIPPLE_DECAY = 0.7;
+const ROW_RIPPLE_STAGGER_MS = 24;
+
 export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) => {
   const folders = useLibraryStore((s) => s.folders);
   const createFolder = useLibraryStore((s) => s.createFolder);
@@ -43,14 +48,22 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
   const updateFolderAppearance = useLibraryStore((s) => s.updateFolderAppearance);
   const deleteFolder = useLibraryStore((s) => s.deleteFolder);
   const pinFolderOffline = useLibraryStore((s) => s.pinFolderOffline);
+  const pinnedFolderIDs = useLibraryStore((s) => s.pinnedFolderIDs);
+  const assetsByID = useLibraryStore((s) => s.assetsByID);
   const batchPatch = useLibraryStore((s) => s.batchPatch);
   const uploadFiles = useLibraryStore((s) => s.uploadFiles);
 
   const destination = useCoordinatorStore((s) => s.destination);
   const navigate = useCoordinatorStore((s) => s.navigate);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+  const expandedSidebarFolderIDs = useCoordinatorStore((s) => s.expandedSidebarFolderIDs);
+  const toggleSidebarFolderExpanded = useCoordinatorStore((s) => s.toggleSidebarFolderExpanded);
+  const setSidebarFolderExpanded = useCoordinatorStore((s) => s.setSidebarFolderExpanded);
 
-  const [expandedIDs, setExpandedIDs] = useState<Set<UUID>>(() => new Set());
+  const expandedIDs = useMemo(
+    () => new Set<UUID>(expandedSidebarFolderIDs),
+    [expandedSidebarFolderIDs],
+  );
   const [renamingID, setRenamingID] = useState<UUID | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [creatingUnderParentID, setCreatingUnderParentID] = useState<UUID | null>(null);
@@ -73,7 +86,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
 
   const [deleteDialogFolder, setDeleteDialogFolder] = useState<FolderRecord | null>(null);
 
-  const childrenByParent = useMemo(() => {
+  const rawChildrenByParent = useMemo(() => {
     const map = new Map<UUID | null, FolderRecord[]>();
     for (const folder of folders) {
       const key = folder.parentID ?? null;
@@ -81,27 +94,100 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
       list.push(folder);
       map.set(key, list);
     }
-    for (const [, list] of map) {
-      list.sort((a, b) => {
+    return map;
+  }, [folders]);
+
+  // Recursive subtree asset counts & offline pin state matching macOS SidebarView
+  const { subtreeCountByID, folderPinStateByID } = useMemo(() => {
+    const countCache = new Map<UUID, number>();
+    const subtreeIDsCache = new Map<UUID, UUID[]>();
+
+    const collectSubtree = (id: UUID, stack: Set<UUID>): { count: number; ids: UUID[] } => {
+      const cachedCount = countCache.get(id);
+      const cachedIDs = subtreeIDsCache.get(id);
+      if (cachedCount !== undefined && cachedIDs !== undefined) {
+        return { count: cachedCount, ids: cachedIDs };
+      }
+      if (stack.has(id)) return { count: 0, ids: [] };
+      stack.add(id);
+      const node = folders.find((f) => f.id === id);
+      let sum = node?.assetCount ?? 0;
+      const ids: UUID[] = [id];
+      const children = rawChildrenByParent.get(id) ?? [];
+      for (const child of children) {
+        const res = collectSubtree(child.id, stack);
+        sum += res.count;
+        ids.push(...res.ids);
+      }
+      stack.delete(id);
+      countCache.set(id, sum);
+      subtreeIDsCache.set(id, ids);
+      return { count: sum, ids };
+    };
+
+    const stack = new Set<UUID>();
+    for (const folder of folders) {
+      collectSubtree(folder.id, stack);
+    }
+
+    // Aggregate loaded non-trashed assets per folder ID
+    const loadedStatsByFolder = new Map<UUID, { total: number; pinned: number }>();
+    for (const asset of Object.values(assetsByID)) {
+      if (asset.isTrashed || !asset.folderID) continue;
+      const entry = loadedStatsByFolder.get(asset.folderID) ?? { total: 0, pinned: 0 };
+      entry.total += 1;
+      if (asset.pinnedOffline) entry.pinned += 1;
+      loadedStatsByFolder.set(asset.folderID, entry);
+    }
+
+    const persistedPinned = new Set(pinnedFolderIDs);
+    const pinMap = new Map<UUID, { allPinned: boolean; anyPinned: boolean }>();
+    for (const folder of folders) {
+      const ids = subtreeIDsCache.get(folder.id) ?? [folder.id];
+      let loadedTotal = 0;
+      let loadedPinned = 0;
+      for (const fid of ids) {
+        const stat = loadedStatsByFolder.get(fid);
+        if (stat) {
+          loadedTotal += stat.total;
+          loadedPinned += stat.pinned;
+        }
+      }
+      if (loadedTotal > 0) {
+        pinMap.set(folder.id, {
+          allPinned: loadedPinned === loadedTotal,
+          anyPinned: loadedPinned > 0,
+        });
+      } else {
+        const isPersisted = persistedPinned.has(folder.id);
+        pinMap.set(folder.id, { allPinned: isPersisted, anyPinned: isPersisted });
+      }
+    }
+
+    return { subtreeCountByID: countCache, folderPinStateByID: pinMap };
+  }, [folders, rawChildrenByParent, assetsByID, pinnedFolderIDs]);
+
+  const childrenByParent = useMemo(() => {
+    const map = new Map<UUID | null, FolderRecord[]>();
+    for (const [key, list] of rawChildrenByParent) {
+      const sorted = [...list].sort((a, b) => {
         if (sortMode === 'name') return a.name.localeCompare(b.name, 'zh-CN');
         if (sortMode === 'count') {
-          if (b.assetCount !== a.assetCount) return b.assetCount - a.assetCount;
+          const countA = subtreeCountByID.get(a.id) ?? a.assetCount;
+          const countB = subtreeCountByID.get(b.id) ?? b.assetCount;
+          if (countB !== countA) return countB - countA;
           return a.name.localeCompare(b.name, 'zh-CN');
         }
         if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
         return a.name.localeCompare(b.name, 'zh-CN');
       });
+      map.set(key, sorted);
     }
     return map;
-  }, [folders, sortMode]);
+  }, [rawChildrenByParent, sortMode, subtreeCountByID]);
 
   const toggleExpand = (id: UUID) => {
-    setExpandedIDs((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    toggleSidebarFolderExpanded(id);
   };
 
   const commitRename = async () => {
@@ -125,7 +211,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
     if (!trimmed || !parentID) return;
     try {
       const created = await createFolder(trimmed, parentID);
-      setExpandedIDs((prev) => new Set(prev).add(parentID));
+      setSidebarFolderExpanded(parentID, true);
       navigate({ type: 'folder', id: created.id });
     } catch (err) {
       pushToast({ tone: 'error', message: err instanceof Error ? err.message : '创建子文件夹失败' });
@@ -145,12 +231,16 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
       e.dataTransfer.dropEffect = 'move';
       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
       const relY = (e.clientY - rect.top) / Math.max(1, rect.height);
-      const position: DropPosition = relY < 0.25 ? 'before' : relY > 0.75 ? 'after' : 'inside';
+      const position: DropPosition = relY < 0.28 ? 'before' : relY > 0.72 ? 'after' : 'inside';
       setDropTarget({ folderID: folder.id, position });
     }
   };
 
-  const handleRowDrop = async (e: React.DragEvent, targetFolder: FolderRecord, siblingIndex: number) => {
+  const handleRowDrop = async (
+    e: React.DragEvent,
+    targetFolder: FolderRecord,
+    siblingIndex: number,
+  ) => {
     e.preventDefault();
     e.stopPropagation();
     const currentDrop = dropTarget;
@@ -202,7 +292,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
     try {
       if (pos === 'inside') {
         await moveFolder(sourceID, targetFolder.id, null);
-        setExpandedIDs((prev) => new Set(prev).add(targetFolder.id));
+        setSidebarFolderExpanded(targetFolder.id, true);
       } else {
         const insertIdx = pos === 'before' ? siblingIndex : siblingIndex + 1;
         await moveFolder(sourceID, targetFolder.parentID ?? null, insertIdx);
@@ -216,24 +306,60 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
     const list = childrenByParent.get(parentID) ?? [];
     if (list.length === 0) return null;
 
+    // Determine active insertion gap among this sibling list for neighbor displacement ripple
+    let activeGapIndex: number | null = null;
+    const draggedIndexInList = draggedFolderID
+      ? list.findIndex((f) => f.id === draggedFolderID)
+      : -1;
+    if (draggedFolderID && dropTarget && dropTarget.position !== 'inside') {
+      const targetIndex = list.findIndex((f) => f.id === dropTarget.folderID);
+      if (targetIndex >= 0) {
+        const candidateGap = dropTarget.position === 'before' ? targetIndex : targetIndex + 1;
+        // No insertion line over the dragged item's own slot
+        if (
+          draggedIndexInList < 0 ||
+          (candidateGap !== draggedIndexInList && candidateGap !== draggedIndexInList + 1)
+        ) {
+          activeGapIndex = candidateGap;
+        }
+      }
+    }
+    const reduced = prefersReducedMotion();
+
     return list.map((folder, index) => {
       const children = childrenByParent.get(folder.id) ?? [];
       const hasChildren = children.length > 0 || creatingUnderParentID === folder.id;
       const isExpanded = expandedIDs.has(folder.id);
       const isActive = destination.type === 'folder' && destination.id === folder.id;
       const isRenaming = renamingID === folder.id;
-      const isDropBefore = dropTarget?.folderID === folder.id && dropTarget.position === 'before';
       const isDropInside = dropTarget?.folderID === folder.id && dropTarget.position === 'inside';
-      const isDropAfter = dropTarget?.folderID === folder.id && dropTarget.position === 'after';
+      const showLineBefore = activeGapIndex === index;
+      const showLineAfter = activeGapIndex === index + 1 && index === list.length - 1;
+      const totalCount = subtreeCountByID.get(folder.id) ?? folder.assetCount;
+
+      // Neighbor ripple offset: A * 0.7^n with 24ms * n stagger
+      let rippleTransform: string | undefined;
+      let rippleDelayMs = 0;
+      if (!reduced && activeGapIndex !== null && draggedFolderID !== folder.id) {
+        const n = index < activeGapIndex ? activeGapIndex - 1 - index : index - activeGapIndex;
+        const sign = index < activeGapIndex ? -1 : 1;
+        const offsetPx = Number(
+          (sign * ROW_RIPPLE_AMPLITUDE_PX * Math.pow(ROW_RIPPLE_DECAY, n)).toFixed(2),
+        );
+        if (Math.abs(offsetPx) >= 0.35) {
+          rippleTransform = `translate3d(0, ${offsetPx}px, 0)`;
+          rippleDelayMs = n * ROW_RIPPLE_STAGGER_MS;
+        }
+      }
 
       return (
         <div key={folder.id} className="relative">
-          {/* Thin drag-reorder insertion line */}
-          {isDropBefore && (
-            <div className="absolute left-3 right-3 top-0 h-[2px] rounded-full bg-[var(--accent)] pointer-events-none z-10" />
+          {showLineBefore && (
+            <div className="charkle-drop-line absolute left-3 right-3 -top-[1px] pointer-events-none z-20" />
           )}
 
           <div
+            data-sidebar-active={isActive ? 'true' : undefined}
             draggable={!isRenaming}
             onDragStart={(e) => {
               setDraggedFolderID(folder.id);
@@ -256,28 +382,36 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
             onClick={() => {
               if (!isRenaming) navigate({ type: 'folder', id: folder.id });
             }}
-            style={{ paddingLeft: collapsed ? 8 : 8 + depth * 14 }}
+            style={{
+              paddingLeft: collapsed ? 0 : 8 + depth * 14,
+              transform: rippleTransform,
+              transitionDelay: rippleTransform ? `${rippleDelayMs}ms` : '0ms',
+            }}
             className={[
-              'group relative flex items-center gap-1.5 h-8 pr-2 rounded-[var(--radius-chip)] text-[13px] cursor-pointer select-none',
-              'transition-[background-color,color,opacity] duration-[var(--duration-press)] ease-[var(--ease-out)]',
+              'group charkle-drag-ripple-item relative z-10 flex items-center gap-1.5 h-8 rounded-[var(--radius-chip)] text-[13px] select-none',
+              collapsed ? 'justify-center px-0' : 'pr-2',
+              draggedFolderID ? 'cursor-grabbing' : 'cursor-pointer',
+              'transition-[background-color,color,opacity,transform] duration-[var(--duration-press)] ease-[var(--ease-out)]',
               isActive
-                ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] font-medium shadow-[0_1px_2px_rgba(0,0,0,0.05)]'
+                ? 'text-[var(--text-primary)] font-medium'
                 : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/75',
               isDropInside ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-soft)]' : '',
-              draggedFolderID === folder.id ? 'opacity-45' : '',
+              draggedFolderID === folder.id ? 'opacity-45 scale-[0.94]' : '',
             ].join(' ')}
-            title={collapsed ? `${folder.name} (${folder.assetCount})` : undefined}
+            title={collapsed ? `${folder.name} (${totalCount})` : undefined}
           >
             {!collapsed && (
               <button
                 type="button"
+                aria-label={isExpanded ? '收起子文件夹' : '展开子文件夹'}
+                aria-expanded={hasChildren ? isExpanded : undefined}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (hasChildren) toggleExpand(folder.id);
                 }}
                 className={[
-                  'h-4 w-4 flex items-center justify-center rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] shrink-0',
-                  hasChildren ? 'visible cursor-pointer' : 'invisible',
+                  'w-[22px] h-[28px] -ml-1 flex items-center justify-center rounded-[5px] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] shrink-0',
+                  hasChildren ? 'visible cursor-pointer' : 'invisible pointer-events-none',
                 ].join(' ')}
               >
                 <ChevronRight
@@ -316,9 +450,14 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
                 )}
 
                 {!isRenaming && (
-                  <div className="flex items-center gap-0.5 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0">
+                    {folderPinStateByID.get(folder.id)?.allPinned && (
+                      <span title="已保留离线副本" className="inline-flex items-center group-hover:hidden">
+                        <ArrowDownCircle size={11.5} className="text-[var(--accent)]" />
+                      </span>
+                    )}
                     <span className="text-[11px] tabular-nums text-[var(--text-tertiary)] group-hover:hidden">
-                      {folder.assetCount}
+                      {totalCount}
                     </span>
                     <button
                       type="button"
@@ -337,8 +476,8 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
             )}
           </div>
 
-          {isDropAfter && (
-            <div className="absolute left-3 right-3 bottom-0 h-[2px] rounded-full bg-[var(--accent)] pointer-events-none z-10" />
+          {showLineAfter && (
+            <div className="charkle-drop-line absolute left-3 right-3 -bottom-[1px] pointer-events-none z-20" />
           )}
 
           {/* Nested Children + Inline Create Subfolder */}
@@ -397,7 +536,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
               onClick={() => {
                 const target = menuState.folder;
                 setMenuState(null);
-                setExpandedIDs((prev) => new Set(prev).add(target.id));
+                setSidebarFolderExpanded(target.id, true);
                 setCreatingUnderParentID(target.id);
                 setNewSubfolderName('');
               }}
@@ -452,18 +591,49 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
               自定义图标与颜色…
             </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                const target = menuState.folder;
-                setMenuState(null);
-                void pinFolderOffline(target.id, true);
-              }}
-              className="charkle-pressable flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] cursor-pointer text-left"
-            >
-              <ArrowDownCircle size={14} className="text-[var(--text-secondary)]" />
-              保留离线副本
-            </button>
+            {(() => {
+              const target =
+                folders.find((f) => f.id === menuState.folder.id) ?? menuState.folder;
+              const pinState = folderPinStateByID.get(target.id) ?? {
+                allPinned: false,
+                anyPinned: false,
+              };
+              return (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuState(null);
+                      void pinFolderOffline(target.id, !pinState.allPinned);
+                    }}
+                    className="charkle-pressable flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] cursor-pointer text-left"
+                  >
+                    <ArrowDownCircle
+                      size={14}
+                      className={
+                        pinState.allPinned
+                          ? 'text-[var(--accent)]'
+                          : 'text-[var(--text-secondary)]'
+                      }
+                    />
+                    {pinState.allPinned ? '取消保留在本地' : '始终保留在本地'}
+                  </button>
+                  {!pinState.allPinned && pinState.anyPinned && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuState(null);
+                        void pinFolderOffline(target.id, false);
+                      }}
+                      className="charkle-pressable flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] cursor-pointer text-left"
+                    >
+                      <ArrowDownCircle size={14} className="text-[var(--text-secondary)]" />
+                      取消保留在本地
+                    </button>
+                  )}
+                </>
+              );
+            })()}
 
             <div className="h-px my-1 bg-[var(--border-hairline)]" />
 
@@ -505,13 +675,12 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
         )}
       </Popover>
 
-      {/* Delete Folder Confirmation Modal (matching deleteFolder(trashContents:)) */}
+      {/* Delete Folder Confirmation Modal */}
       <ModalShell
         open={Boolean(deleteDialogFolder)}
         onClose={() => setDeleteDialogFolder(null)}
         width="sm"
         title={`删除文件夹「${deleteDialogFolder?.name ?? ''}」`}
-        subtitle="请选择如何处理文件夹内的素材"
         footer={
           <Button variant="ghost" onClick={() => setDeleteDialogFolder(null)}>
             取消
@@ -526,15 +695,12 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
                 const f = deleteDialogFolder;
                 setDeleteDialogFolder(null);
                 await deleteFolder(f.id, false);
-                pushToast({ tone: 'info', message: `已删除「${f.name}」，素材已安全移回收件箱` });
+                pushToast({ tone: 'info', message: `已删除「${f.name}」，素材已移回收件箱` });
               }}
               className="charkle-pressable flex flex-col items-start gap-0.5 p-3 rounded-[var(--radius-settings-outer)] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-left cursor-pointer"
             >
               <span className="text-[13px] font-medium text-[var(--text-primary)]">
                 仅删除文件夹（素材移回收件箱）
-              </span>
-              <span className="text-[12px] text-[var(--text-secondary)]">
-                保留文件夹中的所有素材，将其归位至「收件箱」等待重新整理。
               </span>
             </button>
 
@@ -546,7 +712,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
                 await deleteFolder(f.id, true);
                 pushToast({
                   tone: 'info',
-                  message: `已删除「${f.name}」及其子树，相关素材已移入回收站`,
+                  message: `已删除「${f.name}」及子文件夹，素材已移入回收站`,
                 });
               }}
               className="charkle-pressable flex flex-col items-start gap-0.5 p-3 rounded-[var(--radius-settings-outer)] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/18 text-left cursor-pointer"
@@ -555,7 +721,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({ sortMode, collapsed }) =
                 删除文件夹并将其中素材移入回收站
               </span>
               <span className="text-[12px] text-[var(--text-secondary)]">
-                同时移除所有子文件夹，并将该子树下的全部素材软删除至回收站。
+                同时删除子文件夹，并将素材移入回收站
               </span>
             </button>
           </div>

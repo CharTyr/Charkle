@@ -1,25 +1,12 @@
-import JSZip from 'jszip';
 import {
-  createDefaultMoodboardExportOptions,
   deltaE2000,
-  isLightHex,
   labFromHex,
   labToHex,
-  mediaKindLocalizedLabel,
-  solveEditorialLayout,
   sRGBToHex,
   sRGBToLab,
-  type AssetRecord,
-  type BoardRect,
   type FigmaBridgeBoardManifest,
-  type FigmaBridgeObject,
-  type FigmaBridgeObjectGeometry,
   type FigmaBridgeReport,
-  type GroupTint,
   type LabColor,
-  type MediaKind,
-  type NoteStyle,
-  type UUID,
 } from '@charkle/shared';
 import {
   buildAudioWaveformSvg,
@@ -30,7 +17,6 @@ import {
   buildSocialPostSvg,
   buildTextDocumentSvg,
   buildWebBookmarkSvg,
-  escapeXml,
 } from '../media/artwork-svg.js';
 import type {
   ArtworkRenderRequest,
@@ -47,12 +33,19 @@ import type {
 import {
   bytesToBase64,
   bytesToStream,
-  posixExtname,
-  sha256HexAsync,
-  sha256HexSync,
   utf8Decode,
   utf8Encode,
 } from './web-crypto-utils.js';
+
+export class ClientExportRequiredError extends Error {
+  readonly code = 'CLIENT_EXPORT_REQUIRED';
+  readonly status = 501;
+
+  constructor(message = '当前运行环境不支持服务端栅格导出，请在浏览器端完成导出。') {
+    super(message);
+    this.name = 'ClientExportRequiredError';
+  }
+}
 
 export interface ImageHeaderInfo {
   width: number;
@@ -187,9 +180,10 @@ export function inspectImageHeader(
     }
   }
 
-  // 4. JPEG (walk markers until SOF0..SOF15 except DHT/JPG/DAC)
+  // 4. JPEG (walk APP1 EXIF orientation + SOF0..SOF15 markers)
   if (bytes.byteLength >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
     let offset = 2;
+    let exifOrientation = 1;
     while (offset + 4 <= bytes.byteLength) {
       if (bytes[offset] !== 0xff) {
         offset++;
@@ -206,16 +200,48 @@ export function inspectImageHeader(
       const segLen = view.getUint16(offset, false);
       if (segLen < 2) break;
 
+      // Parse APP1 Exif TIFF IFD0 Orientation tag (0x0112) so portrait EXIF JPEGs report upright dimensions
+      if (marker === 0xe1 && offset + 16 <= bytes.byteLength && readAscii(bytes, offset + 2, 6) === 'Exif\0\0') {
+        const tiffStart = offset + 8;
+        const segEnd = Math.min(bytes.byteLength, offset + segLen);
+        if (tiffStart + 8 <= segEnd) {
+          const byteOrder = readAscii(bytes, tiffStart, 2);
+          if (byteOrder === 'II' || byteOrder === 'MM') {
+            const le = byteOrder === 'II';
+            const ifdOffset = view.getUint32(tiffStart + 4, le);
+            const ifdStart = tiffStart + ifdOffset;
+            if (ifdStart >= tiffStart && ifdStart + 2 <= segEnd) {
+              const entryCount = view.getUint16(ifdStart, le);
+              for (let i = 0; i < entryCount; i++) {
+                const entryPos = ifdStart + 2 + i * 12;
+                if (entryPos + 12 > segEnd) break;
+                const tag = view.getUint16(entryPos, le);
+                if (tag === 0x0112) {
+                  exifOrientation = view.getUint16(entryPos + 8, le);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
       const isSof =
         (marker >= 0xc0 && marker <= 0xc3) ||
         (marker >= 0xc5 && marker <= 0xc7) ||
         (marker >= 0xc9 && marker <= 0xcb) ||
         (marker >= 0xcd && marker <= 0xcf);
       if (isSof && offset + 7 <= bytes.byteLength) {
-        const height = view.getUint16(offset + 3, false);
-        const width = view.getUint16(offset + 5, false);
-        if (width > 0 && height > 0) {
-          return { width, height, format: 'jpeg', mimeType: 'image/jpeg' };
+        const rawHeight = view.getUint16(offset + 3, false);
+        const rawWidth = view.getUint16(offset + 5, false);
+        if (rawWidth > 0 && rawHeight > 0) {
+          const swapped = exifOrientation >= 5 && exifOrientation <= 8;
+          return {
+            width: swapped ? rawHeight : rawWidth,
+            height: swapped ? rawWidth : rawHeight,
+            format: 'jpeg',
+            mimeType: 'image/jpeg',
+          };
         }
       }
       offset += segLen;
@@ -420,76 +446,6 @@ function buildDeterministicFingerprint(bytes: Uint8Array, colors: readonly LabCo
   return vec;
 }
 
-function mediaBadgeLabel(kind: MediaKind): string | null {
-  switch (kind) {
-    case 'video':
-      return 'VID';
-    case 'animatedImage':
-      return 'GIF';
-    case 'document':
-      return 'PDF';
-    case 'webBookmark':
-      return 'WEB';
-    case 'designFile':
-      return 'DES';
-    case 'audio':
-      return 'AUD';
-    case 'model3D':
-      return '3D';
-    case 'image':
-      return null;
-  }
-}
-
-function noteStyleHex(style: NoteStyle): { background: string; foreground: string; border: string } {
-  switch (style) {
-    case 'paper':
-      return { background: '#FFFFFF', foreground: '#1D1F23', border: '#D9DBDE' };
-    case 'ink':
-      return { background: '#1D1F24', foreground: '#F1F2F4', border: '#3A3D45' };
-    case 'warm':
-      return { background: '#F7F0E4', foreground: '#392F22', border: '#C9B79C' };
-    case 'sage':
-      return { background: '#E8F0EA', foreground: '#203227', border: '#9AB5A3' };
-    case 'slate':
-      return { background: '#E9EEF3', foreground: '#1F2B36', border: '#9EB0C2' };
-  }
-}
-
-function groupTintHex(tint: GroupTint): string {
-  switch (tint) {
-    case 'neutral':
-      return '#7D838B';
-    case 'sand':
-      return '#B5956B';
-    case 'sage':
-      return '#6B8E76';
-    case 'slate':
-      return '#627A94';
-    case 'terracotta':
-      return '#BA6B55';
-    case 'ocean':
-      return '#4D7E97';
-  }
-}
-
-function geometryObj(
-  rect: BoardRect,
-  angle: number,
-  flipX: boolean,
-  flipY: boolean,
-): FigmaBridgeObjectGeometry {
-  return {
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
-    angle,
-    flipX,
-    flipY,
-  };
-}
-
 export interface WorkersImageProcessorOptions {
   imagesBinding?: CloudflareImagesBinding | null;
 }
@@ -639,6 +595,7 @@ export class WorkersImageProcessor implements IImageProcessor {
       case 'socialPost':
         svgOut = buildSocialPostSvg(input.post, {
           inlineCoverBytes: input.coverImageBytes ?? null,
+          inlineAvatarBytes: input.authorAvatarBytes ?? null,
         });
         break;
       case 'webBookmark':
@@ -702,426 +659,28 @@ export class WorkersImageProcessor implements IImageProcessor {
   }
 
   async renderContactSheet(
-    items: ContactSheetItemInput[],
-    opts: { maxCanvasWidth?: number; format?: 'png' | 'jpeg'; jpegQuality?: number } = {},
+    _items: ContactSheetItemInput[],
+    _opts: { maxCanvasWidth?: number; format?: 'png' | 'jpeg'; jpegQuality?: number } = {},
   ): Promise<ContactSheetRenderResult | null> {
-    const capped = items.slice(0, 16);
-    if (capped.length === 0) return null;
-
-    const count = capped.length;
-    const columns = count <= 4 ? Math.min(2, count) : count <= 9 ? 3 : 4;
-    const rows = Math.ceil(count / columns);
-    const margin = 18;
-    const gap = 14;
-    const canvasWidth = Math.max(640, Math.round(opts.maxCanvasWidth ?? 1280));
-    const cellWidth = Math.floor((canvasWidth - margin * 2 - gap * (columns - 1)) / columns);
-    const cellHeight = Math.floor(cellWidth * 0.82);
-    const canvasHeight = margin * 2 + rows * cellHeight + Math.max(0, rows - 1) * gap;
-
-    const slotToAssetID = new Map<number, UUID>();
-    const orderedSlots: Array<{ slot: number; assetID: UUID }> = [];
-    const cells: string[] = [];
-
-    for (let idx = 0; idx < capped.length; idx++) {
-      const entry = capped[idx];
-      const col = idx % columns;
-      const row = Math.floor(idx / columns);
-      const x = margin + col * (cellWidth + gap);
-      const y = margin + row * (cellHeight + gap);
-
-      slotToAssetID.set(entry.slot, entry.asset.id);
-      orderedSlots.push({ slot: entry.slot, assetID: entry.asset.id });
-
-      const clipId = `cell_${idx}`;
-      const fallbackColor = entry.asset.dominantColors[0]?.hex ?? '#2D303A';
-      let imgTag = `<rect x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" rx="10" fill="${escapeXml(fallbackColor)}"/>`;
-      if (entry.thumbnailBytes && entry.thumbnailBytes.byteLength > 0) {
-        const mime = sniffImageMimeType(entry.thumbnailBytes, 'image/jpeg');
-        const dataUri = `data:${mime};base64,${bytesToBase64(entry.thumbnailBytes)}`;
-        imgTag = `<defs><clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" rx="10"/></clipPath></defs>
-          <rect x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" rx="10" fill="#25272E"/>
-          <image href="${dataUri}" x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" preserveAspectRatio="xMidYMid meet" clip-path="url(#${clipId})"/>`;
-      }
-
-      const slotBadge = `#${String(entry.slot).padStart(2, '0')}`;
-      const kindBadge = mediaBadgeLabel(entry.asset.mediaKind);
-      cells.push(`
-        ${imgTag}
-        <rect x="${x + 8}" y="${y + 8}" width="44" height="24" rx="6" fill="rgba(16,18,24,0.86)" stroke="rgba(255,255,255,0.22)"/>
-        <text x="${x + 30}" y="${y + 24}" text-anchor="middle" fill="#FFFFFF" font-family="ui-monospace, Menlo, monospace" font-size="13" font-weight="700">${slotBadge}</text>
-        ${
-          kindBadge
-            ? `<rect x="${x + cellWidth - 46}" y="${y + 8}" width="38" height="22" rx="5" fill="rgba(16,18,24,0.78)"/><text x="${x + cellWidth - 27}" y="${y + 23}" text-anchor="middle" fill="#D5DBE8" font-family="ui-monospace, Menlo, monospace" font-size="11" font-weight="600">${kindBadge}</text>`
-            : ''
-        }
-        <rect x="${x}" y="${y}" width="${cellWidth}" height="${cellHeight}" rx="10" fill="none" stroke="rgba(255,255,255,0.12)"/>
-      `);
-    }
-
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">
-      <rect width="${canvasWidth}" height="${canvasHeight}" fill="#181A1F"/>
-      ${cells.join('\n')}
-    </svg>`;
-
-    return {
-      data: utf8Encode(svg),
-      mimeType: 'image/svg+xml',
-      slotToAssetID,
-      orderedSlots,
-      width: canvasWidth,
-      height: canvasHeight,
-    };
+    // Cloudflare Workers cannot rasterize SVG contact sheets into JPEG/PNG without a
+    // headless compositor. Returning `null` ensures multimodal LLM curation runs cleanly
+    // on the detailed text/metadata manifest instead of sending SVG XML as `image/jpeg`.
+    return null;
   }
 
   async exportMoodboardImage(
-    params: MoodboardExportRequestParams,
+    _params: MoodboardExportRequestParams,
   ): Promise<{ data: Uint8Array; mimeType: string; width: number; height: number }> {
-    const opts = createDefaultMoodboardExportOptions(params.options);
-    const bgMode = params.options?.backgroundMode ?? (opts.darkAppearance ? 'dark' : 'light');
-    const bgFill = bgMode === 'transparent' ? 'none' : bgMode === 'dark' ? '#141517' : '#F6F6F5';
-    const textFill = bgMode === 'dark' ? '#F2F3F6' : '#18191D';
-
-    const assetRecordObj: Record<string, AssetRecord> = {};
-    for (const [k, v] of params.assetsByID.entries()) assetRecordObj[k] = v;
-
-    let framesById = new Map<UUID, BoardRect>();
-    if (params.document.mode.type === 'autoEditorial') {
-      const solved = solveEditorialLayout(
-        params.document.nodes,
-        params.document.mode.config,
-        params.containerWidth ?? 1120,
-        assetRecordObj,
-      );
-      for (const [id, r] of Object.entries(solved.frames)) {
-        framesById.set(id, r);
-      }
-    } else {
-      for (const n of params.document.nodes) {
-        framesById.set(n.id, n.frame);
-      }
-    }
-
-    let minX = Number.POSITIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
-    for (const r of framesById.values()) {
-      minX = Math.min(minX, r.x);
-      minY = Math.min(minY, r.y);
-      maxX = Math.max(maxX, r.x + r.width);
-      maxY = Math.max(maxY, r.y + r.height);
-    }
-    if (!Number.isFinite(minX)) {
-      minX = 0;
-      minY = 0;
-      maxX = 800;
-      maxY = 600;
-    }
-
-    const pad = Math.max(24, opts.padding);
-    const width = Math.max(400, Math.round(maxX - minX + pad * 2));
-    const height = Math.max(300, Math.round(maxY - minY + pad * 2));
-    const offsetX = pad - minX;
-    const offsetY = pad - minY;
-
-    const sorted = [...params.document.nodes].sort((a, b) => a.zIndex - b.zIndex);
-    const parts: string[] = [];
-
-    for (const node of sorted) {
-      const r = framesById.get(node.id) ?? node.frame;
-      const x = r.x + offsetX;
-      const y = r.y + offsetY;
-      if (node.kind.type === 'groupFrame') {
-        const accent = groupTintHex(node.kind.tint);
-        parts.push(
-          `<rect x="${x}" y="${y}" width="${r.width}" height="${r.height}" rx="18" fill="${accent}" fill-opacity="0.1" stroke="${accent}" stroke-opacity="0.35" stroke-width="2"/>`,
-          `<text x="${x + 18}" y="${y + 28}" fill="${textFill}" font-family="-apple-system, PingFang SC, sans-serif" font-size="16" font-weight="600">${escapeXml(node.kind.title)}</text>`,
-        );
-      } else if (node.kind.type === 'assetRef') {
-        const bytes =
-          (await params.loadAssetBytes(node.kind.assetID, 'preview1400')) ??
-          (await params.loadAssetBytes(node.kind.assetID, 'grid520'));
-        if (bytes && bytes.byteLength > 0) {
-          const mime = sniffImageMimeType(bytes, 'image/jpeg');
-          const dataUri = `data:${mime};base64,${bytesToBase64(bytes)}`;
-          const clipId = `n_${node.id.replace(/[^a-zA-Z0-9]/g, '')}`;
-          parts.push(
-            `<defs><clipPath id="${clipId}"><rect x="${x}" y="${y}" width="${r.width}" height="${r.height}" rx="12"/></clipPath></defs>`,
-            `<image href="${dataUri}" x="${x}" y="${y}" width="${r.width}" height="${r.height}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})"/>`,
-          );
-        } else {
-          parts.push(
-            `<rect x="${x}" y="${y}" width="${r.width}" height="${r.height}" rx="12" fill="#2A2D36"/>`,
-          );
-        }
-      } else if (node.kind.type === 'note') {
-        const style = noteStyleHex(node.kind.style);
-        parts.push(
-          `<rect x="${x}" y="${y}" width="${r.width}" height="${r.height}" rx="14" fill="${style.background}" stroke="${style.border}" stroke-width="1.5"/>`,
-          `<text x="${x + 18}" y="${y + 34}" fill="${style.foreground}" font-family="-apple-system, PingFang SC, sans-serif" font-size="${node.kind.fontSize}" font-weight="600">${escapeXml(node.kind.title || node.kind.text.slice(0, 48))}</text>`,
-        );
-      }
-    }
-
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-      ${bgFill !== 'none' ? `<rect width="${width}" height="${height}" fill="${bgFill}"/>` : ''}
-      ${parts.join('\n')}
-    </svg>`;
-    return {
-      data: utf8Encode(svg),
-      mimeType: 'image/svg+xml',
-      width,
-      height,
-    };
+    throw new ClientExportRequiredError(
+      '当前 Cloudflare Workers 环境不支持服务端位图渲染导出，请使用浏览器端导出情绪板图片。',
+    );
   }
 
   async exportFigmaBridgeZip(
-    params: FigmaBridgeExportRequestParams,
+    _params: FigmaBridgeExportRequestParams,
   ): Promise<{ zipBytes: Uint8Array; manifest: FigmaBridgeBoardManifest; report: FigmaBridgeReport }> {
-    const opts = createDefaultMoodboardExportOptions(params.options);
-    const doc = params.document;
-    const assetRecordObj: Record<string, AssetRecord> = {};
-    for (const [k, v] of params.assetsByID.entries()) assetRecordObj[k] = v;
-
-    let framesById = new Map<UUID, BoardRect>();
-    if (doc.mode.type === 'autoEditorial') {
-      const solved = solveEditorialLayout(
-        doc.nodes,
-        doc.mode.config,
-        params.containerWidth ?? 1120,
-        assetRecordObj,
-      );
-      for (const [id, r] of Object.entries(solved.frames)) framesById.set(id, r);
-    } else {
-      for (const n of doc.nodes) framesById.set(n.id, n.frame);
-    }
-
-    const zip = new JSZip();
-    const objects: FigmaBridgeObject[] = [];
-    const originals: FigmaBridgeBoardManifest['originals'] = [];
-    const warningsList: FigmaBridgeReport['warnings'] = [];
-    const seenOriginals = new Set<string>();
-
-    let imageCount = 0;
-    let noteCount = 0;
-    let groupCount = 0;
-    let paletteCount = 0;
-
-    const sortedNodes = [...doc.nodes].sort((a, b) => a.zIndex - b.zIndex);
-    for (const node of sortedNodes) {
-      const rect = framesById.get(node.id) ?? node.frame;
-      const geom = geometryObj(rect, node.rotationDegrees, node.flipHorizontal, node.flipVertical);
-
-      if (node.kind.type === 'groupFrame') {
-        groupCount++;
-        objects.push({
-          id: node.id,
-          kind: 'groupFrame',
-          name: node.kind.title || '分组',
-          geometry: geom,
-          locked: node.isLocked,
-          warnings: [],
-          group: {
-            title: node.kind.title,
-            tint: node.kind.tint,
-            accentHex: groupTintHex(node.kind.tint),
-          },
-        });
-      } else if (node.kind.type === 'note') {
-        noteCount++;
-        const st = noteStyleHex(node.kind.style);
-        objects.push({
-          id: node.id,
-          kind: 'note',
-          name: node.kind.title || '文字卡片',
-          geometry: geom,
-          locked: node.isLocked,
-          warnings: [],
-          note: {
-            title: node.kind.title ?? null,
-            text: node.kind.text,
-            style: node.kind.style,
-            fontSize: node.kind.fontSize,
-            backgroundHex: st.background,
-            foregroundHex: st.foreground,
-            borderHex: st.border,
-          },
-        });
-      } else if (node.kind.type === 'paletteStrip') {
-        paletteCount++;
-        const swatches = (
-          node.kind.colors.length > 0 ? node.kind.colors : doc.extractedPalette
-        ).map((c) => ({ hex: c.hex, isLight: isLightHex(c.hex) }));
-        objects.push({
-          id: node.id,
-          kind: 'paletteStrip',
-          name: '色板条',
-          geometry: geom,
-          locked: node.isLocked,
-          warnings: [],
-          palette: { swatches },
-        });
-      } else if (node.kind.type === 'assetRef') {
-        const asset = params.assetsByID.get(node.kind.assetID);
-        const orig = await params.loadOriginalBytes(node.kind.assetID);
-        const thumb =
-          (await params.loadThumbnailBytes(node.kind.assetID, 'preview1400')) ??
-          (await params.loadThumbnailBytes(node.kind.assetID, 'grid520'));
-        const tileBytes = orig?.bytes ?? thumb;
-        const warnings: string[] = [];
-
-        if (!tileBytes || tileBytes.byteLength === 0) {
-          warnings.push('缺少可用的图片数据，请在浏览器端重新导出。');
-          warningsList.push({
-            id: node.id,
-            name: asset?.title ?? node.kind.assetID,
-            issues: warnings,
-          });
-          objects.push({
-            id: node.id,
-            kind: 'unsupported',
-            name: asset?.title ?? '缺失素材',
-            geometry: geom,
-            locked: node.isLocked,
-            warnings,
-          });
-          continue;
-        }
-
-        const header = inspectImageHeader(tileBytes, asset?.mimeType);
-        const pixelWidth = header?.width ?? asset?.pixelWidth ?? 800;
-        const pixelHeight = header?.height ?? asset?.pixelHeight ?? 600;
-        const sha = await sha256HexAsync(tileBytes);
-        const ext =
-          header?.format === 'png'
-            ? 'png'
-            : header?.format === 'gif'
-              ? 'gif'
-              : header?.format === 'webp'
-                ? 'webp'
-                : 'jpg';
-
-        if (orig && !seenOriginals.has(node.kind.assetID)) {
-          seenOriginals.add(node.kind.assetID);
-          const origExt = posixExtname(orig.fileName ?? asset?.fileName ?? '').replace(/^\./, '') || ext;
-          const origPath = `originals/${node.kind.assetID}.${origExt}`;
-          const origSha = await sha256HexAsync(orig.bytes);
-          zip.file(origPath, orig.bytes);
-          originals.push({
-            id: node.kind.assetID,
-            name: asset?.fileName ?? `${node.kind.assetID}.${origExt}`,
-            file: origPath,
-            sha256: origSha,
-            bytes: orig.bytes.byteLength,
-          });
-        }
-
-        const isAnimated = header?.format === 'gif' || asset?.mediaKind === 'animatedImage';
-        if (pixelWidth > 4096 || pixelHeight > 4096) {
-          warnings.push('图片尺寸超过 4096px，建议在浏览器端导出以获得无损自动切片。');
-        }
-        if (node.kind.crop) {
-          warnings.push('服务端无图形库模式保留原图，建议在浏览器端导出以烘焙裁剪区域。');
-        }
-        if (warnings.length > 0) {
-          warningsList.push({
-            id: node.id,
-            name: asset?.title ?? node.kind.assetID,
-            issues: warnings,
-          });
-        }
-
-        const tileFile = `tiles/${sha256HexSync(node.id).slice(0, 8)}_r0_c0.${ext}`;
-        zip.file(tileFile, tileBytes);
-        imageCount++;
-
-        objects.push({
-          id: node.id,
-          kind: 'image',
-          name: asset?.title ?? mediaKindLocalizedLabel(asset?.mediaKind ?? 'image'),
-          geometry: geom,
-          locked: node.isLocked,
-          cornerRadius: 12,
-          warnings,
-          image: {
-            pixelWidth,
-            pixelHeight,
-            tiles: [
-              {
-                file: tileFile,
-                x: 0,
-                y: 0,
-                width: pixelWidth,
-                height: pixelHeight,
-                sha256: sha,
-              },
-            ],
-            animated: isAnimated,
-            ...(isAnimated && header?.format === 'gif'
-              ? { animation: { file: `originals/${node.kind.assetID}.gif`, sha256: sha } }
-              : {}),
-          },
-        });
-      }
-    }
-
-    const report: FigmaBridgeReport = {
-      objectCount: objects.length,
-      imageCount,
-      noteCount,
-      groupCount,
-      paletteCount,
-      connectorCount: opts.includeAnnotations ? doc.connectors.length : 0,
-      strokeCount: opts.includeAnnotations ? doc.inkStrokes.length : 0,
-      reviewCount: warningsList.length,
-      warnings: warningsList,
-    };
-
-    const manifest: FigmaBridgeBoardManifest = {
-      format: 'charkle-figma-bridge',
-      version: 1,
-      boardId: doc.id,
-      name: doc.title,
-      subtitle: doc.subtitle,
-      mode: doc.mode.type,
-      darkAppearance: opts.darkAppearance,
-      exportedAt: new Date().toISOString(),
-      sourceOS: 'Cloudflare Workers',
-      objects,
-      connectors: opts.includeAnnotations
-        ? doc.connectors.map((c) => ({
-            id: c.id,
-            fromNodeID: c.fromNodeID,
-            fromAnchor: c.fromAnchor,
-            toNodeID: c.toNodeID,
-            toAnchor: c.toAnchor,
-            style: c.style,
-            colorHex: c.colorHex,
-            dashed: c.dashed,
-            label: c.label ?? null,
-          }))
-        : [],
-      inkStrokes: opts.includeAnnotations
-        ? doc.inkStrokes.map((s) => ({
-            id: s.id,
-            points: s.points,
-            colorHex: s.colorHex,
-            lineWidth: s.lineWidth,
-            opacity: s.opacity,
-          }))
-        : [],
-      originals,
-      report,
-    };
-
-    zip.file('board.json', JSON.stringify(manifest, null, 2));
-    zip.file('migration-report.json', JSON.stringify(report, null, 2));
-    const zipBytes = await zip.generateAsync({
-      type: 'uint8array',
-      compression: 'DEFLATE',
-      compressionOptions: { level: 6 },
-    });
-
-    return { zipBytes, manifest, report };
+    throw new ClientExportRequiredError(
+      '当前 Cloudflare Workers 环境不支持服务端无损 PNG 切片打包，请使用浏览器端导出 .charkleboard 文件。',
+    );
   }
 }

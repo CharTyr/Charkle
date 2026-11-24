@@ -12,11 +12,13 @@ import {
   Search,
   Settings,
   Sparkles,
+  X,
 } from 'lucide-react';
 import { fuzzyScoreSearchText } from '@charkle/shared';
 import type { QuickJumpMatch } from '@charkle/shared';
 import { apiClient } from '../../api/client';
 import { CharkleFolderIcon, CharkleIcon } from '../../design-system';
+import { revealAssetInLibrary } from '../../lib/revealAssetInLibrary';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 import { useLibraryStore } from '../../stores/libraryStore';
 import { useMoodboardStore } from '../../stores/moodboardStore';
@@ -44,7 +46,7 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'openQuickCapture',
     title: '打开快速采集',
-    subtitle: '上传文件、链接、笔记、色卡或截屏 (⇧⌘N)',
+    subtitle: '⇧⌘N',
     score: 1.01,
   },
   {
@@ -52,7 +54,7 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'generateBoard',
     title: '快速生成情绪板…',
-    subtitle: '按提示词、素材或色板生成情绪板',
+    subtitle: '',
     score: 1,
   },
   {
@@ -60,7 +62,7 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'gotoInbox',
     title: '前往收件箱清理台',
-    subtitle: '使用数字键 1–9 快速归档素材',
+    subtitle: '',
     score: 0.99,
   },
   {
@@ -68,7 +70,7 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'installExtension',
     title: '安装浏览器采集扩展',
-    subtitle: '下载扩展包并获取访问令牌',
+    subtitle: '',
     score: 0.98,
   },
   {
@@ -76,7 +78,7 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'rerunOnboarding',
     title: '重新运行首次使用引导',
-    subtitle: '快速配置素材库、浏览器扩展、AI 与外观',
+    subtitle: '',
     score: 0.975,
   },
   {
@@ -84,17 +86,23 @@ const QUICK_COMMANDS: JumpRow[] = [
     kind: 'command',
     commandKey: 'openSettings',
     title: '打开设置中心',
-    subtitle: '账号、同步、智能与存储设置',
+    subtitle: '⌘,',
     score: 0.97,
   },
 ];
+
+const KIND_BADGE_LABELS: Record<Exclude<JumpRow['kind'], 'command'>, string> = {
+  moodboard: '情绪板',
+  folder: '文件夹',
+  tag: '标签',
+  asset: '素材',
+};
 
 export const JumpAnywhereModal: React.FC = () => {
   const open = useCoordinatorStore((s) => s.jumpAnywhereOpen);
   const setOpen = useCoordinatorStore((s) => s.setJumpAnywhereOpen);
   const navigate = useCoordinatorStore((s) => s.navigate);
   const openBoard = useCoordinatorStore((s) => s.openBoard);
-  const openQuickLook = useCoordinatorStore((s) => s.openQuickLook);
   const openGeneratorModal = useCoordinatorStore((s) => s.openGeneratorModal);
   const openSettings = useCoordinatorStore((s) => s.openSettings);
   const openQuickCapture = useCoordinatorStore((s) => s.openQuickCapture);
@@ -103,7 +111,6 @@ export const JumpAnywhereModal: React.FC = () => {
   const folders = useLibraryStore((s) => s.folders);
   const tags = useLibraryStore((s) => s.tags);
   const assets = useLibraryStore((s) => s.assets);
-  const selectAsset = useLibraryStore((s) => s.selectAsset);
 
   const boards = useMoodboardStore((s) => s.boards);
 
@@ -111,6 +118,7 @@ export const JumpAnywhereModal: React.FC = () => {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [remoteMatches, setRemoteMatches] = useState<QuickJumpMatch[]>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -235,6 +243,12 @@ export const JumpAnywhereModal: React.FC = () => {
     setSelectedIndex(0);
   }, [rows.length, query]);
 
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-jump-index="${selectedIndex}"]`);
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [open, selectedIndex]);
+
   if (!open) return null;
 
   const executeRow = (row: JumpRow) => {
@@ -256,8 +270,7 @@ export const JumpAnywhereModal: React.FC = () => {
       const name = (row.tagName || row.title).replace(/^#+/, '');
       navigate({ type: 'tag', name });
     } else if (row.kind === 'asset' && row.targetUUID) {
-      selectAsset(row.targetUUID, 'replace');
-      openQuickLook(row.targetUUID);
+      void revealAssetInLibrary(row.targetUUID);
     }
   };
 
@@ -308,10 +321,10 @@ export const JumpAnywhereModal: React.FC = () => {
     return <ImageIcon size={16} className="text-[var(--text-secondary)]" />;
   };
 
-  // Deliberately zero open animation on high-frequency keyboard command palette for instant response.
+  // Deliberately zero open animation on high-frequency keyboard palette for instant response
   return (
     <div
-      className="fixed inset-0 z-[140] flex items-start justify-center pt-[14vh] px-4 bg-black/32"
+      className="charkle-modal-veil fixed inset-0 z-[140] flex items-start justify-center pt-[14vh] px-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) setOpen(false);
       }}
@@ -329,18 +342,34 @@ export const JumpAnywhereModal: React.FC = () => {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="跳转至文件夹、情绪板、标签或搜索素材（支持中文拼音）…"
+            placeholder="跳转或搜索…"
             className="flex-1 min-w-0 bg-transparent text-[14.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none"
           />
+          {query && (
+            <button
+              type="button"
+              aria-label="清空搜索"
+              onClick={() => {
+                setQuery('');
+                inputRef.current?.focus();
+              }}
+              className="charkle-pressable h-6 w-6 rounded-full inline-flex items-center justify-center text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0"
+            >
+              <X size={13} />
+            </button>
+          )}
           <kbd className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] text-[var(--text-tertiary)]">
             ESC
           </kbd>
         </div>
 
-        <div className="max-h-[380px] overflow-y-auto charkle-scroll p-2 flex flex-col gap-0.5">
+        <div
+          ref={listRef}
+          className="max-h-[380px] overflow-y-auto charkle-scroll p-2 flex flex-col gap-0.5"
+        >
           {rows.length === 0 ? (
             <div className="py-10 text-center text-[13px] text-[var(--text-secondary)]">
-              未找到匹配「{query}」的文件夹、情绪板、标签或素材
+              无匹配结果
             </div>
           ) : (
             rows.map((row, index) => {
@@ -349,6 +378,7 @@ export const JumpAnywhereModal: React.FC = () => {
                 <button
                   key={row.id}
                   type="button"
+                  data-jump-index={index}
                   onMouseEnter={() => setSelectedIndex(index)}
                   onClick={() => executeRow(row)}
                   className={[
@@ -363,10 +393,17 @@ export const JumpAnywhereModal: React.FC = () => {
                   </span>
                   <div className="flex-1 min-w-0">
                     <div className="text-[13.5px] font-medium truncate">{row.title}</div>
-                    <div className="text-[11.5px] text-[var(--text-secondary)] truncate">
-                      {row.subtitle}
-                    </div>
+                    {row.subtitle && (
+                      <div className="text-[11.5px] text-[var(--text-secondary)] truncate">
+                        {row.subtitle}
+                      </div>
+                    )}
                   </div>
+                  {row.kind !== 'command' && (
+                    <span className="px-1.5 py-0.5 rounded-[5px] bg-[var(--bg-subtle)] text-[10.5px] text-[var(--text-tertiary)] shrink-0">
+                      {KIND_BADGE_LABELS[row.kind]}
+                    </span>
+                  )}
                   {active && (
                     <CornerDownLeft size={14} className="text-[var(--accent)] shrink-0" />
                   )}

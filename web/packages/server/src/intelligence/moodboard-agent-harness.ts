@@ -35,7 +35,7 @@ import type { IMediaPipeline } from '../context.js';
 import { cosineSimilarity, type LibraryDatabase } from '../db/library-database.js';
 import type { ContactSheetItemInput } from '../runtime/types.js';
 import { randomUUID, toBuffer } from '../runtime/web-crypto-utils.js';
-import { CloudTagNormalizer, type CloudAIProvider } from './cloud-ai-provider.js';
+import { CloudAIError, CloudTagNormalizer, type CloudAIProvider } from './cloud-ai-provider.js';
 import {
   featurePrintSimilarity,
   MoodboardCurator,
@@ -395,6 +395,7 @@ export class CharkleAgentTools {
     inferredColors?: LabColor[];
     provider?: CloudAIProvider | null;
     maxCandidates?: number;
+    signal?: AbortSignal;
   }): Promise<AgentRecallResult> {
     const {
       request,
@@ -403,6 +404,7 @@ export class CharkleAgentTools {
       inferredColors = [],
       provider = null,
       maxCandidates = 32,
+      signal,
     } = params;
 
     const allAssets = this.db.fetchAssets({ includeTrashed: false });
@@ -489,8 +491,11 @@ export class CharkleAgentTools {
       }
       if (hasCompat) {
         try {
-          queryVector = await provider.embed(primaryQueryText);
-        } catch {
+          queryVector = await provider.embed(primaryQueryText, signal);
+        } catch (err) {
+          if (signal?.aborted || (err instanceof CloudAIError && err.code === 'aborted')) {
+            throw err;
+          }
           queryVector = null;
         }
       }
@@ -545,6 +550,7 @@ export class CharkleAgentTools {
     lockedIDs?: Set<UUID>;
     existingBoardIDs?: Set<UUID>;
     sheetCapacity?: number;
+    maxCanvasWidth?: number;
     format?: 'png' | 'jpeg';
   }): Promise<ContactSheetPackage> {
     const {
@@ -554,6 +560,7 @@ export class CharkleAgentTools {
       lockedIDs = new Set(),
       existingBoardIDs = new Set(),
       sheetCapacity = 16,
+      maxCanvasWidth,
       format = 'jpeg',
     } = params;
 
@@ -567,8 +574,12 @@ export class CharkleAgentTools {
     const flushSheet = async () => {
       if (currentEntries.length === 0) return;
       if (this.media.images.renderContactSheet) {
-        const res = await this.media.images.renderContactSheet(currentEntries, { format });
-        if (res) {
+        const res = await this.media.images.renderContactSheet(currentEntries, {
+          format,
+          ...(maxCanvasWidth ? { maxCanvasWidth } : {}),
+        });
+        // Never treat non-raster SVG XML as a multimodal JPEG/PNG contact sheet (P0-19).
+        if (res && (res.mimeType === 'image/jpeg' || res.mimeType === 'image/png')) {
           const buf = toBuffer(res.data);
           sheets.push({
             data: buf,
@@ -894,7 +905,10 @@ export class CharkleAgentTools {
     };
   }
 
-  persistVisualInsights(insights: readonly AgentVisualInsight[]): number {
+  persistVisualInsights(
+    insights: readonly AgentVisualInsight[],
+    overwriteDescription = false,
+  ): number {
     if (insights.length === 0) return 0;
     try {
       return this.db.transaction(() => {
@@ -913,7 +927,7 @@ export class CharkleAgentTools {
           );
           let changed = false;
           const next: AssetRecord = { ...asset };
-          if ((!asset.aiDescription || !asset.aiDescription.trim()) && cleanDesc) {
+          if (cleanDesc && (overwriteDescription || !asset.aiDescription || !asset.aiDescription.trim())) {
             next.aiDescription = cleanDesc.slice(0, 600);
             changed = true;
           }
@@ -1192,6 +1206,19 @@ export interface CurateHarnessOptions {
   typeSafeAPIKey?: string | null;
   grounding?: VisualGroundingEngine | null;
   onStep?: (step: MoodboardAgentStep) => void | Promise<void>;
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new CloudAIError('策展请求已取消。', 'aborted', 499);
+  }
+}
+
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  if (err instanceof CloudAIError && err.code === 'aborted') return true;
+  return err instanceof Error && err.name === 'AbortError';
 }
 
 export class MoodboardAgentHarness {
@@ -1209,12 +1236,15 @@ export class MoodboardAgentHarness {
       typeSafeAPIKey = null,
       grounding = null,
       onStep,
+      signal,
     } = opts;
 
+    throwIfAborted(signal);
     const recorder = new AgentTraceRecorder(onStep);
 
     // Stage 1: Planning
     await recorder.emit('planning', '读取素材库结构与策展目标', '扫描文件夹树、标签分布与约束条件…', 'running');
+    throwIfAborted(signal);
     const overview = this.tools.libraryOverview();
 
     let expandedQueries: string[] = [];
@@ -1232,15 +1262,17 @@ export class MoodboardAgentHarness {
         'running',
       );
       try {
-        const planned = await this.runRetrievalPlanner(request, overview, provider);
+        const planned = await this.runRetrievalPlanner(request, overview, provider, signal);
         expandedQueries = planned.searchQueries;
         preferredFolderNames = planned.preferredFolders;
         inferredColors = planned.targetColorHexes.map((h) => labFromHex(h));
-      } catch {
+      } catch (err) {
+        if (isAbortError(err, signal)) throw err;
         // Planner is best-effort
       }
     }
 
+    throwIfAborted(signal);
     await recorder.emit(
       'planning',
       `已分析素材库全貌（共 ${overview.totalAssets} 项素材 · ${overview.folders.length} 个文件夹）`,
@@ -1253,6 +1285,7 @@ export class MoodboardAgentHarness {
     );
 
     // Stage 2: Multi-Route Recall
+    throwIfAborted(signal);
     await recorder.emit('retrieving', '多路召回候选素材', '按文件夹、标签、视觉相似与色彩过滤候选池…', 'running');
     let recall = await this.tools.recallCandidates({
       request,
@@ -1261,7 +1294,9 @@ export class MoodboardAgentHarness {
       inferredColors,
       provider,
       maxCandidates: 32,
+      signal,
     });
+    throwIfAborted(signal);
 
     if (recall.candidates.length === 0) {
       await recorder.emit(
@@ -1375,6 +1410,7 @@ export class MoodboardAgentHarness {
     );
 
     // Stage 3: Multimodal Visual Contact Sheet Curation
+    throwIfAborted(signal);
     if (provider) {
       try {
         const pkg = await this.tools.buildContactSheets({
@@ -1388,27 +1424,38 @@ export class MoodboardAgentHarness {
           sheetCapacity: 16,
           format: 'jpeg',
         });
+        throwIfAborted(signal);
+
+        const rasterSheets = pkg.sheets.filter(
+          (s) => s.mimeType === 'image/jpeg' || s.mimeType === 'image/png',
+        );
+        const sheetImages = rasterSheets.map((s) => s.jpegData);
 
         await recorder.emit(
           'inspectingVisuals',
-          `AI 正在视觉审片与编排（${pkg.sheets.length} 张编号联系表 · ${recall.candidates.length} 张图）`,
-          '直接识别每张图的构图、光影、题材与风格，宁缺毋滥挑选并划分逻辑分区…',
+          rasterSheets.length > 0
+            ? `AI 正在视觉审片与编排（${rasterSheets.length} 张编号联系表 · ${recall.candidates.length} 张图）`
+            : `AI 正在按清单与元数据策展编排（${recall.candidates.length} 项候选）`,
+          rasterSheets.length > 0
+            ? '直接识别每张图的构图、光影、题材与风格，宁缺毋滥挑选并划分逻辑分区…'
+            : '当前运行环境无服务端栅格联系表，正结合描述、标签与色板完成精准策展…',
           'running',
         );
 
         const curationPrompt = MoodboardAgentHarness.buildVisualCurationPrompt(
           request,
           pkg.manifestText,
-          pkg.sheets.length,
+          rasterSheets.length,
           pkg.slotToAsset.size,
         );
-        const sheetImages = pkg.sheets.map((s) => s.jpegData);
 
         const rawOutput = await provider.completeJSON(
           VISUAL_CURATOR_SYSTEM_PROMPT,
           curationPrompt,
           sheetImages,
+          signal,
         );
+        throwIfAborted(signal);
 
         await recorder.emit('inspectingVisuals', '视觉审片完成，已生成策展方案', '开始执行编号接地、防重与约束校验…', 'done');
         await recorder.emit('verifying', '校验画布结构与防重约束', '核对真实素材 ID、锁定/排除规则与视觉去重…', 'running');
@@ -1433,6 +1480,7 @@ export class MoodboardAgentHarness {
 
         // Deterministic 1-Turn Auto-Repair
         if (!parsedPlan || compilation?.needsRepair) {
+          throwIfAborted(signal);
           const repairReason =
             parseError ?? (compilation?.issues.join('; ') || '未能选出有效编号');
           await recorder.emit(
@@ -1452,7 +1500,9 @@ export class MoodboardAgentHarness {
             VISUAL_CURATOR_SYSTEM_PROMPT,
             repairPrompt,
             sheetImages,
+            signal,
           );
+          throwIfAborted(signal);
           parsedPlan = MoodboardAgentHarness.parseBoardPlan(repairedRaw, request.layoutStyle);
           compilation = this.tools.compileAndVerifyBoard({
             plan: parsedPlan,
@@ -1464,6 +1514,7 @@ export class MoodboardAgentHarness {
         }
 
         if (parsedPlan && compilation) {
+          throwIfAborted(signal);
           const insights: AgentVisualInsight[] = [];
           for (const item of parsedPlan.visualInsights) {
             const asset = pkg.slotToAsset.get(item.slot);
@@ -1485,7 +1536,9 @@ export class MoodboardAgentHarness {
             typeSafeAPIKey,
             grounding,
             recorder,
+            signal,
           });
+          throwIfAborted(signal);
 
           const verifyDetail =
             compilation.issues.length === 0
@@ -1519,6 +1572,7 @@ export class MoodboardAgentHarness {
           };
         }
       } catch (err) {
+        if (isAbortError(err, signal)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         await recorder.emit('fallbackOffline', '云端模型暂不可用，已切换本机离线策展', msg, 'warning');
       }
@@ -1531,6 +1585,7 @@ export class MoodboardAgentHarness {
       );
     }
 
+    throwIfAborted(signal);
     // Stage 4: Strict-Threshold Offline / Jev Curator
     const fallbackProposal = await this.runStrictOfflineCurator(
       request,
@@ -1546,6 +1601,7 @@ export class MoodboardAgentHarness {
       typeSafeAPIKey,
       grounding,
       recorder,
+      signal,
     });
     fallbackProposal.agentTrace = recorder.snapshot();
     return fallbackProposal;
@@ -1559,8 +1615,19 @@ export class MoodboardAgentHarness {
     typeSafeAPIKey: string | null;
     grounding: VisualGroundingEngine | null;
     recorder: AgentTraceRecorder;
+    signal?: AbortSignal;
   }): Promise<MoodboardDocument> {
-    const { document, assets, request, typeSafeConfig, typeSafeAPIKey, grounding, recorder } = params;
+    const {
+      document,
+      assets,
+      request,
+      typeSafeConfig,
+      typeSafeAPIKey,
+      grounding,
+      recorder,
+      signal,
+    } = params;
+    throwIfAborted(signal);
     const query = request.prompt.trim();
     if (
       !request.autoFocusDetailCrop ||
@@ -1598,8 +1665,9 @@ export class MoodboardAgentHarness {
     const cropsByIndex = new Map<number, NormalizedCropRect>();
     await Promise.all(
       targets.slice(0, 12).map(async ({ index, asset }) => {
+        if (signal?.aborted) return;
         const jpeg = await this.tools.preparedTypeSafeJPEG(asset, 640);
-        if (!jpeg) return;
+        if (!jpeg || signal?.aborted) return;
         try {
           const res = await grounding.locateRegion({
             query,
@@ -1616,6 +1684,7 @@ export class MoodboardAgentHarness {
         }
       }),
     );
+    throwIfAborted(signal);
 
     const nextNodes = document.nodes.map((node, idx) => {
       const crop = cropsByIndex.get(idx);
@@ -1640,6 +1709,7 @@ export class MoodboardAgentHarness {
     request: MoodboardCurationRequest,
     overview: AgentLibraryOverview,
     provider: CloudAIProvider,
+    signal?: AbortSignal,
   ): Promise<{ searchQueries: string[]; preferredFolders: string[]; targetColorHexes: string[] }> {
     const foldersSummary = overview.folders
       .slice(0, 30)
@@ -1668,6 +1738,7 @@ export class MoodboardAgentHarness {
       'You are a visual library retrieval planner. Output strict JSON only.',
       prompt,
       [],
+      signal,
     );
     const obj = MoodboardAgentHarness.extractJSONObject(raw);
     const toStringList = (v: unknown): string[] =>
@@ -1862,9 +1933,15 @@ export class MoodboardAgentHarness {
     }
     lines.push(`- 期望上限张数：最多 ${request.preferredCount} 张（宁缺毋滥，严禁硬塞风格冲突的素材）`);
     lines.push(`- 偏好排版风格：${request.layoutStyle}`);
-    lines.push(
-      `- 附带 ${sheetCount} 张编号视觉联系表，共 ${totalSlots} 个候选编号（#01 ~ #${String(totalSlots).padStart(2, '0')}）。请务必仔细观察联系表上的真实画面后再做选择！`,
-    );
+    if (sheetCount > 0) {
+      lines.push(
+        `- 附带 ${sheetCount} 张编号视觉联系表，共 ${totalSlots} 个候选编号（#01 ~ #${String(totalSlots).padStart(2, '0')}）。请务必仔细观察联系表上的真实画面后再做选择！`,
+      );
+    } else {
+      lines.push(
+        `- 当前运行环境未附带栅格联系表，共 ${totalSlots} 个候选编号（#01 ~ #${String(totalSlots).padStart(2, '0')}）。请严格依据下方清单的标题、标签、色板、画幅比例与描述完成筛选与分区编排。`,
+      );
+    }
     lines.push('');
     lines.push('【候选素材清单】');
     lines.push(manifest);

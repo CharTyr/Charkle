@@ -49,6 +49,25 @@ public final class MoodboardStore {
         }
     }
 
+    /// Releases the loaded board document, undo/redo history, and candidate pool while retaining tiny
+    /// board summaries so Notch Shelf "Active Moodboard" capture remains functional in Minimal Mode.
+    public func enterMinimalCaptureMode() {
+        saveDebounceTask?.cancel()
+        saveDebounceTask = nil
+        viewportSaveTask?.cancel()
+        viewportSaveTask = nil
+        latestViewportOverride = nil
+        activeBoard = nil
+        candidatePool = []
+        swappingNodeID = nil
+        undoStack = []
+        redoStack = []
+        proposal = nil
+        agentTrace = []
+        activeBoardAgentTrace = []
+        activeBoardLastSummary = nil
+    }
+
     public func openBoard(id: UUID) async {
         viewportSaveTask?.cancel()
         latestViewportOverride = nil

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ChevronLeft,
@@ -42,14 +42,45 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset, post 
   const [slideIndex, setSlideIndex] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const [failedAttIDs, setFailedAttIDs] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    setSlideIndex(0);
+    setFailedAttIDs(new Set());
+  }, [asset.id]);
 
   const safeIndex = Math.min(slideIndex, Math.max(0, attachments.length - 1));
   const currentAtt = attachments[safeIndex] ?? null;
+
+  // Only route to local cached `originalMediaURL` when the stored asset itself is a video
+  // AND the active carousel attachment is the matching video attachment (avoids feeding `.md`
+  // archives or photo slides into `<video>` in mixed `[photo, video]` carousels).
+  const firstVideoIndex = useMemo(
+    () => attachments.findIndex((att) => att.kind === 'video' || att.kind === 'gif'),
+    [attachments],
+  );
+  const useLocalCachedVideo =
+    asset.mediaKind === 'video' &&
+    Boolean(currentAtt) &&
+    (currentAtt.kind === 'video' || currentAtt.kind === 'gif') &&
+    safeIndex === firstVideoIndex;
+
+  const currentAttFailed = currentAtt ? failedAttIDs.has(currentAtt.id) : false;
+
+  const markAttachmentFailed = (id: string) => {
+    setFailedAttIDs((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  };
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
       await refreshRichAsset(asset.id);
+      setFailedAttIDs(new Set());
       pushToast({ tone: 'success', message: '已重新抓取推文与媒体附件' });
     } catch (err) {
       pushToast({ tone: 'error', message: err instanceof Error ? err.message : '重新抓取失败' });
@@ -117,7 +148,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset, post 
           <a
             href={post.originalURL}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="charkle-pressable h-7 px-2.5 inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[12px] font-medium text-[var(--text-primary)]"
           >
             <ExternalLink size={12} />
@@ -127,14 +158,19 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset, post 
       </div>
 
       {/* Scrollable Body + Media Carousel */}
-      <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-5 flex flex-col gap-4">
+      <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-5 flex flex-col gap-4 select-text">
         {post.mediaFetchFailed && (
           <div className="px-3.5 py-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--warning-soft)] text-[var(--warning)] text-[12.5px] flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-2">
               <AlertTriangle size={15} />
-              原推文部分媒体资源抓取失败，建议点击重试获取。
+              部分媒体加载失败
             </span>
-            <Button variant="secondary" size="xs" loading={refreshing} onClick={() => void handleRefresh()}>
+            <Button
+              variant="secondary"
+              size="xs"
+              loading={refreshing}
+              onClick={() => void handleRefresh()}
+            >
               重试获取
             </Button>
           </div>
@@ -171,18 +207,42 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset, post 
         {/* Multi-Attachment Carousel */}
         {currentAtt && (
           <div className="relative rounded-[var(--radius-settings-outer)] overflow-hidden bg-black/90 flex items-center justify-center min-h-[260px] max-h-[420px]">
-            {currentAtt.kind === 'video' || currentAtt.kind === 'gif' ? (
+            {currentAttFailed ? (
+              <div className="w-full min-h-[240px] flex flex-col items-center justify-center gap-3 p-6 text-center bg-[var(--bg-subtle)] text-[var(--text-secondary)]">
+                <AlertTriangle size={24} className="text-[var(--warning)]" />
+                <div className="text-[13px] font-medium text-[var(--text-primary)]">
+                  媒体暂时无法加载
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="xs"
+                    loading={refreshing}
+                    onClick={() => void handleRefresh()}
+                  >
+                    <RefreshCw size={12} />
+                    重新抓取
+                  </Button>
+                  <a
+                    href={post.originalURL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="charkle-pressable h-7 px-2.5 inline-flex items-center gap-1 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)]"
+                  >
+                    <ExternalLink size={12} />
+                    打开原帖
+                  </a>
+                </div>
+              </div>
+            ) : currentAtt.kind === 'video' || currentAtt.kind === 'gif' ? (
               <video
                 key={currentAtt.id}
-                src={
-                  post.hasVideo && safeIndex === 0
-                    ? apiClient.originalMediaURL(asset.id)
-                    : currentAtt.url
-                }
+                src={useLocalCachedVideo ? apiClient.originalMediaURL(asset.id) : currentAtt.url}
                 poster={currentAtt.thumbnailURL ?? undefined}
                 controls
                 loop={currentAtt.kind === 'gif'}
                 playsInline
+                onError={() => markAttachmentFailed(currentAtt.id)}
                 className="max-w-full max-h-[420px] object-contain"
               />
             ) : (
@@ -190,6 +250,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset, post 
                 key={currentAtt.id}
                 src={currentAtt.url}
                 alt={`推文附件 ${safeIndex + 1}`}
+                onError={() => markAttachmentFailed(currentAtt.id)}
                 className="max-w-full max-h-[420px] object-contain"
               />
             )}
@@ -219,8 +280,10 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset, post 
                       type="button"
                       onClick={() => setSlideIndex(idx)}
                       className={[
-                        'h-1.5 rounded-full transition-[width,background-color] duration-[180ms] ease-[var(--ease-out)] cursor-pointer',
-                        idx === safeIndex ? 'w-4 bg-white' : 'w-1.5 bg-white/45',
+                        'h-1.5 w-1.5 rounded-full transition-[transform,opacity,background-color] duration-[180ms] ease-[var(--ease-out)] cursor-pointer',
+                        idx === safeIndex
+                          ? 'scale-125 bg-white opacity-100'
+                          : 'scale-100 bg-white/45 opacity-75',
                       ].join(' ')}
                     />
                   ))}

@@ -7,6 +7,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { Box, Grid, RotateCcw } from 'lucide-react';
 import type { AssetRecord } from '@charkle/shared';
 import { apiClient } from '../../api/client';
+import { SkeletonBlock, useDelayedFlag } from '../../design-system';
 
 export interface Model3DViewerProps {
   asset: AssetRecord;
@@ -14,9 +15,15 @@ export interface Model3DViewerProps {
 
 const SUPPORTED_WEBGL_EXTS = new Set(['glb', 'gltf', 'obj', 'stl']);
 
+/**
+ * On-demand WebGL 3D Viewer:
+ * Renders ONLY when OrbitControls moves/damps, when the model loads, on resize, or when
+ * wireframe/reset toggles — dropping idle GPU/CPU frame usage to 0%.
+ */
 export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const resetFnRef = useRef<(() => void) | null>(null);
+  const requestRenderRef = useRef<(() => void) | null>(null);
   const loadedGroupRef = useRef<THREE.Object3D | null>(null);
 
   const ext = (asset.richMetadata?.model3DFormat || asset.fileName.split('.').pop() || '3D')
@@ -27,6 +34,8 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
   const [loading, setLoading] = useState(webglSupported);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [wireframe, setWireframe] = useState(false);
+
+  const showLoadingOverlay = useDelayedFlag(loading, 300, 500);
 
   useEffect(() => {
     const group = loadedGroupRef.current;
@@ -42,6 +51,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
         }
       }
     });
+    requestRenderRef.current?.();
   }, [wireframe]);
 
   useEffect(() => {
@@ -61,7 +71,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     } catch {
       setLoading(false);
-      setErrorMsg('当前浏览器环境不支持 3D 渲染');
+      setErrorMsg('当前浏览器不支持 3D 预览');
       return;
     }
 
@@ -81,7 +91,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.07;
+    controls.dampingFactor = 0.08;
 
     // 3-Point Neutral Studio Lighting
     const hemi = new THREE.HemisphereLight(0xffffff, 0x2b303a, 1.1);
@@ -98,6 +108,59 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
     grid.position.y = -1.0;
     scene.add(grid);
 
+    // On-demand render scheduler: runs frames only during interaction & damping settle
+    let rafID = 0;
+    let interacting = false;
+    let dampingFramesRemaining = 0;
+    const prevCamPos = new THREE.Vector3();
+    const prevTarget = new THREE.Vector3();
+
+    const renderFrame = () => {
+      rafID = 0;
+      if (disposed) return;
+
+      prevCamPos.copy(camera.position);
+      prevTarget.copy(controls.target);
+      controls.update();
+      renderer.render(scene, camera);
+
+      const moved =
+        camera.position.distanceToSquared(prevCamPos) > 1e-8 ||
+        controls.target.distanceToSquared(prevTarget) > 1e-8;
+
+      if (interacting || moved || dampingFramesRemaining > 0) {
+        if (!interacting && !moved) {
+          dampingFramesRemaining = Math.max(0, dampingFramesRemaining - 1);
+        }
+        rafID = requestAnimationFrame(renderFrame);
+      }
+    };
+
+    const scheduleRender = (settleFrames = 0) => {
+      if (disposed) return;
+      dampingFramesRemaining = Math.max(dampingFramesRemaining, settleFrames);
+      if (!rafID) {
+        rafID = requestAnimationFrame(renderFrame);
+      }
+    };
+    requestRenderRef.current = () => scheduleRender(0);
+
+    const onControlStart = () => {
+      interacting = true;
+      scheduleRender(2);
+    };
+    const onControlEnd = () => {
+      interacting = false;
+      scheduleRender(24);
+    };
+    const onControlChange = () => {
+      scheduleRender(interacting ? 2 : 12);
+    };
+
+    controls.addEventListener('start', onControlStart);
+    controls.addEventListener('end', onControlEnd);
+    controls.addEventListener('change', onControlChange);
+
     const fitAndCenter = (obj: THREE.Object3D) => {
       const box = new THREE.Box3().setFromObject(obj);
       const size = box.getSize(new THREE.Vector3());
@@ -111,11 +174,13 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
       camera.position.copy(fitPos);
       controls.target.set(0, 0, 0);
       controls.update();
+      scheduleRender(0);
 
       resetFnRef.current = () => {
         camera.position.copy(fitPos);
         controls.target.set(0, 0, 0);
         controls.update();
+        scheduleRender(0);
       };
     };
 
@@ -127,6 +192,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
       fitAndCenter(obj);
       scene.add(obj);
       setLoading(false);
+      scheduleRender(0);
     };
 
     const onError = () => {
@@ -183,28 +249,28 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
     }
 
     const ro = new ResizeObserver(() => {
-      if (!host) return;
+      if (!host || disposed) return;
       const w = host.clientWidth || width;
       const h = host.clientHeight || height;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
+      scheduleRender(0);
     });
     ro.observe(host);
 
-    let rafID = 0;
-    const animate = () => {
-      rafID = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    animate();
+    // Render initial empty studio grid once
+    scheduleRender(0);
 
     return () => {
       disposed = true;
       loadedGroupRef.current = null;
       resetFnRef.current = null;
-      cancelAnimationFrame(rafID);
+      requestRenderRef.current = null;
+      if (rafID) cancelAnimationFrame(rafID);
+      controls.removeEventListener('start', onControlStart);
+      controls.removeEventListener('end', onControlEnd);
+      controls.removeEventListener('change', onControlChange);
       ro.disconnect();
       controls.dispose();
       renderer.dispose();
@@ -220,7 +286,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
           <Box size={44} className="text-[#60A5FA]" />
           <div className="text-[15px] font-semibold text-white">{asset.title}</div>
           <div className="text-[12.5px] text-[#9CA3AF]">
-            {errorMsg || `${ext.toUpperCase()} 格式暂不支持浏览器直接交互渲染，可下载原文件查看`}
+            {errorMsg || `暂不支持预览 ${ext.toUpperCase()} 文件，可下载查看`}
           </div>
           <img
             src={apiClient.thumbnailURL(asset.id, 'preview1400')}
@@ -245,7 +311,7 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
             className={[
               'charkle-pressable h-8 px-2.5 rounded-[var(--radius-chip)] backdrop-blur-md text-[12px] inline-flex items-center gap-1.5 border cursor-pointer',
               wireframe
-                ? 'bg-[#2A60E0] border-[#5B8DEF] text-white'
+                ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
                 : 'bg-black/55 border-white/12 text-white/90 hover:bg-black/75',
             ].join(' ')}
           >
@@ -263,10 +329,10 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
         </div>
       )}
 
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#181A20]/75 text-white text-[13px] gap-2">
-          <span className="h-4 w-4 rounded-full border-2 border-[#5B8DEF] border-t-transparent animate-spin" />
-          正在载入 3D 几何体…
+      {showLoadingOverlay && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#181A20]/80 text-white/85 text-[13px]">
+          <SkeletonBlock className="h-14 w-14 rounded-2xl bg-white/10" />
+          <span>正在加载 3D 模型…</span>
         </div>
       )}
     </div>

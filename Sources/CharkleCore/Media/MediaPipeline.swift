@@ -187,6 +187,18 @@ public nonisolated struct MediaPipeline: Sendable {
                 throw LibraryDatabaseError("Could not render color swatch.")
             }
             try data.write(to: file)
+        case .socialBookmark(let post, _, _):
+            let resolved = ResolvedSocialPost(
+                metadata: post,
+                primaryMediaDownloadURL: nil,
+                primaryMediaKind: nil,
+                primaryThumbnailURL: nil
+            )
+            title = resolved.shortTitle
+            notes = post.bodyText
+            source = URL(string: post.originalURL)
+            file = temp.appending(path: Self.cleanName(resolved.shortTitle) + ".md")
+            try Data(resolved.markdownDocument.utf8).write(to: file)
         }
 
         let mime = Self.mimeType(fileName: file.lastPathComponent)
@@ -198,6 +210,49 @@ public nonisolated struct MediaPipeline: Sendable {
             sourceDomain: source?.host(), notes: notes, isLocalOriginalCached: true
         )
         try await render(file, for: &asset, preferredTitle: title)
+        return Import(asset: asset, original: try installOriginal(file, for: asset))
+    }
+
+    /// Creates a `.webloc` web bookmark asset from an already-resolved `WebBookmark` in a single pass
+    /// (zero redundant HTTP fetch) and writes high-DPI Retina thumbnails (`720px` grid + `1400px` preview).
+    @concurrent
+    func ingestPreResolvedWebPage(
+        url: URL,
+        title: String,
+        notes: String,
+        domain: String,
+        poster: CGImage,
+        folderID: UUID?,
+        id: UUID = UUID()
+    ) async throws -> Import {
+        guard WebBookmark.isWebURL(url) else {
+            throw LibraryDatabaseError("Unsupported bookmark URL scheme.")
+        }
+        let temp = staging.appending(path: id.uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        let file = temp.appending(path: Self.cleanName(title.isEmpty ? domain : title) + ".webloc")
+        let plistData = try PropertyListSerialization.data(fromPropertyList: ["URL": url.absoluteString], format: .xml, options: 0)
+        try plistData.write(to: file)
+
+        let mime = Self.mimeType(fileName: file.lastPathComponent)
+        let digests = try Self.digests(file)
+        var asset = AssetRecord(
+            id: id,
+            title: title.isEmpty ? domain : title,
+            fileName: file.lastPathComponent,
+            folderID: folderID,
+            contentHash: digests.sha256,
+            mediaKind: .webBookmark,
+            mimeType: mime,
+            fileSizeBytes: digests.bytes,
+            sourceURL: url.absoluteString,
+            sourceDomain: domain,
+            notes: notes,
+            isLocalOriginalCached: true
+        )
+        try writeCustomPoster(poster, for: &asset)
         return Import(asset: asset, original: try installOriginal(file, for: asset))
     }
 
@@ -220,11 +275,31 @@ public nonisolated struct MediaPipeline: Sendable {
             render = await Self.video(file)
         case .webBookmark:
             let url = asset.sourceURL.flatMap(URL.init(string:)) ?? WebBookmark.url(in: file)
-            let bookmark = await WebBookmark.fetch(url)
             asset.sourceURL = url?.absoluteString
-            asset.sourceDomain = url?.host()
-            asset.title = preferredTitle ?? bookmark.title ?? asset.title
-            if let poster = bookmark.poster { render = MediaRender(poster) }
+            asset.sourceDomain = url.flatMap(WebURLParser.cleanDomain) ?? url?.host()
+            // Skip duplicate fetch when specialized GitHub/Social resolvers immediately overwrite the bookmark.
+            if let url, GitHubRepoURLParser.parse(url) == nil, SocialPostURLParser.parse(url) == nil {
+                let bookmark = await WebBookmark.fetch(url, allowWebViewSnapshot: true)
+                let resolvedTitle = preferredTitle ?? bookmark.title ?? WebBookmark.fallbackTitle(for: url)
+                asset.title = resolvedTitle
+                if asset.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   let desc = bookmark.description, !desc.isEmpty {
+                    asset.notes = desc
+                }
+                if let poster = bookmark.poster {
+                    render = MediaRender(poster)
+                } else if let card = MediaArtwork.webPageCard(
+                    title: asset.title,
+                    domain: asset.sourceDomain ?? url.host() ?? "web.link",
+                    siteName: bookmark.siteName,
+                    description: bookmark.description ?? asset.notes,
+                    urlString: asset.sourceURL,
+                    themeColorHex: bookmark.themeColorHex,
+                    favicon: bookmark.favicon
+                ) {
+                    render = MediaRender(card)
+                }
+            }
         case .document:
             if ext == "pdf" { render = Self.pdf(file) }
             if ["md", "markdown", "txt", "rtf", "json", "yaml", "yml", "toml", "csv"].contains(ext) {

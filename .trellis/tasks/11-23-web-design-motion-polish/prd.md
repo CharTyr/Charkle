@@ -25,11 +25,11 @@ Bring Charkle Web (`./web/`) to full visual, motion, interaction, and functional
   - Add `DESIGN.md` §4.2 rules into `web/packages/client/src/design-system/tokens.css` (`text-wrap: balance` on headings, `text-wrap: pretty` on paragraphs, `:lang(zh) { text-autospace: normal; text-spacing-trim: trim-start; }`, opt-out on `code, pre, kbd, input, textarea, select`, ensure `overflow-wrap: anywhere` instead of `word-break: break-all` / `line-break: anywhere`).
 - **P0-4 Anti-Flicker Delayed Loaders & Structural Skeletons**:
   - Create `design-system/useDelayedFlag.ts` (`useDelayedFlag(active, 300, 500)`) and `design-system/Skeleton.tsx` (`GalleryMasonrySkeleton`, `InboxTriageSkeleton`, `CandidateGridSkeleton`, `InspectorSimilarSkeleton`) with coordinated sweep (`prefers-reduced-motion` static fallback).
-  - Replace bare centered `animate-spin` in `GalleryView.tsx`, `InboxTriageBar.tsx`, `InspectorView.tsx`, and `CandidatePoolPanel.tsx`; preserve existing data cleanly during refresh.
+  - Audit and replace bare centered `animate-spin` placeholders (20 instances across client views, including `GalleryView.tsx`, `InboxTriageBar.tsx`, `InspectorView.tsx`, and `CandidatePoolPanel.tsx`); preserve existing data cleanly during refresh.
 
 ### P1 — Consistency, Performance & macOS v1.0.1 Parity
 - **P1-1 Token & Radius Convergence**:
-  - Audit and migrate hardcoded UI chrome hex colors (e.g. `#5B8DEF` in `QuickLookOverlay.tsx`, `GalleryFilmstripView.tsx`, `Model3DViewer.tsx`) and ad-hoc `rounded-[Npx]` radii outside `design-system/` back to `tokens.css` semantic variables and concentric `--radius-*` tokens. Keep user-data swatch palettes untouched.
+  - Audit and migrate hardcoded UI chrome hex colors (e.g. `#5B8DEF` in `QuickLookOverlay.tsx`, `GalleryFilmstripView.tsx`, `Model3DViewer.tsx`) and ad-hoc `rounded-[Npx]` radii outside `design-system/` (converging off-grid pixel radii onto concentric `--radius-*` tokens in `tokens.css`). Keep user-data swatch palettes untouched.
 - **P1-2 Transform-Only Canvas Transitions**:
   - Remove layout-property `width` transition in `web/packages/client/src/features/moodboard/MoodboardCanvasView.tsx:1372`; keep transitions strictly on `transform` and `opacity`.
 - **P1-3 EXIF, AI Generation Prompt, Long-Strip Quick Look & Reorderable Zero-Flicker Inspector**:
@@ -45,7 +45,8 @@ Bring Charkle Web (`./web/`) to full visual, motion, interaction, and functional
 - **P2-1 Miniature Product-UI Empty States**:
   - Build `design-system/EmptyStateVignette.tsx` with 5 self-contained `160×120` inline SVGs matching `DESIGN.md` §5.2 (`emptyLibrary`, `emptyFolder`, `noFilterResults`, `inboxZero`, `emptyMoodboard`, plus `emptyTrash` / `emptyInspector`) with automatic Light/Dark CSS variable theming and `prefers-reduced-motion` safety. Wire into `GalleryView`, `InboxZeroView`, `MoodboardsHomeView`, `InspectorView`.
 - **P2-2 Cascade Menu Safe Triangle & Card Delete Exit**:
-  - Add pointer-trajectory safe-triangle submenu tolerance for nested folder move menus and crisp `150ms` scale+opacity exit animation on card soft-delete paired with Undo Toast.
+  - Add pointer-trajectory safe-triangle submenu tolerance + `180ms` grace timer on nested folder move submenus (`web/packages/client/src/features/gallery/GalleryFilmstripView.tsx:841-925` and shared context menus), and crisp `150ms` scale+opacity exit animation on card soft-delete paired with Undo Toast.
+  - Pair single-item permanent delete triggers in Quick Look & Inspector with anchored non-modal Popconfirm (keeping modal dialog for batch delete / Empty Trash) to match macOS `CharklePopconfirm`.
 
 ---
 

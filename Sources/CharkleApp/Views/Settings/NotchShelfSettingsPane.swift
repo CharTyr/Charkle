@@ -1,20 +1,24 @@
 import CharkleCore
 import SwiftUI
 
-/// Tab 4: 刘海浮窗 (Notch Shelf) — Dedicated control surface for Charkle's signature top-edge inspiration drop shelf.
+/// Tab 4: 刘海浮窗 (Notch Shelf) — Dedicated control surface for Charkle's signature top-edge inspiration drop shelf
+/// and Ultra-Low-Resource Minimal Capture Mode.
 public struct NotchShelfSettingsPane: View {
     public let coordinator: AppCoordinatorStore
     public let onToggleNotchPreview: () -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
+    public let onEnterMinimalCaptureMode: () -> Void
 
     public init(
         coordinator: AppCoordinatorStore,
         onToggleNotchPreview: @escaping () -> Void,
-        onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in }
+        onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
+        onEnterMinimalCaptureMode: @escaping () -> Void = {}
     ) {
         self.coordinator = coordinator
         self.onToggleNotchPreview = onToggleNotchPreview
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
+        self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
     }
 
     public var body: some View {
@@ -62,12 +66,13 @@ public struct NotchShelfSettingsPane: View {
                             onSyncDefaultNotchTarget(newMode)
                         }
                     )) {
-                        ForEach(NotchTargetMode.allCases, id: \.self) { mode in
-                            Text(mode.localizedTitle).tag(mode)
-                        }
+                        Text("收件箱").tag(NotchTargetMode.inbox)
+                        Text("文件夹").tag(NotchTargetMode.folder)
+                        Text("活跃情绪板").tag(NotchTargetMode.activeMoodboard)
                     }
                     .labelsHidden()
-                    .frame(width: 156)
+                    .pickerStyle(.segmented)
+                    .frame(width: 236)
                 }
 
                 SettingsCardDivider()
@@ -99,6 +104,49 @@ public struct NotchShelfSettingsPane: View {
                         title: "反向拖出素材同样顺手",
                         detail: "悬停顶部唤出浮窗后，可将最近收藏或完整瀑布流中的参考图直接拖进 Figma、Keynote 或设计软件。"
                     )
+                }
+            }
+
+            SettingsSection("最低资源占用模式（仅保留刘海采集）") {
+                SettingsRow(
+                    title: "立即进入极简刘海模式",
+                    subtitle: "关闭主窗口、释放全库画廊与大图缓存并隐藏程序坞图标，仅保留顶部刘海采集、最近素材快捷取用与菜单栏入口"
+                ) {
+                    Button("进入极简模式") {
+                        onEnterMinimalCaptureMode()
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                }
+
+                SettingsCardDivider()
+
+                SettingsRow(
+                    title: "启动时直接进入极简刘海模式",
+                    subtitle: "打开 Charkle 时不加载主工作台，静默驻留菜单栏与顶部刘海，随时可从菜单栏恢复主窗口"
+                ) {
+                    Toggle("", isOn: Binding(
+                        get: { coordinator.launchInMinimalCaptureMode },
+                        set: { coordinator.launchInMinimalCaptureMode = $0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+
+                SettingsCardDivider()
+
+                SettingsRow(
+                    title: "关闭主窗口时自动进入极简刘海模式",
+                    subtitle: "点按主窗口左上角关闭按钮后自动释放画廊内存并转入极简采集态，点击菜单栏图标即可瞬间回到主窗"
+                ) {
+                    Toggle("", isOn: Binding(
+                        get: { coordinator.enterMinimalModeOnWindowClose },
+                        set: { coordinator.enterMinimalModeOnWindowClose = $0 }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
                 }
             }
         }

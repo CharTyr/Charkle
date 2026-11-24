@@ -139,7 +139,7 @@ export async function captureScreenFrame(): Promise<CaptureInput> {
       video.onloadedmetadata = () => {
         video.play().then(() => resolve()).catch(reject);
       };
-      video.onerror = () => reject(new Error('无法读取屏幕视频帧'));
+      video.onerror = () => reject(new Error('截屏失败，请重试'));
     });
 
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -151,7 +151,7 @@ export async function captureScreenFrame(): Promise<CaptureInput> {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      throw new Error('Canvas 2D 上下文不可用');
+      throw new Error('截屏失败，请刷新后重试');
     }
     ctx.drawImage(video, 0, 0, width, height);
 

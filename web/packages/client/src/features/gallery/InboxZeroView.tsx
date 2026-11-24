@@ -1,5 +1,5 @@
 import React from 'react';
-import { Button, CharkleIcon } from '../../design-system';
+import { Button, EmptyStateVignette } from '../../design-system';
 import { useCoordinatorStore } from '../../stores/coordinatorStore';
 
 export const InboxZeroView: React.FC = () => {
@@ -7,13 +7,8 @@ export const InboxZeroView: React.FC = () => {
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-10 text-center charkle-modal-panel">
-      <div
-        className="mb-4"
-        style={{
-          animation: 'charkle-modal-panel-enter 240ms var(--ease-out-strong) 45ms both',
-        }}
-      >
-        <CharkleIcon name="inbox" style="layered" size={84} />
+      <div className="mb-4">
+        <EmptyStateVignette kind="inboxZero" />
       </div>
 
       <h2 className="text-[17px] font-semibold tracking-[-0.015em] text-[var(--text-primary)]">

@@ -56,6 +56,8 @@ const MODEL_PRICING_PER_MILLION: Array<{ match: RegExp; input: number; output: n
   { match: /^gpt-4\.1/i, input: 2.0, output: 8.0 },
   { match: /^gpt-4o-mini/i, input: 0.15, output: 0.6 },
   { match: /^gpt-4o/i, input: 2.5, output: 10.0 },
+  { match: /^gpt-5(?:\.\d+)?-mini/i, input: 0.25, output: 2.0 },
+  { match: /^gpt-5(?:\.\d+)?-nano/i, input: 0.05, output: 0.4 },
   { match: /^gpt-5/i, input: 1.25, output: 10.0 },
   { match: /^claude-sonnet/i, input: 3.0, output: 15.0 },
   { match: /^claude-haiku/i, input: 0.8, output: 4.0 },
@@ -183,6 +185,7 @@ export class CloudAIUsageTracker {
   private readonly stateKey: string;
   private cached: ExtendedCloudAIUsageSummary;
   private loaded = false;
+  private loadPromise: Promise<void> | null = null;
 
   constructor(store?: UsageStateStore | null, stateKey: string = CLOUD_AI_USAGE_STATE_KEY) {
     this.store = store ?? null;
@@ -192,31 +195,43 @@ export class CloudAIUsageTracker {
 
   private async ensureLoaded(now: Date): Promise<void> {
     if (this.loaded) return;
-    this.loaded = true;
-    if (!this.store) return;
-
-    const raw = await this.store.getState<Partial<ExtendedCloudAIUsageSummary>>(this.stateKey);
-    if (!raw || typeof raw !== 'object') return;
-
-    const dayKey = raw.dayKey || localDayKey(now);
-    if (raw.standard || raw.jev) {
-      const summary = createExtendedSummary(dayKey);
-      summary.standard = normalizeBucket(raw.standard, dayKey);
-      summary.jev = normalizeBucket(raw.jev, dayKey);
-      synchronizeAggregates(summary);
-      this.cached = summary;
-    } else {
-      // Legacy flat summary migration
-      const legacy = normalizeBucket(raw as unknown as Partial<ExtendedCloudAIUsageBucket>, dayKey);
-      const summary = createExtendedSummary(dayKey);
-      if (looksLikeJev(legacy.lastProviderLabel, legacy.lastModel)) {
-        summary.jev = legacy;
-      } else {
-        summary.standard = legacy;
-      }
-      synchronizeAggregates(summary);
-      this.cached = summary;
+    if (!this.store) {
+      this.loaded = true;
+      return;
     }
+    if (!this.loadPromise) {
+      this.loadPromise = (async () => {
+        const raw = await this.store!.getState<Partial<ExtendedCloudAIUsageSummary>>(this.stateKey);
+        if (raw && typeof raw === 'object') {
+          const dayKey = raw.dayKey || localDayKey(now);
+          if (raw.standard || raw.jev) {
+            const summary = createExtendedSummary(dayKey);
+            summary.standard = normalizeBucket(raw.standard, dayKey);
+            summary.jev = normalizeBucket(raw.jev, dayKey);
+            synchronizeAggregates(summary);
+            this.cached = summary;
+          } else {
+            // Legacy flat summary migration
+            const legacy = normalizeBucket(
+              raw as unknown as Partial<ExtendedCloudAIUsageBucket>,
+              dayKey,
+            );
+            const summary = createExtendedSummary(dayKey);
+            if (looksLikeJev(legacy.lastProviderLabel, legacy.lastModel)) {
+              summary.jev = legacy;
+            } else {
+              summary.standard = legacy;
+            }
+            synchronizeAggregates(summary);
+            this.cached = summary;
+          }
+        }
+        this.loaded = true;
+      })().finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    await this.loadPromise;
   }
 
   private async persist(): Promise<void> {

@@ -152,7 +152,7 @@ public struct AISettingsPane: View {
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity)
-        .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     // MARK: - Cloud AI Section
@@ -418,7 +418,7 @@ public struct AISettingsPane: View {
                     .foregroundStyle(.secondary)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             case .chatGPTSubscription:
                 chatGPTConfigContent
@@ -881,7 +881,7 @@ public struct AISettingsPane: View {
     }
 
     private func scenarioToggle(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 12) {
+        Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 12.5, weight: .medium))
@@ -889,12 +889,10 @@ public struct AISettingsPane: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
-            Spacer()
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
+        .toggleStyle(.checkbox)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
     }

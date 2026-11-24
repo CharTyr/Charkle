@@ -1,5 +1,6 @@
 import type { GitHubRepoMetadata } from '@charkle/shared';
 import { base64ToBytes, readEnv, utf8Decode } from '../../runtime/web-crypto-utils.js';
+import { inspectImageHeader } from '../../runtime/workers-image.js';
 
 const GITHUB_HOSTS = new Set(['github.com', 'www.github.com']);
 
@@ -200,4 +201,87 @@ export async function resolveGitHubRepo(rawUrl: string): Promise<GitHubRepoMetad
     readmeMarkdown,
     fetchedAt: new Date().toISOString(),
   };
+}
+
+const MAX_GITHUB_OG_BYTES = 4 * 1024 * 1024;
+
+async function downloadBoundedImageBytes(
+  url: string,
+  maxBytes: number,
+  timeoutMs = 6_000,
+): Promise<Uint8Array | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'image/png,image/webp,image/jpeg,image/*',
+        'User-Agent': 'CharkleWeb/1.0',
+      },
+    });
+    if (!res.ok) return null;
+    const contentLength = Number(res.headers.get('content-length') ?? '0');
+    if (contentLength > maxBytes) return null;
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      return bytes.byteLength <= maxBytes ? bytes : null;
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+    if (total === 0) return null;
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.byteLength;
+    }
+    return out;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetches GitHub's official OpenGraph preview card (`opengraph.githubassets.com/1/<owner>/<repo>`)
+ * validating magic bytes and minimum dimensions (>= 200x100). 100% Workers-safe.
+ */
+export async function fetchGitHubOpenGraphCardBytes(
+  repo: Pick<GitHubRepoMetadata, 'owner' | 'repo' | 'openGraphImageURL'>,
+): Promise<{ bytes: Uint8Array; mimeType: string } | null> {
+  const candidates: string[] = [];
+  const custom = repo.openGraphImageURL?.trim();
+  if (custom) candidates.push(custom);
+  const standard = `https://opengraph.githubassets.com/1/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}`;
+  if (!candidates.includes(standard)) candidates.push(standard);
+
+  for (const url of candidates) {
+    const bytes = await downloadBoundedImageBytes(url, MAX_GITHUB_OG_BYTES, 6_000);
+    if (!bytes) continue;
+    const header = inspectImageHeader(bytes);
+    if (
+      header &&
+      header.format !== 'svg' &&
+      header.width >= 200 &&
+      header.height >= 100
+    ) {
+      return { bytes, mimeType: header.mimeType };
+    }
+  }
+  return null;
 }

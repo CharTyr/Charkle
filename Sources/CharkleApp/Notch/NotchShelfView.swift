@@ -272,6 +272,19 @@ public struct NotchShelfView: View {
                     Text("Charkle")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.94))
+                    if shelfState.isMinimalCaptureOnly {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color(charkleHex: "#34C769"))
+                                .frame(width: 5, height: 5)
+                            Text("极简采集")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.84))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.white.opacity(0.11), in: Capsule(style: .continuous))
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -320,12 +333,12 @@ public struct NotchShelfView: View {
             // nor the full masonry waterfall ever reflow mid-morph while the black capsule springs smoothly.
             let bodyTransition = CharkleMotion.originTransition(anchor: .top, scale: 0.985, reduced: reduceMotion)
             let compactInnerW = max(300, shelfState.compactBodyWidth - 32)
-            let compactInnerH = max(160, shelfState.compactCardHeight - shelfState.topNotchBandHeight - 22)
+            let compactInnerH = max(96, shelfState.compactCardHeight - shelfState.topNotchBandHeight - 22)
             let fullInnerW = max(400, shelfState.fullGalleryBodyWidth - 32)
             let fullInnerH = max(240, shelfState.fullGalleryCardHeight - shelfState.topNotchBandHeight - 22)
 
             ZStack(alignment: .top) {
-                if shelfState.isFullGalleryExpanded {
+                if shelfState.isFullGalleryExpanded && !shelfState.isMinimalCaptureOnly {
                     fullWaterfallGalleryBody
                         .frame(width: fullInnerW, height: fullInnerH, alignment: .top)
                         .transition(bodyTransition)
@@ -340,7 +353,7 @@ public struct NotchShelfView: View {
         }
     }
 
-    // MARK: - Compact Shelf Mode (Img 5: Capture Actions + Drop Well + Recent Assets Filmstrip)
+    // MARK: - Compact Shelf Mode (Capture Actions + Drop Well + Optional Recent Assets Filmstrip)
 
     private var compactShelfBody: some View {
         VStack(spacing: 10) {
@@ -349,27 +362,38 @@ public struct NotchShelfView: View {
                 HStack(spacing: 6) {
                     notchCompactToolButton(title: "区域截图", icon: "camera.viewfinder", action: onCaptureArea)
                     notchCompactToolButton(title: "剪贴板", icon: "doc.on.clipboard", action: onCollectClipboard)
-                    notchCompactToolButton(title: "主窗", icon: "macwindow", action: onOpenMainWindow)
+                    notchCompactToolButton(
+                        title: shelfState.isMinimalCaptureOnly ? "恢复主窗" : "主窗",
+                        icon: "macwindow",
+                        action: onOpenMainWindow
+                    )
                 }
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(3)
 
                 Spacer(minLength: 4)
 
-                HStack(spacing: 2) {
-                    targetSegment(.inbox, label: "收件箱")
-                    targetSegment(.folder, label: "文件夹")
-                    targetSegment(.activeMoodboard, label: "活跃情绪板")
-                }
-                .padding(2.5)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                HStack(spacing: 6) {
+                    HStack(spacing: 2) {
+                        targetSegment(.inbox, label: "收件箱")
+                        targetSegment(.folder, label: "文件夹")
+                        targetSegment(.activeMoodboard, label: "活跃情绪板")
+                    }
+                    .padding(2)
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(2)
 
-                destinationDetailChip
+                    destinationDetailChip
+                        .layoutPriority(0)
+                }
             }
 
             // Row 3: Slim Drop Well / Status Banner
             dropWellRow
                 .frame(height: 52)
 
-            // Row 4: Recent Assets Header ("最近素材" = recently saved + recently opened) + Horizontal Filmstrip
+            // Row 4: Recent Assets Filmstrip (kept in Minimal Mode with bounded 16-item lightweight cache for fast drag-out)
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
                     Text("最近素材")
@@ -386,23 +410,42 @@ public struct NotchShelfView: View {
 
                     Spacer()
 
-                    Button {
-                        onToggleFullGallery(true)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("全部 (\(recentAssets.count))")
-                                .font(.system(size: 11, weight: .semibold))
-                                .monospacedDigit()
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .bold))
+                    if shelfState.isMinimalCaptureOnly {
+                        Button {
+                            onOpenMainWindow()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("恢复主窗看全部")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                Image(systemName: "arrow.up.forward.app")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            }
+                            .foregroundStyle(.white.opacity(0.78))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3.5)
+                            .background(Color.white.opacity(0.09), in: Capsule(style: .continuous))
                         }
-                        .foregroundStyle(.white.opacity(0.84))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 3.5)
-                        .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
+                        .buttonStyle(.plain)
+                        .help("退出极简模式并打开主窗口浏览全部素材")
+                    } else {
+                        Button {
+                            onToggleFullGallery(true)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("全部 (\(recentAssets.count))")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .monospacedDigit()
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                            .foregroundStyle(.white.opacity(0.84))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3.5)
+                            .background(Color.white.opacity(0.10), in: Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .help("展开全画面瀑布流浏览最近素材（支持框选多选）")
                     }
-                    .buttonStyle(.plain)
-                    .help("展开全画面瀑布流浏览最近素材（支持框选多选）")
                 }
 
                 if recentAssets.isEmpty {
@@ -417,7 +460,7 @@ public struct NotchShelfView: View {
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 9) {
-                            ForEach(recentAssets.prefix(24)) { asset in
+                            ForEach(recentAssets.prefix(shelfState.isMinimalCaptureOnly ? 16 : 24)) { asset in
                                 recentFilmstripCard(asset)
                             }
                         }
@@ -466,14 +509,14 @@ public struct NotchShelfView: View {
                         Button {
                             onOpenAssetInQuickLook(asset)
                         } label: {
-                            Image(systemName: "eye")
+                            Image(systemName: asset.isExternalWebLink ? "safari" : "eye")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .frame(width: 22, height: 22)
                                 .background(Color.black.opacity(0.72), in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .help("在主窗中沉浸预览")
+                        .help(asset.isExternalWebLink ? "在默认浏览器中打开" : "在主窗中沉浸预览")
                     }
                     .padding(5)
                     .transition(.opacity)
@@ -608,7 +651,7 @@ public struct NotchShelfView: View {
 
     private var dropWellRow: some View {
         ZStack {
-            let wellShape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+            let wellShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
             wellShape
                 .fill(shelfState.isDropTargeted ? activeBlue.opacity(0.24) : Color.white.opacity(0.06))
                 .overlay(
@@ -651,15 +694,16 @@ public struct NotchShelfView: View {
                             .foregroundStyle(.white.opacity(0.74))
                     }
                 }
-            } else if shelfState.clipboardXPostURL != nil {
+            } else if let detectedLink = shelfState.clipboardLink {
                 Button(action: onCollectClipboard) {
                     HStack(spacing: 10) {
                         Image(systemName: "link.badge.plus")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(activeBlue)
-                        Text("检测到剪贴板推文链接 · 点击或按 ⌘V 立即保存")
+                        Text(detectedLink.notchHintLabel)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.white)
+                            .lineLimit(1)
                         Spacer()
                         Text("保存")
                             .font(.system(size: 11, weight: .semibold))
@@ -679,7 +723,7 @@ public struct NotchShelfView: View {
                         Image(systemName: "square.and.arrow.down.on.square")
                             .font(.system(size: 15, weight: .light))
                             .foregroundStyle(.white.opacity(0.72))
-                        Text("拖入文件、整个文件夹、推文或 GitHub 链接，或按 ⌘V 粘贴")
+                        Text("拖入文件、整个文件夹或任意网页链接，或按 ⌘V 粘贴")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.white.opacity(0.84))
                             .lineLimit(1)
@@ -717,11 +761,13 @@ public struct NotchShelfView: View {
                     .font(.system(size: 11.5, weight: .medium))
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
             }
             .foregroundStyle(.white.opacity(0.88))
             .padding(.horizontal, 9)
             .padding(.vertical, 5.5)
-            .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .fixedSize(horizontal: true, vertical: false)
         }
         .buttonStyle(CharkleTactileButtonStyle())
     }
@@ -733,10 +779,12 @@ public struct NotchShelfView: View {
             Text("\(library.inboxCount) 项")
                 .font(.system(size: 10.5, weight: .medium, design: .rounded))
                 .monospacedDigit()
+                .lineLimit(1)
                 .foregroundStyle(.white.opacity(0.68))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .fixedSize(horizontal: true, vertical: true)
         case .folder:
             Menu {
                 CharkleHierarchicalFolderMenuContent(
@@ -756,28 +804,65 @@ public struct NotchShelfView: View {
                         .font(.system(size: 10.5, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
                         .lineLimit(1)
+                        .truncationMode(.tail)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 8))
                         .foregroundStyle(.white.opacity(0.55))
                 }
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .menuStyle(.borderlessButton)
-            .fixedSize(horizontal: true, vertical: false)
+            .menuIndicator(.hidden)
+            .fixedSize(horizontal: false, vertical: true)
         case .activeMoodboard:
-            HStack(spacing: 4) {
-                Circle().fill(Color.green).frame(width: 5, height: 5)
-                Text(activeBoardTitle)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.86))
-                    .lineLimit(1)
+            if moodboards.boards.isEmpty {
+                HStack(spacing: 4) {
+                    Circle().fill(Color.white.opacity(0.38)).frame(width: 5, height: 5)
+                    Text("未选择情绪板")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.68))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Menu {
+                    ForEach(moodboards.boards) { board in
+                        Button {
+                            coordinator.activeMoodboardID = board.id
+                        } label: {
+                            if (coordinator.activeMoodboardID ?? moodboards.boards.first?.id) == board.id {
+                                Label(board.title, systemImage: "checkmark")
+                            } else {
+                                Text(board.title)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.green).frame(width: 5, height: 5)
+                        Text(activeBoardTitle)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: 110, alignment: .trailing)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
     }
 
@@ -789,20 +874,25 @@ public struct NotchShelfView: View {
                 if mode == .folder && shelfState.selectedFolderID == nil {
                     shelfState.selectedFolderID = library.folderHierarchyRoots.first?.id ?? library.folders.first?.id
                 }
+                if mode == .activeMoodboard && coordinator.activeMoodboardID == nil {
+                    coordinator.activeMoodboardID = moodboards.boards.first?.id
+                }
             }
         } label: {
             Text(label)
                 .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                .lineLimit(1)
                 .foregroundStyle(isSelected ? .white : .white.opacity(0.62))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3.5)
                 .background {
                     if isSelected {
-                        RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(Color.white.opacity(0.18))
                             .matchedGeometryEffect(id: "notch-target-pill", in: targetPillNamespace)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
         }
         .buttonStyle(.plain)
     }

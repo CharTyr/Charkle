@@ -1556,6 +1556,25 @@ public struct OnboardingView: View {
                             }
                         }
                     }
+                case .ringGallery:
+                    HStack(alignment: .center, spacing: 6) {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(tile.opacity(0.65))
+                            .frame(width: 26, height: 50)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(tile)
+                            .frame(width: 34, height: 64)
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(accent.opacity(0.45))
+                            .frame(width: 44, height: 78)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(tile)
+                            .frame(width: 34, height: 64)
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(tile.opacity(0.65))
+                            .frame(width: 26, height: 50)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             }
             .frame(height: 82)
@@ -1919,7 +1938,7 @@ public struct OnboardingView: View {
                 Circle()
                     .fill(Color.primary)
                     .frame(width: 7.5, height: 7.5)
-                    .transition(.scale(scale: 0.5).combined(with: .opacity))
+                    .transition(CharkleMotion.originTransition(anchor: .center, scale: 0.86, reduced: reduceMotion))
             }
         }
     }

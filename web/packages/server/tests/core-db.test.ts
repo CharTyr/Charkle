@@ -11,7 +11,13 @@ import {
   toSwiftUUID,
 } from '@charkle/shared';
 import {
+  decodeEmbeddingBlob,
+  decodeFeaturePrintFloat32,
+  encodeEmbeddingBlob,
   encodeFeaturePrintFloat32,
+  float16BitsToFloat32,
+  float32ToFloat16Bits,
+  LibraryDatabaseError,
   type LibraryDatabase,
 } from '../src/db/library-database.js';
 import { openNodeLibraryDatabase } from '../src/runtime/node-sql.js';
@@ -263,6 +269,144 @@ describe('LibraryDatabase (SQLite WAL + FTS5 + Pinyin + CIELAB + Folders)', () =
       );
       const jumps = db.quickJump('gyy', 10);
       expect(jumps.some((j) => j.kind === 'moodboard' && j.targetUUID === board.id)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('round-trips Float16 carry edge cases & NaN accurately and guards bplist00 VNFeaturePrint blobs (P0-01)', () => {
+    // Rounding carry values (mantissa 0x3ff -> carries into exponent via +, NOT bitwise |)
+    const carryValues = [0.4999, 1.9999, 0.12499, -0.4999, -1.9999, 65504, 1e-6, 0, -0];
+    const encoded = encodeEmbeddingBlob(carryValues, 16);
+    const decoded = decodeEmbeddingBlob(encoded, 16);
+    expect(decoded).toHaveLength(carryValues.length);
+    for (let i = 0; i < carryValues.length; i++) {
+      expect(Math.abs(decoded[i] - carryValues[i])).toBeLessThan(0.01);
+    }
+    // Specifically verify 0.4999 rounds to 0.5 (not 0.25!) and 1.9999 rounds to 2.0 (not 1.0!)
+    expect(float16BitsToFloat32(float32ToFloat16Bits(0.4999))).toBeCloseTo(0.5, 4);
+    expect(float16BitsToFloat32(float32ToFloat16Bits(1.9999))).toBeCloseTo(2.0, 4);
+    expect(float16BitsToFloat32(float32ToFloat16Bits(0.12499))).toBeCloseTo(0.125, 4);
+    // NaN MUST remain NaN (not silently turn into Infinity)
+    expect(Number.isNaN(float16BitsToFloat32(float32ToFloat16Bits(Number.NaN)))).toBe(true);
+
+    // Binary plist VNFeaturePrintObservation blob from macOS MUST return null instead of bogus Float32 values
+    const macFeaturePrintBplist = Buffer.from('bplist00\x00\x01\x02\x03\x04\x05\x06\x07', 'latin1').toString('base64');
+    expect(decodeFeaturePrintFloat32(macFeaturePrintBplist)).toBeNull();
+    // Valid Float32 base64 still decodes cleanly
+    const validFp = encodeFeaturePrintFloat32([0.25, -0.5, 0.75, 1.0]);
+    expect(decodeFeaturePrintFloat32(validFp)).toEqual([0.25, -0.5, 0.75, 1.0]);
+  });
+
+  it('enforces strict folder validation, deleteFolder collision suffixing, applyBatchPatch ordering, smart folder clearable colorHex, epoch 0 timestamps, and embeddingModel filtering (P0-08, P1-03, P1-06, P2-01, P2-02)', () => {
+    const db = makeTempDB();
+    try {
+      // Folder name validation rejects .charkle, .., /, and root Inbox
+      for (const bad of ['.charkle', '..', 'a/b', 'Inbox', 'inbox', '   ']) {
+        expect(() => db.createFolder(bad)).toThrow(LibraryDatabaseError);
+      }
+      const fA = db.createFolder('Archive');
+      const fB = db.createFolder('Brand');
+      expect(fB.sortOrder).toBe(fA.sortOrder + 1);
+      // Duplicate sibling throws 409 FOLDER_EXISTS instead of silently renaming
+      expect(() => db.createFolder('archive')).toThrow(LibraryDatabaseError);
+
+      // Subfolder named 'Inbox' IS allowed, and deleting parent with trashContents=false disambiguates root collision -> 'Inbox 2'
+      const subInbox = db.createFolder('Inbox', fA.id);
+      const subBrand = db.createFolder('Brand', fA.id);
+      db.deleteFolder(fA.id, false);
+      expect(db.getFolder(subInbox.id)?.name).toBe('Inbox 2');
+      expect(db.getFolder(subBrand.id)?.name).toBe('Brand 2');
+
+      // updateFolderAppearance trims blank strings to null
+      const cleared = db.updateFolderAppearance(fB.id, { colorHex: '   ', customSymbol: ' ' });
+      expect(cleared.colorHex).toBeNull();
+      expect(cleared.customSymbol).toBeNull();
+
+      // SmartFolder clearable colorHex + default name
+      const sf = db.saveSmartFolder({
+        id: toSwiftUUID(crypto.randomUUID()),
+        name: '   ',
+        colorHex: null,
+        rule: createDefaultSmartFolderRule({ colorHexes: ['#FF0000'] }),
+        sortOrder: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      expect(sf.name).toBe('未命名智能文件夹');
+      expect(sf.colorHex).toBeNull();
+
+      // Unix epoch 0 timestamp preserved (not replaced by Date.now())
+      const epochAsset = db.saveAssetLocally(
+        createDefaultAssetRecord({
+          id: toSwiftUUID(crypto.randomUUID()),
+          title: 'Epoch Zero',
+          fileName: 'epoch.png',
+          createdAt: '1970-01-01T00:00:00.000Z',
+          updatedAt: '1970-01-01T00:00:00.000Z',
+          suggestedTags: ['keep-me', 'drop-me'],
+          tags: ['existing'],
+        }),
+      );
+      const rawRow = db.sql.get<{ created: number }>('SELECT created FROM assets WHERE id = ?', [
+        epochAsset.id,
+      ]);
+      expect(rawRow?.created).toBe(0);
+
+      // applyBatchPatch: dismissSuggestedTags runs BEFORE acceptSuggestedTags, removeTags runs LAST, validates folderID, deduplicates IDs
+      expect(() =>
+        db.applyBatchPatch({
+          assetIDs: [epochAsset.id],
+          addTags: [],
+          removeTags: [],
+          acceptSuggestedTags: false,
+          dismissSuggestedTags: [],
+          folderAssignment: { type: 'folder', folderID: toSwiftUUID(crypto.randomUUID()) },
+        }),
+      ).toThrow(LibraryDatabaseError);
+
+      const patched = db.applyBatchPatch({
+        assetIDs: [epochAsset.id, epochAsset.id],
+        addTags: ['added-then-removed', 'kept-added'],
+        removeTags: ['added-then-removed'],
+        acceptSuggestedTags: true,
+        dismissSuggestedTags: ['drop-me'],
+        folderAssignment: { type: 'folder', folderID: fB.id },
+      });
+      expect(patched).toHaveLength(1);
+      expect(patched[0].tags).toContain('keep-me');
+      expect(patched[0].tags).toContain('kept-added');
+      expect(patched[0].tags).not.toContain('drop-me');
+      expect(patched[0].tags).not.toContain('added-then-removed');
+      expect(patched[0].suggestedTags).toEqual([]);
+
+      // fetchAssets offset without limit
+      const a2 = db.saveAssetLocally(
+        createDefaultAssetRecord({
+          id: toSwiftUUID(crypto.randomUUID()),
+          title: 'Second Asset',
+          fileName: 'two.png',
+          folderID: fB.id,
+        }),
+      );
+      expect(db.fetchAssets(undefined, undefined, 1)).toHaveLength(1);
+
+      // similarAssets filters mismatched embeddingModel; suggestFolder excludes asset's own folder
+      db.saveVector(epochAsset.id, {
+        embedding: [1, 0, 0, 0],
+        embeddingModel: 'model-A',
+        precision: 16,
+      });
+      db.saveVector(a2.id, {
+        embedding: [1, 0, 0, 0],
+        embeddingModel: 'model-B',
+        precision: 16,
+      });
+      const sim = db.similarAssets(epochAsset.id, 5);
+      // Should NOT get a bogus 1.0 embedding similarity across mismatched models
+      expect(sim[0]?.matchReasons.some((r) => r.includes('语义'))).toBeFalsy();
+      // Both assets are in fB -> suggestFolder for epochAsset must NOT recommend its own folder fB
+      expect(db.suggestFolder(epochAsset.id)?.folderID).not.toBe(fB.id);
     } finally {
       db.close();
     }

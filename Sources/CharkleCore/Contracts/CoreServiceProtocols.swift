@@ -33,6 +33,7 @@ public protocol CharkleEngineProtocol: Sendable {
     func permanentlyDeleteAssets(ids: [UUID]) async throws
     func markAssetOpened(id: UUID) async
     func refreshRichAsset(id: UUID) async throws -> AssetRecord
+    func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID]
 
     func quickJump(query: String, limit: Int) async throws -> [QuickJumpMatch]
     func similarAssets(to assetID: UUID, limit: Int) async throws -> [ScoredAsset]
@@ -152,6 +153,8 @@ public extension CharkleEngineProtocol {
         }
         return asset
     }
+
+    func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID] { [] }
 
     func hydrateImageMetadataIfNeeded(id: UUID) async throws -> AssetRecord? { nil }
 

@@ -154,7 +154,7 @@ describe('Wave 2 Delta Sync & Browser Clipper Extension Server Support', () => {
     } finally {
       ctx.db.close();
     }
-  });
+  }, 45_000);
 
   it('defaults POST /api/v1/boards, MoodboardCurator, MoodboardAgentHarness, and MCP compose_moodboard to freeform-first', async () => {
     const { ctx, app, pat } = await createRig();

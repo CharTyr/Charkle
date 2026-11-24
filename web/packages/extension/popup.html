@@ -76,7 +76,7 @@
                 id="onboard-token"
                 type="password"
                 class="input-control"
-                placeholder="chk_..."
+                placeholder="粘贴访问令牌"
                 autocomplete="off"
                 spellcheck="false"
                 required
@@ -95,7 +95,7 @@
               </button>
             </div>
             <p class="field-hint">
-              可在 Charkle「设置 → 浏览器扩展与采集」生成 <code>chk_</code> 访问令牌。
+              在 Charkle「设置 → 插件与扩展」生成访问令牌
             </p>
           </div>
 
@@ -218,7 +218,7 @@
         </div>
 
         <div id="images-empty" class="empty-state" hidden>
-          <p id="images-empty-text">当前页面未发现可采集的高清图片。</p>
+          <p id="images-empty-text">未发现图片</p>
         </div>
 
         <div id="images-grid" class="images-grid charkle-scroll" role="list"></div>
@@ -263,7 +263,6 @@
       <section id="panel-color" class="tab-panel surface-card" role="tabpanel" aria-labelledby="tab-color" hidden>
         <div id="color-swatch-stage" class="color-swatch-stage" style="background-color: #2A60E0;">
           <span id="color-swatch-hex" class="swatch-hex-display">#2A60E0</span>
-          <span id="color-swatch-sub" class="swatch-sub-display">色卡预览</span>
         </div>
 
         <div class="color-picker-row">
@@ -293,7 +292,7 @@
 
         <div class="field-group">
           <label for="color-title-input">色卡名称（可选）</label>
-          <input id="color-title-input" type="text" class="input-control" placeholder="留空则默认使用 HEX 色值" />
+          <input id="color-title-input" type="text" class="input-control" placeholder="色卡名称" />
         </div>
 
         <button id="btn-save-color" type="button" class="btn-primary pressable">

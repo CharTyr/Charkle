@@ -6,6 +6,7 @@ public enum CaptureInput: Hashable, Sendable {
     case webURL(URL, title: String?, notes: String?)
     case textSnippet(title: String, text: String, sourceURL: String?)
     case colorSwatch(hex: String, title: String?)
+    case socialBookmark(SocialPostMetadata, coverImageData: Data? = nil, tags: [String] = [])
 }
 
 public enum ThumbnailTier: String, Codable, Hashable, Sendable {

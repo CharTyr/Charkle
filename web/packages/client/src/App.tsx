@@ -1,5 +1,9 @@
 import React, { useEffect } from 'react';
-import { createDefaultAssetBatchPatch, hasVisibleLibraryChanges } from '@charkle/shared';
+import {
+  createDefaultAssetBatchPatch,
+  flattenFolderTree,
+  hasVisibleLibraryChanges,
+} from '@charkle/shared';
 import { connectCharkleSSE } from './api/sse';
 import { applyThemeToDocument, ToastHost } from './design-system';
 import { AuthGate } from './features/auth/AuthGate';
@@ -108,9 +112,32 @@ const CharkleWorkspace: React.FC = () => {
               void mb.loadBoards();
             }
             break;
-          case 'library.changed':
+          case 'library.changed': {
+            if (
+              (event.reason === 'permanent-delete' || event.reason === 'empty-trash') &&
+              event.assetIDs &&
+              event.assetIDs.length > 0
+            ) {
+              lib.pruneDeletedAssets(event.assetIDs);
+            }
+            const shouldBustThumbnails =
+              event.reason === 'refresh-rich' ||
+              event.reason === 'sync' ||
+              event.reason === 'rebuild-index' ||
+              event.reason === 'rebuild-local-index' ||
+              event.reason === 'storage-migration';
+            void Promise.all([
+              lib.refreshSidebarMetadata(),
+              lib.loadAssets(),
+              lib.loadRecentActivity(24),
+            ]).then(() => {
+              if (shouldBustThumbnails) {
+                useLibraryStore.getState().bumpCacheBust();
+              }
+            });
+            break;
+          }
           case 'library.enriched':
-            lib.bumpCacheBust();
             void lib.refreshSidebarMetadata();
             void lib.loadAssets();
             void lib.loadRecentActivity(24);
@@ -148,23 +175,27 @@ const CharkleWorkspace: React.FC = () => {
   // Re-fetch assets whenever navigation destination changes
   useEffect(() => {
     const lib = useLibraryStore.getState();
-    lib.clearSelection();
+    const pendingReveal = useCoordinatorStore.getState().pendingGalleryReveal;
+    if (!pendingReveal) {
+      lib.clearSelection();
+    }
     lib.clearSemanticSearch();
 
     if (destination.type === 'moodboard') {
       void useMoodboardStore.getState().openBoard(destination.id);
     } else if (destination.type === 'moodboardsHome') {
       void useMoodboardStore.getState().loadBoards();
-    } else {
+    } else if (!pendingReveal) {
       void lib.loadAssets(destination);
     }
   }, [destination]);
 
-  // Global Studio Keyboard Shortcuts
+  // Global Studio Keyboard Shortcuts (capture phase ensures Spacebar Quick Look works across Sidebar/Toolbar/Inspector focus)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       const key = e.key.toLowerCase();
+      const isUnmodified = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
       const coord = useCoordinatorStore.getState();
       const lib = useLibraryStore.getState();
 
@@ -184,9 +215,11 @@ const CharkleWorkspace: React.FC = () => {
         coord.toggleSidebar();
         return;
       }
-      if (mod && key === 'i') {
-        e.preventDefault();
-        coord.toggleInspector();
+      if (mod && key === 'i' && !e.shiftKey) {
+        if (!coord.quickLookAssetID) {
+          e.preventDefault();
+          coord.toggleInspector();
+        }
         return;
       }
       if (mod && e.shiftKey && key === 'n') {
@@ -201,15 +234,12 @@ const CharkleWorkspace: React.FC = () => {
         return;
       }
 
-      // Skip gallery-scoped shortcuts when typing or inside modals/Quick Look/Moodboard canvas
+      // Skip gallery-scoped shortcuts when typing or inside modals/Quick Look/menus/Moodboard canvas
       if (isInputElement(e.target)) return;
+      if (coord.isOverlayPresented()) return;
       if (
-        coord.quickLookAssetID ||
-        coord.jumpAnywhereOpen ||
-        coord.settingsOpen ||
-        coord.onboardingOpen ||
-        coord.generatorModalOpen ||
-        coord.showQuickCapture
+        document.querySelector('[role="dialog"][aria-modal="true"]') ||
+        document.querySelector('[role="menu"]')
       ) {
         return;
       }
@@ -229,7 +259,7 @@ const CharkleWorkspace: React.FC = () => {
         lib.setCutAssetIDs(lib.selectedAssetIDs);
         coord.pushToast({
           tone: 'info',
-          message: `已剪切 ${lib.selectedAssetIDs.size} 项素材，可前往目标文件夹粘贴移动`,
+          message: `已剪切 ${lib.selectedAssetIDs.size} 项素材`,
         });
         return;
       }
@@ -252,11 +282,17 @@ const CharkleWorkspace: React.FC = () => {
         }
       }
 
-      if (e.key === ' ') {
+      // Deterministic Spacebar Quick Look ignoring CapsLock/NumLock (masks only Meta/Ctrl/Alt/Shift)
+      if (isUnmodified && (e.code === 'Space' || e.key === ' ')) {
+        if (e.repeat) {
+          e.preventDefault();
+          return;
+        }
         const targetID =
           Array.from(lib.selectedAssetIDs)[0] ?? (lib.assets.length > 0 ? lib.assets[0].id : null);
         if (targetID) {
           e.preventDefault();
+          e.stopPropagation();
           coord.openQuickLook(targetID);
         }
         return;
@@ -278,16 +314,15 @@ const CharkleWorkspace: React.FC = () => {
         return;
       }
 
-      // Inbox 1-9 Quick Archive (`PARITY_SPEC.md` §6)
+      // Inbox 1-9 Quick Archive (deterministic DFS folder order matching Sidebar tree)
       if (
         coord.destination.type === 'inbox' &&
-        !mod &&
-        !e.altKey &&
-        !e.shiftKey &&
+        isUnmodified &&
         /^[1-9]$/.test(e.key)
       ) {
         const folderIdx = Number(e.key) - 1;
-        const folder = lib.folders[folderIdx];
+        const orderedFolders = flattenFolderTree(lib.folders).map((n) => n.folder);
+        const folder = orderedFolders[folderIdx];
         if (!folder) return;
         const targetIDs =
           lib.selectedAssetIDs.size > 0
@@ -309,6 +344,7 @@ const CharkleWorkspace: React.FC = () => {
               tone: 'success',
               message: `已将 ${targetIDs.length} 项归档至「${folder.name}」`,
               actionLabel: '撤销',
+              durationMs: 5200,
               onAction: () => {
                 void lib.batchPatch(
                   createDefaultAssetBatchPatch(targetIDs, {
@@ -321,8 +357,8 @@ const CharkleWorkspace: React.FC = () => {
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, []);
 
   return (
@@ -330,7 +366,7 @@ const CharkleWorkspace: React.FC = () => {
       {/* Left Navigation Sidebar */}
       <SidebarView />
 
-      {/* Center Workspace Stage (clean full-height Gallery-First chrome) */}
+      {/* Center Workspace Stage (clean full-height media canvas) */}
       <main className="flex-1 min-w-0 h-full flex flex-col overflow-hidden">
         {destination.type === 'moodboardsHome' ? (
           <MoodboardsHomeView />

@@ -36,7 +36,9 @@ public struct InspectorView: View {
     @State private var boardRefinementDraft: String = ""
     @State private var showBoardAgentTrace: Bool = false
     @State private var pendingPermanentDeleteIDs: [UUID] = []
+    @State private var confirmSinglePermanentDelete: Bool = false
     @State private var draggingInspectorSection: InspectorInfoSection? = nil
+    @State private var dropTargetInspectorSection: InspectorInfoSection? = nil
     @State private var hoveredInspectorSection: InspectorInfoSection? = nil
 
     @Namespace private var inspectorTabNamespace
@@ -166,7 +168,7 @@ public struct InspectorView: View {
                         .padding(.vertical, 6)
                         .background {
                             if active {
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .fill(CharkleTheme.surfaceElevated(for: colorScheme))
                                     .shadow(color: .black.opacity(colorScheme == .dark ? 0.3 : 0.08), radius: 2, y: 1)
                                     .matchedGeometryEffect(id: "inspector-top-tab-pill", in: inspectorTabNamespace)
@@ -177,11 +179,16 @@ public struct InspectorView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(3)
-            .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .padding(2)
+            .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .padding(.horizontal, 12)
-            .padding(.top, 12)
+            .padding(.top, 10)
             .padding(.bottom, 8)
+            .background {
+                if !isQuickLookHosted {
+                    CharkleWindowDragArea()
+                }
+            }
 
             if coordinator.selectedInspectorTab == .similar {
                 singleAssetSimilarTab(asset)
@@ -209,7 +216,9 @@ public struct InspectorView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
-                if library.similarAssets.isEmpty {
+                if library.isLoadingSimilarAssets && library.similarAssets.isEmpty {
+                    CharkleSimilarGridSkeleton()
+                } else if library.similarAssets.isEmpty {
                     VStack(spacing: 10) {
                         CharkleEmptyStateVignette(.noFilterResults, compact: true)
                         Text("暂无视觉或色彩相近的素材")
@@ -292,9 +301,28 @@ public struct InspectorView: View {
         let visibleSections = visibleInfoSections(for: asset, resolvedMeta: resolvedMeta)
 
         return ScrollView(.vertical) {
+            let activeAnchorSection = dropTargetInspectorSection ?? draggingInspectorSection
+            let activeAnchorIndex = activeAnchorSection.flatMap { visibleSections.firstIndex(of: $0) }
+
             VStack(alignment: .leading, spacing: 10) {
-                ForEach(visibleSections) { section in
+                ForEach(Array(visibleSections.enumerated()), id: \.element.id) { index, section in
                     let isDragged = draggingInspectorSection == section
+                    let rippleMetrics: (offset: CGFloat, delay: Double) = {
+                        guard draggingInspectorSection != nil,
+                              !isDragged,
+                              !reduceMotion,
+                              let anchorIdx = activeAnchorIndex,
+                              index != anchorIdx else {
+                            return (0, 0)
+                        }
+                        let dist = abs(index - anchorIdx) - 1
+                        let direction: CGFloat = index < anchorIdx ? -1 : 1
+                        return (
+                            direction * CharkleMotion.rippleOffset(distance: dist, amplitude: 5),
+                            CharkleMotion.rippleDelay(distance: dist)
+                        )
+                    }()
+
                     singleAssetSectionCard(
                         section,
                         for: asset,
@@ -302,6 +330,31 @@ public struct InspectorView: View {
                         visibleSections: visibleSections
                     )
                         .opacity(isDragged ? 0.36 : 1.0)
+                        .offset(y: rippleMetrics.offset)
+                        .animation(
+                            CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)
+                                .delay(rippleMetrics.delay),
+                            value: activeAnchorSection
+                        )
+                        .overlay(alignment: .top) {
+                            if isDragged {
+                                HStack(spacing: 0) {
+                                    Circle()
+                                        .fill(Color.accentColor)
+                                        .frame(width: 5, height: 5)
+                                    Rectangle()
+                                        .fill(Color.accentColor)
+                                        .frame(height: 2)
+                                    Circle()
+                                        .fill(Color.accentColor)
+                                        .frame(width: 5, height: 5)
+                                }
+                                .padding(.horizontal, 6)
+                                .offset(y: -6)
+                                .allowsHitTesting(false)
+                                .transition(.opacity)
+                            }
+                        }
                         .overlay {
                             if isDragged {
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -320,6 +373,7 @@ public struct InspectorView: View {
                             }
                             if draggingInspectorSection != nil && NSEvent.pressedMouseButtons == 0 {
                                 draggingInspectorSection = nil
+                                dropTargetInspectorSection = nil
                             }
                         }
                         .onDrop(
@@ -327,6 +381,7 @@ public struct InspectorView: View {
                             delegate: InspectorSectionDropDelegate(
                                 targetSection: section,
                                 draggingSection: $draggingInspectorSection,
+                                dropTargetSection: $dropTargetInspectorSection,
                                 reduceMotion: reduceMotion,
                                 onMove: { dragged, target in
                                     coordinator.moveInspectorSection(dragged, toTarget: target)
@@ -443,7 +498,7 @@ public struct InspectorView: View {
                         onOpenQuickLook(asset)
                     }
                 }
-                .help(isQuickLookHosted ? asset.title : "点击打开 Quick Look 全屏预览")
+                .help(isQuickLookHosted ? asset.title : (asset.isExternalWebLink ? "点击在默认浏览器中打开" : "点击打开 Quick Look 全屏预览"))
 
                 inspectorInnerDivider
 
@@ -541,7 +596,7 @@ public struct InspectorView: View {
                             .buttonStyle(CharkleTactileButtonStyle())
 
                             Button(role: .destructive) {
-                                pendingPermanentDeleteIDs = [asset.id]
+                                confirmSinglePermanentDelete = true
                             } label: {
                                 Label("彻底删除", systemImage: "trash.slash")
                                     .font(.system(size: 11.5, weight: .medium))
@@ -551,6 +606,23 @@ public struct InspectorView: View {
                                     .background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
+                            .charklePopconfirm(
+                                isPresented: $confirmSinglePermanentDelete,
+                                title: "彻底删除此素材？",
+                                message: "彻底删除后将无法从废纸篓恢复。",
+                                confirmTitle: "彻底删除",
+                                arrowEdge: .bottom
+                            ) {
+                                let id = asset.id
+                                if coordinator.quickLookAssetID == id {
+                                    onRequestCloseQuickLook?()
+                                    coordinator.closeQuickLook()
+                                }
+                                Task {
+                                    await library.permanentlyDeleteAssets([id])
+                                    coordinator.showToast("已彻底删除素材", icon: "trash.slash")
+                                }
+                            }
                         }
                     } else {
                         VStack(spacing: 8) {
@@ -719,7 +791,7 @@ public struct InspectorView: View {
                                                 .foregroundStyle(Color.accentColor)
                                         }
                                         .buttonStyle(.plain)
-                                        .help("使用 TypeSafe Jev Box（未开启时用本机 Vision）先锁定画面主体再提取去背景色板")
+                                        .help("先自动锁定画面主体再提取去背景色板（优先使用已配置的视觉定位增强，否则使用本机 Apple Vision）")
                                     }
                                 }
                                 CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
@@ -741,9 +813,9 @@ public struct InspectorView: View {
                                             }
                                             .padding(.horizontal, 7)
                                             .padding(.vertical, 4)
-                                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                                             .overlay(
-                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                RoundedRectangle(cornerRadius: 6, style: .continuous)
                                                     .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.65)
                                             )
                                         }
@@ -1004,6 +1076,43 @@ public struct InspectorView: View {
                             .lineLimit(1)
                     }
                     .padding(.vertical, 5)
+
+                    if asset.isExternalWebLink {
+                        HStack(spacing: 6) {
+                            Button {
+                                library.markAssetOpened(asset.id)
+                                NSWorkspace.shared.open(url)
+                            } label: {
+                                Label("默认浏览器打开", systemImage: "safari")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 5.5)
+                                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                coordinator.showToast("正在刷新网页缩略图…", icon: "arrow.clockwise")
+                                Task {
+                                    if await library.refreshRichAsset(asset.id) != nil {
+                                        coordinator.showToast("已刷新网页缩略图", icon: "checkmark.circle.fill", tone: .success)
+                                    } else {
+                                        coordinator.showToast("网页缩略图刷新失败", icon: "exclamationmark.triangle", tone: .warning)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .frame(width: 28, height: 26)
+                                    .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("重新抓取网页标题与缩略图")
+                        }
+                        .padding(.top, 4)
+                    }
                 }
             }
         }
@@ -1090,7 +1199,7 @@ public struct InspectorView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6.5)
-                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
@@ -1119,7 +1228,7 @@ public struct InspectorView: View {
                         .foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 6)
-                        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
                 }
@@ -1284,9 +1393,9 @@ public struct InspectorView: View {
                             .font(.system(size: 11, weight: .medium))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 5.5)
-                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .overlay(
-                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.65)
                             )
                     }
@@ -1461,7 +1570,7 @@ public struct InspectorView: View {
                                 .foregroundStyle(.white)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8.5)
-                                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
                         }
@@ -2131,7 +2240,7 @@ public struct InspectorView: View {
                             (boardRefinementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || moodboards.isRefiningActiveBoard)
                                 ? Color.accentColor.opacity(0.42)
                                 : Color.accentColor,
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
                     }
                     .buttonStyle(.plain)
@@ -2154,8 +2263,7 @@ public struct InspectorView: View {
 
                 if moodboards.isRefiningActiveBoard, let activeStep = moodboards.activeBoardAgentTrace.last {
                     HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.mini)
+                        CharkleDelayedSpinner(isActive: moodboards.isRefiningActiveBoard, controlSize: .mini)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(activeStep.title)
                                 .font(.system(size: 10.5, weight: .semibold))
@@ -2632,6 +2740,7 @@ private struct InspectorDragGripDots: View {
 private struct InspectorSectionDropDelegate: DropDelegate {
     let targetSection: InspectorInfoSection
     @Binding var draggingSection: InspectorInfoSection?
+    @Binding var dropTargetSection: InspectorInfoSection?
     let reduceMotion: Bool
     let onMove: (InspectorInfoSection, InspectorInfoSection) -> Void
 
@@ -2640,7 +2749,9 @@ private struct InspectorSectionDropDelegate: DropDelegate {
     }
 
     func dropEntered(info: DropInfo) {
-        guard let dragged = draggingSection, dragged != targetSection else { return }
+        guard let dragged = draggingSection else { return }
+        dropTargetSection = targetSection
+        guard dragged != targetSection else { return }
         withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
             onMove(dragged, targetSection)
         }
@@ -2652,6 +2763,7 @@ private struct InspectorSectionDropDelegate: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         draggingSection = nil
+        dropTargetSection = nil
         return true
     }
 
@@ -2661,6 +2773,7 @@ private struct InspectorSectionDropDelegate: DropDelegate {
             try? await Task.sleep(for: .milliseconds(120))
             if draggingSection != nil && NSEvent.pressedMouseButtons == 0 {
                 draggingSection = nil
+                dropTargetSection = nil
             }
         }
     }

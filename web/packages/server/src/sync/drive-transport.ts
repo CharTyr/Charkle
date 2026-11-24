@@ -36,7 +36,7 @@ export interface DriveDownloadStreamResult {
 
 /**
  * Backend-agnostic streaming remote storage transport implemented by Google Drive API v3,
- * WebDAV, Local Folder / gdirect mount (Node-only), and InMemory test transport.
+ * WebDAV, Local Folder / Mounted Directory (Node-only), and InMemory test transport.
  */
 export interface DriveTransport {
   readonly displayName: string;

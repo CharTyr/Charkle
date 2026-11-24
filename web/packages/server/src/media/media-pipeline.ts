@@ -19,6 +19,7 @@ import {
 } from '@charkle/shared';
 import type { IMediaPipeline, MediaIngestResult } from '../context.js';
 import { encodeFeaturePrintFloat32, type LibraryDatabase } from '../db/library-database.js';
+import { isBinaryPlist, parseBinaryPlist } from '../runtime/bplist.js';
 import type {
   BlobHeadResult,
   BlobRangeRequest,
@@ -40,8 +41,13 @@ import {
 import { sniffImageMimeType } from '../runtime/workers-image.js';
 import { DEFAULT_CACHE_BUDGET_BYTES } from '../storage/config-store.js';
 import { extractAudioWaveform } from './audio-waveform.js';
+import { extractImageMetadata } from './image-metadata-extractor.js';
 import { isWebURL, resolveWebBookmark } from './resolvers/bookmark.js';
-import { parseGitHubRepoURL, resolveGitHubRepo } from './resolvers/github.js';
+import {
+  fetchGitHubOpenGraphCardBytes,
+  parseGitHubRepoURL,
+  resolveGitHubRepo,
+} from './resolvers/github.js';
 import {
   downloadBoundedBuffer,
   MAX_SOCIAL_PHOTO_BYTES,
@@ -514,16 +520,20 @@ export class MediaPipeline implements IMediaPipeline {
         if (buffer.byteLength === 0) {
           throw new Error('图片数据为空。');
         }
-        let ext = posixExtname(input.suggestedName).replace(/^\./, '').toLowerCase();
-        if (!ext) {
-          const info = await this.images.inspectDimensions(buffer).catch(() => null);
-          if (info?.format) {
-            ext = info.format === 'jpeg' ? 'jpg' : info.format;
-          } else {
-            const sniffed = sniffImageMimeType(buffer, 'image/png');
-            ext = extForImageMime(sniffed);
-          }
-        }
+        const info = await this.images.inspectDimensions(buffer).catch(() => null);
+        const sniffedMime = sniffImageMimeType(buffer, 'image/png');
+        const actualExt =
+          info?.format === 'jpeg'
+            ? 'jpg'
+            : info?.format
+              ? info.format.toLowerCase()
+              : extForImageMime(sniffedMime);
+        const rawExt = posixExtname(input.suggestedName).replace(/^\./, '').toLowerCase();
+        const canonicalRawExt = rawExt === 'jpeg' ? 'jpg' : rawExt;
+        const ext =
+          actualExt && (!canonicalRawExt || (canonicalRawExt !== actualExt && ['jpg', 'png', 'webp', 'gif', 'avif', 'svg'].includes(actualExt)))
+            ? actualExt
+            : rawExt || 'png';
         const base = sanitizeFileName(posixStripExt(input.suggestedName) || 'Clipboard Image');
         const fileName = `${base}.${ext}`;
         const result = await this.ingestUploadedFile(
@@ -643,7 +653,14 @@ export class MediaPipeline implements IMediaPipeline {
     if (parseSocialPostURL(rawUrl)) {
       const resolved = await resolveSocialPost(rawUrl);
       if (resolved) {
-        const { metadata, title, markdownArchive, coverImageBuffer, primaryVideoBuffer } = resolved;
+        const {
+          metadata,
+          title,
+          markdownArchive,
+          coverImageBuffer,
+          primaryVideoBuffer,
+          authorAvatarBytes,
+        } = resolved;
         const platformTag = socialPlatformDisplayName(metadata.platform);
         const originalBuf: Uint8Array = primaryVideoBuffer ?? utf8Encode(markdownArchive);
         const fileExt = primaryVideoBuffer ? 'mp4' : 'md';
@@ -653,6 +670,7 @@ export class MediaPipeline implements IMediaPipeline {
           kind: 'socialPost',
           post: metadata,
           coverImageBytes: coverImageBuffer ?? null,
+          authorAvatarBytes: authorAvatarBytes ?? null,
         });
         const dims = await this.storeRenderedCard(assetID, card);
         const colorSource: Uint8Array = coverImageBuffer ?? card.fullImage;
@@ -704,11 +722,30 @@ export class MediaPipeline implements IMediaPipeline {
     if (parseGitHubRepoURL(rawUrl)) {
       const repo = await resolveGitHubRepo(rawUrl);
       if (repo) {
-        const card = await this.images.renderArtworkCard({ kind: 'githubRepo', repo });
-        const dims = await this.storeRenderedCard(assetID, card);
-        const analysis = await this.images
-          .extractColorsAndFingerprint(card.fullImage, card.mimeType, { count: 5 })
-          .catch(() => ({ colors: [] as LabColor[], featurePrint: undefined }));
+        let dims: { width: number; height: number } | null = null;
+        let analysis: { colors: LabColor[]; featurePrint?: Float32Array } = {
+          colors: [],
+          featurePrint: undefined,
+        };
+
+        const ogCard = await fetchGitHubOpenGraphCardBytes(repo).catch(() => null);
+        if (ogCard) {
+          try {
+            dims = await this.generateThumbnailsFromBuffer(assetID, ogCard.bytes, ogCard.mimeType);
+            analysis = await this.images
+              .extractColorsAndFingerprint(ogCard.bytes, ogCard.mimeType, { count: 5 })
+              .catch(() => ({ colors: [] as LabColor[], featurePrint: undefined }));
+          } catch {
+            dims = null;
+          }
+        }
+        if (!dims) {
+          const card = await this.images.renderArtworkCard({ kind: 'githubRepo', repo });
+          dims = await this.storeRenderedCard(assetID, card);
+          analysis = await this.images
+            .extractColorsAndFingerprint(card.fullImage, card.mimeType, { count: 5 })
+            .catch(() => ({ colors: [] as LabColor[], featurePrint: undefined }));
+        }
         const originalBuf = buildWeblocXml(`https://github.com/${repo.fullName}`);
         const fileName = `${sanitizeFileName(repo.owner + '-' + repo.repo)}.webloc`;
         const tags = ['GitHub', ...(repo.language ? [repo.language] : [])];
@@ -979,6 +1016,17 @@ export class MediaPipeline implements IMediaPipeline {
             };
           }
         }
+        const extractedImgMeta = await extractImageMetadata(buffer, resolvedMime).catch(() => ({
+          photoExif: null,
+          aiGeneration: null,
+        }));
+        if (extractedImgMeta.photoExif || extractedImgMeta.aiGeneration) {
+          asset.richMetadata = {
+            ...(asset.richMetadata ?? { isMarkdown: false }),
+            photoExif: extractedImgMeta.photoExif ?? asset.richMetadata?.photoExif ?? null,
+            aiGeneration: extractedImgMeta.aiGeneration ?? asset.richMetadata?.aiGeneration ?? null,
+          };
+        }
         break;
       }
 
@@ -1014,6 +1062,17 @@ export class MediaPipeline implements IMediaPipeline {
               precision: 16,
             };
           }
+        }
+        const extractedDesignMeta = await extractImageMetadata(buffer, resolvedMime).catch(() => ({
+          photoExif: null,
+          aiGeneration: null,
+        }));
+        if (extractedDesignMeta.photoExif || extractedDesignMeta.aiGeneration) {
+          asset.richMetadata = {
+            ...(asset.richMetadata ?? { isMarkdown: false }),
+            photoExif: extractedDesignMeta.photoExif ?? asset.richMetadata?.photoExif ?? null,
+            aiGeneration: extractedDesignMeta.aiGeneration ?? asset.richMetadata?.aiGeneration ?? null,
+          };
         }
         break;
       }
@@ -1102,10 +1161,9 @@ export class MediaPipeline implements IMediaPipeline {
       }
 
       case 'webBookmark': {
-        const text = utf8Decode(buffer);
-        const urlMatch = /https?:\/\/[^\s<>"']+/i.exec(text);
-        if (urlMatch && isWebURL(urlMatch[0])) {
-          return this.ingestWebURL(urlMatch[0], null, '', folderID, assetID);
+        const extractedURL = extractWebBookmarkURL(buffer);
+        if (extractedURL && isWebURL(extractedURL)) {
+          return this.ingestWebURL(extractedURL, null, '', folderID, assetID);
         }
         if (!hasClientThumb520) {
           renderedCard = await this.images.renderArtworkCard({
@@ -1144,7 +1202,45 @@ export class MediaPipeline implements IMediaPipeline {
     return { asset, originalPath, vector };
   }
 
-  // MARK: - Rich Asset Refresh & Social Post Standalone Media Extraction
+  // MARK: - Rich Asset Refresh, Lazy Image Metadata Hydration & Social Post Standalone Media Extraction
+
+  /**
+   * Lazily extracts camera EXIF and embedded AI generation prompt metadata from the cached original blob.
+   * Returns an updated `AssetRecord` if new metadata was discovered, or `null` when unchanged/not applicable.
+   */
+  async hydrateImageMetadata(asset: AssetRecord): Promise<AssetRecord | null> {
+    if (
+      asset.mediaKind !== 'image' &&
+      asset.mediaKind !== 'animatedImage' &&
+      asset.mediaKind !== 'designFile'
+    ) {
+      return null;
+    }
+    if (asset.richMetadata?.photoExif != null || asset.richMetadata?.aiGeneration != null) {
+      return null;
+    }
+    const origKey = await this.findOriginalBlobKey(asset);
+    if (!origKey) return null;
+    const bytes = await this.blobs.getBytes(origKey);
+    if (!bytes || bytes.byteLength < 8) return null;
+
+    const extracted = await extractImageMetadata(bytes, asset.mimeType).catch(() => ({
+      photoExif: null,
+      aiGeneration: null,
+    }));
+    if (!extracted.photoExif && !extracted.aiGeneration) {
+      return null;
+    }
+
+    return {
+      ...asset,
+      richMetadata: {
+        ...(asset.richMetadata ?? { isMarkdown: false }),
+        photoExif: extracted.photoExif ?? asset.richMetadata?.photoExif ?? null,
+        aiGeneration: extracted.aiGeneration ?? asset.richMetadata?.aiGeneration ?? null,
+      },
+    };
+  }
 
   async refreshRichAsset(asset: AssetRecord): Promise<MediaIngestResult> {
     const targetUrl =
@@ -1312,7 +1408,17 @@ export class MediaPipeline implements IMediaPipeline {
   }
 
   setCacheBudgetBytes(bytes: number): void {
-    this.cacheBudgetBytes = Math.max(1024 * 1024, Math.round(bytes));
+    this.cacheBudgetBytes = Math.max(0, Math.round(bytes));
+  }
+
+  async cleanupDeletedMedia(db: LibraryDatabase): Promise<void> {
+    const cleanups = db.getStatesWithPrefix<boolean>('media.cleanup.');
+    if (cleanups.length === 0) return;
+    const ids = cleanups.map((item) => item.key.slice('media.cleanup.'.length));
+    await this.removeFilesByIDs(ids);
+    for (const item of cleanups) {
+      db.setState(item.key, null);
+    }
   }
 
   async getCacheStats(db: LibraryDatabase): Promise<CacheStats> {
@@ -1325,23 +1431,23 @@ export class MediaPipeline implements IMediaPipeline {
     const thumbnailBytes =
       thumbs520.reduce((s, e) => s + e.size, 0) + thumbs1400.reduce((s, e) => s + e.size, 0);
     const protectedIDs = db.protectedAssetIDs();
-    let originalCacheBytes = 0;
+    let totalOriginalBytes = 0;
     let pinnedOfflineBytes = 0;
     let pinnedCount = 0;
 
     for (const entry of originals) {
+      totalOriginalBytes += entry.size;
       const id = posixStripExt(posixBasename(entry.key)).toUpperCase();
       if (protectedIDs.has(id)) {
         pinnedOfflineBytes += entry.size;
         pinnedCount++;
-      } else {
-        originalCacheBytes += entry.size;
       }
     }
 
     return {
       thumbnailBytes,
-      originalCacheBytes,
+      // Report total cached original bytes (matching macOS MediaPipeline+Cache.swift)
+      originalCacheBytes: totalOriginalBytes,
       pinnedOfflineBytes,
       budgetBytes: this.cacheBudgetBytes,
       cachedOriginalCount: originals.length,
@@ -1350,11 +1456,19 @@ export class MediaPipeline implements IMediaPipeline {
   }
 
   /**
-   * Evicts oldest-accessed unpinned originals until total original cache fits within `budgetBytes`.
-   * Strictly protects assets with `pinnedOffline === true` OR referenced by any `pinnedOffline` board.
+   * Evicts oldest-accessed unpinned, cloud-backed originals until total original cache fits within `budgetBytes`.
+   * Strictly protects:
+   * - Assets without a cloud `driveFileID` binding (unbacked local-only originals are NEVER permanently deleted!)
+   * - Assets with `pinnedOffline === true` OR referenced by any `pinnedOffline` board
+   * - Any asset IDs explicitly passed in `keepingIDs`
    */
-  async evictCacheNow(db: LibraryDatabase): Promise<CacheStats> {
+  async evictCacheNow(
+    db: LibraryDatabase,
+    keepingIDs: ReadonlySet<UUID> = new Set(),
+  ): Promise<CacheStats> {
+    await this.cleanupDeletedMedia(db);
     const protectedIDs = db.protectedAssetIDs();
+    const recoverableIDs = new Set(db.getAssetDriveBindings().map((b) => toSwiftUUID(b.assetID)));
     const accessTimes = db.originalAccessTimes();
     const originals = await this.blobs.list('originals/').catch(() => []);
 
@@ -1367,11 +1481,16 @@ export class MediaPipeline implements IMediaPipeline {
           size: e.size,
           mtimeMs: e.lastModifiedMs ?? 0,
         }))
-        .filter((e) => !protectedIDs.has(e.id))
+        .filter(
+          (e) =>
+            !protectedIDs.has(e.id) &&
+            !keepingIDs.has(e.id) &&
+            recoverableIDs.has(e.id),
+        )
         .sort((a, b) => {
           const ta = accessTimes.get(a.id) ?? a.mtimeMs / 1000;
           const tb = accessTimes.get(b.id) ?? b.mtimeMs / 1000;
-          return ta - tb;
+          return ta - tb || a.id.localeCompare(b.id);
         });
 
       for (const entry of evictable) {
@@ -1387,4 +1506,70 @@ export class MediaPipeline implements IMediaPipeline {
 
     return this.getCacheStats(db);
   }
+}
+
+function decodeXmlEntities(raw: string): string {
+  return raw
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Extracts the bookmark URL from macOS XML `.webloc`, macOS binary `bplist00` `.webloc`,
+ * or Windows `.url` INI files — never capturing Apple's PropertyList DTD URL.
+ */
+export function extractWebBookmarkURL(buffer: Uint8Array): string | null {
+  if (buffer.byteLength === 0 || buffer.byteLength > 256_000) return null;
+
+  // 1. Binary plist (`bplist00`)
+  if (isBinaryPlist(buffer)) {
+    try {
+      const parsed = parseBinaryPlist(buffer);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !(parsed instanceof Uint8Array)) {
+        const dict = parsed as Record<string, unknown>;
+        if (typeof dict.URL === 'string' && dict.URL.trim().length > 0) {
+          return dict.URL.trim();
+        }
+        // Fallback case-insensitive key match
+        for (const [k, v] of Object.entries(dict)) {
+          if (k.toLowerCase() === 'url' && typeof v === 'string' && v.trim().length > 0) {
+            return v.trim();
+          }
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  const text = utf8Decode(buffer);
+
+  // 2. XML property list: `<key>URL</key><string>...</string>`
+  const xmlMatch = /<key>\s*URL\s*<\/key>\s*<string>([\s\S]*?)<\/string>/i.exec(text);
+  if (xmlMatch?.[1]) {
+    const candidate = decodeXmlEntities(xmlMatch[1]).trim();
+    if (candidate.length > 0) return candidate;
+  }
+
+  // 3. Windows `.url` INI file (`URL=https://...`)
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (/^url\s*=/i.test(trimmed)) {
+      const val = trimmed.replace(/^url\s*=\s*/i, '').trim();
+      if (val.length > 0) return val;
+    }
+  }
+
+  // 4. Plain-text fallback ONLY if it's NOT a plist XML document (avoid capturing Apple DTD URL!)
+  if (!/<!DOCTYPE\s+plist/i.test(text) && !/<plist\b/i.test(text)) {
+    const plainMatch = /https?:\/\/[^\s<>"']+/i.exec(text);
+    if (plainMatch?.[0]) return plainMatch[0];
+  }
+
+  return null;
 }

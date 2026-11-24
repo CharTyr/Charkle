@@ -20,6 +20,7 @@ public struct MainWindowView: View {
     public let onCollectClipboard: () -> Void
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
+    public let onEnterMinimalCaptureMode: () -> Void
     public let onAppReady: () -> Void
 
     @Namespace private var heroNamespace
@@ -52,6 +53,7 @@ public struct MainWindowView: View {
         onCollectClipboard: @escaping () -> Void,
         onSyncHotkeysEnabled: @escaping (Bool) -> Void = { _ in },
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
+        onEnterMinimalCaptureMode: @escaping () -> Void = {},
         onAppReady: @escaping () -> Void = {}
     ) {
         self.coordinator = coordinator
@@ -63,17 +65,30 @@ public struct MainWindowView: View {
         self.onCollectClipboard = onCollectClipboard
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
+        self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
         self.onAppReady = onAppReady
     }
 
     public var body: some View {
+        if coordinator.isMinimalCaptureMode {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .task {
+                    onAppReady()
+                }
+        } else {
+            mainWorkspaceBody
+        }
+    }
+
+    private var mainWorkspaceBody: some View {
         ZStack {
             // Native 3-pane studio layout (avoids macOS 26/27 NavigationSplitView + hiddenTitleBar
             // ScrollView safe-area hit-test vertical offset bug, ensuring 0px-accurate sidebar clicks).
             // Sidebar and Inspector keep deterministic fixed internal widths inside animated width slots
             // so rapid collapse/expand cycles never get stuck half-open or overflow past window bounds.
             HStack(spacing: 0) {
-                let sidebarTargetWidth: CGFloat = coordinator.isSidebarCollapsed ? 56 : 232
+                let sidebarTargetWidth: CGFloat = coordinator.isSidebarCollapsed ? 76 : 232
                 HStack(spacing: 0) {
                     SidebarView(
                         coordinator: coordinator,
@@ -115,26 +130,25 @@ public struct MainWindowView: View {
                     .frame(width: sidebarTargetWidth)
                     .background {
                         CharkleSidebarMaterialBackground()
-                            .ignoresSafeArea(.container, edges: .top)
                     }
 
                     Rectangle()
                         .fill(CharkleTheme.hairline(for: colorScheme))
                         .frame(width: 1)
-                        .ignoresSafeArea(.container, edges: .top)
                 }
                 .frame(width: sidebarTargetWidth + 1)
-                .frame(maxHeight: .infinity)
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(isSidebarVisible ? 1 : 0)
                 .allowsHitTesting(isSidebarVisible)
                 .disabled(!isSidebarVisible)
                 .accessibilityHidden(!isSidebarVisible)
                 .frame(width: isSidebarVisible ? (sidebarTargetWidth + 1) : 0, alignment: .trailing)
+                .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
 
                 centerWorkspace
-                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                     .background {
                         Color.clear
                             .onGeometryChange(for: CGFloat.self) { proxy in
@@ -145,6 +159,7 @@ public struct MainWindowView: View {
                                 }
                             }
                     }
+                    .ignoresSafeArea(.container, edges: .top)
                     .clipped()
                     .layoutPriority(0)
 
@@ -180,15 +195,17 @@ public struct MainWindowView: View {
                     }
                 )
                 .frame(width: 300)
-                .frame(maxHeight: .infinity)
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(coordinator.isInspectorVisible ? 1 : 0)
                 .allowsHitTesting(coordinator.isInspectorVisible)
                 .disabled(!coordinator.isInspectorVisible)
                 .accessibilityHidden(!coordinator.isInspectorVisible)
                 .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
+                .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
             }
+            .ignoresSafeArea(.container, edges: .top)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidebarVisible)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
@@ -251,6 +268,7 @@ public struct MainWindowView: View {
                     onToggleNotchPreview: onToggleNotch,
                     onSyncHotkeysEnabled: onSyncHotkeysEnabled,
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
+                    onEnterMinimalCaptureMode: onEnterMinimalCaptureMode,
                     onClose: {
                         withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
                             coordinator.closeSettings()
@@ -288,8 +306,11 @@ public struct MainWindowView: View {
                 .zIndex(300)
         }
         .background {
-            WindowKeyEventBridge { event, hostWindow in
-                handleMainWindowKeyDown(event, in: hostWindow)
+            ZStack {
+                CharkleWindowChromeBridge()
+                WindowKeyEventBridge { event, hostWindow in
+                    handleMainWindowKeyDown(event, in: hostWindow)
+                }
             }
             .allowsHitTesting(false)
         }
@@ -412,7 +433,7 @@ public struct MainWindowView: View {
         let isTrash = coordinator.selectedDestination == .trash
         let activeFolderID: UUID? = if case .folder(let fid) = coordinator.selectedDestination { fid } else { nil }
         let topInset: CGFloat = {
-            var base: CGFloat = 74
+            var base: CGFloat = 64
             if library.semanticSearchReport != nil { base += 46 }
             if coordinator.isVisualFilterBarPresented { base += 92 }
             if isInbox && !library.assets.isEmpty { base += 54 }
@@ -426,6 +447,98 @@ public struct MainWindowView: View {
                 inboxZeroCelebrationView
             } else if library.assets.isEmpty && !library.isLoading {
                 emptyLibraryView
+            } else if coordinator.galleryLayoutMode == .ringGallery {
+                GalleryRingView(
+                    assets: library.assets,
+                    folders: library.folders,
+                    boards: moodboards.boards,
+                    activeMoodboardID: coordinator.activeMoodboardID,
+                    isOverlayPresented: coordinator.quickLookAssetID != nil
+                        || coordinator.isSettingsPresented
+                        || coordinator.isJumpAnywherePresented
+                        || coordinator.isOnboardingPresented
+                        || coordinator.isMoodboardGeneratorPresented
+                        || coordinator.isSmartFolderEditorPresented
+                        || showInboxBatchTriageSheet,
+                    loader: library.thumbnailLoader,
+                    selectedAssetIDs: Binding(
+                        get: { library.selectedAssetIDs },
+                        set: { library.selectedAssetIDs = $0 }
+                    ),
+                    topContentInset: topInset,
+                    onOpenQuickLook: { asset in
+                        openQuickLook(asset)
+                    },
+                    onMarkOpened: { id in
+                        library.markAssetOpened(id)
+                    },
+                    onCopyAssets: { ids in
+                        Task {
+                            let count = await library.copyAssetsToPasteboard(ids)
+                            coordinator.showToast("已拷贝 \(count) 项素材到剪贴板", icon: "doc.on.doc")
+                        }
+                    },
+                    onRevealInFinder: { id in
+                        Task {
+                            let ok = await library.revealInFinder(assetID: id)
+                            if !ok {
+                                coordinator.showToast("无法定位该素材的本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onAddToMoodboard: { ids, boardID in
+                        let items = ids.compactMap { library.allAssetsByID[$0] }
+                        guard !items.isEmpty else { return }
+                        if let targetBoardID = boardID {
+                            let boardTitle = moodboards.boards.first(where: { $0.id == targetBoardID })?.title ?? "活跃情绪板"
+                            Task {
+                                await moodboards.addAssetsToSpecificBoard(boardID: targetBoardID, assets: items)
+                                coordinator.showToast("已加入情绪板「\(boardTitle)」(\(items.count) 项)", icon: "rectangle.3.group")
+                            }
+                        } else {
+                            library.selectedAssetIDs = Set(ids)
+                            coordinator.presentMoodboardGenerator(entry: .selection)
+                        }
+                    },
+                    onMoveToFolder: { ids, folderID in
+                        Task {
+                            await library.moveAssets(ids, toFolderID: folderID)
+                            let targetName = folderID.flatMap { fid in library.folders.first(where: { $0.id == fid })?.name } ?? "收件箱"
+                            coordinator.showToast("已移动 \(ids.count) 项至「\(targetName)」", icon: "folder")
+                        }
+                    },
+                    onTogglePinOffline: { ids, pinned in
+                        Task {
+                            await library.togglePinOffline(ids: ids, pinned: pinned)
+                            coordinator.showToast(
+                                pinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
+                                icon: pinned ? "arrow.down.circle.fill" : "icloud"
+                            )
+                        }
+                    },
+                    onTrashAssets: { ids in
+                        Task {
+                            await library.trashAssets(ids)
+                            coordinator.showToast(
+                                "已移至废纸篓 (\(ids.count) 项)",
+                                icon: "trash",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await library.restoreAssets(ids)
+                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                    }
+                                }
+                            )
+                        }
+                    },
+                    onRestoreAssets: { ids in
+                        Task {
+                            await library.restoreAssets(ids)
+                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward")
+                        }
+                    }
+                )
             } else if coordinator.galleryLayoutMode == .galleryFilmstrip {
                 GalleryFilmstripView(
                     assets: library.assets,
@@ -581,6 +694,9 @@ public struct MainWindowView: View {
                         onOpenQuickLook: { asset in openQuickLook(asset) },
                         onDropExternalInputs: { inputs in
                             let folderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
+                            if inputs.contains(where: { if case .webURL = $0 { true } else { false } }) {
+                                coordinator.showToast("正在解析网页缩略图…", icon: "safari")
+                            }
                             Task {
                                 let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
                                 coordinator.showToast("已导入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
@@ -636,21 +752,7 @@ public struct MainWindowView: View {
                             }
                         },
                         onPasteIntoCurrentFolder: {
-                            let targetFolderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
-                            if library.internalPasteboardAssets()?.isCut == true {
-                                Task {
-                                    let moved = await library.pasteCutAssets(toFolderID: targetFolderID)
-                                    let destName = targetFolderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
-                                    coordinator.showToast("已移动 \(moved) 项素材至「\(destName)」", icon: "folder")
-                                }
-                            } else {
-                                let inputs = ClipboardCollector.extractInputs(from: .general)
-                                guard !inputs.isEmpty else { return }
-                                Task {
-                                    let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
-                                    coordinator.showToast("已粘贴导入 \(max(created.count, inputs.count)) 项素材", icon: "doc.on.clipboard")
-                                }
-                            }
+                            pasteIntoCurrentGalleryFolder()
                         },
                         onRetagAssets: { ids in
                             triggerAIRetagging(for: ids)
@@ -697,6 +799,11 @@ public struct MainWindowView: View {
             // Floating Liquid Glass Top Control Stack
             VStack(spacing: 8) {
                 floatingTopBar
+                    .background {
+                        CharkleWindowDragArea()
+                            .padding(.top, -10)
+                            .padding(.horizontal, -18)
+                    }
 
                 if let report = library.semanticSearchReport {
                     semanticSearchStatusBar(report)
@@ -723,8 +830,8 @@ public struct MainWindowView: View {
                         .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 14)
+            .padding(.horizontal, galleryViewportWidth < 560 ? 12 : 18)
+            .padding(.top, 10)
             .animation(
                 CharkleMotion.enterExit(
                     coordinator.isVisualFilterBarPresented,
@@ -783,18 +890,32 @@ public struct MainWindowView: View {
     // MARK: - Floating Liquid Glass Top Bar
 
     private var floatingTopBar: some View {
-        CharkleGlassContainer(spacing: 8) {
-            HStack(spacing: 8) {
+        let isUltraCompact = galleryViewportWidth < 630
+        let supportsDensity = coordinator.galleryLayoutMode == .verticalMasonry || coordinator.galleryLayoutMode == .horizontalJustified
+        let showDensitySlider = galleryViewportWidth >= 790 && supportsDensity
+        let showFullSyncLabel = galleryViewportWidth >= 870
+        let showFullCTALabel = galleryViewportWidth >= 950
+        let showSemanticText = galleryViewportWidth >= 950
+        let barSpacing: CGFloat = isUltraCompact ? 6 : 8
+
+        return CharkleGlassContainer(spacing: barSpacing) {
+            HStack(spacing: barSpacing) {
                 // Search capsule
-                HStack(spacing: 7) {
-                    CharkleIcon("search", style: .duotone, size: 17, color: library.semanticSearchEnabled ? Color.accentColor : .secondary, isActive: library.semanticSearchEnabled)
+                HStack(spacing: 6) {
+                    CharkleIcon("search", style: .duotone, size: 16, color: library.semanticSearchEnabled ? Color.accentColor : .secondary, isActive: library.semanticSearchEnabled)
                     TextField(
-                        library.semanticSearchEnabled ? "自然语言语义搜图，回车检索…" : "搜索素材、标签、OCR 文字或拼音…",
+                        isUltraCompact
+                            ? (library.semanticSearchEnabled ? "语义搜图…" : "搜索素材…")
+                            : (library.semanticSearchEnabled ? "自然语言语义搜图，回车检索…" : "搜索素材、标签、OCR 文字或拼音…"),
                         text: $searchDraft
                     )
                     .textFieldStyle(.plain)
                     .font(.system(size: 12.5))
-                    .frame(minWidth: 68, idealWidth: 168, maxWidth: 260)
+                    .frame(
+                        minWidth: isUltraCompact ? 44 : 72,
+                        idealWidth: isUltraCompact ? 120 : 168,
+                        maxWidth: isUltraCompact ? .infinity : 260
+                    )
                     .onSubmit {
                         let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !q.isEmpty else { return }
@@ -835,23 +956,28 @@ public struct MainWindowView: View {
                                 Image(systemName: "sparkles")
                                     .font(.system(size: 10, weight: .semibold))
                             }
-                            Text("语义")
-                                .font(.system(size: 10.5, weight: .semibold))
+                            if showSemanticText {
+                                Text("语义")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .lineLimit(1)
+                            }
                         }
                         .foregroundStyle(library.semanticSearchEnabled ? Color.white : Color.accentColor)
-                        .padding(.horizontal, 7)
+                        .padding(.horizontal, showSemanticText ? 7 : 6)
                         .padding(.vertical, 3)
                         .background(
                             library.semanticSearchEnabled ? Color.accentColor : Color.accentColor.opacity(0.12),
                             in: Capsule(style: .continuous)
                         )
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     .buttonStyle(.plain)
-                    .help("混合视觉语义搜图（结合 TypeSafe Jev 视觉评分 + 语义向量 + 全文）")
+                    .help("混合视觉语义搜图（结合视觉评分、语义向量与全文检索）")
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, isUltraCompact ? 10 : 12)
                 .padding(.vertical, 7)
                 .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
+                .layoutPriority(isUltraCompact ? 0 : 1)
 
                 // Visual Filter Toggle (⇧⌘S)
                 Button {
@@ -867,21 +993,35 @@ public struct MainWindowView: View {
                         coordinator.isVisualFilterBarPresented = willOpen
                     }
                 } label: {
-                    HStack(spacing: 5) {
-                        CharkleIcon("filter", style: .duotone, size: 17, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary, isActive: coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters)
-                        Text("筛选")
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(1)
-                        if library.filter.hasActiveVisualFilters {
-                            Circle()
-                                .fill(Color.accentColor)
-                                .frame(width: 6, height: 6)
+                    if isUltraCompact {
+                        ZStack(alignment: .topTrailing) {
+                            CharkleIcon("filter", style: .duotone, size: 16, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary, isActive: coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters)
+                                .frame(width: 30, height: 30)
+                            if library.filter.hasActiveVisualFilters {
+                                Circle()
+                                    .fill(Color.accentColor)
+                                    .frame(width: 6, height: 6)
+                                    .offset(x: -5, y: 5)
+                            }
                         }
+                        .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
+                    } else {
+                        HStack(spacing: 5) {
+                            CharkleIcon("filter", style: .duotone, size: 17, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary, isActive: coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters)
+                            Text("筛选")
+                                .font(.system(size: 12, weight: .medium))
+                                .lineLimit(1)
+                            if library.filter.hasActiveVisualFilters {
+                                Circle()
+                                    .fill(Color.accentColor)
+                                    .frame(width: 6, height: 6)
+                            }
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 7)
+                        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                     }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 7)
-                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
                 .help("展开视觉与色彩筛选条 (⇧⌘S)")
@@ -902,31 +1042,126 @@ public struct MainWindowView: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 4) {
+                    if isUltraCompact {
                         Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 11))
-                        Text(library.filter.sortBy.localizedLabel)
                             .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.primary.opacity(0.84))
+                            .frame(width: 30, height: 30)
+                            .charkleLiquidGlass(.regular, in: Circle())
+                    } else {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.arrow.down")
+                                .font(.system(size: 11))
+                            Text(library.filter.sortBy.localizedLabel)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(isUltraCompact ? .hidden : .automatic)
                 .fixedSize()
+                .help("排序方式：\(library.filter.sortBy.localizedLabel)")
 
-                // 3-Mode Gallery View Switcher (Vertical Masonry / Horizontal Justified / Finder Filmstrip Gallery)
-                HStack(spacing: 2) {
-                    layoutModeButton(mode: .verticalMasonry, icon: "masonry-vertical", helpText: "纵向瀑布流")
-                    layoutModeButton(mode: .horizontalJustified, icon: "masonry-horizontal", helpText: "横向等高瀑布流（竖图自动对齐）")
-                    layoutModeButton(mode: .galleryFilmstrip, icon: "quicklook", helpText: "画廊视图（底部胶片挑图）")
+                // Gallery View Mode Switcher (collapses into compact Menu with density actions when narrow)
+                if isUltraCompact {
+                    let activeModeIcon: String = switch coordinator.galleryLayoutMode {
+                    case .verticalMasonry: "masonry-vertical"
+                    case .horizontalJustified: "masonry-horizontal"
+                    case .galleryFilmstrip: "quicklook"
+                    case .ringGallery: "gallery-ring"
+                    }
+                    Menu {
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                coordinator.galleryLayoutMode = .verticalMasonry
+                            }
+                        } label: {
+                            if coordinator.galleryLayoutMode == .verticalMasonry {
+                                Label("纵向瀑布流", systemImage: "checkmark")
+                            } else {
+                                Text("纵向瀑布流")
+                            }
+                        }
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                coordinator.galleryLayoutMode = .horizontalJustified
+                            }
+                        } label: {
+                            if coordinator.galleryLayoutMode == .horizontalJustified {
+                                Label("横向等高瀑布流", systemImage: "checkmark")
+                            } else {
+                                Text("横向等高瀑布流")
+                            }
+                        }
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                coordinator.galleryLayoutMode = .galleryFilmstrip
+                            }
+                        } label: {
+                            if coordinator.galleryLayoutMode == .galleryFilmstrip {
+                                Label("画廊视图", systemImage: "checkmark")
+                            } else {
+                                Text("画廊视图")
+                            }
+                        }
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                coordinator.galleryLayoutMode = .ringGallery
+                            }
+                        } label: {
+                            if coordinator.galleryLayoutMode == .ringGallery {
+                                Label("环形画廊", systemImage: "checkmark")
+                            } else {
+                                Text("环形画廊")
+                            }
+                        }
+                        if supportsDensity {
+                            Divider()
+                            Button("放大卡片") {
+                                coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+                                    currentWidth: CGFloat(coordinator.targetColumnWidth),
+                                    direction: 1,
+                                    layoutMode: coordinator.galleryLayoutMode,
+                                    containerWidth: galleryViewportWidth
+                                ))
+                            }
+                            Button("缩小卡片") {
+                                coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+                                    currentWidth: CGFloat(coordinator.targetColumnWidth),
+                                    direction: -1,
+                                    layoutMode: coordinator.galleryLayoutMode,
+                                    containerWidth: galleryViewportWidth
+                                ))
+                            }
+                        }
+                    } label: {
+                        CharkleIcon(activeModeIcon, style: .duotone, size: 15.5, isActive: true)
+                            .frame(width: 30, height: 30)
+                            .charkleLiquidGlass(.regular, in: Circle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("切换视图与缩放密度（也支持双指捏合或 ⌘+滚轮）")
+                } else {
+                    HStack(spacing: 2) {
+                        layoutModeButton(mode: .verticalMasonry, icon: "masonry-vertical", helpText: "纵向瀑布流")
+                        layoutModeButton(mode: .horizontalJustified, icon: "masonry-horizontal", helpText: "横向等高瀑布流（竖图自动对齐）")
+                        layoutModeButton(mode: .galleryFilmstrip, icon: "quicklook", helpText: "画廊视图（底部胶片挑图）")
+                        layoutModeButton(mode: .ringGallery, icon: "gallery-ring", helpText: "环形画廊（3D 外圈景深浏览）")
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 3.5)
+                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
+                    .fixedSize(horizontal: true, vertical: false)
                 }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 3.5)
-                .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
 
                 // Column / Row Density Slider Pill (synced with trackpad pinch & ⌘+scroll)
-                if coordinator.galleryLayoutMode != .galleryFilmstrip {
+                if showDensitySlider {
                     HStack(spacing: 6) {
                         Button {
                             coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
@@ -947,7 +1182,7 @@ public struct MainWindowView: View {
                             get: { coordinator.targetColumnWidth },
                             set: { coordinator.targetColumnWidth = $0 }
                         ), in: 130...420)
-                        .frame(width: 64)
+                        .frame(width: showFullCTALabel ? 64 : 52)
 
                         Button {
                             coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
@@ -971,7 +1206,9 @@ public struct MainWindowView: View {
                     .help("支持触控板双指捏合缩放或按住 ⌘+滚轮缩放")
                 }
 
-                Spacer(minLength: 4)
+                if !isUltraCompact {
+                    Spacer(minLength: 0)
+                }
 
                 // Rapid Moodboard Generator CTA Pill
                 Button {
@@ -979,22 +1216,30 @@ public struct MainWindowView: View {
                         entry: library.selectedAssetIDs.count >= 2 ? .selection : .prompt
                     )
                 } label: {
-                    HStack(spacing: 5) {
-                        CharkleIcon("sparkle-board", style: .duotone, size: 17, color: Color.accentColor, isActive: true)
-                        Text("快速生成情绪板")
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1)
+                    if isUltraCompact {
+                        CharkleIcon("sparkle-board", style: .duotone, size: 16, color: Color.accentColor, isActive: true)
+                            .frame(width: 30, height: 30)
+                            .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
+                    } else {
+                        HStack(spacing: 5) {
+                            CharkleIcon("sparkle-board", style: .duotone, size: 17, color: Color.accentColor, isActive: true)
+                            Text(showFullCTALabel ? "快速生成情绪板" : "生成")
+                                .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, showFullCTALabel ? 12 : 10)
+                        .padding(.vertical, 7)
+                        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                     }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
+                .help("快速生成情绪板 (⌘N)")
 
                 // Isolated Sync Status Pill so 20Hz live sync progress updates never re-render MainWindowView or VirtualizedMasonryView
                 FloatingSyncStatusPill(
                     syncAndAI: syncAndAI,
+                    compact: !showFullSyncLabel,
                     onOpenSettings: {
                         let targetTab: CharkleSettingsTab = syncAndAI.syncConfig.mode == .localOnly ? .library : .sync
                         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
@@ -1015,7 +1260,7 @@ public struct MainWindowView: View {
                         .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
-                .help("显示 / 隐藏右侧检查器")
+                .help("显示 / 隐藏右侧检查器 (⌘⌥I)")
             }
             .frame(minWidth: 0, maxWidth: .infinity)
         }
@@ -1068,6 +1313,7 @@ public struct MainWindowView: View {
                         } label: {
                             Text(shape.localizedLabel)
                                 .font(.system(size: 11, weight: active ? .semibold : .medium))
+                                .lineLimit(1)
                                 .foregroundStyle(active ? .white : .secondary)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
@@ -1079,6 +1325,7 @@ public struct MainWindowView: View {
                         .buttonStyle(.plain)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
 
                 if library.filter.hasActiveVisualFilters {
                     Button("清除") {
@@ -1088,140 +1335,145 @@ public struct MainWindowView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                     .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
             }
 
-            // Row 2: Friendly Color Filter + Tolerance Range + Rating + Kept Locally
-            HStack(spacing: 12) {
-                HStack(spacing: 5) {
-                    Text("色彩")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 30, alignment: .leading)
+            // Row 2: Friendly Color Filter + Tolerance Range + Rating + Kept Locally (horizontally scrollable on narrow windows)
+            HStack(spacing: 6) {
+                Text("色彩")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, alignment: .leading)
 
-                    ForEach(Self.filterColorPresets, id: \.self) { hex in
-                        let selected = library.filter.selectedColorHex?.uppercased() == hex
-                        Button {
-                            library.filter.selectedColorHex = selected ? nil : hex
-                            Task { await library.refreshAssets() }
-                        } label: {
-                            Circle()
-                                .fill(Color(charkleHex: hex))
-                                .frame(width: 17, height: 17)
-                                .overlay(
-                                    Circle().strokeBorder(
-                                        selected ? Color.accentColor : Color.primary.opacity(0.18),
-                                        lineWidth: selected ? 2.5 : 0.75
-                                    )
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .help("按主色调筛选 \(hex)")
-                    }
-
-                    // Custom color picker (natural NSColorWell size via fixedSize so it never overlaps adjacent swatches)
-                    ColorPicker(
-                        "",
-                        selection: Binding(
-                            get: {
-                                Color(charkleHex: library.filter.selectedColorHex ?? "#3D5A80")
-                            },
-                            set: { newColor in
-                                if let hex = Self.hexString(from: newColor) {
-                                    library.filter.selectedColorHex = hex
-                                    Task { await library.refreshAssets() }
-                                }
-                            }
-                        ),
-                        supportsOpacity: false
-                    )
-                    .labelsHidden()
-                    .fixedSize()
-                    .padding(.leading, 4)
-                    .help("自定义颜色或吸管取色")
-
-                    if library.filter.selectedColorHex != nil {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
                         HStack(spacing: 5) {
-                            Text("精确")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                            Slider(value: Binding(
-                                get: { library.filter.colorTolerance },
-                                set: { newVal in
-                                    library.filter.colorTolerance = newVal
+                            ForEach(Self.filterColorPresets, id: \.self) { hex in
+                                let selected = library.filter.selectedColorHex?.uppercased() == hex
+                                Button {
+                                    library.filter.selectedColorHex = selected ? nil : hex
                                     Task { await library.refreshAssets() }
+                                } label: {
+                                    Circle()
+                                        .fill(Color(charkleHex: hex))
+                                        .frame(width: 17, height: 17)
+                                        .overlay(
+                                            Circle().strokeBorder(
+                                                selected ? Color.accentColor : Color.primary.opacity(0.18),
+                                                lineWidth: selected ? 2.5 : 0.75
+                                            )
+                                        )
                                 }
-                            ), in: 10...55)
-                            .frame(width: 74)
-                            .help("调节颜色匹配范围：越靠左越接近所选颜色，越靠右包含更多相近色调")
-                            Text("宽松")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                            Text(colorToleranceLabel(library.filter.colorTolerance))
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
-                            Button {
-                                library.filter.selectedColorHex = nil
-                                Task { await library.refreshAssets() }
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.secondary)
+                                .buttonStyle(.plain)
+                                .help("按主色调筛选 \(hex)")
                             }
-                            .buttonStyle(.plain)
-                            .help("清除颜色筛选")
+
+                            // Custom color picker (natural NSColorWell size via fixedSize so it never overlaps adjacent swatches)
+                            ColorPicker(
+                                "",
+                                selection: Binding(
+                                    get: {
+                                        Color(charkleHex: library.filter.selectedColorHex ?? "#3D5A80")
+                                    },
+                                    set: { newColor in
+                                        if let hex = Self.hexString(from: newColor) {
+                                            library.filter.selectedColorHex = hex
+                                            Task { await library.refreshAssets() }
+                                        }
+                                    }
+                                ),
+                                supportsOpacity: false
+                            )
+                            .labelsHidden()
+                            .fixedSize()
+                            .padding(.leading, 4)
+                            .help("自定义颜色或吸管取色")
+
+                            if library.filter.selectedColorHex != nil {
+                                HStack(spacing: 5) {
+                                    Text("精确")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                    Slider(value: Binding(
+                                        get: { library.filter.colorTolerance },
+                                        set: { newVal in
+                                            library.filter.colorTolerance = newVal
+                                            Task { await library.refreshAssets() }
+                                        }
+                                    ), in: 10...55)
+                                    .frame(width: 74)
+                                    .help("调节颜色匹配范围：越靠左越接近所选颜色，越靠右包含更多相近色调")
+                                    Text("宽松")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                    Text(colorToleranceLabel(library.filter.colorTolerance))
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                                    Button {
+                                        library.filter.selectedColorHex = nil
+                                        Task { await library.refreshAssets() }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 11.5))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("清除颜色筛选")
+                                }
+                                .padding(.leading, 4)
+                            }
                         }
-                        .padding(.leading, 4)
-                    }
-                }
 
-                Divider().frame(height: 16)
+                        Divider().frame(height: 16)
 
-                // Minimum Rating Filter
-                HStack(spacing: 3) {
-                    Text("评分")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    ForEach(1...5, id: \.self) { star in
+                        // Minimum Rating Filter
+                        HStack(spacing: 3) {
+                            Text("评分")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(1...5, id: \.self) { star in
+                                Button {
+                                    library.filter.minRating = (library.filter.minRating == star) ? 0 : star
+                                    Task { await library.refreshAssets() }
+                                } label: {
+                                    Image(systemName: star <= library.filter.minRating ? "star.fill" : "star")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(star <= library.filter.minRating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.5))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        Divider().frame(height: 16)
+
+                        // Kept Locally (iCloud-style) Filter Toggle
                         Button {
-                            library.filter.minRating = (library.filter.minRating == star) ? 0 : star
+                            library.filter.onlyPinnedOffline.toggle()
                             Task { await library.refreshAssets() }
                         } label: {
-                            Image(systemName: star <= library.filter.minRating ? "star.fill" : "star")
-                                .font(.system(size: 11))
-                                .foregroundStyle(star <= library.filter.minRating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.5))
+                            HStack(spacing: 4) {
+                                Image(systemName: library.filter.onlyPinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle")
+                                    .font(.system(size: 10.5))
+                                Text("已保留在本地")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(library.filter.onlyPinnedOffline ? Color.accentColor : .secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                library.filter.onlyPinnedOffline ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.05),
+                                in: Capsule(style: .continuous)
+                            )
                         }
                         .buttonStyle(.plain)
                     }
+                    .padding(.vertical, 1)
                 }
-
-                Divider().frame(height: 16)
-
-                // Kept Locally (iCloud-style) Filter Toggle
-                Button {
-                    library.filter.onlyPinnedOffline.toggle()
-                    Task { await library.refreshAssets() }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: library.filter.onlyPinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle")
-                            .font(.system(size: 10.5))
-                        Text("已保留在本地")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundStyle(library.filter.onlyPinnedOffline ? Color.accentColor : .secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        library.filter.onlyPinnedOffline ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.05),
-                        in: Capsule(style: .continuous)
-                    )
-                }
-                .buttonStyle(.plain)
-
-                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 14)
@@ -1427,13 +1679,16 @@ public struct MainWindowView: View {
             []
         }
 
-        return HStack(spacing: 10) {
+        let isNarrowBar = galleryViewportWidth < 620
+        return HStack(spacing: isNarrowBar ? 7 : 10) {
             HStack(spacing: 6) {
                 CharkleIcon("inbox", style: .duotone, size: 14, color: Color.accentColor)
-                Text("待整理 \(library.inboxCount) 项")
+                Text(isNarrowBar ? "\(library.inboxCount) 项" : "待整理 \(library.inboxCount) 项")
                     .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
+                    .lineLimit(1)
             }
+            .fixedSize(horizontal: true, vertical: false)
 
             Divider().frame(height: 16)
 
@@ -1450,17 +1705,19 @@ public struct MainWindowView: View {
                             .font(.system(size: 10, weight: .semibold))
                         Text("推荐：\(suggestion.folderName)")
                             .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
                     }
                     .foregroundStyle(Color.accentColor)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .background(Color.accentColor.opacity(0.12), in: Capsule(style: .continuous))
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
                 .help(suggestion.reason)
             }
 
-            // Phase 2: Batch Inbox Smart Triage (TypeSafe Choice + Companion Noul)
+            // Batch Inbox Smart Triage
             if !library.folders.isEmpty {
                 Button {
                     triggerInboxBatchTriage()
@@ -1472,17 +1729,19 @@ public struct MainWindowView: View {
                             Image(systemName: "wand.and.stars")
                                 .font(.system(size: 10.5, weight: .semibold))
                         }
-                        Text(library.isRunningInboxTriage ? "分拣中…" : "智能分拣")
+                        Text(library.isRunningInboxTriage ? "分拣中…" : (isNarrowBar ? "分拣" : "智能分拣"))
                             .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
                     }
                     .foregroundStyle(Color.accentColor)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .background(Color.accentColor.opacity(0.10), in: Capsule(style: .continuous))
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
                 .disabled(library.isRunningInboxTriage)
-                .help("使用 TypeSafe Jev (Choice + 伴随 Noul) 批量识别收件箱素材并推荐归档目录")
+                .help("批量识别收件箱素材并推荐归档目录")
             }
 
             // Quick 1–9 Folder Archive Chips (in deterministic tree order + full hierarchical menu)
@@ -1506,10 +1765,11 @@ public struct MainWindowView: View {
                                     .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                                 Text(node.depth > 0 ? "↳ \(folder.name)" : folder.name)
                                     .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
                         .buttonStyle(CharkleTactileButtonStyle())
                         .help(library.folderDisplayPath(for: folder.id))
@@ -1534,11 +1794,12 @@ public struct MainWindowView: View {
                                     .font(.system(size: 10, weight: .medium))
                                 Text("全部目录")
                                     .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
                             }
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                         }
                         .menuStyle(.borderlessButton)
                         .fixedSize()
@@ -1567,8 +1828,9 @@ public struct MainWindowView: View {
             } label: {
                 HStack(spacing: 4) {
                     CharkleIcon("sparkle-board", style: .duotone, size: 12.5, color: Color.accentColor)
-                    Text("一键收入情绪板")
+                    Text(isNarrowBar ? "收入板" : "一键收入情绪板")
                         .font(.system(size: 11.5, weight: .semibold))
+                        .lineLimit(1)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -1701,9 +1963,11 @@ public struct MainWindowView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 11))
-                    Text("新建子文件夹")
+                    Text(galleryViewportWidth < 580 ? "新建" : "新建子文件夹")
                         .font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(1)
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -1864,12 +2128,14 @@ public struct MainWindowView: View {
         let isTrashSelection = coordinator.selectedDestination == .trash
             || (!selectedAssets.isEmpty && selectedAssets.allSatisfy(\.isTrashed))
         let allKeptLocally = !selectedAssets.isEmpty && selectedAssets.allSatisfy(\.pinnedOffline)
+        let isCompactPill = galleryViewportWidth < 620
 
-        return CharkleGlassContainer(spacing: 8) {
-            HStack(spacing: 8) {
+        return CharkleGlassContainer(spacing: isCompactPill ? 6 : 8) {
+            HStack(spacing: isCompactPill ? 6 : 8) {
                 Text("已选 \(ids.count) 项")
                     .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
+                    .lineLimit(1)
                     .padding(.leading, 4)
 
                 Rectangle().fill(CharkleTheme.hairline(for: colorScheme)).frame(width: 1, height: 16)
@@ -1912,11 +2178,12 @@ public struct MainWindowView: View {
                     } label: {
                         HStack(spacing: 5) {
                             CharkleIcon("sparkle-board", style: .duotone, size: 13.5, color: .white)
-                            Text("生成情绪板")
+                            Text(isCompactPill ? "生成板" : "生成情绪板")
                                 .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
                         }
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 11)
+                        .padding(.horizontal, isCompactPill ? 9 : 11)
                         .padding(.vertical, 6)
                         .background(Color.accentColor, in: Capsule(style: .continuous))
                     }
@@ -1935,23 +2202,37 @@ public struct MainWindowView: View {
                             }
                         }
                     } label: {
-                        Label("移动", systemImage: "folder")
-                            .font(.system(size: 12, weight: .medium))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
+                        if isCompactPill {
+                            Image(systemName: "folder")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .frame(width: 26, height: 26)
+                        } else {
+                            Label("移动", systemImage: "folder")
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                        }
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
+                    .help("移动到文件夹")
 
                     Button {
                         showBatchTagPopover.toggle()
                     } label: {
-                        Label("加标签", systemImage: "tag")
-                            .font(.system(size: 12, weight: .medium))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
+                        if isCompactPill {
+                            Image(systemName: "tag")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .frame(width: 26, height: 26)
+                        } else {
+                            Label("加标签", systemImage: "tag")
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                        }
                     }
                     .buttonStyle(.plain)
+                    .help("批量添加标签")
                     .popover(isPresented: $showBatchTagPopover) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("为 \(ids.count) 项素材添加标签")
@@ -1979,16 +2260,20 @@ public struct MainWindowView: View {
                         HStack(spacing: 4) {
                             if library.isEnrichingTags {
                                 ProgressView().controlSize(.mini)
-                                Text("打标中 \(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount))")
+                                Text("\(library.enrichCompletedCount)/\(max(1, library.enrichTotalCount))")
                                     .monospacedDigit()
+                            } else if isCompactPill {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .frame(width: 26, height: 26)
                             } else {
                                 Image(systemName: "sparkles")
                                 Text("AI 打标")
                             }
                         }
                         .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, isCompactPill && !library.isEnrichingTags ? 0 : 8)
+                        .padding(.vertical, isCompactPill && !library.isEnrichingTags ? 0 : 5)
                     }
                     .buttonStyle(.plain)
                     .help(library.isEnrichingTags ? "点击停止批量重新打标" : "按当前语言格式重新生成建议标签并优先合并已有标签")
@@ -2001,13 +2286,20 @@ public struct MainWindowView: View {
                         }
                         Button("清除评分") { Task { await library.setRating(0, for: ids) } }
                     } label: {
-                        Label("评分", systemImage: "star")
-                            .font(.system(size: 12, weight: .medium))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
+                        if isCompactPill {
+                            Image(systemName: "star")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .frame(width: 26, height: 26)
+                        } else {
+                            Label("评分", systemImage: "star")
+                                .font(.system(size: 12, weight: .medium))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                        }
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
+                    .help("批量评分")
 
                     Button {
                         let nextPinned = !allKeptLocally
@@ -2169,8 +2461,14 @@ public struct MainWindowView: View {
                     }
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.top, 30)
+            .padding(.bottom, 24)
             .charkleCleanScrollbars(hidden: false)
+        }
+        .overlay(alignment: .top) {
+            CharkleWindowDragArea()
+                .frame(height: 24)
         }
         .charkleScrollEdgeSoft(for: .top)
         .background(CharkleTheme.galleryGround(for: colorScheme))
@@ -2306,6 +2604,15 @@ public struct MainWindowView: View {
                         Task { await moodboards.selectSwapTarget(nodeID) }
                     },
                     onOpenQuickLook: { asset in
+                        if asset.isExternalWebLink, let url = asset.externalWebURL {
+                            library.markAssetOpened(asset.id)
+                            NSWorkspace.shared.open(url)
+                            coordinator.showToast(
+                                "已在默认浏览器中打开 \(asset.sourceDomain ?? url.host() ?? "网页")",
+                                icon: "safari"
+                            )
+                            return
+                        }
                         if coordinator.quickLookAssetID != nil {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                                 coordinator.closeQuickLook()
@@ -2478,16 +2785,20 @@ public struct MainWindowView: View {
                     HStack(spacing: 5) {
                         Image(systemName: "sidebar.right")
                             .font(.system(size: 12, weight: .medium))
-                        Text(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
-                            .font(.system(size: 11.5, weight: .medium))
+                        if galleryViewportWidth >= 520 {
+                            Text(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                        }
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, galleryViewportWidth >= 520 ? 10 : 8)
                     .padding(.vertical, 6)
                     .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
-                .padding(.top, 14)
-                .padding(.trailing, 18)
+                .help(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
+                .padding(.top, 12)
+                .padding(.trailing, 14)
             }
         } else {
             CharkleBoardLoadingSkeleton()
@@ -2616,6 +2927,27 @@ public struct MainWindowView: View {
         guard hostWindow.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
 
         let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        // Support ⌘V paste in Gallery Filmstrip & 3D Ring Gallery (Masonry & Moodboard handle ⌘V directly)
+        if primaryModifiers == [.command],
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           coordinator.quickLookAssetID == nil,
+           event.window === hostWindow,
+           !coordinator.isViewingMoodboard,
+           (coordinator.galleryLayoutMode == .galleryFilmstrip || coordinator.galleryLayoutMode == .ringGallery),
+           !coordinator.isSettingsPresented,
+           !coordinator.isJumpAnywherePresented,
+           !coordinator.isOnboardingPresented,
+           !coordinator.isMoodboardGeneratorPresented,
+           !coordinator.isSmartFolderEditorPresented,
+           !showInboxBatchTriageSheet,
+           !isEditingText(in: hostWindow) {
+            if !event.isARepeat {
+                pasteIntoCurrentGalleryFolder()
+            }
+            return nil
+        }
+
         guard event.keyCode == 49, primaryModifiers.isEmpty else { return event }
 
         // 1. Quick Look is OPEN -> Space closes Quick Look (unless user is actively editing in Quick Look's Inspector)
@@ -2649,8 +2981,8 @@ public struct MainWindowView: View {
 
         if event.isARepeat { return nil }
 
-        // Gallery Filmstrip: always preview the selected or currently displayed stage asset
-        if coordinator.galleryLayoutMode == .galleryFilmstrip {
+        // Gallery Filmstrip & Ring Gallery: always preview the selected or currently displayed stage asset
+        if coordinator.galleryLayoutMode == .galleryFilmstrip || coordinator.galleryLayoutMode == .ringGallery {
             let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
                 ?? library.assets.first
             if let asset = target {
@@ -2672,7 +3004,43 @@ public struct MainWindowView: View {
         return event
     }
 
+    private func pasteIntoCurrentGalleryFolder() {
+        let targetFolderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
+        if library.internalPasteboardAssets()?.isCut == true {
+            Task {
+                let moved = await library.pasteCutAssets(toFolderID: targetFolderID)
+                let destName = targetFolderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
+                coordinator.showToast("已移动 \(moved) 项素材至「\(destName)」", icon: "folder")
+            }
+        } else {
+            let inputs = ClipboardCollector.extractInputs(from: .general)
+            guard !inputs.isEmpty else { return }
+            let hasWebURL = inputs.contains { if case .webURL = $0 { true } else { false } }
+            if hasWebURL {
+                coordinator.showToast("正在解析网页缩略图…", icon: "safari")
+            }
+            Task {
+                let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
+                coordinator.showToast(
+                    hasWebURL
+                        ? "已收藏网页书签 (\(max(created.count, inputs.count)) 项)"
+                        : "已粘贴导入 \(max(created.count, inputs.count)) 项素材",
+                    icon: hasWebURL ? "safari" : "doc.on.clipboard"
+                )
+            }
+        }
+    }
+
     private func openQuickLook(_ asset: AssetRecord) {
+        if asset.isExternalWebLink, let url = asset.externalWebURL {
+            library.markAssetOpened(asset.id)
+            NSWorkspace.shared.open(url)
+            coordinator.showToast(
+                "已在默认浏览器中打开 \(asset.sourceDomain ?? url.host() ?? "网页")",
+                icon: "safari"
+            )
+            return
+        }
         resignTextFocusIfNeeded()
         let playlist = library.assets.map(\.id)
         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
@@ -2812,6 +3180,7 @@ public struct MainWindowView: View {
 /// update only this compact control rather than triggering full Gallery / MainWindowView diffs.
 private struct FloatingSyncStatusPill: View {
     let syncAndAI: SyncAndAIStore
+    var compact: Bool = false
     let onOpenSettings: () -> Void
     let onTriggerManualSync: () -> Void
 
@@ -2828,23 +3197,37 @@ private struct FloatingSyncStatusPill: View {
                 }
             }
         } label: {
-            HStack(spacing: 5) {
-                if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Circle()
-                        .fill(syncDotColor)
-                        .frame(width: 7, height: 7)
+            if compact {
+                ZStack {
+                    if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Circle()
+                            .fill(syncDotColor)
+                            .frame(width: 8, height: 8)
+                    }
                 }
-                Text(syncPillLabel)
-                    .font(.system(size: 11.5, weight: .medium))
-                    .monospacedDigit()
-                    .lineLimit(1)
+                .frame(width: 30, height: 30)
+                .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
+            } else {
+                HStack(spacing: 5) {
+                    if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Circle()
+                            .fill(syncDotColor)
+                            .frame(width: 7, height: 7)
+                    }
+                    Text(syncPillLabel)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
             }
-            .fixedSize(horizontal: true, vertical: false)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
         }
         .buttonStyle(CharkleTactileButtonStyle())
         .popover(isPresented: $showSyncPopover, arrowEdge: .bottom) {
@@ -2859,7 +3242,7 @@ private struct FloatingSyncStatusPill: View {
             }
             Button("打开存储与同步设置…") { onOpenSettings() }
         }
-        .help(syncAndAI.syncConfig.mode == .localOnly ? "当前为本地保存，点击打开存储设置" : "点击查看云端同步进度与状态")
+        .help(syncAndAI.syncConfig.mode == .localOnly ? "\(syncPillLabel) · 点击打开存储设置" : "\(syncPillLabel) · 点击查看云端同步进度与状态")
     }
 
     private var syncDotColor: Color {

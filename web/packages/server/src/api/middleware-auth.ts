@@ -133,9 +133,38 @@ export function createExtensionCorsMiddleware(): MiddlewareHandler {
   };
 }
 
+const READ_ONLY_POST_ROUTES = new Set<string>([
+  '/api/v1/assets/query',
+  '/api/v1/boards/palette',
+  '/api/v1/boards/replacements',
+  '/api/v1/typesafe/semantic-search',
+]);
+
+function isPatForbiddenAdminRoute(method: string, pathname: string): boolean {
+  const upper = method.toUpperCase();
+  // PATs may NEVER mint tokens, revoke tokens, inspect/revoke sessions, change passwords,
+  // or mutate external agent configuration.
+  if (pathname === '/api/v1/auth/tokens' && upper !== 'GET' && upper !== 'HEAD') {
+    return true;
+  }
+  if (pathname.startsWith('/api/v1/auth/tokens/')) {
+    return true;
+  }
+  if (pathname === '/api/v1/auth/sessions' || pathname.startsWith('/api/v1/auth/sessions/')) {
+    return true;
+  }
+  if (pathname === '/api/v1/auth/change-password') {
+    return true;
+  }
+  if (pathname === '/api/v1/agent/config' && upper !== 'GET' && upper !== 'HEAD') {
+    return true;
+  }
+  return false;
+}
+
 /**
- * Strictly enforces session cookie OR Bearer PAT authentication on ALL `/api/v1/*` routes
- * except `/api/v1/health`, `/api/v1/auth/status`, `/api/v1/auth/setup`, `/api/v1/auth/login`.
+ * Strictly enforces session cookie OR Bearer PAT authentication AND PAT scope authorization
+ * on ALL `/api/v1/*` routes except `/api/v1/health`, `/api/v1/auth/status`, `/api/v1/auth/setup`, `/api/v1/auth/login`.
  */
 export function createAuthMiddleware(ctx: ServerContext): MiddlewareHandler<{
   Variables: AppVariables;
@@ -161,6 +190,57 @@ export function createAuthMiddleware(ctx: ServerContext): MiddlewareHandler<{
         },
         401,
       );
+    }
+
+    // Session cookies carry full admin authority; PATs are strictly scoped.
+    if (principal.authType === 'token') {
+      const method = c.req.method.toUpperCase();
+      if (isPatForbiddenAdminRoute(method, pathname)) {
+        return c.json(
+          {
+            error: '个人访问令牌无权执行账号管理或安全策略修改操作，请使用登录会话操作。',
+            code: 'FORBIDDEN',
+          },
+          403,
+        );
+      }
+
+      const scopes = principal.scopes ?? [];
+      if (pathname === '/api/v1/mcp' || pathname.startsWith('/api/v1/mcp/')) {
+        if (!scopes.includes('mcp')) {
+          return c.json(
+            {
+              error: '当前访问令牌缺少 mcp 权限。',
+              code: 'INSUFFICIENT_SCOPE',
+            },
+            403,
+          );
+        }
+      } else if (
+        method === 'GET' ||
+        method === 'HEAD' ||
+        (method === 'POST' && READ_ONLY_POST_ROUTES.has(pathname))
+      ) {
+        if (!scopes.includes('read')) {
+          return c.json(
+            {
+              error: '当前访问令牌缺少 read 权限。',
+              code: 'INSUFFICIENT_SCOPE',
+            },
+            403,
+          );
+        }
+      } else if (method !== 'OPTIONS') {
+        if (!scopes.includes('write')) {
+          return c.json(
+            {
+              error: '当前访问令牌缺少 write 权限。',
+              code: 'INSUFFICIENT_SCOPE',
+            },
+            403,
+          );
+        }
+      }
     }
 
     return next();

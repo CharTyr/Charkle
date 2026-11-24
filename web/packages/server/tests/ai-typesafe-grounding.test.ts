@@ -90,7 +90,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
       if (capturedUrl.endsWith('/v1/models')) {
         return new Response(
           JSON.stringify({
-            models: [{ name: 'jev-latest', description: 'System One', releaseDate: '2026-06-01' }],
+            models: [{ name: 'jev-latest', description: 'System One', release_date: '2026-06-01' }],
           }),
           { status: 200 },
         );
@@ -123,6 +123,7 @@ describe('TypeSafe System One (Jev) & VisualGroundingEngine', () => {
     const models = await client.listModels();
     expect(models).toHaveLength(1);
     expect(models[0].name).toBe('jev-latest');
+    expect(models[0].releaseDate).toBe('2026-06-01');
 
     const imgBuf = await createSubjectTestPNG();
     const engine = new VisualGroundingEngine({ usage, fetchFn: mockFetch, images: nodeImages });

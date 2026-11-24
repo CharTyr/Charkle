@@ -307,11 +307,16 @@ export function buildGitHubRepoSvg(repo: GitHubRepoMetadata): SvgCardOutput {
     repo.licenseName ?? '',
   ].filter(Boolean);
 
+  const readmePill = repo.readmeMarkdown?.trim()
+    ? `<rect x="182" y="56" width="108" height="36" rx="10" fill="#1D2B24" stroke="#2D4A3B"/><text x="200" y="80" fill="#7CE0A6" font-family="ui-monospace, Menlo, sans-serif" font-size="16" font-weight="600">README</text>`
+    : '';
+
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="820" height="620" viewBox="0 0 820 620">
     <rect width="820" height="620" fill="#111317"/>
     <rect x="28" y="28" width="764" height="564" rx="22" fill="#161920" stroke="#252B36" stroke-width="2"/>
     <rect x="52" y="56" width="118" height="36" rx="10" fill="#1E232B"/>
     <text x="72" y="80" fill="#E6ECF5" font-family="-apple-system, BlinkMacSystemFont, Helvetica Neue, sans-serif" font-size="17" font-weight="700">GITHUB</text>
+    ${readmePill}
     <text x="52" y="142" fill="#8B95A8" font-family="ui-monospace, Menlo, sans-serif" font-size="22">${escapeXml(repo.owner)}</text>
     <text x="52" y="188" fill="#F6F8FC" font-family="-apple-system, BlinkMacSystemFont, Helvetica Neue, sans-serif" font-size="40" font-weight="700">${escapeXml(repo.repo.slice(0, 28))}</text>
     ${descSvg}
@@ -342,11 +347,21 @@ function sniffInlineImageMime(bytes: Uint8Array): string {
 
 export function buildSocialPostSvg(
   post: SocialPostMetadata,
-  options: { hasExternalCover?: boolean; inlineCoverBytes?: Uint8Array | null } = {},
+  options: {
+    hasExternalCover?: boolean;
+    inlineCoverBytes?: Uint8Array | null;
+    hasExternalAvatar?: boolean;
+    inlineAvatarBytes?: Uint8Array | null;
+  } = {},
 ): SvgCardOutput {
-  const inlineCover = options.inlineCoverBytes && options.inlineCoverBytes.byteLength > 0
-    ? options.inlineCoverBytes
-    : null;
+  const inlineCover =
+    options.inlineCoverBytes && options.inlineCoverBytes.byteLength > 0
+      ? options.inlineCoverBytes
+      : null;
+  const inlineAvatar =
+    options.inlineAvatarBytes && options.inlineAvatarBytes.byteLength > 0
+      ? options.inlineAvatarBytes
+      : null;
   const hasMedia =
     Boolean(options.hasExternalCover) ||
     Boolean(inlineCover) ||
@@ -375,26 +390,61 @@ export function buildSocialPostSvg(
     ? `<circle cx="400" cy="${mediaTop + mediaH / 2}" r="42" fill="rgba(20,21,23,0.72)" stroke="rgba(255,255,255,0.8)" stroke-width="2.5"/><polygon points="390,${mediaTop + mediaH / 2 - 16} 390,${mediaTop + mediaH / 2 + 16} 418,${mediaTop + mediaH / 2}" fill="#FFFFFF"/>`
     : '';
 
+  const defsParts: string[] = [];
+  let avatarBlock = '';
+  const initial = (
+    Array.from((post.authorName || post.authorHandle || badgeLabel).trim())[0] ?? 'X'
+  ).toUpperCase();
+  if (inlineAvatar) {
+    const mime = sniffInlineImageMime(inlineAvatar);
+    const dataUri = `data:${mime};base64,${bytesToBase64(inlineAvatar)}`;
+    defsParts.push(`<clipPath id="socialAvatarClip"><circle cx="78" cy="84" r="26"/></clipPath>`);
+    avatarBlock = `<image href="${dataUri}" x="52" y="58" width="52" height="52" preserveAspectRatio="xMidYMid slice" clip-path="url(#socialAvatarClip)"/>
+      <circle cx="78" cy="84" r="25.25" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="1.5"/>`;
+  } else if (!options.hasExternalAvatar) {
+    avatarBlock = `<circle cx="78" cy="84" r="26" fill="${badgeColor}"/>
+      <text x="78" y="92" text-anchor="middle" fill="#FFFFFF" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, sans-serif" font-size="22" font-weight="700">${escapeXml(initial)}</text>`;
+  }
+
   let mediaBlock = '';
   if (inlineCover) {
     const mime = sniffInlineImageMime(inlineCover);
     const dataUri = `data:${mime};base64,${bytesToBase64(inlineCover)}`;
-    mediaBlock = `<defs><clipPath id="socialCoverClip"><rect x="52" y="${mediaTop}" width="696" height="${mediaH}" rx="18"/></clipPath></defs>
-      <image href="${dataUri}" x="52" y="${mediaTop}" width="696" height="${mediaH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#socialCoverClip)"/>
+    defsParts.push(`<clipPath id="socialCoverClip"><rect x="52" y="${mediaTop}" width="696" height="${mediaH}" rx="18"/></clipPath>`);
+    mediaBlock = `<image href="${dataUri}" x="52" y="${mediaTop}" width="696" height="${mediaH}" preserveAspectRatio="xMidYMid slice" clip-path="url(#socialCoverClip)"/>
       ${playOverlay}`;
   } else if (hasMedia && !options.hasExternalCover) {
     mediaBlock = `<rect x="52" y="${mediaTop}" width="696" height="${mediaH}" rx="18" fill="#EAE9E4"/>${playOverlay}`;
   }
 
-  const handleLine = `@${post.authorHandle.replace(/^@/, '').slice(0, 28)} · ${badgeLabel}`;
+  const defsBlock = defsParts.length > 0 ? `<defs>${defsParts.join('')}</defs>` : '';
+  const handleSuffix = post.publishedAtText?.trim()
+    ? ` · ${post.publishedAtText.trim().slice(0, 16)}`
+    : ` · ${badgeLabel}`;
+  const handleLine = `@${post.authorHandle.replace(/^@/, '').slice(0, 26)}${handleSuffix}`;
+
+  const fmtMetric = (n: number): string =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}K` : String(n);
+  const engagementParts: string[] = [];
+  if (post.replyCount != null) engagementParts.push(`↩ ${fmtMetric(post.replyCount)}`);
+  if (post.repostCount != null) engagementParts.push(`↻ ${fmtMetric(post.repostCount)}`);
+  if (post.likeCount != null) engagementParts.push(`♥ ${fmtMetric(post.likeCount)}`);
+  if (post.viewCount != null) engagementParts.push(`◉ ${fmtMetric(post.viewCount)}`);
+  const footerSvg =
+    engagementParts.length > 0
+      ? `<text x="52" y="${height - 46}" fill="#6E7482" font-family="ui-monospace, Menlo, sans-serif" font-size="17" font-weight="500">${escapeXml(engagementParts.join('    '))}</text>`
+      : '';
+
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    ${defsBlock}
     <rect width="${width}" height="${height}" fill="#F6F6F4"/>
     <rect x="26" y="26" width="${width - 52}" height="${height - 52}" rx="24" fill="#FFFFFF" stroke="#E4E3DD" stroke-width="2"/>
-    <text x="52" y="88" fill="#18191D" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, sans-serif" font-size="28" font-weight="700">${escapeXml(post.authorName.slice(0, 28))}</text>
-    <circle cx="58" cy="115" r="5" fill="${badgeColor}"/>
-    <text x="72" y="122" fill="#6E7482" font-family="ui-monospace, Menlo, sans-serif" font-size="20">${escapeXml(handleLine)}</text>
+    ${avatarBlock}
+    <text x="120" y="79" fill="#18191D" font-family="-apple-system, BlinkMacSystemFont, PingFang SC, Helvetica Neue, sans-serif" font-size="26" font-weight="700">${escapeXml(post.authorName.slice(0, 24))}</text>
+    <text x="120" y="108" fill="#6E7482" font-family="ui-monospace, Menlo, sans-serif" font-size="18">${escapeXml(handleLine)}</text>
     ${bodySvg}
     ${mediaBlock}
+    ${footerSvg}
   </svg>`;
   return { svg, width, height };
 }

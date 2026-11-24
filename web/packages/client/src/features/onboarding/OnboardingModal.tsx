@@ -1,11 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   ArrowRight,
   Check,
   ChevronDown,
-  ChevronRight,
   Copy,
   Download,
   Folder,
@@ -20,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  buildFolderPathsMap,
   createDefaultAIProviderConfig,
   createDefaultDriveSyncConfig,
 } from '@charkle/shared';
@@ -35,7 +35,12 @@ import { apiClient } from '../../api/client';
 import {
   Button,
   CharkleBrandMark,
+  CharkleFolderIcon,
   CharkleIcon,
+  DisclosureGroup,
+  FolderHierarchyMenu,
+  Popover,
+  usePresence,
   type ThemeMode,
 } from '../../design-system';
 import type { CaptureTarget, SettingsTabID } from '../../stores/coordinatorStore';
@@ -185,13 +190,15 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
       ? `${window.location.origin}/api/v1/sync/google/oauth/callback`
       : '/api/v1/sync/google/oauth/callback';
 
+  const presence = usePresence(open, 175);
+
   useEffect(() => {
     if (!open) return;
     setErrorMsg(null);
     setCopiedRedirect(false);
   }, [open]);
 
-  if (!open) return null;
+  if (!presence.rendered) return null;
 
   const handleCopyRedirectURI = async () => {
     try {
@@ -214,21 +221,21 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
       };
       const block = parsed.installed ?? parsed.web ?? parsed;
       if (!block.client_id) {
-        setErrorMsg('文件中未找到有效的 client_id 字段');
+        setErrorMsg('凭据文件格式无效');
         return;
       }
       setClientID(block.client_id);
       if (block.client_secret) setClientSecret(block.client_secret);
       setErrorMsg(null);
     } catch {
-      setErrorMsg('无法解析 JSON 文件，请确认选择的是 Google OAuth 凭据文件');
+      setErrorMsg('无法读取凭据文件，请重新选择');
     }
   };
 
   const handleSave = async (startOAuth: boolean) => {
     const id = clientID.trim();
     if (!id) {
-      setErrorMsg('请填写 Client ID 或导入 client_secret.json');
+      setErrorMsg('请填写凭据或导入凭据文件');
       return;
     }
     setSaving(true);
@@ -246,7 +253,7 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
       onSaved(startOAuth);
       onClose();
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '保存 OAuth 凭据失败');
+      setErrorMsg(err instanceof Error ? err.message : '保存凭据失败');
     } finally {
       setSaving(false);
     }
@@ -254,15 +261,22 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
 
   return (
     <div
-      className="fixed inset-0 z-[135] flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px]"
+      data-state={presence.state}
+      className={[
+        'charkle-modal-veil charkle-modal-veil-transition fixed inset-0 z-[135] flex items-center justify-center p-4',
+        presence.state === 'closing' ? 'pointer-events-none' : '',
+      ].join(' ')}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="charkle-modal-panel w-full max-w-[500px] rounded-[16px] bg-[var(--settings-card)] border border-[var(--settings-border)] shadow-2xl overflow-hidden flex flex-col">
+      <div
+        data-state={presence.state}
+        className="charkle-modal-surface-transition w-full max-w-[500px] rounded-[16px] bg-[var(--settings-card)] border border-[var(--settings-border)] shadow-2xl overflow-hidden flex flex-col"
+      >
         <div className="px-5 py-3.5 border-b border-[var(--settings-divider)] flex items-center justify-between">
           <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">
-            配置 Google OAuth 凭据
+            配置 Google 登录凭据
           </h3>
           <button
             type="button"
@@ -279,7 +293,7 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
           <div className="p-3 rounded-[10px] bg-[var(--settings-content)] border border-[var(--settings-border)] flex flex-col gap-2">
             <div className="flex items-center justify-between gap-2">
               <div className="text-[11.5px] font-medium text-[var(--text-primary)]">
-                授权回调地址（已授权的重定向 URI）
+                授权回调地址
               </div>
               <Button
                 variant="secondary"
@@ -291,7 +305,7 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
                 {copiedRedirect ? '已复制' : '复制回调地址'}
               </Button>
             </div>
-            <code className="block w-full px-2.5 py-1.5 rounded-[7px] bg-[var(--settings-card)] border border-[var(--settings-border)] text-[11px] font-mono leading-relaxed text-[var(--text-primary)] break-all select-all">
+            <code className="block w-full px-2.5 py-1.5 rounded-[7px] bg-[var(--settings-card)] border border-[var(--settings-border)] text-[11px] font-mono leading-relaxed text-[var(--text-primary)] charkle-wrap-anywhere select-all">
               {oauthRedirectURI}
             </code>
           </div>
@@ -314,7 +328,7 @@ const InlineGoogleOAuthModal: React.FC<InlineOAuthModalProps> = ({ open, onClose
             className="charkle-pressable w-full px-3.5 py-2.5 rounded-[10px] border border-dashed border-[var(--border-strong)] bg-[var(--settings-content)] hover:border-[var(--accent)] text-[12.5px] font-medium text-[var(--text-primary)] flex items-center justify-center gap-2 cursor-pointer"
           >
             <Upload size={14} className="text-[var(--accent)]" />
-            导入 client_secret.json 自动填写
+            导入凭据文件
           </button>
 
           <div className="flex flex-col gap-1">
@@ -434,6 +448,9 @@ export const OnboardingModal: React.FC = () => {
   const [generatedExtToken, setGeneratedExtToken] = useState<string | null>(null);
   const [creatingExtToken, setCreatingExtToken] = useState(false);
   const [showExtGuide, setShowExtGuide] = useState(false);
+  const [captureFolderMenuOpen, setCaptureFolderMenuOpen] = useState(false);
+  const captureFolderBtnRef = useRef<HTMLButtonElement | null>(null);
+  const folderPaths = useMemo(() => buildFolderPathsMap(folders), [folders]);
 
   // AI drafts
   const [draftAI, setDraftAI] = useState<AIProviderConfig>(() => createDefaultAIProviderConfig());
@@ -444,6 +461,30 @@ export const OnboardingModal: React.FC = () => {
 
   // Inline feedback banner per step
   const [actionHint, setActionHint] = useState<{ text: string; isError: boolean } | null>(null);
+
+  // Mounted-exit presence & travelling step pill indicator
+  const modalPresence = usePresence(onboardingOpen, 175);
+  const pillRailRef = useRef<HTMLDivElement | null>(null);
+  const stepBtnRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [pillIndicator, setPillIndicator] = useState<{ left: number; width: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!modalPresence.rendered) return;
+    const update = () => {
+      const rail = pillRailRef.current;
+      const btn = stepBtnRefs.current[stepIdx];
+      if (!rail || !btn) {
+        setPillIndicator(null);
+        return;
+      }
+      setPillIndicator({ left: btn.offsetLeft, width: btn.offsetWidth });
+    };
+    update();
+    if (typeof ResizeObserver === 'undefined' || !pillRailRef.current) return;
+    const ro = new ResizeObserver(update);
+    ro.observe(pillRailRef.current);
+    return () => ro.disconnect();
+  }, [stepIdx, modalPresence.rendered]);
 
   const currentStep = STEPS[stepIdx] ?? STEPS[0];
   const activeBoard = useMemo(
@@ -539,7 +580,7 @@ export const OnboardingModal: React.FC = () => {
     openSettings(tab);
   };
 
-  if (!onboardingOpen || typeof document === 'undefined') return null;
+  if (!modalPresence.rendered || typeof document === 'undefined') return null;
 
   // Derived storage state
   const activeStorageMode: DriveTransportMode =
@@ -813,9 +854,16 @@ export const OnboardingModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       aria-label="欢迎使用 Charkle"
-      className="charkle-modal-backdrop fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6 bg-black/35 dark:bg-black/55 backdrop-blur-[3px] select-none"
+      data-state={modalPresence.state}
+      className={[
+        'charkle-modal-veil charkle-modal-veil-transition fixed inset-0 z-[120] flex items-center justify-center p-4 sm:p-6 select-none',
+        modalPresence.state === 'closing' ? 'pointer-events-none' : '',
+      ].join(' ')}
     >
-      <div className="charkle-modal-panel w-[min(840px,calc(100vw-48px))] h-[min(636px,calc(100vh-48px))] rounded-[20px] bg-[var(--settings-content)] border border-[var(--settings-border)] shadow-[0_24px_64px_rgba(0,0,0,0.24),0_4px_12px_rgba(0,0,0,0.08)] flex flex-col overflow-hidden">
+      <div
+        data-state={modalPresence.state}
+        className="charkle-modal-surface-transition w-[min(840px,calc(100vw-48px))] h-[min(636px,calc(100vh-48px))] rounded-[20px] bg-[var(--settings-content)] border border-[var(--settings-border)] shadow-[0_24px_64px_rgba(0,0,0,0.24),0_4px_12px_rgba(0,0,0,0.08)] flex flex-col overflow-hidden"
+      >
         {/* Header Bar */}
         <div className="px-5 pt-3.5 pb-3 border-b border-[var(--settings-border)] flex items-center justify-between gap-3 shrink-0">
           <div className="w-[108px] flex items-center gap-2 shrink-0">
@@ -825,8 +873,21 @@ export const OnboardingModal: React.FC = () => {
             </span>
           </div>
 
-          {/* Interactive 6-Step Pill Rail */}
-          <div className="flex items-center gap-0.5 p-[3px] rounded-full bg-[var(--settings-subtle)] overflow-x-auto">
+          {/* Interactive 6-Step Pill Rail with Travelling Active Indicator */}
+          <div
+            ref={pillRailRef}
+            className="relative flex items-center gap-0.5 p-[3px] rounded-full bg-[var(--settings-subtle)] overflow-x-auto"
+          >
+            {pillIndicator && (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute left-0 top-[3px] bottom-[3px] rounded-full bg-[var(--settings-card)] border border-[var(--settings-border)] shadow-xs transition-transform duration-[var(--duration-move)] ease-[var(--ease-in-out)]"
+                style={{
+                  transform: `translate3d(${pillIndicator.left}px, 0, 0)`,
+                  width: pillIndicator.width,
+                }}
+              />
+            )}
             {STEPS.map((step, idx) => {
               const isActive = idx === stepIdx;
               const isPast = idx < stepIdx;
@@ -834,14 +895,17 @@ export const OnboardingModal: React.FC = () => {
               return (
                 <button
                   key={step.id}
+                  ref={(el) => {
+                    stepBtnRefs.current[idx] = el;
+                  }}
                   type="button"
                   onClick={() => goToStep(idx, false)}
                   className={[
-                    'px-2.5 py-1 rounded-full text-[11.5px] inline-flex items-center gap-1.5 cursor-pointer shrink-0',
-                    'transition-[background-color,color,box-shadow] duration-[var(--duration-move)] ease-[var(--ease-in-out)]',
+                    'relative z-10 px-2.5 py-1 rounded-full text-[11.5px] inline-flex items-center gap-1.5 cursor-pointer shrink-0',
+                    'transition-colors duration-[var(--duration-press)] ease-[var(--ease-out)]',
                     isActive
-                      ? 'bg-[var(--settings-card)] text-[var(--text-primary)] font-semibold border border-[var(--settings-border)] shadow-xs'
-                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium border border-transparent',
+                      ? 'text-[var(--text-primary)] font-semibold'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium',
                   ].join(' ')}
                 >
                   {isPast && !wasSkipped ? (
@@ -885,8 +949,8 @@ export const OnboardingModal: React.FC = () => {
           >
             {/* STEP 0: WELCOME */}
             {currentStep.id === 'welcome' && (
-              <div className="h-full flex flex-col items-center justify-center px-7 py-6 gap-6">
-                <div className="flex flex-col items-center text-center gap-2.5">
+              <div className="h-full flex flex-col items-center justify-center px-7 py-6 gap-7">
+                <div className="flex flex-col items-center text-center gap-3">
                   <div className="relative h-[88px] w-[88px] flex items-center justify-center">
                     <div
                       aria-hidden="true"
@@ -901,65 +965,51 @@ export const OnboardingModal: React.FC = () => {
                   <h2 className="text-[25px] font-bold tracking-[-0.025em] text-[var(--text-primary)]">
                     欢迎使用 Charkle
                   </h2>
-                  <p className="text-[13px] text-[var(--text-secondary)] max-w-[440px]">
-                    花 1 分钟按需选几项偏好，或直接跳过立即开始。
-                  </p>
                 </div>
 
-                <div className="w-full grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="w-full max-w-[540px] grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                   {[
-                    {
-                      icon: 'inbox',
-                      accent: '#3B74E8',
-                      title: '浏览器与剪贴板随手收',
-                      desc: '右键收藏网页图文、全局粘贴或直接拖入窗口',
-                      target: 'capture' as StepID,
-                    },
                     {
                       icon: 'library',
                       accent: '#D96B43',
-                      title: isBuiltInCloud ? '内置云存储与多端同步' : '本地与云盘灵活切换',
-                      desc: isBuiltInCloud
-                        ? '开箱即用的云端实例存储，支持 Google Drive 与 WebDAV 同步'
-                        : '支持本地目录、Google Drive 与 WebDAV 同步',
+                      label: '素材库',
                       target: 'storage' as StepID,
+                    },
+                    {
+                      icon: 'inbox',
+                      accent: '#3B74E8',
+                      label: '采集',
+                      target: 'capture' as StepID,
                     },
                     {
                       icon: 'ai-spark',
                       accent: '#2A8F9D',
-                      title: '基础识图 + 可选云 AI',
-                      desc: '免费内置配色与相似推荐，按需接入云端模型',
+                      label: 'AI 智能',
                       target: 'intelligence' as StepID,
                     },
                     {
-                      icon: 'moodboard',
+                      icon: 'gallery',
                       accent: '#3D9970',
-                      title: '自由画布与 Figma 导出',
-                      desc: '自由拼板整理灵感，导出可编辑 Figma 文件',
+                      label: '外观',
                       target: 'workspace' as StepID,
                     },
-                  ].map((card, i) => (
+                  ].map((item, i) => (
                     <button
-                      key={card.title}
+                      key={item.target}
                       type="button"
-                      onClick={() => jumpToStepID(card.target)}
+                      onClick={() => jumpToStepID(item.target)}
                       style={{ animationDelay: `${i * 45}ms` }}
-                      className="charkle-pressable text-left p-3.5 rounded-[14px] bg-[var(--settings-card)] border border-[var(--settings-border)] hover:border-[var(--border-strong)] shadow-xs flex flex-col gap-2.5 cursor-pointer"
+                      className="charkle-stagger-item charkle-pressable p-3.5 rounded-[14px] bg-[var(--settings-card)] border border-[var(--settings-border)] hover:border-[var(--border-strong)] shadow-xs flex flex-col items-center justify-center gap-2 cursor-pointer"
                     >
                       <div
-                        className="h-[48px] w-[48px] rounded-[11px] flex items-center justify-center"
-                        style={{ backgroundColor: `${card.accent}18` }}
+                        className="h-[44px] w-[44px] rounded-[11px] flex items-center justify-center"
+                        style={{ backgroundColor: `${item.accent}18` }}
                       >
-                        <CharkleIcon name={card.icon} style="layered" size={34} />
+                        <CharkleIcon name={item.icon} style="layered" size={30} />
                       </div>
-                      <div className="flex flex-col gap-1">
-                        <div className="text-[12.5px] font-semibold text-[var(--text-primary)] leading-snug">
-                          {card.title}
-                        </div>
-                        <div className="text-[11.5px] text-[var(--text-secondary)] leading-relaxed">
-                          {card.desc}
-                        </div>
-                      </div>
+                      <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                        {item.label}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -998,9 +1048,9 @@ export const OnboardingModal: React.FC = () => {
                   <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
                     {isLocal
                       ? isBuiltInCloud
-                        ? '素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。'
-                        : '素材原件与索引直接留在服务端本地目录，开箱即用。'
-                      : '文件夹、素材与情绪板增量同步，随时可在设置中无损迁移。'}
+                        ? '素材默认保存在云端，可随时开启同步'
+                        : '保存在本地文件夹'
+                      : '自动多端同步'}
                   </p>
                 </div>
 
@@ -1011,11 +1061,6 @@ export const OnboardingModal: React.FC = () => {
                       <h3 className="text-[17px] font-semibold text-[var(--text-primary)]">
                         素材库保存在哪里？
                       </h3>
-                      <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-                        {isBuiltInCloud
-                          ? '默认使用内置云存储，也可现在或稍后再接入 Google Drive 或 WebDAV 同步到桌面端。'
-                          : '默认使用本地目录，也可现在或稍后再接入云盘。'}
-                      </p>
                     </div>
                     <span className="px-2 py-0.5 rounded-full text-[10.5px] bg-[var(--settings-subtle)] text-[var(--text-tertiary)] shrink-0">
                       可选 · 可跳过
@@ -1053,35 +1098,30 @@ export const OnboardingModal: React.FC = () => {
                         {isLocal && <Check size={10} strokeWidth={3} />}
                       </span>
                     </div>
-                    {isLocal &&
-                      (isBuiltInCloud ? (
-                        <p className="text-[11.5px] text-[var(--text-secondary)] leading-relaxed">
-                          素材与索引直接保存在当前云端实例中，也可随时开启 Google Drive 或 WebDAV 同步到桌面端。
-                        </p>
-                      ) : (
-                        <div
-                          className="flex items-center gap-2 pt-1"
-                          onClick={(e) => e.stopPropagation()}
+                    {isLocal && !isBuiltInCloud && (
+                      <div
+                        className="flex items-center gap-2 pt-1"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="text"
+                          value={draftSync.localLibraryPath}
+                          onChange={(e) =>
+                            setDraftSync((prev) => ({ ...prev, localLibraryPath: e.target.value }))
+                          }
+                          placeholder={activeStorageSummary || '本地文件夹路径'}
+                          className="flex-1 min-w-0 h-8 px-2.5 text-[12px] font-mono rounded-[8px] bg-[var(--settings-content)] border border-[var(--settings-border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                        />
+                        <Button
+                          variant="secondary"
+                          size="xs"
+                          loading={savingStorage}
+                          onClick={() => void handleSaveLocalPath()}
                         >
-                          <input
-                            type="text"
-                            value={draftSync.localLibraryPath}
-                            onChange={(e) =>
-                              setDraftSync((prev) => ({ ...prev, localLibraryPath: e.target.value }))
-                            }
-                            placeholder={activeStorageSummary || '.charkle-data/library'}
-                            className="flex-1 min-w-0 h-8 px-2.5 text-[12px] font-mono rounded-[8px] bg-[var(--settings-content)] border border-[var(--settings-border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
-                          />
-                          <Button
-                            variant="secondary"
-                            size="xs"
-                            loading={savingStorage}
-                            onClick={() => void handleSaveLocalPath()}
-                          >
-                            保存路径
-                          </Button>
-                        </div>
-                      ))}
+                          保存路径
+                        </Button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Option 2: Google Drive */}
@@ -1143,7 +1183,7 @@ export const OnboardingModal: React.FC = () => {
                         ) : (
                           <>
                             <span className="text-[11.5px] text-[var(--text-secondary)]">
-                              导入 client_secret.json 或填写 OAuth 凭据
+                              导入或填写登录凭据
                             </span>
                             <Button
                               variant="primary"
@@ -1262,11 +1302,8 @@ export const OnboardingModal: React.FC = () => {
                   <div className="h-[84px] w-[84px] rounded-[22px] bg-[#3B74E8]/12 flex items-center justify-center">
                     <CharkleIcon name="inbox" style="layered" size={56} />
                   </div>
-                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--settings-card)] border border-[var(--settings-border)] text-[var(--text-secondary)]">
-                    跨网页随手收集
-                  </span>
                   <p className="text-[12px] text-[var(--text-secondary)] leading-relaxed">
-                    搭配浏览器扩展右键收藏任意网页素材，或在应用内直接拖入文件、按 ⌘V 粘贴。
+                    支持浏览器扩展、拖入与 ⌘V 粘贴
                   </p>
                   <Button
                     variant="secondary"
@@ -1288,9 +1325,6 @@ export const OnboardingModal: React.FC = () => {
                       <h3 className="text-[17px] font-semibold text-[var(--text-primary)]">
                         设置常用采集方式
                       </h3>
-                      <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-                        下载浏览器扩展以便跨网站一键收藏，并指定默认收纳位置。
-                      </p>
                     </div>
                     <span className="px-2 py-0.5 rounded-full text-[10.5px] bg-[var(--settings-subtle)] text-[var(--text-tertiary)] shrink-0">
                       可选 · 可跳过
@@ -1305,7 +1339,7 @@ export const OnboardingModal: React.FC = () => {
                           浏览器采集扩展
                         </div>
                         <div className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
-                          适用于 Chrome / Edge / Arc / Brave，支持右键收藏、批量抓图与截屏
+                          支持 Chrome / Edge / Arc / Brave
                         </div>
                       </div>
                     </div>
@@ -1368,23 +1402,22 @@ export const OnboardingModal: React.FC = () => {
                       </div>
                     )}
 
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => setShowExtGuide((v) => !v)}
-                        className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-                      >
-                        {showExtGuide ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                        如何安装（3 步）
-                      </button>
-                      {showExtGuide && (
-                        <ol className="mt-2 p-2.5 rounded-[8px] bg-[var(--settings-subtle)] text-[11.5px] text-[var(--text-secondary)] flex flex-col gap-1 list-decimal list-inside">
-                          <li>下载并解压扩展压缩包到本地文件夹</li>
-                          <li>打开浏览器扩展管理页，开启「开发者模式」并加载已解压文件夹</li>
-                          <li>在扩展设置中填入上方服务地址与访问令牌即可开始收藏</li>
-                        </ol>
-                      )}
-                    </div>
+                    <DisclosureGroup
+                      open={showExtGuide}
+                      onOpenChange={setShowExtGuide}
+                      headerClassName="px-1.5 min-h-[28px]"
+                      label={
+                        <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                          如何安装（3 步）
+                        </span>
+                      }
+                    >
+                      <ol className="p-2.5 rounded-[8px] bg-[var(--settings-subtle)] text-[11.5px] text-[var(--text-secondary)] flex flex-col gap-1 list-decimal list-inside">
+                        <li>下载并解压扩展包</li>
+                        <li>在浏览器扩展页开启开发者模式并加载文件夹</li>
+                        <li>填入服务地址与令牌</li>
+                      </ol>
+                    </DisclosureGroup>
                   </div>
 
                   {/* Card 2: Default Capture Target */}
@@ -1421,22 +1454,60 @@ export const OnboardingModal: React.FC = () => {
                         指定文件夹
                       </button>
 
-                      {captureTarget.type === 'folder' && folders.length > 0 && (
-                        <select
-                          aria-label="选择默认文件夹"
-                          value={captureTarget.folderID}
-                          onChange={(e) =>
-                            setCaptureTarget({ type: 'folder', folderID: e.target.value })
-                          }
-                          className="h-7.5 px-2 text-[12px] rounded-[8px] bg-[var(--settings-content)] border border-[var(--settings-border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] max-w-[160px]"
-                        >
-                          {folders.map((f) => (
-                            <option key={f.id} value={f.id}>
-                              {f.name}
-                            </option>
-                          ))}
-                        </select>
-                      )}
+                      {captureTarget.type === 'folder' && folders.length > 0 && (() => {
+                        const currentFolder =
+                          folders.find((f) => f.id === captureTarget.folderID) ?? folders[0];
+                        return (
+                          <>
+                            <button
+                              ref={captureFolderBtnRef}
+                              type="button"
+                              aria-label="选择默认文件夹"
+                              aria-haspopup="menu"
+                              aria-expanded={captureFolderMenuOpen}
+                              onClick={() => setCaptureFolderMenuOpen((v) => !v)}
+                              className="charkle-pressable min-h-[30px] px-2 text-[12px] rounded-[8px] bg-[var(--settings-content)] hover:bg-[var(--settings-subtle)] border border-[var(--settings-border)] text-[var(--text-primary)] inline-flex items-center gap-1.5 max-w-[180px] cursor-pointer"
+                            >
+                              {currentFolder && (
+                                <CharkleFolderIcon
+                                  colorHex={currentFolder.colorHex}
+                                  customSymbol={currentFolder.customSymbol}
+                                  size={13}
+                                />
+                              )}
+                              <span className="truncate">
+                                {currentFolder
+                                  ? folderPaths[currentFolder.id] || currentFolder.name
+                                  : '选择文件夹'}
+                              </span>
+                              <ChevronDown
+                                size={11.5}
+                                className="text-[var(--text-tertiary)] shrink-0"
+                              />
+                            </button>
+                            <Popover
+                              open={captureFolderMenuOpen}
+                              onOpenChange={setCaptureFolderMenuOpen}
+                              anchorEl={captureFolderBtnRef.current}
+                              placement="bottom-start"
+                            >
+                              <FolderHierarchyMenu
+                                folders={folders}
+                                includeInbox={false}
+                                selectedFolderID={captureTarget.folderID}
+                                highlightSelection
+                                parentSelfPrefix="选择"
+                                onSelectFolder={(folderID) => {
+                                  setCaptureFolderMenuOpen(false);
+                                  if (folderID) {
+                                    setCaptureTarget({ type: 'folder', folderID });
+                                  }
+                                }}
+                              />
+                            </Popover>
+                          </>
+                        );
+                      })()}
 
                       <button
                         type="button"
@@ -1453,9 +1524,6 @@ export const OnboardingModal: React.FC = () => {
                         {activeBoard ? `情绪板 · ${activeBoard.title}` : '当前活跃情绪板'}
                       </button>
                     </div>
-                    <p className="text-[11.5px] text-[var(--text-tertiary)]">
-                      全窗口拖入文件或按 ⌘V 粘贴剪贴板图片、链接与色值时将自动存入此位置。
-                    </p>
                   </div>
 
                   {actionHint && (
@@ -1483,7 +1551,7 @@ export const OnboardingModal: React.FC = () => {
                     <CharkleIcon name="ai-spark" style="layered" size={56} />
                   </div>
                   <span className="px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[var(--settings-card)] border border-[var(--settings-border)] text-[var(--text-secondary)]">
-                    基础离线能力免费内置
+                    内置能力
                   </span>
                   <div className="w-full flex flex-col gap-1.5 text-left pt-1">
                     {[
@@ -1515,7 +1583,7 @@ export const OnboardingModal: React.FC = () => {
                         需要接入云端 AI 吗？
                       </h3>
                       <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-                        不配置也能使用全部离线功能；接入后可开启自然语言搜图与智能拼板。
+                        可选：用于自然语言搜图与智能拼板
                       </p>
                     </div>
                     <span className="px-2 py-0.5 rounded-full text-[10.5px] bg-[var(--settings-subtle)] text-[var(--text-tertiary)] shrink-0">
@@ -1712,7 +1780,7 @@ export const OnboardingModal: React.FC = () => {
                             onChange={(e) =>
                               setDraftAI((prev) => ({ ...prev, baseURL: e.target.value }))
                             }
-                            placeholder="服务地址（Base URL）"
+                            placeholder="服务地址"
                             className="h-8 px-2.5 text-[12px] font-mono rounded-[8px] bg-[var(--settings-content)] border border-[var(--settings-border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
                           />
                         )}
@@ -1764,9 +1832,6 @@ export const OnboardingModal: React.FC = () => {
                     <CharkleIcon name="gallery" style="layered" size={48} />
                   </div>
                   <GalleryWireframePreview mode={layoutMode} />
-                  <p className="text-[11.5px] text-[var(--text-secondary)]">
-                    右侧选项均即时生效，随时可在设置或工具栏切换。
-                  </p>
                 </div>
 
                 {/* Right Instant-Apply Preferences */}
@@ -1885,22 +1950,36 @@ export const OnboardingModal: React.FC = () => {
                   </div>
 
                   {/* Compact Sidebar Toggle */}
-                  <label className="p-3 rounded-[10px] bg-[var(--settings-card)] border border-[var(--settings-border)] flex items-center justify-between gap-3 cursor-pointer">
+                  <div className="p-3 rounded-[10px] bg-[var(--settings-card)] border border-[var(--settings-border)] flex items-center justify-between gap-3">
                     <div>
                       <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
                         默认收起侧边栏为精简图标栏
                       </div>
                       <div className="text-[11px] text-[var(--text-tertiary)]">
-                        随时可用 ⌘\ 展开或收起
+                        快捷键 ⌘\
                       </div>
                     </div>
-                    <input
-                      type="checkbox"
-                      checked={sidebarCollapsed}
-                      onChange={(e) => setSidebarCollapsed(e.target.checked)}
-                      className="h-4 w-4 accent-[var(--accent)] cursor-pointer"
-                    />
-                  </label>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={sidebarCollapsed}
+                      aria-label="默认收起侧边栏为精简图标栏"
+                      onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                      className={[
+                        'relative inline-flex h-[22px] w-[38px] shrink-0 items-center rounded-full border transition-colors duration-[var(--duration-move)] ease-[var(--ease-out)] cursor-pointer',
+                        sidebarCollapsed
+                          ? 'bg-[var(--accent)] border-transparent'
+                          : 'bg-[var(--settings-subtle)] border-[var(--settings-border)]',
+                      ].join(' ')}
+                    >
+                      <span
+                        className={[
+                          'pointer-events-none block h-[16px] w-[16px] rounded-full bg-white shadow-xs transition-transform duration-[var(--duration-move)] ease-[var(--ease-out)]',
+                          sidebarCollapsed ? 'translate-x-[18px]' : 'translate-x-[2px]',
+                        ].join(' ')}
+                      />
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1924,9 +2003,6 @@ export const OnboardingModal: React.FC = () => {
                   <h2 className="text-[24px] font-bold tracking-[-0.02em] text-[var(--text-primary)]">
                     一切准备就绪
                   </h2>
-                  <p className="text-[12.5px] text-[var(--text-secondary)]">
-                    点击下方任意卡片可返回微调，或直接进入素材库开始整理。
-                  </p>
                 </div>
 
                 <div className="w-full max-w-[600px] grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1951,14 +2027,15 @@ export const OnboardingModal: React.FC = () => {
                       title: '外观与画廊排布',
                       value: summaryWorkspaceText,
                     },
-                  ].map((item) => {
+                  ].map((item, idx) => {
                     const skipped = skippedSteps.has(item.step);
                     return (
                       <button
                         key={item.step}
                         type="button"
                         onClick={() => jumpToStepID(item.step)}
-                        className="charkle-pressable text-left p-3.5 rounded-[12px] bg-[var(--settings-card)] border border-[var(--settings-border)] hover:border-[var(--border-strong)] flex flex-col gap-1 cursor-pointer"
+                        style={{ animationDelay: `${idx * 45}ms` }}
+                        className="charkle-stagger-item charkle-pressable text-left p-3.5 rounded-[12px] bg-[var(--settings-card)] border border-[var(--settings-border)] hover:border-[var(--border-strong)] flex flex-col gap-1 cursor-pointer"
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[12px] font-semibold text-[var(--text-primary)]">
@@ -1985,15 +2062,11 @@ export const OnboardingModal: React.FC = () => {
         {/* Footer Bar */}
         <div className="px-5 py-3.5 border-t border-[var(--settings-border)] flex items-center justify-between gap-3 shrink-0">
           <div>
-            {stepIdx > 0 ? (
+            {stepIdx > 0 && (
               <Button variant="secondary" size="sm" onClick={() => goToStep(stepIdx - 1, false)}>
                 <ArrowLeft size={13} />
                 上一步
               </Button>
-            ) : (
-              <span className="text-[11.5px] text-[var(--text-tertiary)] hidden sm:inline">
-                每一步都可跳过 · 随时可在「设置 (⌘,) → 通用」重新查看
-              </span>
             )}
           </div>
 
@@ -2005,14 +2078,14 @@ export const OnboardingModal: React.FC = () => {
             {currentStep.id === 'welcome' ? (
               <>
                 <Button variant="secondary" size="sm" onClick={completeOnboarding}>
-                  跳过，直接使用
+                  跳过
                 </Button>
                 <Button
                   variant="skeuoPrimary"
                   size="md"
                   onClick={() => goToStep(1, false)}
                 >
-                  开始快速配置
+                  开始设置
                   <ArrowRight size={13.5} />
                 </Button>
               </>
@@ -2030,7 +2103,7 @@ export const OnboardingModal: React.FC = () => {
                   size="md"
                   onClick={completeOnboarding}
                 >
-                  进入 Charkle 工作台
+                  开始使用
                   <ArrowRight size={13.5} />
                 </Button>
               </>
@@ -2059,7 +2132,7 @@ export const OnboardingModal: React.FC = () => {
         onClose={() => setShowOAuthModal(false)}
         onSaved={(started) => {
           setActionHint({
-            text: started ? '凭据已保存，请在打开的页面完成 Google 登录' : 'Google OAuth 凭据已保存',
+            text: started ? '凭据已保存，请在打开的页面完成 Google 登录' : 'Google 登录凭据已保存',
             isError: false,
           });
         }}

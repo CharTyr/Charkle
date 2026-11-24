@@ -1,4 +1,8 @@
-import { downloadBoundedBuffer, extractOpenGraphFromHtml } from './social.js';
+import {
+  downloadBoundedBuffer,
+  downloadBoundedBufferWithFinalURL,
+  extractOpenGraphFromHtml,
+} from './social.js';
 
 const MAX_BOOKMARK_HTML_BYTES = 512 * 1024;
 const MAX_OG_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -13,7 +17,12 @@ export interface ResolvedWebBookmark {
 export function isWebURL(rawUrl: string): boolean {
   try {
     const u = new URL(rawUrl.trim());
-    return u.protocol === 'http:' || u.protocol === 'https:';
+    return (
+      (u.protocol === 'http:' || u.protocol === 'https:') &&
+      Boolean(u.hostname) &&
+      !u.username &&
+      !u.password
+    );
   } catch {
     return false;
   }
@@ -23,15 +32,17 @@ export async function resolveWebBookmark(rawUrl: string): Promise<ResolvedWebBoo
   if (!isWebURL(rawUrl)) {
     return { title: null, description: null, imageURL: null, posterBuffer: null };
   }
-  const htmlBuf = await downloadBoundedBuffer(rawUrl, MAX_BOOKMARK_HTML_BYTES, 10_000);
-  if (!htmlBuf) {
+  const page = await downloadBoundedBufferWithFinalURL(rawUrl, MAX_BOOKMARK_HTML_BYTES, 10_000);
+  if (!page) {
     return { title: null, description: null, imageURL: null, posterBuffer: null };
   }
-  const og = extractOpenGraphFromHtml(htmlBuf.toString('utf8'));
+  const baseURL = page.finalURL && isWebURL(page.finalURL) ? page.finalURL : rawUrl;
+  const og = extractOpenGraphFromHtml(page.buffer.toString('utf8'));
   let resolvedImageURL: string | null = null;
   if (og.image) {
     try {
-      resolvedImageURL = new URL(og.image, rawUrl).toString();
+      const candidate = new URL(og.image, baseURL).toString();
+      resolvedImageURL = isWebURL(candidate) ? candidate : null;
     } catch {
       resolvedImageURL = null;
     }

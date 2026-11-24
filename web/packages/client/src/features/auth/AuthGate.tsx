@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Eye, EyeOff, Lock, ShieldCheck, User as UserIcon } from 'lucide-react';
-import { Button, CharkleBrandMark, GlassSurface } from '../../design-system';
+import { Button, CharkleBrandMark, GlassSurface, SkeletonBlock, useDelayedFlag } from '../../design-system';
 import { useAuthStore } from '../../stores/authStore';
 
 function evaluatePasswordStrength(password: string): {
@@ -16,7 +16,7 @@ function evaluatePasswordStrength(password: string): {
   if (/\d/.test(password) && /[^A-Za-z0-9]/.test(password)) score++;
 
   if (password.length < 8) return { level: 1, label: '长度不足（需至少 8 位）', color: 'var(--danger)' };
-  if (score <= 2) return { level: 1, label: '强度：弱（建议混合数字与大小写）', color: 'var(--warning)' };
+  if (score <= 2) return { level: 1, label: '强度：弱', color: 'var(--warning)' };
   if (score === 3) return { level: 2, label: '强度：良好', color: 'var(--accent)' };
   return { level: 3, label: '强度：强', color: 'var(--success)' };
 }
@@ -64,15 +64,18 @@ export const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
   }, [rateLimitUntilMs, nowMs]);
 
   const strength = useMemo(() => evaluatePasswordStrength(password), [password]);
+  const showLoadingSkeleton = useDelayedFlag(loading, 300, 500);
 
   if (loading) {
     return (
       <div className="h-full w-full flex flex-col items-center justify-center bg-[var(--bg-gallery)] gap-4">
         <CharkleBrandMark size={48} />
-        <div className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)]">
-          <span className="h-3.5 w-3.5 rounded-full border-2 border-[var(--accent)] border-t-transparent animate-spin" />
-          正在载入…
-        </div>
+        {showLoadingSkeleton && (
+          <div className="flex flex-col items-center gap-2">
+            <SkeletonBlock className="w-[120px] h-[6px] rounded-full" />
+            <span className="text-[12.5px] text-[var(--text-tertiary)]">正在载入…</span>
+          </div>
+        )}
       </div>
     );
   }
@@ -178,7 +181,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
                 </label>
                 <input
                   type="text"
-                  placeholder="用于在侧边栏展示的称呼"
+                  placeholder="昵称"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   className="w-full h-10 px-3 text-[13.5px] rounded-[var(--radius-dock-inner)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-ring)]"
