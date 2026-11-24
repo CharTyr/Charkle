@@ -455,4 +455,161 @@ struct UpgradeFeaturesTests {
         #expect(loader.currentCacheCostLimit == 320 * 1024 * 1024)
         #expect(loader.currentOriginalCacheCountLimit == 4)
     }
+
+    @Test("Ring Gallery Outside math satisfies default circumference, perspective projection, DoF blur, far fade, and painter's order")
+    @MainActor
+    func ringGalleryOutsideMathAndProjection() {
+        let params = RingGalleryParameters.default
+        #expect(params.slotCount == 22)
+        #expect(params.step == 198)
+        #expect(abs(params.radius - 693.2789) < 0.01)
+        #expect(params.perspective == 1500)
+        #expect(params.depthBlur == 14)
+        #expect(params.farFade == 0.50)
+        #expect(params.cornerRadius == 32)
+        #expect(GalleryLayoutMode(rawValue: "ringGallery") == .ringGallery)
+
+        // Front card sits cleanly at (x=0, z=0) with zero DoF blur and zero far fade
+        let front = RingGalleryMath.placePoint(arcS: 0, curvature: params.curvature)
+        #expect(abs(front.x) < 1e-6)
+        #expect(abs(front.z) < 1e-6)
+        #expect(RingGalleryMath.depthOfFieldBlur(screenX: 0, halfViewportWidth: 640, z: 0, radius: params.radius, maxBlur: 14) == 0)
+        #expect(RingGalleryMath.farFadeAmount(z: 0, radius: params.radius, fade: 0.5) == 0)
+
+        // Far-side card at s = half circumference sits at z = -2R with full depth blur and 50% far fade
+        let far = RingGalleryMath.placePoint(arcS: params.circumference * 0.5, curvature: params.curvature)
+        #expect(abs(far.x) < 1e-4)
+        #expect(abs(far.z + 2.0 * params.radius) < 1e-4)
+        let farBlur = RingGalleryMath.depthOfFieldBlur(screenX: 0, halfViewportWidth: 640, z: far.z, radius: params.radius, maxBlur: 14)
+        #expect(abs(farBlur - 14.0) < 1e-6)
+        let farFade = RingGalleryMath.farFadeAmount(z: far.z, radius: params.radius, fade: 0.5)
+        #expect(abs(farFade - 0.5) < 1e-6)
+
+        // Near-plane culling rejects points closer than 140pt in front of the eye
+        #expect(RingGalleryMath.project(x: 0, y: 0, z: params.perspective - 100, perspective: params.perspective) == nil)
+        #expect(RingGalleryMath.project(x: 0, y: 0, z: 0, perspective: params.perspective) != nil)
+
+        // Visible Outside cards across a 500-asset library sort strictly farthest-first (painter's order)
+        let cards = RingGalleryMath.visibleOutsideCards(
+            assetCount: 500,
+            offset: params.step * 42.0,
+            params: params,
+            viewportSize: CGSize(width: 1280, height: 760)
+        )
+        #expect(cards.count == 22)
+        for i in 1..<cards.count {
+            #expect(cards[i].centerZ >= cards[i - 1].centerZ - 0.02)
+        }
+        // Last drawn (front-most) card is virtualIndex 42 -> assetIndex 42
+        #expect(cards.last?.virtualIndex == 42)
+        #expect(cards.last?.assetIndex == 42)
+
+        // Cubic-bezier drag glide and Reduce Motion duration cap (<= 200ms)
+        #expect(RingCubicBezier.dragGlide.evaluate(0) == 0)
+        #expect(RingCubicBezier.dragGlide.evaluate(1) == 1)
+        #expect(RingCubicBezier.dragGlide.evaluate(0.5) > 0.5)
+
+        let normalGlide = RingGalleryMath.releaseGlide(offset: 40, velocity: -900, step: 198, reducedMotion: false)
+        #expect(normalGlide.duration >= 0.42 && normalGlide.duration <= 1.10)
+        let reducedGlide = RingGalleryMath.releaseGlide(offset: 40, velocity: -900, step: 198, reducedMotion: true)
+        #expect(reducedGlide.duration <= 0.20)
+    }
+
+    @Test("Universal WebURLParser, HTML metadata/charset parsing, and external web link ingestion")
+    func universalWebURLParsingAndExternalBrowserLink() async throws {
+        // 1. Standalone URLs (case-insensitive, Unicode, balanced parens, www., wrapped punctuation)
+        #expect(WebURLParser.parse("HTTPS://Example.COM/path")?.absoluteString == "https://Example.COM/path")
+        #expect(WebURLParser.parse("www.apple.com/mac")?.absoluteString == "https://www.apple.com/mac")
+        #expect(WebURLParser.parse("<https://en.wikipedia.org/wiki/Swift_(programming_language)>。")?
+            .absoluteString == "https://en.wikipedia.org/wiki/Swift_(programming_language)")
+        #expect(WebURLParser.parse("https://zh.wikipedia.org/wiki/设计系统") != nil)
+        #expect(WebURLParser.parse("javascript:alert(1)") == nil)
+        #expect(WebURLParser.parse("https://user:pass@example.com/") == nil)
+        #expect(WebURLParser.parse("README.md") == nil)
+
+        // 2. Short share-copy extraction vs long prose preservation
+        let shareCopy = "【灵感收藏】很棒的字体站 https://fonts.example.org/specimen/inter?ref=1 强烈推荐！"
+        #expect(WebURLParser.extractWebURL(from: shareCopy)?.absoluteString == "https://fonts.example.org/specimen/inter?ref=1")
+        let longProse = String(repeating: "这是一段很长的笔记正文内容，包含很多段落和参考说明。", count: 16) + " https://example.org/ref"
+        #expect(WebURLParser.extractWebURL(from: longProse) == nil)
+        #expect(WebURLParser.cleanDomain(for: try #require(URL(string: "https://www.Figma.com/community"))) == "figma.com")
+
+        // 3. HTML metadata, relative image resolution, JSON-LD image fallback, theme-color, icon discovery & GBK decoding
+        let baseURL = try #require(URL(string: "https://studio.example.org/articles/color"))
+        let sampleHTML = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta property="og:title" content="Color &amp; Contrast Guide" />
+          <meta name="description" content="Practical studio palette notes." />
+          <meta property="og:site_name" content="Studio Journal" />
+          <meta name="theme-color" content="#3a7" />
+          <meta name="twitter:image" content="//cdn.example.org/cards/color.jpg" />
+          <link rel="apple-touch-icon" href="/icons/apple-touch.png" />
+          <script type="application/ld+json">{"@type":"Article","image":{"url":"/fallback-ld.png"}}</script>
+        </head>
+        <body><h1>Heading</h1></body>
+        </html>
+        """
+        let parsed = WebBookmark.parseHTML(sampleHTML, baseURL: baseURL)
+        #expect(parsed.title == "Color & Contrast Guide")
+        #expect(parsed.description == "Practical studio palette notes.")
+        #expect(parsed.siteName == "Studio Journal")
+        #expect(parsed.themeColorHex == "#33AA77")
+        #expect(parsed.imageURLs.map(\.absoluteString) == [
+            "https://cdn.example.org/cards/color.jpg",
+            "https://studio.example.org/fallback-ld.png"
+        ])
+        #expect(parsed.iconURLs.first?.absoluteString == "https://studio.example.org/icons/apple-touch.png")
+        #expect(WebBookmark.usablePageTitle("Just a moment...", fallbackURL: baseURL) == "color — studio.example.org")
+
+        // 4. AssetRecord.isExternalWebLink classification (true ONLY for generic web bookmarks)
+        let genericWeb = AssetRecord(
+            title: "Example",
+            fileName: "example.webloc",
+            mediaKind: .webBookmark,
+            sourceURL: "https://example.org/page",
+            sourceDomain: "example.org"
+        )
+        #expect(genericWeb.isExternalWebLink)
+
+        let githubAsset = AssetRecord(
+            title: "apple/swift",
+            fileName: "swift.webloc",
+            mediaKind: .webBookmark,
+            sourceURL: "https://github.com/apple/swift",
+            sourceDomain: "github.com",
+            richMetadata: AssetRichMetadata(githubRepo: GitHubRepoMetadata(owner: "apple", repo: "swift", fullName: "apple/swift"))
+        )
+        #expect(!githubAsset.isExternalWebLink)
+
+        let imageAsset = AssetRecord(
+            title: "Photo",
+            fileName: "photo.jpg",
+            mediaKind: .image,
+            sourceURL: "https://example.org/photo.jpg"
+        )
+        #expect(!imageAsset.isExternalWebLink)
+
+        // 5. End-to-end generic URL ingestion generates editorial thumbnail & preserves exact source URL
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let engine = try BackendFixture.makeEngine(dir)
+        let offlineURL = try #require(URL(string: "http://127.0.0.1:1/design-system/tokens"))
+        let created = try await engine.ingest([.webURL(offlineURL, title: nil, notes: nil)], targetFolderID: nil, targetBoardID: nil)
+        let saved = try #require(created.first)
+        #expect(saved.mediaKind == .webBookmark)
+        #expect(saved.isExternalWebLink)
+        #expect(saved.sourceURL == offlineURL.absoluteString)
+        #expect(saved.sourceDomain == "127.0.0.1")
+        #expect(await engine.thumbnailURL(for: saved.id, tier: .grid520) != nil)
+        #expect(await engine.thumbnailURL(for: saved.id, tier: .preview1400) != nil)
+
+        // 6. Moodboard responsive dock layout tiers adapt cleanly across wide, medium, and narrow widths
+        #expect(MoodboardDockLayoutTier.resolve(forWidth: 1100) == .wide)
+        #expect(MoodboardDockLayoutTier.resolve(forWidth: 820) == .wide)
+        #expect(MoodboardDockLayoutTier.resolve(forWidth: 680) == .medium)
+        #expect(MoodboardDockLayoutTier.resolve(forWidth: 560) == .medium)
+        #expect(MoodboardDockLayoutTier.resolve(forWidth: 440) == .compact)
+    }
 }

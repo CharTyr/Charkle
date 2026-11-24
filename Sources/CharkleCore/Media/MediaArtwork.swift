@@ -132,6 +132,131 @@ nonisolated enum MediaArtwork {
         return ctx.makeImage()
     }
 
+    /// Editorial browser bookmark card fallback for arbitrary websites without an OpenGraph preview or WebKit snapshot.
+    static func webPageCard(
+        title: String,
+        domain: String,
+        siteName: String? = nil,
+        description: String? = nil,
+        urlString: String? = nil,
+        themeColorHex: String? = nil,
+        favicon: CGImage? = nil
+    ) -> CGImage? {
+        let width = 1200
+        let height = 750
+        guard let ctx = context(width: width, height: height) else { return nil }
+
+        let accentHex = resolveWebCardAccentHex(themeColorHex: themeColorHex, domain: domain)
+
+        // Subtle warm paper-studio backdrop matching Charkle gallery light surface
+        ctx.setFillColor(color(0xF5F5F3))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Main elevated browser card
+        let cardRect = CGRect(x: 34, y: 34, width: width - 68, height: height - 68)
+        ctx.setFillColor(color(0xFFFFFF))
+        fillRoundedRect(cardRect, radius: 28, in: ctx)
+        ctx.setStrokeColor(color(0xE5E7EB))
+        ctx.setLineWidth(2)
+        addRoundedRectPath(cardRect, radius: 28, in: ctx)
+        ctx.strokePath()
+
+        // Top accent ribbon clipped inside card top edge
+        ctx.saveGState()
+        addRoundedRectPath(cardRect, radius: 28, in: ctx)
+        ctx.clip()
+        ctx.setFillColor(color(accentHex))
+        ctx.fill(CGRect(x: cardRect.minX, y: cardRect.maxY - 12, width: cardRect.width, height: 12))
+        ctx.restoreGState()
+
+        // Browser-style header bar with favicon + site name / domain
+        let headerY = 612.0
+        let iconRect = CGRect(x: 78, y: headerY, width: 52, height: 52)
+        if let favicon {
+            ctx.saveGState()
+            addRoundedRectPath(iconRect, radius: 13, in: ctx)
+            ctx.clip()
+            ctx.setFillColor(color(0xF3F4F6))
+            ctx.fill(iconRect)
+            drawAspectFill(favicon, in: iconRect.insetBy(dx: 4, dy: 4), ctx: ctx)
+            ctx.restoreGState()
+            ctx.setStrokeColor(color(0x000000, alpha: 0.08))
+            ctx.setLineWidth(1.5)
+            addRoundedRectPath(iconRect, radius: 13, in: ctx)
+            ctx.strokePath()
+        } else {
+            ctx.setFillColor(color(accentHex, alpha: 0.14))
+            fillRoundedRect(iconRect, radius: 13, in: ctx)
+            let initial = String((domain.first ?? "W")).uppercased()
+            draw(initial, in: ctx, at: CGPoint(x: 95, y: headerY + 15), size: 25, ink: accentHex, width: 32, bold: true)
+        }
+
+        let cleanSite = siteName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let primaryHeader = (cleanSite?.isEmpty == false) ? cleanSite! : domain
+        draw(primaryHeader, in: ctx, at: CGPoint(x: 148, y: headerY + 26), size: 22, ink: 0x111827, width: 760, bold: true)
+        draw(domain, in: ctx, at: CGPoint(x: 148, y: headerY + 2), size: 17, ink: 0x6B7280, width: 760, bold: false)
+
+        // Top-right WEB badge pill
+        ctx.setFillColor(color(accentHex, alpha: 0.12))
+        fillRoundedRect(CGRect(x: 1018, y: headerY + 8, width: 104, height: 36), radius: 18, in: ctx)
+        draw("WEB", in: ctx, at: CGPoint(x: 1046, y: headerY + 18), size: 17, ink: accentHex, width: 64, bold: true)
+
+        // Subtle divider below header
+        ctx.setFillColor(color(0xF0F1F4))
+        ctx.fill(CGRect(x: 78, y: 582, width: 1044, height: 2))
+
+        // Main webpage title (up to 3 lines)
+        let displayTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? domain : title
+        let titleLines = wrapText(displayTitle, maxCharsPerLine: 26, maxLines: 3)
+        var cursorY = 506.0
+        for line in titleLines {
+            draw(line, in: ctx, at: CGPoint(x: 78, y: cursorY), size: 46, ink: 0x111827, width: 1044, bold: true)
+            cursorY -= 62
+        }
+
+        // Meta description excerpt (up to 3 lines)
+        let cleanDesc = description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanDesc.isEmpty {
+            let descLines = wrapText(cleanDesc, maxCharsPerLine: 44, maxLines: 3)
+            var descY = min(cursorY - 10, 326.0)
+            for line in descLines {
+                draw(line, in: ctx, at: CGPoint(x: 78, y: descY), size: 24, ink: 0x4B5563, width: 1044)
+                descY -= 38
+            }
+        }
+
+        // Footer bar with full URL & browser-open indicator
+        ctx.setFillColor(color(0xF0F1F4))
+        ctx.fill(CGRect(x: 78, y: 128, width: 1044, height: 2))
+
+        let footerURL = urlString ?? "https://\(domain)"
+        draw(footerURL, in: ctx, at: CGPoint(x: 78, y: 76), size: 19, ink: 0x6B7280, width: 790)
+
+        ctx.setFillColor(color(0x111827))
+        fillRoundedRect(CGRect(x: 912, y: 62, width: 210, height: 44), radius: 22, in: ctx)
+        draw("↗ 默认浏览器打开", in: ctx, at: CGPoint(x: 938, y: 76), size: 18, ink: 0xFFFFFF, width: 170, bold: true)
+
+        return ctx.makeImage()
+    }
+
+    private static func resolveWebCardAccentHex(themeColorHex: String?, domain: String) -> UInt32 {
+        if let raw = themeColorHex?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.hasPrefix("#"),
+           let parsed = UInt32(raw.dropFirst(), radix: 16) {
+            let r = Int((parsed >> 16) & 255)
+            let g = Int((parsed >> 8) & 255)
+            let b = Int(parsed & 255)
+            let lum = (r * 299 + g * 587 + b * 114) / 1000
+            // Avoid near-white theme colors disappearing against the white card.
+            if lum < 215 && lum > 22 {
+                return parsed
+            }
+        }
+        let palette: [UInt32] = [0x2563EB, 0x0F766E, 0x4F46E5, 0xB45309, 0x0369A1, 0x7C3AED, 0xBE123C, 0x334155]
+        let hash = domain.utf8.reduce(5381) { (($0 << 5) &+ $0) &+ Int($1) }
+        return palette[abs(hash) % palette.count]
+    }
+
     /// Clean social post card (X / Threads / Bluesky) optionally compositing an embedded photo/video poster
     /// and the author's real circular avatar.
     static func socialPostCard(

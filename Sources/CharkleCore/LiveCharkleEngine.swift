@@ -319,6 +319,34 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
         }
 
+        if current.mediaKind == .webBookmark, WebBookmark.isWebURL(url) {
+            let bookmark = await WebBookmark.fetch(url, allowWebViewSnapshot: true)
+            let domain = WebURLParser.cleanDomain(for: url) ?? url.host() ?? current.sourceDomain ?? "web.link"
+            current.sourceDomain = domain
+            if let fetchedTitle = bookmark.title, !fetchedTitle.isEmpty {
+                current.title = fetchedTitle
+            }
+            if let desc = bookmark.description, !desc.isEmpty {
+                current.notes = desc
+            }
+            let poster = bookmark.poster ?? MediaArtwork.webPageCard(
+                title: current.title,
+                domain: domain,
+                siteName: bookmark.siteName,
+                description: bookmark.description ?? current.notes,
+                urlString: url.absoluteString,
+                themeColorHex: bookmark.themeColorHex,
+                favicon: bookmark.favicon
+            )
+            if let poster {
+                try? media.writeCustomPoster(poster, for: &current)
+            }
+            let updated = current
+            return try await database.transaction { store in
+                try store.saveAssetLocally(updated)
+            }
+        }
+
         return current
     }
 
@@ -574,15 +602,73 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     private func prepareExpanded(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
-        if case .webURL(let url, _, _) = input {
+        if case .webURL(let url, let suppliedTitle, let suppliedNotes) = input {
             if let repoRef = GitHubRepoURLParser.parse(url) {
                 return try await prepareGitHubRepo(repoRef, folderID: folderID)
             }
             if let socialRef = SocialPostURLParser.parse(url) {
                 return try await prepareSocialPost(socialRef, fallbackInput: input, folderID: folderID)
             }
+            return try await prepareWebPage(url, suppliedTitle: suppliedTitle, suppliedNotes: suppliedNotes, folderID: folderID)
         }
         return try await prepare(input, folderID: folderID)
+    }
+
+    private func prepareWebPage(
+        _ url: URL,
+        suppliedTitle: String?,
+        suppliedNotes: String?,
+        folderID: UUID?
+    ) async throws -> PreparedAsset {
+        let bookmark = await WebBookmark.fetch(url, allowWebViewSnapshot: true)
+        let domain = WebURLParser.cleanDomain(for: url) ?? url.host() ?? "web.link"
+        let cleanSuppliedTitle = suppliedTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = (cleanSuppliedTitle?.isEmpty == false ? cleanSuppliedTitle! : nil)
+            ?? bookmark.title
+            ?? WebBookmark.fallbackTitle(for: url)
+        let cleanSuppliedNotes = suppliedNotes?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedNotes = (cleanSuppliedNotes?.isEmpty == false ? cleanSuppliedNotes! : nil)
+            ?? bookmark.description
+            ?? ""
+
+        guard let poster = bookmark.poster ?? MediaArtwork.webPageCard(
+            title: resolvedTitle,
+            domain: domain,
+            siteName: bookmark.siteName,
+            description: resolvedNotes,
+            urlString: url.absoluteString,
+            themeColorHex: bookmark.themeColorHex,
+            favicon: bookmark.favicon
+        ) else {
+            return try await prepare(.webURL(url, title: resolvedTitle, notes: resolvedNotes), folderID: folderID)
+        }
+
+        let id = UUID()
+        do {
+            let source = try await media.ingestPreResolvedWebPage(
+                url: url,
+                title: resolvedTitle,
+                notes: resolvedNotes,
+                domain: domain,
+                poster: poster,
+                folderID: folderID,
+                id: id
+            )
+            var feature: Data?
+            if let thumbnail = media.thumbnailURL(for: id, tier: .grid520) {
+                let analysis = await intelligence.analyze(
+                    thumbnailURL: thumbnail,
+                    includeColors: false,
+                    includeOCR: false,
+                    includeFeaturePrint: true
+                )
+                feature = analysis.featurePrintData
+            }
+            return PreparedAsset(asset: source.asset, feature: feature)
+        } catch {
+            media.removeFiles(for: AssetRecord(id: id, title: "", fileName: ""))
+            throw error
+        }
     }
 
     private func prepare(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {

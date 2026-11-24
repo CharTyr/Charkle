@@ -182,8 +182,13 @@ public struct InspectorView: View {
             .padding(2)
             .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .padding(.horizontal, 12)
-            .padding(.top, 12)
+            .padding(.top, 10)
             .padding(.bottom, 8)
+            .background {
+                if !isQuickLookHosted {
+                    CharkleWindowDragArea()
+                }
+            }
 
             if coordinator.selectedInspectorTab == .similar {
                 singleAssetSimilarTab(asset)
@@ -493,7 +498,7 @@ public struct InspectorView: View {
                         onOpenQuickLook(asset)
                     }
                 }
-                .help(isQuickLookHosted ? asset.title : "点击打开 Quick Look 全屏预览")
+                .help(isQuickLookHosted ? asset.title : (asset.isExternalWebLink ? "点击在默认浏览器中打开" : "点击打开 Quick Look 全屏预览"))
 
                 inspectorInnerDivider
 
@@ -1071,6 +1076,43 @@ public struct InspectorView: View {
                             .lineLimit(1)
                     }
                     .padding(.vertical, 5)
+
+                    if asset.isExternalWebLink {
+                        HStack(spacing: 6) {
+                            Button {
+                                library.markAssetOpened(asset.id)
+                                NSWorkspace.shared.open(url)
+                            } label: {
+                                Label("默认浏览器打开", systemImage: "safari")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 5.5)
+                                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                coordinator.showToast("正在刷新网页缩略图…", icon: "arrow.clockwise")
+                                Task {
+                                    if await library.refreshRichAsset(asset.id) != nil {
+                                        coordinator.showToast("已刷新网页缩略图", icon: "checkmark.circle.fill", tone: .success)
+                                    } else {
+                                        coordinator.showToast("网页缩略图刷新失败", icon: "exclamationmark.triangle", tone: .warning)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .frame(width: 28, height: 26)
+                                    .background(CharkleTheme.inspectorFieldSurface(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("重新抓取网页标题与缩略图")
+                        }
+                        .padding(.top, 4)
+                    }
                 }
             }
         }

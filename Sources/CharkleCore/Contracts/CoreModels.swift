@@ -666,6 +666,25 @@ public struct AssetRecord: Codable, Hashable, Identifiable, Sendable {
         richMetadata?.socialPost != nil
     }
 
+    /// Validated `http`/`https` destination URL stored on a web bookmark asset.
+    public var externalWebURL: URL? {
+        guard let raw = sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host() != nil else {
+            return nil
+        }
+        return url
+    }
+
+    /// Generic web link bookmark (any URL outside in-app GitHub repository / social post rich viewers).
+    /// Opening such assets launches the user's default web browser directly.
+    public var isExternalWebLink: Bool {
+        mediaKind == .webBookmark && !isGitHubRepo && !isSocialPost && externalWebURL != nil
+    }
+
     public var displayTypeLabel: String {
         if let post = richMetadata?.socialPost {
             return "\(post.platform.displayName) 推文"
@@ -1134,12 +1153,14 @@ public enum GalleryLayoutMode: String, Codable, CaseIterable, Hashable, Sendable
     case verticalMasonry
     case horizontalJustified
     case galleryFilmstrip
+    case ringGallery
 
     public var localizedLabel: String {
         switch self {
         case .verticalMasonry: "纵向瀑布流"
         case .horizontalJustified: "横向瀑布流"
         case .galleryFilmstrip: "画廊视图"
+        case .ringGallery: "环形画廊"
         }
     }
 }

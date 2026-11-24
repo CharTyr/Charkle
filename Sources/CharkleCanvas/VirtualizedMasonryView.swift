@@ -207,7 +207,7 @@ public nonisolated enum MasonryLayoutEngine {
         guard direction != 0 else { return max(minColumnWidth, min(maxColumnWidth, currentWidth)) }
         let zoomIn = direction > 0
         switch layoutMode {
-        case .verticalMasonry, .galleryFilmstrip:
+        case .verticalMasonry, .galleryFilmstrip, .ringGallery:
             let minCols = minReachableVerticalColumns(containerWidth: containerWidth, spacing: spacing, horizontalPadding: horizontalPadding)
             let maxCols = maxReachableVerticalColumns(containerWidth: containerWidth, spacing: spacing, horizontalPadding: horizontalPadding)
             let currentCols = verticalColumnCount(
@@ -305,7 +305,7 @@ public nonisolated enum MasonryLayoutEngine {
         bottomInset: CGFloat
     ) -> MasonryLayoutSnapshot {
         switch layoutMode {
-        case .verticalMasonry, .galleryFilmstrip:
+        case .verticalMasonry, .galleryFilmstrip, .ringGallery:
             return computeVertical(
                 assets: assets,
                 containerWidth: containerWidth,
@@ -336,9 +336,9 @@ public nonisolated enum MasonryLayoutEngine {
             if asset.isSocialPost {
                 asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.12
             } else if asset.isGitHubRepo {
-                1.32
+                asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.32
             } else {
-                1.25
+                asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.6
             }
         case .document: asset.fileName.lowercased().hasSuffix(".swatch") ? 1.0 : 0.84
         case .model3D: asset.pixelWidth > 0 && asset.pixelHeight > 0 ? CGFloat(asset.aspectRatio) : 1.0
@@ -1942,7 +1942,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             // actually changes — eliminates 120Hz slider-drag twitching and boundary oscillation.
             let width = activeContainerWidth()
             let densityChanged: Bool = switch layoutMode {
-            case .verticalMasonry, .galleryFilmstrip:
+            case .verticalMasonry, .galleryFilmstrip, .ringGallery:
                 MasonryLayoutEngine.verticalColumnCount(
                     containerWidth: width,
                     targetColumnWidth: targetColumnWidth,
@@ -2234,7 +2234,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         var atZoomOutLimit = false
 
         switch layoutMode {
-        case .verticalMasonry, .galleryFilmstrip:
+        case .verticalMasonry, .galleryFilmstrip, .ringGallery:
             let cols = layout.columnCount
             let minCols = MasonryLayoutEngine.minReachableVerticalColumns(
                 containerWidth: width,
@@ -3111,8 +3111,15 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             for url in urls {
                 inputs.append(.fileURL(url))
             }
-        } else if let rawURLStr = pb.string(forType: .URL), let url = URL(string: rawURLStr),
-                  url.scheme == "http" || url.scheme == "https" {
+        } else if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+                  let webURL = urls.first(where: { WebBookmark.isWebURL($0) }) {
+            inputs.append(.webURL(webURL, title: nil, notes: nil))
+        } else if let rawURLStr = pb.string(forType: .URL) ?? pb.string(forType: NSPasteboard.PasteboardType("public.url")),
+                  let url = WebURLParser.parse(rawURLStr) {
+            inputs.append(.webURL(url, title: nil, notes: nil))
+        } else if let plist = pb.propertyList(forType: NSPasteboard.PasteboardType("WebURLsWithTitlesPboardType")) as? [[String]],
+                  let firstURL = plist.first?.first,
+                  let url = WebURLParser.parse(firstURL) {
             inputs.append(.webURL(url, title: nil, notes: nil))
         } else if let png = pb.data(forType: .png) {
             inputs.append(.imageData(png, suggestedName: "Drop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
@@ -3122,8 +3129,12 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             inputs.append(.imageData(png, suggestedName: "Drop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
         } else if let str = pb.string(forType: .string) {
             let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let url = URL(string: trimmed), url.scheme == "http" || url.scheme == "https" {
-                inputs.append(.webURL(url, title: nil, notes: nil))
+            if let socialURL = SocialPostURLParser.extractPostURL(from: trimmed) {
+                inputs.append(.webURL(socialURL, title: nil, notes: nil))
+            } else if let githubURL = GitHubRepoURLParser.extractRepoURL(from: trimmed) {
+                inputs.append(.webURL(githubURL, title: nil, notes: nil))
+            } else if let webURL = WebURLParser.extractWebURL(from: trimmed) {
+                inputs.append(.webURL(webURL, title: nil, notes: nil))
             } else if !trimmed.isEmpty {
                 let title = String(trimmed.prefix(36)).replacingOccurrences(of: "\n", with: " ")
                 inputs.append(.textSnippet(title: title, text: trimmed, sourceURL: nil))
@@ -3162,7 +3173,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let asset = hit.asset
         let targets = effectiveSelection(including: asset.id)
 
-        menu.addItem(makeMenuItem(title: "快速预览 (Space)", symbol: "eye") { [weak self] in
+        menu.addItem(makeMenuItem(
+            title: asset.isExternalWebLink ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)",
+            symbol: asset.isExternalWebLink ? "safari" : "eye"
+        ) { [weak self] in
             self?.callbacks.onOpenQuickLook(asset)
         })
         menu.addItem(makeMenuItem(title: "在访达中显示", symbol: "folder") { [weak self] in

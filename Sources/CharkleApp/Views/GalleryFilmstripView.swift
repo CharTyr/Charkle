@@ -465,43 +465,83 @@ public struct GalleryFilmstripView: View {
     }
 
     private func webBookmarkStageCard(for asset: AssetRecord) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
-                    .frame(width: 11, height: 11)
-                Text(asset.sourceDomain ?? "网页书签")
-                    .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottomTrailing) {
+                Group {
+                    if let img = previewImage {
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                    } else {
+                        AssetThumbnailSurface(
+                            asset: asset,
+                            loader: loader,
+                            tier: .preview1400,
+                            cornerRadius: 0,
+                            contentMode: .fit,
+                            enableHoverPlayback: false
+                        )
+                    }
+                }
+                .frame(maxWidth: 780, maxHeight: 440)
+                .background(CharkleTheme.surfaceElevated(for: colorScheme))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onOpenQuickLook(asset)
+                }
+
+                if asset.externalWebURL != nil {
                     Button {
-                        NSWorkspace.shared.open(url)
+                        onOpenQuickLook(asset)
                     } label: {
-                        Label("在浏览器中打开", systemImage: "safari")
+                        Label("在默认浏览器中打开", systemImage: "safari")
                             .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
+                    .padding(14)
                 }
             }
-            Text(asset.title)
-                .font(.system(size: 19, weight: .semibold))
-            if let urlStr = asset.sourceURL {
-                Text(urlStr)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
+                        .frame(width: 9, height: 9)
+                    Text(asset.sourceDomain ?? "网页书签")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let urlStr = asset.sourceURL {
+                        Text(urlStr)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Text(asset.title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(2)
+                if !asset.notes.isEmpty {
+                    Text(asset.notes)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
-            if !asset.notes.isEmpty {
-                Divider()
-                Text(asset.notes)
-                    .font(.system(size: 13))
-                    .lineSpacing(5)
-            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .frame(maxWidth: 780, alignment: .leading)
+            .background(CharkleTheme.surfaceElevated(for: colorScheme))
         }
-        .padding(24)
-        .frame(maxWidth: 600)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: 0.75)
+        )
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.34 : 0.10), radius: 20, y: 8)
     }
 
@@ -750,17 +790,25 @@ public struct GalleryFilmstripView: View {
         let targetIDs = effectiveTargetIDs(for: item)
         let countSuffix = targetIDs.count > 1 ? " (\(targetIDs.count) 项)" : ""
 
-        Button {
-            onOpenQuickLook(item)
-        } label: {
-            Label("沉浸预览", systemImage: "eye")
-        }
-
-        if let urlStr = item.sourceURL, let webURL = URL(string: urlStr) {
+        if item.isExternalWebLink {
             Button {
-                NSWorkspace.shared.open(webURL)
+                onOpenQuickLook(item)
             } label: {
-                Label("打开来源网页", systemImage: "safari")
+                Label("在默认浏览器中打开", systemImage: "safari")
+            }
+        } else {
+            Button {
+                onOpenQuickLook(item)
+            } label: {
+                Label("沉浸预览", systemImage: "eye")
+            }
+
+            if let urlStr = item.sourceURL, let webURL = URL(string: urlStr) {
+                Button {
+                    NSWorkspace.shared.open(webURL)
+                } label: {
+                    Label("打开来源网页", systemImage: "safari")
+                }
             }
         }
 
@@ -1052,8 +1100,7 @@ public struct GalleryFilmstripView: View {
                 return
             }
 
-            if previewImage == nil || targetAsset?.mediaKind != .webBookmark,
-               let img = await loader.loadImage(for: id, tier: .preview1400) {
+            if let img = await loader.loadImage(for: id, tier: .preview1400) {
                 guard !Task.isCancelled else { return }
                 previewImage = img
             }

@@ -457,13 +457,28 @@ public final class CharkleRuntime {
             coordinator.showToast("剪贴板暂无可收藏的图片、链接或文本", icon: "doc.on.clipboard", tone: .warning)
             return
         }
-        let hasXPost = inputs.contains { input in
-            if case .webURL(let url, _, _) = input { return XPostURLParser.parse(url) != nil }
+        let hasSocialPost = inputs.contains { input in
+            if case .webURL(let url, _, _) = input { return SocialPostURLParser.parse(url) != nil }
+            return false
+        }
+        let hasGitHubRepo = inputs.contains { input in
+            if case .webURL(let url, _, _) = input { return GitHubRepoURLParser.parse(url) != nil }
+            return false
+        }
+        let hasGenericWebURL = inputs.contains { input in
+            if case .webURL(let url, _, _) = input {
+                return SocialPostURLParser.parse(url) == nil && GitHubRepoURLParser.parse(url) == nil
+            }
             return false
         }
         let (folderID, boardID, destLabel) = currentCaptureTarget()
-        if hasXPost {
-            notchController?.showProcessing("正在保存 X 推文及媒体…")
+        if hasSocialPost {
+            notchController?.showProcessing("正在保存推文及媒体…")
+        } else if hasGitHubRepo {
+            notchController?.showProcessing("正在解析 GitHub 仓库…")
+        } else if hasGenericWebURL {
+            notchController?.showProcessing("正在解析网页缩略图…")
+            coordinator.showToast("正在解析网页缩略图…", icon: "safari")
         }
         Task {
             let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: boardID)
@@ -474,10 +489,22 @@ public final class CharkleRuntime {
                 await moodboards.refreshBoards()
             }
             let count = max(created.count, inputs.count)
-            let msg = hasXPost
-                ? "已保存 X 推文及媒体至「\(destLabel)」(\(count) 项)"
-                : "剪贴板已收入「\(destLabel)」(\(count) 项)"
-            coordinator.showToast(msg, icon: hasXPost ? "checkmark.circle.fill" : "doc.on.clipboard.fill", tone: .success)
+            let msg: String
+            let icon: String
+            if hasSocialPost {
+                msg = "已保存推文及媒体至「\(destLabel)」(\(count) 项)"
+                icon = "checkmark.circle.fill"
+            } else if hasGitHubRepo {
+                msg = "已收藏 GitHub 仓库至「\(destLabel)」(\(count) 项)"
+                icon = "checkmark.circle.fill"
+            } else if hasGenericWebURL {
+                msg = "已收藏网页书签至「\(destLabel)」(\(count) 项)"
+                icon = "safari"
+            } else {
+                msg = "剪贴板已收入「\(destLabel)」(\(count) 项)"
+                icon = "doc.on.clipboard.fill"
+            }
+            coordinator.showToast(msg, icon: icon, tone: .success)
             notchController?.flashConfirmation(msg)
         }
     }

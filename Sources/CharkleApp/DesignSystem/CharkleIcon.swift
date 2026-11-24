@@ -74,6 +74,7 @@ public struct CharkleIcon: View {
         // Gallery & Media
         case "masonry-vertical": "rectangle.split.3x1"
         case "masonry-horizontal": "rectangle.split.1x2"
+        case "gallery-ring": "square.stack.3d.forward.dottedline"
         case "github": "chevron.left.forwardslash.chevron.right"
         case "model3d": "cube"
         case "audio": "waveform"

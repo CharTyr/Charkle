@@ -490,7 +490,13 @@ public final class NotchShelfController {
         let count = NSPasteboard.general.changeCount
         guard force || count != lastObservedGeneralPasteboardChangeCount else { return }
         lastObservedGeneralPasteboardChangeCount = count
-        shelfState.clipboardXPostURL = ClipboardCollector.detectedXPostURL(from: .general)
+        let detected = ClipboardCollector.detectedClipboardLink(from: .general)
+        shelfState.clipboardLink = detected
+        if case .social(let url) = detected {
+            shelfState.clipboardXPostURL = url
+        } else {
+            shelfState.clipboardXPostURL = nil
+        }
     }
 
     // MARK: - Fixed Oversized Transparent NSPanel Setup
@@ -519,6 +525,10 @@ public final class NotchShelfController {
                 guard let self else { return }
                 self.library.markAssetOpened(asset.id)
                 self.collapse()
+                if asset.isExternalWebLink, let url = asset.externalWebURL {
+                    NSWorkspace.shared.open(url)
+                    return
+                }
                 self.onOpenMainWindow()
                 self.library.selectedAssetIDs = [asset.id]
                 self.coordinator.openQuickLook(assetID: asset.id, playlist: [asset.id])
@@ -761,6 +771,7 @@ public final class NotchShelfController {
             NSPasteboard.PasteboardType("NSFilenamesPboardType"),
             .URL,
             NSPasteboard.PasteboardType("public.url"),
+            NSPasteboard.PasteboardType("WebURLsWithTitlesPboardType"),
             .png,
             .tiff,
             NSPasteboard.PasteboardType(UTType.jpeg.identifier),
@@ -772,9 +783,9 @@ public final class NotchShelfController {
         if types.contains(where: { accepted.contains($0) }) {
             return true
         }
-        if let text = pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           text.hasPrefix("http://") || text.hasPrefix("https://") {
-            return URL(string: text) != nil
+        if let text = pb.string(forType: .string),
+           WebURLParser.extractWebURL(from: text) != nil {
+            return true
         }
         return false
     }
@@ -957,13 +968,27 @@ public final class NotchShelfController {
         // 1. Standard synchronous pasteboard payloads (files, images, URLs, X posts, hex colors, text)
         let directInputs = ClipboardCollector.extractInputs(from: pasteboard)
         if !directInputs.isEmpty {
-            let hasXPost = directInputs.contains { input in
-                if case .webURL(let url, _, _) = input { return XPostURLParser.parse(url) != nil }
+            let hasSocialPost = directInputs.contains { input in
+                if case .webURL(let url, _, _) = input { return SocialPostURLParser.parse(url) != nil }
+                return false
+            }
+            let hasGitHubRepo = directInputs.contains { input in
+                if case .webURL(let url, _, _) = input { return GitHubRepoURLParser.parse(url) != nil }
+                return false
+            }
+            let hasGenericWebURL = directInputs.contains { input in
+                if case .webURL(let url, _, _) = input {
+                    return SocialPostURLParser.parse(url) == nil && GitHubRepoURLParser.parse(url) == nil
+                }
                 return false
             }
             notchLogger.info("NotchShelf received \(directInputs.count) payload(s) -> \(destLabel, privacy: .public)")
-            if hasXPost {
-                showProcessing("正在保存 X 推文及媒体…")
+            if hasSocialPost {
+                showProcessing("正在保存推文及媒体…")
+            } else if hasGitHubRepo {
+                showProcessing("正在解析 GitHub 仓库…")
+            } else if hasGenericWebURL {
+                showProcessing("正在解析网页缩略图…")
             }
             Task { @MainActor in
                 let created = await library.ingest(
@@ -976,9 +1001,16 @@ public final class NotchShelfController {
                     await moodboards.refreshBoards()
                 }
                 let count = max(created.count, directInputs.count)
-                let message = hasXPost
-                    ? "已保存 X 推文及媒体至「\(destLabel)」(\(count) 项)"
-                    : "已收入「\(destLabel)」(\(count) 项)"
+                let message: String
+                if hasSocialPost {
+                    message = "已保存推文及媒体至「\(destLabel)」(\(count) 项)"
+                } else if hasGitHubRepo {
+                    message = "已收藏 GitHub 仓库至「\(destLabel)」(\(count) 项)"
+                } else if hasGenericWebURL {
+                    message = "已收藏网页书签至「\(destLabel)」(\(count) 项)"
+                } else {
+                    message = "已收入「\(destLabel)」(\(count) 项)"
+                }
                 flashConfirmation(message)
             }
             return true

@@ -247,107 +247,96 @@ public struct MoodboardCanvasView: View {
     }
 
     public var body: some View {
-        ZStack {
-            CanvasSurface.ground(for: colorScheme)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    clearCanvasSelection()
+        // Use an infinitely flexible Color.clear base so fixed-size inner canvas stages
+        // can NEVER inflate the root HStack height or clip the bottom of the app window.
+        Color.clear
+            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+            .onGeometryChange(for: CGSize.self) { proxy in
+                CGSize(width: floor(max(1, proxy.size.width)), height: floor(max(1, proxy.size.height)))
+            } action: { _, newSize in
+                if newSize.width > 40, newSize.height > 40,
+                   (abs(newSize.width - viewportSize.width) >= 1 || abs(newSize.height - viewportSize.height) >= 1) {
+                    viewportSize = newSize
                 }
-
-            freeformInfiniteStage
-
-            // Top floating Board Palette Strip (cleanly positioned below main floating search/header)
-            VStack {
-                if showTopPaletteStrip && !document.extractedPalette.isEmpty {
-                    BoardPaletteHeaderStrip(
-                        colors: document.extractedPalette,
-                        onCopyHex: callbacks.onCopyColorHex,
-                        onSearchColor: callbacks.onSearchByColorHex
-                    )
-                    .padding(.top, 14)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
-                }
-                Spacer()
             }
-
-            // Bottom-Right Freeform Zoom Controls (isolated leaf view — only observes camera.zoom)
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    FreeformZoomControlsPill(
-                        camera: camera,
-                        reduceMotion: reduceMotion,
-                        onZoomStep: { factor in
-                            applyZoom(factor: factor, anchorScreenPoint: CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5))
-                            persistCameraViewport()
-                        },
-                        onResetZoom: {
-                            withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
-                                camera.setZoom(1.0)
-                            }
-                            persistCameraViewport()
-                        },
-                        onFitBoard: {
-                            fitBoardToScreen()
+            .overlay {
+                ZStack {
+                    CanvasSurface.ground(for: colorScheme)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            clearCanvasSelection()
                         }
-                    )
-                }
-                .padding(.trailing, 20)
-                .padding(.bottom, 20)
-            }
 
-            // Bottom-Center Floating Liquid Glass Transform Pill (when nodes selected) + Tool Dock
-            VStack(spacing: 8) {
-                Spacer()
-                if !selectedUnlockedNodes.isEmpty && activeTool == .select {
-                    selectedTransformBar
-                        .transition(
-                            .opacity
-                                .combined(with: .scale(scale: 0.94, anchor: .bottom))
-                                .combined(with: .offset(y: 6))
-                        )
-                }
-                floatingToolDock
-                    .padding(.bottom, 18)
-            }
-            .animation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion), value: selectedNodeIDs)
+                    freeformInfiniteStage
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
 
-            // External drop highlight border
-            CanvasDropRingOverlay(isTargeted: isDropTargeted, padding: 10, fillOpacity: 0.04)
-        }
-        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            // Measure proposed safe-area viewport completely decoupled from ScrollView content
-            // so Auto Editorial width/height never oscillates with scrollbar show/hide.
-            Color.clear
-                .onGeometryChange(for: CGSize.self) { proxy in
-                    CGSize(width: floor(proxy.size.width), height: floor(proxy.size.height))
-                } action: { _, newSize in
-                    if newSize.width > 120, newSize.height > 120,
-                       (abs(newSize.width - viewportSize.width) >= 2 || abs(newSize.height - viewportSize.height) >= 2) {
-                        viewportSize = newSize
+                    // Top floating Board Palette Strip (positioned below window top chrome, clear of trailing button)
+                    VStack {
+                        if showTopPaletteStrip && !document.extractedPalette.isEmpty {
+                            BoardPaletteHeaderStrip(
+                                colors: document.extractedPalette,
+                                onCopyHex: callbacks.onCopyColorHex,
+                                onSearchColor: callbacks.onSearchByColorHex
+                            )
+                            .padding(.top, 12)
+                            .padding(.leading, 14)
+                            .padding(.trailing, viewportSize.width < 680 ? 124 : 14)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                        }
+                        Spacer(minLength: 0)
                     }
+
+                    // Unified Responsive Bottom HUD (Transform Pill + Tool Options + Tool Dock + Zoom Controls)
+                    // Adapts cleanly across wide, medium, and narrow window sizes with zero clipping or overlap.
+                    VStack(spacing: 8) {
+                        Spacer(minLength: 0)
+
+                        if !selectedUnlockedNodes.isEmpty && activeTool == .select {
+                            selectedTransformBar
+                                .transition(
+                                    .opacity
+                                        .combined(with: .scale(scale: 0.94, anchor: .bottom))
+                                        .combined(with: .offset(y: 6))
+                                )
+                        }
+
+                        if !shouldInlineToolOptions && (activeTool == .pen || activeTool == .connector) {
+                            floatingContextualToolOptionsBar
+                                .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottom)))
+                        }
+
+                        adaptiveBottomDockAndZoomRow
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .animation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion), value: selectedNodeIDs)
+                    .animation(CanvasMotion.accessible(CanvasMotion.settleStrong, reduced: reduceMotion), value: activeTool)
+
+                    // External drop highlight border
+                    CanvasDropRingOverlay(isTargeted: isDropTargeted, padding: 10, fillOpacity: 0.04)
                 }
-        }
-        .onAppear {
-            syncCameraFromDocument()
-            ensureFreeformModeIfLegacy()
-        }
-        .onChange(of: document.id) { _, _ in
-            selectedNodeIDs.removeAll()
-            selectedConnectorID = nil
-            activeTool = .select
-            syncCameraFromDocument()
-            ensureFreeformModeIfLegacy()
-        }
-        .onDrop(of: [.fileURL, .url, .image, .plainText], isTargeted: $isDropTargeted) { providers, location in
-            handleCanvasDrop(providers: providers, screenLocation: location)
-        }
-        .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.escape) {
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+            }
+            .onAppear {
+                syncCameraFromDocument()
+                ensureFreeformModeIfLegacy()
+            }
+            .onChange(of: document.id) { _, _ in
+                selectedNodeIDs.removeAll()
+                selectedConnectorID = nil
+                activeTool = .select
+                syncCameraFromDocument()
+                ensureFreeformModeIfLegacy()
+            }
+            .onDrop(of: [.fileURL, .url, .image, .plainText], isTargeted: $isDropTargeted) { providers, location in
+                handleCanvasDrop(providers: providers, screenLocation: location)
+            }
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.escape) {
             if pendingConnectorSource != nil {
                 pendingConnectorSource = nil
                 return .handled
@@ -1510,11 +1499,157 @@ public struct MoodboardCanvasView: View {
         }
     }
 
-    // MARK: - Floating Liquid Glass Bottom Tool Dock (Single GlassEffectContainer)
+    // MARK: - Floating Liquid Glass Bottom Tool Dock (Responsive Adaptive Tiers)
 
-    private var floatingToolDock: some View {
-        CanvasGlassContainer(spacing: 10) {
-            HStack(spacing: 8) {
+    private var dockLayoutTier: MoodboardDockLayoutTier {
+        MoodboardDockLayoutTier.resolve(forWidth: viewportSize.width)
+    }
+
+    private var shouldInlineToolOptions: Bool {
+        dockLayoutTier == .wide && viewportSize.width >= 960
+    }
+
+    @ViewBuilder
+    private var adaptiveBottomDockAndZoomRow: some View {
+        let tier = dockLayoutTier
+        let zoomPill = FreeformZoomControlsPill(
+            camera: camera,
+            reduceMotion: reduceMotion,
+            compact: tier != .wide,
+            onZoomStep: { factor in
+                applyZoom(factor: factor, anchorScreenPoint: CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5))
+                persistCameraViewport()
+            },
+            onResetZoom: {
+                withAnimation(CanvasMotion.accessible(CanvasMotion.uiSpring, reduced: reduceMotion)) {
+                    camera.setZoom(1.0)
+                }
+                persistCameraViewport()
+            },
+            onFitBoard: {
+                fitBoardToScreen()
+            }
+        )
+
+        switch tier {
+        case .wide:
+            ZStack {
+                floatingToolDock(
+                    compact: false,
+                    showExportLabel: true,
+                    includeInlineOptions: shouldInlineToolOptions
+                )
+                HStack {
+                    Spacer(minLength: 0)
+                    zoomPill
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+        case .medium:
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
+                floatingToolDock(
+                    compact: viewportSize.width < 680,
+                    showExportLabel: viewportSize.width >= 700,
+                    includeInlineOptions: false
+                )
+                Spacer(minLength: 6)
+                zoomPill
+            }
+            .frame(maxWidth: .infinity)
+
+        case .compact:
+            VStack(spacing: 8) {
+                HStack {
+                    Spacer(minLength: 0)
+                    zoomPill
+                }
+                let dockView = floatingToolDock(
+                    compact: true,
+                    showExportLabel: false,
+                    includeInlineOptions: false
+                )
+                if viewportSize.width < 430 {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        dockView
+                            .padding(.horizontal, 2)
+                    }
+                    .frame(maxWidth: max(220, viewportSize.width - 28))
+                } else {
+                    dockView
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var floatingContextualToolOptionsBar: some View {
+        HStack(spacing: 6) {
+            if activeTool == .pen {
+                penToolOptionsContent
+            } else if activeTool == .connector {
+                connectorToolOptionsContent
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .canvasLiquidGlass(in: Capsule(style: .continuous))
+    }
+
+    @ViewBuilder
+    private var penToolOptionsContent: some View {
+        HStack(spacing: 4) {
+            ForEach(Self.calmInkSwatches, id: \.hex) { swatch in
+                Button {
+                    inkColorHex = swatch.hex
+                } label: {
+                    Circle()
+                        .fill(Color(charkleHex: swatch.hex))
+                        .frame(width: 14, height: 14)
+                        .overlay(
+                            Circle().strokeBorder(
+                                inkColorHex == swatch.hex ? Color.accentColor : Color.white.opacity(0.45),
+                                lineWidth: inkColorHex == swatch.hex ? 2 : 0.75
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(swatch.name)
+            }
+            Picker("", selection: $inkWidth) {
+                Text("细").tag(2.0)
+                Text("中").tag(3.5)
+                Text("粗").tag(6.5)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 84)
+        }
+    }
+
+    @ViewBuilder
+    private var connectorToolOptionsContent: some View {
+        Picker("", selection: $connectorStyle) {
+            Text("曲线").tag(ConnectorStyle.curved)
+            Text("折线").tag(ConnectorStyle.elbow)
+            Text("直线").tag(ConnectorStyle.straight)
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 120)
+    }
+
+    private func floatingToolDock(
+        compact: Bool,
+        showExportLabel: Bool,
+        includeInlineOptions: Bool
+    ) -> some View {
+        let itemSpacing: CGFloat = compact ? 4 : 8
+        let toolSide: CGFloat = compact ? 26 : 30
+        let actionSide: CGFloat = compact ? 25 : 28
+        let iconSize: CGFloat = compact ? 12 : 13
+
+        return CanvasGlassContainer(spacing: compact ? 6 : 10) {
+            HStack(spacing: itemSpacing) {
                 // Freeform Tool Buttons
                 ForEach(MoodboardTool.allCases, id: \.self) { tool in
                     let active = activeTool == tool
@@ -1524,85 +1659,54 @@ public struct MoodboardCanvasView: View {
                         }
                     } label: {
                         Image(systemName: toolIcon(tool))
-                            .font(.system(size: 13, weight: active ? .semibold : .regular))
+                            .font(.system(size: iconSize, weight: active ? .semibold : .regular))
                             .foregroundStyle(active ? Color.accentColor : .primary.opacity(0.84))
-                            .frame(width: 30, height: 30)
+                            .frame(width: toolSide, height: toolSide)
                             .background(
                                 active ? Color.accentColor.opacity(0.14) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous)
                             )
                     }
                     .buttonStyle(.plain)
                     .help("\(tool.label) (\(tool.shortcutHint))")
                 }
 
-                // Contextual Ink Pen swatch & width controls
-                if activeTool == .pen {
+                // Contextual Ink Pen swatch & width controls (inline on wide displays)
+                if includeInlineOptions && activeTool == .pen {
                     dockDivider
-                    HStack(spacing: 4) {
-                        ForEach(Self.calmInkSwatches, id: \.hex) { swatch in
-                            Button {
-                                inkColorHex = swatch.hex
-                            } label: {
-                                Circle()
-                                    .fill(Color(charkleHex: swatch.hex))
-                                    .frame(width: 14, height: 14)
-                                    .overlay(
-                                        Circle().strokeBorder(
-                                            inkColorHex == swatch.hex ? Color.accentColor : Color.white.opacity(0.45),
-                                            lineWidth: inkColorHex == swatch.hex ? 2 : 0.75
-                                        )
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .help(swatch.name)
-                        }
-                        Picker("", selection: $inkWidth) {
-                            Text("细").tag(2.0)
-                            Text("中").tag(3.5)
-                            Text("粗").tag(6.5)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 84)
-                    }
+                    penToolOptionsContent
                 }
 
-                // Contextual Connector style toggle
-                if activeTool == .connector {
+                // Contextual Connector style toggle (inline on wide displays)
+                if includeInlineOptions && activeTool == .connector {
                     dockDivider
-                    Picker("", selection: $connectorStyle) {
-                        Text("曲线").tag(ConnectorStyle.curved)
-                        Text("折线").tag(ConnectorStyle.elbow)
-                        Text("直线").tag(ConnectorStyle.straight)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 120)
+                    connectorToolOptionsContent
                 }
 
                 dockDivider
 
                 // Insert Nodes (Note / Group Frame / Palette Strip)
-                dockIconButton(systemName: "note.text.badge.plus", help: "添加便签卡片") {
+                dockIconButton(systemName: "note.text.badge.plus", help: "添加便签卡片", side: actionSide, iconSize: iconSize) {
                     addNoteNode()
                 }
-                dockIconButton(systemName: "rectangle.dashed", help: "添加区域分组框") {
+                dockIconButton(systemName: "rectangle.dashed", help: "添加区域分组框", side: actionSide, iconSize: iconSize) {
                     addGroupFrameNode()
                 }
-                dockIconButton(systemName: "paintpalette", help: "添加全板色卡条") {
+                dockIconButton(systemName: "paintpalette", help: "添加全板色卡条", side: actionSide, iconSize: iconSize) {
                     addPaletteStripNode()
                 }
 
-                dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版") {
+                dockIconButton(systemName: "sparkles.rectangle.stack", help: "重新整齐排版", side: actionSide, iconSize: iconSize) {
                     tidyFreeformNodes()
                 }
 
                 dockDivider
 
                 // Undo / Redo
-                dockIconButton(systemName: "arrow.uturn.backward", help: "撤销 (⌘Z)", disabled: !canUndo) {
+                dockIconButton(systemName: "arrow.uturn.backward", help: "撤销 (⌘Z)", disabled: !canUndo, side: actionSide, iconSize: iconSize) {
                     callbacks.onUndo()
                 }
-                dockIconButton(systemName: "arrow.uturn.forward", help: "重做 (⇧⌘Z)", disabled: !canRedo) {
+                dockIconButton(systemName: "arrow.uturn.forward", help: "重做 (⇧⌘Z)", disabled: !canRedo, side: actionSide, iconSize: iconSize) {
                     callbacks.onRedo()
                 }
 
@@ -1636,20 +1740,23 @@ public struct MoodboardCanvasView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 12.5, weight: .semibold))
-                        Text("导出")
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(.system(size: compact ? 11.5 : 12.5, weight: .semibold))
+                        if showExportLabel {
+                            Text("导出")
+                                .font(.system(size: 11.5, weight: .semibold))
+                        }
                     }
                     .foregroundStyle(.primary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, showExportLabel ? 10 : 7)
+                    .padding(.vertical, compact ? 5 : 6)
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .help("导出情绪板或复制到 Figma")
             }
-            .padding(8)
-            .canvasLiquidGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(compact ? 6 : 8)
+            .canvasLiquidGlass(in: RoundedRectangle(cornerRadius: compact ? 16 : 20, style: .continuous))
         }
     }
 
@@ -1657,13 +1764,15 @@ public struct MoodboardCanvasView: View {
         systemName: String,
         help: String,
         disabled: Bool = false,
+        side: CGFloat = 28,
+        iconSize: CGFloat = 13,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: iconSize, weight: .medium))
                 .foregroundStyle(disabled ? Color.secondary.opacity(0.4) : Color.primary.opacity(0.84))
-                .frame(width: 28, height: 28)
+                .frame(width: side, height: side)
                 .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -2245,12 +2354,14 @@ public struct MoodboardCanvasView: View {
             var externalInputs: [CaptureInput] = []
 
             for provider in providers {
+                var plainTextCandidate: String?
                 if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                    let str = await loadPlainString(provider: provider) {
                     if let decoded = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
                         internalIDs.append(contentsOf: decoded)
                         continue
                     }
+                    plainTextCandidate = str
                 }
                 // Never treat secondary `.fileURL` items from an internal multi-asset drag as external file drops.
                 guard internalIDs.isEmpty else { continue }
@@ -2263,7 +2374,7 @@ public struct MoodboardCanvasView: View {
                    let url = await loadURL(provider: provider, type: UTType.url) {
                     if url.isFileURL {
                         externalInputs.append(.fileURL(url))
-                    } else if url.scheme == "http" || url.scheme == "https" {
+                    } else if WebBookmark.isWebURL(url) {
                         externalInputs.append(.webURL(url, title: nil, notes: nil))
                     }
                     continue
@@ -2272,6 +2383,12 @@ public struct MoodboardCanvasView: View {
                    let data = await loadData(provider: provider, type: UTType.image) {
                     externalInputs.append(.imageData(data, suggestedName: "BoardDrop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
                     continue
+                }
+                if let text = plainTextCandidate,
+                   let webURL = SocialPostURLParser.extractPostURL(from: text)
+                    ?? GitHubRepoURLParser.extractRepoURL(from: text)
+                    ?? WebURLParser.extractWebURL(from: text) {
+                    externalInputs.append(.webURL(webURL, title: nil, notes: nil))
                 }
             }
 
@@ -3201,22 +3318,37 @@ private struct FreeformConnectorLabelsLayer: View {
     }
 }
 
+/// Responsive layout tiers for the Moodboard bottom dock and zoom pill.
+public nonisolated enum MoodboardDockLayoutTier: Equatable, Sendable {
+    case wide
+    case medium
+    case compact
+
+    public static func resolve(forWidth width: CGFloat) -> MoodboardDockLayoutTier {
+        if width >= 820 { return .wide }
+        if width >= 560 { return .medium }
+        return .compact
+    }
+}
+
 private struct FreeformZoomControlsPill: View {
     @Environment(\.colorScheme) private var colorScheme
     let camera: FreeformCameraState
     let reduceMotion: Bool
+    var compact: Bool = false
     let onZoomStep: (CGFloat) -> Void
     let onResetZoom: () -> Void
     let onFitBoard: () -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
+        let btnSide: CGFloat = compact ? 22 : 24
+        HStack(spacing: compact ? 2 : 4) {
             Button {
                 onZoomStep(0.82)
             } label: {
                 Image(systemName: "minus")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: compact ? 10 : 11, weight: .semibold))
+                    .frame(width: btnSide, height: btnSide)
             }
             .buttonStyle(.plain)
             .help("缩小画布")
@@ -3225,9 +3357,9 @@ private struct FreeformZoomControlsPill: View {
                 onResetZoom()
             } label: {
                 Text("\(Int((camera.zoom * 100).rounded()))%")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(.system(size: compact ? 10.5 : 11, weight: .semibold, design: .monospaced))
                     .monospacedDigit()
-                    .frame(minWidth: 42)
+                    .frame(minWidth: compact ? 36 : 42)
             }
             .buttonStyle(.plain)
             .help("重置为 100%")
@@ -3236,28 +3368,28 @@ private struct FreeformZoomControlsPill: View {
                 onZoomStep(1.22)
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: compact ? 10 : 11, weight: .semibold))
+                    .frame(width: btnSide, height: btnSide)
             }
             .buttonStyle(.plain)
             .help("放大画布")
 
             Rectangle()
                 .fill(CanvasSurface.hairline(for: colorScheme))
-                .frame(width: 1, height: 14)
+                .frame(width: 1, height: compact ? 12 : 14)
 
             Button {
                 onFitBoard()
             } label: {
                 Image(systemName: "arrow.up.left.and.down.right.magnifyingglass")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 24, height: 24)
+                    .font(.system(size: compact ? 10 : 11, weight: .semibold))
+                    .frame(width: btnSide, height: btnSide)
             }
             .buttonStyle(.plain)
             .help("适配全板视图")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, compact ? 6 : 8)
+        .padding(.vertical, compact ? 4 : 5)
         .canvasLiquidGlass(in: Capsule(style: .continuous))
     }
 }

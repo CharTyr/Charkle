@@ -526,43 +526,80 @@ public struct QuickLookOverlayView: View {
     }
 
     private var webBookmarkDetailCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
-                    .frame(width: 12, height: 12)
-                Text(asset.sourceDomain ?? "网页书签")
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let urlStr = asset.sourceURL, let url = URL(string: urlStr) {
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottomTrailing) {
+                Group {
+                    if let img = highResImage ?? library.thumbnailLoader.cachedImage(for: asset.id, tier: .grid520) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                    } else {
+                        AssetThumbnailSurface(
+                            asset: asset,
+                            loader: library.thumbnailLoader,
+                            tier: .preview1400,
+                            cornerRadius: 0,
+                            contentMode: .fit,
+                            enableHoverPlayback: false
+                        )
+                    }
+                }
+                .frame(maxWidth: 780, maxHeight: 460)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if let url = asset.externalWebURL {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+
+                if let url = asset.externalWebURL {
                     Button {
                         NSWorkspace.shared.open(url)
                     } label: {
-                        Label("在浏览器中打开", systemImage: "safari")
+                        Label("在默认浏览器中打开", systemImage: "safari")
                             .font(.system(size: 12, weight: .semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
                     }
                     .buttonStyle(.borderedProminent)
+                    .padding(16)
                 }
             }
-            Text(asset.title)
-                .font(.system(size: 20, weight: .semibold))
-            if let urlStr = asset.sourceURL {
-                Text(urlStr)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(charkleHex: asset.dominantColors.first?.hex ?? "#5C6B73"))
+                        .frame(width: 10, height: 10)
+                    Text(asset.sourceDomain ?? "网页书签")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                Text(asset.title)
+                    .font(.system(size: 18, weight: .semibold))
+                if let urlStr = asset.sourceURL {
+                    Text(urlStr)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+                if !asset.notes.isEmpty {
+                    Divider()
+                    Text(asset.notes)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+                        .lineLimit(4)
+                }
             }
-            if !asset.notes.isEmpty {
-                Divider()
-                Text(asset.notes)
-                    .font(.system(size: 13.5))
-                    .lineSpacing(5)
-            }
+            .padding(22)
+            .frame(maxWidth: 780, alignment: .leading)
+            .background(CharkleTheme.surfaceElevated(for: colorScheme))
         }
-        .padding(26)
-        .frame(maxWidth: 620)
-        .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.38), radius: 26, y: 12)
     }
 

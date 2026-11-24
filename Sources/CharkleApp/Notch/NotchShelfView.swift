@@ -509,14 +509,14 @@ public struct NotchShelfView: View {
                         Button {
                             onOpenAssetInQuickLook(asset)
                         } label: {
-                            Image(systemName: "eye")
+                            Image(systemName: asset.isExternalWebLink ? "safari" : "eye")
                                 .font(.system(size: 9.5, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .frame(width: 22, height: 22)
                                 .background(Color.black.opacity(0.72), in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .help("在主窗中沉浸预览")
+                        .help(asset.isExternalWebLink ? "在默认浏览器中打开" : "在主窗中沉浸预览")
                     }
                     .padding(5)
                     .transition(.opacity)
@@ -694,15 +694,16 @@ public struct NotchShelfView: View {
                             .foregroundStyle(.white.opacity(0.74))
                     }
                 }
-            } else if shelfState.clipboardXPostURL != nil {
+            } else if let detectedLink = shelfState.clipboardLink {
                 Button(action: onCollectClipboard) {
                     HStack(spacing: 10) {
                         Image(systemName: "link.badge.plus")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(activeBlue)
-                        Text("检测到剪贴板推文链接 · 点击或按 ⌘V 立即保存")
+                        Text(detectedLink.notchHintLabel)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.white)
+                            .lineLimit(1)
                         Spacer()
                         Text("保存")
                             .font(.system(size: 11, weight: .semibold))
@@ -722,7 +723,7 @@ public struct NotchShelfView: View {
                         Image(systemName: "square.and.arrow.down.on.square")
                             .font(.system(size: 15, weight: .light))
                             .foregroundStyle(.white.opacity(0.72))
-                        Text("拖入文件、整个文件夹、推文或 GitHub 链接，或按 ⌘V 粘贴")
+                        Text("拖入文件、整个文件夹或任意网页链接，或按 ⌘V 粘贴")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.white.opacity(0.84))
                             .lineLimit(1)

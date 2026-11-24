@@ -111,7 +111,7 @@ public struct GeneralSettingsPane: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 244)
+                    .frame(width: 312)
                 }
             }
 

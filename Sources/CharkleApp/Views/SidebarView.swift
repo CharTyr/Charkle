@@ -218,11 +218,15 @@ public struct SidebarView: View {
         }
     }
 
-    // MARK: - Collapsed Icon-Only Rail (56pt)
+    // MARK: - Collapsed Icon-Only Rail (76pt — clears macOS traffic lights symmetrically)
 
     private var collapsedRailBody: some View {
         VStack(spacing: 0) {
-            // Pinned top controls below the hidden titlebar traffic lights
+            // Draggable top clearance behind macOS traffic lights
+            CharkleWindowDragArea()
+                .frame(height: 36)
+
+            // Pinned top controls cleanly beneath the traffic lights
             VStack(spacing: 8) {
                 Button {
                     withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
@@ -246,7 +250,7 @@ public struct SidebarView: View {
                 .buttonStyle(.plain)
                 .help("快速跳转 (⌘J)")
             }
-            .padding(.top, 10)
+            .padding(.top, 2)
             .padding(.bottom, 8)
 
             railDivider
@@ -427,52 +431,64 @@ public struct SidebarView: View {
         .help(tooltip)
     }
 
-    // MARK: - Expanded Full Sidebar (226pt)
+    // MARK: - Expanded Full Sidebar (232pt)
 
     private var expandedSidebarBody: some View {
         VStack(spacing: 0) {
-            // Pinned compact brand header + quick jump + collapse toggle (strictly below traffic lights)
+            // Unified top window-chrome row: traffic lights float natively on the left;
+            // Quick Jump & sidebar collapse align right alongside them on the same continuous surface.
+            ZStack {
+                CharkleWindowDragArea()
+
+                HStack(spacing: 6) {
+                    Spacer(minLength: 72)
+
+                    Button {
+                        coordinator.isJumpAnywherePresented = true
+                    } label: {
+                        HStack(spacing: 3) {
+                            CharkleIcon("search", style: .duotone, size: 12)
+                            Text("⌘J")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .help("快速跳转 (⌘J)")
+
+                    Button {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                            coordinator.isSidebarCollapsed = true
+                        }
+                    } label: {
+                        CharkleIcon("sidebar-toggle", style: .duotone, size: 17)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("收起为仅图标侧边栏 (⌘\\)")
+                }
+                .padding(.horizontal, 12)
+            }
+            .frame(height: 36)
+
+            // Calm brand identity seamlessly integrated on the same sidebar surface (no harsh boxed seam)
             HStack(spacing: 8) {
-                CharkleBrandMark(size: 22)
+                CharkleBrandMark(size: 20)
                 Text("Charkle")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 13.5, weight: .semibold))
                     .tracking(-0.2)
                 Spacer()
-                Button {
-                    coordinator.isJumpAnywherePresented = true
-                } label: {
-                    HStack(spacing: 3) {
-                        CharkleIcon("search", style: .duotone, size: 12)
-                        Text("⌘J")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    }
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3.5)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .help("快速跳转 (⌘J)")
-
-                Button {
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                        coordinator.isSidebarCollapsed = true
-                    }
-                } label: {
-                    CharkleIcon("sidebar-toggle", style: .duotone, size: 17)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("收起为仅图标侧边栏 (⌘\\)")
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 10)
+            .padding(.horizontal, 13)
+            .padding(.top, 2)
+            .padding(.bottom, 8)
+            .background(CharkleWindowDragArea())
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: 0.75)
+            sidebarSectionDivider
 
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
@@ -1925,6 +1941,7 @@ extension SidebarView {
             var externalInputs: [CaptureInput] = []
 
             for provider in providers {
+                var plainTextCandidate: String?
                 if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                    let str = await loadText(provider) {
                     if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
@@ -1935,6 +1952,7 @@ extension SidebarView {
                         internalIDs.append(contentsOf: ids)
                         continue
                     }
+                    plainTextCandidate = str
                 }
                 // Once internal folder/asset IDs are already recognized from item 0, skip extra `.fileURL`
                 // providers attached for external Finder export so internal drags NEVER duplicate files!
@@ -1947,7 +1965,7 @@ extension SidebarView {
                 if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
                    let url = await loadURL(provider, type: .url) {
                     if url.isFileURL { externalInputs.append(.fileURL(url)) }
-                    else if url.scheme == "http" || url.scheme == "https" {
+                    else if WebBookmark.isWebURL(url) {
                         externalInputs.append(.webURL(url, title: nil, notes: nil))
                     }
                     continue
@@ -1955,6 +1973,13 @@ extension SidebarView {
                 if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
                    let data = await loadData(provider, type: .image) {
                     externalInputs.append(.imageData(data, suggestedName: "SidebarDrop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
+                    continue
+                }
+                if let text = plainTextCandidate,
+                   let webURL = SocialPostURLParser.extractPostURL(from: text)
+                    ?? GitHubRepoURLParser.extractRepoURL(from: text)
+                    ?? WebURLParser.extractWebURL(from: text) {
+                    externalInputs.append(.webURL(webURL, title: nil, notes: nil))
                 }
             }
 

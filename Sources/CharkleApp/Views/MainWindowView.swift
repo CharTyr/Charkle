@@ -88,7 +88,7 @@ public struct MainWindowView: View {
             // Sidebar and Inspector keep deterministic fixed internal widths inside animated width slots
             // so rapid collapse/expand cycles never get stuck half-open or overflow past window bounds.
             HStack(spacing: 0) {
-                let sidebarTargetWidth: CGFloat = coordinator.isSidebarCollapsed ? 56 : 232
+                let sidebarTargetWidth: CGFloat = coordinator.isSidebarCollapsed ? 76 : 232
                 HStack(spacing: 0) {
                     SidebarView(
                         coordinator: coordinator,
@@ -130,26 +130,25 @@ public struct MainWindowView: View {
                     .frame(width: sidebarTargetWidth)
                     .background {
                         CharkleSidebarMaterialBackground()
-                            .ignoresSafeArea(.container, edges: .top)
                     }
 
                     Rectangle()
                         .fill(CharkleTheme.hairline(for: colorScheme))
                         .frame(width: 1)
-                        .ignoresSafeArea(.container, edges: .top)
                 }
                 .frame(width: sidebarTargetWidth + 1)
-                .frame(maxHeight: .infinity)
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(isSidebarVisible ? 1 : 0)
                 .allowsHitTesting(isSidebarVisible)
                 .disabled(!isSidebarVisible)
                 .accessibilityHidden(!isSidebarVisible)
                 .frame(width: isSidebarVisible ? (sidebarTargetWidth + 1) : 0, alignment: .trailing)
+                .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
 
                 centerWorkspace
-                    .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
                     .background {
                         Color.clear
                             .onGeometryChange(for: CGFloat.self) { proxy in
@@ -160,6 +159,7 @@ public struct MainWindowView: View {
                                 }
                             }
                     }
+                    .ignoresSafeArea(.container, edges: .top)
                     .clipped()
                     .layoutPriority(0)
 
@@ -195,15 +195,17 @@ public struct MainWindowView: View {
                     }
                 )
                 .frame(width: 300)
-                .frame(maxHeight: .infinity)
+                .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(coordinator.isInspectorVisible ? 1 : 0)
                 .allowsHitTesting(coordinator.isInspectorVisible)
                 .disabled(!coordinator.isInspectorVisible)
                 .accessibilityHidden(!coordinator.isInspectorVisible)
                 .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
+                .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
             }
+            .ignoresSafeArea(.container, edges: .top)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidebarVisible)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
@@ -304,8 +306,11 @@ public struct MainWindowView: View {
                 .zIndex(300)
         }
         .background {
-            WindowKeyEventBridge { event, hostWindow in
-                handleMainWindowKeyDown(event, in: hostWindow)
+            ZStack {
+                CharkleWindowChromeBridge()
+                WindowKeyEventBridge { event, hostWindow in
+                    handleMainWindowKeyDown(event, in: hostWindow)
+                }
             }
             .allowsHitTesting(false)
         }
@@ -428,7 +433,7 @@ public struct MainWindowView: View {
         let isTrash = coordinator.selectedDestination == .trash
         let activeFolderID: UUID? = if case .folder(let fid) = coordinator.selectedDestination { fid } else { nil }
         let topInset: CGFloat = {
-            var base: CGFloat = 74
+            var base: CGFloat = 64
             if library.semanticSearchReport != nil { base += 46 }
             if coordinator.isVisualFilterBarPresented { base += 92 }
             if isInbox && !library.assets.isEmpty { base += 54 }
@@ -442,6 +447,98 @@ public struct MainWindowView: View {
                 inboxZeroCelebrationView
             } else if library.assets.isEmpty && !library.isLoading {
                 emptyLibraryView
+            } else if coordinator.galleryLayoutMode == .ringGallery {
+                GalleryRingView(
+                    assets: library.assets,
+                    folders: library.folders,
+                    boards: moodboards.boards,
+                    activeMoodboardID: coordinator.activeMoodboardID,
+                    isOverlayPresented: coordinator.quickLookAssetID != nil
+                        || coordinator.isSettingsPresented
+                        || coordinator.isJumpAnywherePresented
+                        || coordinator.isOnboardingPresented
+                        || coordinator.isMoodboardGeneratorPresented
+                        || coordinator.isSmartFolderEditorPresented
+                        || showInboxBatchTriageSheet,
+                    loader: library.thumbnailLoader,
+                    selectedAssetIDs: Binding(
+                        get: { library.selectedAssetIDs },
+                        set: { library.selectedAssetIDs = $0 }
+                    ),
+                    topContentInset: topInset,
+                    onOpenQuickLook: { asset in
+                        openQuickLook(asset)
+                    },
+                    onMarkOpened: { id in
+                        library.markAssetOpened(id)
+                    },
+                    onCopyAssets: { ids in
+                        Task {
+                            let count = await library.copyAssetsToPasteboard(ids)
+                            coordinator.showToast("已拷贝 \(count) 项素材到剪贴板", icon: "doc.on.doc")
+                        }
+                    },
+                    onRevealInFinder: { id in
+                        Task {
+                            let ok = await library.revealInFinder(assetID: id)
+                            if !ok {
+                                coordinator.showToast("无法定位该素材的本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
+                    onAddToMoodboard: { ids, boardID in
+                        let items = ids.compactMap { library.allAssetsByID[$0] }
+                        guard !items.isEmpty else { return }
+                        if let targetBoardID = boardID {
+                            let boardTitle = moodboards.boards.first(where: { $0.id == targetBoardID })?.title ?? "活跃情绪板"
+                            Task {
+                                await moodboards.addAssetsToSpecificBoard(boardID: targetBoardID, assets: items)
+                                coordinator.showToast("已加入情绪板「\(boardTitle)」(\(items.count) 项)", icon: "rectangle.3.group")
+                            }
+                        } else {
+                            library.selectedAssetIDs = Set(ids)
+                            coordinator.presentMoodboardGenerator(entry: .selection)
+                        }
+                    },
+                    onMoveToFolder: { ids, folderID in
+                        Task {
+                            await library.moveAssets(ids, toFolderID: folderID)
+                            let targetName = folderID.flatMap { fid in library.folders.first(where: { $0.id == fid })?.name } ?? "收件箱"
+                            coordinator.showToast("已移动 \(ids.count) 项至「\(targetName)」", icon: "folder")
+                        }
+                    },
+                    onTogglePinOffline: { ids, pinned in
+                        Task {
+                            await library.togglePinOffline(ids: ids, pinned: pinned)
+                            coordinator.showToast(
+                                pinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
+                                icon: pinned ? "arrow.down.circle.fill" : "icloud"
+                            )
+                        }
+                    },
+                    onTrashAssets: { ids in
+                        Task {
+                            await library.trashAssets(ids)
+                            coordinator.showToast(
+                                "已移至废纸篓 (\(ids.count) 项)",
+                                icon: "trash",
+                                actionTitle: "撤销",
+                                onAction: {
+                                    Task {
+                                        await library.restoreAssets(ids)
+                                        coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward", tone: .success)
+                                    }
+                                }
+                            )
+                        }
+                    },
+                    onRestoreAssets: { ids in
+                        Task {
+                            await library.restoreAssets(ids)
+                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward")
+                        }
+                    }
+                )
             } else if coordinator.galleryLayoutMode == .galleryFilmstrip {
                 GalleryFilmstripView(
                     assets: library.assets,
@@ -597,6 +694,9 @@ public struct MainWindowView: View {
                         onOpenQuickLook: { asset in openQuickLook(asset) },
                         onDropExternalInputs: { inputs in
                             let folderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
+                            if inputs.contains(where: { if case .webURL = $0 { true } else { false } }) {
+                                coordinator.showToast("正在解析网页缩略图…", icon: "safari")
+                            }
                             Task {
                                 let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
                                 coordinator.showToast("已导入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
@@ -652,21 +752,7 @@ public struct MainWindowView: View {
                             }
                         },
                         onPasteIntoCurrentFolder: {
-                            let targetFolderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
-                            if library.internalPasteboardAssets()?.isCut == true {
-                                Task {
-                                    let moved = await library.pasteCutAssets(toFolderID: targetFolderID)
-                                    let destName = targetFolderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
-                                    coordinator.showToast("已移动 \(moved) 项素材至「\(destName)」", icon: "folder")
-                                }
-                            } else {
-                                let inputs = ClipboardCollector.extractInputs(from: .general)
-                                guard !inputs.isEmpty else { return }
-                                Task {
-                                    let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
-                                    coordinator.showToast("已粘贴导入 \(max(created.count, inputs.count)) 项素材", icon: "doc.on.clipboard")
-                                }
-                            }
+                            pasteIntoCurrentGalleryFolder()
                         },
                         onRetagAssets: { ids in
                             triggerAIRetagging(for: ids)
@@ -713,6 +799,11 @@ public struct MainWindowView: View {
             // Floating Liquid Glass Top Control Stack
             VStack(spacing: 8) {
                 floatingTopBar
+                    .background {
+                        CharkleWindowDragArea()
+                            .padding(.top, -10)
+                            .padding(.horizontal, -18)
+                    }
 
                 if let report = library.semanticSearchReport {
                     semanticSearchStatusBar(report)
@@ -740,7 +831,7 @@ public struct MainWindowView: View {
                 }
             }
             .padding(.horizontal, galleryViewportWidth < 560 ? 12 : 18)
-            .padding(.top, 14)
+            .padding(.top, 10)
             .animation(
                 CharkleMotion.enterExit(
                     coordinator.isVisualFilterBarPresented,
@@ -799,11 +890,12 @@ public struct MainWindowView: View {
     // MARK: - Floating Liquid Glass Top Bar
 
     private var floatingTopBar: some View {
-        let isUltraCompact = galleryViewportWidth < 600
-        let showDensitySlider = galleryViewportWidth >= 760 && coordinator.galleryLayoutMode != .galleryFilmstrip
-        let showFullSyncLabel = galleryViewportWidth >= 840
-        let showFullCTALabel = galleryViewportWidth >= 920
-        let showSemanticText = galleryViewportWidth >= 920
+        let isUltraCompact = galleryViewportWidth < 630
+        let supportsDensity = coordinator.galleryLayoutMode == .verticalMasonry || coordinator.galleryLayoutMode == .horizontalJustified
+        let showDensitySlider = galleryViewportWidth >= 790 && supportsDensity
+        let showFullSyncLabel = galleryViewportWidth >= 870
+        let showFullCTALabel = galleryViewportWidth >= 950
+        let showSemanticText = galleryViewportWidth >= 950
         let barSpacing: CGFloat = isUltraCompact ? 6 : 8
 
         return CharkleGlassContainer(spacing: barSpacing) {
@@ -980,6 +1072,7 @@ public struct MainWindowView: View {
                     case .verticalMasonry: "masonry-vertical"
                     case .horizontalJustified: "masonry-horizontal"
                     case .galleryFilmstrip: "quicklook"
+                    case .ringGallery: "gallery-ring"
                     }
                     Menu {
                         Button {
@@ -1015,7 +1108,18 @@ public struct MainWindowView: View {
                                 Text("画廊视图")
                             }
                         }
-                        if coordinator.galleryLayoutMode != .galleryFilmstrip {
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                coordinator.galleryLayoutMode = .ringGallery
+                            }
+                        } label: {
+                            if coordinator.galleryLayoutMode == .ringGallery {
+                                Label("环形画廊", systemImage: "checkmark")
+                            } else {
+                                Text("环形画廊")
+                            }
+                        }
+                        if supportsDensity {
                             Divider()
                             Button("放大卡片") {
                                 coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
@@ -1048,6 +1152,7 @@ public struct MainWindowView: View {
                         layoutModeButton(mode: .verticalMasonry, icon: "masonry-vertical", helpText: "纵向瀑布流")
                         layoutModeButton(mode: .horizontalJustified, icon: "masonry-horizontal", helpText: "横向等高瀑布流（竖图自动对齐）")
                         layoutModeButton(mode: .galleryFilmstrip, icon: "quicklook", helpText: "画廊视图（底部胶片挑图）")
+                        layoutModeButton(mode: .ringGallery, icon: "gallery-ring", helpText: "环形画廊（3D 外圈景深浏览）")
                     }
                     .padding(.horizontal, 4)
                     .padding(.vertical, 3.5)
@@ -2356,8 +2461,14 @@ public struct MainWindowView: View {
                     }
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.top, 30)
+            .padding(.bottom, 24)
             .charkleCleanScrollbars(hidden: false)
+        }
+        .overlay(alignment: .top) {
+            CharkleWindowDragArea()
+                .frame(height: 24)
         }
         .charkleScrollEdgeSoft(for: .top)
         .background(CharkleTheme.galleryGround(for: colorScheme))
@@ -2493,6 +2604,15 @@ public struct MainWindowView: View {
                         Task { await moodboards.selectSwapTarget(nodeID) }
                     },
                     onOpenQuickLook: { asset in
+                        if asset.isExternalWebLink, let url = asset.externalWebURL {
+                            library.markAssetOpened(asset.id)
+                            NSWorkspace.shared.open(url)
+                            coordinator.showToast(
+                                "已在默认浏览器中打开 \(asset.sourceDomain ?? url.host() ?? "网页")",
+                                icon: "safari"
+                            )
+                            return
+                        }
                         if coordinator.quickLookAssetID != nil {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
                                 coordinator.closeQuickLook()
@@ -2665,16 +2785,20 @@ public struct MainWindowView: View {
                     HStack(spacing: 5) {
                         Image(systemName: "sidebar.right")
                             .font(.system(size: 12, weight: .medium))
-                        Text(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
-                            .font(.system(size: 11.5, weight: .medium))
+                        if galleryViewportWidth >= 520 {
+                            Text(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .lineLimit(1)
+                        }
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, galleryViewportWidth >= 520 ? 10 : 8)
                     .padding(.vertical, 6)
                     .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
-                .padding(.top, 14)
-                .padding(.trailing, 18)
+                .help(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
+                .padding(.top, 12)
+                .padding(.trailing, 14)
             }
         } else {
             CharkleBoardLoadingSkeleton()
@@ -2803,6 +2927,27 @@ public struct MainWindowView: View {
         guard hostWindow.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
 
         let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        // Support ⌘V paste in Gallery Filmstrip & 3D Ring Gallery (Masonry & Moodboard handle ⌘V directly)
+        if primaryModifiers == [.command],
+           event.charactersIgnoringModifiers?.lowercased() == "v",
+           coordinator.quickLookAssetID == nil,
+           event.window === hostWindow,
+           !coordinator.isViewingMoodboard,
+           (coordinator.galleryLayoutMode == .galleryFilmstrip || coordinator.galleryLayoutMode == .ringGallery),
+           !coordinator.isSettingsPresented,
+           !coordinator.isJumpAnywherePresented,
+           !coordinator.isOnboardingPresented,
+           !coordinator.isMoodboardGeneratorPresented,
+           !coordinator.isSmartFolderEditorPresented,
+           !showInboxBatchTriageSheet,
+           !isEditingText(in: hostWindow) {
+            if !event.isARepeat {
+                pasteIntoCurrentGalleryFolder()
+            }
+            return nil
+        }
+
         guard event.keyCode == 49, primaryModifiers.isEmpty else { return event }
 
         // 1. Quick Look is OPEN -> Space closes Quick Look (unless user is actively editing in Quick Look's Inspector)
@@ -2836,8 +2981,8 @@ public struct MainWindowView: View {
 
         if event.isARepeat { return nil }
 
-        // Gallery Filmstrip: always preview the selected or currently displayed stage asset
-        if coordinator.galleryLayoutMode == .galleryFilmstrip {
+        // Gallery Filmstrip & Ring Gallery: always preview the selected or currently displayed stage asset
+        if coordinator.galleryLayoutMode == .galleryFilmstrip || coordinator.galleryLayoutMode == .ringGallery {
             let target = library.assets.first(where: { library.selectedAssetIDs.contains($0.id) })
                 ?? library.assets.first
             if let asset = target {
@@ -2859,7 +3004,43 @@ public struct MainWindowView: View {
         return event
     }
 
+    private func pasteIntoCurrentGalleryFolder() {
+        let targetFolderID: UUID? = if case .folder(let id) = coordinator.selectedDestination { id } else { nil }
+        if library.internalPasteboardAssets()?.isCut == true {
+            Task {
+                let moved = await library.pasteCutAssets(toFolderID: targetFolderID)
+                let destName = targetFolderID.map { library.folderDisplayPath(for: $0) } ?? "收件箱"
+                coordinator.showToast("已移动 \(moved) 项素材至「\(destName)」", icon: "folder")
+            }
+        } else {
+            let inputs = ClipboardCollector.extractInputs(from: .general)
+            guard !inputs.isEmpty else { return }
+            let hasWebURL = inputs.contains { if case .webURL = $0 { true } else { false } }
+            if hasWebURL {
+                coordinator.showToast("正在解析网页缩略图…", icon: "safari")
+            }
+            Task {
+                let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
+                coordinator.showToast(
+                    hasWebURL
+                        ? "已收藏网页书签 (\(max(created.count, inputs.count)) 项)"
+                        : "已粘贴导入 \(max(created.count, inputs.count)) 项素材",
+                    icon: hasWebURL ? "safari" : "doc.on.clipboard"
+                )
+            }
+        }
+    }
+
     private func openQuickLook(_ asset: AssetRecord) {
+        if asset.isExternalWebLink, let url = asset.externalWebURL {
+            library.markAssetOpened(asset.id)
+            NSWorkspace.shared.open(url)
+            coordinator.showToast(
+                "已在默认浏览器中打开 \(asset.sourceDomain ?? url.host() ?? "网页")",
+                icon: "safari"
+            )
+            return
+        }
         resignTextFocusIfNeeded()
         let playlist = library.assets.map(\.id)
         withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {

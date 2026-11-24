@@ -281,6 +281,74 @@ public struct CharkleModalBackdrop: View {
     }
 }
 
+// MARK: - Full-Bleed Native Window Chrome & Drag Area
+
+/// Configures the host `NSWindow` for seamless edge-to-edge full-bleed content:
+/// transparent titlebar, zero titlebar separator hairline, and `.fullSizeContentView`
+/// so Sidebar, Center Workspace, and Inspector surfaces extend cleanly behind the traffic lights.
+public struct CharkleWindowChromeBridge: NSViewRepresentable {
+    public init() {}
+
+    public func makeNSView(context: Context) -> ChromeBridgeNSView {
+        ChromeBridgeNSView()
+    }
+
+    public func updateNSView(_ nsView: ChromeBridgeNSView, context: Context) {
+        nsView.applyWindowChrome()
+    }
+
+    public final class ChromeBridgeNSView: NSView {
+        public override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyWindowChrome()
+        }
+
+        func applyWindowChrome() {
+            guard let window else { return }
+            if window.titleVisibility != .hidden {
+                window.titleVisibility = .hidden
+            }
+            if !window.titlebarAppearsTransparent {
+                window.titlebarAppearsTransparent = true
+            }
+            if window.titlebarSeparatorStyle != .none {
+                window.titlebarSeparatorStyle = .none
+            }
+            if !window.styleMask.contains(.fullSizeContentView) {
+                window.styleMask.insert(.fullSizeContentView)
+            }
+        }
+    }
+}
+
+/// Interactive empty top-bar drag handle allowing native window dragging and double-click zoom
+/// inside full-bleed hidden-titlebar headers without enabling global `isMovableByWindowBackground`.
+public struct CharkleWindowDragArea: NSViewRepresentable {
+    public init() {}
+
+    public func makeNSView(context: Context) -> WindowDragNSView {
+        WindowDragNSView()
+    }
+
+    public func updateNSView(_ nsView: WindowDragNSView, context: Context) {}
+
+    public final class WindowDragNSView: NSView {
+        public override var mouseDownCanMoveWindow: Bool { true }
+
+        public override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                window?.performZoom(nil)
+            } else {
+                window?.performDrag(with: event)
+            }
+        }
+    }
+}
+
 // MARK: - AppKit Overlay Scrollbar Enforcer (Zero Legacy Rectangular Track Box)
 
 private struct CharkleOverlayScrollbarBridge: NSViewRepresentable {

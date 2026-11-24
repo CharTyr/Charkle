@@ -40,6 +40,7 @@ public final class NotchShelfState {
     public var selectedFolderID: UUID?
 
     public var clipboardXPostURL: URL?
+    public var clipboardLink: ClipboardDetectedLink?
     public var processingMessage: String?
     public var statusBanner: String?
     public var lastDropTimestamp: Date?
