@@ -9,11 +9,15 @@ use charkle_core::models::core::AssetRecord;
 use charkle_core::models::media::{CaptureInput, ThumbnailTier};
 use charkle_platform_win::capture::crop_captured_frame;
 use charkle_platform_win::clipboard::{copy_files_to_clipboard, ClipboardPreview};
-use charkle_platform_win::drag_out::{run_outbound_file_drag_on_ui_thread, DragOutOutcome};
+use charkle_platform_win::drag_out::{
+    decode_drag_preview_thumbnail, run_outbound_file_drag_with_preview_on_ui_thread, DragOutOutcome,
+};
 use charkle_platform_win::ocr::{probe_ocr_diagnostics, OcrDiagnostics};
 use charkle_platform_win::shelf_win::{
-    refresh_shelf_drop_targets, set_shelf_allow_activate as win_set_shelf_allow_activate,
-    set_shelf_hit_rect as win_set_shelf_hit_rect,
+    apply_shelf_no_activate_style, default_compact_capsule_rect_for_edge,
+    refresh_shelf_drop_targets, reposition_shelf_to_cursor_monitor_for_edge,
+    set_shelf_allow_activate_state_only, set_shelf_hit_rect as win_set_shelf_hit_rect,
+    ShelfDockEdge,
 };
 use charkle_platform_win::windowing::ClientRect;
 use tauri::{AppHandle, Emitter, State};
@@ -22,10 +26,11 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use crate::commands::{parse_optional_uuid, parse_uuid, AppState, IpcError, IpcResult};
 use crate::desktop::{
     build_desktop_status, collect_clipboard_into_library, destroy_capture_window,
-    hide_shelf_window, launch_region_capture_async, read_initial_clipboard_preview,
-    register_configured_hotkeys, set_minimal_mode_state, show_or_focus_main_window,
-    show_or_focus_main_window_with_event, show_shelf_window_async, toggle_shelf_window_async,
-    CaptureSessionInfo, DesktopIntegrationStatus, HotkeyConfig, ShelfSettings,
+    emit_shelf_state_all, hide_shelf_window, launch_region_capture_async,
+    read_initial_clipboard_preview, register_configured_hotkeys, set_minimal_mode_state,
+    show_or_focus_main_window, show_or_focus_main_window_with_event, show_shelf_window_async,
+    toggle_shelf_window_async, CaptureSessionInfo, DesktopIntegrationStatus, HotkeyConfig,
+    ShelfSettings,
 };
 
 fn native_err(message: impl Into<String>) -> IpcError {
@@ -75,6 +80,18 @@ pub async fn start_outbound_drag(
         return Err(native_err("所选素材尚未缓存在本地磁盘，无法拖出到外部应用"));
     }
 
+    // Decode & resize the optional floating drag preview thumbnail OFF the Win32 UI thread so
+    // `DoDragDrop` setup never stalls the UI message pump on disk or image decoding.
+    let preview_source = preview_path.or_else(|| paths.first().cloned());
+    let decoded_preview = tokio::task::spawn_blocking(move || {
+        preview_source
+            .as_deref()
+            .and_then(decode_drag_preview_thumbnail)
+    })
+    .await
+    .ok()
+    .flatten();
+
     let is_shelf = window.label() == "shelf";
     if is_shelf {
         state.shelf_busy.store(true, Ordering::SeqCst);
@@ -91,9 +108,9 @@ pub async fn start_outbound_drag(
         #[cfg(not(target_os = "windows"))]
         let source_hwnd = 0isize;
 
-        let res = run_outbound_file_drag_on_ui_thread(
+        let res = run_outbound_file_drag_with_preview_on_ui_thread(
             &paths,
-            preview_path.as_deref(),
+            decoded_preview.as_ref(),
             source_hwnd,
             is_shelf,
         );
@@ -318,24 +335,24 @@ pub async fn run_asset_ocr(
 }
 
 #[tauri::command]
-pub fn focus_main_window(app: AppHandle) -> IpcResult<()> {
+pub async fn focus_main_window(app: AppHandle) -> IpcResult<()> {
     show_or_focus_main_window(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub fn open_main_window(app: AppHandle) -> IpcResult<()> {
+pub async fn open_main_window(app: AppHandle) -> IpcResult<()> {
     show_or_focus_main_window(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub fn set_minimal_mode(app: AppHandle, enabled: bool) -> IpcResult<ShelfSettings> {
+pub async fn set_minimal_mode(app: AppHandle, enabled: bool) -> IpcResult<ShelfSettings> {
     set_minimal_mode_state(&app, enabled).map_err(native_err)
 }
 
 #[tauri::command]
-pub fn open_asset_in_main_window(
+pub async fn open_asset_in_main_window(
     app: AppHandle,
     state: State<'_, AppState>,
     asset_id: String,
@@ -392,33 +409,69 @@ pub fn get_shelf_settings(state: State<'_, AppState>) -> IpcResult<ShelfSettings
 }
 
 #[tauri::command]
-pub fn save_shelf_settings(
+pub async fn save_shelf_settings(
     app: AppHandle,
     state: State<'_, AppState>,
-    settings: ShelfSettings,
+    mut settings: ShelfSettings,
 ) -> IpcResult<ShelfSettings> {
+    let edge = ShelfDockEdge::from_str_lossy(&settings.dock_edge);
+    settings.dock_edge = edge.as_str().to_string();
+
     state
         .shelf_enabled
         .store(settings.enabled, Ordering::SeqCst);
     state
         .shelf_hover_trigger
         .store(settings.hover_trigger_enabled, Ordering::SeqCst);
-    if !settings.enabled {
-        hide_shelf_window(&app);
-    }
+    let prev_edge_u8 = state.shelf_dock_edge.swap(edge.to_u8(), Ordering::SeqCst);
+    let edge_changed = prev_edge_u8 != edge.to_u8();
+
     settings.save(&state.data_dir);
     if let Ok(mut guard) = state.shelf_settings.lock() {
         *guard = settings.clone();
     }
     let _ = app.emit("shelf:settings", &settings);
+
+    if !settings.enabled {
+        hide_shelf_window(&app);
+    } else if edge_changed {
+        let raw = state.shelf_hwnd.load(Ordering::SeqCst);
+        let is_expanded = state.shelf_expanded.load(Ordering::SeqCst);
+        if raw != 0 {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = app.run_on_main_thread(move || {
+                if let Ok(placement) = reposition_shelf_to_cursor_monitor_for_edge(raw, edge) {
+                    if is_expanded {
+                        win_set_shelf_hit_rect(
+                            raw,
+                            Some(default_compact_capsule_rect_for_edge(placement, edge)),
+                        );
+                    }
+                }
+                let _ = tx.send(());
+            });
+            let _ = rx.await;
+        }
+        if is_expanded {
+            emit_shelf_state_all(&app, true);
+        }
+    }
+
     Ok(settings)
 }
 
 #[tauri::command]
-pub fn set_shelf_allow_activate(state: State<'_, AppState>, allow: bool) -> IpcResult<()> {
+pub async fn set_shelf_allow_activate(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    allow: bool,
+) -> IpcResult<()> {
     let raw = state.shelf_hwnd.load(Ordering::SeqCst);
     if raw != 0 {
-        win_set_shelf_allow_activate(raw, allow);
+        set_shelf_allow_activate_state_only(raw, allow);
+        let _ = app.run_on_main_thread(move || {
+            apply_shelf_no_activate_style(raw, allow);
+        });
     }
     Ok(())
 }

@@ -15,7 +15,7 @@ pub mod web_snapshot;
 use std::backtrace::Backtrace;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8};
 use std::sync::{Arc, Mutex};
 
 use charkle_core::bridge::LocalExtensionBridgeServer;
@@ -25,7 +25,7 @@ use charkle_core::intelligence::CloudAIUsageStore;
 use charkle_core::media::MediaPipeline;
 use charkle_core::wire::swift_codec::format_swift_uuid;
 use charkle_platform_win::clipboard::start_clipboard_listener;
-use charkle_platform_win::shelf_win::{start_top_edge_monitor, ShelfMonitorConfig};
+use charkle_platform_win::shelf_win::{start_top_edge_monitor, ShelfDockEdge, ShelfMonitorConfig};
 use charkle_platform_win::wake::start_library_wake_listener;
 use charkle_platform_win::{
     WinCredentialVault, WinRtOcrProvider, WinShellThumbnailProvider, WinVolumeMountInspector,
@@ -183,6 +183,9 @@ pub fn run() {
             let shelf_cfg = ShelfSettings::load(&data_dir);
             let shelf_enabled = Arc::new(AtomicBool::new(shelf_cfg.enabled));
             let shelf_hover_trigger = Arc::new(AtomicBool::new(shelf_cfg.hover_trigger_enabled));
+            let shelf_dock_edge = Arc::new(AtomicU8::new(
+                ShelfDockEdge::from_str_lossy(&shelf_cfg.dock_edge).to_u8(),
+            ));
             let shelf_expanded = Arc::new(AtomicBool::new(false));
             let shelf_pinned = Arc::new(AtomicBool::new(false));
             let shelf_drag_hovering = Arc::new(AtomicBool::new(false));
@@ -211,6 +214,7 @@ pub fn run() {
                 ShelfMonitorConfig {
                     enabled: Arc::clone(&shelf_enabled),
                     hover_trigger_enabled: Arc::clone(&shelf_hover_trigger),
+                    dock_edge: Arc::clone(&shelf_dock_edge),
                     shelf_expanded: Arc::clone(&shelf_expanded),
                     shelf_pinned: Arc::clone(&shelf_pinned),
                     shelf_drag_hovering: Arc::clone(&shelf_drag_hovering),
@@ -308,6 +312,7 @@ pub fn run() {
                 shelf_settings: Arc::new(Mutex::new(shelf_cfg)),
                 shelf_enabled,
                 shelf_hover_trigger,
+                shelf_dock_edge,
                 shelf_expanded,
                 shelf_pinned,
                 shelf_drag_hovering,

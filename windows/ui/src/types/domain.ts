@@ -1141,12 +1141,15 @@ export interface RebuildIndexResultDto {
   total: number;
 }
 
+export type ShelfDockEdge = 'top' | 'left' | 'right';
+
 export interface ShelfSettings {
   enabled: boolean;
   hoverTriggerEnabled: boolean;
   defaultTargetMode: ShelfTargetMode;
   defaultFolderId?: string | null;
   minimalMode?: boolean;
+  dockEdge?: ShelfDockEdge;
 }
 
 export interface ExtensionBridgeStateDto {

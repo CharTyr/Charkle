@@ -21,10 +21,11 @@ use charkle_platform_win::clipboard::{
 use charkle_platform_win::mount::detect_gdirect_binary;
 use charkle_platform_win::ocr::{probe_ocr_diagnostics, OcrDiagnostics};
 use charkle_platform_win::shelf_win::{
-    configure_shelf_window, default_compact_capsule_rect, hide_shelf_native,
-    install_shelf_drop_target, install_shelf_subclass, is_shelf_window_visible,
-    refresh_shelf_drop_targets, reposition_shelf_to_cursor_monitor, set_shelf_allow_activate,
-    set_shelf_hit_rect, show_shelf_no_activate, ShelfDropEvent, ShelfDropPayload,
+    apply_shelf_no_activate_style, configure_shelf_window_for_edge,
+    default_compact_capsule_rect_for_edge, hide_shelf_native, install_shelf_drop_target,
+    install_shelf_subclass, is_shelf_window_visible, refresh_shelf_drop_targets,
+    reposition_shelf_to_cursor_monitor_for_edge, set_shelf_allow_activate_state_only,
+    set_shelf_hit_rect, show_shelf_no_activate, ShelfDockEdge, ShelfDropEvent, ShelfDropPayload,
 };
 use charkle_platform_win::windowing::{
     apply_window_chrome, install_snap_layout_subclass, BackdropKind,
@@ -92,6 +93,10 @@ impl HotkeyConfig {
     }
 }
 
+fn default_dock_edge() -> String {
+    "top".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShelfSettings {
@@ -102,6 +107,8 @@ pub struct ShelfSettings {
     pub default_folder_id: Option<String>,
     #[serde(default)]
     pub minimal_mode: bool,
+    #[serde(default = "default_dock_edge")]
+    pub dock_edge: String,
 }
 
 impl Default for ShelfSettings {
@@ -112,6 +119,7 @@ impl Default for ShelfSettings {
             default_target_mode: "inbox".to_string(),
             default_folder_id: None,
             minimal_mode: false,
+            dock_edge: default_dock_edge(),
         }
     }
 }
@@ -391,17 +399,23 @@ pub fn configure_main_window(app: &AppHandle, main_win: &tauri::WebviewWindow) {
     });
 }
 
+pub fn current_shelf_dock_edge(state: &AppState) -> ShelfDockEdge {
+    ShelfDockEdge::from_u8(state.shelf_dock_edge.load(Ordering::SeqCst))
+}
+
 fn emit_shelf_minimal_state(app: &AppHandle, state: &AppState) {
     let default_target = state
         .shelf_settings
         .lock()
         .map(|g| g.default_target_mode.clone())
         .unwrap_or_else(|_| "inbox".to_string());
+    let edge = current_shelf_dock_edge(state);
     let payload = serde_json::json!({
         "expanded": state.shelf_expanded.load(Ordering::SeqCst),
         "pinned": state.shelf_pinned.load(Ordering::SeqCst),
         "defaultTargetMode": default_target,
         "minimalMode": state.shelf_minimal_mode.load(Ordering::SeqCst),
+        "dockEdge": edge.as_str(),
     });
     let _ = app.emit("shelf:state", payload.clone());
     let _ = app.emit_to("shelf", "shelf:state", payload);
@@ -475,13 +489,17 @@ pub fn show_or_focus_main_window_with_event(
     state.shelf_minimal_mode.store(false, Ordering::SeqCst);
 
     if let Some(main_win) = app.get_webview_window("main") {
-        let _ = main_win.unminimize();
-        let _ = main_win.show();
-        let _ = main_win.set_focus();
-        emit_shelf_minimal_state(app, &state);
-        if let Some((event_name, payload)) = pending_event {
-            let _ = app.emit_to("main", event_name, payload);
-        }
+        let ui_handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = main_win.unminimize();
+            let _ = main_win.show();
+            let _ = main_win.set_focus();
+            let st = ui_handle.state::<AppState>();
+            emit_shelf_minimal_state(&ui_handle, &st);
+            if let Some((event_name, payload)) = pending_event {
+                let _ = ui_handle.emit_to("main", event_name, payload);
+            }
+        });
         return;
     }
 
@@ -928,10 +946,11 @@ pub fn ensure_shelf_window(app: &AppHandle) -> Result<(), String> {
     if let Ok(hwnd) = win.hwnd() {
         let raw = hwnd.0 as isize;
         let state = app.state::<AppState>();
+        let edge = current_shelf_dock_edge(&state);
         state.shelf_hwnd.store(raw, Ordering::SeqCst);
-        // Install subclass BEFORE configure_shelf_window so Frame-0 SWP_FRAMECHANGED is guarded.
+        // Install subclass BEFORE configure_shelf_window_for_edge so Frame-0 SWP_FRAMECHANGED is guarded.
         let _ = install_shelf_subclass(raw);
-        let _ = configure_shelf_window(raw);
+        let _ = configure_shelf_window_for_edge(raw, edge);
 
         let native_drop_app = app.clone();
         let native_recent_drop = Arc::clone(&recent_drop);
@@ -971,6 +990,7 @@ pub async fn ensure_shelf_window_async(app: &AppHandle) -> Result<bool, String> 
         let raw_opt = win.hwnd().ok().map(|h| h.0 as isize);
         if let Some(raw) = raw_opt {
             let state = app.state::<AppState>();
+            let edge = current_shelf_dock_edge(&state);
             state.shelf_hwnd.store(raw, Ordering::SeqCst);
 
             let native_drop_app = app.clone();
@@ -978,7 +998,7 @@ pub async fn ensure_shelf_window_async(app: &AppHandle) -> Result<bool, String> 
             let (tx, rx) = tokio::sync::oneshot::channel::<()>();
             let _ = app.run_on_main_thread(move || {
                 let _ = install_shelf_subclass(raw);
-                let _ = configure_shelf_window(raw);
+                let _ = configure_shelf_window_for_edge(raw, edge);
                 let _ = install_shelf_drop_target(
                     raw,
                     Arc::new(move |ev| {
@@ -1002,15 +1022,17 @@ fn shelf_state_payload(app: &AppHandle, expanded: bool) -> serde_json::Value {
         .lock()
         .map(|g| g.default_target_mode.clone())
         .unwrap_or_else(|_| "inbox".to_string());
+    let edge = current_shelf_dock_edge(&state);
     serde_json::json!({
         "expanded": expanded,
         "pinned": if expanded { state.shelf_pinned.load(Ordering::SeqCst) } else { false },
         "defaultTargetMode": default_target,
         "minimalMode": state.shelf_minimal_mode.load(Ordering::SeqCst),
+        "dockEdge": edge.as_str(),
     })
 }
 
-fn emit_shelf_state_all(app: &AppHandle, expanded: bool) {
+pub fn emit_shelf_state_all(app: &AppHandle, expanded: bool) {
     let payload = shelf_state_payload(app, expanded);
     let _ = app.emit("shelf:state", payload.clone());
     let _ = app.emit_to("shelf", "shelf:state", payload);
@@ -1070,10 +1092,14 @@ pub fn show_shelf_window(app: &AppHandle, pinned: bool) -> Result<(), String> {
         #[cfg(target_os = "windows")]
         if let Ok(hwnd) = win.hwnd() {
             let raw = hwnd.0 as isize;
+            let edge = current_shelf_dock_edge(&state);
             state.shelf_hwnd.store(raw, Ordering::SeqCst);
             let _ = app.run_on_main_thread(move || {
-                if let Ok(placement) = reposition_shelf_to_cursor_monitor(raw) {
-                    set_shelf_hit_rect(raw, Some(default_compact_capsule_rect(placement)));
+                if let Ok(placement) = reposition_shelf_to_cursor_monitor_for_edge(raw, edge) {
+                    set_shelf_hit_rect(
+                        raw,
+                        Some(default_compact_capsule_rect_for_edge(placement, edge)),
+                    );
                 }
                 show_shelf_no_activate(raw);
                 let _ = refresh_shelf_drop_targets(raw);
@@ -1108,13 +1134,17 @@ async fn show_shelf_window_inner_async(
         {
             let raw_opt = win.hwnd().ok().map(|h| h.0 as isize);
             if let Some(raw) = raw_opt {
+                let edge = current_shelf_dock_edge(&state);
                 state.shelf_hwnd.store(raw, Ordering::SeqCst);
                 let (tx, rx) = tokio::sync::oneshot::channel::<()>();
                 let _ = app.run_on_main_thread(move || {
-                    if let Ok(placement) = reposition_shelf_to_cursor_monitor(raw) {
+                    if let Ok(placement) = reposition_shelf_to_cursor_monitor_for_edge(raw, edge) {
                         // Seed the settled compact capsule hit-rect synchronously BEFORE showing so
                         // OS file drags immediately hit the drop well on frame 0 (never HTTRANSPARENT).
-                        set_shelf_hit_rect(raw, Some(default_compact_capsule_rect(placement)));
+                        set_shelf_hit_rect(
+                            raw,
+                            Some(default_compact_capsule_rect_for_edge(placement, edge)),
+                        );
                     }
                     show_shelf_no_activate(raw);
                     let _ = refresh_shelf_drop_targets(raw);
@@ -1148,10 +1178,13 @@ pub fn hide_shelf_window_immediate(app: &AppHandle) {
     state.shelf_drag_hovering.store(false, Ordering::SeqCst);
     state.shelf_hold_until_ms.store(0, Ordering::SeqCst);
     let raw = state.shelf_hwnd.load(Ordering::SeqCst);
+    if raw != 0 {
+        set_shelf_allow_activate_state_only(raw, false);
+    }
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if raw != 0 {
-            set_shelf_allow_activate(raw, false);
+            apply_shelf_no_activate_style(raw, false);
             set_shelf_hit_rect(raw, None);
             hide_shelf_native(raw);
         } else if let Some(win) = handle.get_webview_window("shelf") {
@@ -1171,12 +1204,15 @@ async fn hide_shelf_window_immediate_async(app: &AppHandle) -> bool {
     state.shelf_pinned.store(false, Ordering::SeqCst);
     state.shelf_drag_hovering.store(false, Ordering::SeqCst);
     state.shelf_hold_until_ms.store(0, Ordering::SeqCst);
+    if raw != 0 {
+        set_shelf_allow_activate_state_only(raw, false);
+    }
 
     let handle = app.clone();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let _ = app.run_on_main_thread(move || {
         if raw != 0 {
-            set_shelf_allow_activate(raw, false);
+            apply_shelf_no_activate_style(raw, false);
             set_shelf_hit_rect(raw, None);
             hide_shelf_native(raw);
         } else if let Some(win) = handle.get_webview_window("shelf") {
@@ -1199,7 +1235,11 @@ pub fn hide_shelf_window(app: &AppHandle) {
 
     let raw = state.shelf_hwnd.load(Ordering::SeqCst);
     if raw != 0 {
-        set_shelf_allow_activate(raw, false);
+        // Update shared flag synchronously; ALWAYS dispatch SetWindowLongPtrW to the main UI thread!
+        set_shelf_allow_activate_state_only(raw, false);
+        let _ = app.run_on_main_thread(move || {
+            apply_shelf_no_activate_style(raw, false);
+        });
     }
 
     // First trigger the smooth spring collapse back into the top bezel,
@@ -1799,20 +1839,38 @@ mod tests {
     }
 
     #[test]
-    fn shelf_settings_minimal_mode_defaults_false_and_round_trips() {
+    fn shelf_settings_minimal_mode_and_dock_edge_default_and_round_trip() {
         let legacy_json =
             r#"{"enabled":true,"hoverTriggerEnabled":true,"defaultTargetMode":"inbox"}"#;
         let decoded: ShelfSettings = serde_json::from_str(legacy_json).expect("decode legacy");
         assert!(!decoded.minimal_mode);
+        assert_eq!(decoded.dock_edge, "top");
 
-        let updated = ShelfSettings {
-            minimal_mode: true,
-            ..decoded
-        };
-        let encoded = serde_json::to_string(&updated).expect("encode");
-        assert!(encoded.contains("\"minimalMode\":true"));
-        let roundtrip: ShelfSettings = serde_json::from_str(&encoded).expect("roundtrip");
-        assert!(roundtrip.minimal_mode);
+        for (edge, expected_enum) in [
+            ("top", ShelfDockEdge::Top),
+            ("left", ShelfDockEdge::Left),
+            ("right", ShelfDockEdge::Right),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&expected_enum).expect("serialize enum"),
+                format!("\"{edge}\"")
+            );
+            let decoded_enum: ShelfDockEdge =
+                serde_json::from_str(&format!("\"{edge}\"")).expect("deserialize enum");
+            assert_eq!(decoded_enum, expected_enum);
+
+            let updated = ShelfSettings {
+                minimal_mode: true,
+                dock_edge: edge.to_string(),
+                ..decoded.clone()
+            };
+            let encoded = serde_json::to_string(&updated).expect("encode");
+            assert!(encoded.contains("\"minimalMode\":true"));
+            assert!(encoded.contains(&format!("\"dockEdge\":\"{edge}\"")));
+            let roundtrip: ShelfSettings = serde_json::from_str(&encoded).expect("roundtrip");
+            assert!(roundtrip.minimal_mode);
+            assert_eq!(roundtrip.dock_edge, edge);
+        }
     }
 
     #[test]
@@ -1901,10 +1959,12 @@ mod tests {
             default_target_mode: "folder".to_string(),
             default_folder_id: Some("10000000-0000-4000-8000-000000000001".to_string()),
             minimal_mode: true,
+            dock_edge: "right".to_string(),
         };
         shelf.save(tmp.path());
         let loaded_shelf = ShelfSettings::load(tmp.path());
         assert!(loaded_shelf.minimal_mode);
+        assert_eq!(loaded_shelf.dock_edge, "right");
         assert_eq!(
             loaded_shelf.default_folder_id.as_deref(),
             Some("10000000-0000-4000-8000-000000000001")

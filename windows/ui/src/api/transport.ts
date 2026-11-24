@@ -45,6 +45,7 @@ import {
   type QuickJumpMatch,
   type RebuildIndexResultDto,
   type ScoredAsset,
+  type ShelfDockEdge,
   type ShelfSettings,
   type ShelfTargetMode,
   type SmartFolderRecord,
@@ -79,6 +80,7 @@ export interface CharkleEventHandlers {
     pinned: boolean;
     defaultTargetMode?: ShelfTargetMode;
     minimalMode?: boolean;
+    dockEdge?: ShelfDockEdge;
   }) => void;
   onShelfSettings?: (settings: ShelfSettings) => void;
   onShelfDragHover?: (payload: { active: boolean; count: number }) => void;
@@ -886,6 +888,7 @@ export class TauriTransport implements CharkleTransport {
           pinned: boolean;
           defaultTargetMode?: ShelfTargetMode;
           minimalMode?: boolean;
+          dockEdge?: ShelfDockEdge;
         }>('shelf:state', (e) => {
           if (!disposed) handlers.onShelfState?.(e.payload);
         }),
@@ -2537,6 +2540,7 @@ export class InMemoryMockTransport implements CharkleTransport {
     hoverTriggerEnabled: true,
     defaultTargetMode: 'inbox',
     minimalMode: false,
+    dockEdge: 'top',
   };
 
   async openAssetInMainWindow(): Promise<void> {}
@@ -2550,7 +2554,10 @@ export class InMemoryMockTransport implements CharkleTransport {
   }
 
   async saveShelfSettings(settings: ShelfSettings): Promise<ShelfSettings> {
-    this.mockShelfSettings = { ...settings };
+    this.mockShelfSettings = {
+      ...settings,
+      dockEdge: settings.dockEdge ?? this.mockShelfSettings.dockEdge ?? 'top',
+    };
     return { ...this.mockShelfSettings };
   }
 

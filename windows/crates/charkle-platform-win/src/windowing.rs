@@ -25,6 +25,51 @@ pub const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
 /// without repainting any non-client caption bar or title text.
 pub const WM_NCACTIVATE_NO_REPAINT_LPARAM: isize = -1;
 
+/// Standard Win32 `WM_NCHITTEST` resize edge/corner constants (stable ABI across all Windows versions).
+pub const HIT_LEFT: isize = 10; // HTLEFT
+pub const HIT_RIGHT: isize = 11; // HTRIGHT
+pub const HIT_TOP: isize = 12; // HTTOP
+pub const HIT_TOPLEFT: isize = 13; // HTTOPLEFT
+pub const HIT_TOPRIGHT: isize = 14; // HTTOPRIGHT
+pub const HIT_BOTTOM: isize = 15; // HTBOTTOM
+pub const HIT_BOTTOMLEFT: isize = 16; // HTBOTTOMLEFT
+pub const HIT_BOTTOMRIGHT: isize = 17; // HTBOTTOMRIGHT
+
+/// Resolves native Win32 borderless resize hit-test codes (`HTTOPLEFT`..=`HTBOTTOMRIGHT` /
+/// `HTLEFT`..=`HTBOTTOM`) in physical client pixels for restored (non-maximized) windows whose
+/// `WM_NCCALCSIZE` returns `0` so `client_rect == window_rect` on all 4 sides.
+pub fn resolve_borderless_resize_hittest(
+    pt_x: i32,
+    pt_y: i32,
+    width: i32,
+    height: i32,
+    side_border: i32,
+    top_border: i32,
+) -> Option<isize> {
+    if width <= 0 || height <= 0 || pt_x < 0 || pt_y < 0 || pt_x >= width || pt_y >= height {
+        return None;
+    }
+    let sb = side_border.max(1).min((width / 2).max(1));
+    let tb = top_border.max(1).min((height / 2).max(1));
+
+    let on_left = pt_x < sb;
+    let on_right = pt_x >= width - sb;
+    let on_top = pt_y < tb;
+    let on_bottom = pt_y >= height - sb;
+
+    match (on_left, on_right, on_top, on_bottom) {
+        (true, _, true, _) => Some(HIT_TOPLEFT),
+        (_, true, true, _) => Some(HIT_TOPRIGHT),
+        (true, _, _, true) => Some(HIT_BOTTOMLEFT),
+        (_, true, _, true) => Some(HIT_BOTTOMRIGHT),
+        (true, _, _, _) => Some(HIT_LEFT),
+        (_, true, _, _) => Some(HIT_RIGHT),
+        (_, _, true, _) => Some(HIT_TOP),
+        (_, _, _, true) => Some(HIT_BOTTOM),
+        _ => None,
+    }
+}
+
 /// Strips `WS_SYSMENU` (`0x0008_0000`) from a Win32 `GWL_STYLE` bitmask while preserving
 /// `WS_CAPTION`, `WS_THICKFRAME`, `WS_MINIMIZEBOX`, `WS_MAXIMIZEBOX`, `WS_CLIPSIBLINGS`,
 /// and all other style bits.
@@ -151,26 +196,27 @@ mod win32_impl {
     use std::mem::size_of;
 
     use windows::core::w;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Dwm::{
         DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
-        DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DWMSBT_TABBEDWINDOW, DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT, DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
     use windows::Win32::Graphics::Gdi::ScreenToClient;
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     use windows::Win32::UI::Controls::MARGINS;
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_F4;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, IsZoomed, PostMessageW, SetWindowLongW, SetWindowPos, ShowWindow,
-        SystemParametersInfoW, GWL_STYLE, HTMAXBUTTON, SC_CLOSE, SPI_GETCLIENTAREAANIMATION,
-        STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-        SW_MAXIMIZE, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CLOSE, WM_NCACTIVATE,
-        WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT,
-        WM_SETTINGCHANGE, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_THEMECHANGED,
-        WS_VISIBLE,
+        GetClientRect, GetWindowLongW, IsZoomed, PostMessageW, SetWindowLongW, SetWindowPos,
+        ShowWindow, SystemParametersInfoW, GWL_STYLE, HTMAXBUTTON, SC_CLOSE,
+        SPI_GETCLIENTAREAANIMATION, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        WM_CLOSE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+        WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT, WM_SETTINGCHANGE, WM_STYLECHANGING, WM_SYSCOMMAND,
+        WM_SYSKEYDOWN, WM_THEMECHANGED, WS_VISIBLE,
     };
 
     const SNAP_SUBCLASS_ID: usize = 0x4348_4B31; // "CHK1"
@@ -314,6 +360,16 @@ mod win32_impl {
                         size_of::<u32>() as u32,
                     );
 
+                    // Explicitly keep the native subtle 1px Win11 border synced to the active
+                    // Light/Dark immersive theme instead of a stale custom/inactive color.
+                    let border_default: u32 = DWMWA_COLOR_DEFAULT;
+                    let _ = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_BORDER_COLOR,
+                        std::ptr::from_ref(&border_default).cast::<c_void>(),
+                        size_of::<u32>() as u32,
+                    );
+
                     // Extend the DWM glass frame across the entire client area so transparent
                     // WebView2 regions (`Color(0,0,0,0)`) composite directly over live Mica Alt.
                     let margins = MARGINS {
@@ -389,6 +445,17 @@ mod win32_impl {
                     (*ss).styleNew = strip_native_caption_menu_style((*ss).styleNew);
                 }
             }
+            WM_NCCALCSIZE => {
+                // When maximized, forward to `tao`'s WM_NCCALCSIZE so monitor_info.rcWork and
+                // auto-hide taskbar clamping run unchanged (zero edge overhang).
+                // When restored/normal, return 0 directly so client_rect == window_rect on ALL 4
+                // sides — eliminating `tao`'s ~7px left/right/bottom non-client margin that DWM
+                // paints solid light-gray when the window loses focus, while preserving Win11
+                // rounded corners, subtle 1px theme border, DWM drop shadow, and live Mica Alt!
+                if !IsZoomed(hwnd).as_bool() {
+                    return LRESULT(0);
+                }
+            }
             WM_NCACTIVATE => {
                 // Forward lParam = -1 so the windowing layer preserves exact active/focus state
                 // (inspecting wParam) while DefWindowProcW skips all non-client caption redraws
@@ -426,17 +493,50 @@ mod win32_impl {
                 return LRESULT(0);
             }
             WM_NCHITTEST => {
-                let maybe_rect = max_button_rects()
-                    .lock()
-                    .ok()
-                    .and_then(|map| map.get(&hwnd_key).copied());
-                if let Some(rect) = maybe_rect {
-                    // Extract signed 16-bit screen coordinates (supports multi-monitor negative X/Y)
-                    let x = (lparam.0 as i32 & 0xFFFF) as i16 as i32;
-                    let y = ((lparam.0 as i32 >> 16) & 0xFFFF) as i16 as i32;
-                    let mut pt = POINT { x, y };
-                    if ScreenToClient(hwnd, &mut pt).as_bool() && rect.contains(pt.x, pt.y) {
-                        return LRESULT(HTMAXBUTTON as isize);
+                // Extract signed 16-bit screen coordinates (supports multi-monitor negative X/Y)
+                let x = (lparam.0 as i32 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 as i32 >> 16) & 0xFFFF) as i16 as i32;
+                let mut pt = POINT { x, y };
+                if ScreenToClient(hwnd, &mut pt).as_bool() {
+                    let zoomed = IsZoomed(hwnd).as_bool();
+                    let dpi = {
+                        let d = GetDpiForWindow(hwnd);
+                        if d == 0 {
+                            96
+                        } else {
+                            d
+                        }
+                    };
+                    let side_border = ((6.0 * dpi as f64) / 96.0).round().max(5.0) as i32;
+                    let top_border = ((4.0 * dpi as f64) / 96.0).round().max(4.0) as i32;
+
+                    let maybe_rect = max_button_rects()
+                        .lock()
+                        .ok()
+                        .and_then(|map| map.get(&hwnd_key).copied());
+                    if let Some(rect) = maybe_rect {
+                        let allow_max_hit = zoomed || pt.y >= top_border;
+                        if allow_max_hit && rect.contains(pt.x, pt.y) {
+                            return LRESULT(HTMAXBUTTON as isize);
+                        }
+                    }
+
+                    if !zoomed {
+                        let mut rc = RECT::default();
+                        if GetClientRect(hwnd, &mut rc).is_ok() {
+                            let width = rc.right - rc.left;
+                            let height = rc.bottom - rc.top;
+                            if let Some(hit) = resolve_borderless_resize_hittest(
+                                pt.x,
+                                pt.y,
+                                width,
+                                height,
+                                side_border,
+                                top_border,
+                            ) {
+                                return LRESULT(hit);
+                            }
+                        }
                     }
                 }
             }
@@ -625,6 +725,76 @@ mod tests {
             assert_eq!(WM_NCPAINT_MSG, WM_NCPAINT);
             assert!(should_suppress_nc_paint_message(WM_NCPAINT));
             assert!(!should_suppress_nc_paint_message(WM_NCACTIVATE));
+        }
+    }
+
+    #[test]
+    fn resolve_borderless_resize_hittest_covers_all_eight_edges_and_interior() {
+        let (w, h) = (1360, 860);
+        let (sb, tb) = (6, 4);
+
+        // 4 corners
+        assert_eq!(
+            resolve_borderless_resize_hittest(0, 0, w, h, sb, tb),
+            Some(HIT_TOPLEFT)
+        );
+        assert_eq!(
+            resolve_borderless_resize_hittest(w - 1, 0, w, h, sb, tb),
+            Some(HIT_TOPRIGHT)
+        );
+        assert_eq!(
+            resolve_borderless_resize_hittest(0, h - 1, w, h, sb, tb),
+            Some(HIT_BOTTOMLEFT)
+        );
+        assert_eq!(
+            resolve_borderless_resize_hittest(w - 1, h - 1, w, h, sb, tb),
+            Some(HIT_BOTTOMRIGHT)
+        );
+
+        // 4 edges
+        assert_eq!(
+            resolve_borderless_resize_hittest(2, 400, w, h, sb, tb),
+            Some(HIT_LEFT)
+        );
+        assert_eq!(
+            resolve_borderless_resize_hittest(w - 3, 400, w, h, sb, tb),
+            Some(HIT_RIGHT)
+        );
+        assert_eq!(
+            resolve_borderless_resize_hittest(600, 1, w, h, sb, tb),
+            Some(HIT_TOP)
+        );
+        assert_eq!(
+            resolve_borderless_resize_hittest(600, h - 2, w, h, sb, tb),
+            Some(HIT_BOTTOM)
+        );
+
+        // Interior & out-of-bounds / zero-size safety
+        assert_eq!(
+            resolve_borderless_resize_hittest(600, 100, w, h, sb, tb),
+            None
+        );
+        assert_eq!(resolve_borderless_resize_hittest(6, 4, w, h, sb, tb), None);
+        assert_eq!(
+            resolve_borderless_resize_hittest(-1, 10, w, h, sb, tb),
+            None
+        );
+        assert_eq!(resolve_borderless_resize_hittest(0, 0, 0, 0, sb, tb), None);
+
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT,
+            };
+            assert_eq!(HIT_LEFT, HTLEFT as isize);
+            assert_eq!(HIT_RIGHT, HTRIGHT as isize);
+            assert_eq!(HIT_TOP, HTTOP as isize);
+            assert_eq!(HIT_TOPLEFT, HTTOPLEFT as isize);
+            assert_eq!(HIT_TOPRIGHT, HTTOPRIGHT as isize);
+            assert_eq!(HIT_BOTTOM, HTBOTTOM as isize);
+            assert_eq!(HIT_BOTTOMLEFT, HTBOTTOMLEFT as isize);
+            assert_eq!(HIT_BOTTOMRIGHT, HTBOTTOMRIGHT as isize);
         }
     }
 

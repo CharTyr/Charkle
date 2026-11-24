@@ -4,6 +4,8 @@ import {
   Camera,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Clipboard,
   Copy,
@@ -27,6 +29,7 @@ import {
   type ClipboardPreview,
   type FolderRecord,
   type MoodboardSummary,
+  type ShelfDockEdge,
   type ShelfSettings,
   type ShelfTargetMode,
 } from '../../types/domain';
@@ -40,16 +43,67 @@ const FULL_WIDTH = 980;
 const FULL_HEIGHT = 564;
 const COLLAPSED_WIDTH = 228;
 const COLLAPSED_HEIGHT = 36;
+const SIDE_COMPACT_WIDTH = 344;
+const SIDE_COMPACT_HEIGHT = 560;
+const SIDE_FULL_WIDTH = 520;
+const SIDE_FULL_HEIGHT = 700;
+const SIDE_COLLAPSED_WIDTH = 36;
+const SIDE_COLLAPSED_HEIGHT = 200;
 const DRAG_OUT_THRESHOLD = 6;
+const DRAG_OUT_MIN_HOLD_MS = 35;
+const DRAG_OUT_FAST_THRESHOLD = 14;
+
+function normalizeDockEdge(raw?: string | null): ShelfDockEdge {
+  if (raw === 'left' || raw === 'right') return raw;
+  return 'top';
+}
 
 /**
- * Exact SVG path matching macOS `NotchShellShape` (concave top ears flaring into `y = 0`
- * and smooth continuous bottom corners).
+ * Exact SVG path matching macOS `NotchShellShape` for top bezel, plus mirrored concave-ear
+ * bezel silhouettes for left and right screen-edge docking.
  */
-function buildNotchShellPath(w: number, h: number, topEar = TOP_EAR_RADIUS, botCorner = BOTTOM_CORNER_RADIUS): string {
-  const topR = Math.min(topEar, w * 0.25, h * 0.45);
-  const botR = Math.min(botCorner, Math.max(0, (w - topR * 2) * 0.5), Math.max(0, h - topR));
+function buildNotchShellPath(
+  w: number,
+  h: number,
+  edge: ShelfDockEdge = 'top',
+  earRadius = TOP_EAR_RADIUS,
+  outerCorner = BOTTOM_CORNER_RADIUS,
+): string {
   const k = 0.55228475;
+  if (edge === 'left') {
+    const ear = Math.min(earRadius, h * 0.25, w * 0.45);
+    const cor = Math.min(outerCorner, Math.max(0, (h - ear * 2) * 0.5), Math.max(0, w - ear));
+    return [
+      `M 0 0`,
+      `C 0 ${(ear * k).toFixed(2)} ${(ear * (1 - k)).toFixed(2)} ${ear.toFixed(2)} ${ear.toFixed(2)} ${ear.toFixed(2)}`,
+      `L ${(w - cor).toFixed(2)} ${ear.toFixed(2)}`,
+      `C ${(w - cor * (1 - k)).toFixed(2)} ${ear.toFixed(2)} ${w.toFixed(2)} ${(ear + cor * (1 - k)).toFixed(2)} ${w.toFixed(2)} ${(ear + cor).toFixed(2)}`,
+      `L ${w.toFixed(2)} ${(h - ear - cor).toFixed(2)}`,
+      `C ${w.toFixed(2)} ${(h - ear - cor * (1 - k)).toFixed(2)} ${(w - cor * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} ${(w - cor).toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `L ${ear.toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `C ${(ear * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} 0 ${(h - ear * k).toFixed(2)} 0 ${h.toFixed(2)}`,
+      `Z`,
+    ].join(' ');
+  }
+
+  if (edge === 'right') {
+    const ear = Math.min(earRadius, h * 0.25, w * 0.45);
+    const cor = Math.min(outerCorner, Math.max(0, (h - ear * 2) * 0.5), Math.max(0, w - ear));
+    return [
+      `M ${w.toFixed(2)} 0`,
+      `C ${w.toFixed(2)} ${(ear * k).toFixed(2)} ${(w - ear * (1 - k)).toFixed(2)} ${ear.toFixed(2)} ${(w - ear).toFixed(2)} ${ear.toFixed(2)}`,
+      `L ${cor.toFixed(2)} ${ear.toFixed(2)}`,
+      `C ${(cor * (1 - k)).toFixed(2)} ${ear.toFixed(2)} 0 ${(ear + cor * (1 - k)).toFixed(2)} 0 ${(ear + cor).toFixed(2)}`,
+      `L 0 ${(h - ear - cor).toFixed(2)}`,
+      `C 0 ${(h - ear - cor * (1 - k)).toFixed(2)} ${(cor * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} ${cor.toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `L ${(w - ear).toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `C ${(w - ear * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} ${w.toFixed(2)} ${(h - ear * k).toFixed(2)} ${w.toFixed(2)} ${h.toFixed(2)}`,
+      `Z`,
+    ].join(' ');
+  }
+
+  const topR = Math.min(earRadius, w * 0.25, h * 0.45);
+  const botR = Math.min(outerCorner, Math.max(0, (w - topR * 2) * 0.5), Math.max(0, h - topR));
   return [
     `M 0 0`,
     `C ${(topR * k).toFixed(2)} 0 ${topR.toFixed(2)} ${(topR * (1 - k)).toFixed(2)} ${topR.toFixed(2)} ${topR.toFixed(2)}`,
@@ -63,10 +117,47 @@ function buildNotchShellPath(w: number, h: number, topEar = TOP_EAR_RADIUS, botC
   ].join(' ');
 }
 
-function buildNotchRimPath(w: number, h: number, topEar = TOP_EAR_RADIUS, botCorner = BOTTOM_CORNER_RADIUS): string {
-  const topR = Math.min(topEar, w * 0.25, h * 0.45);
-  const botR = Math.min(botCorner, Math.max(0, (w - topR * 2) * 0.5), Math.max(0, h - topR));
+function buildNotchRimPath(
+  w: number,
+  h: number,
+  edge: ShelfDockEdge = 'top',
+  earRadius = TOP_EAR_RADIUS,
+  outerCorner = BOTTOM_CORNER_RADIUS,
+): string {
   const k = 0.55228475;
+  if (edge === 'left') {
+    const ear = Math.min(earRadius, h * 0.25, w * 0.45);
+    const cor = Math.min(outerCorner, Math.max(0, (h - ear * 2) * 0.5), Math.max(0, w - ear));
+    const rw = w - 0.5;
+    return [
+      `M 0 0.5`,
+      `C 0 ${(ear * k).toFixed(2)} ${(ear * (1 - k)).toFixed(2)} ${ear.toFixed(2)} ${ear.toFixed(2)} ${ear.toFixed(2)}`,
+      `L ${(rw - cor).toFixed(2)} ${ear.toFixed(2)}`,
+      `C ${(rw - cor * (1 - k)).toFixed(2)} ${ear.toFixed(2)} ${rw.toFixed(2)} ${(ear + cor * (1 - k)).toFixed(2)} ${rw.toFixed(2)} ${(ear + cor).toFixed(2)}`,
+      `L ${rw.toFixed(2)} ${(h - ear - cor).toFixed(2)}`,
+      `C ${rw.toFixed(2)} ${(h - ear - cor * (1 - k)).toFixed(2)} ${(rw - cor * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} ${(rw - cor).toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `L ${ear.toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `C ${(ear * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} 0 ${(h - ear * k).toFixed(2)} 0 ${(h - 0.5).toFixed(2)}`,
+    ].join(' ');
+  }
+
+  if (edge === 'right') {
+    const ear = Math.min(earRadius, h * 0.25, w * 0.45);
+    const cor = Math.min(outerCorner, Math.max(0, (h - ear * 2) * 0.5), Math.max(0, w - ear));
+    return [
+      `M ${w.toFixed(2)} 0.5`,
+      `C ${w.toFixed(2)} ${(ear * k).toFixed(2)} ${(w - ear * (1 - k)).toFixed(2)} ${ear.toFixed(2)} ${(w - ear).toFixed(2)} ${ear.toFixed(2)}`,
+      `L ${(cor + 0.5).toFixed(2)} ${ear.toFixed(2)}`,
+      `C ${(0.5 + cor * (1 - k)).toFixed(2)} ${ear.toFixed(2)} 0.5 ${(ear + cor * (1 - k)).toFixed(2)} 0.5 ${(ear + cor).toFixed(2)}`,
+      `L 0.5 ${(h - ear - cor).toFixed(2)}`,
+      `C 0.5 ${(h - ear - cor * (1 - k)).toFixed(2)} ${(0.5 + cor * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} ${(cor + 0.5).toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `L ${(w - ear).toFixed(2)} ${(h - ear).toFixed(2)}`,
+      `C ${(w - ear * (1 - k)).toFixed(2)} ${(h - ear).toFixed(2)} ${w.toFixed(2)} ${(h - ear * k).toFixed(2)} ${w.toFixed(2)} ${(h - 0.5).toFixed(2)}`,
+    ].join(' ');
+  }
+
+  const topR = Math.min(earRadius, w * 0.25, h * 0.45);
+  const botR = Math.min(outerCorner, Math.max(0, (w - topR * 2) * 0.5), Math.max(0, h - topR));
   return [
     `M 0.5 0`,
     `C ${(topR * k).toFixed(2)} 0 ${topR.toFixed(2)} ${(topR * (1 - k)).toFixed(2)} ${topR.toFixed(2)} ${topR.toFixed(2)}`,
@@ -192,19 +283,21 @@ const ShelfAssetThumb: React.FC<ShelfAssetThumbProps> = ({
 export interface TopEdgeDropShelfProps {
   initialFullGallery?: boolean;
   initialExpanded?: boolean;
+  initialDockEdge?: ShelfDockEdge;
 }
 
 /**
- * Pure-black Hardware Notch Drop Shelf (`shelf.html`) faithful 1:1 to macOS `NotchShelfView.swift`:
- * - Concave top-ear pure-black bezel silhouette with vertical rim gradient & capsule-only shadow
- * - Fluid `notchMorphSpring` expand/collapse from top bezel & compact <-> full-waterfall morph
- * - Zero invented title bar text; exact top wing controls (brand mark + Pin / Open Main / Close)
- * - Native Tauri v2 OS file/folder drop + 6px-threshold native Win32 OLE `DoDragDrop` drag-out
+ * Pure-black Hardware Notch Drop Shelf (`shelf.html`) supporting top, left, and right screen-edge docking:
+ * - Concave bezel-ear silhouette with directional rim gradient & capsule-only drop shadow
+ * - Fluid `notchMorphSpring` expand/collapse from the docked screen edge & compact <-> full-waterfall morph
+ * - Zero invented title bar text; exact wing controls (brand mark + Pin / Open Main / Close)
+ * - Native Tauri v2 OS file/folder drop + threshold-guarded Win32 OLE `DoDragDrop` drag-out
  * - Full-Waterfall rubber-band marquee multi-select + live search
  */
 export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   initialFullGallery = false,
   initialExpanded,
+  initialDockEdge,
 }) => {
   const capsuleRef = useRef<HTMLDivElement | null>(null);
   const filmstripRef = useRef<HTMLDivElement | null>(null);
@@ -216,6 +309,11 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   const [fullGallery, setFullGallery] = useState(initialFullGallery);
   const fullGalleryRef = useRef(fullGallery);
   fullGalleryRef.current = fullGallery;
+  const [dockEdge, setDockEdge] = useState<ShelfDockEdge>(normalizeDockEdge(initialDockEdge));
+  const dockEdgeRef = useRef<ShelfDockEdge>(dockEdge);
+  dockEdgeRef.current = dockEdge;
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
   const [pinned, setPinned] = useState(false);
   const [minimalMode, setMinimalMode] = useState(false);
   const [targetMode, setTargetMode] = useState<ShelfTargetMode>('inbox');
@@ -250,6 +348,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     defaultTargetMode: 'inbox',
     defaultFolderId: null,
     minimalMode: false,
+    dockEdge: normalizeDockEdge(initialDockEdge),
   });
 
   const isDropTargeted = htmlDragHovering || nativeDragHover.active;
@@ -258,6 +357,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   const transport = getTransport();
   const bannerTimerRef = useRef<number | null>(null);
   const autoCollapseTimerRef = useRef<number | null>(null);
+  const openingMainRef = useRef(false);
+  const openingAssetRef = useRef(false);
+  const startingCaptureRef = useRef(false);
 
   // Pitfall 5: Atomic timer cancellation clearing AND nulling handles across every transition
   // (hover, drag, banner, pin, hide, blur) so an unpinned shelf can NEVER wedge open.
@@ -345,50 +447,83 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   const resolvedTargetsRef = useRef(resolvedTargets);
   resolvedTargetsRef.current = resolvedTargets;
 
+  const openMainWindowAndCollapse = useCallback(() => {
+    if (openingMainRef.current) return;
+    openingMainRef.current = true;
+    cancelAutoCollapse();
+    const tasks: Promise<unknown>[] = [transport.openMainWindow().catch(() => {})];
+    if (isTauriRuntime()) {
+      tasks.push(transport.hideShelf().catch(() => {}));
+    }
+    void Promise.all(tasks).finally(() => {
+      window.setTimeout(() => {
+        openingMainRef.current = false;
+      }, 280);
+    });
+  }, [transport, cancelAutoCollapse]);
+
   const openFullGallery = useCallback(() => {
     if (minimalMode) {
-      void transport.openMainWindow();
-      if (isTauriRuntime()) {
-        void transport.hideShelf();
-      }
+      openMainWindowAndCollapse();
       return;
     }
     cancelAutoCollapse();
     setFullGallery(true);
     setPinned(true);
-    void transport.setShelfPinned(true);
-    void transport.setShelfAllowActivate(true);
-  }, [transport, minimalMode, cancelAutoCollapse]);
+    void transport.setShelfPinned(true).catch(() => {});
+    void transport.setShelfAllowActivate(true).catch(() => {});
+  }, [transport, minimalMode, cancelAutoCollapse, openMainWindowAndCollapse]);
 
   const closeFullGallery = useCallback(() => {
     setSelectedIds([]);
     setSearchQuery('');
     setFullGallery(false);
-    void transport.setShelfAllowActivate(false);
+    void transport.setShelfAllowActivate(false).catch(() => {});
   }, [transport]);
-
-  const openMainWindowAndCollapse = useCallback(() => {
-    cancelAutoCollapse();
-    void transport.openMainWindow();
-    if (isTauriRuntime()) {
-      void transport.hideShelf();
-    }
-  }, [transport, cancelAutoCollapse]);
 
   const openShelfAsset = useCallback(
     (asset: AssetRecord) => {
+      if (openingAssetRef.current) return;
+      openingAssetRef.current = true;
+      const done = () => {
+        window.setTimeout(() => {
+          openingAssetRef.current = false;
+        }, 240);
+      };
       if (isPlainWebBookmark(asset) && asset.sourceURL) {
-        void transport.openExternalUrl(asset.sourceURL).catch(() => {});
-        void transport.markAssetOpened(asset.id).catch(() => {});
+        const tasks: Promise<unknown>[] = [
+          transport.openExternalUrl(asset.sourceURL).catch(() => {}),
+          transport.markAssetOpened(asset.id).catch(() => {}),
+        ];
         if (isTauriRuntime()) {
-          void transport.hideShelf();
+          tasks.push(transport.hideShelf().catch(() => {}));
         }
+        void Promise.all(tasks).finally(done);
         return;
       }
-      void transport.openAssetInMainWindow(asset.id, true);
+      void transport
+        .openAssetInMainWindow(asset.id, true)
+        .catch(() => {})
+        .finally(done);
     },
     [transport],
   );
+
+  const handleStartRegionCapture = useCallback(() => {
+    if (startingCaptureRef.current) return;
+    startingCaptureRef.current = true;
+    const { folderId, boardId } = resolvedTargetsRef.current;
+    void transport
+      .startRegionCapture(folderId, boardId)
+      .catch((err) => {
+        showBanner(err instanceof Error && err.message ? err.message : '无法启动区域截图');
+      })
+      .finally(() => {
+        window.setTimeout(() => {
+          startingCaptureRef.current = false;
+        }, 320);
+      });
+  }, [transport, showBanner]);
 
   const persistTargetSelection = useCallback(
     (nextMode: ShelfTargetMode, nextFolderId: string) => {
@@ -396,6 +531,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
         ...shelfSettingsRef.current,
         defaultTargetMode: nextMode,
         defaultFolderId: nextFolderId || null,
+        dockEdge: dockEdgeRef.current,
       };
       shelfSettingsRef.current = next;
       void transport.saveShelfSettings(next).catch(() => {});
@@ -403,35 +539,84 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     [transport],
   );
 
-  // Sync settled target capsule bounds to Win32 WM_NCHITTEST so outside pixels stay click-through
-  // and mid-CSS-transition measurements NEVER shrink the drop target below the expanded capsule!
+  // Sync settled target capsule bounds (+ any open portaled folder Popover) to Win32 WM_NCHITTEST
+  // so outside pixels stay click-through while dropdowns and expanded drawers remain 100% interactive.
   const reportHitRectFor = useCallback(
-    (isExpanded: boolean, isFullGallery: boolean) => {
+    (isExpanded: boolean, isFullGallery: boolean, edge: ShelfDockEdge = dockEdgeRef.current) => {
       if (!isExpanded) {
-        void transport.setShelfHitRect(null);
+        void transport.setShelfHitRect(null).catch(() => {});
         return;
       }
       const dpr = window.devicePixelRatio || 1;
-      const viewportW = window.innerWidth || 1040;
-      const logicalW = Math.min(
-        isFullGallery ? FULL_WIDTH : COMPACT_WIDTH,
-        Math.max(200, viewportW - 16),
-      );
-      const logicalH = isFullGallery ? FULL_HEIGHT : COMPACT_HEIGHT;
-      const logicalLeft = Math.max(0, (viewportW - logicalW) / 2);
-      void transport.setShelfHitRect({
-        x: Math.round(logicalLeft * dpr),
-        y: 0,
-        width: Math.round(logicalW * dpr),
-        height: Math.round(logicalH * dpr),
-      });
+      const isSide = edge === 'left' || edge === 'right';
+      const viewportW = window.innerWidth || (isSide ? 560 : 1040);
+      const viewportH = window.innerHeight || (isSide ? 760 : 620);
+
+      let logicalLeft: number;
+      let logicalTop: number;
+      let logicalW: number;
+      let logicalH: number;
+
+      if (isSide) {
+        logicalW = Math.min(
+          isFullGallery ? SIDE_FULL_WIDTH : SIDE_COMPACT_WIDTH,
+          Math.max(200, viewportW - 16),
+        );
+        logicalH = Math.min(
+          isFullGallery ? SIDE_FULL_HEIGHT : SIDE_COMPACT_HEIGHT,
+          Math.max(240, viewportH - 16),
+        );
+        logicalTop = Math.max(0, (viewportH - logicalH) / 2);
+        logicalLeft = edge === 'left' ? 0 : Math.max(0, viewportW - logicalW);
+      } else {
+        logicalW = Math.min(
+          isFullGallery ? FULL_WIDTH : COMPACT_WIDTH,
+          Math.max(200, viewportW - 16),
+        );
+        logicalH = Math.min(
+          isFullGallery ? FULL_HEIGHT : COMPACT_HEIGHT,
+          Math.max(160, viewportH - 8),
+        );
+        logicalLeft = Math.max(0, (viewportW - logicalW) / 2);
+        logicalTop = 0;
+      }
+
+      let left = logicalLeft;
+      let top = logicalTop;
+      let right = logicalLeft + logicalW;
+      let bottom = logicalTop + logicalH;
+
+      // Expand hit rect cleanly around any open portaled Popover (e.g. folder selector)
+      if (typeof document !== 'undefined') {
+        const openPopovers = document.querySelectorAll<HTMLElement>(
+          '[data-charkle-popover-open="true"]',
+        );
+        openPopovers.forEach((pop) => {
+          const r = pop.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0 && r.left > -5000 && r.top > -5000) {
+            left = Math.max(0, Math.min(left, r.left - 4));
+            top = Math.max(0, Math.min(top, r.top - 4));
+            right = Math.min(viewportW, Math.max(right, r.right + 4));
+            bottom = Math.min(viewportH, Math.max(bottom, r.bottom + 4));
+          }
+        });
+      }
+
+      void transport
+        .setShelfHitRect({
+          x: Math.round(left * dpr),
+          y: Math.round(top * dpr),
+          width: Math.round(Math.max(1, right - left) * dpr),
+          height: Math.round(Math.max(1, bottom - top) * dpr),
+        })
+        .catch(() => {});
     },
     [transport],
   );
 
   const reportHitRect = useCallback(() => {
-    reportHitRectFor(expanded, fullGallery);
-  }, [reportHitRectFor, expanded, fullGallery]);
+    reportHitRectFor(expanded, fullGallery, dockEdge);
+  }, [reportHitRectFor, expanded, fullGallery, dockEdge]);
 
   useEffect(() => {
     void refreshData();
@@ -441,6 +626,11 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
         shelfSettingsRef.current = cfg;
         setTargetMode(cfg.defaultTargetMode);
         if (cfg.defaultFolderId) setSelectedFolderId(cfg.defaultFolderId);
+        if (initialDockEdge === undefined && cfg.dockEdge) {
+          const nextEdge = normalizeDockEdge(cfg.dockEdge);
+          dockEdgeRef.current = nextEdge;
+          setDockEdge(nextEdge);
+        }
       })
       .catch(() => {});
 
@@ -454,7 +644,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           setPinned(status.shelfPinned);
           if (status.shelfVisible) {
             setExpanded(true);
-            reportHitRectFor(true, fullGalleryRef.current);
+            reportHitRectFor(true, fullGalleryRef.current, dockEdgeRef.current);
             void refreshData();
           }
         })
@@ -473,6 +663,14 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           shelfSettingsRef.current = cfg;
           setTargetMode(cfg.defaultTargetMode);
           if (cfg.defaultFolderId) setSelectedFolderId(cfg.defaultFolderId);
+          if (cfg.dockEdge) {
+            const nextEdge = normalizeDockEdge(cfg.dockEdge);
+            dockEdgeRef.current = nextEdge;
+            setDockEdge(nextEdge);
+            if (expandedRef.current) {
+              reportHitRectFor(true, fullGalleryRef.current, nextEdge);
+            }
+          }
         },
         onShelfDragHover: (payload) => {
           cancelAutoCollapse();
@@ -492,6 +690,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           cancelAutoCollapse();
           setPinned(s.pinned);
           let nextFullGallery = fullGalleryRef.current;
+          let nextEdge = dockEdgeRef.current;
+          if (s.dockEdge) {
+            nextEdge = normalizeDockEdge(s.dockEdge);
+            dockEdgeRef.current = nextEdge;
+            setDockEdge(nextEdge);
+          }
           if (typeof s.minimalMode === 'boolean') {
             setMinimalMode(s.minimalMode);
             if (s.minimalMode) {
@@ -505,7 +709,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           if (s.expanded) {
             // Set expanded directly (never inside requestAnimationFrame, which hidden WebView2 suspends!)
             setExpanded(true);
-            reportHitRectFor(true, nextFullGallery);
+            reportHitRectFor(true, nextFullGallery, nextEdge);
             void refreshData();
           } else {
             clearBannerTimer();
@@ -514,8 +718,8 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
             setNativeDragHover({ active: false, count: 0 });
             setSelectedIds([]);
             setSearchQuery('');
-            reportHitRectFor(false, false);
-            void transport.setShelfAllowActivate(false);
+            reportHitRectFor(false, false, nextEdge);
+            void transport.setShelfAllowActivate(false).catch(() => {});
           }
         },
       })
@@ -539,6 +743,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     refreshData,
     showBanner,
     initialExpanded,
+    initialDockEdge,
     cancelAutoCollapse,
     clearBannerTimer,
     reportHitRectFor,
@@ -547,10 +752,28 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   useEffect(() => {
     reportHitRect();
     window.addEventListener('resize', reportHitRect);
+    let mo: MutationObserver | null = null;
+    let rafId: number | null = null;
+    if (expanded && typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
+      const scheduleSync = () => {
+        if (rafId !== null) cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          reportHitRect();
+        });
+      };
+      mo = new MutationObserver(scheduleSync);
+      mo.observe(document.body, {
+        childList: true,
+        subtree: false,
+      });
+    }
     return () => {
       window.removeEventListener('resize', reportHitRect);
+      mo?.disconnect();
+      if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [reportHitRect]);
+  }, [expanded, reportHitRect]);
 
   // Keyboard shortcuts inside shelf: Ctrl+V instant paste collect, Escape collapse
   const handleCollectClipboardRef = useRef<() => Promise<void>>(async () => {});
@@ -559,11 +782,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       const target = e.target as HTMLElement | null;
       const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
       if (e.key === 'Escape') {
+        if (document.querySelector('[data-charkle-popover-open="true"]')) return;
         e.preventDefault();
         if (fullGallery) {
           closeFullGallery();
         } else {
-          void transport.hideShelf();
+          void transport.hideShelf().catch(() => {});
         }
         return;
       }
@@ -711,7 +935,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     }
   };
 
-  // Start native Win32 OLE DoDragDrop ONLY after a 6px drag motion (distinguishing click vs drag!)
+  // Start native Win32 OLE DoDragDrop ONLY after deliberate drag motion (distinguishing click vs drag!)
   const startCardDragOut = (e: React.PointerEvent, ids: string[], onClick?: () => void) => {
     if (e.button !== 0 || ids.length === 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
@@ -726,6 +950,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
 
     const startX = e.clientX;
     const startY = e.clientY;
+    const startedAt = performance.now();
     let launched = false;
 
     const releaseCapture = () => {
@@ -749,7 +974,14 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
 
     const onMove = (ev: PointerEvent) => {
       if (launched) return;
-      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_OUT_THRESHOLD) return;
+      if (typeof ev.buttons === 'number' && ev.buttons !== 0 && (ev.buttons & 1) === 0) {
+        cleanup();
+        return;
+      }
+      const dist = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+      if (dist < DRAG_OUT_THRESHOLD) return;
+      const elapsed = performance.now() - startedAt;
+      if (elapsed < DRAG_OUT_MIN_HOLD_MS && dist < DRAG_OUT_FAST_THRESHOLD) return;
       launched = true;
       cleanup();
       void transport
@@ -845,11 +1077,73 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     });
   };
 
-  const targetW = expanded ? (fullGallery ? FULL_WIDTH : COMPACT_WIDTH) : COLLAPSED_WIDTH;
-  const targetH = expanded ? (fullGallery ? FULL_HEIGHT : COMPACT_HEIGHT) : COLLAPSED_HEIGHT;
-  const botRadius = expanded ? BOTTOM_CORNER_RADIUS : 14;
-  const shellPath = buildNotchShellPath(targetW, targetH, TOP_EAR_RADIUS, botRadius);
-  const rimPath = buildNotchRimPath(targetW, targetH, TOP_EAR_RADIUS, botRadius);
+  const isSideDock = dockEdge === 'left' || dockEdge === 'right';
+  const targetW = expanded
+    ? fullGallery
+      ? isSideDock
+        ? SIDE_FULL_WIDTH
+        : FULL_WIDTH
+      : isSideDock
+        ? SIDE_COMPACT_WIDTH
+        : COMPACT_WIDTH
+    : isSideDock
+      ? SIDE_COLLAPSED_WIDTH
+      : COLLAPSED_WIDTH;
+  const targetH = expanded
+    ? fullGallery
+      ? isSideDock
+        ? SIDE_FULL_HEIGHT
+        : FULL_HEIGHT
+      : isSideDock
+        ? SIDE_COMPACT_HEIGHT
+        : COMPACT_HEIGHT
+    : isSideDock
+      ? SIDE_COLLAPSED_HEIGHT
+      : COLLAPSED_HEIGHT;
+  const outerCornerRadius = expanded ? BOTTOM_CORNER_RADIUS : 14;
+  const shellPath = buildNotchShellPath(targetW, targetH, dockEdge, TOP_EAR_RADIUS, outerCornerRadius);
+  const rimPath = buildNotchRimPath(targetW, targetH, dockEdge, TOP_EAR_RADIUS, outerCornerRadius);
+
+  const rimGradientCoords =
+    dockEdge === 'left'
+      ? { x1: '0', y1: '0', x2: '1', y2: '0' }
+      : dockEdge === 'right'
+        ? { x1: '1', y1: '0', x2: '0', y2: '0' }
+        : { x1: '0', y1: '0', x2: '0', y2: '1' };
+
+  const collapsedTransform =
+    dockEdge === 'left'
+      ? 'translate3d(-16px, 0, 0) scale3d(0.92, 0.96, 1)'
+      : dockEdge === 'right'
+        ? 'translate3d(16px, 0, 0) scale3d(0.92, 0.96, 1)'
+        : 'translate3d(0, -14px, 0) scale3d(0.96, 0.92, 1)';
+
+  const expandedShadow =
+    dockEdge === 'left'
+      ? 'drop-shadow(10px 4px 24px rgba(0, 0, 0, 0.46))'
+      : dockEdge === 'right'
+        ? 'drop-shadow(-10px 4px 24px rgba(0, 0, 0, 0.46))'
+        : 'drop-shadow(0 12px 24px rgba(0, 0, 0, 0.44))';
+
+  const outerAlignClass =
+    dockEdge === 'left'
+      ? 'justify-start items-center'
+      : dockEdge === 'right'
+        ? 'justify-end items-center'
+        : 'justify-center items-start';
+
+  const interiorPaddingStyle = isSideDock
+    ? {
+        paddingTop: TOP_EAR_RADIUS + 14,
+        paddingBottom: TOP_EAR_RADIUS + 14,
+        paddingLeft: 14,
+        paddingRight: 14,
+      }
+    : {
+        paddingLeft: TOP_EAR_RADIUS + 16,
+        paddingRight: TOP_EAR_RADIUS + 16,
+        paddingBottom: 14,
+      };
 
   const marqueeBox = marquee
     ? {
@@ -860,9 +1154,99 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       }
     : null;
 
+  const renderDropWellContent = (sideCompact: boolean) => {
+    if (processingMessage) {
+      return (
+        <div className="flex items-center gap-2 text-[12px] font-semibold text-white">
+          <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin shrink-0" />
+          <span className="truncate">{processingMessage}</span>
+        </div>
+      );
+    }
+    if (statusMessage) {
+      return (
+        <div className="flex items-center gap-2 text-[12px] font-semibold text-white min-w-0">
+          <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
+          <span className="truncate">{statusMessage}</span>
+        </div>
+      );
+    }
+    if (isDropTargeted) {
+      return (
+        <div className="flex items-center gap-2.5 min-w-0">
+          <Upload size={17} className="text-[#3B82F6] shrink-0" />
+          <div className="flex flex-col leading-tight min-w-0">
+            <span className="text-[12.5px] font-semibold text-white truncate">
+              松开立即收藏 {dragItemCount} 项素材
+            </span>
+            <span className="text-[10.5px] text-white/74 truncate">{targetDropHint}</span>
+          </div>
+        </div>
+      );
+    }
+    if (activeClipboardUrlPrompt) {
+      return (
+        <div className="w-full h-full flex items-center gap-2">
+          <button
+            type="button"
+            aria-label={`检测到剪贴板链接 · ${activeClipboardUrlPrompt.label}`}
+            onClick={() => void handleCollectClipboard()}
+            className="flex-1 min-w-0 h-full flex items-center justify-between gap-2 cursor-pointer text-left"
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              <Link2 size={15} className="text-[#3B82F6] shrink-0" />
+              <span
+                className={
+                  sideCompact
+                    ? 'text-[11.5px] font-medium text-white line-clamp-2 leading-snug'
+                    : 'text-[12px] font-medium text-white truncate'
+                }
+              >
+                {activeClipboardUrlPrompt.label}
+              </span>
+            </span>
+            <span className="px-2.5 py-1 rounded-full bg-[#3B82F6] text-[11px] font-semibold text-white shrink-0">
+              保存
+            </span>
+          </button>
+          <button
+            type="button"
+            title="忽略剪贴板链接"
+            aria-label="忽略剪贴板链接"
+            onClick={() => setDismissedClipboardLabel(activeClipboardUrlPrompt.clip.label)}
+            className="charkle-pressable w-6 h-6 rounded-full bg-white/8 hover:bg-white/16 text-white/62 hover:text-white inline-flex items-center justify-center shrink-0 cursor-pointer"
+          >
+            <X size={11.5} />
+          </button>
+        </div>
+      );
+    }
+    return (
+      <button
+        type="button"
+        onClick={() => void handleCollectClipboard()}
+        className="w-full h-full flex items-center gap-2.5 cursor-pointer text-left"
+      >
+        <Upload size={14.5} className="text-white/72 shrink-0" />
+        <span
+          className={
+            sideCompact
+              ? 'text-[11.5px] font-medium text-white/84 leading-snug line-clamp-2'
+              : 'text-[12px] font-medium text-white/84 truncate'
+          }
+        >
+          拖入文件、整个文件夹、网页、推文或 GitHub 链接，或按 Ctrl+V 粘贴
+        </span>
+      </button>
+    );
+  };
+
   return (
     <div
-      className="w-screen h-screen flex justify-center items-start bg-transparent select-none overflow-hidden"
+      className={[
+        'w-screen h-screen flex bg-transparent select-none overflow-hidden',
+        outerAlignClass,
+      ].join(' ')}
       onDragOver={(e) => {
         e.preventDefault();
         setHtmlDragHovering(true);
@@ -872,24 +1256,23 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
       }}
       onDrop={(e) => void handleHtmlDrop(e)}
     >
-      {/* Pure-Black Hardware Notch Capsule with Concave Top Ears (0px outer DWM frame) */}
+      {/* Pure-Black Hardware Notch Capsule with Concave Bezel Ears (0px outer DWM frame) */}
       <div
         ref={capsuleRef}
         data-testid="top-edge-drop-shelf"
         data-mode={fullGallery ? 'waterfall' : 'compact'}
         data-expanded={expanded ? 'true' : 'false'}
+        data-dock-edge={dockEdge}
         style={{
           width: `min(${targetW}px, calc(100vw - 16px))`,
-          height: `${targetH}px`,
+          height: isSideDock ? `min(${targetH}px, calc(100vh - 16px))` : `${targetH}px`,
           opacity: expanded ? 1 : 0,
-          transform: expanded
-            ? 'translate3d(0, 0, 0) scale3d(1, 1, 1)'
-            : 'translate3d(0, -14px, 0) scale3d(0.96, 0.92, 1)',
-          filter: expanded ? 'drop-shadow(0 12px 24px rgba(0, 0, 0, 0.44))' : 'none',
+          transform: expanded ? 'translate3d(0, 0, 0) scale3d(1, 1, 1)' : collapsedTransform,
+          filter: expanded ? expandedShadow : 'none',
         }}
         className="charkle-shelf-shell relative flex flex-col text-white overflow-hidden"
       >
-        {/* Pure-Black NotchShellShape Vector Backdrop + Vertical Subtle Rim Stroke */}
+        {/* Pure-Black NotchShellShape Vector Backdrop + Directional Subtle Rim Stroke */}
         <svg
           aria-hidden="true"
           viewBox={`0 0 ${targetW} ${targetH}`}
@@ -897,7 +1280,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           className="pointer-events-none absolute inset-0 w-full h-full"
         >
           <defs>
-            <linearGradient id="charkle-notch-rim" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="charkle-notch-rim" {...rimGradientCoords}>
               <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
               <stop offset="26%" stopColor="#FFFFFF" stopOpacity="0.08" />
               <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0.14" />
@@ -913,18 +1296,14 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
           />
         </svg>
 
-        {/* Interior Content padded inside concave top ears (topEar + 16px) */}
+        {/* Interior Content padded inside concave bezel ears */}
         <div
-          style={{
-            paddingLeft: TOP_EAR_RADIUS + 16,
-            paddingRight: TOP_EAR_RADIUS + 16,
-            paddingBottom: 14,
-          }}
+          style={interiorPaddingStyle}
           className="relative z-10 flex-1 min-h-0 flex flex-col"
         >
           {/* Band 1: Minimal Wing Bar (Left: Charkle mark + optional Minimal Mode pill; Right: Pin / Open / Close) */}
           <div
-            style={{ height: TOP_BAND_HEIGHT }}
+            style={{ height: isSideDock ? 32 : TOP_BAND_HEIGHT }}
             className="shrink-0 flex items-center justify-between"
           >
             <div className="flex items-center gap-1.5 min-w-0">
@@ -949,7 +1328,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   cancelAutoCollapse();
                   const next = !pinned;
                   setPinned(next);
-                  void transport.setShelfPinned(next);
+                  void transport.setShelfPinned(next).catch(() => {});
                 }}
                 className={[
                   'charkle-pressable w-[22px] h-[22px] rounded-full inline-flex items-center justify-center cursor-pointer',
@@ -973,11 +1352,11 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
 
               <button
                 type="button"
-                title="收起顶部托盘"
+                title={isSideDock ? '收起侧边托盘' : '收起顶部托盘'}
                 aria-label="收起抽屉"
                 onClick={() => {
                   cancelAutoCollapse();
-                  void transport.hideShelf();
+                  void transport.hideShelf().catch(() => {});
                 }}
                 className="charkle-pressable w-[22px] h-[22px] rounded-full bg-white/10 text-white/68 hover:text-white hover:bg-white/18 inline-flex items-center justify-center cursor-pointer"
               >
@@ -986,8 +1365,249 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
             </div>
           </div>
 
-          {/* Body: Compact Mode vs Expanded Full-Waterfall Mode */}
+          {/* Body: Compact Mode vs Expanded Full-Waterfall Mode (Top Notch vs Left/Right Vertical Drawer) */}
           {!fullGallery || minimalMode ? (
+            isSideDock ? (
+              /* Vertical Side-Edge Compact Drawer (344 × 560) */
+              <div className="pt-2 flex-1 min-h-0 flex flex-col gap-2.5 overflow-hidden">
+                {/* Equal-width Quick Capture Actions */}
+                <div className="grid grid-cols-3 gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    title="区域截图 (Alt+Shift+A)"
+                    aria-label="区域截图采集"
+                    onClick={handleStartRegionCapture}
+                    className="charkle-pressable h-[29px] px-1.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                  >
+                    <Camera size={12} className="shrink-0" />
+                    <span>区域截图</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    title="采集剪贴板 (Alt+Shift+V)"
+                    aria-label="采集剪贴板"
+                    onClick={() => void handleCollectClipboard()}
+                    className="charkle-pressable h-[29px] px-1.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                  >
+                    <Clipboard size={12} className="shrink-0" />
+                    <span>剪贴板</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    title={minimalMode ? '退出极简模式并打开主窗' : '打开 Charkle 主窗'}
+                    onClick={openMainWindowAndCollapse}
+                    className="charkle-pressable h-[29px] px-1.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                  >
+                    <LayoutGrid size={12} className="shrink-0" />
+                    <span>{minimalMode ? '恢复主窗' : '主窗'}</span>
+                  </button>
+                </div>
+
+                {/* Stacked Target Switcher + Contextual Target Sub-row */}
+                <div className="flex flex-col gap-1.5 shrink-0">
+                  <div
+                    role="radiogroup"
+                    aria-label="采集投递目标"
+                    className="grid grid-cols-3 p-[2.5px] gap-0.5 rounded-[9px] bg-white/8"
+                  >
+                    {(
+                      [
+                        { id: 'inbox', label: '收件箱' },
+                        { id: 'folder', label: '文件夹' },
+                        { id: 'activeMoodboard', label: '活跃情绪板' },
+                      ] as const
+                    ).map((opt) => {
+                      const active = targetMode === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={() => {
+                            const nextFolderId =
+                              opt.id === 'folder'
+                                ? selectedFolderId || folders[0]?.id || ''
+                                : selectedFolderId;
+                            if (opt.id === 'folder' && nextFolderId && !selectedFolderId) {
+                              setSelectedFolderId(nextFolderId);
+                            }
+                            setTargetMode(opt.id);
+                            persistTargetSelection(opt.id, nextFolderId);
+                          }}
+                          className={[
+                            'charkle-pressable px-1.5 py-[4px] rounded-[7px] text-[10.5px] cursor-pointer whitespace-nowrap text-center',
+                            active
+                              ? 'bg-white/18 text-white font-semibold'
+                              : 'text-white/62 hover:text-white/90 font-medium',
+                          ].join(' ')}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {targetMode === 'inbox' && (
+                    <div className="flex items-center justify-between px-2.5 py-1 rounded-[8px] bg-white/[0.05] text-[10.5px] text-white/66">
+                      <span>默认收入收件箱待整理</span>
+                      <span className="charkle-tabular font-semibold text-white/84">
+                        {inboxCount} 项
+                      </span>
+                    </div>
+                  )}
+
+                  {targetMode === 'folder' &&
+                    (folderOptions.length > 0 ? (
+                      <CustomSelect<string>
+                        value={selectedFolderId}
+                        options={folderOptions}
+                        onChange={(fid) => {
+                          setSelectedFolderId(fid);
+                          persistTargetSelection('folder', fid);
+                        }}
+                        ariaLabel="选择投递文件夹"
+                        size="xs"
+                        className="w-full h-[26px] bg-white/11 border-white/12 text-white text-[11px]"
+                      />
+                    ) : (
+                      <div className="px-2.5 py-1 rounded-[8px] bg-white/[0.05] text-[10.5px] text-white/55">
+                        暂无文件夹，将保存至收件箱
+                      </div>
+                    ))}
+
+                  {targetMode === 'activeMoodboard' && (
+                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-white/[0.05] text-[10.5px] text-white/86 min-w-0">
+                      <span className="w-[5px] h-[5px] rounded-full bg-emerald-400 shrink-0" />
+                      <span className="truncate">{activeBoardTitle}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Vertical-Friendly Drop Well */}
+                <div
+                  className={[
+                    'min-h-[64px] shrink-0 rounded-[13px] flex items-center justify-center transition-colors duration-150 py-2.5 px-3',
+                    isDropTargeted
+                      ? 'bg-[#3B82F6]/24 border-[1.5px] border-[#3B82F6]/92'
+                      : 'bg-white/[0.06] border border-dashed border-white/14 hover:bg-white/[0.08]',
+                  ].join(' ')}
+                >
+                  {renderDropWellContent(true)}
+                </div>
+
+                {/* Recent Assets 2-Column Scrollable Grid */}
+                <div className="flex-1 min-h-0 flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between gap-2 shrink-0">
+                    <span className="px-2.5 py-[3px] rounded-full bg-white/14 text-[11px] font-semibold text-white shrink-0">
+                      最近素材
+                    </span>
+
+                    {minimalMode ? (
+                      <button
+                        type="button"
+                        title="退出极简模式并打开主窗口浏览全部素材"
+                        aria-label="恢复主窗看全部"
+                        onClick={openMainWindowAndCollapse}
+                        className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/9 hover:bg-white/16 text-[10.5px] font-semibold text-white/78 inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                      >
+                        <span>恢复主窗看全部</span>
+                        <ArrowUpRight size={10.5} />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        title="展开全画面瀑布流浏览最近素材（支持框选多选）"
+                        aria-label="展开为全瀑布流抽屉"
+                        onClick={openFullGallery}
+                        className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/10 hover:bg-white/16 text-[11px] font-semibold text-white/84 inline-flex items-center gap-1 cursor-pointer shrink-0 charkle-tabular"
+                      >
+                        {dockEdge === 'right' && <ChevronLeft size={11} />}
+                        <span>全部 ({assets.length})</span>
+                        {dockEdge === 'left' && <ChevronRight size={11} />}
+                      </button>
+                    )}
+                  </div>
+
+                  {assets.length === 0 ? (
+                    <div className="flex-1 flex items-center justify-center text-center px-3 text-[11.5px] text-white/45">
+                      暂无最近素材，拖入文件或按 Alt+Shift+V 粘贴收藏
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2 overflow-y-auto charkle-scroll pr-0.5 flex-1 min-h-0 content-start">
+                      {assets.slice(0, minimalMode ? 16 : 24).map((asset) => (
+                        <div key={asset.id} className="group flex flex-col gap-1 min-w-0">
+                          <div
+                            onPointerDown={(e) =>
+                              startCardDragOut(e, [asset.id], openFullGallery)
+                            }
+                            className="relative w-full aspect-[4/3] rounded-[10px] overflow-hidden bg-white/8 ring-1 ring-white/12 group-hover:ring-white/38 cursor-grab active:cursor-grabbing transition-shadow duration-150"
+                          >
+                            <ShelfAssetThumb
+                              asset={asset}
+                              rawThumbUrl={transport.thumbnailUrl(asset.id, 'grid520')}
+                              fixedHeight
+                            />
+
+                            <div className="absolute top-1.5 right-1.5 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                              <button
+                                type="button"
+                                title="拷贝文件到剪贴板"
+                                aria-label={`拷贝 ${asset.title}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void transport
+                                    .copyAssetsToClipboard([asset.id])
+                                    .then(() => showBanner('已拷贝文件到剪贴板'))
+                                    .catch((err) =>
+                                      showBanner(
+                                        err instanceof Error ? err.message : '无法拷贝该素材',
+                                      ),
+                                    );
+                                }}
+                                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                              >
+                                <Copy size={10} />
+                              </button>
+                              <button
+                                type="button"
+                                title={
+                                  isPlainWebBookmark(asset)
+                                    ? '在默认浏览器中打开'
+                                    : '在主窗中沉浸预览'
+                                }
+                                aria-label={
+                                  isPlainWebBookmark(asset)
+                                    ? `在默认浏览器中打开 ${asset.title}`
+                                    : `预览 ${asset.title}`
+                                }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openShelfAsset(asset);
+                                }}
+                                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                              >
+                                {isPlainWebBookmark(asset) ? (
+                                  <ExternalLink size={10.5} />
+                                ) : (
+                                  <Eye size={10.5} />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          <span className="text-[10px] font-medium text-white/68 truncate">
+                            {asset.title}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
             <div className="pt-2 flex-1 min-h-0 flex flex-col gap-2.5">
               {/* Row 2: Quick Capture Actions (Pitfall 3: shrink-0 whitespace-nowrap) + Target Switcher + Truncated Detail Chip */}
               <div className="flex items-center justify-between gap-2 min-w-0">
@@ -996,13 +1616,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     type="button"
                     title="区域截图 (Alt+Shift+A)"
                     aria-label="区域截图采集"
-                    onClick={() =>
-                      void transport
-                        .startRegionCapture(resolvedTargets.folderId, resolvedTargets.boardId)
-                        .catch((err) =>
-                          showBanner(err instanceof Error && err.message ? err.message : '无法启动区域截图'),
-                        )
-                    }
+                    onClick={handleStartRegionCapture}
                     className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
                   >
                     <Camera size={12} className="shrink-0" />
@@ -1113,68 +1727,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     : 'bg-white/[0.06] border border-dashed border-white/14 hover:bg-white/[0.08]',
                 ].join(' ')}
               >
-                {processingMessage ? (
-                  <div className="flex items-center gap-2 text-[12px] font-semibold text-white">
-                    <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                    <span>{processingMessage}</span>
-                  </div>
-                ) : statusMessage ? (
-                  <div className="flex items-center gap-2 text-[12.5px] font-semibold text-white">
-                    <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
-                    <span>{statusMessage}</span>
-                  </div>
-                ) : isDropTargeted ? (
-                  <div className="flex items-center gap-2.5">
-                    <Upload size={17} className="text-[#3B82F6] shrink-0" />
-                    <div className="flex flex-col leading-tight">
-                      <span className="text-[12.5px] font-semibold text-white">
-                        松开立即收藏 {dragItemCount} 项素材
-                      </span>
-                      <span className="text-[10.5px] text-white/74">{targetDropHint}</span>
-                    </div>
-                  </div>
-                ) : activeClipboardUrlPrompt ? (
-                  <div className="w-full h-full flex items-center gap-2">
-                    <button
-                      type="button"
-                      aria-label={`检测到剪贴板链接 · ${activeClipboardUrlPrompt.label}`}
-                      onClick={() => void handleCollectClipboard()}
-                      className="flex-1 min-w-0 h-full flex items-center justify-between gap-2.5 cursor-pointer text-left"
-                    >
-                      <span className="flex items-center gap-2 min-w-0">
-                        <Link2 size={15} className="text-[#3B82F6] shrink-0" />
-                        <span className="text-[12px] font-medium text-white truncate">
-                          {activeClipboardUrlPrompt.label}
-                        </span>
-                      </span>
-                      <span className="px-2.5 py-1 rounded-full bg-[#3B82F6] text-[11px] font-semibold text-white shrink-0">
-                        保存
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      title="忽略剪贴板链接"
-                      aria-label="忽略剪贴板链接"
-                      onClick={() =>
-                        setDismissedClipboardLabel(activeClipboardUrlPrompt.clip.label)
-                      }
-                      className="charkle-pressable w-6 h-6 rounded-full bg-white/8 hover:bg-white/16 text-white/62 hover:text-white inline-flex items-center justify-center shrink-0 cursor-pointer"
-                    >
-                      <X size={11.5} />
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => void handleCollectClipboard()}
-                    className="w-full h-full flex items-center gap-2.5 cursor-pointer text-left"
-                  >
-                    <Upload size={14.5} className="text-white/72 shrink-0" />
-                    <span className="text-[12px] font-medium text-white/84 truncate">
-                      拖入文件、整个文件夹、网页、推文或 GitHub 链接，或按 Ctrl+V 粘贴
-                    </span>
-                  </button>
-                )}
+                {renderDropWellContent(false)}
               </div>
 
               {/* Row 4: Recent Assets Header + Horizontal Wheel-Scrollable Filmstrip */}
@@ -1305,9 +1858,92 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 )}
               </div>
             </div>
+            )
           ) : (
             /* Expanded Full-Waterfall Gallery Mode (Pure-black masonry + rubber-band marquee + multi-drag) */
-            <div className="pt-2 flex-1 min-h-0 flex flex-col gap-2.5 overflow-hidden">
+            <div className="pt-2 flex-1 min-h-0 flex flex-col gap-2 overflow-hidden">
+              {isSideDock ? (
+                /* Side Full-Waterfall 2-Row Compact Header (520 × 700) */
+                <div className="flex flex-col gap-1.5 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-1 rounded-full bg-white/16 text-[11.5px] font-semibold text-white shrink-0">
+                      最近素材
+                    </span>
+
+                    <div className="flex-1 min-w-0 flex items-center gap-1.5 h-[28px] px-2.5 rounded-full bg-white/9 border border-white/8 focus-within:border-[#3B82F6]/70">
+                      <Search size={11.5} className="text-white/55 shrink-0" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onPointerDown={() => void transport.setShelfAllowActivate(true).catch(() => {})}
+                        onFocus={() => void transport.setShelfAllowActivate(true).catch(() => {})}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="搜索最近素材…"
+                        className="flex-1 min-w-0 bg-transparent text-[12px] text-white placeholder:text-white/45 outline-none"
+                      />
+                      {searchQuery && (
+                        <button
+                          type="button"
+                          aria-label="清除搜索"
+                          onClick={() => setSearchQuery('')}
+                          className="text-white/50 hover:text-white cursor-pointer"
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      aria-label="切换为紧凑抽屉"
+                      onClick={closeFullGallery}
+                      className="charkle-pressable px-2.5 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-semibold text-white/88 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      {dockEdge === 'left' && <ChevronLeft size={11} />}
+                      <span>收起</span>
+                      {dockEdge === 'right' && <ChevronRight size={11} />}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 min-h-[22px]">
+                    {selectedIds.length > 0 ? (
+                      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                        <span className="px-2.5 py-0.5 rounded-full bg-[#3B82F6]/20 text-[#60A5FA] text-[11px] font-semibold charkle-tabular">
+                          已选 {selectedIds.length} 项 · 拖动卡片可直接拖出
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void transport
+                              .copyAssetsToClipboard(selectedIds)
+                              .then(() => showBanner(`已拷贝 ${selectedIds.length} 项文件`))
+                              .catch((err) =>
+                                showBanner(
+                                  err instanceof Error ? err.message : '无法拷贝所选素材',
+                                ),
+                              )
+                          }
+                          className="charkle-pressable px-2 py-0.5 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-medium text-white/88 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Copy size={10.5} />
+                          <span>拷贝</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedIds([])}
+                          className="charkle-pressable px-2 py-0.5 rounded-full bg-white/8 hover:bg-white/14 text-[11px] text-white/70 hover:text-white cursor-pointer"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-[10.5px] text-white/48 truncate">
+                        拖拽空白处框选多选 · 拖动卡片至其他应用 / 情绪板 / 文件夹
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ) : (
               <div className="flex items-center gap-2.5 shrink-0">
                 <span className="px-2.5 py-1 rounded-full bg-white/16 text-[12px] font-semibold text-white shrink-0">
                   最近素材
@@ -1318,8 +1954,8 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   <input
                     type="text"
                     value={searchQuery}
-                    onPointerDown={() => void transport.setShelfAllowActivate(true)}
-                    onFocus={() => void transport.setShelfAllowActivate(true)}
+                    onPointerDown={() => void transport.setShelfAllowActivate(true).catch(() => {})}
+                    onFocus={() => void transport.setShelfAllowActivate(true).catch(() => {})}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="搜索最近素材…"
                     className="flex-1 min-w-0 bg-transparent text-[12px] text-white placeholder:text-white/45 outline-none"
@@ -1382,6 +2018,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   <ChevronUp size={11} />
                 </button>
               </div>
+              )}
 
               <div
                 ref={waterfallGridRef}
@@ -1412,7 +2049,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     )}
                   </div>
                 ) : (
-                <div className="columns-5 gap-2.5 space-y-2.5">
+                <div className={isSideDock ? 'columns-3 gap-2 space-y-2' : 'columns-5 gap-2.5 space-y-2.5'}>
                   {filteredAssets.slice(0, 80).map((asset) => {
                     const selected = selectedIds.includes(asset.id);
                     const dragIds =

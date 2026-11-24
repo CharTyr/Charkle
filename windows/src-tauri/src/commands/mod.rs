@@ -11,7 +11,7 @@ pub mod sync;
 pub mod window;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8};
 use std::sync::{Arc, Mutex};
 
 use charkle_core::bridge::LocalExtensionBridgeServer;
@@ -36,6 +36,7 @@ pub struct AppState {
     pub shelf_settings: Arc<Mutex<ShelfSettings>>,
     pub shelf_enabled: Arc<AtomicBool>,
     pub shelf_hover_trigger: Arc<AtomicBool>,
+    pub shelf_dock_edge: Arc<AtomicU8>,
     pub shelf_expanded: Arc<AtomicBool>,
     pub shelf_pinned: Arc<AtomicBool>,
     pub shelf_drag_hovering: Arc<AtomicBool>,

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,57 @@ pub const SHELF_COMPACT_LOGICAL_WIDTH: i32 = 668;
 pub const SHELF_COMPACT_LOGICAL_HEIGHT: i32 = 330;
 pub const TOP_HOTSTRIP_LOGICAL_WIDTH: i32 = 320;
 pub const TOP_HOTSTRIP_LOGICAL_HEIGHT: i32 = 4;
+
+pub const SIDE_SHELF_LOGICAL_WIDTH: i32 = 560;
+pub const SIDE_SHELF_LOGICAL_HEIGHT: i32 = 760;
+pub const SIDE_COMPACT_LOGICAL_WIDTH: i32 = 344;
+pub const SIDE_COMPACT_LOGICAL_HEIGHT: i32 = 560;
+pub const SIDE_HOTSTRIP_LOGICAL_THICKNESS: i32 = 4;
+pub const SIDE_HOTSTRIP_LOGICAL_LENGTH: i32 = 240;
+
+/// Screen edge where the floating Drop Shelf docks (`"top"` | `"left"` | `"right"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShelfDockEdge {
+    #[default]
+    Top,
+    Left,
+    Right,
+}
+
+impl ShelfDockEdge {
+    pub fn from_str_lossy(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::Top,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            Self::Top => 0,
+            Self::Left => 1,
+            Self::Right => 2,
+        }
+    }
+
+    pub const fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Left,
+            2 => Self::Right,
+            _ => Self::Top,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,16 +105,51 @@ pub struct ShelfWindowPlacement {
     pub dpi_scale_percent: u32,
 }
 
-/// Computes the fixed oversized transparent shelf window placement anchored top-center
-/// of `monitor` for the given DPI scale factor (e.g. `1.0`, `1.25`, `1.5`).
-pub fn compute_shelf_window_rect(monitor: MonitorRect, dpi_scale: f64) -> ShelfWindowPlacement {
+/// Computes the fixed oversized transparent shelf window placement anchored flush against
+/// `edge` (`Top` / `Left` / `Right`) of `monitor` (vertically centered inside `work_area` above
+/// the taskbar for `Left` / `Right`) for the given DPI scale factor.
+pub fn compute_shelf_window_rect_for_edge(
+    monitor: MonitorRect,
+    work_area: MonitorRect,
+    dpi_scale: f64,
+    edge: ShelfDockEdge,
+) -> ShelfWindowPlacement {
     let scale = dpi_scale.clamp(1.0, 4.0);
-    let desired_w = (SHELF_LOGICAL_WIDTH as f64 * scale).round() as i32;
-    let desired_h = (SHELF_LOGICAL_HEIGHT as f64 * scale).round() as i32;
-    let width = desired_w.min(monitor.width().max(320));
-    let height = desired_h.min(monitor.height().max(240));
-    let x = monitor.left + (monitor.width() - width) / 2;
-    let y = monitor.top;
+    let (x, y, width, height) = match edge {
+        ShelfDockEdge::Top => {
+            let desired_w = (SHELF_LOGICAL_WIDTH as f64 * scale).round() as i32;
+            let desired_h = (SHELF_LOGICAL_HEIGHT as f64 * scale).round() as i32;
+            let width = desired_w.min(monitor.width().max(320));
+            let height = desired_h.min(monitor.height().max(240));
+            let x = monitor.left + (monitor.width() - width) / 2;
+            let y = monitor.top;
+            (x, y, width, height)
+        }
+        ShelfDockEdge::Left | ShelfDockEdge::Right => {
+            let desired_w = (SIDE_SHELF_LOGICAL_WIDTH as f64 * scale).round() as i32;
+            let desired_h = (SIDE_SHELF_LOGICAL_HEIGHT as f64 * scale).round() as i32;
+            let work_h = if work_area.height() > 0 {
+                work_area.height()
+            } else {
+                monitor.height()
+            };
+            let work_top = if work_area.height() > 0 {
+                work_area.top
+            } else {
+                monitor.top
+            };
+            let width = desired_w.min(monitor.width().max(320));
+            let height = desired_h.min(work_h.max(320));
+            let y = work_top + (work_h - height) / 2;
+            let x = match edge {
+                ShelfDockEdge::Left => monitor.left,
+                ShelfDockEdge::Right => monitor.right - width,
+                ShelfDockEdge::Top => unreachable!(),
+            };
+            (x, y, width, height)
+        }
+    };
+
     ShelfWindowPlacement {
         x,
         y,
@@ -73,27 +159,138 @@ pub fn compute_shelf_window_rect(monitor: MonitorRect, dpi_scale: f64) -> ShelfW
     }
 }
 
+/// Computes the fixed oversized transparent shelf window placement anchored top-center
+/// of `monitor` for the given DPI scale factor (e.g. `1.0`, `1.25`, `1.5`).
+pub fn compute_shelf_window_rect(monitor: MonitorRect, dpi_scale: f64) -> ShelfWindowPlacement {
+    compute_shelf_window_rect_for_edge(monitor, monitor, dpi_scale, ShelfDockEdge::Top)
+}
+
 /// Computes the initial physical-pixel interactive rect for the compact expanded capsule
-/// centered at the top edge (`y = 0`) of `placement`, seeded synchronously before showing
-/// the shelf window so OS drag-and-drop hits immediately on frame 0 without waiting for
-/// CSS transitions or a JS IPC round-trip.
-pub fn default_compact_capsule_rect(placement: ShelfWindowPlacement) -> ClientRect {
+/// anchored to `edge`, seeded synchronously before showing the shelf window so OS drag-and-drop
+/// hits immediately on frame 0 without waiting for CSS transitions or a JS IPC round-trip.
+pub fn default_compact_capsule_rect_for_edge(
+    placement: ShelfWindowPlacement,
+    edge: ShelfDockEdge,
+) -> ClientRect {
     let scale = (placement.dpi_scale_percent as f64 / 100.0).clamp(1.0, 4.0);
     let margin = (16.0 * scale).round() as i32;
-    let max_w = (placement.width - margin).max(200);
-    let width = ((SHELF_COMPACT_LOGICAL_WIDTH as f64 * scale).round() as i32).min(max_w);
-    let height = ((SHELF_COMPACT_LOGICAL_HEIGHT as f64 * scale).round() as i32)
-        .min(placement.height.max(160));
-    let x = ((placement.width - width) / 2).max(0);
-    ClientRect {
-        x,
-        y: 0,
-        width,
-        height,
+    match edge {
+        ShelfDockEdge::Top => {
+            let max_w = (placement.width - margin).max(200);
+            let width = ((SHELF_COMPACT_LOGICAL_WIDTH as f64 * scale).round() as i32).min(max_w);
+            let height = ((SHELF_COMPACT_LOGICAL_HEIGHT as f64 * scale).round() as i32)
+                .min(placement.height.max(160));
+            let x = ((placement.width - width) / 2).max(0);
+            ClientRect {
+                x,
+                y: 0,
+                width,
+                height,
+            }
+        }
+        ShelfDockEdge::Left => {
+            let max_w = (placement.width - margin).max(160);
+            let max_h = (placement.height - margin).max(200);
+            let width = ((SIDE_COMPACT_LOGICAL_WIDTH as f64 * scale).round() as i32).min(max_w);
+            let height = ((SIDE_COMPACT_LOGICAL_HEIGHT as f64 * scale).round() as i32).min(max_h);
+            let y = ((placement.height - height) / 2).max(0);
+            ClientRect {
+                x: 0,
+                y,
+                width,
+                height,
+            }
+        }
+        ShelfDockEdge::Right => {
+            let max_w = (placement.width - margin).max(160);
+            let max_h = (placement.height - margin).max(200);
+            let width = ((SIDE_COMPACT_LOGICAL_WIDTH as f64 * scale).round() as i32).min(max_w);
+            let height = ((SIDE_COMPACT_LOGICAL_HEIGHT as f64 * scale).round() as i32).min(max_h);
+            let x = (placement.width - width).max(0);
+            let y = ((placement.height - height) / 2).max(0);
+            ClientRect {
+                x,
+                y,
+                width,
+                height,
+            }
+        }
     }
 }
 
+/// Computes the initial physical-pixel interactive rect for the top-docked compact capsule.
+pub fn default_compact_capsule_rect(placement: ShelfWindowPlacement) -> ClientRect {
+    default_compact_capsule_rect_for_edge(placement, ShelfDockEdge::Top)
+}
+
 /// Evaluates whether client-coordinate pixel `(x, y)` inside the fixed shelf window
+/// should receive mouse/drag events rather than returning `HTTRANSPARENT` for `edge`.
+pub fn shelf_point_is_interactive_for_edge(
+    x: i32,
+    y: i32,
+    window_width: i32,
+    window_height: i32,
+    dpi_scale: f64,
+    active_capsule_rect: Option<ClientRect>,
+    edge: ShelfDockEdge,
+) -> bool {
+    if let Some(rect) = active_capsule_rect {
+        if rect.contains(x, y) {
+            return true;
+        }
+    }
+
+    let scale = dpi_scale.clamp(1.0, 4.0);
+    let hotstrip = match edge {
+        ShelfDockEdge::Top => {
+            // Thin 3-4px top-center trigger hotstrip without blocking maximized app tabs/caption buttons.
+            let strip_w =
+                ((TOP_HOTSTRIP_LOGICAL_WIDTH as f64 * scale).round() as i32).min(window_width);
+            let strip_h = (TOP_HOTSTRIP_LOGICAL_HEIGHT as f64 * scale)
+                .round()
+                .max(3.0) as i32;
+            let strip_x = (window_width - strip_w) / 2;
+            ClientRect {
+                x: strip_x,
+                y: 0,
+                width: strip_w,
+                height: strip_h,
+            }
+        }
+        ShelfDockEdge::Left => {
+            let strip_w = (SIDE_HOTSTRIP_LOGICAL_THICKNESS as f64 * scale)
+                .round()
+                .max(3.0) as i32;
+            let strip_h =
+                ((SIDE_HOTSTRIP_LOGICAL_LENGTH as f64 * scale).round() as i32).min(window_height);
+            let strip_y = (window_height - strip_h) / 2;
+            ClientRect {
+                x: 0,
+                y: strip_y,
+                width: strip_w,
+                height: strip_h,
+            }
+        }
+        ShelfDockEdge::Right => {
+            let strip_w = (SIDE_HOTSTRIP_LOGICAL_THICKNESS as f64 * scale)
+                .round()
+                .max(3.0) as i32;
+            let strip_h =
+                ((SIDE_HOTSTRIP_LOGICAL_LENGTH as f64 * scale).round() as i32).min(window_height);
+            let strip_x = (window_width - strip_w).max(0);
+            let strip_y = (window_height - strip_h) / 2;
+            ClientRect {
+                x: strip_x,
+                y: strip_y,
+                width: strip_w,
+                height: strip_h,
+            }
+        }
+    };
+    hotstrip.contains(x, y)
+}
+
+/// Evaluates whether client-coordinate pixel `(x, y)` inside the top-docked shelf window
 /// should receive mouse/drag events rather than returning `HTTRANSPARENT`.
 pub fn shelf_point_is_interactive(
     x: i32,
@@ -102,27 +299,15 @@ pub fn shelf_point_is_interactive(
     dpi_scale: f64,
     active_capsule_rect: Option<ClientRect>,
 ) -> bool {
-    if let Some(rect) = active_capsule_rect {
-        if rect.contains(x, y) {
-            return true;
-        }
-    }
-
-    // Always keep a thin 3-4px top-center trigger hotstrip receptive without blocking
-    // maximized app tabs or caption buttons on the left/right edges.
-    let scale = dpi_scale.clamp(1.0, 4.0);
-    let strip_w = ((TOP_HOTSTRIP_LOGICAL_WIDTH as f64 * scale).round() as i32).min(window_width);
-    let strip_h = (TOP_HOTSTRIP_LOGICAL_HEIGHT as f64 * scale)
-        .round()
-        .max(3.0) as i32;
-    let strip_x = (window_width - strip_w) / 2;
-    let hotstrip = ClientRect {
-        x: strip_x,
-        y: 0,
-        width: strip_w,
-        height: strip_h,
-    };
-    hotstrip.contains(x, y)
+    shelf_point_is_interactive_for_edge(
+        x,
+        y,
+        window_width,
+        SHELF_LOGICAL_HEIGHT,
+        dpi_scale,
+        active_capsule_rect,
+        ShelfDockEdge::Top,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,8 +315,22 @@ struct ShelfHitState {
     capsule_rect: Option<ClientRect>,
     window_origin: (i32, i32),
     dpi_scale: f64,
+    dock_edge: ShelfDockEdge,
     allow_activate: bool,
     outbound_dragging: bool,
+}
+
+impl Default for ShelfHitState {
+    fn default() -> Self {
+        Self {
+            capsule_rect: None,
+            window_origin: (0, 0),
+            dpi_scale: 1.0,
+            dock_edge: ShelfDockEdge::Top,
+            allow_activate: false,
+            outbound_dragging: false,
+        }
+    }
 }
 
 static SHELF_HIT_STATES: OnceLock<Mutex<HashMap<isize, ShelfHitState>>> = OnceLock::new();
@@ -141,44 +340,39 @@ fn shelf_hit_states() -> &'static Mutex<HashMap<isize, ShelfHitState>> {
 }
 
 /// Updates the visible interactive capsule rect (in physical client pixels) for the shelf HWND.
-/// Pass `None` when collapsed so only the 3-4px top-center hotstrip remains receptive.
+/// Pass `None` when collapsed so only the 3-4px docked bezel hotstrip remains receptive.
 pub fn set_shelf_hit_rect(hwnd_raw: isize, rect: Option<ClientRect>) {
     if let Ok(mut map) = shelf_hit_states().lock() {
-        let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
-            capsule_rect: None,
-            window_origin: (0, 0),
-            dpi_scale: 1.0,
-            allow_activate: false,
-            outbound_dragging: false,
-        });
+        let entry = map.entry(hwnd_raw).or_default();
         entry.capsule_rect = rect;
     }
 }
 
-/// Temporarily permits the shelf window to accept keyboard focus (e.g. while typing in
-/// Full-Waterfall search) while keeping normal expand/drag strictly non-activating.
-pub fn set_shelf_allow_activate(hwnd_raw: isize, allow: bool) {
+/// Updates only the in-memory `allow_activate` flag for `WM_MOUSEACTIVATE` (safe from any thread).
+pub fn set_shelf_allow_activate_state_only(hwnd_raw: isize, allow: bool) {
     if let Ok(mut map) = shelf_hit_states().lock() {
-        let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
-            capsule_rect: None,
-            window_origin: (0, 0),
-            dpi_scale: 1.0,
-            allow_activate: false,
-            outbound_dragging: false,
-        });
+        let entry = map.entry(hwnd_raw).or_default();
         entry.allow_activate = allow;
     }
+}
+
+/// Updates `allow_activate` state AND toggles `WS_EX_NOACTIVATE` on the shelf HWND.
+/// MUST be invoked strictly on the main Win32 UI thread that owns `hwnd_raw`!
+pub fn apply_shelf_no_activate_style(hwnd_raw: isize, allow: bool) {
+    set_shelf_allow_activate_state_only(hwnd_raw, allow);
 
     #[cfg(target_os = "windows")]
     if hwnd_raw != 0 {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+            GetWindowLongPtrW, IsWindow, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
         };
         let hwnd = HWND(hwnd_raw as *mut _);
-        // SAFETY: Toggles `WS_EX_NOACTIVATE` on our owned shelf HWND so Full-Waterfall search
-        // inputs can receive keyboard focus on click, and restores non-activating mode afterward.
+        // SAFETY: Toggles `WS_EX_NOACTIVATE` on our owned shelf HWND on the owning Win32 UI thread.
         unsafe {
+            if !IsWindow(hwnd).as_bool() {
+                return;
+            }
             let cur_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             let next_ex = if allow {
                 cur_ex & !(WS_EX_NOACTIVATE.0 as isize)
@@ -192,18 +386,19 @@ pub fn set_shelf_allow_activate(hwnd_raw: isize, allow: bool) {
     }
 }
 
+/// Temporarily permits the shelf window to accept keyboard focus (e.g. while typing in
+/// Full-Waterfall search) while keeping normal expand/drag strictly non-activating.
+/// MUST be invoked on the main Win32 UI thread.
+pub fn set_shelf_allow_activate(hwnd_raw: isize, allow: bool) {
+    apply_shelf_no_activate_style(hwnd_raw, allow);
+}
+
 /// Marks whether an outbound OLE `DoDragDrop` initiated from the shelf is currently active.
 /// While true, `WM_NCHITTEST` returns `HTTRANSPARENT` across the shelf so apps underneath
 /// (Desktop, Explorer, Figma, Charkle main window) can receive drops anywhere on screen.
 pub fn set_shelf_outbound_dragging(hwnd_raw: isize, dragging: bool) {
     if let Ok(mut map) = shelf_hit_states().lock() {
-        let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
-            capsule_rect: None,
-            window_origin: (0, 0),
-            dpi_scale: 1.0,
-            allow_activate: false,
-            outbound_dragging: false,
-        });
+        let entry = map.entry(hwnd_raw).or_default();
         entry.outbound_dragging = dragging;
     }
 }
@@ -239,7 +434,10 @@ const SHELF_SUBCLASS_ID: usize = 0x4348_5348; // "CHSH"
 /// IMPORTANT: Never set `DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED` — doing so disables DWM
 /// non-client composition and causes Windows to paint a legacy GDI `"Charkle Shelf"` titlebar!
 #[cfg(target_os = "windows")]
-pub fn configure_shelf_window(hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
+pub fn configure_shelf_window_for_edge(
+    hwnd_raw: isize,
+    edge: ShelfDockEdge,
+) -> Result<ShelfWindowPlacement, String> {
     use std::ffi::c_void;
     use std::mem::size_of;
     use windows::Win32::Foundation::{BOOL, HWND};
@@ -332,7 +530,12 @@ pub fn configure_shelf_window(hwnd_raw: isize) -> Result<ShelfWindowPlacement, S
         let _ = DwmExtendFrameIntoClientArea(hwnd, &full_sheet);
     }
 
-    reposition_shelf_to_cursor_monitor(hwnd_raw)
+    reposition_shelf_to_cursor_monitor_for_edge(hwnd_raw, edge)
+}
+
+#[cfg(target_os = "windows")]
+pub fn configure_shelf_window(hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
+    configure_shelf_window_for_edge(hwnd_raw, ShelfDockEdge::Top)
 }
 
 /// Shows the shelf HWND topmost without activating or stealing foreground focus (`SW_SHOWNOACTIVATE`).
@@ -399,22 +602,31 @@ pub fn is_shelf_window_visible(_hwnd_raw: isize) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn configure_shelf_window(_hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
-    Ok(compute_shelf_window_rect(
-        MonitorRect {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        },
-        1.0,
-    ))
+pub fn configure_shelf_window_for_edge(
+    _hwnd_raw: isize,
+    edge: ShelfDockEdge,
+) -> Result<ShelfWindowPlacement, String> {
+    let mon = MonitorRect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    Ok(compute_shelf_window_rect_for_edge(mon, mon, 1.0, edge))
 }
 
-/// Repositions the fixed-size shelf HWND to the top-center of whichever monitor currently
-/// hosts the mouse cursor, without stealing foreground focus (`SWP_NOACTIVATE`).
+#[cfg(not(target_os = "windows"))]
+pub fn configure_shelf_window(_hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
+    configure_shelf_window_for_edge(0, ShelfDockEdge::Top)
+}
+
+/// Repositions the fixed-size shelf HWND to `edge` (`Top`/`Left`/`Right`) of whichever monitor
+/// currently hosts the mouse cursor, without stealing foreground focus (`SWP_NOACTIVATE`).
 #[cfg(target_os = "windows")]
-pub fn reposition_shelf_to_cursor_monitor(hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
+pub fn reposition_shelf_to_cursor_monitor_for_edge(
+    hwnd_raw: isize,
+    edge: ShelfDockEdge,
+) -> Result<ShelfWindowPlacement, String> {
     use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -436,20 +648,29 @@ pub fn reposition_shelf_to_cursor_monitor(hwnd_raw: isize) -> Result<ShelfWindow
     };
     // SAFETY: `info.cbSize` is initialized.
     let ok = unsafe { GetMonitorInfoW(hmon, &mut info) };
-    let monitor = if ok.as_bool() {
-        MonitorRect {
-            left: info.rcMonitor.left,
-            top: info.rcMonitor.top,
-            right: info.rcMonitor.right,
-            bottom: info.rcMonitor.bottom,
-        }
+    let (monitor, work_area) = if ok.as_bool() {
+        (
+            MonitorRect {
+                left: info.rcMonitor.left,
+                top: info.rcMonitor.top,
+                right: info.rcMonitor.right,
+                bottom: info.rcMonitor.bottom,
+            },
+            MonitorRect {
+                left: info.rcWork.left,
+                top: info.rcWork.top,
+                right: info.rcWork.right,
+                bottom: info.rcWork.bottom,
+            },
+        )
     } else {
-        MonitorRect {
+        let fallback = MonitorRect {
             left: 0,
             top: 0,
             right: 1920,
             bottom: 1080,
-        }
+        };
+        (fallback, fallback)
     };
 
     let mut dpi_x: u32 = 96;
@@ -458,17 +679,12 @@ pub fn reposition_shelf_to_cursor_monitor(hwnd_raw: isize) -> Result<ShelfWindow
     let _ = unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
     let dpi_scale = (dpi_x as f64 / 96.0).clamp(1.0, 4.0);
 
-    let placement = compute_shelf_window_rect(monitor, dpi_scale);
+    let placement = compute_shelf_window_rect_for_edge(monitor, work_area, dpi_scale, edge);
     if let Ok(mut map) = shelf_hit_states().lock() {
-        let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
-            capsule_rect: None,
-            window_origin: (placement.x, placement.y),
-            dpi_scale,
-            allow_activate: false,
-            outbound_dragging: false,
-        });
+        let entry = map.entry(hwnd_raw).or_default();
         entry.window_origin = (placement.x, placement.y);
         entry.dpi_scale = dpi_scale;
+        entry.dock_edge = edge;
     }
 
     let hwnd = HWND(hwnd_raw as *mut _);
@@ -488,11 +704,24 @@ pub fn reposition_shelf_to_cursor_monitor(hwnd_raw: isize) -> Result<ShelfWindow
     Ok(placement)
 }
 
+#[cfg(target_os = "windows")]
+pub fn reposition_shelf_to_cursor_monitor(hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
+    reposition_shelf_to_cursor_monitor_for_edge(hwnd_raw, ShelfDockEdge::Top)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn reposition_shelf_to_cursor_monitor_for_edge(
+    _hwnd_raw: isize,
+    edge: ShelfDockEdge,
+) -> Result<ShelfWindowPlacement, String> {
+    configure_shelf_window_for_edge(0, edge)
+}
+
 #[cfg(not(target_os = "windows"))]
 pub fn reposition_shelf_to_cursor_monitor(
     _hwnd_raw: isize,
 ) -> Result<ShelfWindowPlacement, String> {
-    configure_shelf_window(0)
+    configure_shelf_window_for_edge(0, ShelfDockEdge::Top)
 }
 
 /// Installs the Win32 subclass handling zero-nonclient-area suppression, `WM_NCHITTEST`
@@ -515,85 +744,90 @@ pub fn install_shelf_subclass(hwnd_raw: isize) -> bool {
         uid_subclass: usize,
         _ref_data: usize,
     ) -> LRESULT {
-        match msg {
-            WM_NCCALCSIZE => {
-                // Eliminate ALL non-client border/caption pixels so Windows never reserves a titlebar.
-                return LRESULT(0);
-            }
-            WM_NCACTIVATE => {
-                // Never allow DefWindowProc to paint a classic active/inactive titlebar strip.
-                return LRESULT(1);
-            }
-            m if crate::windowing::should_suppress_nc_paint_message(m) => {
-                // Swallow WM_NCPAINT, WM_NCUAHDRAWCAPTION (0x00AE), and WM_NCUAHDRAWFRAME (0x00AF).
-                return LRESULT(0);
-            }
-            WM_ERASEBKGND => {
-                return LRESULT(1);
-            }
-            WM_MOUSEACTIVATE => {
-                let allow_activate = shelf_hit_states()
-                    .lock()
-                    .ok()
-                    .and_then(|m| m.get(&(hwnd.0 as isize)).map(|s| s.allow_activate))
-                    .unwrap_or(false);
-                return LRESULT(if allow_activate {
-                    MA_ACTIVATE as isize
-                } else {
-                    MA_NOACTIVATE as isize
-                });
-            }
-            WM_NCHITTEST => {
-                let state = shelf_hit_states()
-                    .lock()
-                    .ok()
-                    .and_then(|m| m.get(&(hwnd.0 as isize)).copied())
-                    .unwrap_or(ShelfHitState {
-                        capsule_rect: None,
-                        window_origin: (0, 0),
-                        dpi_scale: 1.0,
-                        allow_activate: false,
-                        outbound_dragging: false,
-                    });
-
-                // During an active outbound OLE drag from the shelf, let all hit tests pass through
-                // so the user can drop files onto ANY window or desktop area behind the shelf!
-                if state.outbound_dragging {
-                    return LRESULT(HTTRANSPARENT as isize);
-                }
-
-                let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                let mut pt = POINT {
-                    x: screen_x,
-                    y: screen_y,
-                };
-                if unsafe { ScreenToClient(hwnd, &mut pt) }.as_bool() {
-                    let mut rc = RECT::default();
-                    let _ = unsafe { GetClientRect(hwnd, &mut rc) };
-                    let win_w = (rc.right - rc.left).max(1);
-                    if !shelf_point_is_interactive(
-                        pt.x,
-                        pt.y,
-                        win_w,
-                        state.dpi_scale,
-                        state.capsule_rect,
-                    ) {
-                        return LRESULT(HTTRANSPARENT as isize);
+        let handled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<LRESULT> {
+                match msg {
+                    WM_NCCALCSIZE => {
+                        // Eliminate ALL non-client border/caption pixels so Windows never reserves a titlebar.
+                        return Some(LRESULT(0));
                     }
-                }
-            }
-            WM_NCDESTROY => {
-                if let Ok(mut map) = shelf_hit_states().lock() {
-                    map.remove(&(hwnd.0 as isize));
-                }
-                cleanup_shelf_drop_targets(hwnd.0 as isize);
-                let _ =
-                    unsafe { RemoveWindowSubclass(hwnd, Some(shelf_subclass_proc), uid_subclass) };
-            }
-            _ => {}
-        }
+                    WM_NCACTIVATE => {
+                        // Never allow DefWindowProc to paint a classic active/inactive titlebar strip.
+                        return Some(LRESULT(1));
+                    }
+                    m if crate::windowing::should_suppress_nc_paint_message(m) => {
+                        // Swallow WM_NCPAINT, WM_NCUAHDRAWCAPTION (0x00AE), and WM_NCUAHDRAWFRAME (0x00AF).
+                        return Some(LRESULT(0));
+                    }
+                    WM_ERASEBKGND => {
+                        return Some(LRESULT(1));
+                    }
+                    WM_MOUSEACTIVATE => {
+                        let allow_activate = shelf_hit_states()
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&(hwnd.0 as isize)).map(|s| s.allow_activate))
+                            .unwrap_or(false);
+                        return Some(LRESULT(if allow_activate {
+                            MA_ACTIVATE as isize
+                        } else {
+                            MA_NOACTIVATE as isize
+                        }));
+                    }
+                    WM_NCHITTEST => {
+                        let state = shelf_hit_states()
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&(hwnd.0 as isize)).copied())
+                            .unwrap_or_default();
 
+                        // During an active outbound OLE drag from the shelf, let all hit tests pass through
+                        // so the user can drop files onto ANY window or desktop area behind the shelf!
+                        if state.outbound_dragging {
+                            return Some(LRESULT(HTTRANSPARENT as isize));
+                        }
+
+                        let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
+                        let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                        let mut pt = POINT {
+                            x: screen_x,
+                            y: screen_y,
+                        };
+                        if unsafe { ScreenToClient(hwnd, &mut pt) }.as_bool() {
+                            let mut rc = RECT::default();
+                            let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+                            let win_w = (rc.right - rc.left).max(1);
+                            let win_h = (rc.bottom - rc.top).max(1);
+                            if !shelf_point_is_interactive_for_edge(
+                                pt.x,
+                                pt.y,
+                                win_w,
+                                win_h,
+                                state.dpi_scale,
+                                state.capsule_rect,
+                                state.dock_edge,
+                            ) {
+                                return Some(LRESULT(HTTRANSPARENT as isize));
+                            }
+                        }
+                    }
+                    WM_NCDESTROY => {
+                        if let Ok(mut map) = shelf_hit_states().lock() {
+                            map.remove(&(hwnd.0 as isize));
+                        }
+                        cleanup_shelf_drop_targets(hwnd.0 as isize);
+                        let _ = unsafe {
+                            RemoveWindowSubclass(hwnd, Some(shelf_subclass_proc), uid_subclass)
+                        };
+                    }
+                    _ => {}
+                }
+                None
+            }));
+
+        if let Ok(Some(res)) = handled {
+            return res;
+        }
         unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
 
@@ -618,11 +852,12 @@ impl Drop for TopEdgeDragMonitorHandle {
     }
 }
 
-/// Shared live control flags for the Top-Edge Drop Shelf monitor.
+/// Shared live control flags for the Drop Shelf edge monitor.
 #[derive(Clone)]
 pub struct ShelfMonitorConfig {
     pub enabled: Arc<AtomicBool>,
     pub hover_trigger_enabled: Arc<AtomicBool>,
+    pub dock_edge: Arc<AtomicU8>,
     pub shelf_expanded: Arc<AtomicBool>,
     pub shelf_pinned: Arc<AtomicBool>,
     pub shelf_drag_hovering: Arc<AtomicBool>,
@@ -708,14 +943,32 @@ where
                 }
 
                 let mon = info.rcMonitor;
+                let work = info.rcWork;
                 let center_x = (mon.left + mon.right) / 2;
+                let work_center_y = (work.top + work.bottom) / 2;
+                let edge = ShelfDockEdge::from_u8(config.dock_edge.load(Ordering::Relaxed));
                 let is_expanded = config.shelf_expanded.load(Ordering::Relaxed);
                 let is_pinned = config.shelf_pinned.load(Ordering::Relaxed);
 
                 if !is_expanded {
                     outside_since = None;
-                    let in_drag_strip =
-                        pt.y >= mon.top && pt.y <= mon.top + 10 && (pt.x - center_x).abs() <= 220;
+                    let in_drag_strip = match edge {
+                        ShelfDockEdge::Top => {
+                            pt.y >= mon.top
+                                && pt.y <= mon.top + 10
+                                && (pt.x - center_x).abs() <= 220
+                        }
+                        ShelfDockEdge::Left => {
+                            pt.x >= mon.left
+                                && pt.x <= mon.left + 10
+                                && (pt.y - work_center_y).abs() <= 220
+                        }
+                        ShelfDockEdge::Right => {
+                            pt.x >= mon.right - 10
+                                && pt.x <= mon.right
+                                && (pt.y - work_center_y).abs() <= 220
+                        }
+                    };
                     if lbutton_down && in_drag_strip {
                         if !drag_triggered {
                             drag_triggered = true;
@@ -728,11 +981,25 @@ where
                         drag_triggered = false;
                     }
 
-                    // Optional top-center hover dwell trigger (~180ms) matching macOS NotchShelfController
+                    // Optional docked-edge hover dwell trigger (~180ms) matching macOS NotchShelfController
                     if !lbutton_down && config.hover_trigger_enabled.load(Ordering::Relaxed) {
-                        let in_hover_strip = pt.y >= mon.top
-                            && pt.y <= mon.top + 3
-                            && (pt.x - center_x).abs() <= 140;
+                        let in_hover_strip = match edge {
+                            ShelfDockEdge::Top => {
+                                pt.y >= mon.top
+                                    && pt.y <= mon.top + 3
+                                    && (pt.x - center_x).abs() <= 140
+                            }
+                            ShelfDockEdge::Left => {
+                                pt.x >= mon.left
+                                    && pt.x <= mon.left + 3
+                                    && (pt.y - work_center_y).abs() <= 140
+                            }
+                            ShelfDockEdge::Right => {
+                                pt.x >= mon.right - 3
+                                    && pt.x <= mon.right
+                                    && (pt.y - work_center_y).abs() <= 140
+                            }
+                        };
                         if in_hover_strip {
                             let started = hover_since.get_or_insert_with(Instant::now);
                             if started.elapsed() >= Duration::from_millis(180) {
@@ -772,13 +1039,30 @@ where
                         continue;
                     }
 
-                    // Auto-collapse unpinned shelf once cursor leaves the active capsule rect (+24px grace)
+                    // Auto-collapse unpinned shelf once cursor leaves the active capsule rect
+                    // (+24px outward grace, +8px bezel grace on the docked edge).
                     let inside_capsule = if let Some(rc) = active_shelf_screen_rect(hwnd_raw) {
                         let margin = 24;
-                        pt.x >= rc.x - margin
-                            && pt.x <= rc.x + rc.width + margin
-                            && pt.y >= rc.y - 8
-                            && pt.y <= rc.y + rc.height + margin
+                        match edge {
+                            ShelfDockEdge::Top => {
+                                pt.x >= rc.x - margin
+                                    && pt.x <= rc.x + rc.width + margin
+                                    && pt.y >= rc.y - 8
+                                    && pt.y <= rc.y + rc.height + margin
+                            }
+                            ShelfDockEdge::Left => {
+                                pt.x >= rc.x - 8
+                                    && pt.x <= rc.x + rc.width + margin
+                                    && pt.y >= rc.y - margin
+                                    && pt.y <= rc.y + rc.height + margin
+                            }
+                            ShelfDockEdge::Right => {
+                                pt.x >= rc.x - margin
+                                    && pt.x <= rc.x + rc.width + 8
+                                    && pt.y >= rc.y - margin
+                                    && pt.y <= rc.y + rc.height + margin
+                            }
+                        }
                     } else {
                         // Capsule still animating in; keep it open until hit rect arrives
                         true
@@ -812,6 +1096,7 @@ where
         ShelfMonitorConfig {
             enabled: Arc::new(AtomicBool::new(true)),
             hover_trigger_enabled: Arc::new(AtomicBool::new(false)),
+            dock_edge: Arc::new(AtomicU8::new(ShelfDockEdge::Top.to_u8())),
             shelf_expanded: Arc::new(AtomicBool::new(false)),
             shelf_pinned: Arc::new(AtomicBool::new(false)),
             shelf_drag_hovering: Arc::new(AtomicBool::new(false)),
@@ -901,12 +1186,13 @@ mod drop_target {
         RevokeDragDrop, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
     use windows::Win32::UI::Shell::{
         DragQueryFileW, IShellItemArray, SHCreateShellItemArrayFromDataObject, HDROP,
         SIGDN_FILESYSPATH,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, GetClassNameW, GetPropW, IsWindow,
+        EnumChildWindows, GetClassNameW, GetPropW, GetWindowThreadProcessId, IsWindow,
     };
 
     static SHELF_DROP_CALLBACKS: OnceLock<Mutex<HashMap<isize, ShelfDropCallback>>> =
@@ -920,8 +1206,23 @@ mod drop_target {
     // Shelf HWND and registered them, keeping COM lifetimes alive until `WM_NCDESTROY`.
     thread_local! {
         static OLE_INIT_DONE: Cell<bool> = const { Cell::new(false) };
+        static REFRESH_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
         static SHELF_DROP_TARGETS: RefCell<HashMap<isize, HashMap<isize, IDropTarget>>> =
             RefCell::new(HashMap::new());
+    }
+
+    struct RefreshGuard;
+    impl Drop for RefreshGuard {
+        fn drop(&mut self) {
+            REFRESH_IN_PROGRESS.with(|flag| flag.set(false));
+        }
+    }
+
+    fn is_own_thread_hwnd(hwnd: HWND, cur_pid: u32, cur_tid: u32) -> bool {
+        let mut pid = 0u32;
+        // SAFETY: Read-only Win32 thread/process ownership query.
+        let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        pid == cur_pid && tid == cur_tid
     }
 
     struct StgMediumGuard(STGMEDIUM);
@@ -1196,6 +1497,19 @@ mod drop_target {
         if shelf_hwnd_raw == 0 {
             return 0;
         }
+        let already_busy = REFRESH_IN_PROGRESS.with(|flag| {
+            if flag.get() {
+                true
+            } else {
+                flag.set(true);
+                false
+            }
+        });
+        if already_busy {
+            return 0;
+        }
+        let _refresh_guard = RefreshGuard;
+
         let callback = drop_callbacks()
             .lock()
             .ok()
@@ -1206,13 +1520,19 @@ mod drop_target {
 
         ensure_sta_ole_initialized();
 
+        let cur_pid = unsafe { GetCurrentProcessId() };
+        let cur_tid = unsafe { GetCurrentThreadId() };
         let root_hwnd = HWND(shelf_hwnd_raw as *mut _);
-        if !unsafe { IsWindow(root_hwnd) }.as_bool() {
+        if !unsafe { IsWindow(root_hwnd) }.as_bool()
+            || !is_own_thread_hwnd(root_hwnd, cur_pid, cur_tid)
+        {
             return 0;
         }
 
-        // Collect the shelf root HWND plus EVERY descendant HWND (including WebView2's lazily
-        // created `Chrome_WidgetWin_1` and `Chrome_RenderWidgetHostHWND` child HWNDs).
+        // Collect the shelf root HWND plus descendants, then STRICTLY filter to HWNDs owned by
+        // our own process & STA UI thread. NEVER call RevokeDragDrop / RegisterDragDrop on
+        // cross-process `msedgewebview2.exe` HWNDs (`Chrome_RenderWidgetHostHWND`), which can
+        // corrupt WebView2 input/click handling or pump re-entrant COM messages.
         let mut all_hwnds: Vec<HWND> = vec![root_hwnd];
         unsafe extern "system" fn collect_child(child: HWND, lparam: LPARAM) -> BOOL {
             let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
@@ -1226,50 +1546,71 @@ mod drop_target {
                 LPARAM(&mut all_hwnds as *mut Vec<HWND> as isize),
             );
         }
+        let own_hwnds: Vec<HWND> = all_hwnds
+            .into_iter()
+            .filter(|&h| {
+                unsafe { IsWindow(h) }.as_bool() && is_own_thread_hwnd(h, cur_pid, cur_tid)
+            })
+            .collect();
 
-        let mut newly_installed = 0usize;
-        SHELF_DROP_TARGETS.with(|cell| {
-            let mut root_map = cell.borrow_mut();
+        // Snapshot tracked HWND keys & prune destroyed ones under a SHORT RefCell borrow —
+        // ALWAYS release `SHELF_DROP_TARGETS` BEFORE any COM `RevokeDragDrop`/`RegisterDragDrop`
+        // call (which can pump the Win32 message queue and re-enter!).
+        let tracked_keys: std::collections::HashSet<isize> = SHELF_DROP_TARGETS.with(|cell| {
+            let Ok(mut root_map) = cell.try_borrow_mut() else {
+                return std::collections::HashSet::new();
+            };
             let targets = root_map.entry(shelf_hwnd_raw).or_default();
-
-            // Prune destroyed child HWNDs
             targets.retain(|&h_raw, _| unsafe { IsWindow(HWND(h_raw as *mut _)) }.as_bool());
+            targets.keys().copied().collect()
+        });
 
-            for h in all_hwnds {
-                let h_raw = h.0 as isize;
-                let prop = unsafe { GetPropW(h, w!("OleDropTargetInterface")) };
-                if targets.contains_key(&h_raw) && !prop.0.is_null() {
-                    continue;
+        let mut registered_batch: Vec<(isize, IDropTarget)> = Vec::new();
+        for h in own_hwnds {
+            let h_raw = h.0 as isize;
+            let prop = unsafe { GetPropW(h, w!("OleDropTargetInterface")) };
+            if tracked_keys.contains(&h_raw) && !prop.0.is_null() {
+                continue;
+            }
+
+            let cls = hwnd_class_name(h);
+            let revoke_res = unsafe { RevokeDragDrop(h) };
+            if revoke_res == Err(DRAGDROP_E_INVALIDHWND.into()) {
+                continue;
+            }
+
+            let drop_target: IDropTarget = ShelfDropTarget::new(Arc::clone(&callback)).into();
+            match unsafe { RegisterDragDrop(h, &drop_target) } {
+                Ok(()) => {
+                    registered_batch.push((h_raw, drop_target));
+                    tracing::info!(
+                        hwnd = h_raw,
+                        class = %cls,
+                        "Installed native Shelf IDropTarget"
+                    );
                 }
-
-                let cls = hwnd_class_name(h);
-                let revoke_res = unsafe { RevokeDragDrop(h) };
-                if revoke_res == Err(DRAGDROP_E_INVALIDHWND.into()) {
-                    continue;
-                }
-
-                let drop_target: IDropTarget = ShelfDropTarget::new(Arc::clone(&callback)).into();
-                match unsafe { RegisterDragDrop(h, &drop_target) } {
-                    Ok(()) => {
-                        targets.insert(h_raw, drop_target);
-                        newly_installed += 1;
-                        tracing::info!(
-                            hwnd = h_raw,
-                            class = %cls,
-                            "Installed native Shelf IDropTarget"
-                        );
-                    }
-                    Err(err) => {
-                        tracing::debug!(
-                            hwnd = h_raw,
-                            class = %cls,
-                            %err,
-                            "Skipped native Shelf IDropTarget registration"
-                        );
-                    }
+                Err(err) => {
+                    tracing::debug!(
+                        hwnd = h_raw,
+                        class = %cls,
+                        %err,
+                        "Skipped native Shelf IDropTarget registration"
+                    );
                 }
             }
-        });
+        }
+
+        let newly_installed = registered_batch.len();
+        if !registered_batch.is_empty() {
+            SHELF_DROP_TARGETS.with(|cell| {
+                if let Ok(mut root_map) = cell.try_borrow_mut() {
+                    let targets = root_map.entry(shelf_hwnd_raw).or_default();
+                    for (h_raw, target) in registered_batch {
+                        targets.insert(h_raw, target);
+                    }
+                }
+            });
+        }
 
         newly_installed
     }
@@ -1278,16 +1619,23 @@ mod drop_target {
         if let Ok(mut map) = drop_callbacks().lock() {
             map.remove(&shelf_hwnd_raw);
         }
-        SHELF_DROP_TARGETS.with(|cell| {
-            if let Some(targets) = cell.borrow_mut().remove(&shelf_hwnd_raw) {
-                for (h_raw, _target) in targets {
-                    let h = HWND(h_raw as *mut _);
-                    if unsafe { IsWindow(h) }.as_bool() {
-                        let _ = unsafe { RevokeDragDrop(h) };
-                    }
+        // Drain out of RefCell BEFORE calling `RevokeDragDrop` so re-entrant WM_NCDESTROY /
+        // COM pumping can NEVER trigger a `BorrowMutError` panic across `extern "system"`.
+        let drained = SHELF_DROP_TARGETS.with(|cell| {
+            cell.try_borrow_mut()
+                .ok()
+                .and_then(|mut root_map| root_map.remove(&shelf_hwnd_raw))
+        });
+        if let Some(targets) = drained {
+            let cur_pid = unsafe { GetCurrentProcessId() };
+            let cur_tid = unsafe { GetCurrentThreadId() };
+            for (h_raw, _target) in targets {
+                let h = HWND(h_raw as *mut _);
+                if unsafe { IsWindow(h) }.as_bool() && is_own_thread_hwnd(h, cur_pid, cur_tid) {
+                    let _ = unsafe { RevokeDragDrop(h) };
                 }
             }
-        });
+        }
     }
 }
 
@@ -1440,5 +1788,97 @@ mod tests {
         let files = ShelfDropPayload::Files(vec![PathBuf::from("a.png"), PathBuf::from("b.png")]);
         assert_eq!(files.item_count(), 2);
         assert_eq!(ShelfDropPayload::Files(Vec::new()).item_count(), 1);
+    }
+
+    #[test]
+    fn shelf_dock_edge_parses_and_round_trips_u8_and_str() {
+        for (raw, expected, canonical) in [
+            ("top", ShelfDockEdge::Top, "top"),
+            ("LEFT", ShelfDockEdge::Left, "left"),
+            (" Right ", ShelfDockEdge::Right, "right"),
+            ("unknown", ShelfDockEdge::Top, "top"),
+        ] {
+            let parsed = ShelfDockEdge::from_str_lossy(raw);
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.as_str(), canonical);
+            assert_eq!(ShelfDockEdge::from_u8(parsed.to_u8()), expected);
+        }
+        assert_eq!(ShelfDockEdge::from_u8(99), ShelfDockEdge::Top);
+    }
+
+    #[test]
+    fn side_edge_window_placement_centers_in_work_area_and_flushes_bezel() {
+        let mon = MonitorRect {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        // Simulated 60px Windows taskbar at the bottom
+        let work = MonitorRect {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1380,
+        };
+
+        let left_p = compute_shelf_window_rect_for_edge(mon, work, 1.5, ShelfDockEdge::Left);
+        assert_eq!(left_p.x, 0);
+        assert_eq!(left_p.width, (560.0 * 1.5_f64).round() as i32);
+        assert_eq!(left_p.height, (760.0 * 1.5_f64).round() as i32);
+        assert_eq!(left_p.y, (1380 - left_p.height) / 2);
+
+        let right_p = compute_shelf_window_rect_for_edge(mon, work, 1.5, ShelfDockEdge::Right);
+        assert_eq!(right_p.x, mon.right - right_p.width);
+        assert_eq!(right_p.y, left_p.y);
+        assert_eq!(right_p.width, left_p.width);
+        assert_eq!(right_p.height, left_p.height);
+
+        // Compact frame-0 hit rects stay flush on the docked bezel and vertically centered
+        let left_cap = default_compact_capsule_rect_for_edge(left_p, ShelfDockEdge::Left);
+        assert_eq!(left_cap.x, 0);
+        assert_eq!(left_cap.y, (left_p.height - left_cap.height) / 2);
+
+        let right_cap = default_compact_capsule_rect_for_edge(right_p, ShelfDockEdge::Right);
+        assert_eq!(right_cap.x, right_p.width - right_cap.width);
+        assert_eq!(right_cap.y, (right_p.height - right_cap.height) / 2);
+
+        // Collapsed bezel hotstrip hit-testing works on Left & Right edges
+        assert!(shelf_point_is_interactive_for_edge(
+            1,
+            left_p.height / 2,
+            left_p.width,
+            left_p.height,
+            1.5,
+            None,
+            ShelfDockEdge::Left
+        ));
+        assert!(!shelf_point_is_interactive_for_edge(
+            40,
+            left_p.height / 2,
+            left_p.width,
+            left_p.height,
+            1.5,
+            None,
+            ShelfDockEdge::Left
+        ));
+        assert!(shelf_point_is_interactive_for_edge(
+            right_p.width - 1,
+            right_p.height / 2,
+            right_p.width,
+            right_p.height,
+            1.5,
+            None,
+            ShelfDockEdge::Right
+        ));
+        assert!(!shelf_point_is_interactive_for_edge(
+            10,
+            right_p.height / 2,
+            right_p.width,
+            right_p.height,
+            1.5,
+            None,
+            ShelfDockEdge::Right
+        ));
     }
 }

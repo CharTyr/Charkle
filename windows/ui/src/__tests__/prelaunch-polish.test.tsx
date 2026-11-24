@@ -5,7 +5,11 @@ import { QuickCaptureModal } from '../features/capture/QuickCaptureModal';
 import { InspectorView } from '../features/inspector/InspectorView';
 import { buildConnectorSvgPath, sanitizeExportFileName } from '../features/moodboard/editorial';
 import { AudioStudioViewer } from '../features/quicklook/AudioStudioViewer';
-import { CaptureShortcutsSettingsPane } from '../features/settings/SettingsPanesCaptureSystem';
+import {
+  CaptureShortcutsSettingsPane,
+  DropShelfSettingsPane,
+} from '../features/settings/SettingsPanesCaptureSystem';
+import { TopEdgeDropShelf } from '../features/shelf/TopEdgeDropShelf';
 import {
   DEFAULT_INSPECTOR_CARD_ORDER,
   useCoordinatorStore,
@@ -626,6 +630,93 @@ describe('Pre-Launch Comprehensive Bug Hunt & Polish Regressions (#148-#154)', (
       expect(state.agentState).not.toBeNull();
       expect(state.syncStatus).toBeNull();
       expect(state.diagnostics).toBeNull();
+    });
+  });
+
+  // =========================================================================
+  // 6. Drop Shelf Screen-Edge Docking (#162, #164, #165)
+  // =========================================================================
+  describe('Drop Shelf Screen-Edge Docking (Top / Left / Right)', () => {
+    it('DropShelfSettingsPane renders 屏幕顶部/左侧/右侧, persists dockEdge via saveShelfSettings, and updates hover-trigger copy dynamically', async () => {
+      const transport = new InMemoryMockTransport();
+      const saveSpy = vi.spyOn(transport, 'saveShelfSettings');
+      setTransport(transport);
+
+      render(<DropShelfSettingsPane />);
+
+      const topOpt = await screen.findByRole('radio', { name: '屏幕顶部' });
+      const leftOpt = screen.getByRole('radio', { name: '屏幕左侧' });
+      const rightOpt = screen.getByRole('radio', { name: '屏幕右侧' });
+      expect(topOpt).toHaveAttribute('aria-checked', 'true');
+      expect(screen.getByText('悬停顶部中央自动展开')).toBeInTheDocument();
+
+      // Switch to Left edge
+      fireEvent.click(leftOpt);
+      await waitFor(() => {
+        expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ dockEdge: 'left' }));
+      });
+      expect(screen.getByText('悬停左侧中央自动展开')).toBeInTheDocument();
+      expect(screen.getByText(/鼠标移至屏幕左侧中央时轻滑唤出浮窗/)).toBeInTheDocument();
+
+      // Switch to Right edge
+      fireEvent.click(rightOpt);
+      await waitFor(() => {
+        expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ dockEdge: 'right' }));
+      });
+      expect(screen.getByText('悬停右侧中央自动展开')).toBeInTheDocument();
+      expect(screen.getByText(/鼠标移至屏幕右侧中央时轻滑唤出浮窗/)).toBeInTheDocument();
+    });
+
+    it('TopEdgeDropShelf renders left/right docked edges with edge-flush hit-rects and expands sideways to waterfall on clicking 全部', async () => {
+      const transport = new InMemoryMockTransport();
+      await transport.seedSampleLibraryIfEmpty();
+      const hitRectSpy = vi.spyOn(transport, 'setShelfHitRect');
+      setTransport(transport);
+
+      // Left-docked shelf: x === 0 and expands sideways to waterfall
+      const leftView = render(<TopEdgeDropShelf initialExpanded initialDockEdge="left" />);
+      const leftShelf = await screen.findByTestId('top-edge-drop-shelf');
+      expect(leftShelf).toHaveAttribute('data-dock-edge', 'left');
+      expect(leftShelf).toHaveAttribute('data-mode', 'compact');
+
+      await waitFor(() => {
+        const nonNullCalls = hitRectSpy.mock.calls.filter(([rect]) => rect !== null);
+        expect(nonNullCalls.length).toBeGreaterThan(0);
+        const latestRect = nonNullCalls[nonNullCalls.length - 1][0]!;
+        expect(latestRect.x).toBe(0);
+        expect(latestRect.width).toBeGreaterThan(200);
+      });
+
+      const expandLeftBtn = await screen.findByRole('button', { name: '展开为全瀑布流抽屉' });
+      expect(expandLeftBtn.textContent).toContain('全部');
+      fireEvent.click(expandLeftBtn);
+      await waitFor(() => {
+        expect(screen.getByTestId('top-edge-drop-shelf')).toHaveAttribute('data-mode', 'waterfall');
+      });
+      leftView.unmount();
+
+      // Right-docked shelf: right-flush x > 0 and expands sideways to waterfall
+      hitRectSpy.mockClear();
+      const rightView = render(<TopEdgeDropShelf initialExpanded initialDockEdge="right" />);
+      const rightShelf = await screen.findByTestId('top-edge-drop-shelf');
+      expect(rightShelf).toHaveAttribute('data-dock-edge', 'right');
+      expect(rightShelf).toHaveAttribute('data-mode', 'compact');
+
+      await waitFor(() => {
+        const nonNullCalls = hitRectSpy.mock.calls.filter(([rect]) => rect !== null);
+        expect(nonNullCalls.length).toBeGreaterThan(0);
+        const latestRect = nonNullCalls[nonNullCalls.length - 1][0]!;
+        expect(latestRect.x).toBeGreaterThan(0);
+        expect(latestRect.width).toBeGreaterThan(200);
+      });
+
+      const expandRightBtn = await screen.findByRole('button', { name: '展开为全瀑布流抽屉' });
+      expect(expandRightBtn.textContent).toContain('全部');
+      fireEvent.click(expandRightBtn);
+      await waitFor(() => {
+        expect(screen.getByTestId('top-edge-drop-shelf')).toHaveAttribute('data-mode', 'waterfall');
+      });
+      rightView.unmount();
     });
   });
 });

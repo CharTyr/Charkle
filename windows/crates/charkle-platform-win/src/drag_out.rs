@@ -51,11 +51,39 @@ pub fn build_hdrop_bytes(paths: &[PathBuf]) -> Vec<u8> {
     out
 }
 
-/// Executes a synchronous Win32 OLE `DoDragDrop` directly on the caller's UI STA thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredecodedDragPreview {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Decodes and resizes an optional drag preview thumbnail (`<= 112px`) into raw RGBA pixels.
+/// Safe and recommended to run on a background blocking thread (`tokio::task::spawn_blocking`)
+/// BEFORE entering `app.run_on_main_thread(...)` so `DoDragDrop` setup never stalls the Win32 UI thread.
+pub fn decode_drag_preview_thumbnail(path: &Path) -> Option<PredecodedDragPreview> {
+    if !path.is_file() {
+        return None;
+    }
+    let img = image::open(path).ok()?;
+    let thumb = img.thumbnail(112, 112).to_rgba8();
+    let (width, height) = thumb.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(PredecodedDragPreview {
+        width,
+        height,
+        rgba: thumb.into_raw(),
+    })
+}
+
+/// Executes a synchronous Win32 OLE `DoDragDrop` directly on the caller's UI STA thread using
+/// an already-decoded RGBA preview thumbnail (avoiding disk/image decode on the UI thread).
 /// MUST be invoked inside `app.run_on_main_thread(...)` from Tauri!
-pub fn run_outbound_file_drag_on_ui_thread(
+pub fn run_outbound_file_drag_with_preview_on_ui_thread(
     paths: &[PathBuf],
-    preview_image_path: Option<&Path>,
+    preview: Option<&PredecodedDragPreview>,
     source_hwnd: isize,
     is_shelf_window: bool,
 ) -> Result<DragOutOutcome, String> {
@@ -65,13 +93,32 @@ pub fn run_outbound_file_drag_on_ui_thread(
     }
     #[cfg(target_os = "windows")]
     {
-        win_ole::run(&existing, preview_image_path, source_hwnd, is_shelf_window)
+        win_ole::run(&existing, preview, source_hwnd, is_shelf_window)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (preview_image_path, source_hwnd, is_shelf_window);
+        let _ = (preview, source_hwnd, is_shelf_window);
         Ok(DragOutOutcome::Cancelled)
     }
+}
+
+/// Executes a synchronous Win32 OLE `DoDragDrop` directly on the caller's UI STA thread.
+/// MUST be invoked inside `app.run_on_main_thread(...)` from Tauri!
+pub fn run_outbound_file_drag_on_ui_thread(
+    paths: &[PathBuf],
+    preview_image_path: Option<&Path>,
+    source_hwnd: isize,
+    is_shelf_window: bool,
+) -> Result<DragOutOutcome, String> {
+    let preview = preview_image_path
+        .or_else(|| paths.first().map(PathBuf::as_path))
+        .and_then(decode_drag_preview_thumbnail);
+    run_outbound_file_drag_with_preview_on_ui_thread(
+        paths,
+        preview.as_ref(),
+        source_hwnd,
+        is_shelf_window,
+    )
 }
 
 /// Backward-compatible helper (prefer `run_outbound_file_drag_on_ui_thread` from Tauri UI thread).
@@ -225,16 +272,21 @@ mod win_ole {
 
     /// Best-effort attaches a crisp translucent Shell drag thumbnail (`<= 112px`) to `data_object`
     /// so Windows renders a floating image preview next to the cursor while dragging.
-    fn attach_drag_preview_bitmap(data_object: &IDataObject, preview_path: Option<&Path>) {
-        let Some(path) = preview_path.filter(|p| p.is_file()) else {
+    fn attach_drag_preview_bitmap(
+        data_object: &IDataObject,
+        preview: Option<&PredecodedDragPreview>,
+    ) {
+        let Some(preview) = preview else {
             return;
         };
-        let Ok(img) = image::open(path) else {
+        let (w, h) = (preview.width, preview.height);
+        let Some(expected_len) = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|px| px.checked_mul(4))
+        else {
             return;
         };
-        let thumb = img.thumbnail(112, 112).to_rgba8();
-        let (w, h) = thumb.dimensions();
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || preview.rgba.len() != expected_len {
             return;
         }
 
@@ -272,7 +324,7 @@ mod win_ole {
         let pixel_count = (w * h) as usize;
         // SAFETY: `bits_ptr` points to `w * h * 4` writable bytes allocated by `CreateDIBSection`.
         let dst = unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, pixel_count * 4) };
-        let src = thumb.as_raw();
+        let src = preview.rgba.as_slice();
         for i in 0..pixel_count {
             let r = src[i * 4] as u16;
             let g = src[i * 4 + 1] as u16;
@@ -315,7 +367,7 @@ mod win_ole {
 
     pub fn run(
         paths: &[PathBuf],
-        preview_image_path: Option<&Path>,
+        preview: Option<&PredecodedDragPreview>,
         source_hwnd: isize,
         is_shelf_window: bool,
     ) -> Result<DragOutOutcome, String> {
@@ -406,10 +458,7 @@ mod win_ole {
             .map_err(|e| format!("BindToHandler(BHID_DataObject) failed: {e}"))?;
 
         // Attach floating translucent image preview thumbnail for native OS drag feedback
-        attach_drag_preview_bitmap(
-            &data_object,
-            preview_image_path.or(paths.first().map(PathBuf::as_path)),
-        );
+        attach_drag_preview_bitmap(&data_object, preview);
 
         // Re-check mouse button right before entering DoDragDrop
         if !is_primary_mouse_down() {

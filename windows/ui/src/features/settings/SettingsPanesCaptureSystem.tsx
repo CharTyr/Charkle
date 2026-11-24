@@ -21,6 +21,7 @@ import type {
   DriveTransportMode,
   ExtensionBridgeStateDto,
   HotkeyConfig,
+  ShelfDockEdge,
   ShelfSettings,
 } from '../../types/domain';
 import {
@@ -64,6 +65,18 @@ const DEFAULT_SYNC_CONFIG: DriveSyncConfig = {
 // Pane 4: 顶部悬浮窗 (DropShelfSettingsPane) — mirrors NotchShelfSettingsPane.swift 1:1
 // =========================================================================
 
+function edgeZoneLabel(edge: ShelfDockEdge): string {
+  if (edge === 'left') return '左侧中央';
+  if (edge === 'right') return '右侧中央';
+  return '顶部中央';
+}
+
+function edgeNameLabel(edge: ShelfDockEdge): string {
+  if (edge === 'left') return '屏幕左侧';
+  if (edge === 'right') return '屏幕右侧';
+  return '屏幕顶部';
+}
+
 export const DropShelfSettingsPane: React.FC = () => {
   const pushToast = useCoordinatorStore((s) => s.pushToast);
   const folders = useLibraryStore((s) => s.folders);
@@ -73,6 +86,7 @@ export const DropShelfSettingsPane: React.FC = () => {
     defaultTargetMode: 'inbox',
     defaultFolderId: null,
     minimalMode: false,
+    dockEdge: 'top',
   });
   const [pinned, setPinned] = useState(false);
   const [toggleShortcut, setToggleShortcut] = useState('Alt+Shift+S');
@@ -81,7 +95,7 @@ export const DropShelfSettingsPane: React.FC = () => {
   useEffect(() => {
     void getTransport()
       .getShelfSettings()
-      .then(setSettings)
+      .then((cfg) => setSettings({ ...cfg, dockEdge: cfg.dockEdge ?? 'top' }))
       .catch(() => {});
     void getTransport()
       .getDesktopIntegrationStatus()
@@ -98,22 +112,26 @@ export const DropShelfSettingsPane: React.FC = () => {
     setSettings(next);
     try {
       const saved = await getTransport().saveShelfSettings(next);
-      setSettings(saved);
+      setSettings({ ...saved, dockEdge: saved.dockEdge ?? next.dockEdge ?? 'top' });
     } catch (err) {
       setSettings(prev);
       pushToast({
-        message: err instanceof Error ? err.message : '保存顶部悬浮窗配置失败',
+        message: err instanceof Error ? err.message : '保存边缘悬浮窗配置失败',
         tone: 'error',
       });
     }
   };
 
+  const dockEdge: ShelfDockEdge = settings.dockEdge ?? 'top';
+  const activeEdgeZone = edgeZoneLabel(dockEdge);
+  const activeEdgeName = edgeNameLabel(dockEdge);
+
   return (
     <div data-testid="settings-pane-dropShelf" className="flex flex-col gap-[22px]">
-      <SettingsSection title="顶部灵感浮窗">
+      <SettingsSection title="屏幕边缘灵感浮窗">
         <SettingsRow
           title="启用屏幕顶部灵感浮窗"
-          subtitle="在其他应用中拖起图片、链接或文件时，屏幕顶部自动滑出收纳区"
+          subtitle={`在其他应用中拖起图片、链接或文件靠近${activeEdgeName}时，自动滑出收纳区`}
         >
           <SettingsSwitch
             checked={settings.enabled}
@@ -125,8 +143,30 @@ export const DropShelfSettingsPane: React.FC = () => {
         <SettingsCardDivider />
 
         <SettingsRow
-          title="悬停顶部中央自动展开"
-          subtitle="鼠标移至屏幕顶部中央时轻滑唤出浮窗，快速查看最近素材或拖出使用"
+          title="悬浮窗停靠位置"
+          subtitle="选择灵感浮窗贴合的屏幕边缘：顶部横条样式，或贴合左/右侧边的竖向收纳抽屉"
+          disabled={!settings.enabled}
+        >
+          <SegmentedControl<ShelfDockEdge>
+            value={dockEdge}
+            onChange={(nextEdge) => {
+              if (!settings.enabled) return;
+              void persistSettings({ dockEdge: nextEdge });
+            }}
+            ariaLabel="悬浮窗停靠位置"
+            options={[
+              { value: 'top', label: '屏幕顶部' },
+              { value: 'left', label: '屏幕左侧' },
+              { value: 'right', label: '屏幕右侧' },
+            ]}
+          />
+        </SettingsRow>
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title={`悬停${activeEdgeZone}自动展开`}
+          subtitle={`鼠标移至屏幕${activeEdgeZone}时轻滑唤出浮窗，快速查看最近素材或拖出使用`}
           disabled={!settings.enabled}
         >
           <SettingsSwitch
@@ -190,8 +230,8 @@ export const DropShelfSettingsPane: React.FC = () => {
         <SettingsCardDivider />
 
         <SettingsRow
-          title="预览顶部浮窗效果"
-          subtitle={`立即在屏幕顶部展开浮窗，体验收纳与快速拖出交互（快捷键 ${toggleShortcut}）`}
+          title="预览边缘浮窗效果"
+          subtitle={`立即在${activeEdgeName}展开浮窗，体验收纳与快速拖出交互（快捷键 ${toggleShortcut}）`}
           disabled={!settings.enabled}
         >
           <SettingsButton
@@ -238,18 +278,18 @@ export const DropShelfSettingsPane: React.FC = () => {
         <InlineGuideDisclosure title="跨应用拖图与「活跃情绪板」连采技巧">
           <SettingsGuideStep
             number="1"
-            title="浏览器 / Figma / 文件资源管理器直接往屏幕顶部甩"
-            detail="无需切换回 Charkle 窗口，拖起图片时顶部浮窗会自动滑出接住素材。"
+            title="浏览器 / Figma / 文件资源管理器直接往屏幕顶部或侧边边缘甩"
+            detail="无需切换回 Charkle 窗口，拖起图片靠近已设定的屏幕边缘时，灵感浮窗会自动滑出接住素材。"
           />
           <SettingsGuideStep
             number="2"
             title="锁定「当前活跃情绪板」，边逛网页边长出一块板"
-            detail="在浮窗顶部切换目标为「活跃情绪板」，之后所有截图、剪贴板收藏和拖图都会自动同步追加进画布。"
+            detail="在浮窗中切换目标为「活跃情绪板」，之后所有截图、剪贴板收藏和拖图都会自动同步追加进画布。"
           />
           <SettingsGuideStep
             number="3"
             title="反向拖出素材同样顺手"
-            detail="悬停顶部唤出浮窗后，可将最近收藏或完整瀑布流中的参考图直接拖进 Figma、Photoshop 或设计软件。"
+            detail="悬停屏幕边缘唤出浮窗后，可将最近收藏或完整瀑布流中的参考图直接拖进 Figma、Photoshop 或设计软件。"
           />
         </InlineGuideDisclosure>
       </SettingsSection>

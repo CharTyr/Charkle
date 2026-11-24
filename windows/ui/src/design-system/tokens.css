@@ -1350,7 +1350,7 @@ textarea {
   animation: charkle-shockwave 680ms var(--ease-out-strong) both;
 }
 
-/* Hardware Notch Shelf fluid spring morph (pure-black bezel drop-down) */
+/* Hardware Notch Shelf fluid spring morph (top / left / right pure-black bezel drawers) */
 .charkle-shelf-shell {
   transform-origin: top center;
   transition:
@@ -1358,6 +1358,14 @@ textarea {
     height var(--duration-notch) var(--ease-notch-spring),
     transform var(--duration-notch) var(--ease-notch-spring),
     opacity var(--duration-md) var(--ease-out);
+}
+
+.charkle-shelf-shell[data-dock-edge="left"] {
+  transform-origin: left center;
+}
+
+.charkle-shelf-shell[data-dock-edge="right"] {
+  transform-origin: right center;
 }
 
 .charkle-shelf-shell[data-expanded="false"] {
