@@ -18,6 +18,7 @@ public final class CharkleRuntime {
     public let moodboards: MoodboardStore
     public let syncAndAI: SyncAndAIStore
     public let extensionBridge: ExtensionBridgeController
+    public let appUpdater: AppUpdateStore
 
     private var notchController: NotchShelfController?
     private let hotkeyManager = GlobalHotkeyManager()
@@ -82,6 +83,7 @@ public final class CharkleRuntime {
                 )
             }
         }
+        self.appUpdater = AppUpdateStore()
 
         // IMPORTANT (macOS 15 compatibility):
         // Never instantiate `NSHostingView` / `NSPanel` (NotchShelfController) or touch `NSApp`
@@ -130,12 +132,26 @@ public final class CharkleRuntime {
         if coordinator.isMinimalCaptureMode || coordinator.launchInMinimalCaptureMode {
             applyMinimalCaptureMode(announce: false)
         }
+        appUpdater.checkForUpdatesIfDueOnLaunch { [weak self] update in
+            guard let self else { return }
+            self.coordinator.showToast(
+                "发现新版本 \(update.tagName)",
+                icon: "arrow.down.circle.fill",
+                tone: .neutral,
+                duration: 6.5,
+                actionTitle: "查看更新"
+            ) { [weak self] in
+                self?.activateMainWindow()
+                self?.appUpdater.isUpdateSheetPresented = true
+            }
+        }
     }
 
     public func markTerminating() {
         isTerminating = true
         moodboards.triggerImmediateSaveFlush()
         extensionBridge.stop()
+        appUpdater.cancelBackgroundWorkForTermination()
     }
 
     private func isMainWorkspaceWindow(_ window: NSWindow) -> Bool {
@@ -650,7 +666,21 @@ private struct MainWindowSceneHost: View {
             onAppReady: { runtime.startAppKitServicesIfNeeded() }
         )
         .environment(\.charkleAccentSource, accentSource)
+        .environment(\.charkleAppUpdater, runtime.appUpdater)
         .tint(CharkleTheme.accent(for: colorScheme, source: accentSource))
+        .sheet(
+            isPresented: Binding(
+                get: { runtime.appUpdater.isUpdateSheetPresented },
+                set: { runtime.appUpdater.isUpdateSheetPresented = $0 }
+            )
+        ) {
+            AppUpdateSheetView(
+                appUpdater: runtime.appUpdater,
+                onPrepareQuitForUpdate: { runtime.markTerminating() }
+            )
+            .environment(\.charkleAccentSource, accentSource)
+            .tint(CharkleTheme.accent(for: colorScheme, source: accentSource))
+        }
         .onAppear {
             runtime.openMainWindowHandler = {
                 openWindow(id: "main")
@@ -718,6 +748,11 @@ private struct CharkleMenuBarContentView: View {
             runtime.activateMainWindow()
             runtime.rerunOnboarding()
         }
+        Button("检查更新…") {
+            registerWindowOpener()
+            runtime.activateMainWindow()
+            runtime.appUpdater.checkForUpdatesManually(presentSheet: true)
+        }
         Button("设置…") {
             registerWindowOpener()
             runtime.activateMainWindow()
@@ -745,6 +780,13 @@ struct CharkleApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1360, height: 860)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("检查更新…") {
+                    runtime.activateMainWindow()
+                    runtime.appUpdater.checkForUpdatesManually(presentSheet: true)
+                }
+            }
+
             CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
                     runtime.activateMainWindow()

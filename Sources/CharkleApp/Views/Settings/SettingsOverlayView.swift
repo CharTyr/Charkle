@@ -10,6 +10,7 @@ public struct SettingsOverlayView: View {
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
     public let syncAndAI: SyncAndAIStore
+    public let appUpdater: AppUpdateStore?
     public let onToggleNotchPreview: () -> Void
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
@@ -20,6 +21,7 @@ public struct SettingsOverlayView: View {
         coordinator: AppCoordinatorStore,
         library: LibraryStore,
         syncAndAI: SyncAndAIStore,
+        appUpdater: AppUpdateStore? = nil,
         onToggleNotchPreview: @escaping () -> Void,
         onSyncHotkeysEnabled: @escaping (Bool) -> Void,
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
@@ -29,6 +31,7 @@ public struct SettingsOverlayView: View {
         self.coordinator = coordinator
         self.library = library
         self.syncAndAI = syncAndAI
+        self.appUpdater = appUpdater
         self.onToggleNotchPreview = onToggleNotchPreview
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
@@ -51,6 +54,7 @@ public struct SettingsOverlayView: View {
                     coordinator: coordinator,
                     library: library,
                     syncAndAI: syncAndAI,
+                    appUpdater: appUpdater,
                     onToggleNotchPreview: onToggleNotchPreview,
                     onSyncHotkeysEnabled: onSyncHotkeysEnabled,
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
@@ -103,6 +107,7 @@ public struct SettingsContentShell: View {
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore?
     public let syncAndAI: SyncAndAIStore
+    public let appUpdater: AppUpdateStore?
     public let onToggleNotchPreview: () -> Void
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
@@ -113,6 +118,7 @@ public struct SettingsContentShell: View {
         coordinator: AppCoordinatorStore,
         library: LibraryStore? = nil,
         syncAndAI: SyncAndAIStore,
+        appUpdater: AppUpdateStore? = nil,
         onToggleNotchPreview: @escaping () -> Void,
         onSyncHotkeysEnabled: @escaping (Bool) -> Void,
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
@@ -122,6 +128,7 @@ public struct SettingsContentShell: View {
         self.coordinator = coordinator
         self.library = library
         self.syncAndAI = syncAndAI
+        self.appUpdater = appUpdater
         self.onToggleNotchPreview = onToggleNotchPreview
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
@@ -342,11 +349,12 @@ public struct SettingsContentShell: View {
             ExtensionsSettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
         case .advancedAbout:
             if let library {
-                AdvancedAboutSettingsPane(library: library, syncAndAI: syncAndAI)
+                AdvancedAboutSettingsPane(library: library, syncAndAI: syncAndAI, appUpdater: appUpdater)
             } else {
                 AdvancedAboutSettingsPane(
                     library: LibraryStore(engine: syncAndAI.engine),
-                    syncAndAI: syncAndAI
+                    syncAndAI: syncAndAI,
+                    appUpdater: appUpdater
                 )
             }
         }

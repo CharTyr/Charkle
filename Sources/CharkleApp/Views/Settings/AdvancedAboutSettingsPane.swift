@@ -6,18 +6,30 @@ import SwiftUI
 /// OAuth credential management, local visual index rebuild, data directory access, and app info.
 public struct AdvancedAboutSettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
+    @Environment(\.charkleAppUpdater) private var environmentAppUpdater
 
     public let library: LibraryStore
     public let syncAndAI: SyncAndAIStore
+    public let appUpdater: AppUpdateStore?
 
     @State private var draftSyncConfig: DriveSyncConfig = DriveSyncConfig()
     @State private var didLoadDraft: Bool = false
     @State private var showOAuthSetupSheet: Bool = false
     @State private var showGDirectMountSheet: Bool = false
 
-    public init(library: LibraryStore, syncAndAI: SyncAndAIStore) {
+    public init(
+        library: LibraryStore,
+        syncAndAI: SyncAndAIStore,
+        appUpdater: AppUpdateStore? = nil
+    ) {
         self.library = library
         self.syncAndAI = syncAndAI
+        self.appUpdater = appUpdater
+    }
+
+    private var resolvedUpdater: AppUpdateStore {
+        appUpdater ?? environmentAppUpdater ?? CharkleRuntime.shared.appUpdater
     }
 
     public var body: some View {
@@ -173,6 +185,8 @@ public struct AdvancedAboutSettingsPane: View {
                 }
             }
 
+            softwareUpdateSection(appVersion: appVersion, buildNumber: buildNumber)
+
             SettingsSection("关于 Charkle") {
                 HStack(spacing: 14) {
                     if let icon = CharkleAppIconManager.shared.previewImage(for: CharkleAppIconManager.shared.currentVariant) {
@@ -225,6 +239,259 @@ public struct AdvancedAboutSettingsPane: View {
             return "正在离线重建配色、OCR 与视觉相似特征（\(progress.completed) / \(progress.total)）…"
         }
         return "升级 macOS 或发现部分素材缺少配色、文字识别或相似推荐时，可离线重新扫描全库（共 \(library.allAssetsByID.count) 项）"
+    }
+
+    // MARK: - Software Updates Section
+
+    @ViewBuilder
+    private func softwareUpdateSection(appVersion: String, buildNumber: String) -> some View {
+        let updater = resolvedUpdater
+
+        SettingsSection("软件更新") {
+            SettingsRow(
+                title: "当前版本 v\(appVersion) (\(buildNumber))",
+                subtitle: updateStatusSubtitle(for: updater),
+                subtitleColor: updateStatusColor(for: updater)
+            ) {
+                Button {
+                    updater.checkForUpdatesManually(presentSheet: false)
+                } label: {
+                    HStack(spacing: 5) {
+                        if updater.isChecking {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Text(updater.isChecking ? "检查中…" : "检查更新")
+                    }
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .fixedSize()
+                .disabled(updater.isBusy)
+            }
+
+            if updater.hasPendingUpdateBanner {
+                SettingsCardDivider()
+                inlineUpdateBannerRow(for: updater)
+            }
+
+            SettingsCardDivider()
+
+            SettingsRow(
+                title: "启动时自动检查更新",
+                subtitle: "每 6 小时静默检查一次 GitHub Releases，仅在有新版本时以轻提示提醒"
+            ) {
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { updater.autoCheckUpdates },
+                        set: { updater.autoCheckUpdates = $0 }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            if let skipped = updater.skippedVersion {
+                SettingsCardDivider()
+                SettingsRow(
+                    title: "已跳过版本 v\(skipped)",
+                    subtitle: "自动检查将忽略此版本，手动点击「检查更新」仍可查看"
+                ) {
+                    Button("恢复提醒") {
+                        updater.clearSkippedVersion()
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                }
+            }
+        }
+    }
+
+    private func updateStatusSubtitle(for updater: AppUpdateStore) -> String {
+        switch updater.state {
+        case .checking:
+            return "正在连接 GitHub Releases 检查最新版本…"
+        case .upToDate(let checkedAt):
+            return "已是最新稳定版本 · 上次检查：\(SettingsHelpers.relativeTimeText(checkedAt))"
+        case .available(let update):
+            return "发现新版本 \(update.tagName) 可供下载"
+        case .downloading(let update, let progress, _, _):
+            let pct = Int((min(1.0, max(0.0, progress)) * 100).rounded())
+            return "正在下载 \(update.tagName)（\(pct)%）…"
+        case .verifying(let update):
+            return "正在校验 \(update.tagName) 的 SHA-256 摘要与代码签名…"
+        case .readyToInstall(let update, _, _):
+            return "\(update.tagName) 已校验通过并准备就绪"
+        case .installing(let update):
+            return "正在安装 \(update.tagName) 并重启…"
+        case .manualInstallRequired(let update, _):
+            return "\(update.tagName) 安装包已校验通过，请手动打开完成安装"
+        case .failed(let message):
+            return message
+        case .idle:
+            if let last = updater.lastUpdateCheckAt {
+                return "上次检查：\(SettingsHelpers.relativeTimeText(last))"
+            }
+            return "通过 GitHub Releases 自动获取已签名的 macOS 更新包"
+        }
+    }
+
+    private func updateStatusColor(for updater: AppUpdateStore) -> Color? {
+        switch updater.state {
+        case .available:
+            return CharkleTheme.accent(for: colorScheme, source: accentSource)
+        case .readyToInstall, .upToDate:
+            return SettingsPalette.positiveInk(for: colorScheme)
+        case .manualInstallRequired:
+            return SettingsPalette.warningInk(for: colorScheme)
+        case .failed:
+            return SettingsPalette.destructiveInk(for: colorScheme)
+        default:
+            return nil
+        }
+    }
+
+    @ViewBuilder
+    private func inlineUpdateBannerRow(for updater: AppUpdateStore) -> some View {
+        let activeAccent = CharkleTheme.accent(for: colorScheme, source: accentSource)
+
+        switch updater.state {
+        case .available(let update):
+            SettingsRow(
+                title: "新版本 \(update.tagName) 已发布",
+                subtitle: update.assetName
+            ) {
+                HStack(spacing: 8) {
+                    Button("更新说明") {
+                        updater.isUpdateSheetPresented = true
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+
+                    Button("立即下载并更新") {
+                        updater.downloadAndPrepareUpdate()
+                    }
+                    .buttonStyle(SettingsPrimaryButtonStyle())
+                    .fixedSize()
+                }
+            }
+
+        case .downloading(let update, let progress, let downloadedBytes, let totalBytes):
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("正在下载 \(update.tagName)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.primary)
+                        Text(inlineDownloadBytesText(downloaded: downloadedBytes, total: totalBytes, progress: progress))
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 10)
+                    Button("查看详情") {
+                        updater.isUpdateSheetPresented = true
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+
+                    Button("取消") {
+                        updater.cancelDownload()
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                }
+
+                ProgressView(value: progress, total: 1.0)
+                    .progressViewStyle(.linear)
+                    .tint(activeAccent)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+
+        case .verifying(let update):
+            SettingsRow(
+                title: "正在校验 \(update.tagName) 安装包",
+                subtitle: "核对 SHA-256 校验和与严格代码签名"
+            ) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Button("查看详情") {
+                        updater.isUpdateSheetPresented = true
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                }
+            }
+
+        case .readyToInstall(let update, _, _):
+            SettingsRow(
+                title: "\(update.tagName) 已验证就绪",
+                subtitle: "已完成 SHA-256 与严格代码签名校验，重启后自动替换应用包",
+                subtitleColor: SettingsPalette.positiveInk(for: colorScheme)
+            ) {
+                HStack(spacing: 8) {
+                    Button("查看详情") {
+                        updater.isUpdateSheetPresented = true
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+
+                    Button("重启并安装") {
+                        updater.installAndRelaunch {
+                            CharkleRuntime.shared.markTerminating()
+                        }
+                    }
+                    .buttonStyle(SettingsPrimaryButtonStyle())
+                    .fixedSize()
+                }
+            }
+
+        case .installing(let update):
+            SettingsRow(
+                title: "正在安装 \(update.tagName)…",
+                subtitle: "正在保存数据并准备重启"
+            ) {
+                ProgressView().controlSize(.small)
+            }
+
+        case .manualInstallRequired(let update, let dmgURL):
+            SettingsRow(
+                title: "\(update.tagName) 需手动安装",
+                subtitle: updater.manualInstallReason ?? dmgURL.lastPathComponent,
+                subtitleColor: SettingsPalette.warningInk(for: colorScheme)
+            ) {
+                HStack(spacing: 8) {
+                    Button("在访达中显示") {
+                        updater.revealDownloadedDMG()
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+
+                    Button("打开安装包") {
+                        updater.openDownloadedDMG()
+                    }
+                    .buttonStyle(SettingsPrimaryButtonStyle())
+                    .fixedSize()
+                }
+            }
+
+        default:
+            EmptyView()
+        }
+    }
+
+    private func inlineDownloadBytesText(downloaded: Int64, total: Int64, progress: Double) -> String {
+        let fmt = ByteCountFormatter()
+        fmt.allowedUnits = [.useMB, .useKB]
+        fmt.countStyle = .file
+        fmt.includesUnit = true
+        let pct = Int((min(1.0, max(0.0, progress)) * 100).rounded())
+        let down = fmt.string(fromByteCount: max(0, downloaded))
+        if total > 0 {
+            return "\(down) / \(fmt.string(fromByteCount: total)) · \(pct)%"
+        }
+        return "\(down) · \(pct)%"
     }
 
     // MARK: - gdirect Mount Management Sheet
