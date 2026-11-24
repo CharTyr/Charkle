@@ -5,18 +5,32 @@ import Foundation
 public final actor WebDAVTransport: DriveTransport {
     public nonisolated let displayName = "WebDAV"
 
+    private static let defaultSession: URLSession = makePooledSession()
+
     private let baseURL: URL
     private let username: String
     private let authHeader: String?
     private let rootPathSegments: [String]
     private let session: URLSession
+    private var knownFolderIDs: Set<String> = []
+
+    /// Pooled URLSession tuned for WebDAV servers (bounded per-host concurrency, no stale HTTP cache).
+    public nonisolated static func makePooledSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.httpMaximumConnectionsPerHost = 4
+        config.timeoutIntervalForRequest = 45
+        config.timeoutIntervalForResource = 300
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }
 
     public init(
         serverURL: String,
         username: String,
         password: String,
         remotePath: String = "/Charkle",
-        session: URLSession = .shared
+        session: URLSession? = nil
     ) throws {
         let trimmedURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let rawURL = URL(string: trimmedURL),
@@ -44,7 +58,7 @@ public final actor WebDAVTransport: DriveTransport {
             try DriveFiles.validateName(seg)
         }
         self.rootPathSegments = segments.isEmpty ? ["Charkle"] : segments
-        self.session = session
+        self.session = session ?? Self.defaultSession
     }
 
     // MARK: - DriveTransport Protocol
@@ -55,7 +69,7 @@ public final actor WebDAVTransport: DriveTransport {
         req.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         req.httpBody = Data(Self.propfindBody.utf8)
 
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await dataWithRetry(for: req)
         try validate(response, data: data, allowed: [200, 204, 207])
 
         let host = baseURL.host() ?? baseURL.absoluteString
@@ -72,6 +86,14 @@ public final actor WebDAVTransport: DriveTransport {
     public func fetchStartPageToken() async throws -> String {
         let snap = try await snapshot()
         return try JSONEncoder().encode(snap).base64EncodedString()
+    }
+
+    /// Single-pass full crawl returning both file dictionary and matching change token so initial sync
+    /// does not crawl the WebDAV tree twice.
+    func crawlSnapshotWithToken() async throws -> (files: [String: RemoteDriveFile], token: String) {
+        let snap = try await snapshot()
+        let token = try JSONEncoder().encode(snap).base64EncodedString()
+        return (snap, token)
     }
 
     public func listChanges(pageToken: String) async throws -> DriveChangePage {
@@ -95,7 +117,7 @@ public final actor WebDAVTransport: DriveTransport {
 
         var req = makeRequest(for: targetURL, method: "MKCOL")
         req.timeoutInterval = 30
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await dataWithRetry(for: req)
         guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
@@ -104,6 +126,7 @@ public final actor WebDAVTransport: DriveTransport {
             try validate(response, data: data, allowed: [200, 201, 204, 405])
         }
 
+        knownFolderIDs.insert(relPath)
         return RemoteDriveFile(
             id: relPath,
             name: name,
@@ -124,17 +147,22 @@ public final actor WebDAVTransport: DriveTransport {
         req.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         req.httpBody = Data(Self.propfindBody.utf8)
 
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await dataWithRetry(for: req)
         if let http = response as? HTTPURLResponse, http.statusCode == 404 {
             return []
         }
         try validate(response, data: data, allowed: [200, 207])
-        return try Self.parsePropfindResponse(data, baseURL: baseURL, directoryRelPath: rel, parentID: folderID)
+        let files = try Self.parsePropfindResponse(data, baseURL: baseURL, directoryRelPath: rel, parentID: folderID)
+        if !rel.isEmpty { knownFolderIDs.insert(rel) }
+        for item in files where item.isFolder {
+            knownFolderIDs.insert(item.id)
+        }
+        return files
     }
 
     public func downloadData(fileID: String) async throws -> Data {
         let req = makeRequest(for: url(forRelativePath: fileID, isDirectory: false), method: "GET")
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await dataWithRetry(for: req)
         if let http = response as? HTTPURLResponse, http.statusCode == 404 {
             throw DriveTransportError.fileNotFound(fileID)
         }
@@ -144,7 +172,7 @@ public final actor WebDAVTransport: DriveTransport {
 
     public func downloadFile(fileID: String, to destinationURL: URL) async throws {
         let req = makeRequest(for: url(forRelativePath: fileID, isDirectory: false), method: "GET")
-        let (tempURL, response) = try await session.download(for: req)
+        let (tempURL, response) = try await downloadWithRetry(for: req)
         defer { try? FileManager.default.removeItem(at: tempURL) }
         if let http = response as? HTTPURLResponse, http.statusCode == 404 {
             throw DriveTransportError.fileNotFound(fileID)
@@ -164,9 +192,15 @@ public final actor WebDAVTransport: DriveTransport {
         let relPath = existingFileID ?? joinRelative(parent: parentID, name: name)
         var req = makeRequest(for: url(forRelativePath: relPath, isDirectory: false), method: "PUT")
         req.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        if existingFileID == nil {
+            req.setValue("*", forHTTPHeaderField: "If-None-Match")
+        }
         req.httpBody = data
 
-        let (respData, response) = try await session.data(for: req)
+        let (respData, response) = try await dataWithRetry(for: req)
+        if existingFileID == nil, let http = response as? HTTPURLResponse, http.statusCode == 412 {
+            throw DriveTransportError.fileAlreadyExists(name)
+        }
         try validate(response, data: respData, allowed: [200, 201, 204])
         return RemoteDriveFile(
             id: relPath,
@@ -192,8 +226,14 @@ public final actor WebDAVTransport: DriveTransport {
         var req = makeRequest(for: url(forRelativePath: relPath, isDirectory: false), method: "PUT")
         req.timeoutInterval = 300
         req.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        if existingFileID == nil {
+            req.setValue("*", forHTTPHeaderField: "If-None-Match")
+        }
 
-        let (respData, response) = try await session.upload(for: req, fromFile: localURL)
+        let (respData, response) = try await uploadWithRetry(for: req, fromFile: localURL)
+        if existingFileID == nil, let http = response as? HTTPURLResponse, http.statusCode == 412 {
+            throw DriveTransportError.fileAlreadyExists(name)
+        }
         try validate(response, data: respData, allowed: [200, 201, 204])
         let size = Int64((try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         return RemoteDriveFile(
@@ -218,19 +258,42 @@ public final actor WebDAVTransport: DriveTransport {
         let finalName = newName ?? currentName
         try DriveFiles.validateName(finalName)
         let targetRel = joinRelative(parent: toParentID, name: finalName)
+        var isCollection = knownFolderIDs.contains(fileID)
 
         if targetRel != fileID {
-            var req = makeRequest(for: url(forRelativePath: fileID, isDirectory: false), method: "MOVE")
-            req.setValue(url(forRelativePath: targetRel, isDirectory: false).absoluteString, forHTTPHeaderField: "Destination")
-            req.setValue("T", forHTTPHeaderField: "Overwrite")
-            let (data, response) = try await session.data(for: req)
+            func sendMove(asDirectory: Bool) async throws -> (Data, URLResponse) {
+                var req = makeRequest(for: url(forRelativePath: fileID, isDirectory: asDirectory), method: "MOVE")
+                req.setValue(url(forRelativePath: targetRel, isDirectory: asDirectory).absoluteString, forHTTPHeaderField: "Destination")
+                req.setValue("F", forHTTPHeaderField: "Overwrite")
+                return try await dataWithRetry(for: req)
+            }
+
+            var (data, response) = try await sendMove(asDirectory: isCollection)
+            if !isCollection, let http = response as? HTTPURLResponse, (http.statusCode == 301 || http.statusCode == 308) {
+                isCollection = true
+                (data, response) = try await sendMove(asDirectory: true)
+            }
+            if let http = response as? HTTPURLResponse, http.statusCode == 412 {
+                throw DriveTransportError.fileAlreadyExists(finalName)
+            }
             try validate(response, data: data, allowed: [200, 201, 204])
+
+            if isCollection {
+                knownFolderIDs.remove(fileID)
+                knownFolderIDs.insert(targetRel)
+                let oldPrefix = fileID + "/"
+                let newPrefix = targetRel + "/"
+                let updated = knownFolderIDs.map { id in
+                    id.hasPrefix(oldPrefix) ? newPrefix + id.dropFirst(oldPrefix.count) : id
+                }
+                knownFolderIDs = Set(updated)
+            }
         }
 
         return RemoteDriveFile(
             id: targetRel,
             name: finalName,
-            mimeType: MediaPipeline.mimeType(fileName: finalName),
+            mimeType: isCollection ? RemoteDriveFile.folderMimeType : MediaPipeline.mimeType(fileName: finalName),
             size: nil,
             modifiedTime: Date(),
             md5Checksum: nil,
@@ -240,12 +303,15 @@ public final actor WebDAVTransport: DriveTransport {
     }
 
     public func trashFile(fileID: String) async throws {
-        let req = makeRequest(for: url(forRelativePath: fileID, isDirectory: false), method: "DELETE")
-        let (data, response) = try await session.data(for: req)
+        let isCollection = knownFolderIDs.contains(fileID)
+        let req = makeRequest(for: url(forRelativePath: fileID, isDirectory: isCollection), method: "DELETE")
+        let (data, response) = try await dataWithRetry(for: req)
         if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+            knownFolderIDs.remove(fileID)
             return
         }
         try validate(response, data: data, allowed: [200, 204])
+        knownFolderIDs.remove(fileID)
     }
 
     // MARK: - Snapshot & Helpers
@@ -279,6 +345,93 @@ public final actor WebDAVTransport: DriveTransport {
             req.setValue(authHeader, forHTTPHeaderField: "Authorization")
         }
         return req
+    }
+
+    private func dataWithRetry(for request: URLRequest) async throws -> (Data, URLResponse) {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse, Self.isRetryableStatus(http.statusCode), attempt < 3 {
+                    attempt += 1
+                    try await Task.sleep(for: Self.retryDelay(for: http, attempt: attempt))
+                    continue
+                }
+                return (data, response)
+            } catch {
+                try Task.checkCancellation()
+                guard Self.isRetryableError(error), attempt < 3 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(350 * attempt * attempt))
+            }
+        }
+    }
+
+    private func downloadWithRetry(for request: URLRequest) async throws -> (URL, URLResponse) {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (tempURL, response) = try await session.download(for: request)
+                if let http = response as? HTTPURLResponse, Self.isRetryableStatus(http.statusCode), attempt < 3 {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    attempt += 1
+                    try await Task.sleep(for: Self.retryDelay(for: http, attempt: attempt))
+                    continue
+                }
+                return (tempURL, response)
+            } catch {
+                try Task.checkCancellation()
+                guard Self.isRetryableError(error), attempt < 3 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(350 * attempt * attempt))
+            }
+        }
+    }
+
+    private func uploadWithRetry(for request: URLRequest, fromFile localURL: URL) async throws -> (Data, URLResponse) {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await session.upload(for: request, fromFile: localURL)
+                if let http = response as? HTTPURLResponse, Self.isRetryableStatus(http.statusCode), attempt < 3 {
+                    attempt += 1
+                    try await Task.sleep(for: Self.retryDelay(for: http, attempt: attempt))
+                    continue
+                }
+                return (data, response)
+            } catch {
+                try Task.checkCancellation()
+                guard Self.isRetryableError(error), attempt < 3 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(350 * attempt * attempt))
+            }
+        }
+    }
+
+    private static func isRetryableStatus(_ code: Int) -> Bool {
+        code == 429 || code == 500 || code == 502 || code == 503 || code == 504
+    }
+
+    private static func isRetryableError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut, .networkConnectionLost, .notConnectedToInternet, .cannotConnectToHost, .dnsLookupFailed, .cannotFindHost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func retryDelay(for response: HTTPURLResponse, attempt: Int) -> Duration {
+        if let retryAfter = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let seconds = Double(retryAfter), seconds.isFinite, seconds > 0 {
+            let clamped = min(10.0, max(0.2, seconds))
+            return .milliseconds(Int(clamped * 1000))
+        }
+        return .milliseconds(350 * attempt * attempt)
     }
 
     private func joinRelative(parent: String, name: String) -> String {
@@ -429,7 +582,13 @@ private nonisolated final class PropfindXMLDelegate: NSObject, XMLParserDelegate
 
     var entries: [Entry] = []
     private var current: Entry?
+    private var inPropstat = false
     private var inResourceType = false
+    private var propstatStatus: String?
+    private var propstatIsCollection = false
+    private var propstatContentLength: Int64?
+    private var propstatLastModified: Date?
+    private var propstatContentType: String?
     private var buffer = ""
 
     private let rfc1123Formatter: DateFormatter = {
@@ -442,6 +601,7 @@ private nonisolated final class PropfindXMLDelegate: NSObject, XMLParserDelegate
 
     private func parseWebDAVDate(_ text: String) -> Date? {
         if let rfc = rfc1123Formatter.date(from: text) { return rfc }
+        if let frac = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) { return frac }
         return try? Date.ISO8601FormatStyle().parse(text)
     }
 
@@ -459,10 +619,23 @@ private nonisolated final class PropfindXMLDelegate: NSObject, XMLParserDelegate
         switch name {
         case "response":
             current = Entry()
+        case "propstat":
+            inPropstat = true
+            propstatStatus = nil
+            propstatIsCollection = false
+            propstatContentLength = nil
+            propstatLastModified = nil
+            propstatContentType = nil
         case "resourcetype":
             inResourceType = true
         case "collection":
-            if inResourceType { current?.isCollection = true }
+            if inResourceType {
+                if inPropstat {
+                    propstatIsCollection = true
+                } else {
+                    current?.isCollection = true
+                }
+            }
         default:
             break
         }
@@ -478,14 +651,34 @@ private nonisolated final class PropfindXMLDelegate: NSObject, XMLParserDelegate
         switch name {
         case "href":
             if current?.href.isEmpty == true { current?.href = text }
+        case "status":
+            if inPropstat && !text.isEmpty { propstatStatus = text }
         case "resourcetype":
             inResourceType = false
         case "getcontentlength":
-            if let len = Int64(text) { current?.contentLength = len }
+            if let len = Int64(text) {
+                if inPropstat { propstatContentLength = len } else { current?.contentLength = len }
+            }
         case "getlastmodified":
-            current?.lastModified = parseWebDAVDate(text)
+            if let parsed = parseWebDAVDate(text) {
+                if inPropstat { propstatLastModified = parsed } else { current?.lastModified = parsed }
+            }
         case "getcontenttype":
-            if !text.isEmpty { current?.contentType = text }
+            if !text.isEmpty {
+                if inPropstat { propstatContentType = text } else { current?.contentType = text }
+            }
+        case "propstat":
+            let statusOK: Bool = {
+                guard let status = propstatStatus else { return true }
+                return status.contains(" 200 ") || status.contains(" 201 ") || status.contains(" 204 ")
+            }()
+            if statusOK {
+                if propstatIsCollection { current?.isCollection = true }
+                if let len = propstatContentLength { current?.contentLength = len }
+                if let mod = propstatLastModified { current?.lastModified = mod }
+                if let ct = propstatContentType { current?.contentType = ct }
+            }
+            inPropstat = false
         case "response":
             if let entry = current, !entry.href.isEmpty {
                 entries.append(entry)

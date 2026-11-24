@@ -44,6 +44,7 @@ public struct JumpAnywhereView: View {
     @State private var query: String = ""
     @State private var matches: [QuickJumpMatch] = []
     @State private var selectedIndex: Int = 0
+    @State private var didExecuteSelection: Bool = false
     @FocusState private var isSearchFocused: Bool
 
     public init(
@@ -106,74 +107,87 @@ public struct JumpAnywhereView: View {
                 Divider()
 
                 // Results List
-                ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        if showingQuickCommands {
-                            Text("快捷操作")
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 14)
-                                .padding(.top, 8)
-                                .padding(.bottom, 4)
+                ScrollViewReader { scrollProxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            if showingQuickCommands {
+                                Text("快捷操作")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.top, 8)
+                                    .padding(.bottom, 4)
 
-                            ForEach(Array(QuickCommand.allCases.enumerated()), id: \.element.id) { idx, cmd in
-                                rowShell(isSelected: selectedIndex == idx) {
-                                    CharkleIcon(cmd.icon, style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
-                                    Text(cmd.title)
+                                ForEach(Array(QuickCommand.allCases.enumerated()), id: \.element.id) { idx, cmd in
+                                    rowShell(isSelected: selectedIndex == idx) {
+                                        CharkleIcon(cmd.icon, style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
+                                        Text(cmd.title)
+                                            .font(.system(size: 13, weight: .medium))
+                                        Spacer()
+                                        Text("↵")
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .id(idx)
+                                    .onTapGesture {
+                                        guard !didExecuteSelection else { return }
+                                        didExecuteSelection = true
+                                        onTriggerQuickCommand(cmd)
+                                        onClose()
+                                    }
+                                }
+                            } else if matches.isEmpty {
+                                VStack(spacing: 6) {
+                                    Text("未找到与「\(query)」匹配的内容")
                                         .font(.system(size: 13, weight: .medium))
-                                    Spacer()
-                                    Text("↵")
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                    Text("试试搜索文件夹名、情绪板标题、标签或拼音首字母")
+                                        .font(.system(size: 11.5))
                                         .foregroundStyle(.tertiary)
                                 }
-                                .onTapGesture {
-                                    onTriggerQuickCommand(cmd)
-                                    onClose()
-                                }
-                            }
-                        } else if matches.isEmpty {
-                            VStack(spacing: 6) {
-                                Text("未找到与「\(query)」匹配的内容")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                Text("试试搜索文件夹名、情绪板标题、标签或拼音首字母")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 32)
-                        } else {
-                            ForEach(Array(matches.enumerated()), id: \.element.id) { idx, match in
-                                rowShell(isSelected: selectedIndex == idx) {
-                                    CharkleIcon(iconName(for: match.kind), style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(match.title)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .lineLimit(1)
-                                        Text(match.subtitle)
-                                            .font(.system(size: 11))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 32)
+                            } else {
+                                ForEach(Array(matches.enumerated()), id: \.element.id) { idx, match in
+                                    rowShell(isSelected: selectedIndex == idx) {
+                                        CharkleIcon(iconName(for: match.kind), style: .duotone, size: 15, color: selectedIndex == idx ? Color.accentColor : .secondary)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(match.title)
+                                                .font(.system(size: 13, weight: .medium))
+                                                .lineLimit(1)
+                                            Text(match.subtitle)
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer()
+                                        Text(kindLabel(for: match.kind))
+                                            .font(.system(size: 10.5, weight: .medium))
                                             .foregroundStyle(.secondary)
-                                            .lineLimit(1)
+                                            .padding(.horizontal, 7)
+                                            .padding(.vertical, 2.5)
+                                            .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
                                     }
-                                    Spacer()
-                                    Text(kindLabel(for: match.kind))
-                                        .font(.system(size: 10.5, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 2.5)
-                                        .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
-                                }
-                                .onTapGesture {
-                                    onSelectMatch(match)
-                                    onClose()
+                                    .id(idx)
+                                    .onTapGesture {
+                                        guard !didExecuteSelection else { return }
+                                        didExecuteSelection = true
+                                        onSelectMatch(match)
+                                        onClose()
+                                    }
                                 }
                             }
                         }
+                        .padding(.vertical, 6)
+                        .charkleCleanScrollbars(hidden: false)
                     }
-                    .padding(.vertical, 6)
-                    .charkleCleanScrollbars(hidden: false)
+                    .frame(maxHeight: 360)
+                    .onChange(of: selectedIndex) { _, newIndex in
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+                            scrollProxy.scrollTo(newIndex, anchor: .center)
+                        }
+                    }
                 }
-                .frame(maxHeight: 360)
             }
             .frame(width: 580)
             .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
@@ -181,7 +195,10 @@ public struct JumpAnywhereView: View {
         }
         .ignoresSafeArea(.all)
         .onAppear {
-            isSearchFocused = true
+            didExecuteSelection = false
+            DispatchQueue.main.async {
+                isSearchFocused = true
+            }
             runSearch()
         }
         .onChange(of: query) { _, _ in
@@ -226,8 +243,14 @@ public struct JumpAnywhereView: View {
 
     private func runSearch() {
         let currentQuery = query
+        let trimmed = currentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            matches = []
+            selectedIndex = 0
+            return
+        }
         Task {
-            let results = await library.quickJump(query: currentQuery, limit: 24)
+            let results = await library.quickJump(query: trimmed, limit: 24)
             if currentQuery == query {
                 matches = results
                 if selectedIndex >= max(1, totalSelectableCount) {
@@ -238,13 +261,16 @@ public struct JumpAnywhereView: View {
     }
 
     private func executeSelectedRow() {
+        guard !didExecuteSelection else { return }
         if showingQuickCommands {
             let commands = QuickCommand.allCases
             guard selectedIndex < commands.count else { return }
+            didExecuteSelection = true
             onTriggerQuickCommand(commands[selectedIndex])
             onClose()
         } else {
             guard selectedIndex < matches.count else { return }
+            didExecuteSelection = true
             onSelectMatch(matches[selectedIndex])
             onClose()
         }

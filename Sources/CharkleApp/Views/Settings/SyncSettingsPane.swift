@@ -18,6 +18,8 @@ public struct SyncSettingsPane: View {
     @State private var webDAVDraftUsername: String = ""
     @State private var webDAVDraftRemotePath: String = "/Charkle"
     @State private var webDAVPasswordInput: String = ""
+    @FocusState private var isRootFolderFieldFocused: Bool
+    @FocusState private var isSharedFolderFieldFocused: Bool
 
     public init(coordinator: AppCoordinatorStore, syncAndAI: SyncAndAIStore) {
         self.coordinator = coordinator
@@ -160,7 +162,13 @@ public struct SyncSettingsPane: View {
                     Spacer(minLength: 10)
 
                     Button {
-                        Task { _ = await syncAndAI.syncNow() }
+                        let snapshot = draftConfig
+                        Task {
+                            if snapshot != syncAndAI.syncConfig {
+                                await syncAndAI.saveSyncConfig(snapshot, quiet: true)
+                            }
+                            _ = await syncAndAI.syncNow()
+                        }
                     } label: {
                         Text(isSyncing ? "同步中…" : "立即同步")
                     }
@@ -392,7 +400,11 @@ public struct SyncSettingsPane: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 210)
                     .disabled(draftConfig.resolvedSharedFolderID != nil)
+                    .focused($isRootFolderFieldFocused)
                     .onSubmit { persistIfReady() }
+                    .onChange(of: isRootFolderFieldFocused) { wasFocused, nowFocused in
+                        if wasFocused && !nowFocused { persistIfReady() }
+                    }
             }
         }
     }
@@ -461,9 +473,9 @@ public struct SyncSettingsPane: View {
                         .padding(.vertical, 5)
                         .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .fixedSize()
-                        .onTapGesture {
-                            if syncAndAI.sharedFolders.isEmpty && !syncAndAI.isLoadingSharedFolders {
-                                Task { await syncAndAI.loadSharedFolders() }
+                        .task(id: isSignedIn) {
+                            if isSignedIn && syncAndAI.sharedFolders.isEmpty && !syncAndAI.isLoadingSharedFolders {
+                                await syncAndAI.loadSharedFolders()
                             }
                         }
                     }
@@ -472,7 +484,11 @@ public struct SyncSettingsPane: View {
                 HStack(spacing: 8) {
                     TextField("https://drive.google.com/drive/folders/… 或目录 ID", text: $draftConfig.sharedFolderURLOrID)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isSharedFolderFieldFocused)
                         .onSubmit { persistIfReady() }
+                        .onChange(of: isSharedFolderFieldFocused) { wasFocused, nowFocused in
+                            if wasFocused && !nowFocused { persistIfReady() }
+                        }
 
                     if !trimmed.isEmpty {
                         Button("清除") {
@@ -594,6 +610,8 @@ public struct SyncSettingsPane: View {
                 Spacer()
             }
 
+            SettingsSheetFeedbackBanner(syncAndAI: syncAndAI)
+
             VStack(alignment: .leading, spacing: 10) {
                 fieldRow("服务器地址") {
                     TextField("https://dav.jianguoyun.com/dav/", text: $webDAVDraftURL)
@@ -678,6 +696,8 @@ public struct SyncSettingsPane: View {
     // MARK: - Helpers
 
     private func openWebDAVEditor() {
+        syncAndAI.errorMessage = nil
+        syncAndAI.statusMessage = nil
         webDAVDraftURL = draftConfig.webDAVServerURL
         webDAVDraftUsername = draftConfig.webDAVUsername
         webDAVDraftRemotePath = draftConfig.webDAVRemotePath.isEmpty ? "/Charkle" : draftConfig.webDAVRemotePath

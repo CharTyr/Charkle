@@ -278,6 +278,48 @@ public nonisolated enum MasonryLayoutEngine {
         )
     }
 
+    /// Computes the deterministic post-drawer target viewport width when a side pane
+    /// (Sidebar collapse/expand or Inspector show/hide) changes total chrome width.
+    /// Pass any active in-flight target width as `currentViewportWidth` so rapid mid-flight
+    /// reversals stay mathematically exact without drifting.
+    public static func paneTransitionTargetWidth(
+        currentViewportWidth: CGFloat,
+        previousSideChromeWidth: CGFloat,
+        newSideChromeWidth: CGFloat,
+        minWidth: CGFloat = 240
+    ) -> CGFloat {
+        let delta = previousSideChromeWidth - newSideChromeWidth
+        return max(minWidth, floor(currentViewportWidth + delta))
+    }
+
+    /// Computes post-drawer scroll origin for Sidebar/Inspector pane transitions:
+    /// keeps `scrollY = 0` when already at the top of the library (`oldScrollY <= 4`) so Row 1 never
+    /// scrolls off-screen, while anchoring the mid-viewport card cleanly when scrolled further down.
+    public static func paneTransitionScrollY(
+        oldScrollY: CGFloat,
+        oldAnchorRect: CGRect,
+        newAnchorRect: CGRect,
+        anchorNormV: CGFloat,
+        anchorScreenY: CGFloat,
+        topInset: CGFloat = 76,
+        totalHeight: CGFloat,
+        viewportHeight: CGFloat
+    ) -> CGFloat {
+        if oldScrollY <= 4 {
+            return 0
+        }
+        return anchoredScrollY(
+            oldScrollY: oldScrollY,
+            oldAnchorRect: oldAnchorRect,
+            newAnchorRect: newAnchorRect,
+            anchorNormV: anchorNormV,
+            anchorScreenY: anchorScreenY,
+            topInset: topInset,
+            totalHeight: totalHeight,
+            viewportHeight: viewportHeight
+        )
+    }
+
     /// Computes the clamped vertical scroll origin that centers an asset card vertically within the usable
     /// viewport area beneath `topInset` (and above `bottomInset`), used when revealing an asset from Moodboard or Jump.
     public static func revealScrollY(
@@ -589,6 +631,7 @@ public struct VirtualizedMasonryView: View {
     public let targetColumnWidth: CGFloat
     public let topContentInset: CGFloat
     public let bottomContentInset: CGFloat
+    public let sideChromeWidth: CGFloat?
     public let heroNamespace: Namespace.ID
     public let activeQuickLookID: UUID?
     public let revealRequest: MasonryRevealRequest?
@@ -608,6 +651,7 @@ public struct VirtualizedMasonryView: View {
         targetColumnWidth: CGFloat = 228,
         topContentInset: CGFloat = 76,
         bottomContentInset: CGFloat = 96,
+        sideChromeWidth: CGFloat? = nil,
         heroNamespace: Namespace.ID,
         activeQuickLookID: UUID? = nil,
         revealRequest: MasonryRevealRequest? = nil,
@@ -624,6 +668,7 @@ public struct VirtualizedMasonryView: View {
         self.targetColumnWidth = targetColumnWidth
         self.topContentInset = topContentInset
         self.bottomContentInset = bottomContentInset
+        self.sideChromeWidth = sideChromeWidth
         self.heroNamespace = heroNamespace
         self.activeQuickLookID = activeQuickLookID
         self.revealRequest = revealRequest
@@ -654,6 +699,7 @@ public struct VirtualizedMasonryView: View {
                 targetColumnWidth: targetColumnWidth,
                 topContentInset: topContentInset,
                 bottomContentInset: bottomContentInset,
+                sideChromeWidth: sideChromeWidth,
                 activeQuickLookID: activeQuickLookID,
                 revealRequest: revealRequest,
                 isDarkMode: colorScheme == .dark,
@@ -685,6 +731,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
     let targetColumnWidth: CGFloat
     let topContentInset: CGFloat
     let bottomContentInset: CGFloat
+    let sideChromeWidth: CGFloat?
     let activeQuickLookID: UUID?
     let revealRequest: MasonryRevealRequest?
     let isDarkMode: Bool
@@ -713,6 +760,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             targetColumnWidth: targetColumnWidth,
             topInset: topContentInset,
             bottomInset: bottomContentInset,
+            sideChromeWidth: sideChromeWidth,
             activeQuickLookID: activeQuickLookID,
             revealRequest: revealRequest,
             isDarkMode: isDarkMode,
@@ -742,6 +790,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             targetColumnWidth: targetColumnWidth,
             topInset: topContentInset,
             bottomInset: bottomContentInset,
+            sideChromeWidth: sideChromeWidth,
             activeQuickLookID: activeQuickLookID,
             revealRequest: revealRequest,
             isDarkMode: isDarkMode,
@@ -752,6 +801,48 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
 }
 
 // MARK: - AppKit Scroll Container (with macOS Photos-Style Pinch & ⌘+Scroll Zoom)
+
+/// Layer-backed clip view with zero resize backing-store redraws, zero implicit CA actions,
+/// and strict horizontal origin clamping so animated sidebar/inspector width changes never jitter `bounds.origin.x`.
+private final class MasonryClipView: NSClipView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        applyZeroFlickerLayerConfig()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        applyZeroFlickerLayerConfig()
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        let root = super.makeBackingLayer()
+        root.actions = MasonryStaticLayerAssets.noImplicitActions
+        return root
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyZeroFlickerLayerConfig()
+    }
+
+    private func applyZeroFlickerLayerConfig() {
+        drawsBackground = false
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        layer?.actions = MasonryStaticLayerAssets.noImplicitActions
+    }
+
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        rect.origin.x = 0
+        return rect
+    }
+
+    override func setBoundsOrigin(_ newOrigin: NSPoint) {
+        super.setBoundsOrigin(NSPoint(x: 0, y: newOrigin.y))
+    }
+}
 
 private final class MasonryScrollView: NSScrollView {
     let masonryDocument = MasonryDocumentView()
@@ -770,6 +861,19 @@ private final class MasonryScrollView: NSScrollView {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         configure()
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        let root = super.makeBackingLayer()
+        root.actions = MasonryStaticLayerAssets.noImplicitActions
+        return root
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        layer?.actions = MasonryStaticLayerAssets.noImplicitActions
     }
 
     override func magnify(with event: NSEvent) {
@@ -795,6 +899,9 @@ private final class MasonryScrollView: NSScrollView {
     }
 
     private func configure() {
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        layer?.actions = MasonryStaticLayerAssets.noImplicitActions
         drawsBackground = false
         borderType = .noBorder
         hasVerticalScroller = true
@@ -802,9 +909,10 @@ private final class MasonryScrollView: NSScrollView {
         autohidesScrollers = true
         scrollerStyle = .overlay
         automaticallyAdjustsContentInsets = false
-        contentView.drawsBackground = false
-        contentView.postsBoundsChangedNotifications = true
-        contentView.postsFrameChangedNotifications = true
+        let clipView = MasonryClipView(frame: bounds)
+        clipView.postsBoundsChangedNotifications = true
+        clipView.postsFrameChangedNotifications = true
+        contentView = clipView
         documentView = masonryDocument
 
         let nc = NotificationCenter.default
@@ -892,7 +1000,11 @@ private enum MasonryStaticLayerAssets {
         "shadowOpacity": NSNull(),
         "shadowRadius": NSNull(),
         "shadowOffset": NSNull(),
-        "path": NSNull()
+        "path": NSNull(),
+        "sublayers": NSNull(),
+        "transform": NSNull(),
+        "onOrderIn": NSNull(),
+        "onOrderOut": NSNull()
     ]
 
     static func selectedCheckmarkBadge(scale: CGFloat) -> CGImage? {
@@ -1179,6 +1291,9 @@ private final class MasonryTileLayer {
     var loadTask: Task<Void, Never>?
     private var lastShadowSize: CGSize = .zero
     private var lastBadgeText: String?
+    private var lastBadgeScale: CGFloat = 0
+    private var isShowingProceduralImage: Bool = false
+    private var lastProceduralKey: String?
 
     private let clipLayer = CALayer()
     private let imageLayer = CALayer()
@@ -1190,6 +1305,10 @@ private final class MasonryTileLayer {
 
     init() {
         setupSublayers()
+    }
+
+    isolated deinit {
+        loadTask?.cancel()
     }
 
     private func setupSublayers() {
@@ -1260,6 +1379,8 @@ private final class MasonryTileLayer {
         mediaBadgeLayer.isHidden = true
         cutDashLayer.isHidden = true
         lastBadgeText = nil
+        isShowingProceduralImage = false
+        lastProceduralKey = nil
     }
 
     func stripLayoutAnimations() {
@@ -1284,9 +1405,15 @@ private final class MasonryTileLayer {
 
     /// GPU-composited Photos-style transition from a scroll/transform-compensated `fromRect` to `newRect`.
     /// Animates card frame, image clip, border, shadow, and right-edge badges in unison with zero jump.
-    func animateFrameTransition(from fromRect: CGRect, to newRect: CGRect, duration: CFTimeInterval = 0.28) {
+    func animateFrameTransition(
+        from fromRect: CGRect,
+        to newRect: CGRect,
+        duration: CFTimeInterval = 0.28,
+        timingFunction: CAMediaTimingFunction = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0)
+    ) {
+        stripLayoutAnimations()
         guard fromRect != newRect, fromRect.width > 1, fromRect.height > 1 else { return }
-        let timing = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0)
+        let timing = timingFunction
 
         let fromPos = CGPoint(x: fromRect.midX, y: fromRect.midY)
         let toPos = CGPoint(x: newRect.midX, y: newRect.midY)
@@ -1353,20 +1480,25 @@ private final class MasonryTileLayer {
         }
     }
 
-    /// Quiet Photos-style crossfade settle (`scale(0.96 -> 1.0)` + `opacity(0 -> 1)`) used for newly visible cards
+    /// Quiet Photos-style crossfade settle (`scale(0.96 -> 1.0)` + `opacity(fromOpacity -> 1)`) used for newly visible cards
     /// and for cards whose column wrap would otherwise shoot wildly across the entire screen.
-    func animateEnter(duration: CFTimeInterval = 0.22) {
+    func animateEnter(
+        duration: CFTimeInterval = 0.22,
+        fromOpacity: Float = 0.0,
+        fromScale: CGFloat = 0.96,
+        timingFunction: CAMediaTimingFunction = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0)
+    ) {
         stripLayoutAnimations()
-        let timing = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0)
+        let timing = timingFunction
         let scaleAnim = CABasicAnimation(keyPath: "transform.scale")
-        scaleAnim.fromValue = 0.96
+        scaleAnim.fromValue = fromScale
         scaleAnim.toValue = 1.0
         scaleAnim.duration = duration
         scaleAnim.timingFunction = timing
         layer.add(scaleAnim, forKey: "charkle.enterScale")
 
         let opAnim = CABasicAnimation(keyPath: "opacity")
-        opAnim.fromValue = 0.0
+        opAnim.fromValue = fromOpacity
         opAnim.toValue = 1.0
         opAnim.duration = duration * 0.85
         opAnim.timingFunction = timing
@@ -1454,13 +1586,14 @@ private final class MasonryTileLayer {
         }
 
         // Selection & cut visuals
+        let scaleChanged = abs(lastBadgeScale - scale) > 0.01
         updateVisualStates(isSelected: isSelected, isCut: isCut, isHiddenForHero: isHiddenForHero, isDark: isDark, scale: scale)
 
         // Badges (top-right)
         var rightCursor = rect.width - 6
         let badgeText = Self.mediaBadgeText(for: asset)
         if let badgeText {
-            if lastBadgeText != badgeText || mediaBadgeLayer.contents == nil,
+            if lastBadgeText != badgeText || mediaBadgeLayer.contents == nil || scaleChanged,
                let pill = MasonryStaticLayerAssets.mediaPillBadge(text: badgeText, scale: scale) {
                 mediaBadgeLayer.contents = pill.image
                 mediaBadgeLayer.contentsScale = scale
@@ -1479,7 +1612,7 @@ private final class MasonryTileLayer {
         }
 
         if asset.pinnedOffline {
-            if pinBadgeLayer.contents == nil {
+            if pinBadgeLayer.contents == nil || scaleChanged {
                 pinBadgeLayer.contents = MasonryStaticLayerAssets.pinOfflineBadge(scale: scale)
                 pinBadgeLayer.contentsScale = scale
             }
@@ -1488,15 +1621,35 @@ private final class MasonryTileLayer {
         } else {
             pinBadgeLayer.isHidden = true
         }
+        lastBadgeScale = scale
 
         // Thumbnail image (synchronous zero-bridging CGImage fast path -> async off-main-thread fallback)
-        guard !sameAsset || forceReloadImage || imageLayer.contents == nil else { return }
+        let proceduralKey = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(asset.dominantColors.first?.hex ?? "")-\(isDark ? 1 : 0)-\(Int((scale * 10).rounded()))"
+        let proceduralNeedsRefresh = isShowingProceduralImage && lastProceduralKey != proceduralKey
+        guard !sameAsset || forceReloadImage || imageLayer.contents == nil || proceduralNeedsRefresh else { return }
+
+        if proceduralNeedsRefresh && sameAsset && !forceReloadImage {
+            if let cached = loader?.cachedCGImage(for: asset.id, tier: .grid520) {
+                clipLayer.backgroundColor = cardSurface.cgColor
+                imageLayer.contents = cached
+                isShowingProceduralImage = false
+                lastProceduralKey = nil
+            } else {
+                imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale)
+                isShowingProceduralImage = true
+                lastProceduralKey = proceduralKey
+            }
+            return
+        }
+
         loadTask?.cancel()
         loadTask = nil
 
         if let cached = loader?.cachedCGImage(for: asset.id, tier: .grid520) {
             clipLayer.backgroundColor = cardSurface.cgColor
             imageLayer.contents = cached
+            isShowingProceduralImage = false
+            lastProceduralKey = nil
             return
         }
 
@@ -1510,10 +1663,14 @@ private final class MasonryTileLayer {
 
         if isProceduralKind {
             imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale)
+            isShowingProceduralImage = true
+            lastProceduralKey = proceduralKey
         } else {
             let tintHex = asset.dominantColors.first?.hex ?? (isDark ? "#262930" : "#EAE9E5")
             clipLayer.backgroundColor = NSColor.charkleHex(tintHex).withAlphaComponent(0.35).cgColor
             imageLayer.contents = nil
+            isShowingProceduralImage = false
+            lastProceduralKey = nil
         }
 
         guard let loader else { return }
@@ -1527,6 +1684,8 @@ private final class MasonryTileLayer {
             if let cg {
                 self.imageLayer.contents = cg
                 self.clipLayer.backgroundColor = cardSurface.cgColor
+                self.isShowingProceduralImage = false
+                self.lastProceduralKey = nil
             } else if self.imageLayer.contents == nil {
                 self.imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(
                     for: asset,
@@ -1534,6 +1693,8 @@ private final class MasonryTileLayer {
                     isDark: isDark,
                     scale: scale
                 )
+                self.isShowingProceduralImage = true
+                self.lastProceduralKey = proceduralKey
             }
             CATransaction.commit()
         }
@@ -1547,7 +1708,7 @@ private final class MasonryTileLayer {
             layer.shadowOpacity = isDark ? 0.34 : 0.14
             layer.shadowRadius = 8
             layer.shadowOffset = CGSize(width: 0, height: 3)
-            if selectedCheckLayer.contents == nil {
+            if selectedCheckLayer.contents == nil || abs(selectedCheckLayer.contentsScale - scale) > 0.01 {
                 selectedCheckLayer.contents = MasonryStaticLayerAssets.selectedCheckmarkBadge(scale: scale)
                 selectedCheckLayer.contentsScale = scale
             }
@@ -1642,7 +1803,7 @@ private final class MasonryHoverOverlayLayer {
         if isSelected {
             checkboxLayer.isHidden = true
         } else {
-            if checkboxLayer.contents == nil {
+            if checkboxLayer.contents == nil || abs(checkboxLayer.contentsScale - scale) > 0.01 {
                 checkboxLayer.contents = MasonryStaticLayerAssets.uncheckedHoverBadge(scale: scale)
                 checkboxLayer.contentsScale = scale
             }
@@ -1739,6 +1900,20 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     private var pendingRevealRequest: MasonryRevealRequest?
     private var lastHandledRevealNonce: UUID?
 
+    // Single-shot GPU-synchronized reflow during Sidebar / Inspector drawer animations
+    private var lastSideChromeWidth: CGFloat?
+    private var paneTransitionTargetWidth: CGFloat?
+    private var paneTransitionWindowWidth: CGFloat?
+    private var paneTransitionDeadline: CFAbsoluteTime = 0
+    private var paneTransitionSettleWorkItem: DispatchWorkItem?
+    private var isInPaneTransition: Bool {
+        paneTransitionTargetWidth != nil && CFAbsoluteTimeGetCurrent() < paneTransitionDeadline
+    }
+
+    // O(1) pasteboard changeCount cache for zero-XPC `draggingUpdated`
+    private var cachedDragChangeCount: Int = -1
+    private var cachedDragIsInternal: Bool = false
+
     private let spacing: CGFloat = 12
     private let horizontalPadding: CGFloat = 20
     private let tileOverscan: CGFloat = 520
@@ -1826,6 +2001,16 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         super.viewDidMoveToWindow()
         if window == nil {
             hoverMediaPreview.stop()
+            legacyPinchSettleWorkItem?.cancel()
+            legacyPinchSettleWorkItem = nil
+            paneTransitionSettleWorkItem?.cancel()
+            paneTransitionSettleWorkItem = nil
+            paneTransitionTargetWidth = nil
+            paneTransitionWindowWidth = nil
+            for tile in activeTiles.values {
+                tile.loadTask?.cancel()
+                tile.loadTask = nil
+            }
         } else {
             handleViewportFrameChanged()
         }
@@ -1860,6 +2045,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         targetColumnWidth: CGFloat,
         topInset: CGFloat,
         bottomInset: CGFloat,
+        sideChromeWidth: CGFloat?,
         activeQuickLookID: UUID?,
         revealRequest: MasonryRevealRequest?,
         isDarkMode: Bool,
@@ -1871,6 +2057,11 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let layoutModeChanged = (self.layoutMode != layoutMode)
         let columnWidthChanged = abs(self.targetColumnWidth - targetColumnWidth) >= 0.5
         let insetsChanged = abs(self.topInset - topInset) >= 0.5 || abs(self.bottomInset - bottomInset) >= 0.5
+        let previousSideChrome = self.lastSideChromeWidth
+        let sideChromeChanged: Bool = {
+            guard let prev = previousSideChrome, let next = sideChromeWidth else { return false }
+            return abs(prev - next) >= 1
+        }()
         let invalidationChanged = (self.loaderInvalidationVersion != loaderInvalidationVersion)
         let appearanceChanged = (self.isDarkMode != isDarkMode)
         let selectionChanged = (self.selectedAssetIDs != selectedIDs)
@@ -1892,6 +2083,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         self.targetColumnWidth = targetColumnWidth
         self.topInset = topInset
         self.bottomInset = bottomInset
+        self.lastSideChromeWidth = sideChromeWidth
         self.activeQuickLookID = activeQuickLookID
         if activeQuickLookID != nil {
             hoverMediaPreview.stop()
@@ -1909,12 +2101,69 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             self.assetIndexByID = map
         }
 
-        let isSelfZoomEcho = !assetsChanged && !layoutModeChanged && !insetsChanged && columnWidthChanged
+        let isSelfZoomEcho = !assetsChanged && !layoutModeChanged && !insetsChanged && !sideChromeChanged && columnWidthChanged
             && abs(targetColumnWidth - lastPublishedZoomWidth) < 1.0
             && (CFAbsoluteTimeGetCurrent() - lastInteractiveZoomAt) < 0.45
 
         if let revealRequest, revealRequest.nonce != lastHandledRevealNonce {
             pendingRevealRequest = revealRequest
+        }
+
+        // Single-shot GPU-synchronized reflow when Sidebar collapses/expands or Inspector toggles:
+        // computes the exact post-drawer layout ONCE at t=0 and glides cards in lockstep with
+        // `drawerEase` (0.30s) instead of thrashing layout 40+ times during the SwiftUI HStack animation.
+        if sideChromeChanged,
+           let prevChrome = previousSideChrome,
+           let nextChrome = sideChromeWidth,
+           let clipView = enclosingScrollView?.contentView,
+           clipView.bounds.width > 120 {
+            let liveWindowWidth = window?.frame.width
+            let baseWidth: CGFloat = {
+                if isInPaneTransition, let prevTarget = paneTransitionTargetWidth {
+                    let windowDelta: CGFloat
+                    if let curWin = liveWindowWidth, let prevWin = paneTransitionWindowWidth {
+                        windowDelta = curWin - prevWin
+                    } else {
+                        windowDelta = 0
+                    }
+                    return prevTarget + windowDelta
+                }
+                return floor(clipView.bounds.width)
+            }()
+            let targetWidth = MasonryLayoutEngine.paneTransitionTargetWidth(
+                currentViewportWidth: baseWidth,
+                previousSideChromeWidth: prevChrome,
+                newSideChromeWidth: nextChrome
+            )
+            let drawerDuration: CFTimeInterval = reduceMotion ? 0.15 : 0.30
+            paneTransitionTargetWidth = targetWidth
+            paneTransitionWindowWidth = liveWindowWidth
+            paneTransitionDeadline = CFAbsoluteTimeGetCurrent() + drawerDuration + 0.08
+            schedulePaneTransitionSettle(after: drawerDuration + 0.09)
+
+            if !assetsChanged && !layoutModeChanged && !insetsChanged && !columnWidthChanged && layout.items.count == assets.count {
+                sessionZoomAnchor = nil
+                cancelOpticalTransformImmediate()
+                hoveredAssetID = nil
+                hoverOverlayLayer.hide()
+                hoverMediaPreview.stop()
+                _ = recomputeLayoutAnchored(
+                    anchorDocPoint: nil,
+                    forceCursorLookup: false,
+                    animate: !reduceMotion && hadAssetsBefore,
+                    animationDuration: drawerDuration,
+                    timingFunction: CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0, 1),
+                    forceReconfigureExisting: invalidationChanged || appearanceChanged,
+                    forceReloadImages: invalidationChanged,
+                    isPaneTransition: true
+                )
+                sessionZoomAnchor = nil
+                if visualFlagsChanged && !(invalidationChanged || appearanceChanged) {
+                    updateVisibleTileStatesOnly()
+                }
+                fulfillPendingRevealIfPossible()
+                return
+            }
         }
 
         if isSelfZoomEcho {
@@ -1976,6 +2225,40 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         fulfillPendingRevealIfPossible()
     }
 
+    private func schedulePaneTransitionSettle(after delay: TimeInterval) {
+        paneTransitionSettleWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.paneTransitionSettleWorkItem = nil
+                self.paneTransitionTargetWidth = nil
+                self.paneTransitionWindowWidth = nil
+                guard let clipView = self.enclosingScrollView?.contentView else { return }
+                let actualWidth = floor(clipView.bounds.width)
+                if actualWidth > 120, abs(actualWidth - self.lastLayoutWidth) >= 2 {
+                    if clipView.bounds.origin.y > 4 {
+                        self.sessionZoomAnchor = nil
+                        _ = self.recomputeLayoutAnchored(
+                            anchorDocPoint: nil,
+                            forceCursorLookup: false,
+                            animate: false,
+                            forceReconfigureExisting: false
+                        )
+                        self.sessionZoomAnchor = nil
+                    } else {
+                        self.recomputeLayout(animate: false, reconfigureExisting: false)
+                    }
+                } else {
+                    self.updateDocumentHeight(clipHeight: clipView.bounds.height)
+                    self.syncVisibleTiles()
+                }
+                self.refreshHoverForCurrentMouseLocation()
+            }
+        }
+        paneTransitionSettleWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
     private func fulfillPendingRevealIfPossible() {
         guard let request = pendingRevealRequest,
               request.nonce != lastHandledRevealNonce,
@@ -2016,6 +2299,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     // MARK: - macOS Photos-Style Optical Pinch & ⌘+Scroll Gallery Zoom
 
     private func activeContainerWidth() -> CGFloat {
+        if isInPaneTransition, let target = paneTransitionTargetWidth {
+            return max(240, target)
+        }
         let clipBounds = enclosingScrollView?.contentView.bounds ?? bounds
         return max(240, floor(clipBounds.width > 120 ? clipBounds.width : max(lastLayoutWidth, 960)))
     }
@@ -2428,12 +2714,47 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
     func handleViewportFrameChanged() {
         guard let clipView = enclosingScrollView?.contentView else { return }
+        if isInPaneTransition {
+            if window?.inLiveResize == true {
+                // User started actively resizing the window mid-drawer transition: cancel the
+                // fixed-target drawer lock so live resize tracks the window edge immediately.
+                paneTransitionSettleWorkItem?.cancel()
+                paneTransitionSettleWorkItem = nil
+                paneTransitionTargetWidth = nil
+                paneTransitionWindowWidth = nil
+            } else {
+                // Suppress mid-animation per-frame reflows while the single-shot GPU transition is in flight.
+                if clipView.bounds.height > frame.height + 1 {
+                    updateDocumentHeight(clipHeight: clipView.bounds.height)
+                }
+                return
+            }
+        }
+        paneTransitionTargetWidth = nil
+        paneTransitionWindowWidth = nil
         let width = floor(clipView.bounds.width)
         guard width > 120 else { return }
         if abs(width - lastLayoutWidth) >= 1 {
+            let oldCols = layout.columnCount
+            let nextCols = MasonryLayoutEngine.verticalColumnCount(
+                containerWidth: width,
+                targetColumnWidth: targetColumnWidth,
+                spacing: spacing,
+                horizontalPadding: horizontalPadding
+            )
             sessionZoomAnchor = nil
             cancelOpticalTransformImmediate()
-            recomputeLayout(animate: false, reconfigureExisting: false)
+            if clipView.bounds.origin.y > 4 && (layoutMode == .horizontalJustified || nextCols != oldCols) {
+                _ = recomputeLayoutAnchored(
+                    anchorDocPoint: nil,
+                    forceCursorLookup: false,
+                    animate: false,
+                    forceReconfigureExisting: false
+                )
+                sessionZoomAnchor = nil
+            } else {
+                recomputeLayout(animate: false, reconfigureExisting: false)
+            }
         } else {
             updateDocumentHeight(clipHeight: clipView.bounds.height)
             syncVisibleTiles()
@@ -2478,6 +2799,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         forceCursorLookup: Bool,
         animate: Bool,
         animationDuration: CFTimeInterval = 0.28,
+        timingFunction: CAMediaTimingFunction = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0),
+        forceReconfigureExisting: Bool = true,
+        forceReloadImages: Bool = false,
+        isPaneTransition: Bool = false,
         oldOpticalScale: CGFloat = 1.0,
         newOpticalScale: CGFloat = 1.0,
         oldOpticalAnchorScreen: CGPoint = .zero
@@ -2528,35 +2853,51 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         updateDocumentHeight(clipHeight: clipBounds.height)
 
-        // Compute & apply exact anchor-locked scroll origin BEFORE mounting/animating visible tiles
+        // Compute & apply exact anchor-locked scroll origin BEFORE mounting/animating visible tiles.
+        // During Sidebar/Inspector drawer toggles, if the user is already at the very top of the library
+        // (`oldScrollY <= 4`), keep `newScrollY = 0` so Row 1 never scrolls off-screen above the toolbar.
         var newScrollY = oldScrollY
         var newOpticalAnchorScreen = oldOpticalAnchorScreen
-        let anchorID = resolvedAnchor?.anchor.assetID
+        let pinTopDuringPaneTransition = isPaneTransition && oldScrollY <= 4
+        let anchorID = pinTopDuringPaneTransition ? nil : resolvedAnchor?.anchor.assetID
 
         if let clipView {
             let maxScrollY = max(0, layout.totalHeight - clipBounds.height)
             if let resolved = resolvedAnchor, let newAnchorItem = layoutItem(for: resolved.anchor.assetID) {
                 let newAnchorRect = newAnchorItem.rect
                 let targetScreenY = resolved.anchor.screenY
-                newScrollY = MasonryLayoutEngine.anchoredScrollY(
-                    oldScrollY: oldScrollY,
-                    oldAnchorRect: resolved.item.rect,
-                    newAnchorRect: newAnchorRect,
-                    anchorNormV: resolved.anchor.normV,
-                    anchorScreenY: targetScreenY,
-                    newOpticalScale: newOpticalScale,
-                    opticalAnchorScreenY: targetScreenY,
-                    topInset: topInset,
-                    totalHeight: layout.totalHeight,
-                    viewportHeight: clipBounds.height
-                )
+                if isPaneTransition {
+                    newScrollY = MasonryLayoutEngine.paneTransitionScrollY(
+                        oldScrollY: oldScrollY,
+                        oldAnchorRect: resolved.item.rect,
+                        newAnchorRect: newAnchorRect,
+                        anchorNormV: resolved.anchor.normV,
+                        anchorScreenY: targetScreenY,
+                        topInset: topInset,
+                        totalHeight: layout.totalHeight,
+                        viewportHeight: clipBounds.height
+                    )
+                } else {
+                    newScrollY = MasonryLayoutEngine.anchoredScrollY(
+                        oldScrollY: oldScrollY,
+                        oldAnchorRect: resolved.item.rect,
+                        newAnchorRect: newAnchorRect,
+                        anchorNormV: resolved.anchor.normV,
+                        anchorScreenY: targetScreenY,
+                        newOpticalScale: newOpticalScale,
+                        opticalAnchorScreenY: targetScreenY,
+                        topInset: topInset,
+                        totalHeight: layout.totalHeight,
+                        viewportHeight: clipBounds.height
+                    )
+                }
 
                 // Track the exact anchor asset's post-handoff visual pivot so optical pinch follows THAT photo
                 let newAnchorRawX = newAnchorRect.minX + resolved.anchor.normU * newAnchorRect.width
                 let newAnchorRawY = newAnchorRect.minY + resolved.anchor.normV * newAnchorRect.height - newScrollY
                 newOpticalAnchorScreen = CGPoint(x: newAnchorRawX, y: newAnchorRawY)
             } else {
-                newScrollY = max(0, min(maxScrollY, oldScrollY))
+                newScrollY = pinTopDuringPaneTransition ? 0 : max(0, min(maxScrollY, oldScrollY))
             }
 
             if abs(newScrollY - oldScrollY) >= 0.5 {
@@ -2588,10 +2929,13 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         }
 
         syncVisibleTiles(
-            forceReconfigure: true,
+            forceReconfigure: forceReconfigureExisting,
+            forceReloadImages: forceReloadImages,
             animateMoves: animate && !isLiveScrolling,
             animateNewTiles: animate && !isLiveScrolling,
             animationDuration: animationDuration,
+            timingFunction: timingFunction,
+            isPaneTransition: isPaneTransition,
             compensatedFromRects: compensatedFromRects.isEmpty ? nil : compensatedFromRects,
             anchorAssetID: anchorID
         )
@@ -2645,13 +2989,19 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     private func updateDocumentHeight(clipHeight: CGFloat) {
-        let targetWidth = max(240, lastLayoutWidth)
+        let clipWidth = enclosingScrollView?.contentView.bounds.width ?? 0
+        // Never shrink document width below live clipWidth (prevents AppKit re-entrant sub-pixel
+        // frameDidChange loops), and preserve full width while a drawer shrink animation is in flight
+        // so inward-gliding cards near the trailing edge are never clipped mid-slide.
+        let targetWidth: CGFloat = isInPaneTransition
+            ? max(240, max(lastLayoutWidth, max(ceil(clipWidth), frame.width)))
+            : max(240, max(lastLayoutWidth, ceil(clipWidth)))
         let targetHeight = max(layout.totalHeight, max(1, clipHeight))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         if abs(frame.width - targetWidth) >= 0.5 || abs(frame.height - targetHeight) >= 0.5 {
             setFrameSize(NSSize(width: targetWidth, height: targetHeight))
         }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
         // Always mutate bounds+position (never frame) so any active optical pinch transform stays intact
         tilesContainerLayer.bounds = CGRect(origin: .zero, size: CGSize(width: targetWidth, height: targetHeight))
         tilesContainerLayer.position = .zero
@@ -2664,6 +3014,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         animateMoves: Bool = false,
         animateNewTiles: Bool = false,
         animationDuration: CFTimeInterval = 0.26,
+        timingFunction: CAMediaTimingFunction = CAMediaTimingFunction(controlPoints: 0.19, 1.0, 0.22, 1.0),
+        isPaneTransition: Bool = false,
         compensatedFromRects: [UUID: CGRect]? = nil,
         anchorAssetID: UUID? = nil
     ) {
@@ -2679,9 +3031,14 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             neededIDs.insert(item.id)
         }
 
-        // Far-jump crossfade threshold: non-anchor cards wrapping wildly across columns softly dissolve in place
-        // instead of flying diagonally over 10 other cards. The exact anchor asset ALWAYS glides continuously on top.
-        let maxGlideDistance = max(layout.columnWidth * 1.55, 290)
+        // Far-jump settle threshold: non-anchor cards wrapping wildly across columns softly settle in place
+        // instead of flying diagonally over 10 other cards. During drawer transitions, allow a wider glide
+        // distance and keep opacity >= 0.35 on far wraps so mounted artwork never flashes blank.
+        let maxGlideDistance: CGFloat = isPaneTransition
+            ? max(layout.columnWidth * 2.15, 420)
+            : max(layout.columnWidth * 1.55, 290)
+        let wrapFromOpacity: Float = isPaneTransition ? 0.35 : 0.0
+        let wrapFromScale: CGFloat = isPaneTransition ? 0.985 : 0.96
 
         let scale = currentScale
         CATransaction.begin()
@@ -2725,19 +3082,39 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                     if animateMoves && fromRect != itemFrame.rect {
                         let dist = hypot(itemFrame.rect.midX - fromRect.midX, itemFrame.rect.midY - fromRect.midY)
                         if isAnchorTile || dist <= maxGlideDistance {
-                            existing.animateFrameTransition(from: fromRect, to: itemFrame.rect, duration: animationDuration)
+                            existing.animateFrameTransition(
+                                from: fromRect,
+                                to: itemFrame.rect,
+                                duration: animationDuration,
+                                timingFunction: timingFunction
+                            )
                         } else {
-                            existing.animateEnter(duration: min(0.22, animationDuration))
+                            existing.animateEnter(
+                                duration: min(0.24, animationDuration),
+                                fromOpacity: wrapFromOpacity,
+                                fromScale: wrapFromScale,
+                                timingFunction: timingFunction
+                            )
                         }
                     }
-                } else if rawPrevious != itemFrame.rect {
+                } else if rawPrevious != itemFrame.rect || (animateMoves && fromRect != itemFrame.rect) {
                     existing.updateFrameOnly(itemFrame.rect)
                     if animateMoves && fromRect != itemFrame.rect {
                         let dist = hypot(itemFrame.rect.midX - fromRect.midX, itemFrame.rect.midY - fromRect.midY)
                         if isAnchorTile || dist <= maxGlideDistance {
-                            existing.animateFrameTransition(from: fromRect, to: itemFrame.rect, duration: animationDuration)
+                            existing.animateFrameTransition(
+                                from: fromRect,
+                                to: itemFrame.rect,
+                                duration: animationDuration,
+                                timingFunction: timingFunction
+                            )
                         } else {
-                            existing.animateEnter(duration: min(0.22, animationDuration))
+                            existing.animateEnter(
+                                duration: min(0.24, animationDuration),
+                                fromOpacity: wrapFromOpacity,
+                                fromScale: wrapFromScale,
+                                timingFunction: timingFunction
+                            )
                         }
                     }
                 }
@@ -2757,14 +3134,19 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                 )
                 tilesContainerLayer.addSublayer(tile.layer)
                 if animateNewTiles {
-                    tile.animateEnter(duration: min(0.22, animationDuration))
+                    tile.animateEnter(
+                        duration: min(0.22, animationDuration),
+                        fromOpacity: isPaneTransition ? 0.25 : 0.0,
+                        fromScale: wrapFromScale,
+                        timingFunction: timingFunction
+                    )
                 }
                 activeTiles[asset.id] = tile
             }
         }
 
-        // Keep hover overlay & muted hover media preview aligned if still visible and not live-scrolling/pinching
-        if !isLiveScrolling, !isPinching, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
+        // Keep hover overlay & muted hover media preview aligned if still visible and not live-scrolling/pinching/reflowing
+        if !isLiveScrolling, !isPinching, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
             hoverOverlayLayer.show(
                 for: asset,
                 in: tile.frame,
@@ -2806,7 +3188,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                 scale: scale
             )
         }
-        if !isLiveScrolling, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
+        if !isLiveScrolling, !isInPaneTransition, let hoveredID = hoveredAssetID, let tile = activeTiles[hoveredID], let asset = tile.boundAsset {
             hoverOverlayLayer.show(
                 for: asset,
                 in: tile.frame,
@@ -2854,7 +3236,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     private func refreshHoverForCurrentMouseLocation() {
-        guard !isLiveScrolling, !isPinching, let window else {
+        guard !isLiveScrolling, !isPinching, !isInPaneTransition, let window else {
             hoveredAssetID = nil
             hoverOverlayLayer.hide()
             hoverMediaPreview.stop()
@@ -2880,7 +3262,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard !isLiveScrolling, !isPinching else { return }
+        guard !isLiveScrolling, !isPinching, !isInPaneTransition else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard let hit = hitTestCard(at: point) else {
             if hoveredAssetID != nil {
@@ -2921,10 +3303,22 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     }
 
     private func effectiveSelection(including id: UUID) -> [UUID] {
-        if selectedAssetIDs.contains(id) {
-            return Array(selectedAssetIDs)
+        guard selectedAssetIDs.contains(id) else {
+            return [id]
         }
-        return [id]
+        var ordered: [UUID] = []
+        ordered.reserveCapacity(selectedAssetIDs.count)
+        ordered.append(id)
+        for asset in assets where asset.id != id && selectedAssetIDs.contains(asset.id) {
+            ordered.append(asset.id)
+        }
+        if ordered.count < selectedAssetIDs.count {
+            let seen = Set(ordered)
+            for remaining in selectedAssetIDs where !seen.contains(remaining) {
+                ordered.append(remaining)
+            }
+        }
+        return ordered
     }
 
     private func applyCardClick(asset: AssetRecord, modifiers: NSEvent.ModifierFlags) {
@@ -3018,9 +3412,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             break
         case .pendingCard(let asset, _, _, _):
             applyCardClick(asset: asset, modifiers: event.modifierFlags)
-        case .marquee:
-            if marqueeLayer.isHidden, !selectedAssetIDs.isEmpty {
-                commitSelection([])
+        case .marquee(_, let baseSelection):
+            if marqueeLayer.isHidden, selectedAssetIDs != baseSelection {
+                commitSelection(baseSelection)
             }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -3082,10 +3476,16 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     // MARK: - External Drop Destination
 
     private func isInternalCharkleDrag(_ pasteboard: NSPasteboard) -> Bool {
-        if let str = pasteboard.string(forType: .string), CharkleDragIdentifiers.isInternalDrag(str) {
-            return true
+        let changeCount = pasteboard.changeCount
+        if changeCount != cachedDragChangeCount {
+            cachedDragChangeCount = changeCount
+            if let str = pasteboard.string(forType: .string), CharkleDragIdentifiers.isInternalDrag(str) {
+                cachedDragIsInternal = true
+            } else {
+                cachedDragIsInternal = false
+            }
         }
-        return false
+        return cachedDragIsInternal
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
@@ -3311,7 +3711,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Ignore Caps Lock / NumPad / Function flags so ⌘A/⌘C/⌘X/⌘V work reliably with Chinese IME switch
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if flags == .command, let chars = event.charactersIgnoringModifiers?.lowercased() {
             switch chars {
             case "a":

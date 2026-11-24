@@ -163,7 +163,7 @@ public struct FolderCustomizationPopover: View {
 
                 ColorPicker("", selection: $customColor, supportsOpacity: false)
                     .labelsHidden()
-                    .frame(width: 24, height: 22)
+                    .fixedSize()
                     .onChange(of: customColor) { _, newValue in
                         if let hex = newValue.folderCustomHex {
                             selectedColorHex = hex

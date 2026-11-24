@@ -221,7 +221,7 @@ public nonisolated enum SocialPostResolver {
         defer { session.invalidateAndCancel() }
 
         for candidate in candidates {
-            guard let url = URL(string: candidate) else { continue }
+            guard let url = URL(string: candidate), WebBookmark.isSafeRemoteFetchURL(url) else { continue }
             var req = URLRequest(url: url, timeoutInterval: 6)
             if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
                 req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
@@ -233,8 +233,10 @@ public nonisolated enum SocialPostResolver {
             guard let (data, response) = try? await session.data(for: req),
                   let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
+                  let finalURL = http.url, WebBookmark.isSafeRemoteFetchURL(finalURL),
+                  data.count <= 4 * 1024 * 1024,
                   let src = CGImageSourceCreateWithData(data as CFData, nil),
-                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil),
+                  let cg = MediaPipeline.raster(src)?.poster,
                   cg.width >= 16, cg.height >= 16 else {
                 continue
             }
@@ -399,7 +401,8 @@ public nonisolated enum SocialPostResolver {
         return ResolvedSocialPost(
             metadata: meta,
             primaryMediaDownloadURL: primaryURL,
-            primaryMediaKind: hasVideo ? .video : (primaryURL != nil ? .photo : nil),
+            // Bluesky video embeds expose HLS `.m3u8` playlists and JPEG thumbnails; download `primaryURL` as a photo poster.
+            primaryMediaKind: primaryURL != nil ? .photo : nil,
             primaryThumbnailURL: primaryThumb
         )
     }

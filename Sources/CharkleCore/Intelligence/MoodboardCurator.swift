@@ -23,7 +23,8 @@ public nonisolated struct MoodboardCurator: Sendable {
         let assets = try await database.fetchAssets(matching: FilterCriteria())
         let indexed = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
         let seeds = unique(seedIDs).compactMap { indexed[$0] }
-        let available = assets.filter { !seedIDs.contains($0.id) }
+        let seedSet = Set(seedIDs)
+        let available = assets.filter { !seedSet.contains($0.id) }
         let vectors = try await database.vectors()
         let ranks = try await keywordRanks(prompt)
         var promptVector: [Float]?
@@ -154,9 +155,14 @@ public nonisolated struct MoodboardCurator: Sendable {
 
     static func palette(_ input: [LabColor], count: Int) -> [LabColor] {
         guard count > 0 else { return [] }
+        let finiteInput: [LabColor] = input.compactMap { swatch in
+            guard swatch.l.isFinite, swatch.a.isFinite, swatch.b.isFinite else { return nil }
+            var clean = swatch
+            clean.proportion = (swatch.proportion.isFinite && swatch.proportion > 0) ? swatch.proportion : 0
+            return clean
+        }
         var groups: [LabColor] = []
-        for swatch in input.sorted(by: { ($0.proportion, $0.hex) > ($1.proportion, $1.hex) }) {
-            guard swatch.l.isFinite, swatch.a.isFinite, swatch.b.isFinite else { continue }
+        for swatch in finiteInput.sorted(by: { ($0.proportion, $0.hex) > ($1.proportion, $1.hex) }) {
             if let index = groups.indices.min(by: {
                 groups[$0].deltaE(to: swatch) < groups[$1].deltaE(to: swatch)
             }), groups[index].deltaE2000(to: swatch) < 8 {
@@ -180,7 +186,10 @@ public nonisolated struct MoodboardCurator: Sendable {
         while lower < assets.count {
             let count = min(lower == 0 && assets.count <= 6 ? 3 : 4, assets.count - lower)
             let row = Array(assets[lower..<(lower + count)])
-            let ratios = row.map { min(2.1, max(0.6, $0.aspectRatio)) }
+            let ratios = row.map { asset -> Double in
+                let raw = asset.aspectRatio
+                return (raw.isFinite && raw > 0) ? min(2.1, max(0.6, raw)) : 1.25
+            }
             let weight = lower == 0 && count > 1 ? 1.25 : 1.0
             let weights = ratios.enumerated().map { $0.offset == 0 ? $0.element * weight : $0.element }
             let gap = 16.0

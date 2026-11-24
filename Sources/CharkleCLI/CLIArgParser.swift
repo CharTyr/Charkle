@@ -41,6 +41,18 @@ struct ParsedCLIArgs: Sendable {
         return false
     }
 
+    func optionalBool(_ key: String) -> Bool? {
+        if booleans.contains(key) { return true }
+        if let raw = first(key)?.lowercased() {
+            switch raw {
+            case "true", "1", "yes": return true
+            case "false", "0", "no": return false
+            default: return nil
+            }
+        }
+        return nil
+    }
+
     var wantsHelp: Bool {
         flag("help")
     }
@@ -84,6 +96,15 @@ enum CLIArgParser {
         "q": "query"
     ]
 
+    private static func looksLikeFlag(_ token: String) -> Bool {
+        if token == "--" { return true }
+        if token.hasPrefix("--"), token.count > 2 { return true }
+        if token.hasPrefix("-"), token.count == 2, let ch = token.last, shortAliases[ch] != nil {
+            return true
+        }
+        return false
+    }
+
     static func parse(_ args: [String], extraBooleans: Set<String> = []) -> ParsedCLIArgs {
         let bools = knownBooleanFlags.union(extraBooleans)
         var positionals: [String] = []
@@ -117,6 +138,7 @@ enum CLIArgParser {
                         let lower = val.lowercased()
                         if lower == "true" || lower == "1" || lower == "yes" {
                             flags.insert(key)
+                            values[key] = nil
                         } else if lower == "false" || lower == "0" || lower == "no" {
                             flags.remove(key)
                             values[key, default: []].append("false")
@@ -129,8 +151,9 @@ enum CLIArgParser {
                     i += 1
                 } else if bools.contains(body) {
                     flags.insert(body)
+                    values[body] = nil
                     i += 1
-                } else if i + 1 < args.count {
+                } else if i + 1 < args.count, !looksLikeFlag(args[i + 1]) {
                     values[body, default: []].append(args[i + 1])
                     i += 2
                 } else {
@@ -145,8 +168,9 @@ enum CLIArgParser {
                let mapped = shortAliases[ch] {
                 if bools.contains(mapped) {
                     flags.insert(mapped)
+                    values[mapped] = nil
                     i += 1
-                } else if i + 1 < args.count {
+                } else if i + 1 < args.count, !looksLikeFlag(args[i + 1]) {
                     values[mapped, default: []].append(args[i + 1])
                     i += 2
                 } else {
@@ -191,7 +215,7 @@ enum CLIArgParser {
                 i += 1
                 continue
             }
-            if token == "--library-dir", i + 1 < rawArgs.count {
+            if token == "--library-dir", i + 1 < rawArgs.count, !looksLikeFlag(rawArgs[i + 1]) {
                 let expanded = (rawArgs[i + 1] as NSString).expandingTildeInPath
                 opts.libraryDir = URL(fileURLWithPath: expanded, isDirectory: true)
                 i += 2

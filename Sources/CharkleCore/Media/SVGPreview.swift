@@ -26,10 +26,12 @@ nonisolated final class SVGPreview: NSObject, XMLParserDelegate {
             let view = coordinates(a["viewBox"])
             let w = view.count == 4 ? view[2] : number(a["width"], default: 300)
             let h = view.count == 4 ? view[3] : number(a["height"], default: 150)
-            guard w > 0, h > 0 else { return }
-            let scale = 1_400 / max(w, h)
-            let width = max(1, Int((w * scale).rounded()))
-            let height = max(1, Int((h * scale).rounded()))
+            let maxDim = max(w, h)
+            guard w.isFinite, h.isFinite, w >= 1e-6, h >= 1e-6, maxDim >= 1e-6 else { return }
+            let scale = 1_400 / maxDim
+            guard scale.isFinite, (w * scale).isFinite, (h * scale).isFinite else { return }
+            let width = max(1, min(4_096, Int((w * scale).rounded())))
+            let height = max(1, min(4_096, Int((h * scale).rounded())))
             size = CGSize(width: width, height: height)
             context = MediaArtwork.context(width: width, height: height)
             context?.translateBy(x: 0, y: size.height)

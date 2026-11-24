@@ -36,6 +36,7 @@ public actor LocalExtensionBridgeServer {
     private let preferredPort: UInt16
     private let allowEphemeralPort: Bool
     private let ioQueue = DispatchQueue(label: "com.charkle.extension.bridge.io", qos: .userInitiated)
+    private let activeSessions = Mutex<[UUID: HTTPConnectionSession]>([:])
     private let onLibraryMutated: (@Sendable (MutationKind, Int, UUID?, UUID?) -> Void)?
 
     public init(
@@ -115,6 +116,14 @@ public actor LocalExtensionBridgeServer {
         listener?.cancel()
         listener = nil
         boundPort = 0
+        let sessionsToCancel = activeSessions.withLock { map -> [HTTPConnectionSession] in
+            let list = Array(map.values)
+            map.removeAll()
+            return list
+        }
+        for session in sessionsToCancel {
+            session.cancel()
+        }
     }
 
     private func bindListener(on port: NWEndpoint.Port) async throws -> (NWListener, UInt16) {
@@ -173,16 +182,21 @@ public actor LocalExtensionBridgeServer {
                     connection.cancel()
                     return
                 }
+                let sessionID = UUID()
                 let session = HTTPConnectionSession(
                     connection: connection,
                     queue: self.ioQueue,
-                    maxBodyBytes: Self.maxRequestBodyBytes
+                    maxBodyBytes: Self.maxRequestBodyBytes,
+                    onFinish: { [weak self] in
+                        _ = self?.activeSessions.withLock { $0.removeValue(forKey: sessionID) }
+                    }
                 ) { [weak self] request in
                     guard let self else {
                         return HTTPResponse.json(status: 503, body: ["error": "服务已停止"])
                     }
                     return await self.handle(request: request)
                 }
+                self.activeSessions.withLock { $0[sessionID] = session }
                 session.start()
             }
             created.start(queue: self.ioQueue)
@@ -324,24 +338,31 @@ public actor LocalExtensionBridgeServer {
 
     private func handleGetFolders(corsHeaders: [String: String]) async throws -> HTTPResponse {
         let folders = try await engine.fetchFolders()
-        let assets = try await engine.fetchAssets(matching: FilterCriteria())
-        var counts: [UUID: Int] = [:]
-        for asset in assets {
-            if let fid = asset.folderID {
-                counts[fid, default: 0] += 1
-            }
-        }
         let serialized: [[String: Any]] = folders.map { f in
             var dict: [String: Any] = [
                 "id": f.id.uuidString,
                 "name": f.name,
                 "sortOrder": f.sortOrder,
-                "assetCount": counts[f.id] ?? 0
+                "assetCount": f.assetCount
             ]
             dict["parentID"] = f.parentID?.uuidString ?? NSNull()
             return dict
         }
         return HTTPResponse.json(status: 200, extraHeaders: corsHeaders, body: ["folders": serialized])
+    }
+
+    private enum OptionalUUIDParse {
+        case valid(UUID?)
+        case invalid
+    }
+
+    private static func parseOptionalUUID(_ raw: Any?) -> OptionalUUIDParse {
+        guard let raw, !(raw is NSNull) else { return .valid(nil) }
+        guard let str = raw as? String else { return .invalid }
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .valid(nil) }
+        guard let uuid = UUID(uuidString: trimmed) else { return .invalid }
+        return .valid(uuid)
     }
 
     private func handleCreateFolder(request: HTTPRequest, corsHeaders: [String: String]) async throws -> HTTPResponse {
@@ -352,7 +373,12 @@ public actor LocalExtensionBridgeServer {
         guard !rawName.isEmpty else {
             return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "请填写文件夹名称。", "code": "INVALID_NAME"])
         }
-        let parentID = (obj["parentID"] as? String).flatMap(UUID.init(uuidString:))
+        let parentID: UUID?
+        switch Self.parseOptionalUUID(obj["parentID"]) {
+        case .valid(let id): parentID = id
+        case .invalid:
+            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "父文件夹 ID 格式不正确。", "code": "INVALID_ID"])
+        }
         let reuseExisting = (obj["reuseExisting"] as? Bool) ?? false
 
         if reuseExisting {
@@ -364,7 +390,7 @@ public actor LocalExtensionBridgeServer {
                     "id": matched.id.uuidString,
                     "name": matched.name,
                     "sortOrder": matched.sortOrder,
-                    "assetCount": 0
+                    "assetCount": matched.assetCount
                 ]
                 dict["parentID"] = matched.parentID?.uuidString ?? NSNull()
                 return HTTPResponse.json(status: 200, extraHeaders: corsHeaders, body: ["folder": dict, "reused": true])
@@ -418,8 +444,18 @@ public actor LocalExtensionBridgeServer {
             )
         }
 
-        let targetFolderID = (body["targetFolderID"] as? String).flatMap(UUID.init(uuidString:))
-        let targetBoardID = (body["targetBoardID"] as? String).flatMap(UUID.init(uuidString:))
+        let targetFolderID: UUID?
+        switch Self.parseOptionalUUID(body["targetFolderID"]) {
+        case .valid(let id): targetFolderID = id
+        case .invalid:
+            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "目标文件夹 ID 格式不正确。", "code": "INVALID_ID"])
+        }
+        let targetBoardID: UUID?
+        switch Self.parseOptionalUUID(body["targetBoardID"]) {
+        case .valid(let id): targetBoardID = id
+        case .invalid:
+            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "目标情绪板 ID 格式不正确。", "code": "INVALID_ID"])
+        }
         let skipDuplicates = (body["skipDuplicates"] as? Bool) ?? false
 
         var knownKeys: Set<String> = []
@@ -570,8 +606,20 @@ public actor LocalExtensionBridgeServer {
             } else {
                 let textValue = String(decoding: part.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
                 switch part.name {
-                case "targetFolderID": targetFolderID = UUID(uuidString: textValue)
-                case "targetBoardID": targetBoardID = UUID(uuidString: textValue)
+                case "targetFolderID":
+                    if !textValue.isEmpty {
+                        guard let parsed = UUID(uuidString: textValue) else {
+                            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "目标文件夹 ID 格式不正确。", "code": "INVALID_ID"])
+                        }
+                        targetFolderID = parsed
+                    }
+                case "targetBoardID":
+                    if !textValue.isEmpty {
+                        guard let parsed = UUID(uuidString: textValue) else {
+                            return HTTPResponse.json(status: 400, extraHeaders: corsHeaders, body: ["error": "目标情绪板 ID 格式不正确。", "code": "INVALID_ID"])
+                        }
+                        targetBoardID = parsed
+                    }
                 case "sourceURL": sourceURL = textValue.isEmpty ? nil : textValue
                 default: break
                 }
@@ -644,14 +692,42 @@ public actor LocalExtensionBridgeServer {
         return diff == 0
     }
 
+    private static func hasLineBreakOrControl(_ s: String) -> Bool {
+        s.unicodeScalars.contains { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7F
+        }
+    }
+
     private static func isBrowserExtensionOrigin(_ origin: String?) -> Bool {
-        guard let raw = origin?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+        guard let raw = origin?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              !hasLineBreakOrControl(raw),
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              ["chrome-extension", "safari-web-extension", "moz-extension"].contains(scheme),
+              let host = url.host(), !host.isEmpty,
+              url.user() == nil, url.password() == nil,
+              url.path.isEmpty || url.path == "/",
+              url.query() == nil, url.fragment() == nil else {
             return false
         }
-        let lower = raw.lowercased()
-        return lower.hasPrefix("chrome-extension://")
-            || lower.hasPrefix("safari-web-extension://")
-            || lower.hasPrefix("moz-extension://")
+        return true
+    }
+
+    private static func isLoopbackWebOrigin(_ origin: String?) -> Bool {
+        guard let raw = origin?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              !hasLineBreakOrControl(raw),
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(), scheme == "http",
+              let host = url.host()?.lowercased(),
+              host == "localhost" || host == "127.0.0.1",
+              url.user() == nil, url.password() == nil,
+              url.path.isEmpty || url.path == "/",
+              url.query() == nil, url.fragment() == nil else {
+            return false
+        }
+        return true
     }
 
     private func handleLocalAutoPair(request: HTTPRequest, corsHeaders: [String: String]) -> HTTPResponse {
@@ -715,16 +791,11 @@ public actor LocalExtensionBridgeServer {
             "Access-Control-Max-Age": "600",
             "Vary": "Origin"
         ]
-        if let origin = origin?.trimmingCharacters(in: .whitespacesAndNewlines), !origin.isEmpty {
-            let lower = origin.lowercased()
-            let allowed = lower.hasPrefix("chrome-extension://")
-                || lower.hasPrefix("safari-web-extension://")
-                || lower.hasPrefix("moz-extension://")
-                || lower.hasPrefix("http://127.0.0.1")
-                || lower.hasPrefix("http://localhost")
-            if allowed {
-                headers["Access-Control-Allow-Origin"] = origin
-            }
+        if let origin = origin?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !origin.isEmpty,
+           !Self.hasLineBreakOrControl(origin),
+           Self.isBrowserExtensionOrigin(origin) || Self.isLoopbackWebOrigin(origin) {
+            headers["Access-Control-Allow-Origin"] = origin
         }
         return headers
     }
@@ -765,10 +836,20 @@ public actor LocalExtensionBridgeServer {
         let bodyText = (item["bodyText"] as? String ?? item["notes"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        func validatedWebURLString(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty,
+                  let parsed = URL(string: trimmed),
+                  WebBookmark.isWebURL(parsed) else {
+                return nil
+            }
+            return parsed.absoluteString
+        }
+
         var attachments: [SocialMediaAttachment] = []
         if let rawAttachments = item["attachments"] as? [[String: Any]] {
             for att in rawAttachments {
-                guard let u = (att["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !u.isEmpty else {
+                guard let u = validatedWebURLString(att["url"] as? String) else {
                     continue
                 }
                 let kindStr = (att["kind"] as? String ?? "photo").lowercased()
@@ -777,13 +858,13 @@ public actor LocalExtensionBridgeServer {
                 case "gif": .gif
                 default: .photo
                 }
-                let thumb = (att["thumbnailURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                attachments.append(SocialMediaAttachment(kind: kind, url: u, thumbnailURL: (thumb?.isEmpty == false) ? thumb : nil))
+                let thumb = validatedWebURLString(att["thumbnailURL"] as? String)
+                attachments.append(SocialMediaAttachment(kind: kind, url: u, thumbnailURL: thumb))
             }
         }
 
-        let mediaURLs = (item["mediaURLs"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        let mediaThumbs = (item["mediaThumbnailURLs"] as? [String] ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let mediaURLs = (item["mediaURLs"] as? [String] ?? []).compactMap(validatedWebURLString)
+        let mediaThumbs = (item["mediaThumbnailURLs"] as? [String] ?? []).compactMap(validatedWebURLString)
 
         if attachments.isEmpty && !mediaURLs.isEmpty {
             for (idx, u) in mediaURLs.enumerated() {
@@ -792,9 +873,9 @@ public actor LocalExtensionBridgeServer {
             }
         }
 
-        let videoURL = (item["videoURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasVideo = (item["hasVideo"] as? Bool) ?? (videoURL?.isEmpty == false)
-        let avatarURL = (item["authorAvatarURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let videoURL = validatedWebURLString(item["videoURL"] as? String)
+        let hasVideo = (item["hasVideo"] as? Bool) ?? (videoURL != nil)
+        let avatarURL = validatedWebURLString(item["authorAvatarURL"] as? String)
         let publishedAt = (item["publishedAtText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let quotedAuthor = (item["quotedAuthor"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let quotedText = (item["quotedText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -908,10 +989,23 @@ public actor LocalExtensionBridgeServer {
 
     private static func extractQuotedParam(_ key: String, in headerLine: String) -> String? {
         let needle = "\(key)=\""
-        guard let start = headerLine.range(of: needle, options: .caseInsensitive) else { return nil }
-        let rest = headerLine[start.upperBound...]
-        guard let end = rest.firstIndex(of: "\"") else { return nil }
-        return String(rest[..<end])
+        var searchStart = headerLine.startIndex
+        while let match = headerLine.range(of: needle, options: .caseInsensitive, range: searchStart..<headerLine.endIndex) {
+            let atBoundary: Bool
+            if match.lowerBound == headerLine.startIndex {
+                atBoundary = true
+            } else {
+                let prev = headerLine[headerLine.index(before: match.lowerBound)]
+                atBoundary = prev == ";" || prev.isWhitespace
+            }
+            if atBoundary {
+                let rest = headerLine[match.upperBound...]
+                guard let end = rest.firstIndex(of: "\"") else { return nil }
+                return String(rest[..<end])
+            }
+            searchStart = match.upperBound
+        }
+        return nil
     }
 }
 
@@ -950,8 +1044,11 @@ private nonisolated struct HTTPResponse: Sendable {
         case 204: "No Content"
         case 400: "Bad Request"
         case 401: "Unauthorized"
+        case 403: "Forbidden"
         case 404: "Not Found"
+        case 411: "Length Required"
         case 413: "Payload Too Large"
+        case 501: "Not Implemented"
         case 503: "Service Unavailable"
         default: "Internal Server Error"
         }
@@ -959,7 +1056,11 @@ private nonisolated struct HTTPResponse: Sendable {
         lines.append("Content-Length: \(body.count)")
         lines.append("Connection: close")
         for (k, v) in headers {
-            lines.append("\(k): \(v)")
+            let cleanK = k.filter { $0 != "\r" && $0 != "\n" }
+            let cleanV = v.filter { $0 != "\r" && $0 != "\n" }
+            if !cleanK.isEmpty {
+                lines.append("\(cleanK): \(cleanV)")
+            }
         }
         lines.append("")
         lines.append("")
@@ -970,34 +1071,123 @@ private nonisolated struct HTTPResponse: Sendable {
 }
 
 private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
+    private static let idleTimeoutSeconds: TimeInterval = 15.0
+
     private let connection: NWConnection
     private let queue: DispatchQueue
     private let maxBodyBytes: Int
+    private let onFinish: @Sendable () -> Void
     private let handler: @Sendable (HTTPRequest) async -> HTTPResponse
 
     private var buffer = Data()
     private var parsedHeaderEnd: Int?
     private var expectedBodyLength: Int = 0
+    private var isChunked = false
     private var method: String = ""
     private var rawTarget: String = ""
     private var headers: [String: String] = [:]
     private var completed = false
+    private var timeoutWorkItem: DispatchWorkItem?
 
     init(
         connection: NWConnection,
         queue: DispatchQueue,
         maxBodyBytes: Int,
+        onFinish: @escaping @Sendable () -> Void,
         handler: @escaping @Sendable (HTTPRequest) async -> HTTPResponse
     ) {
         self.connection = connection
         self.queue = queue
         self.maxBodyBytes = maxBodyBytes
+        self.onFinish = onFinish
         self.handler = handler
     }
 
     func start() {
         connection.start(queue: queue)
-        receiveNextChunk()
+        queue.async { [self] in
+            resetReadTimeout()
+            receiveNextChunk()
+        }
+    }
+
+    func cancel() {
+        queue.async { [self] in
+            guard !completed else { return }
+            completed = true
+            cancelReadTimeout()
+            connection.cancel()
+            onFinish()
+        }
+    }
+
+    private func resetReadTimeout() {
+        cancelReadTimeout()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.completed else { return }
+            self.completed = true
+            self.connection.cancel()
+            self.onFinish()
+        }
+        timeoutWorkItem = work
+        queue.asyncAfter(deadline: .now() + Self.idleTimeoutSeconds, execute: work)
+    }
+
+    private func cancelReadTimeout() {
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+    }
+
+    private enum ChunkDecodeStatus {
+        case incomplete
+        case malformed
+        case payloadTooLarge
+        case complete(Data)
+    }
+
+    private func decodeChunkedBody(from slice: Data) -> ChunkDecodeStatus {
+        let crlf = Data("\r\n".utf8)
+        var cursor = slice.startIndex
+        var decoded = Data()
+
+        while true {
+            guard let sizeLineEnd = slice.range(of: crlf, in: cursor..<slice.endIndex) else {
+                return .incomplete
+            }
+            let sizeLine = String(decoding: slice[cursor..<sizeLineEnd.lowerBound], as: UTF8.self)
+            let sizeToken = sizeLine.split(separator: ";", maxSplits: 1).first?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            guard !sizeToken.isEmpty, let chunkSize = Int(sizeToken, radix: 16), chunkSize >= 0 else {
+                return .malformed
+            }
+            cursor = sizeLineEnd.upperBound
+            if chunkSize == 0 {
+                // Consume final CRLF (or optional trailing headers ending with CRLFCRLF)
+                if slice.distance(from: cursor, to: slice.endIndex) >= 2,
+                   slice[cursor..<slice.index(cursor, offsetBy: 2)] == crlf {
+                    return .complete(decoded)
+                }
+                let trailerEnd = Data("\r\n\r\n".utf8)
+                if slice.range(of: trailerEnd, in: cursor..<slice.endIndex) != nil {
+                    return .complete(decoded)
+                }
+                return .incomplete
+            }
+            if decoded.count + chunkSize > maxBodyBytes {
+                return .payloadTooLarge
+            }
+            let needed = chunkSize + 2
+            guard slice.distance(from: cursor, to: slice.endIndex) >= needed else {
+                return .incomplete
+            }
+            let dataEnd = slice.index(cursor, offsetBy: chunkSize)
+            let crlfEnd = slice.index(dataEnd, offsetBy: 2)
+            guard slice[dataEnd..<crlfEnd] == crlf else {
+                return .malformed
+            }
+            decoded.append(slice[cursor..<dataEnd])
+            cursor = crlfEnd
+        }
     }
 
     private func receiveNextChunk() {
@@ -1005,6 +1195,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
             if completed { return }
             if let data, !data.isEmpty {
                 buffer.append(data)
+                resetReadTimeout()
             }
 
             if parsedHeaderEnd == nil {
@@ -1025,16 +1216,36 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
                     method = String(parts[0]).uppercased()
                     rawTarget = String(parts[1])
                     for line in lines.dropFirst() {
+                        if line.contains("\r") || line.contains("\n") {
+                            finishWithResponse(HTTPResponse.json(status: 400, body: ["error": "请求头格式无效。"]))
+                            return
+                        }
                         if let colon = line.firstIndex(of: ":") {
                             let k = line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                             let v = line[line.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
                             if !k.isEmpty { headers[k] = v }
                         }
                     }
-                    expectedBodyLength = max(0, Int(headers["content-length"] ?? "0") ?? 0)
-                    if expectedBodyLength > maxBodyBytes {
-                        finishWithResponse(HTTPResponse.json(status: 413, body: ["error": "请求体积超出上限。"]))
-                        return
+                    if let te = headers["transfer-encoding"]?.lowercased(), !te.isEmpty {
+                        if te.contains("chunked") {
+                            isChunked = true
+                            expectedBodyLength = 0
+                        } else {
+                            finishWithResponse(HTTPResponse.json(status: 501, body: ["error": "不支持的传输编码。"]))
+                            return
+                        }
+                    } else if let rawCL = headers["content-length"] {
+                        guard let parsedCL = Int(rawCL), parsedCL >= 0 else {
+                            finishWithResponse(HTTPResponse.json(status: 400, body: ["error": "无效的 Content-Length。"]))
+                            return
+                        }
+                        if parsedCL > maxBodyBytes {
+                            finishWithResponse(HTTPResponse.json(status: 413, body: ["error": "请求体积超出上限。"]))
+                            return
+                        }
+                        expectedBodyLength = parsedCL
+                    } else {
+                        expectedBodyLength = 0
                     }
                     parsedHeaderEnd = range.upperBound
                 } else if buffer.count > 65_536 {
@@ -1044,27 +1255,40 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
             }
 
             if let headerEnd = parsedHeaderEnd {
-                let currentBodyLen = buffer.count - headerEnd
-                if currentBodyLen >= expectedBodyLength {
-                    let bodySlice = buffer[headerEnd..<min(buffer.count, headerEnd + expectedBodyLength)]
-                    let req = HTTPRequest(
-                        method: method,
-                        rawTarget: rawTarget,
-                        headers: headers,
-                        body: Data(bodySlice)
-                    )
-                    completed = true
-                    Task { [self] in
-                        let response = await self.handler(req)
-                        self.send(response)
+                if isChunked {
+                    let rawSlice = Data(buffer[headerEnd..<buffer.endIndex])
+                    if rawSlice.count > maxBodyBytes + 1_048_576 {
+                        finishWithResponse(HTTPResponse.json(status: 413, body: ["error": "请求体积超出上限。"]))
+                        return
                     }
-                    return
+                    switch decodeChunkedBody(from: rawSlice) {
+                    case .complete(let bodyData):
+                        dispatchRequest(body: bodyData)
+                        return
+                    case .payloadTooLarge:
+                        finishWithResponse(HTTPResponse.json(status: 413, body: ["error": "请求体积超出上限。"]))
+                        return
+                    case .malformed:
+                        finishWithResponse(HTTPResponse.json(status: 400, body: ["error": "分块传输格式无效。"]))
+                        return
+                    case .incomplete:
+                        break
+                    }
+                } else {
+                    let currentBodyLen = buffer.count - headerEnd
+                    if currentBodyLen >= expectedBodyLength {
+                        let bodySlice = buffer[headerEnd..<min(buffer.count, headerEnd + expectedBodyLength)]
+                        dispatchRequest(body: Data(bodySlice))
+                        return
+                    }
                 }
             }
 
             if isComplete || error != nil {
                 completed = true
+                cancelReadTimeout()
                 connection.cancel()
+                onFinish()
                 return
             }
 
@@ -1072,15 +1296,32 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
         }
     }
 
+    private func dispatchRequest(body: Data) {
+        let req = HTTPRequest(
+            method: method,
+            rawTarget: rawTarget,
+            headers: headers,
+            body: body
+        )
+        completed = true
+        cancelReadTimeout()
+        Task { [self] in
+            let response = await self.handler(req)
+            self.send(response)
+        }
+    }
+
     private func finishWithResponse(_ response: HTTPResponse) {
         completed = true
+        cancelReadTimeout()
         send(response)
     }
 
     private func send(_ response: HTTPResponse) {
         let payload = response.serialize()
-        connection.send(content: payload, completion: .contentProcessed { [connection] _ in
+        connection.send(content: payload, completion: .contentProcessed { [connection, onFinish] _ in
             connection.cancel()
+            onFinish()
         })
     }
 }

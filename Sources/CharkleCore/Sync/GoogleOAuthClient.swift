@@ -97,6 +97,7 @@ public actor GoogleOAuthClient {
     private var cachedToken: GoogleOAuthToken?
     private var hasLoadedToken = false
     private var inFlightRefresh: Task<GoogleOAuthToken, Error>?
+    private var sessionGeneration: UInt64 = 0
 
     public init(keychain: KeychainStore = KeychainStore(), session: URLSession = .shared) {
         self.keychain = keychain
@@ -122,6 +123,9 @@ public actor GoogleOAuthClient {
             tokenURI: config.tokenURI
         )
         if try storedConfig()?.clientID != normalized.clientID {
+            sessionGeneration &+= 1
+            inFlightRefresh?.cancel()
+            inFlightRefresh = nil
             try keychain.delete("drive.oauth.token")
             cachedToken = nil
             hasLoadedToken = true
@@ -185,6 +189,7 @@ public actor GoogleOAuthClient {
     }
 
     public func signOut() throws {
+        sessionGeneration &+= 1
         inFlightRefresh?.cancel()
         inFlightRefresh = nil
         try keychain.delete("drive.oauth.token")
@@ -202,26 +207,48 @@ public actor GoogleOAuthClient {
     /// Return a valid access token, automatically refreshing via `refresh_token` if needed
     /// (with in-flight deduplication so parallel sync workers share a single refresh call).
     public func validAccessToken(config: GoogleOAuthClientConfig) async throws -> String {
+        if let existing = inFlightRefresh {
+            let waitGeneration = sessionGeneration
+            let token = try await existing.value
+            guard sessionGeneration == waitGeneration else {
+                throw DriveTransportError.authenticationRequired("Google 登录状态已变更，请重新登录。")
+            }
+            return token.accessToken
+        }
         guard let token = try currentStoredToken() else {
             throw DriveTransportError.authenticationRequired("尚未完成 Google Drive OAuth 登录")
         }
         if !token.isExpiredOrExpiringSoon {
             return token.accessToken
         }
-        if let existing = inFlightRefresh {
-            return try await existing.value.accessToken
-        }
         guard let refreshToken = token.refreshToken, !refreshToken.isEmpty else {
             throw DriveTransportError.authenticationRequired("访问令牌已过期且无 Refresh Token，请重新登录")
         }
+        let generation = sessionGeneration
         let refreshTask = Task {
             try await self.refreshAccessToken(refreshToken: refreshToken, config: config)
         }
         inFlightRefresh = refreshTask
-        defer { inFlightRefresh = nil }
-        let refreshed = try await refreshTask.value
-        try saveToken(refreshed)
-        return refreshed.accessToken
+        defer {
+            if self.sessionGeneration == generation {
+                self.inFlightRefresh = nil
+            }
+        }
+        do {
+            let refreshed = try await refreshTask.value
+            guard self.sessionGeneration == generation else {
+                throw DriveTransportError.authenticationRequired("Google 登录状态已变更，请重新登录。")
+            }
+            try saveToken(refreshed)
+            return refreshed.accessToken
+        } catch let authError as DriveTransportError {
+            if case .authenticationRequired = authError, self.sessionGeneration == generation {
+                try? keychain.delete("drive.oauth.token")
+                cachedToken = nil
+                hasLoadedToken = true
+            }
+            throw authError
+        }
     }
 
     /// Run full interactive PKCE OAuth 2.0 flow: starts local loopback callback listener,
@@ -291,6 +318,9 @@ public actor GoogleOAuthClient {
             redirectURI: redirectURI,
             config: config
         )
+        sessionGeneration &+= 1
+        inFlightRefresh?.cancel()
+        inFlightRefresh = nil
         try saveToken(token)
         return token
     }
@@ -349,7 +379,13 @@ public actor GoogleOAuthClient {
         request.httpBody = Data(form.utf8)
 
         let (data, response) = try await session.data(for: request)
+        try Task.checkCancellation()
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errCode = obj["error"] as? String,
+               errCode == "invalid_grant" || errCode == "unauthorized_client" {
+                throw DriveTransportError.authenticationRequired("Google 账号授权已失效或已撤销，请重新登录。")
+            }
             let msg = String(data: data, encoding: .utf8) ?? ""
             throw DriveTransportError.httpError(statusCode: http.statusCode, message: String(msg.prefix(300)))
         }
@@ -416,8 +452,12 @@ private actor LoopbackOAuthServer {
                         flag = true
                         return true
                     }
-                    if shouldResume, let port = listener.port?.rawValue {
-                        cont.resume(returning: port)
+                    if shouldResume {
+                        if let port = listener.port?.rawValue {
+                            cont.resume(returning: port)
+                        } else {
+                            cont.resume(throwing: DriveTransportError.invalidResponse("无法绑定本机 OAuth 回调端口。"))
+                        }
                     }
                 case .failed(let error):
                     let shouldResume = resumed.withLock { flag -> Bool in
@@ -427,6 +467,15 @@ private actor LoopbackOAuthServer {
                     }
                     if shouldResume {
                         cont.resume(throwing: error)
+                    }
+                case .cancelled:
+                    let shouldResume = resumed.withLock { flag -> Bool in
+                        guard !flag else { return false }
+                        flag = true
+                        return true
+                    }
+                    if shouldResume {
+                        cont.resume(throwing: CancellationError())
                     }
                 default:
                     break
@@ -476,7 +525,7 @@ private actor LoopbackOAuthServer {
     private func handle(connection: NWConnection) {
         let state = expectedState
         connection.start(queue: DispatchQueue(label: "com.charkle.oauth.connection"))
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, _, _ in
+        Self.receiveHTTPHeaders(on: connection, accumulated: Data(), maxBytes: 16_384) { [weak self] data in
             guard let data, let line = String(data: data, encoding: .utf8)?.components(separatedBy: "\r\n").first else {
                 connection.cancel()
                 return
@@ -518,6 +567,32 @@ private actor LoopbackOAuthServer {
             let status = success ? "200 OK" : "400 Bad Request"
             let response = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
             connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+        }
+    }
+
+    private static let headerTerminator = Data("\r\n\r\n".utf8)
+
+    private static func receiveHTTPHeaders(
+        on connection: NWConnection,
+        accumulated: Data,
+        maxBytes: Int,
+        completion: @escaping @Sendable (Data?) -> Void
+    ) {
+        let remaining = maxBytes - accumulated.count
+        guard remaining > 0 else {
+            completion(accumulated)
+            return
+        }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { chunk, _, isComplete, error in
+            var next = accumulated
+            if let chunk, !chunk.isEmpty {
+                next.append(chunk)
+            }
+            if next.range(of: headerTerminator) != nil || next.count >= maxBytes || isComplete || error != nil {
+                completion(next.isEmpty ? nil : next)
+                return
+            }
+            receiveHTTPHeaders(on: connection, accumulated: next, maxBytes: maxBytes, completion: completion)
         }
     }
 }

@@ -23,7 +23,8 @@ public struct SidebarView: View {
     public let onDropAssetsOntoBoard: ([UUID], UUID) -> Void
     public let onDropExternalOntoBoard: ([CaptureInput], UUID) -> Void
 
-    @Namespace private var selectionIndicatorNamespace
+    @Namespace private var expandedSelectionNamespace
+    @Namespace private var collapsedSelectionNamespace
 
     private enum FolderCreationTarget: Equatable {
         case root
@@ -69,6 +70,7 @@ public struct SidebarView: View {
     @State private var lastClickedFolderID: UUID?
     @State private var customizingFolderID: UUID?
     @State private var pendingDeleteWithContentsFolders: [FolderRecord] = []
+    @State private var pendingDeleteBoard: MoodboardSummary?
 
     @State private var dropTargetedFolderID: UUID?
     @State private var dropTargetedFolderRoot: Bool = false
@@ -160,10 +162,13 @@ public struct SidebarView: View {
         Group {
             if coordinator.isSidebarCollapsed {
                 collapsedRailBody
+                    .frame(width: 76)
             } else {
                 expandedSidebarBody
+                    .frame(width: 232)
             }
         }
+        .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
         .onAppear {
             seedInitialExpansionIfNeeded()
         }
@@ -173,6 +178,8 @@ public struct SidebarView: View {
         .onChange(of: coordinator.selectedDestination) { _, newDest in
             if case .folder(let folderID) = newDest {
                 expandAncestors(of: folderID)
+            } else if !selectedFolderIDs.isEmpty {
+                selectedFolderIDs.removeAll()
             }
         }
         .alert(
@@ -216,6 +223,33 @@ public struct SidebarView: View {
                     : "将删除所选文件夹及其子文件夹。")
             }
         }
+        .alert(
+            "删除情绪板「\(pendingDeleteBoard?.title ?? "")」？",
+            isPresented: Binding(
+                get: { pendingDeleteBoard != nil },
+                set: { if !$0 { pendingDeleteBoard = nil } }
+            )
+        ) {
+            Button("取消", role: .cancel) {
+                pendingDeleteBoard = nil
+            }
+            Button("删除情绪板", role: .destructive) {
+                guard let target = pendingDeleteBoard else { return }
+                pendingDeleteBoard = nil
+                Task {
+                    await moodboards.deleteBoard(id: target.id)
+                    if coordinator.selectedDestination == .moodboard(target.id) {
+                        onSelectDestination(.moodboardsHome)
+                    }
+                    if coordinator.activeMoodboardID == target.id {
+                        coordinator.activeMoodboardID = moodboards.boards.first?.id
+                    }
+                    coordinator.showToast("已删除情绪板「\(target.title)」", icon: "trash")
+                }
+            }
+        } message: {
+            Text("情绪板中的排版、便签、分组与连线将被永久删除，引用的原始素材仍安全保留在素材库中。")
+        }
     }
 
     // MARK: - Collapsed Icon-Only Rail (76pt — clears macOS traffic lights symmetrically)
@@ -229,9 +263,7 @@ public struct SidebarView: View {
             // Pinned top controls cleanly beneath the traffic lights
             VStack(spacing: 8) {
                 Button {
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                        coordinator.isSidebarCollapsed = false
-                    }
+                    coordinator.isSidebarCollapsed = false
                 } label: {
                     CharkleIcon("sidebar-toggle", style: .duotone, size: 20, isActive: false)
                         .frame(width: 36, height: 34)
@@ -305,7 +337,7 @@ public struct SidebarView: View {
                                 if isSelected {
                                     shape
                                         .fill(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
-                                        .matchedGeometryEffect(id: "sidebar-selection-pill", in: selectionIndicatorNamespace)
+                                        .matchedGeometryEffect(id: "sidebar-collapsed-selection-pill", in: collapsedSelectionNamespace)
                                 } else if dropTargetedFolderID == folder.id {
                                     shape
                                         .fill(Color.accentColor.opacity(0.18))
@@ -410,7 +442,7 @@ public struct SidebarView: View {
                         if isSelected {
                             shape
                                 .fill(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
-                                .matchedGeometryEffect(id: "sidebar-selection-pill", in: selectionIndicatorNamespace)
+                                .matchedGeometryEffect(id: "sidebar-collapsed-selection-pill", in: collapsedSelectionNamespace)
                         } else if isDropHighlighted {
                             shape
                                 .fill(Color.accentColor.opacity(0.18))
@@ -460,9 +492,7 @@ public struct SidebarView: View {
                     .help("快速跳转 (⌘J)")
 
                     Button {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            coordinator.isSidebarCollapsed = true
-                        }
+                        coordinator.isSidebarCollapsed = true
                     } label: {
                         CharkleIcon("sidebar-toggle", style: .duotone, size: 17)
                             .frame(width: 24, height: 24)
@@ -618,16 +648,8 @@ public struct SidebarView: View {
                                 )
                             }
                             Divider()
-                            Button("删除情绪板", role: .destructive) {
-                                Task {
-                                    await moodboards.deleteBoard(id: board.id)
-                                    if coordinator.selectedDestination == .moodboard(board.id) {
-                                        onSelectDestination(.moodboardsHome)
-                                    }
-                                    if coordinator.activeMoodboardID == board.id {
-                                        coordinator.activeMoodboardID = moodboards.boards.first?.id
-                                    }
-                                }
+                            Button("删除情绪板…", role: .destructive) {
+                                pendingDeleteBoard = board
                             }
                         }
                     }
@@ -1281,7 +1303,7 @@ public struct SidebarView: View {
             } else if isDestinationSelected {
                 rowShape
                     .fill(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
-                    .matchedGeometryEffect(id: "sidebar-selection-pill", in: selectionIndicatorNamespace)
+                    .matchedGeometryEffect(id: "sidebar-expanded-selection-pill", in: expandedSelectionNamespace)
             } else if isDropHighlighted {
                 rowShape
                     .fill(Color.accentColor.opacity(0.16))
@@ -1627,7 +1649,9 @@ public struct SidebarView: View {
 
     private func sortRootFoldersByCount() async {
         let sorted = library.childFolders(of: nil).sorted {
-            if $0.assetCount != $1.assetCount { return $0.assetCount > $1.assetCount }
+            let lhsCount = library.subtreeAssetCount(for: $0.id)
+            let rhsCount = library.subtreeAssetCount(for: $1.id)
+            if lhsCount != rhsCount { return lhsCount > rhsCount }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
         for (idx, f) in sorted.enumerated() {
@@ -1809,7 +1833,7 @@ extension SidebarView {
                 if isSelected {
                     rowShape
                         .fill(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
-                        .matchedGeometryEffect(id: "sidebar-selection-pill", in: selectionIndicatorNamespace)
+                        .matchedGeometryEffect(id: "sidebar-expanded-selection-pill", in: expandedSelectionNamespace)
                 } else if isDropHighlighted {
                     rowShape
                         .fill(Color.accentColor.opacity(0.16))
@@ -1846,14 +1870,23 @@ extension SidebarView {
         guard !providers.isEmpty else { return false }
         Task {
             var draggedFolderIDs: [UUID] = []
+            var internalAssetIDs: [UUID] = []
             var externalInputs: [CaptureInput] = []
             for provider in providers {
                 if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-                   let str = await loadText(provider),
-                   let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
-                    draggedFolderIDs.append(contentsOf: fids)
-                    continue
+                   let str = await loadText(provider) {
+                    if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
+                        draggedFolderIDs.append(contentsOf: fids)
+                        continue
+                    }
+                    if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
+                        internalAssetIDs.append(contentsOf: aids)
+                        continue
+                    }
                 }
+                // Short-circuit `.fileURL` providers once internal folder/asset IDs are decoded so
+                // internal gallery drags NEVER re-import cached thumbnails as duplicate assets.
+                guard draggedFolderIDs.isEmpty && internalAssetIDs.isEmpty else { continue }
                 if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
                    let url = await loadURL(provider, type: .fileURL) {
                     externalInputs.append(.fileURL(url))
@@ -1864,6 +1897,8 @@ extension SidebarView {
                     _ = await library.moveFolder(id: fid, newParentID: nil, insertAtIndex: offset)
                 }
                 coordinator.showToast("已将 \(draggedFolderIDs.count) 个文件夹移至顶层", icon: "folder")
+            } else if !internalAssetIDs.isEmpty {
+                return
             } else if !externalInputs.isEmpty {
                 let beforeIDs = Set(library.folders.map(\.id))
                 let imported = await library.ingest(externalInputs, targetFolderID: nil)
@@ -1871,7 +1906,11 @@ extension SidebarView {
                 if !newRootFolders.isEmpty {
                     await sortRootFoldersAlphabetically()
                 }
-                coordinator.showToast("已导入文件夹并整理 \(imported.count) 项素材", icon: "folder.badge.plus")
+                if imported.isEmpty && newRootFolders.isEmpty {
+                    coordinator.showToast(library.lastError ?? "导入文件夹失败", icon: "exclamationmark.triangle", tone: .warning)
+                } else {
+                    coordinator.showToast("已导入文件夹并整理 \(imported.count) 项素材", icon: "folder.badge.plus", tone: .success)
+                }
             }
         }
         return true
@@ -1881,14 +1920,23 @@ extension SidebarView {
         guard !providers.isEmpty else { return false }
         Task {
             var draggedFolderIDs: [UUID] = []
+            var internalAssetIDs: [UUID] = []
             var externalInputs: [CaptureInput] = []
             for provider in providers {
                 if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-                   let str = await loadText(provider),
-                   let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
-                    draggedFolderIDs.append(contentsOf: fids)
-                    continue
+                   let str = await loadText(provider) {
+                    if let fids = CharkleDragIdentifiers.decodeFolderIDs(from: str) {
+                        draggedFolderIDs.append(contentsOf: fids)
+                        continue
+                    }
+                    if let aids = CharkleDragIdentifiers.decodeAssetIDs(from: str) {
+                        internalAssetIDs.append(contentsOf: aids)
+                        continue
+                    }
                 }
+                // Short-circuit `.fileURL` providers once internal folder/asset IDs are decoded so
+                // internal gallery drags NEVER re-import cached thumbnails as duplicate assets.
+                guard draggedFolderIDs.isEmpty && internalAssetIDs.isEmpty else { continue }
                 if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
                    let url = await loadURL(provider, type: .fileURL) {
                     externalInputs.append(.fileURL(url))
@@ -1917,6 +1965,11 @@ extension SidebarView {
                 } else if let err = library.lastError {
                     coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
                 }
+            } else if !internalAssetIDs.isEmpty {
+                if let parentID {
+                    onDropAssetsOntoFolder(internalAssetIDs, parentID)
+                }
+                return
             } else if !externalInputs.isEmpty {
                 let beforeIDs = Set(library.folders.map(\.id))
                 let imported = await library.ingest(externalInputs, targetFolderID: parentID)
@@ -1927,7 +1980,11 @@ extension SidebarView {
                     _ = await library.moveFolder(id: folder.id, newParentID: parentID, insertAtIndex: insertIndex + offset)
                 }
                 if let parentID { expandedFolderIDs.insert(parentID) }
-                coordinator.showToast("已按序导入目录（\(imported.count) 项素材）", icon: "folder.badge.plus")
+                if imported.isEmpty && newFolders.isEmpty {
+                    coordinator.showToast(library.lastError ?? "导入目录失败", icon: "exclamationmark.triangle", tone: .warning)
+                } else {
+                    coordinator.showToast("已按序导入目录（\(imported.count) 项素材）", icon: "folder.badge.plus", tone: .success)
+                }
             }
         }
         return true
@@ -1972,7 +2029,8 @@ extension SidebarView {
                 }
                 if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
                    let data = await loadData(provider, type: .image) {
-                    externalInputs.append(.imageData(data, suggestedName: "SidebarDrop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
+                    let ext = Self.detectedImageExtension(for: data)
+                    externalInputs.append(.imageData(data, suggestedName: "SidebarDrop-\(UUID().uuidString.prefix(8)).\(ext)", sourceURL: nil))
                     continue
                 }
                 if let text = plainTextCandidate,
@@ -2043,5 +2101,19 @@ extension SidebarView {
                 cont.resume(returning: data)
             }
         }
+    }
+
+    private static func detectedImageExtension(for data: Data) -> String {
+        let bytes = Array(data.prefix(12))
+        if bytes.count >= 8, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47 { return "png" }
+        if bytes.count >= 3, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF { return "jpg" }
+        if bytes.count >= 6, bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46 { return "gif" }
+        if bytes.count >= 12,
+           bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
+           bytes[8] == 0x57, bytes[9] == 0x45, bytes[10] == 0x42, bytes[11] == 0x50 { return "webp" }
+        if bytes.count >= 4,
+           ((bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00)
+            || (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)) { return "tiff" }
+        return "png"
     }
 }

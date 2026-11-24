@@ -60,6 +60,12 @@ public final class LibraryStore {
     @ObservationIgnored private var metadataHydrationAttemptedIDs: Set<UUID> = []
     @ObservationIgnored private var imageMetadataCache: [UUID: ExtractedImageMetadata] = [:]
     private var retagTask: Task<RetagBatchOutcome, Never>?
+    @ObservationIgnored private var activeRetagBatchID: UUID?
+    @ObservationIgnored private var assetsRequestGeneration: UInt64 = 0
+    @ObservationIgnored private var fullRefreshGeneration: UInt64 = 0
+    @ObservationIgnored private var minimalRefreshGeneration: UInt64 = 0
+    @ObservationIgnored private var semanticSearchGeneration: UInt64 = 0
+    private var semanticSearchTask: Task<SemanticSearchReport?, Never>?
     @ObservationIgnored private var enrichmentObserver: NSObjectProtocol?
     private static let recentTagsDefaultsKey = "com.charkle.recentlyTouchedTags"
     private static let tagUsageFreqDefaultsKey = "com.charkle.tagUsageFrequency"
@@ -84,6 +90,9 @@ public final class LibraryStore {
     }
 
     isolated deinit {
+        inspectorContextTask?.cancel()
+        retagTask?.cancel()
+        semanticSearchTask?.cancel()
         if let observer = enrichmentObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -131,10 +140,17 @@ public final class LibraryStore {
     /// remain instant at minimal RAM.
     public func enterMinimalCaptureMode() {
         isMinimalCaptureMode = true
+        assetsRequestGeneration &+= 1
+        fullRefreshGeneration &+= 1
+        semanticSearchGeneration &+= 1
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        isRunningSemanticSearch = false
         inspectorContextTask?.cancel()
         inspectorContextTask = nil
         retagTask?.cancel()
         retagTask = nil
+        activeRetagBatchID = nil
 
         let recentSnapshot = Array(recentActivityAssets(limit: Self.minimalRecentLimit))
         assets = []
@@ -159,16 +175,20 @@ public final class LibraryStore {
     /// Call `await refreshAll()` right after to repopulate in-memory asset collections.
     public func exitMinimalCaptureMode() {
         isMinimalCaptureMode = false
+        minimalRefreshGeneration &+= 1
         thumbnailLoader.setLowResourceMode(false)
     }
 
     /// Lightweight metadata refresh used in Minimal Capture Mode (folders, inbox count, and latest 16 recent items only).
     public func refreshMinimalMetadataOnly() async {
+        minimalRefreshGeneration &+= 1
+        let gen = minimalRefreshGeneration
         do {
             async let folderList = engine.fetchFolders()
             async let inbox = engine.inboxCount()
             async let fetchedActive = engine.fetchAssets(matching: FilterCriteria(includeTrashed: false, sortBy: .newest))
             let (f, i, active) = try await (folderList, inbox, fetchedActive)
+            guard gen == minimalRefreshGeneration, isMinimalCaptureMode else { return }
             folders = f
             inboxCount = i
             let topRecent = Array(
@@ -185,11 +205,19 @@ public final class LibraryStore {
             cachedRecentActivityAssets = topRecent
             allAssetsByID = Dictionary(uniqueKeysWithValues: topRecent.map { ($0.id, $0) })
         } catch {
-            lastError = error.localizedDescription
+            if gen == minimalRefreshGeneration {
+                lastError = error.localizedDescription
+            }
         }
     }
 
     public func applyDestination(_ destination: SidebarDestination) async {
+        semanticSearchGeneration &+= 1
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        semanticSearchReport = nil
+        isRunningSemanticSearch = false
+
         filter.folderID = nil
         filter.includeSubfolders = false
         filter.onlyInbox = false
@@ -223,6 +251,7 @@ public final class LibraryStore {
             recordRecentlyTouchedTags([tagName])
             tagCounts = sortTagCounts(tagCounts)
         case .moodboardsHome, .moodboard:
+            assetsRequestGeneration &+= 1
             return
         }
 
@@ -231,8 +260,14 @@ public final class LibraryStore {
     }
 
     public func refreshAll() async {
+        fullRefreshGeneration &+= 1
+        let fullGen = fullRefreshGeneration
+        assetsRequestGeneration &+= 1
+        let assetsGen = assetsRequestGeneration
+        let requestedFilter = filter
+        let requestedSmartID = activeSmartFolderID
         do {
-            async let fetchedAssets = engine.fetchAssets(matching: filter)
+            async let fetchedAssets = engine.fetchAssets(matching: requestedFilter)
             async let fetchedAll = engine.fetchAssets(matching: FilterCriteria(includeTrashed: true))
             async let fetchedFolders = engine.fetchFolders()
             async let fetchedSmartFolders = engine.fetchSmartFolders()
@@ -242,28 +277,49 @@ public final class LibraryStore {
             let (visible, all, folderList, smartList, tags, inbox) = try await (
                 fetchedAssets, fetchedAll, fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox
             )
-            smartFolders = smartList
-            allAssetsByID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
-            rebuildRecentActivityCache()
-            assets = applyActiveSmartFolderIfNeeded(visible)
-            folders = folderList
-            tagCounts = sortTagCounts(tags)
-            inboxCount = inbox
+            guard !isMinimalCaptureMode else { return }
+            if fullGen == fullRefreshGeneration {
+                smartFolders = smartList
+                allAssetsByID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+                rebuildRecentActivityCache()
+                folders = folderList
+                tagCounts = sortTagCounts(tags)
+                inboxCount = inbox
+            }
+            if assetsGen == assetsRequestGeneration,
+               filter == requestedFilter,
+               activeSmartFolderID == requestedSmartID {
+                assets = applyActiveSmartFolderIfNeeded(visible)
+            }
         } catch {
-            lastError = error.localizedDescription
+            if fullGen == fullRefreshGeneration {
+                lastError = error.localizedDescription
+            }
             libraryStoreLogger.error("refreshAll failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     public func refreshAssets() async {
+        assetsRequestGeneration &+= 1
+        let gen = assetsRequestGeneration
+        let requestedFilter = filter
+        let requestedSmartID = activeSmartFolderID
         do {
-            let fetched = try await engine.fetchAssets(matching: filter)
+            let fetched = try await engine.fetchAssets(matching: requestedFilter)
+            guard gen == assetsRequestGeneration,
+                  !isMinimalCaptureMode,
+                  filter == requestedFilter,
+                  activeSmartFolderID == requestedSmartID else {
+                return
+            }
             assets = applyActiveSmartFolderIfNeeded(fetched)
             for asset in assets {
                 allAssetsByID[asset.id] = asset
             }
         } catch {
-            lastError = error.localizedDescription
+            if gen == assetsRequestGeneration {
+                lastError = error.localizedDescription
+            }
         }
     }
 
@@ -297,7 +353,10 @@ public final class LibraryStore {
 
     /// Up to 5 recently & frequently used tags for Sidebar quick access.
     public var recentFrequentSidebarTags: [TagCount] {
-        let byLower = Dictionary(uniqueKeysWithValues: tagCounts.map { ($0.name.lowercased(), $0) })
+        let byLower = Dictionary(
+            tagCounts.map { ($0.name.lowercased(), $0) },
+            uniquingKeysWith: { lhs, rhs in lhs.count >= rhs.count ? lhs : rhs }
+        )
         let ranked = recentlyTouchedTags.enumerated().compactMap { index, name -> (TagCount, Double)? in
             guard let item = byLower[name.lowercased()] else { return nil }
             let recencyBonus = Double(max(0, 60 - index)) * 1.5
@@ -466,14 +525,11 @@ public final class LibraryStore {
                     assetIDs: [standalone.id],
                     title: extractedTitle,
                     notes: attributionNotes,
+                    sourceURL: post.originalURL,
                     addTags: [post.platform.displayName]
                 )
             )
-            var finalAsset = patched.first ?? standalone
-            if finalAsset.sourceURL == nil {
-                finalAsset.sourceURL = post.originalURL
-                finalAsset.sourceDomain = URL(string: post.originalURL)?.host()
-            }
+            let finalAsset = patched.first ?? standalone
             allAssetsByID[finalAsset.id] = finalAsset
             await refreshAll()
             return finalAsset
@@ -586,12 +642,8 @@ public final class LibraryStore {
             .filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }
             .map(\.id)
         guard !targetAssetIDs.isEmpty else { return 0 }
-        await applyPatch(AssetBatchPatch(assetIDs: targetAssetIDs, pinnedOffline: pinned))
-        if !pinned {
-            _ = try? await engine.evictCacheNow()
-            await refreshAll()
-        }
-        return targetAssetIDs.count
+        let ok = await applyPatch(AssetBatchPatch(assetIDs: targetAssetIDs, pinnedOffline: pinned))
+        return ok ? targetAssetIDs.count : 0
     }
 
     // MARK: - Folder CRUD
@@ -745,18 +797,21 @@ public final class LibraryStore {
     public func copyAssetsToPasteboard(_ ids: [UUID]) async -> Int {
         guard !ids.isEmpty else { return 0 }
         let urls = await resolveURLs(for: ids)
+        guard !urls.isEmpty else { return 0 }
         writeFilesToGeneralPasteboard(urls)
         copiedAssetIDs = ids
         cutAssetIDs.removeAll()
         lastInternalPasteboardChangeCount = NSPasteboard.general.changeCount
-        return max(urls.count, ids.count)
+        return urls.count
     }
 
     @discardableResult
     public func cutAssets(_ ids: [UUID]) async -> Int {
         guard !ids.isEmpty else { return 0 }
         let urls = await resolveURLs(for: ids)
-        writeFilesToGeneralPasteboard(urls)
+        if !urls.isEmpty {
+            writeFilesToGeneralPasteboard(urls)
+        }
         cutAssetIDs = Set(ids)
         copiedAssetIDs.removeAll()
         lastInternalPasteboardChangeCount = NSPasteboard.general.changeCount
@@ -783,11 +838,12 @@ public final class LibraryStore {
     public func pasteCutAssets(toFolderID folderID: UUID?) async -> Int {
         let ids = Array(cutAssetIDs)
         guard !ids.isEmpty else { return 0 }
-        cutAssetIDs.removeAll()
-        if copiedAssetIDs.isEmpty {
+        let ok = await moveAssets(ids, toFolderID: folderID)
+        guard ok else { return 0 }
+        cutAssetIDs.subtract(ids)
+        if cutAssetIDs.isEmpty && copiedAssetIDs.isEmpty {
             lastInternalPasteboardChangeCount = nil
         }
-        await moveAssets(ids, toFolderID: folderID)
         return ids.count
     }
 
@@ -885,22 +941,26 @@ public final class LibraryStore {
 
     // MARK: - Asset Patching & Batch Operations
 
-    public func applyPatch(_ patch: AssetBatchPatch) async {
-        guard !patch.assetIDs.isEmpty else { return }
+    @discardableResult
+    public func applyPatch(_ patch: AssetBatchPatch) async -> Bool {
+        guard !patch.assetIDs.isEmpty else { return false }
         do {
             let updated = try await engine.updateAssets(patch)
             for item in updated {
                 allAssetsByID[item.id] = item
             }
             await refreshAll()
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
     }
 
-    public func moveAssets(_ ids: [UUID], toFolderID folderID: UUID?) async {
+    @discardableResult
+    public func moveAssets(_ ids: [UUID], toFolderID folderID: UUID?) async -> Bool {
         let assignment: FolderAssignment = folderID.map { .folder($0) } ?? .inbox
-        await applyPatch(AssetBatchPatch(assetIDs: ids, folderAssignment: assignment))
+        return await applyPatch(AssetBatchPatch(assetIDs: ids, folderAssignment: assignment))
     }
 
     public func setRating(_ rating: Int, for ids: [UUID]) async {
@@ -995,12 +1055,15 @@ public final class LibraryStore {
     }
 
     public func trashAssets(_ ids: [UUID]) async {
-        await applyPatch(AssetBatchPatch(assetIDs: ids, isTrashed: true))
-        selectedAssetIDs.subtract(ids)
+        guard await applyPatch(AssetBatchPatch(assetIDs: ids, isTrashed: true)) else { return }
+        let idSet = Set(ids)
+        selectedAssetIDs.subtract(idSet)
+        cutAssetIDs.subtract(idSet)
+        copiedAssetIDs.removeAll { idSet.contains($0) }
     }
 
     public func restoreAssets(_ ids: [UUID]) async {
-        await applyPatch(AssetBatchPatch(assetIDs: ids, isTrashed: false))
+        guard await applyPatch(AssetBatchPatch(assetIDs: ids, isTrashed: false)) else { return }
         selectedAssetIDs.subtract(ids)
     }
 
@@ -1008,11 +1071,14 @@ public final class LibraryStore {
         guard !ids.isEmpty else { return }
         do {
             try await engine.permanentlyDeleteAssets(ids: ids)
-            for id in ids {
+            let idSet = Set(ids)
+            for id in idSet {
                 allAssetsByID.removeValue(forKey: id)
                 thumbnailLoader.invalidate(assetID: id)
             }
-            selectedAssetIDs.subtract(ids)
+            selectedAssetIDs.subtract(idSet)
+            cutAssetIDs.subtract(idSet)
+            copiedAssetIDs.removeAll { idSet.contains($0) }
             await refreshAll()
         } catch {
             lastError = error.localizedDescription
@@ -1133,16 +1199,21 @@ public final class LibraryStore {
         }
 
         retagTask?.cancel()
+        let batchID = UUID()
+        activeRetagBatchID = batchID
         let task = Task<RetagBatchOutcome, Never> { @MainActor in
             let total = targets.count
             enrichingAssetIDs = Set(targets)
             enrichCompletedCount = 0
             enrichTotalCount = total
             defer {
-                enrichingAssetIDs.removeAll()
-                enrichCompletedCount = 0
-                enrichTotalCount = 0
-                retagTask = nil
+                if activeRetagBatchID == batchID {
+                    enrichingAssetIDs.removeAll()
+                    enrichCompletedCount = 0
+                    enrichTotalCount = 0
+                    retagTask = nil
+                    activeRetagBatchID = nil
+                }
             }
 
             let engine = self.engine
@@ -1172,8 +1243,10 @@ public final class LibraryStore {
                 }
 
                 while let (assetID, outcome) = await group.next() {
-                    enrichingAssetIDs.remove(assetID)
-                    enrichCompletedCount += 1
+                    if activeRetagBatchID == batchID {
+                        enrichingAssetIDs.remove(assetID)
+                        enrichCompletedCount += 1
+                    }
                     switch outcome {
                     case .success(let updated):
                         if !updated.isEmpty {
@@ -1242,22 +1315,51 @@ public final class LibraryStore {
             await clearSemanticSearch()
             return nil
         }
+        semanticSearchTask?.cancel()
+        semanticSearchGeneration &+= 1
+        assetsRequestGeneration &+= 1
+        let semGen = semanticSearchGeneration
+        let assetsGen = assetsRequestGeneration
+        let snapshotFilter = filter
+
         isRunningSemanticSearch = true
         lastError = nil
-        defer { isRunningSemanticSearch = false }
-        do {
-            let report = try await engine.semanticSearch(query: resolvedQuery, criteria: filter, limit: 60)
-            semanticSearchReport = report
-            assets = report.hits.map(\.asset)
-            for asset in assets { allAssetsByID[asset.id] = asset }
-            return report
-        } catch {
-            lastError = error.localizedDescription
-            return nil
+
+        let task = Task<SemanticSearchReport?, Never> { @MainActor in
+            defer {
+                if semGen == self.semanticSearchGeneration {
+                    self.isRunningSemanticSearch = false
+                    self.semanticSearchTask = nil
+                }
+            }
+            do {
+                let report = try await self.engine.semanticSearch(query: resolvedQuery, criteria: snapshotFilter, limit: 60)
+                guard !Task.isCancelled,
+                      semGen == self.semanticSearchGeneration,
+                      assetsGen == self.assetsRequestGeneration,
+                      !self.isMinimalCaptureMode else {
+                    return nil
+                }
+                self.semanticSearchReport = report
+                self.assets = report.hits.map(\.asset)
+                for asset in self.assets { self.allAssetsByID[asset.id] = asset }
+                return report
+            } catch {
+                if !Task.isCancelled && semGen == self.semanticSearchGeneration {
+                    self.lastError = error.localizedDescription
+                }
+                return nil
+            }
         }
+        semanticSearchTask = task
+        return await task.value
     }
 
     public func clearSemanticSearch() async {
+        semanticSearchGeneration &+= 1
+        semanticSearchTask?.cancel()
+        semanticSearchTask = nil
+        isRunningSemanticSearch = false
         semanticSearchReport = nil
         await refreshAssets()
     }
@@ -1281,16 +1383,21 @@ public final class LibraryStore {
 
     public func applyInboxTriageRecommendations(_ selected: [InboxTriageRecommendation]) async -> Int {
         var moved = 0
+        var succeededIDs = Set<UUID>()
         var byFolder: [UUID: [UUID]] = [:]
         for rec in selected {
             guard let fid = rec.recommendedFolderID else { continue }
             byFolder[fid, default: []].append(rec.assetID)
         }
         for (folderID, ids) in byFolder {
-            await moveAssets(ids, toFolderID: folderID)
-            moved += ids.count
+            if await moveAssets(ids, toFolderID: folderID) {
+                moved += ids.count
+                succeededIDs.formUnion(ids)
+            }
         }
-        inboxTriageRecommendations = []
+        if !succeededIDs.isEmpty {
+            inboxTriageRecommendations.removeAll { succeededIDs.contains($0.assetID) }
+        }
         return moved
     }
 

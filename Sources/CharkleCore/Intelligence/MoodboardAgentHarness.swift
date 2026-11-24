@@ -77,11 +77,15 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
             || !(request.refinementInstruction ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         if let provider, hasBriefText, overview.totalAssets > 32, request.scopeFolderIDs.isEmpty {
+            try Task.checkCancellation()
             await emit(.planning, title: "拆解灵感方向与检索策略", detail: "正在由模型扩展中英双语视觉关键词与匹配目录…", status: .running)
-            if let planned = try? await runRetrievalPlanner(request: request, overview: overview, provider: provider) {
+            do {
+                let planned = try await runRetrievalPlanner(request: request, overview: overview, provider: provider)
                 expandedQueries = planned.searchQueries
                 preferredFolderNames = planned.preferredFolders
                 inferredColors = planned.targetColorHexes.map { LabColor.fromHex($0) }
+            } catch {
+                if Self.isCancellationError(error) { throw error }
             }
         }
 
@@ -126,6 +130,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         }
 
         // MARK: Stage 2.5 — Optional TypeSafe (Jev Score) Visual Rerank
+        try Task.checkCancellation()
         var usedTypeSafeVisualRerank = false
         let queryBrief = [request.prompt, request.refinementInstruction ?? ""]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -149,32 +154,40 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                     imageData: tools.preparedTypeSafeJPEG(for: asset, targetLongSide: 384)
                 )
             }
-            if let jevScores = try? await grounding.scoreCandidatesForQuery(
-                query: queryBrief,
-                candidates: visualInputs,
-                config: tsCfg,
-                apiKey: tsKey,
-                batchSize: 4,
-                maxConcurrency: 3
-            ), !jevScores.isEmpty {
+            var jevScores: [VisualScoreResult] = []
+            do {
+                jevScores = try await grounding.scoreCandidatesForQuery(
+                    query: queryBrief,
+                    candidates: visualInputs,
+                    config: tsCfg,
+                    apiKey: tsKey,
+                    batchSize: 4,
+                    maxConcurrency: 3
+                )
+            } catch {
+                if Self.isCancellationError(error) { throw error }
+            }
+            if !jevScores.isEmpty {
                 usedTypeSafeVisualRerank = true
                 let scoreMap = Dictionary(uniqueKeysWithValues: jevScores.map { ($0.assetID, $0) })
                 var updatedScores = recall.scoresByID
                 for asset in recall.candidates {
-                    guard let js = scoreMap[asset.id] else { continue }
+                    guard let js = scoreMap[asset.id], js.score.isFinite else { continue }
                     let prior = updatedScores[asset.id]
                     let blended = prior != nil ? max(js.score, (prior!.score * 0.35 + js.score * 0.65)) : js.score
                     var reasons = prior?.matchReasons ?? []
                     if js.score >= 0.45 {
-                        reasons.insert("Jev 视觉契合 \(Int((js.score * 100).rounded()))%", at: 0)
+                        let pct = Int((max(0.0, min(1.0, js.score)) * 100.0).rounded())
+                        reasons.insert("Jev 视觉契合 \(pct)%", at: 0)
                     }
                     updatedScores[asset.id] = ScoredAsset(asset: asset, score: blended, matchReasons: reasons)
                 }
                 let reordered = recall.candidates.sorted { lhs, rhs in
-                    let ls = updatedScores[lhs.id]?.score ?? 0
-                    let rs = updatedScores[rhs.id]?.score ?? 0
-                    if abs(ls - rs) > 0.001 { return ls > rs }
-                    return lhs.rating > rhs.rating
+                    let lb = Self.scoreBucket(updatedScores[lhs.id]?.score ?? 0)
+                    let rb = Self.scoreBucket(updatedScores[rhs.id]?.score ?? 0)
+                    if lb != rb { return lb > rb }
+                    if lhs.rating != rhs.rating { return lhs.rating > rhs.rating }
+                    return lhs.id.uuidString < rhs.id.uuidString
                 }
                 recall = AgentRecallResult(
                     eligibleTotal: recall.eligibleTotal,
@@ -266,17 +279,23 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                         imagesJPEG: sheetImages
                     )
                     let repairedPlan = try Self.parseBoardPlan(from: repairedRaw, fallbackLayout: request.layoutStyle)
-                    parsedPlan = repairedPlan
-                    compilation = try await tools.compileAndVerifyBoard(
+                    let repairedCompilation = try await tools.compileAndVerifyBoard(
                         plan: repairedPlan,
                         slotToAsset: package.slotToAsset,
                         request: request,
                         recall: recall
                     )
+                    if repairedCompilation.needsRepair {
+                        await emit(.repairing, title: "自动修正仍未通过校验", detail: "云端模型连续两轮未产出有效素材编号，将切换本机离线策展", status: .warning)
+                        throw LibraryDatabaseError("云端策展方案自动修正后仍未产出有效素材编号。")
+                    }
+                    parsedPlan = repairedPlan
+                    compilation = repairedCompilation
                     await emit(.repairing, title: "自动修正完成", detail: "修正后的策展方案已通过校验", status: .done)
                 }
 
                 if let plan = parsedPlan, let compiled = compilation {
+                    try Task.checkCancellation()
                     // Cache any newly observed visual descriptions & tags back to SQLite for free
                     let insights: [AgentVisualInsight] = plan.visualInsights.compactMap { item in
                         guard let asset = package.slotToAsset[item.slot] else { return nil }
@@ -288,7 +307,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                         ? "入选 \(compiled.primaryMatches.count) 张 · 分区 \(compiled.sections.count) 组 · 候选池 \(compiled.candidatePool.count) 张"
                         + (cachedCount > 0 ? " · 顺手沉淀 \(cachedCount) 条画面理解" : "")
                         : "已自动修正 \(compiled.issues.count) 项约束 · 入选 \(compiled.primaryMatches.count) 张"
-                    let finalDoc = await applyAutoDetailCropsIfRequested(
+                    let finalDoc = try await applyAutoDetailCropsIfRequested(
                         document: compiled.document,
                         assets: recall.candidates,
                         request: request,
@@ -319,6 +338,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                     )
                 }
             } catch {
+                if Self.isCancellationError(error) { throw error }
                 // Cloud AI failed (network / quota / auth) -> transparently report and fall back to strict offline curator
                 await emit(
                     .fallbackOffline,
@@ -337,13 +357,14 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         }
 
         // MARK: Stage 4 — Strict-Threshold Curator (Jev Visual Rerank OR Offline Fallback)
+        try Task.checkCancellation()
         var fallbackProposal = try await runStrictOfflineCurator(
             request: request,
             recall: recall,
             recorder: recorder,
             usedTypeSafeJev: usedTypeSafeVisualRerank
         )
-        fallbackProposal.draftDocument = await applyAutoDetailCropsIfRequested(
+        fallbackProposal.draftDocument = try await applyAutoDetailCropsIfRequested(
             document: fallbackProposal.draftDocument,
             assets: recall.candidates,
             request: request,
@@ -365,7 +386,8 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         typeSafeAPIKey: String?,
         grounding: VisualGroundingEngine?,
         recorder: AgentTraceRecorder
-    ) async -> MoodboardDocument {
+    ) async throws -> MoodboardDocument {
+        try Task.checkCancellation()
         let query = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard request.autoFocusDetailCrop,
               !query.isEmpty,
@@ -376,7 +398,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
         }
 
         let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
-        let targets: [(index: Int, asset: AssetRecord)] = document.nodes.enumerated().compactMap { idx, node in
+        let allTargets: [(index: Int, asset: AssetRecord)] = document.nodes.enumerated().compactMap { idx, node in
             guard case .assetRef(let assetID, let existingCrop, _, _) = node.kind,
                   existingCrop == nil,
                   let asset = assetsByID[assetID],
@@ -385,6 +407,7 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
             }
             return (idx, asset)
         }
+        let targets = Array(allTargets.prefix(12))
         guard !targets.isEmpty else { return document }
 
         await recorder.emit(
@@ -394,29 +417,65 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
             status: .running
         )
 
-        var cropsByIndex: [Int: NormalizedCropRect] = [:]
-        await withTaskGroup(of: (Int, NormalizedCropRect?).self) { group in
-            for (idx, asset) in targets.prefix(12) {
-                guard let jpeg = tools.preparedTypeSafeJPEG(for: asset, targetLongSide: 640) else { continue }
-                group.addTask {
-                    let res = try? await grounding.locateRegion(
-                        query: query,
-                        imageData: jpeg,
-                        imageFormat: "jpg",
-                        cgImage: nil,
-                        config: tsCfg,
-                        apiKey: tsKey
-                    )
-                    if let res, res.found, res.crop.isMeaningfulSubregion {
-                        return (idx, res.crop)
-                    }
-                    return (idx, nil)
-                }
-            }
-            for await (idx, crop) in group {
-                if let crop { cropsByIndex[idx] = crop }
+        var workItems: [(index: Int, jpeg: Data)] = []
+        workItems.reserveCapacity(targets.count)
+        for (idx, asset) in targets {
+            try Task.checkCancellation()
+            if let jpeg = tools.preparedTypeSafeJPEG(for: asset, targetLongSide: 640) {
+                workItems.append((idx, jpeg))
             }
         }
+
+        var cropsByIndex: [Int: NormalizedCropRect] = [:]
+        let maxConcurrency = min(3, workItems.count)
+        if maxConcurrency > 0 {
+            var nextIdx = 0
+            await withTaskGroup(of: (Int, NormalizedCropRect?).self) { group in
+                for _ in 0..<maxConcurrency {
+                    guard nextIdx < workItems.count, !Task.isCancelled else { break }
+                    let item = workItems[nextIdx]
+                    nextIdx += 1
+                    group.addTask {
+                        guard !Task.isCancelled else { return (item.index, nil) }
+                        let res = try? await grounding.locateRegion(
+                            query: query,
+                            imageData: item.jpeg,
+                            imageFormat: "jpg",
+                            cgImage: nil,
+                            config: tsCfg,
+                            apiKey: tsKey
+                        )
+                        if let res, res.found, res.crop.isMeaningfulSubregion {
+                            return (item.index, res.crop)
+                        }
+                        return (item.index, nil)
+                    }
+                }
+                for await (idx, crop) in group {
+                    if let crop { cropsByIndex[idx] = crop }
+                    if nextIdx < workItems.count, !Task.isCancelled {
+                        let item = workItems[nextIdx]
+                        nextIdx += 1
+                        group.addTask {
+                            guard !Task.isCancelled else { return (item.index, nil) }
+                            let res = try? await grounding.locateRegion(
+                                query: query,
+                                imageData: item.jpeg,
+                                imageFormat: "jpg",
+                                cgImage: nil,
+                                config: tsCfg,
+                                apiKey: tsKey
+                            )
+                            if let res, res.found, res.crop.isMeaningfulSubregion {
+                                return (item.index, res.crop)
+                            }
+                            return (item.index, nil)
+                        }
+                    }
+                }
+            }
+        }
+        try Task.checkCancellation()
 
         var updated = document
         for (idx, crop) in cropsByIndex {
@@ -498,8 +557,11 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
                 let lPin = locked.contains(lhs.id) || seeds.contains(lhs.id)
                 let rPin = locked.contains(rhs.id) || seeds.contains(rhs.id)
                 if lPin != rPin { return lPin }
-                if abs(lhs.score - rhs.score) > 0.001 { return lhs.score > rhs.score }
-                return lhs.asset.rating > rhs.asset.rating
+                let lb = Self.scoreBucket(lhs.score)
+                let rb = Self.scoreBucket(rhs.score)
+                if lb != rb { return lb > rb }
+                if lhs.asset.rating != rhs.asset.rating { return lhs.asset.rating > rhs.asset.rating }
+                return lhs.id.uuidString < rhs.id.uuidString
             }
 
         // Strict relevance threshold: DO NOT dump random unrelated items when user gave a specific brief!
@@ -758,13 +820,29 @@ public nonisolated struct MoodboardAgentHarness: Sendable {
     }
 
     private static func parseIntSlot(_ raw: Any?) -> Int? {
+        guard let raw else { return nil }
+        if type(of: raw) == Bool.self { return nil }
+        if let n = raw as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+            return n.intValue
+        }
         if let i = raw as? Int { return i }
-        if let n = raw as? NSNumber { return n.intValue }
         if let s = raw as? String {
             let digits = s.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
             return Int(digits)
         }
         return nil
+    }
+
+    private static func scoreBucket(_ score: Double) -> Int {
+        guard score.isFinite else { return 0 }
+        return Int((max(-1000.0, min(1000.0, score)) * 1000.0).rounded())
+    }
+
+    private static func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return Task.isCancelled
     }
 
     static func extractJSONObject(from raw: String) throws -> [String: Any] {

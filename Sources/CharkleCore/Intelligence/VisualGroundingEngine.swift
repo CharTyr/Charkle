@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
 
 /// Ensures every image sent to TypeSafe strictly obeys `280 <= width, height <= 1568`
 /// and upright standard JPEG encoding (avoiding HTTP 400 dimension rejections).
@@ -8,11 +9,26 @@ public nonisolated enum TypeSafeImagePreparer: Sendable {
     public static let minSide = 280
     public static let maxSide = 1568
 
-    public static func prepareJPEG(
+    public struct PreparedImage: Sendable {
+        public let jpegData: Data
+        public let canvasWidth: Int
+        public let canvasHeight: Int
+        /// Normalized top-left rect inside the prepared JPEG occupied by the actual unpadded source image.
+        public let contentRect: NormalizedCropRect
+
+        public init(jpegData: Data, canvasWidth: Int, canvasHeight: Int, contentRect: NormalizedCropRect) {
+            self.jpegData = jpegData
+            self.canvasWidth = canvasWidth
+            self.canvasHeight = canvasHeight
+            self.contentRect = contentRect
+        }
+    }
+
+    public static func prepare(
         from cgImage: CGImage,
         targetLongSide: Int = 768,
         compression: Double = 0.86
-    ) -> Data? {
+    ) -> PreparedImage? {
         let srcW = cgImage.width
         let srcH = cgImage.height
         guard srcW > 0, srcH > 0 else { return nil }
@@ -52,11 +68,80 @@ public nonisolated enum TypeSafeImagePreparer: Sendable {
         let originY = (canvasH - drawH) / 2
         ctx.draw(cgImage, in: CGRect(x: originX, y: originY, width: drawW, height: drawH))
 
-        guard let normalized = ctx.makeImage() else { return nil }
-        return NSBitmapImageRep(cgImage: normalized).representation(
-            using: .jpeg,
-            properties: [.compressionFactor: compression]
+        guard let normalized = ctx.makeImage(),
+              let jpeg = NSBitmapImageRep(cgImage: normalized).representation(
+                using: .jpeg,
+                properties: [.compressionFactor: compression]
+              ) else {
+            return nil
+        }
+
+        let topOriginY = canvasH - originY - drawH
+        let contentRect: NormalizedCropRect = (drawW == canvasW && drawH == canvasH)
+            ? .full
+            : NormalizedCropRect(
+                x: Double(originX) / Double(canvasW),
+                y: Double(topOriginY) / Double(canvasH),
+                width: Double(drawW) / Double(canvasW),
+                height: Double(drawH) / Double(canvasH)
+            ).clamped()
+
+        return PreparedImage(
+            jpegData: jpeg,
+            canvasWidth: canvasW,
+            canvasHeight: canvasH,
+            contentRect: contentRect
         )
+    }
+
+    public static func prepareJPEG(
+        from cgImage: CGImage,
+        targetLongSide: Int = 768,
+        compression: Double = 0.86
+    ) -> Data? {
+        prepare(from: cgImage, targetLongSide: targetLongSide, compression: compression)?.jpegData
+    }
+
+    /// Infers the normalized unpadded content rect if `imageData` was letterboxed by `TypeSafeImagePreparer`
+    /// from an extreme-aspect `cgImage` (>5.6:1). Returns `.full` when unpadded or unavailable.
+    public static func inferredContentRect(forPreparedData imageData: Data, sourceCGImage: CGImage?) -> NormalizedCropRect {
+        guard let cg = sourceCGImage, cg.width > 0, cg.height > 0, !imageData.isEmpty,
+              let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let canvasW = props[kCGImagePropertyPixelWidth] as? Int,
+              let canvasH = props[kCGImagePropertyPixelHeight] as? Int,
+              canvasW > 0, canvasH > 0 else {
+            return .full
+        }
+        let scale = min(Double(canvasW) / Double(cg.width), Double(canvasH) / Double(cg.height))
+        let drawW = max(1, min(canvasW, Int((Double(cg.width) * scale).rounded())))
+        let drawH = max(1, min(canvasH, Int((Double(cg.height) * scale).rounded())))
+        if abs(canvasW - drawW) <= 2 && abs(canvasH - drawH) <= 2 {
+            return .full
+        }
+        let originX = Double((canvasW - drawW) / 2)
+        let originYBottom = (canvasH - drawH) / 2
+        let topOriginY = Double(canvasH - originYBottom - drawH)
+        return NormalizedCropRect(
+            x: originX / Double(canvasW),
+            y: topOriginY / Double(canvasH),
+            width: Double(drawW) / Double(canvasW),
+            height: Double(drawH) / Double(canvasH)
+        ).clamped()
+    }
+
+    /// Projects a Box returned in padded prepared-JPEG space back into original unpadded image coordinates `[0, 1]`.
+    public static func unmapBox(_ box: NormalizedCropRect, fromContentRect contentRect: NormalizedCropRect) -> NormalizedCropRect {
+        let safeBox = box.clamped()
+        let safeContent = contentRect.clamped()
+        guard safeContent != .full, safeContent.width > 0.02, safeContent.height > 0.02 else {
+            return safeBox
+        }
+        let left = (safeBox.minX - safeContent.minX) / safeContent.width
+        let right = (safeBox.maxX - safeContent.minX) / safeContent.width
+        let top = (safeBox.minY - safeContent.minY) / safeContent.height
+        let bottom = (safeBox.maxY - safeContent.minY) / safeContent.height
+        return NormalizedCropRect(boxTop: top, bottom: bottom, left: left, right: right).clamped()
     }
 }
 
@@ -178,29 +263,51 @@ public nonisolated struct VisualGroundingEngine: Sendable {
                 images: [attachment]
             )
 
-            let presence = response.answers["present"]?.noulProbability ?? 1.0
+            let rawPresence = response.answers["present"]?.noulProbability ?? 1.0
+            let presence = rawPresence.isFinite ? max(0.0, min(1.0, rawPresence)) : 0.0
+            let minPresence = config.minPresenceProbability.isFinite
+                ? max(0.05, min(0.95, config.minPresenceProbability))
+                : 0.5
+            let found = presence >= minPresence
+
             guard let boxAnswer = response.answers["region"]?.boxValue else {
+                if !found {
+                    let absentSummary = isSemanticQuery
+                        ? "画面中未检测到「\(trimmedQuery)」（存在概率 \(Self.safePercent(presence))%）"
+                        : "未检测到明确视觉主体（存在概率 \(Self.safePercent(presence))%）"
+                    return VisualRegionResult(
+                        crop: .full,
+                        rawBox: .full,
+                        presenceProbability: presence,
+                        confidence: nil,
+                        didApplyPadding: false,
+                        found: false,
+                        source: .typeSafeJev,
+                        model: response.model,
+                        summary: absentSummary
+                    )
+                }
                 throw LibraryDatabaseError("TypeSafe 未返回有效的 Box 定位结果。")
             }
 
-            let rawBox = boxAnswer.coords.normalizedCropRect.clamped()
-            let confidence = boxAnswer.confidence
-            let minPresence = max(0.05, min(0.95, config.minPresenceProbability))
-            let found = presence >= minPresence
+            let contentRect = TypeSafeImagePreparer.inferredContentRect(forPreparedData: imageData, sourceCGImage: cgImage)
+            let rawBox = TypeSafeImagePreparer.unmapBox(boxAnswer.coords.normalizedCropRect.clamped(), fromContentRect: contentRect)
+            let confidence = boxAnswer.confidence.flatMap { $0.isFinite ? max(0.0, min(1.0, $0)) : nil }
+            let lowConfPad = config.lowConfidencePadding.isFinite ? max(0.0, config.lowConfidencePadding) : 0.0
 
             let shouldPad: Bool = {
-                guard let confidence else { return config.lowConfidencePadding > 0 }
-                return confidence < config.minConfidence && config.lowConfidencePadding > 0
+                guard let confidence else { return lowConfPad > 0 }
+                return confidence < config.minConfidence && lowConfPad > 0
             }()
-            let finalCrop = shouldPad ? rawBox.padded(by: config.lowConfidencePadding) : rawBox
+            let finalCrop = shouldPad ? rawBox.padded(by: lowConfPad) : rawBox
 
             let summary: String
             if !found {
                 summary = isSemanticQuery
-                    ? "画面中未检测到「\(trimmedQuery)」（存在概率 \(Int((presence * 100).rounded()))%）"
-                    : "未检测到明确视觉主体（存在概率 \(Int((presence * 100).rounded()))%）"
+                    ? "画面中未检测到「\(trimmedQuery)」（存在概率 \(Self.safePercent(presence))%）"
+                    : "未检测到明确视觉主体（存在概率 \(Self.safePercent(presence))%）"
             } else {
-                let confText = confidence.map { "置信度 \(Int(($0 * 100).rounded()))%" } ?? "已定位"
+                let confText = confidence.map { "置信度 \(Self.safePercent($0))%" } ?? "已定位"
                 let padText = shouldPad ? " · 已自动外扩防切边" : ""
                 summary = isSemanticQuery
                     ? "Jev Box 已定位「\(trimmedQuery)」（\(confText)\(padText)）"
@@ -287,15 +394,34 @@ public nonisolated struct VisualGroundingEngine: Sendable {
             ]
         )
 
-        let presence = response.answers["present"]?.noulProbability ?? 1.0
+        let rawPresence = response.answers["present"]?.noulProbability ?? 1.0
+        let presence = rawPresence.isFinite ? max(0.0, min(1.0, rawPresence)) : 0.0
+        let minPresence = config.minPresenceProbability.isFinite
+            ? max(0.05, min(0.95, config.minPresenceProbability))
+            : 0.5
+        let found = presence >= minPresence
+
         guard let boxAnswer = response.answers["region"]?.boxValue else {
+            if !found {
+                return VisualRegionResult(
+                    crop: .full,
+                    rawBox: .full,
+                    presenceProbability: presence,
+                    confidence: nil,
+                    didApplyPadding: false,
+                    found: false,
+                    source: .typeSafeJev,
+                    model: response.model,
+                    summary: "目标图中未找到匹配该参考图的元素"
+                )
+            }
             throw LibraryDatabaseError("TypeSafe 未返回有效的以图定位 Box 结果。")
         }
         let rawBox = boxAnswer.coords.normalizedCropRect.clamped()
-        let confidence = boxAnswer.confidence
-        let shouldPad = (confidence ?? 0) < config.minConfidence && config.lowConfidencePadding > 0
-        let finalCrop = shouldPad ? rawBox.padded(by: config.lowConfidencePadding) : rawBox
-        let found = presence >= max(0.05, min(0.95, config.minPresenceProbability))
+        let confidence = boxAnswer.confidence.flatMap { $0.isFinite ? max(0.0, min(1.0, $0)) : nil }
+        let lowConfPad = config.lowConfidencePadding.isFinite ? max(0.0, config.lowConfidencePadding) : 0.0
+        let shouldPad = (confidence ?? 0) < config.minConfidence && lowConfPad > 0
+        let finalCrop = shouldPad ? rawBox.padded(by: lowConfPad) : rawBox
 
         return VisualRegionResult(
             crop: finalCrop,
@@ -345,10 +471,12 @@ public nonisolated struct VisualGroundingEngine: Sendable {
                 images: [attachment]
             )
 
-            let noiseProb = response.answers["has_noise"]?.noulProbability ?? 0.0
+            let rawNoiseProb = response.answers["has_noise"]?.noulProbability ?? 0.0
+            let noiseProb = rawNoiseProb.isFinite ? max(0.0, min(1.0, rawNoiseProb)) : 0.0
             let boxAnswer = response.answers["core_content"]?.boxValue
-            let confidence = boxAnswer?.confidence
-            let hasNoise = noiseProb >= max(0.35, min(0.90, config.minPresenceProbability))
+            let confidence = boxAnswer?.confidence.flatMap { $0.isFinite ? max(0.0, min(1.0, $0)) : nil }
+            let minPresence = config.minPresenceProbability.isFinite ? config.minPresenceProbability : 0.5
+            let hasNoise = noiseProb >= max(0.35, min(0.90, minPresence))
 
             guard hasNoise, let boxAnswer else {
                 return CleanBoundsResult(
@@ -363,12 +491,14 @@ public nonisolated struct VisualGroundingEngine: Sendable {
                 )
             }
 
-            let rawBox = boxAnswer.coords.normalizedCropRect.clamped()
-            let shouldPad = (confidence ?? 0) < config.minConfidence && config.lowConfidencePadding > 0
-            let finalCrop = shouldPad ? rawBox.padded(by: min(0.03, config.lowConfidencePadding)) : rawBox
+            let contentRect = TypeSafeImagePreparer.inferredContentRect(forPreparedData: imageData, sourceCGImage: cgImage)
+            let rawBox = TypeSafeImagePreparer.unmapBox(boxAnswer.coords.normalizedCropRect.clamped(), fromContentRect: contentRect)
+            let lowConfPad = config.lowConfidencePadding.isFinite ? max(0.0, config.lowConfidencePadding) : 0.0
+            let shouldPad = (confidence ?? 0) < config.minConfidence && lowConfPad > 0
+            let finalCrop = shouldPad ? rawBox.padded(by: min(0.03, lowConfPad)) : rawBox
             let meaningful = finalCrop.isMeaningfulSubregion
 
-            let confText = confidence.map { "置信度 \(Int(($0 * 100).rounded()))%" } ?? "已识别"
+            let confText = confidence.map { "置信度 \(Self.safePercent($0))%" } ?? "已识别"
             return CleanBoundsResult(
                 hasNoise: meaningful,
                 noiseProbability: noiseProb,
@@ -466,37 +596,60 @@ public nonisolated struct VisualGroundingEngine: Sendable {
 
         let workerLimit = max(1, min(maxConcurrency, chunks.count))
         var nextChunkIndex = 0
+        var firstError: Error?
+        var succeededBatches = 0
 
-        try await withThrowingTaskGroup(of: [VisualScoreResult].self) { group in
+        await withTaskGroup(of: Result<[VisualScoreResult], Error>.self) { group in
             for _ in 0..<workerLimit {
-                guard nextChunkIndex < chunks.count else { break }
+                guard nextChunkIndex < chunks.count, !Task.isCancelled else { break }
                 let batch = chunks[nextChunkIndex]
                 nextChunkIndex += 1
                 group.addTask {
-                    try await Self.scoreSingleBatch(
-                        query: trimmedQuery,
-                        batch: batch,
-                        model: config.model,
-                        client: client
-                    )
-                }
-            }
-
-            while let batchScores = try await group.next() {
-                results.append(contentsOf: batchScores)
-                if nextChunkIndex < chunks.count {
-                    let batch = chunks[nextChunkIndex]
-                    nextChunkIndex += 1
-                    group.addTask {
-                        try await Self.scoreSingleBatch(
+                    do {
+                        let scores = try await Self.scoreSingleBatch(
                             query: trimmedQuery,
                             batch: batch,
                             model: config.model,
                             client: client
                         )
+                        return .success(scores)
+                    } catch {
+                        return .failure(error)
                     }
                 }
             }
+
+            while let outcome = await group.next() {
+                switch outcome {
+                case .success(let batchScores):
+                    succeededBatches += 1
+                    results.append(contentsOf: batchScores)
+                case .failure(let error):
+                    if firstError == nil { firstError = error }
+                }
+                if nextChunkIndex < chunks.count, !Task.isCancelled {
+                    let batch = chunks[nextChunkIndex]
+                    nextChunkIndex += 1
+                    group.addTask {
+                        do {
+                            let scores = try await Self.scoreSingleBatch(
+                                query: trimmedQuery,
+                                batch: batch,
+                                model: config.model,
+                                client: client
+                            )
+                            return .success(scores)
+                        } catch {
+                            return .failure(error)
+                        }
+                    }
+                }
+            }
+        }
+
+        try Task.checkCancellation()
+        if succeededBatches == 0, let firstError {
+            throw firstError
         }
 
         return results.sorted { $0.score > $1.score }
@@ -545,7 +698,7 @@ public nonisolated struct VisualGroundingEngine: Sendable {
             }
             stateItems[slotKey] = entry
 
-            let hasImage = item.imageData != nil
+            let hasImage = !(item.imageData?.isEmpty ?? true)
             let instruction = hasImage
                 ? "Rate how well the design reference in `items.\(slotKey).image` (with metadata in `items.\(slotKey)`) matches the user's visual search query: \"\(query)\"."
                 : "Rate how well the design reference metadata in `items.\(slotKey)` matches the user's search query: \"\(query)\"."
@@ -566,12 +719,13 @@ public nonisolated struct VisualGroundingEngine: Sendable {
         var batchResults: [VisualScoreResult] = []
         batchResults.reserveCapacity(batch.count)
         for (slotKey, assetID) in keyToAssetID {
-            if let scored = response.answers[slotKey]?.scoreValue {
+            if let scored = response.answers[slotKey]?.scoreValue, scored.score.isFinite {
                 let normalized = max(0.0, min(1.0, scored.score / 3.0))
+                let safeConfidence = scored.confidence.flatMap { $0.isFinite ? max(0.0, min(1.0, $0)) : nil }
                 batchResults.append(VisualScoreResult(
                     assetID: assetID,
                     score: normalized,
-                    confidence: scored.confidence,
+                    confidence: safeConfidence,
                     rawScore: scored.score
                 ))
             }
@@ -632,7 +786,7 @@ public nonisolated struct VisualGroundingEngine: Sendable {
         }
 
         let folderNamesList = cappedFolders.map(\.name).joined(separator: ", ")
-        let targetDesc = imageData != nil ? "`photo` and its metadata" : "this design asset's metadata"
+        let targetDesc = !(imageData?.isEmpty ?? true) ? "`photo` and its metadata" : "this design asset's metadata"
 
         let response = try await client.systemOne(
             model: config.model,
@@ -651,30 +805,39 @@ public nonisolated struct VisualGroundingEngine: Sendable {
             images: attachments
         )
 
-        let fitProb = response.answers["fits_any"]?.noulProbability ?? 0.5
+        let rawFitProb = response.answers["fits_any"]?.noulProbability ?? 0.5
+        let fitProb = rawFitProb.isFinite ? max(0.0, min(1.0, rawFitProb)) : 0.5
         guard let choiceAnswer = response.answers["folder"]?.choiceValue,
               let chosen = idByKey[choiceAnswer.choice] else {
             return (nil, 0, fitProb, "未能确定合适目录，建议暂留收件箱")
         }
 
-        let topProb = choiceAnswer.probabilities[choiceAnswer.choice] ?? fitProb
-        let effectiveConfidence = choiceAnswer.confidence ?? topProb
-        let minFit = max(0.35, min(0.85, config.minPresenceProbability))
+        let rawTopProb = choiceAnswer.probabilities[choiceAnswer.choice] ?? fitProb
+        let topProb = rawTopProb.isFinite ? max(0.0, min(1.0, rawTopProb)) : fitProb
+        let rawEffConf = choiceAnswer.confidence ?? topProb
+        let effectiveConfidence = rawEffConf.isFinite ? max(0.0, min(1.0, rawEffConf)) : topProb
+        let minPresence = config.minPresenceProbability.isFinite ? config.minPresenceProbability : 0.5
+        let minFit = max(0.35, min(0.85, minPresence))
 
         if fitProb < minFit {
             return (
                 nil,
                 effectiveConfidence,
                 fitProb,
-                "匹配度偏低（\(Int((fitProb * 100).rounded()))%），建议暂留收件箱（最接近：\(chosen.name)）"
+                "匹配度偏低（\(Self.safePercent(fitProb))%），建议暂留收件箱（最接近：\(chosen.name)）"
             )
         }
 
         return (
             chosen.id,
-            max(0.0, min(1.0, effectiveConfidence)),
+            effectiveConfidence,
             fitProb,
-            "Jev 视觉归类（匹配度 \(Int((fitProb * 100).rounded()))% · 置信度 \(Int((effectiveConfidence * 100).rounded()))%）"
+            "Jev 视觉归类（匹配度 \(Self.safePercent(fitProb))% · 置信度 \(Self.safePercent(effectiveConfidence))%）"
         )
+    }
+
+    private static func safePercent(_ value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        return Int((max(0.0, min(1.0, value)) * 100.0).rounded())
     }
 }

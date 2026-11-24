@@ -427,11 +427,15 @@ public struct HorizontalWheelScrollRedirector: NSViewRepresentable {
         }
 
         private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
-            guard let hostWindow = self.window, event.window === hostWindow, !isHiddenOrHasHiddenAncestor else {
+            guard let hostWindow = self.window,
+                  event.window === hostWindow,
+                  hostWindow.attachedSheet == nil,
+                  NSApp.modalWindow == nil,
+                  !isHiddenOrHasHiddenAncestor else {
                 return event
             }
             // Respect Cmd-zoom shortcuts and native horizontal trackpad swipes / Shift-scroll
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             if flags.contains(.command) || flags.contains(.control) {
                 return event
             }
@@ -454,7 +458,7 @@ public struct HorizontalWheelScrollRedirector: NSViewRepresentable {
             let docWidth = scrollView.documentView?.frame.width ?? 0
             let maxX = max(0, docWidth - clipView.bounds.width)
             guard maxX > 0.5 else {
-                return nil
+                return event
             }
 
             let step = event.hasPreciseScrollingDeltas ? dy : dy * 18.0
@@ -468,30 +472,25 @@ public struct HorizontalWheelScrollRedirector: NSViewRepresentable {
         }
 
         private func findAssociatedHorizontalScrollView(eventLocationInWindow: NSPoint) -> NSScrollView? {
+            guard let hitView = window?.contentView?.hitTest(eventLocationInWindow) else {
+                return nil
+            }
             if let enclosing = enclosingScrollView {
-                return enclosing
+                return hitView.isDescendant(of: enclosing) ? enclosing : nil
             }
-            if let hitView = window?.contentView?.hitTest(eventLocationInWindow) {
-                var cursor: NSView? = hitView
-                while let view = cursor {
-                    if let sv = view as? NSScrollView {
-                        return sv
-                    }
-                    cursor = view.superview
+
+            // Walk upward from the actual topmost hit-tested view so overlays (Quick Look, modals,
+            // sheets, popovers) covering this horizontal strip never have their scroll events stolen.
+            let selfRectInWindow = convert(bounds, to: nil)
+            var cursor: NSView? = hitView
+            while let view = cursor {
+                if let sv = view as? NSScrollView {
+                    let svRect = sv.convert(sv.bounds, to: nil)
+                    let matchesStripHeight = abs(svRect.height - selfRectInWindow.height) <= 16
+                        && abs(svRect.minY - selfRectInWindow.minY) <= 16
+                    return matchesStripHeight ? sv : nil
                 }
-            }
-            // Fallback: inspect superview subtree (when mounted via `.background(...)` on SwiftUI ScrollView)
-            guard let parent = superview else { return nil }
-            var queue: [NSView] = parent.subviews
-            var idx = 0
-            while idx < queue.count {
-                let candidate = queue[idx]
-                idx += 1
-                if candidate === self { continue }
-                if let sv = candidate as? NSScrollView {
-                    return sv
-                }
-                queue.append(contentsOf: candidate.subviews)
+                cursor = view.superview
             }
             return nil
         }
@@ -709,5 +708,40 @@ public enum CanvasFormatters {
     public static func fileExtensionBadge(for fileName: String) -> String {
         let ext = URL(fileURLWithPath: fileName).pathExtension.uppercased()
         return ext.isEmpty ? "FILE" : String(ext.prefix(6))
+    }
+
+    /// Safely decodes up to `maxBytes` of UTF-8 text without returning `nil` or emitting a trailing
+    /// replacement glyph when the byte budget lands mid-sequence in multi-byte CJK/emoji text.
+    public nonisolated static func decodeUTF8Prefix(_ data: Data, maxBytes: Int = 262_144) -> String {
+        guard maxBytes > 0, !data.isEmpty else { return "" }
+        if data.count <= maxBytes {
+            return String(decoding: data, as: UTF8.self)
+        }
+        var end = maxBytes
+        var back = 0
+        while end > 0 && back < 4 && (data[data.index(data.startIndex, offsetBy: end - 1)] & 0xC0) == 0x80 {
+            end -= 1
+            back += 1
+        }
+        var cutEnd = maxBytes
+        if end > 0 {
+            let lead = data[data.index(data.startIndex, offsetBy: end - 1)]
+            let expectedLen: Int
+            if (lead & 0x80) == 0 {
+                expectedLen = 1
+            } else if (lead & 0xE0) == 0xC0 {
+                expectedLen = 2
+            } else if (lead & 0xF0) == 0xE0 {
+                expectedLen = 3
+            } else if (lead & 0xF8) == 0xF0 {
+                expectedLen = 4
+            } else {
+                expectedLen = 1
+            }
+            if (end - 1) + expectedLen > maxBytes {
+                cutEnd = end - 1
+            }
+        }
+        return String(decoding: data.prefix(cutEnd), as: UTF8.self)
     }
 }

@@ -16,7 +16,8 @@ public nonisolated struct ExtractedImageMetadata: Hashable, Sendable {
 }
 
 public nonisolated enum ImageMetadataExtractor {
-    private static let maxBinaryScanBytes = 2 * 1024 * 1024
+    private static let maxPNGChunkScanCount = 4_096
+    private static let maxPNGTextChunkBytes = 1_500_000
 
     public static func extract(from url: URL) -> ExtractedImageMetadata {
         let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
@@ -26,15 +27,9 @@ public nonisolated enum ImageMetadataExtractor {
 
         let photoExif = parsePhotoExif(from: props)
 
-        // Read header/chunk bytes for PNG text chunks (tEXt / iTXt / zTXt) and WebP/JPEG fallback text blocks.
-        var pngChunks: [String: String] = [:]
-        if let handle = try? FileHandle(forReadingFrom: url),
-           let data = try? handle.read(upToCount: maxBinaryScanBytes) {
-            try? handle.close()
-            if data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
-                pngChunks = extractPNGTextChunks(from: data)
-            }
-        }
+        // Stream PNG chunk headers (seeking over IDAT payloads) so trailing tEXt/iTXt/zTXt chunks
+        // are always found even on multi-megabyte 4K PNGs.
+        let pngChunks = extractPNGTextChunks(fromFileAt: url)
 
         let aiGen = extractAIGeneration(
             pngChunks: pngChunks,
@@ -81,7 +76,10 @@ public nonisolated enum ImageMetadataExtractor {
         let colorProfile = cleanString(props[kCGImagePropertyProfileName])
             ?? cleanString(props[kCGImagePropertyColorModel])
         let bitDepth = intValue(props[kCGImagePropertyDepth])
-        let dpiWidth = doubleValue(props[kCGImagePropertyDPIWidth]).map { Int($0.rounded()) }
+        let dpiWidth = doubleValue(props[kCGImagePropertyDPIWidth]).flatMap { val -> Int? in
+            guard val.isFinite, val > 0, val < 1_000_000 else { return nil }
+            return Int(val.rounded())
+        }
 
         let software = cleanString(tiff[kCGImagePropertyTIFFSoftware])
         let artist = cleanString(tiff[kCGImagePropertyTIFFArtist])
@@ -132,12 +130,15 @@ public nonisolated enum ImageMetadataExtractor {
     static func formatExposureTime(_ seconds: Double) -> String? {
         guard seconds > 0, seconds.isFinite else { return nil }
         if seconds >= 0.5 {
+            guard seconds < 1_000_000 else { return nil }
             if abs(seconds - seconds.rounded()) < 0.05 {
                 return "\(Int(seconds.rounded()))s"
             }
             return String(format: "%.1fs", seconds)
         }
-        let denom = max(1, Int((1.0 / seconds).rounded()))
+        let inv = (1.0 / seconds).rounded()
+        guard inv.isFinite, inv >= 1, inv < 10_000_000 else { return nil }
+        let denom = max(1, Int(inv))
         return "1/\(denom)s"
     }
 
@@ -172,6 +173,57 @@ public nonisolated enum ImageMetadataExtractor {
     }
 
     // MARK: - 2. PNG Binary Text Chunk Scanner (`tEXt`, `iTXt`, `zTXt`)
+
+    /// Streams PNG chunk headers directly from disk, seeking past `IDAT` image data so trailing
+    /// `tEXt`/`iTXt`/`zTXt` metadata chunks are always extracted regardless of file size.
+    public static func extractPNGTextChunks(fromFileAt url: URL) -> [String: String] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [:] }
+        defer { try? handle.close() }
+        guard let sig = try? handle.read(upToCount: 8),
+              sig.count == 8,
+              sig.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) else {
+            return [:]
+        }
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        guard fileSize > 16 else { return [:] }
+        var offset: UInt64 = 8
+        var chunks: [String: String] = [:]
+        var scannedChunks = 0
+
+        while offset + 12 <= fileSize && scannedChunks < maxPNGChunkScanCount {
+            scannedChunks += 1
+            do {
+                try handle.seek(toOffset: offset)
+                guard let header = try handle.read(upToCount: 8), header.count == 8 else { break }
+                let length = UInt64(readBigEndianUInt32(header, at: 0))
+                let dataStart = offset + 8
+                let nextOffset = dataStart + length + 4
+                guard nextOffset >= dataStart, nextOffset <= fileSize else { break }
+
+                let chunkType = String(bytes: header[4..<8], encoding: .ascii) ?? ""
+                if chunkType == "IEND" { break }
+                if (chunkType == "tEXt" || chunkType == "iTXt" || chunkType == "zTXt"),
+                   length > 0, length <= UInt64(maxPNGTextChunkBytes),
+                   let payload = try handle.read(upToCount: Int(length)),
+                   payload.count == Int(length) {
+                    switch chunkType {
+                    case "tEXt":
+                        if let (k, v) = decodePNGtEXt(payload) { chunks[k] = v }
+                    case "iTXt":
+                        if let (k, v) = decodePNGiTXt(payload) { chunks[k] = v }
+                    case "zTXt":
+                        if let (k, v) = decodePNGzTXt(payload) { chunks[k] = v }
+                    default:
+                        break
+                    }
+                }
+                offset = nextOffset
+            } catch {
+                break
+            }
+        }
+        return chunks
+    }
 
     public static func extractPNGTextChunks(from data: Data) -> [String: String] {
         guard data.count > 16,
@@ -272,30 +324,45 @@ public nonisolated enum ImageMetadataExtractor {
         return (key, value)
     }
 
-    /// Inflates a standard RFC 1950 zlib stream (2-byte zlib header + raw deflate payload) using Apple's `Compression`.
+    /// Inflates a standard RFC 1950 zlib stream (2-byte zlib header + optional 4-byte FDICT + raw deflate payload).
     private static func inflateZlib(_ data: Data) -> Data? {
         guard data.count > 6 else { return nil }
-        // Strip 2-byte zlib header (0x78 ...) and 4-byte Adler-32 trailer for raw `COMPRESSION_ZLIB` deflate stream.
-        let deflateSlice = data.dropFirst(2)
-        let maxOut = min(max(data.count * 12, 65_536), 4 * 1024 * 1024)
-        var buffer = Data(count: maxOut)
-        let decodedSize = deflateSlice.withUnsafeBytes { srcPtr -> Int in
-            guard let srcBase = srcPtr.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-            return buffer.withUnsafeMutableBytes { dstPtr in
-                guard let dstBase = dstPtr.bindMemory(to: UInt8.self).baseAddress else { return 0 }
-                return compression_decode_buffer(
-                    dstBase,
-                    maxOut,
-                    srcBase,
-                    deflateSlice.count,
-                    nil,
-                    COMPRESSION_ZLIB
-                )
+        let cmf = data[data.startIndex]
+        let flg = data[data.index(after: data.startIndex)]
+        // RFC 1950 check: deflate method == 8 and (CMF*256 + FLG) % 31 == 0
+        let hasFDICT = (flg & 0x20) != 0
+        let headerBytes = ((cmf & 0x0F) == 8 && ((Int(cmf) << 8) + Int(flg)) % 31 == 0)
+            ? (hasFDICT ? 6 : 2)
+            : 2
+        guard data.count > headerBytes + 4 else { return nil }
+        let deflateSlice = data.dropFirst(headerBytes)
+        let cap = 4 * 1024 * 1024
+        var capacity = min(max(data.count * 12, 65_536), cap)
+
+        while true {
+            var buffer = Data(count: capacity)
+            let decodedSize = deflateSlice.withUnsafeBytes { srcPtr -> Int in
+                guard let srcBase = srcPtr.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return buffer.withUnsafeMutableBytes { dstPtr in
+                    guard let dstBase = dstPtr.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                    return compression_decode_buffer(
+                        dstBase,
+                        capacity,
+                        srcBase,
+                        deflateSlice.count,
+                        nil,
+                        COMPRESSION_ZLIB
+                    )
+                }
             }
+            guard decodedSize > 0 else { return nil }
+            if decodedSize == capacity && capacity < cap {
+                capacity = min(capacity * 2, cap)
+                continue
+            }
+            buffer.count = decodedSize
+            return buffer
         }
-        guard decodedSize > 0 else { return nil }
-        buffer.count = decodedSize
-        return buffer
     }
 
     // MARK: - 3. XMP Metadata Extraction
@@ -956,7 +1023,7 @@ public nonisolated enum ImageMetadataExtractor {
                 let prefix = String(bytes: data.prefix(8), encoding: .ascii) ?? ""
                 let body = data.dropFirst(8)
                 if prefix.hasPrefix("UNICODE") {
-                    if let s = String(data: body, encoding: .utf16BigEndian) ?? String(data: body, encoding: .utf16LittleEndian) {
+                    if let s = decodeUTF16Smart(body) {
                         return s.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
                     }
                 } else if prefix.hasPrefix("ASCII") {
@@ -969,6 +1036,32 @@ public nonisolated enum ImageMetadataExtractor {
                 .flatMap(cleanExifCommentPrefix)
         }
         return nil
+    }
+
+    /// Detects UTF-16 byte order (BOM or null-byte lane heuristic) before decoding EXIF `UNICODE\0` comments
+    /// so UTF-16LE payloads from A1111/Forge/Civitai JPEGs are never misread as UTF-16BE mojibake.
+    private static func decodeUTF16Smart(_ body: Data) -> String? {
+        guard body.count >= 2 else { return nil }
+        let bytes = Array(body)
+        if bytes[0] == 0xFE && bytes[1] == 0xFF {
+            return String(data: body.dropFirst(2), encoding: .utf16BigEndian)
+        }
+        if bytes[0] == 0xFF && bytes[1] == 0xFE {
+            return String(data: body.dropFirst(2), encoding: .utf16LittleEndian)
+        }
+        let sampleLen = min(bytes.count & ~1, 256)
+        var evenZeros = 0
+        var oddZeros = 0
+        var i = 0
+        while i + 1 < sampleLen {
+            if bytes[i] == 0 { evenZeros += 1 }
+            if bytes[i + 1] == 0 { oddZeros += 1 }
+            i += 2
+        }
+        let preferLE = oddZeros > evenZeros
+        let primary: String.Encoding = preferLE ? .utf16LittleEndian : .utf16BigEndian
+        let secondary: String.Encoding = preferLE ? .utf16BigEndian : .utf16LittleEndian
+        return String(data: body, encoding: primary) ?? String(data: body, encoding: secondary)
     }
 
     private static func cleanExifCommentPrefix(_ raw: String) -> String? {
@@ -1029,7 +1122,9 @@ public nonisolated enum ImageMetadataExtractor {
     private static func doubleValue(_ value: Any?) -> Double? {
         if let d = value as? Double { return d.isFinite ? d : nil }
         if let n = value as? NSNumber { return n.doubleValue.isFinite ? n.doubleValue : nil }
-        if let s = value as? String { return Double(s.trimmingCharacters(in: .whitespaces)) }
+        if let s = value as? String, let parsed = Double(s.trimmingCharacters(in: .whitespaces)), parsed.isFinite {
+            return parsed
+        }
         return nil
     }
 

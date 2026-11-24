@@ -6,6 +6,13 @@ import Foundation
 struct CharkleCLI {
     static let version = CharkleExternalAgentService.serverVersion
 
+    private static let knownCommands: Set<String> = [
+        "mcp", "doctor", "status", "overview",
+        "inbox", "search", "semantic", "similar", "jump",
+        "asset", "contact-sheet", "board", "folder",
+        "organize", "analyze", "import", "trash", "completions"
+    ]
+
     static func main() async {
         let rawArgs = Array(CommandLine.arguments.dropFirst())
         if rawArgs.isEmpty {
@@ -26,6 +33,10 @@ struct CharkleCLI {
         }
         if command == "--help" || command == "-h" || command == "help" {
             if let topic = global.remaining.dropFirst().first {
+                guard knownCommands.contains(topic) else {
+                    formatter.emitError("Unknown command: \(topic). Run `charkle --help` for usage.")
+                    exit(2)
+                }
                 printSubcommandHelp(topic)
             } else {
                 printGlobalHelp()
@@ -59,6 +70,11 @@ struct CharkleCLI {
             }
             print(script)
             return
+        }
+
+        guard knownCommands.contains(command) else {
+            formatter.emitError("Unknown command: \(command). Run `charkle --help` for usage.")
+            exit(2)
         }
 
         // Per-subcommand `--help` / `-h` before touching SQLite or policy.
@@ -280,6 +296,7 @@ struct CharkleCLI {
         }
         var params: [String: Any] = ["asset_id": id]
         if let limit = parsed.int("limit") { params["limit"] = limit }
+        if parsed.flag("contact-sheet") { params["render_contact_sheet"] = true }
         let out = await service.callTool(name: "find_similar_assets", arguments: params, channel: .cli)
         formatter.emitToolOutput(out, command: "find_similar_assets")
     }
@@ -358,7 +375,8 @@ struct CharkleCLI {
 
         case "get":
             var params: [String: Any] = [:]
-            if let ref = parsed.first("id") ?? parsed.positionals.first {
+            let positionalRef = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let ref = parsed.first("id") ?? (positionalRef.isEmpty ? nil : positionalRef) {
                 if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
             }
             let out = await service.callTool(name: "get_board_context", arguments: params, channel: .cli)
@@ -366,7 +384,8 @@ struct CharkleCLI {
 
         case "export":
             var params: [String: Any] = ["include_image": false]
-            if let ref = parsed.first("id") ?? parsed.positionals.first {
+            let positionalRef = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let ref = parsed.first("id") ?? (positionalRef.isEmpty ? nil : positionalRef) {
                 if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
             }
             if let outPath = parsed.first("out") ?? parsed.first("output") { params["output_path"] = outPath }
@@ -379,7 +398,10 @@ struct CharkleCLI {
             var params: [String: Any] = [:]
             if let title = parsed.first("title") { params["title"] = title }
             if let subtitle = parsed.first("subtitle") { params["subtitle"] = subtitle }
-            if let prompt = parsed.first("prompt") ?? parsed.positionals.first { params["prompt"] = prompt }
+            let positionalPrompt = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let prompt = parsed.first("prompt") ?? (positionalPrompt.isEmpty ? nil : positionalPrompt) {
+                params["prompt"] = prompt
+            }
             let ids = parsed.csvValues("ids")
             if !ids.isEmpty { params["asset_ids"] = ids }
             let heroes = parsed.csvValues("hero-ids")
@@ -402,12 +424,13 @@ struct CharkleCLI {
 
         case "patch":
             var params: [String: Any] = [:]
-            if let ref = parsed.first("id") ?? parsed.positionals.first {
+            let positionalRef = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let ref = parsed.first("id") ?? (positionalRef.isEmpty ? nil : positionalRef) {
                 if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
             }
             if let newTitle = parsed.first("new-title") { params["new_title"] = newTitle }
             if let subtitle = parsed.first("subtitle") { params["subtitle"] = subtitle }
-            if parsed.flag("freeform") { params["use_freeform"] = true }
+            if let freeform = parsed.optionalBool("freeform") { params["use_freeform"] = freeform }
             if let layout = parsed.first("layout") { params["layout_style"] = layout }
             let addIDs = parsed.csvValues("add-ids")
             if !addIDs.isEmpty { params["add_asset_ids"] = addIDs }
@@ -546,7 +569,7 @@ struct CharkleCLI {
         if let notes = parsed.first("notes") { params["notes"] = notes }
         if let title = parsed.first("title") { params["title"] = title }
         if let desc = parsed.first("ai-description") { params["ai_description"] = desc }
-        if parsed.flag("pinned") { params["pinned_offline"] = true }
+        if let pinned = parsed.optionalBool("pinned") { params["pinned_offline"] = pinned }
 
         let out = await service.callTool(name: "organize_assets", arguments: params, channel: .cli)
         formatter.emitToolOutput(out, command: "organize_assets")
@@ -576,14 +599,25 @@ struct CharkleCLI {
     ) async {
         let parsed = CLIArgParser.parse(subArgs)
         var params: [String: Any] = [:]
-        if parsed.positionals.count > 1 {
-            params["file_paths"] = parsed.positionals
-        } else if let target = parsed.positionals.first {
-            if target.hasPrefix("http://") || target.hasPrefix("https://") {
-                params["web_url"] = target
+        var fileTargets: [String] = []
+        var webTargets: [String] = []
+        for target in parsed.positionals {
+            let lower = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+                webTargets.append(target)
             } else {
-                params["file_path"] = target
+                fileTargets.append(target)
             }
+        }
+        if fileTargets.count > 1 {
+            params["file_paths"] = fileTargets
+        } else if let singleFile = fileTargets.first {
+            params["file_path"] = singleFile
+        }
+        if webTargets.count > 1 {
+            params["web_urls"] = webTargets
+        } else if let singleWeb = webTargets.first {
+            params["web_url"] = singleWeb
         }
         if let text = parsed.first("text") { params["text"] = text }
         if let title = parsed.first("title") { params["title"] = title }
@@ -713,9 +747,13 @@ struct CharkleCLI {
     private static func inspectLocalBinSymlink() -> [String: Any] {
         let linkURL = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".local/bin/charkle")
         let fm = FileManager.default
-        let currentExec = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+        let currentExec = Bundle.main.executableURL?.resolvingSymlinksInPath().path
+            ?? URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
         if let dest = try? fm.destinationOfSymbolicLink(atPath: linkURL.path) {
-            let resolvedDest = URL(fileURLWithPath: dest).resolvingSymlinksInPath().path
+            let destURL = dest.hasPrefix("/")
+                ? URL(fileURLWithPath: dest)
+                : URL(fileURLWithPath: dest, relativeTo: linkURL.deletingLastPathComponent())
+            let resolvedDest = destURL.resolvingSymlinksInPath().path
             let executable = fm.isExecutableFile(atPath: linkURL.path)
             let status: String
             if !executable {
@@ -794,6 +832,69 @@ struct CharkleCLI {
             Exposes 20 safe tools (12 read + 8 write, never permanent delete), 4 static resources,
             2 dynamic resource templates, and 4 studio workflow prompts.
             """
+        case "doctor":
+            """
+            USAGE:
+              charkle doctor [--json] [--library-dir <dir>]
+
+            Diagnoses library SQLite health, external agent permissions, MCP capabilities, and ~/.local/bin/charkle symlink status.
+            """
+        case "status":
+            """
+            USAGE:
+              charkle status [--json]
+
+            Shows active external agent permissions and, when CLI access is enabled, the full library overview.
+            """
+        case "overview":
+            """
+            USAGE:
+              charkle overview [--json]
+
+            Displays folder hierarchy, smart folders, top tags, asset counts, and local cache statistics.
+            """
+        case "semantic":
+            """
+            USAGE:
+              charkle semantic <query> [--folder <path|id>] [--subfolders] [--tag <t1,t2>] [--kind <k1,k2>] [--color <#HEX>] [--min-rating <0-5>] [-n, --limit <1-50>]
+
+            Runs hybrid semantic + visual + keyword search across the library.
+            """
+        case "similar":
+            """
+            USAGE:
+              charkle similar <asset-uuid> [-n, --limit <1-32>] [--contact-sheet]
+
+            Finds visually similar assets using Vision FeaturePrint, CIELAB palette proximity, and shared tags.
+            """
+        case "jump":
+            """
+            USAGE:
+              charkle jump <query> [-n, --limit <1-50>]
+
+            Runs unified fuzzy lookup across folders, moodboards, tags, and assets.
+            """
+        case "inbox":
+            """
+            USAGE:
+              charkle inbox [--kind <k1,k2>] [--sort <order>] [--offset <N>] [-n, --limit <1-100>] [--suggest]
+
+            Lists untriaged Inbox assets. Pass --suggest to chain folder recommendations onto the fetched batch.
+            """
+        case "asset":
+            """
+            USAGE:
+              charkle asset <asset-uuid> [--json]
+
+            Inspects full asset metadata including EXIF, AI generation prompts, social/GitHub details, and local file paths.
+            """
+        case "analyze":
+            """
+            USAGE:
+              charkle analyze --ids <A,B> [--refresh-rich]
+
+            Runs local Apple Vision analysis (colors, OCR, FeaturePrint) and EXIF extraction on up to 20 assets.
+            """
         case "search":
             """
             USAGE:
@@ -826,7 +927,7 @@ struct CharkleCLI {
               charkle board get <id-or-title>
               charkle board export <id-or-title> [--out <file.png>] [--width 1440] [--dark]
               charkle board compose [--title T] [--subtitle S] [--ids A,B | --prompt P] [--folder P] [--note N] [--layout magazine|balanced|compact] [--freeform]
-              charkle board patch <id-or-title> [--new-title T] [--subtitle S] [--add-ids A,B] [--remove-ids C] [--remove-node-ids N] [--add-section S] [--tint T] [--add-note N] [--note-title NT] [--note-style paper|ink|warm|sage|slate] [--freeform]
+              charkle board patch <id-or-title> [--new-title T] [--subtitle S] [--add-ids A,B] [--remove-ids C] [--remove-node-ids N] [--add-section S] [--tint T] [--add-note N] [--note-title NT] [--note-style paper|ink|warm|sage|slate] [--freeform[=true|false]] [--layout magazine|balanced|compact]
             """
         case "folder":
             """
@@ -853,7 +954,7 @@ struct CharkleCLI {
               --title <text>            Set title
               --notes <text>            Set notes
               --ai-description <text>   Set/overwrite AI visual description
-              --pinned                  Pin originals offline
+              --pinned[=true|false]     Pin or unpin originals offline
             """
         case "contact-sheet":
             """

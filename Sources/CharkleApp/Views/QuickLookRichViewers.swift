@@ -246,6 +246,7 @@ struct QuickLookSocialPostCard: View {
     let onExtractMedia: (_ attachment: SocialMediaAttachment, _ index: Int) -> Void
     let onExtractAllMedia: (() -> Void)?
     let onRetryFetch: () -> Void
+    var isPlaybackSuspended: Bool = false
 
     @State private var extractingIndex: Int?
     @State private var isExtractingAll: Bool = false
@@ -390,7 +391,7 @@ struct QuickLookSocialPostCard: View {
                         }
                     }
                 } else if isLocalVideoFile, let videoFile = originalURL {
-                    SocialPostInlineVideoPlayer(url: videoFile)
+                    SocialPostInlineVideoPlayer(url: videoFile, isPlaybackSuspended: isPlaybackSuspended)
                         .frame(height: 360)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
@@ -471,7 +472,7 @@ struct QuickLookSocialPostCard: View {
             if isVideoLike {
                 let playbackURL: URL? = (index == 0 && isLocalVideoFile) ? originalURL : URL(string: attachment.url)
                 if let playURL = playbackURL {
-                    SocialPostInlineVideoPlayer(url: playURL)
+                    SocialPostInlineVideoPlayer(url: playURL, isPlaybackSuspended: isPlaybackSuspended)
                         .frame(height: 320)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .overlay(
@@ -616,9 +617,11 @@ struct QuickLookSocialPostCard: View {
 
 private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
     let url: URL
+    var isPlaybackSuspended: Bool = false
 
     final class Coordinator {
         var currentURL: URL?
+        var wasSuspended: Bool = false
         var loadTask: Task<Void, Never>?
 
         func attach(url: URL, to view: AVPlayerView) {
@@ -655,13 +658,22 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .floating
+        context.coordinator.wasSuspended = isPlaybackSuspended
         context.coordinator.attach(url: url, to: view)
         return view
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         if context.coordinator.currentURL != url {
+            context.coordinator.wasSuspended = isPlaybackSuspended
             context.coordinator.attach(url: url, to: nsView)
+            return
+        }
+        if context.coordinator.wasSuspended != isPlaybackSuspended {
+            context.coordinator.wasSuspended = isPlaybackSuspended
+            if isPlaybackSuspended {
+                nsView.player?.pause()
+            }
         }
     }
 
@@ -750,16 +762,24 @@ struct QuickLookMarkdownReaderCard: View {
                 .fill(CharkleTheme.surfaceElevated(for: colorScheme))
                 .shadow(color: .black.opacity(0.36), radius: 24, y: 10)
         }
-        .task(id: originalURL) {
+        .task(id: "\(asset.id.uuidString)-\(originalURL?.path ?? "")") {
+            let fallbackText = asset.notes.isEmpty ? (asset.ocrText ?? asset.richMetadata?.textExcerpt ?? "") : asset.notes
             if let url = originalURL,
-               let data = try? Data(contentsOf: url),
-               let decoded = String(data: data.prefix(262_144), encoding: .utf8),
+               let decoded = await Self.readTextOffMain(url: url),
                !decoded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard !Task.isCancelled else { return }
                 fullText = decoded
             } else {
-                fullText = asset.notes.isEmpty ? (asset.ocrText ?? asset.richMetadata?.textExcerpt ?? "") : asset.notes
+                guard !Task.isCancelled else { return }
+                fullText = fallbackText
             }
         }
+    }
+
+    @concurrent
+    private static func readTextOffMain(url: URL) async -> String? {
+        guard !Task.isCancelled, let data = try? Data(contentsOf: url) else { return nil }
+        return CanvasFormatters.decodeUTF8Prefix(data, maxBytes: 262_144)
     }
 }
 
@@ -782,6 +802,43 @@ private final class RemoteImageMemoryCache: @unchecked Sendable {
         let w = max(1, Int(image.size.width))
         let h = max(1, Int(image.size.height))
         cache.setObject(image, forKey: url.absoluteString as NSString, cost: w * h * 4)
+    }
+}
+
+private nonisolated final class RemoteImageBox: @unchecked Sendable {
+    let image: NSImage
+    init(_ image: NSImage) { self.image = image }
+}
+
+private nonisolated enum RemoteImageFetcher {
+    @concurrent
+    static func fetchImageOffMain(url targetURL: URL) async -> RemoteImageBox? {
+        guard !Task.isCancelled else { return nil }
+        var request = URLRequest(url: targetURL, timeoutInterval: 10)
+        if XiaohongshuURLParser.isXiaohongshuMediaHost(targetURL.host()) {
+            request.setValue(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+                forHTTPHeaderField: "User-Agent"
+            )
+            request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+        } else {
+            request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
+        }
+        request.setValue("image/svg+xml,image/webp,image/png,image/jpeg,image/gif,image/*", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              !Task.isCancelled,
+              let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              !data.isEmpty,
+              data.count <= 24 * 1024 * 1024 else {
+            return nil
+        }
+        // `NSImage(data:)` natively renders SVG, WebP, PNG, JPEG, and GIF on macOS 15+.
+        guard let image = NSImage(data: data), image.size.width > 0, image.size.height > 0 else {
+            return nil
+        }
+        image.isTemplate = false
+        return RemoteImageBox(image)
     }
 }
 
@@ -866,36 +923,12 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
                 didFail = false
                 return
             }
+            // Clear stale image from any prior asset immediately so it never flashes or masks load failures.
+            loadedImage = nil
             didFail = false
-            let targetURL = url
-            let fetched: NSImage? = await Task.detached(priority: .utility) {
-                var request = URLRequest(url: targetURL, timeoutInterval: 10)
-                if XiaohongshuURLParser.isXiaohongshuMediaHost(targetURL.host()) {
-                    request.setValue(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
-                        forHTTPHeaderField: "User-Agent"
-                    )
-                    request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
-                } else {
-                    request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
-                }
-                request.setValue("image/svg+xml,image/webp,image/png,image/jpeg,image/gif,image/*", forHTTPHeaderField: "Accept")
-                guard let (data, response) = try? await URLSession.shared.data(for: request),
-                      let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode),
-                      !data.isEmpty else {
-                    return nil
-                }
-                // `NSImage(data:)` natively renders SVG, WebP, PNG, JPEG, and GIF on macOS 15+.
-                guard let image = NSImage(data: data), image.size.width > 0, image.size.height > 0 else {
-                    return nil
-                }
-                image.isTemplate = false
-                return image
-            }.value
-
+            let fetchedBox = await RemoteImageFetcher.fetchImageOffMain(url: url)
             guard !Task.isCancelled else { return }
-            if let fetched {
+            if let fetched = fetchedBox?.image {
                 RemoteImageMemoryCache.shared.store(fetched, for: url)
                 loadedImage = fetched
             } else {
@@ -1443,6 +1476,23 @@ struct QuickLookModel3DViewer: View {
             }
         }
         .frame(maxWidth: 960, maxHeight: 640)
+        .onChange(of: originalURL) { _, _ in
+            loadFailed = false
+        }
+    }
+}
+
+private nonisolated final class LoadedSCNSceneBox: @unchecked Sendable {
+    let scene: SCNScene
+    let cameraNode: SCNNode
+    let defaultCameraPosition: SCNVector3
+    let defaultTarget: SCNVector3
+
+    init(scene: SCNScene, cameraNode: SCNNode, defaultCameraPosition: SCNVector3, defaultTarget: SCNVector3) {
+        self.scene = scene
+        self.cameraNode = cameraNode
+        self.defaultCameraPosition = defaultCameraPosition
+        self.defaultTarget = defaultTarget
     }
 }
 
@@ -1456,38 +1506,45 @@ private struct SceneKitInteractiveView: NSViewRepresentable {
         var lastReset: Int = 0
         var defaultCameraPosition: SCNVector3 = SCNVector3(0, 1, 3)
         var defaultTarget: SCNVector3 = SCNVector3(0, 0, 0)
-    }
+        var loadTask: Task<Void, Never>?
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+        func load(url: URL, resetTrigger: Int, into view: SCNView, onFailed: @escaping () -> Void) {
+            loadTask?.cancel()
+            lastURL = url
+            lastReset = resetTrigger
+            view.stop(nil)
+            view.isPlaying = false
+            view.scene = nil
+            view.pointOfView = nil
 
-    func makeNSView(context: Context) -> SCNView {
-        let view = SCNView()
-        view.allowsCameraControl = true
-        view.autoenablesDefaultLighting = true
-        view.antialiasingMode = .multisampling4X
-        view.backgroundColor = NSColor(calibratedRed: 0.10, green: 0.11, blue: 0.14, alpha: 1.0)
-        loadScene(into: view, coordinator: context.coordinator)
-        return view
-    }
-
-    func updateNSView(_ nsView: SCNView, context: Context) {
-        if context.coordinator.lastURL != url {
-            loadScene(into: nsView, coordinator: context.coordinator)
-        } else if context.coordinator.lastReset != resetTrigger {
-            context.coordinator.lastReset = resetTrigger
-            if let cam = nsView.pointOfView {
-                SCNTransaction.begin()
-                SCNTransaction.animationDuration = 0.28
-                cam.position = context.coordinator.defaultCameraPosition
-                cam.look(at: context.coordinator.defaultTarget)
-                SCNTransaction.commit()
+            loadTask = Task { @MainActor [weak self, weak view] in
+                let loaded = await SceneKitInteractiveView.buildSceneOffMain(url: url)
+                guard !Task.isCancelled, let self, let view, self.lastURL == url else { return }
+                guard let loaded else {
+                    onFailed()
+                    return
+                }
+                self.defaultCameraPosition = loaded.defaultCameraPosition
+                self.defaultTarget = loaded.defaultTarget
+                view.scene = loaded.scene
+                view.pointOfView = loaded.cameraNode
             }
+        }
+
+        func teardown(_ view: SCNView) {
+            loadTask?.cancel()
+            loadTask = nil
+            lastURL = nil
+            view.stop(nil)
+            view.isPlaying = false
+            view.scene = nil
+            view.pointOfView = nil
         }
     }
 
-    private func loadScene(into view: SCNView, coordinator: Coordinator) {
-        coordinator.lastURL = url
-        coordinator.lastReset = resetTrigger
+    @concurrent
+    private static func buildSceneOffMain(url: URL) async -> LoadedSCNSceneBox? {
+        guard !Task.isCancelled else { return nil }
         let scene: SCNScene?
         if let direct = try? SCNScene(url: url, options: nil) {
             scene = direct
@@ -1495,11 +1552,7 @@ private struct SceneKitInteractiveView: NSViewRepresentable {
             let mdl = MDLAsset(url: url)
             scene = mdl.count > 0 ? SCNScene(mdlAsset: mdl) : nil
         }
-
-        guard let scene else {
-            DispatchQueue.main.async { onFailed() }
-            return
-        }
+        guard !Task.isCancelled, let scene else { return nil }
 
         let (center, radius) = scene.rootNode.boundingSphere
         let camNode = SCNNode()
@@ -1514,11 +1567,38 @@ private struct SceneKitInteractiveView: NSViewRepresentable {
         camNode.position = pos
         camNode.look(at: center)
         scene.rootNode.addChildNode(camNode)
+        return LoadedSCNSceneBox(scene: scene, cameraNode: camNode, defaultCameraPosition: pos, defaultTarget: center)
+    }
 
-        coordinator.defaultCameraPosition = pos
-        coordinator.defaultTarget = center
-        view.scene = scene
-        view.pointOfView = camNode
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> SCNView {
+        let view = SCNView()
+        view.allowsCameraControl = true
+        view.autoenablesDefaultLighting = true
+        view.antialiasingMode = .multisampling4X
+        view.backgroundColor = NSColor(calibratedRed: 0.10, green: 0.11, blue: 0.14, alpha: 1.0)
+        context.coordinator.load(url: url, resetTrigger: resetTrigger, into: view, onFailed: onFailed)
+        return view
+    }
+
+    func updateNSView(_ nsView: SCNView, context: Context) {
+        if context.coordinator.lastURL != url {
+            context.coordinator.load(url: url, resetTrigger: resetTrigger, into: nsView, onFailed: onFailed)
+        } else if context.coordinator.lastReset != resetTrigger {
+            context.coordinator.lastReset = resetTrigger
+            if let cam = nsView.pointOfView {
+                SCNTransaction.begin()
+                SCNTransaction.animationDuration = 0.28
+                cam.position = context.coordinator.defaultCameraPosition
+                cam.look(at: context.coordinator.defaultTarget)
+                SCNTransaction.commit()
+            }
+        }
+    }
+
+    static func dismantleNSView(_ nsView: SCNView, coordinator: Coordinator) {
+        coordinator.teardown(nsView)
     }
 }
 

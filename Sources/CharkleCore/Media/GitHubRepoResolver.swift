@@ -10,7 +10,14 @@ public nonisolated struct GitHubRepoReference: Equatable, Hashable, Sendable {
     public var fullName: String { "\(owner)/\(repo)" }
 
     public var canonicalURL: URL {
-        URL(string: "https://github.com/\(owner)/\(repo)")!
+        var comps = URLComponents()
+        comps.scheme = "https"
+        comps.host = "github.com"
+        comps.path = "/\(owner)/\(repo)"
+        if let url = comps.url {
+            return url
+        }
+        return URL(fileURLWithPath: "/").standardizedFileURL // unreachable for valid ASCII host
     }
 
     public init(owner: String, repo: String, branch: String? = nil) {
@@ -147,9 +154,10 @@ public nonisolated enum GitHubRepoResolver {
 
         for rawURL in candidates {
             guard let url = URL(string: rawURL),
-                  let data = await fetchData(url: url, accept: "image/png,image/webp,image/jpeg,image/*"),
+                  WebBookmark.isSafeRemoteFetchURL(url),
+                  let data = await fetchData(url: url, accept: "image/png,image/webp,image/jpeg,image/*", maxBytes: 8 * 1024 * 1024),
                   let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+                  let image = MediaPipeline.raster(source)?.poster,
                   image.width >= 200, image.height >= 100 else {
                 continue
             }
@@ -201,9 +209,9 @@ public nonisolated enum GitHubRepoResolver {
             return nil
         }
         if payload.encoding?.lowercased() == "base64" {
-            return decodeBase64Markdown(content)
+            return decodeBase64Markdown(content).map { String($0.prefix(120_000)) }
         }
-        return content
+        return String(content.prefix(120_000))
     }
 
     private static func fetchRawReadme(_ ref: GitHubRepoReference, branch: String) async -> String? {
@@ -214,7 +222,7 @@ public nonisolated enum GitHubRepoResolver {
         ]
         for raw in candidates {
             guard let url = URL(string: raw),
-                  let data = await fetchData(url: url, accept: "text/plain"),
+                  let data = await fetchData(url: url, accept: "text/plain", maxBytes: 2 * 1024 * 1024),
                   let text = String(data: data, encoding: .utf8),
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 continue
@@ -224,7 +232,8 @@ public nonisolated enum GitHubRepoResolver {
         return nil
     }
 
-    private static func fetchData(url: URL, accept: String) async -> Data? {
+    private static func fetchData(url: URL, accept: String, maxBytes: Int = 4 * 1024 * 1024) async -> Data? {
+        guard WebBookmark.isSafeRemoteFetchURL(url) else { return nil }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.timeoutIntervalForResource = 12
@@ -237,7 +246,8 @@ public nonisolated enum GitHubRepoResolver {
 
         guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode) else {
+              (200..<300).contains(http.statusCode),
+              data.count <= maxBytes else {
             return nil
         }
         return data

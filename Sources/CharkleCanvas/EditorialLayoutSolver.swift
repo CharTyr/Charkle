@@ -154,7 +154,7 @@ public nonisolated enum EditorialLayoutSolver {
 
     /// Smart Auto-Layout Frame reflow: packs all enclosed nodes cleanly inside `groupRect`
     /// using justified rows and proportionally scales them so every child stays strictly within
-    /// the resized frame bounds in real time (reference Img 4).
+    /// the resized frame bounds in real time.
     public static func reflowNodesInsideGroupFrame(
         groupRect: BoardRect,
         childNodes: [BoardNode],
@@ -169,10 +169,16 @@ public nonisolated enum EditorialLayoutSolver {
         let innerW = max(80, groupRect.width - padding * 2)
         let innerH = max(60, groupRect.height - headerHeight - padding * 1.6)
 
+        // Bucketed row/column ordering guarantees a strict weak ordering (transitive, cycle-free).
         let ordered = childNodes.sorted { lhs, rhs in
-            if abs(lhs.frame.minY - rhs.frame.minY) > 24 { return lhs.frame.minY < rhs.frame.minY }
-            if abs(lhs.frame.minX - rhs.frame.minX) > 12 { return lhs.frame.minX < rhs.frame.minX }
-            return lhs.editorialOrder < rhs.editorialOrder
+            let lRow = lhs.frame.minY.isFinite ? Int((lhs.frame.minY / 24.0).rounded()) : 0
+            let rRow = rhs.frame.minY.isFinite ? Int((rhs.frame.minY / 24.0).rounded()) : 0
+            if lRow != rRow { return lRow < rRow }
+            let lCol = lhs.frame.minX.isFinite ? Int((lhs.frame.minX / 12.0).rounded()) : 0
+            let rCol = rhs.frame.minX.isFinite ? Int((rhs.frame.minX / 12.0).rounded()) : 0
+            if lCol != rCol { return lCol < rCol }
+            if lhs.editorialOrder != rhs.editorialOrder { return lhs.editorialOrder < rhs.editorialOrder }
+            return lhs.id.uuidString < rhs.id.uuidString
         }
 
         let ratios: [Double] = ordered.map { node in
@@ -180,16 +186,19 @@ public nonisolated enum EditorialLayoutSolver {
             case .assetRef(let assetID, let crop, _, _):
                 return resolvedAspectRatio(for: assetID, crop: crop, assetsByID: assetsByID, style: .balanced)
             default:
-                return max(0.65, min(2.2, node.frame.width / max(1, node.frame.height)))
+                let raw = (node.frame.width.isFinite && node.frame.height.isFinite && node.frame.height > 0)
+                    ? (node.frame.width / max(1, node.frame.height))
+                    : 1.25
+                return max(0.65, min(2.2, raw))
             }
         }
 
-        // Choose the row count (1 ... ordered.count) that maximizes area fill inside (innerW x innerH)
+        // Choose the row count (1 ... min(n, 8)) that maximizes area fill inside (innerW x innerH) without overflowing
         let n = ordered.count
         var bestFrames: [UUID: BoardRect] = [:]
-        var bestCoverage: Double = -1
+        var bestScore: Double = -Double.greatestFiniteMagnitude
 
-        for rowCount in 1...min(n, 6) {
+        for rowCount in 1...min(n, 8) {
             let totalGapsY = spacing * Double(rowCount - 1)
             let availH = max(32, innerH - totalGapsY)
             // Partition items greedily by balanced aspect-ratio sum per row
@@ -226,28 +235,36 @@ public nonisolated enum EditorialLayoutSolver {
 
             var candidate: [UUID: BoardRect] = [:]
             var totalPaintedArea: Double = 0
+            var overflowPenalty: Double = 0
             var cursorY = innerY
 
             for (rIdx, r) in rows.enumerated() {
-                let rowH = max(24, naturalRowHeights[rIdx] * verticalScale)
+                let rowH = max(20, naturalRowHeights[rIdx] * verticalScale)
                 let gapsX = spacing * Double(max(0, r.count - 1))
                 let rawRowW = r.reduce(0.0) { $0 + ratios[$1] * rowH } + gapsX
                 let horizScale = rawRowW > innerW ? ((innerW - gapsX) / max(1, rawRowW - gapsX)) : 1.0
-                let effectiveH = rowH * horizScale
+                let effectiveH = max(20, rowH * horizScale)
 
                 var cursorX = innerX
                 for itemIdx in r {
-                    let w = max(24, ratios[itemIdx] * effectiveH)
+                    let w = max(20, ratios[itemIdx] * effectiveH)
                     let rect = BoardRect(x: cursorX, y: cursorY, width: w, height: effectiveH)
                     candidate[ordered[itemIdx].id] = rect
                     totalPaintedArea += w * effectiveH
+                    if rect.maxX > innerX + innerW + 1 {
+                        overflowPenalty += (rect.maxX - (innerX + innerW)) * effectiveH * 4
+                    }
+                    if rect.maxY > innerY + innerH + 1 {
+                        overflowPenalty += (rect.maxY - (innerY + innerH)) * w * 4
+                    }
                     cursorX += w + spacing
                 }
                 cursorY += effectiveH + spacing
             }
 
-            if totalPaintedArea > bestCoverage {
-                bestCoverage = totalPaintedArea
+            let score = totalPaintedArea - overflowPenalty
+            if score > bestScore {
+                bestScore = score
                 bestFrames = candidate
             }
         }
@@ -288,22 +305,23 @@ public nonisolated enum EditorialLayoutSolver {
         return copy
     }
 
-    /// Re-tidies either the selected nodes (around their bounding box origin) or the entire board
-    /// into crisp editorial alignment while remaining in Freeform mode.
+    /// Re-tidies either the selected unlocked nodes (around their bounding box origin) or all unlocked nodes
+    /// into crisp editorial alignment while remaining in Freeform mode (zero cumulative drift).
     public static func tidyNodesInFreeform(
         document: MoodboardDocument,
         selectedNodeIDs: Set<UUID>,
         assetsByID: [UUID: AssetRecord]
     ) -> MoodboardDocument {
         var copy = document
+        let unlockedSelection = copy.nodes.filter { selectedNodeIDs.contains($0.id) && !$0.isLocked }
         let targetNodes: [BoardNode] = selectedNodeIDs.count >= 2
-            ? copy.nodes.filter { selectedNodeIDs.contains($0.id) }
-            : copy.nodes
+            ? unlockedSelection
+            : copy.nodes.filter { !$0.isLocked }
         guard !targetNodes.isEmpty else { return copy }
 
-        let minX = targetNodes.map(\.frame.minX).min() ?? 40
-        let minY = targetNodes.map(\.frame.minY).min() ?? 40
-        let maxX = targetNodes.map(\.frame.maxX).max() ?? 1080
+        let minX = targetNodes.map(\.frame.minX).filter(\.isFinite).min() ?? 40
+        let minY = targetNodes.map(\.frame.minY).filter(\.isFinite).min() ?? 40
+        let maxX = targetNodes.map(\.frame.maxX).filter(\.isFinite).max() ?? 1080
         let width = max(760, min(1440, maxX - minX + 56))
 
         let solved = solve(
@@ -314,12 +332,15 @@ public nonisolated enum EditorialLayoutSolver {
             padding: 0
         )
 
-        for idx in copy.nodes.indices {
+        let solvedOriginX = solved.frames.values.map(\.minX).min() ?? 0
+        let solvedOriginY = solved.frames.values.map(\.minY).min() ?? 0
+
+        for idx in copy.nodes.indices where !copy.nodes[idx].isLocked {
             let id = copy.nodes[idx].id
             if let rect = solved.frames[id] {
                 copy.nodes[idx].frame = BoardRect(
-                    x: minX + rect.x,
-                    y: minY + rect.y,
+                    x: minX + (rect.x - solvedOriginX),
+                    y: minY + (rect.y - solvedOriginY),
                     width: rect.width,
                     height: rect.height
                 )
@@ -334,10 +355,12 @@ public nonisolated enum EditorialLayoutSolver {
         assetsByID: [UUID: AssetRecord],
         style: EditorialStyle
     ) -> Double {
-        var ratio = assetsByID[assetID]?.aspectRatio ?? 1.25
-        if let crop, crop.width > 0.05, crop.height > 0.05 {
+        let rawRatio = assetsByID[assetID]?.aspectRatio ?? 1.25
+        var ratio = (rawRatio.isFinite && rawRatio > 0) ? rawRatio : 1.25
+        if let crop, crop.width.isFinite, crop.height.isFinite, crop.width > 0.05, crop.height > 0.05 {
             ratio = ratio * (crop.width / crop.height)
         }
+        guard ratio.isFinite && ratio > 0 else { return 1.25 }
         switch style {
         case .compact:
             return max(0.80, min(1.32, ratio))

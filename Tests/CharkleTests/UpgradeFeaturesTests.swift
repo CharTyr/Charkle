@@ -225,6 +225,60 @@ struct UpgradeFeaturesTests {
         #expect(bottomReveal == 3200)
     }
 
+    @Test("MasonryLayoutEngine paneTransitionTargetWidth computes exact drift-free targets across sidebar and inspector toggles")
+    func paneTransitionTargetWidthInvariants() {
+        // 1. Sidebar collapse (233 -> 77, +156pt) and expand (77 -> 233, -156pt) with Inspector open (300pt)
+        let expandedChrome: CGFloat = 233 + 300
+        let collapsedChrome: CGFloat = 77 + 300
+        let afterCollapse = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: 1981,
+            previousSideChromeWidth: expandedChrome,
+            newSideChromeWidth: collapsedChrome
+        )
+        #expect(afterCollapse == 2137)
+
+        let afterExpand = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: afterCollapse,
+            previousSideChromeWidth: collapsedChrome,
+            newSideChromeWidth: expandedChrome
+        )
+        #expect(afterExpand == 1981)
+
+        // 2. Rapid chained mid-flight toggles (collapse -> close inspector -> expand -> open inspector) remain 0pt drift
+        let step1 = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: 967,
+            previousSideChromeWidth: 233,
+            newSideChromeWidth: 77
+        )
+        #expect(step1 == 1123)
+        let step2 = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: step1,
+            previousSideChromeWidth: 77,
+            newSideChromeWidth: 77 + 300
+        )
+        #expect(step2 == 823)
+        let step3 = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: step2,
+            previousSideChromeWidth: 77 + 300,
+            newSideChromeWidth: 233 + 300
+        )
+        #expect(step3 == 667)
+        let step4 = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: step3,
+            previousSideChromeWidth: 233 + 300,
+            newSideChromeWidth: 233
+        )
+        #expect(step4 == 967)
+
+        // 3. Narrow windows clamp cleanly at minimum layout width (240pt)
+        let clamped = MasonryLayoutEngine.paneTransitionTargetWidth(
+            currentViewportWidth: 320,
+            previousSideChromeWidth: 77,
+            newSideChromeWidth: 233 + 300
+        )
+        #expect(clamped == 240)
+    }
+
     @Test("GitHubRepoURLParser and SocialPostURLParser parse valid URLs and reject non-post/non-repo links")
     func richURLParsers() throws {
         let u1 = try #require(URL(string: "https://github.com/apple/swift.git"))

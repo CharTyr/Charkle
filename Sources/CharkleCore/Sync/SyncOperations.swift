@@ -226,6 +226,14 @@ extension LibraryDatabase {
             try record(.folder(folder))
         }
 
+        // Clear stale old-backend remote IDs on trashed assets too so restoring from Trash later
+        // never attempts to fetch an ID belonging to the retired storage backend.
+        let trashedAssets = try fetchAssets(matching: FilterCriteria(onlyTrashed: true))
+        for var trashed in trashedAssets where trashed.driveFileID != nil {
+            trashed.driveFileID = nil
+            try put(trashed)
+        }
+
         // Re-queue all non-trashed assets with clean unbound remote IDs
         let allAssets = try fetchAssets(matching: FilterCriteria(includeTrashed: false))
         let allVectors = try vectors()

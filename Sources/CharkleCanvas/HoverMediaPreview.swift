@@ -265,14 +265,22 @@ public final class HoverMediaPreviewLayerController {
 
     // MARK: - Off-Main-Thread Frame-Timed Animated GIF / WebP Preview
 
-    private struct AnimatedImageHeader: Sendable {
+    private nonisolated final class AnimatedImageSourceBox: @unchecked Sendable {
+        let source: CGImageSource
+        init(_ source: CGImageSource) {
+            self.source = source
+        }
+    }
+
+    private nonisolated struct AnimatedImageSession: Sendable {
         let frameCount: Int
         let delays: [Double]
+        let sourceBox: AnimatedImageSourceBox
     }
 
     private func startAnimatedImagePreview(assetID: UUID, url: URL) async {
-        guard let header = await Self.inspectAnimatedImageHeader(url: url),
-              header.frameCount > 1,
+        guard let session = await Self.openAnimatedImageSession(url: url),
+              session.frameCount > 1,
               !Task.isCancelled,
               activeAssetID == assetID else {
             return
@@ -295,9 +303,10 @@ public final class HoverMediaPreviewLayerController {
         gifFrameLayer = layer
 
         // Pre-decode compact frame cache off main thread for short/medium GIFs (≤48 frames);
-        // stream frames lazily on-demand for very long GIFs so memory stays strictly bounded.
-        if header.frameCount <= 48 {
-            var decoded: [CGImage?] = Array(repeating: nil, count: header.frameCount)
+        // stream frames lazily from the single open CGImageSource for very long GIFs so memory
+        // stays strictly bounded without O(N²) disk/header re-parsing on every tick.
+        if session.frameCount <= 48 {
+            var decoded: [CGImage?] = Array(repeating: nil, count: session.frameCount)
             var frameIndex = 0
             var revealed = false
 
@@ -306,7 +315,11 @@ public final class HoverMediaPreviewLayerController {
                 if let cached = decoded[frameIndex] {
                     frame = cached
                 } else {
-                    frame = await Self.decodeAnimatedFrame(url: url, index: frameIndex, maxPixelSize: maxPixel)
+                    frame = await Self.decodeAnimatedFrame(
+                        sourceBox: session.sourceBox,
+                        index: frameIndex,
+                        maxPixelSize: maxPixel
+                    )
                     if let frame {
                         decoded[frameIndex] = frame
                     }
@@ -324,15 +337,19 @@ public final class HoverMediaPreviewLayerController {
                     }
                 }
 
-                let delay = header.delays[frameIndex]
+                let delay = session.delays[frameIndex]
                 try? await Task.sleep(for: .milliseconds(Int((delay * 1000.0).rounded())))
-                frameIndex = (frameIndex + 1) % header.frameCount
+                frameIndex = (frameIndex + 1) % session.frameCount
             }
         } else {
             var frameIndex = 0
             var revealed = false
             while !Task.isCancelled && activeAssetID == assetID {
-                let frame = await Self.decodeAnimatedFrame(url: url, index: frameIndex, maxPixelSize: min(maxPixel, 440))
+                let frame = await Self.decodeAnimatedFrame(
+                    sourceBox: session.sourceBox,
+                    index: frameIndex,
+                    maxPixelSize: min(maxPixel, 440)
+                )
                 guard !Task.isCancelled, activeAssetID == assetID else { break }
                 if let frame {
                     CATransaction.begin()
@@ -344,9 +361,9 @@ public final class HoverMediaPreviewLayerController {
                         revealContainerSmoothly()
                     }
                 }
-                let delay = header.delays[frameIndex]
+                let delay = session.delays[frameIndex]
                 try? await Task.sleep(for: .milliseconds(Int((delay * 1000.0).rounded())))
-                frameIndex = (frameIndex + 1) % header.frameCount
+                frameIndex = (frameIndex + 1) % session.frameCount
             }
         }
     }
@@ -366,7 +383,7 @@ public final class HoverMediaPreviewLayerController {
     }
 
     @concurrent
-    private static func inspectAnimatedImageHeader(url: URL) async -> AnimatedImageHeader? {
+    private static func openAnimatedImageSession(url: URL) async -> AnimatedImageSession? {
         guard !Task.isCancelled else { return nil }
         let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
@@ -379,24 +396,20 @@ public final class HoverMediaPreviewLayerController {
         for idx in 0..<count {
             delays.append(frameDelaySeconds(source: source, index: idx))
         }
-        return AnimatedImageHeader(frameCount: count, delays: delays)
+        return AnimatedImageSession(frameCount: count, delays: delays, sourceBox: AnimatedImageSourceBox(source))
     }
 
     @concurrent
-    private static func decodeAnimatedFrame(url: URL, index: Int, maxPixelSize: Int) async -> CGImage? {
+    private static func decodeAnimatedFrame(sourceBox: AnimatedImageSourceBox, index: Int, maxPixelSize: Int) async -> CGImage? {
         guard !Task.isCancelled else { return nil }
-        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
-            return nil
-        }
         let thumbOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             kCGImageSourceShouldCacheImmediately: true
         ]
-        return CGImageSourceCreateThumbnailAtIndex(source, index, thumbOptions as CFDictionary)
-            ?? CGImageSourceCreateImageAtIndex(source, index, nil)
+        return CGImageSourceCreateThumbnailAtIndex(sourceBox.source, index, thumbOptions as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(sourceBox.source, index, nil)
     }
 
     private nonisolated static func frameDelaySeconds(source: CGImageSource, index: Int) -> Double {

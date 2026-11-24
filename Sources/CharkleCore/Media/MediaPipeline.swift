@@ -145,10 +145,10 @@ public nonisolated struct MediaPipeline: Sendable {
             guard try source.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
                 throw LibraryDatabaseError("Select a regular file to import.")
             }
-            file = temp.appending(path: Self.cleanName(url.lastPathComponent))
+            file = temp.appending(path: Self.cleanFileName(url.lastPathComponent))
             try FileManager.default.copyItem(at: source, to: file)
         case .imageData(let data, let name, let sourceURL):
-            let name = Self.cleanName(name)
+            let name = Self.cleanFileName(name)
             let type = CGImageSourceCreateWithData(data as CFData, nil)
                 .flatMap(CGImageSourceGetType).flatMap { UTType($0 as String) }
             let given = (name as NSString).pathExtension
@@ -264,7 +264,7 @@ public nonisolated struct MediaPipeline: Sendable {
     }
 
     private func render(_ file: URL, for asset: inout AssetRecord, preferredTitle: String?) async throws {
-        let ext = asset.fileName.lowercased().split(separator: ".").last.map(String.init) ?? ""
+        let ext = (asset.fileName as NSString).pathExtension.lowercased()
         var render: MediaRender? = nil
         switch asset.mediaKind {
         case .image, .animatedImage:
@@ -370,9 +370,28 @@ public nonisolated struct MediaPipeline: Sendable {
         asset.richMetadata = rich
     }
 
-    private static func cleanName(_ raw: String) -> String {
+    static func cleanName(_ raw: String) -> String {
         let replaced = raw.components(separatedBy: CharacterSet(charactersIn: "/:\\").union(.controlCharacters))
             .joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String(replaced.prefix(140))
+        return name.isEmpty || name == "." || name == ".." ? "Reference" : name
+    }
+
+    /// Sanitizes an incoming filename while preserving its trailing extension even when >140 chars.
+    static func cleanFileName(_ raw: String) -> String {
+        let replaced = raw.components(separatedBy: CharacterSet(charactersIn: "/:\\").union(.controlCharacters))
+            .joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !replaced.isEmpty, replaced != ".", replaced != ".." else { return "Reference" }
+        let ns = replaced as NSString
+        let ext = ns.pathExtension
+        let validExt = !ext.isEmpty && ext.count <= 16 && ext.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        if validExt {
+            let rawStem = ns.deletingPathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+            let maxStem = max(1, 140 - ext.count - 1)
+            let stem = String(rawStem.prefix(maxStem))
+            let safeStem = (stem.isEmpty || stem == "." || stem == "..") ? "Reference" : stem
+            return "\(safeStem).\(ext)"
+        }
         let name = String(replaced.prefix(140))
         return name.isEmpty || name == "." || name == ".." ? "Reference" : name
     }
@@ -413,6 +432,10 @@ public nonisolated struct MediaPipeline: Sendable {
                            duration: seconds > 0 ? seconds : nil)
     }
 
+    static func videoPosterFrame(_ url: URL) async -> CGImage? {
+        await video(url)?.poster
+    }
+
     private static func video(_ url: URL) async -> MediaRender? {
         let asset = AVURLAsset(url: url)
         let duration = try? await asset.load(.duration).seconds
@@ -425,18 +448,21 @@ public nonisolated struct MediaPipeline: Sendable {
         generator.maximumSize = CGSize(width: 1_400, height: 1_400)
         let time = CMTime(seconds: min(1, max(0, (duration ?? 0).isFinite ? (duration ?? 0) * 0.15 : 0)), preferredTimescale: 600)
         guard let frame = try? await generator.image(at: time) else { return nil }
-        return MediaRender(frame.image, width: area.width > 0 ? Int(area.width.rounded()) : nil,
-                           height: area.height > 0 ? Int(area.height.rounded()) : nil, duration: duration)
+        let safeW: Int? = (area.width.isFinite && area.width > 0 && area.width < 100_000) ? Int(area.width.rounded()) : nil
+        let safeH: Int? = (area.height.isFinite && area.height > 0 && area.height < 100_000) ? Int(area.height.rounded()) : nil
+        return MediaRender(frame.image, width: safeW, height: safeH, duration: duration)
     }
 
     private static func pdf(_ url: URL) -> MediaRender? {
         guard let document = PDFDocument(url: url), let page = document.page(at: 0),
               let reference = page.pageRef else { return nil }
         let bounds = page.bounds(for: .cropBox)
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-        let scale = 1_400 / max(bounds.width, bounds.height)
-        let width = max(1, Int((bounds.width * scale).rounded()))
-        let height = max(1, Int((bounds.height * scale).rounded()))
+        let maxSide = max(bounds.width, bounds.height)
+        guard bounds.width.isFinite, bounds.height.isFinite, bounds.width > 0, bounds.height > 0, maxSide >= 1e-6 else { return nil }
+        let scale = 1_400 / maxSide
+        guard scale.isFinite, (bounds.width * scale).isFinite, (bounds.height * scale).isFinite else { return nil }
+        let width = max(1, min(4_096, Int((bounds.width * scale).rounded())))
+        let height = max(1, min(4_096, Int((bounds.height * scale).rounded())))
         guard let context = MediaArtwork.context(width: width, height: height) else { return nil }
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
         context.setFillColor(CGColor(gray: 1, alpha: 1))
@@ -445,7 +471,9 @@ public nonisolated struct MediaPipeline: Sendable {
         context.drawPDFPage(reference)
         guard let image = context.makeImage() else { return nil }
         let text = (0..<min(5, document.pageCount)).compactMap { document.page(at: $0)?.string }.joined(separator: "\n")
-        return MediaRender(image, width: Int(bounds.width.rounded()), height: Int(bounds.height.rounded()),
+        let safeBoundsW = bounds.width < 1_000_000 ? Int(bounds.width.rounded()) : width
+        let safeBoundsH = bounds.height < 1_000_000 ? Int(bounds.height.rounded()) : height
+        return MediaRender(image, width: safeBoundsW, height: safeBoundsH,
                            text: String(text.prefix(8_000)))
     }
 
@@ -535,7 +563,13 @@ public nonisolated struct MediaPipeline: Sendable {
                 }
                 offset += Int64(buffer.frameLength)
             }
-            return (cleanDuration ?? Double(frameCount) / file.fileFormat.sampleRate, peaks)
+            let fallbackDuration: Double? = {
+                let rate = file.fileFormat.sampleRate
+                guard rate.isFinite, rate > 0 else { return nil }
+                let secs = Double(frameCount) / rate
+                return secs.isFinite && secs > 0 ? secs : nil
+            }()
+            return (cleanDuration ?? fallbackDuration, peaks)
         }
         // Fallback via AVAssetReader for compressed formats AVAudioFile may not decode directly
         if let track = try? await asset.loadTracks(withMediaType: .audio).first,
@@ -557,11 +591,14 @@ public nonisolated struct MediaPipeline: Sendable {
                           let block = CMSampleBufferGetDataBuffer(sampleBuffer) {
                         let length = CMBlockBufferGetDataLength(block)
                         let floatCount = length / MemoryLayout<Float>.size
+                        let byteCount = floatCount * MemoryLayout<Float>.size
                         if floatCount > 0 {
                             var chunk = [Float](repeating: 0, count: floatCount)
-                            _ = chunk.withUnsafeMutableBytes { ptr in
-                                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: ptr.baseAddress!)
+                            let status: OSStatus = chunk.withUnsafeMutableBytes { ptr in
+                                guard let base = ptr.baseAddress else { return kCMBlockBufferBadLengthParameterErr }
+                                return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: byteCount, destination: base)
                             }
+                            guard status == kCMBlockBufferNoErr else { continue }
                             let strideStep = max(1, floatCount / 64)
                             var peak: Float = 0
                             for i in stride(from: 0, to: floatCount, by: strideStep) {

@@ -45,11 +45,15 @@ public final class ExtensionBridgeController {
     @ObservationIgnored
     private let server: LocalExtensionBridgeServer
     @ObservationIgnored
+    private let keychain: KeychainStore
+    @ObservationIgnored
     private var startTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var lifecycleGeneration: UInt64 = 0
     @ObservationIgnored
     private var refreshDebounceTask: Task<Void, Never>?
     @ObservationIgnored
-    private var pendingBoardRefreshID: UUID?
+    private var pendingBoardRefreshIDs: [UUID] = []
     @ObservationIgnored
     private var pendingIngestCount: Int = 0
     @ObservationIgnored
@@ -71,15 +75,9 @@ public final class ExtensionBridgeController {
         let resolvedAutoPair = defaults.bool(forKey: Self.autoPairKey)
         self.allowLocalAutoPair = resolvedAutoPair
 
-        let storedToken = defaults.string(forKey: Self.tokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let resolvedToken: String
-        if storedToken.count >= 24 {
-            resolvedToken = storedToken
-        } else {
-            let fresh = LocalExtensionBridgeServer.generateToken()
-            defaults.set(fresh, forKey: Self.tokenKey)
-            resolvedToken = fresh
-        }
+        let keychain = KeychainStore()
+        self.keychain = keychain
+        let resolvedToken = Self.loadOrMigrateToken(keychain: keychain, defaults: defaults)
         self.accessToken = resolvedToken
         self.onRefreshLibrary = onRefreshLibrary
 
@@ -98,19 +96,60 @@ public final class ExtensionBridgeController {
         box.value = self
     }
 
+    private static func loadOrMigrateToken(keychain: KeychainStore, defaults: UserDefaults) -> String {
+        // 1. Prefer Keychain-stored token and scrub any lingering legacy plaintext UserDefaults copy.
+        if let data = try? keychain.read(Self.tokenKey),
+           let stored = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           stored.count >= 24 {
+            if defaults.object(forKey: Self.tokenKey) != nil {
+                defaults.removeObject(forKey: Self.tokenKey)
+            }
+            return stored
+        }
+
+        // 2. Transparent one-time migration from legacy UserDefaults key so paired extensions stay connected.
+        if let legacy = defaults.string(forKey: Self.tokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           legacy.count >= 24 {
+            do {
+                try keychain.save(Data(legacy.utf8), for: Self.tokenKey)
+                defaults.removeObject(forKey: Self.tokenKey)
+            } catch {
+                bridgeLogger.error("Failed to migrate extension bridge token to Keychain: \(error.localizedDescription, privacy: .public)")
+            }
+            return legacy
+        }
+
+        // 3. Generate a fresh token and persist strictly to Keychain.
+        let fresh = LocalExtensionBridgeServer.generateToken()
+        do {
+            try keychain.save(Data(fresh.utf8), for: Self.tokenKey)
+            defaults.removeObject(forKey: Self.tokenKey)
+        } catch {
+            bridgeLogger.error("Failed to store new extension bridge token in Keychain: \(error.localizedDescription, privacy: .public)")
+        }
+        return fresh
+    }
+
     public func startIfEnabled() {
         guard isEnabled else { return }
+        lifecycleGeneration &+= 1
+        let generation = lifecycleGeneration
         startTask?.cancel()
         startTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let status = try await self.server.start()
+                guard !Task.isCancelled, self.isEnabled, self.lifecycleGeneration == generation else {
+                    await self.server.stop()
+                    return
+                }
                 self.isRunning = status.isRunning
                 self.port = status.port
                 self.baseURL = status.baseURL
                 self.lastError = nil
                 bridgeLogger.info("Browser extension bridge listening on \(status.baseURL, privacy: .public)")
             } catch {
+                guard !Task.isCancelled, self.lifecycleGeneration == generation else { return }
                 self.isRunning = false
                 self.lastError = error.localizedDescription
                 bridgeLogger.error("Browser extension bridge failed to start: \(error.localizedDescription, privacy: .public)")
@@ -119,21 +158,37 @@ public final class ExtensionBridgeController {
     }
 
     public func stop() {
+        lifecycleGeneration &+= 1
         startTask?.cancel()
         startTask = nil
         refreshDebounceTask?.cancel()
         refreshDebounceTask = nil
-        Task { [server] in
+        let server = self.server
+        Task {
             await server.stop()
         }
         isRunning = false
+    }
+
+    isolated deinit {
+        startTask?.cancel()
+        refreshDebounceTask?.cancel()
+        let server = self.server
+        Task.detached(priority: .utility) {
+            await server.stop()
+        }
     }
 
     @discardableResult
     public func regenerateToken() -> String {
         let fresh = LocalExtensionBridgeServer.generateToken()
         accessToken = fresh
-        UserDefaults.standard.set(fresh, forKey: Self.tokenKey)
+        do {
+            try keychain.save(Data(fresh.utf8), for: Self.tokenKey)
+            UserDefaults.standard.removeObject(forKey: Self.tokenKey)
+        } catch {
+            bridgeLogger.error("Failed to persist regenerated extension bridge token to Keychain: \(error.localizedDescription, privacy: .public)")
+        }
         Task { [server] in
             await server.updateToken(fresh)
         }
@@ -182,19 +237,25 @@ public final class ExtensionBridgeController {
         if kind == .ingest {
             pendingIngestCount += max(1, count)
         }
-        if let targetBoardID {
-            pendingBoardRefreshID = targetBoardID
+        if let targetBoardID, !pendingBoardRefreshIDs.contains(targetBoardID) {
+            pendingBoardRefreshIDs.append(targetBoardID)
         }
-        // Coalesce rapid batch bookmark imports into smooth ~450ms UI refreshes.
+        // Coalesce rapid batch bookmark imports into smooth ~450ms UI refreshes without dropping multi-board targets.
         refreshDebounceTask?.cancel()
         refreshDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(450))
             guard let self, !Task.isCancelled else { return }
             let countToReport = self.pendingIngestCount
-            let boardToRefresh = self.pendingBoardRefreshID
+            let boardsToRefresh = self.pendingBoardRefreshIDs
             self.pendingIngestCount = 0
-            self.pendingBoardRefreshID = nil
-            await self.onRefreshLibrary(countToReport, boardToRefresh)
+            self.pendingBoardRefreshIDs.removeAll()
+            if boardsToRefresh.isEmpty {
+                await self.onRefreshLibrary(countToReport, nil)
+            } else {
+                for (index, boardID) in boardsToRefresh.enumerated() {
+                    await self.onRefreshLibrary(index == 0 ? countToReport : 0, boardID)
+                }
+            }
         }
     }
 }

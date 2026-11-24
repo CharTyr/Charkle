@@ -2038,18 +2038,15 @@ public struct OnboardingView: View {
     }
 
     private func skipEntireOnboarding() {
-        coordinator.completeOnboarding()
         coordinator.showToast("已跳过首次引导 · 随时可在「设置 → 通用」重新查看", icon: "forward.end.fill")
         onFinish()
     }
 
     private func finishOnboarding() {
-        coordinator.completeOnboarding()
         onFinish()
     }
 
     private func finishAndOpenSettings(_ tab: CharkleSettingsTab) {
-        coordinator.completeOnboarding()
         onFinish()
         onOpenSettings(tab)
     }

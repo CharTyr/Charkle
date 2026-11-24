@@ -3,6 +3,10 @@ import Foundation
 import Synchronization
 
 public nonisolated enum GDirectIntegration {
+    private static let ignoreSIGPIPE: Void = {
+        _ = Darwin.signal(SIGPIPE, SIG_IGN)
+    }()
+
     private static let searchPath = [
         NSHomeDirectory() + "/.local/bin", "/opt/zerobrew/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"
     ] + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
@@ -282,6 +286,14 @@ public nonisolated enum GDirectIntegration {
                 }
 
                 do {
+                    if Task.isCancelled {
+                        timeoutTask.cancel()
+                        resumeOnce(.failure(CancellationError()))
+                        return
+                    }
+                    if input != nil {
+                        _ = Self.ignoreSIGPIPE
+                    }
                     try process.run()
                     if let input, let inputPipe {
                         try inputPipe.fileHandleForWriting.write(contentsOf: input)
@@ -299,6 +311,7 @@ public nonisolated enum GDirectIntegration {
         } onCancel: {
             if process.isRunning { process.terminate() }
         }
+        try Task.checkCancellation()
         let error = String(decoding: try Data(contentsOf: err), as: UTF8.self)
         guard process.terminationStatus == 0 else {
             throw DriveTransportError.commandFailed(command: URL(fileURLWithPath: executable).lastPathComponent,

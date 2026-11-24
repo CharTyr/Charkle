@@ -107,7 +107,11 @@ public struct MainWindowView: View {
                         onDropExternalOntoFolder: { inputs, folderID in
                             Task {
                                 let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
-                                coordinator.showToast("已导入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
+                                if created.isEmpty {
+                                    coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+                                } else {
+                                    coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
+                                }
                             }
                         },
                         onDropAssetsOntoBoard: { ids, boardID in
@@ -121,13 +125,18 @@ public struct MainWindowView: View {
                         onDropExternalOntoBoard: { inputs, boardID in
                             Task {
                                 let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: boardID)
-                                await moodboards.reloadActiveBoardIfNeeded(id: boardID)
-                                await moodboards.refreshBoards()
-                                coordinator.showToast("已收入并上板 (\(max(created.count, inputs.count)) 项)", icon: "sparkles.rectangle.stack")
+                                if created.isEmpty {
+                                    coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+                                } else {
+                                    await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                                    await moodboards.refreshBoards()
+                                    coordinator.showToast("已收入并上板 (\(created.count) 项)", icon: "sparkles.rectangle.stack", tone: .success)
+                                }
                             }
                         }
                     )
-                    .frame(width: sidebarTargetWidth)
+                    .frame(width: sidebarTargetWidth, alignment: .leading)
+                    .clipped()
                     .background {
                         CharkleSidebarMaterialBackground()
                     }
@@ -136,7 +145,6 @@ public struct MainWindowView: View {
                         .fill(CharkleTheme.hairline(for: colorScheme))
                         .frame(width: 1)
                 }
-                .frame(width: sidebarTargetWidth + 1)
                 .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(isSidebarVisible ? 1 : 0)
                 .allowsHitTesting(isSidebarVisible)
@@ -384,6 +392,24 @@ public struct MainWindowView: View {
         } message: {
             Text("彻底删除后将无法从废纸篓恢复。")
         }
+        .alert(
+            "素材库数据库初始化失败",
+            isPresented: Binding(
+                get: { coordinator.engineStartupError != nil },
+                set: { if !$0 { coordinator.engineStartupError = nil } }
+            )
+        ) {
+            Button("在访达中打开数据目录") {
+                let dir = ExternalAgentConfigStore.defaultDirectory()
+                NSWorkspace.shared.open(dir)
+                coordinator.engineStartupError = nil
+            }
+            Button("知道了", role: .cancel) {
+                coordinator.engineStartupError = nil
+            }
+        } message: {
+            Text("当前已临时回退至内存占位模式，新导入的内容在退出后不会保存。错误原因：\(coordinator.engineStartupError ?? "未知错误")")
+        }
         .task {
             onAppReady()
             await library.bootstrap()
@@ -408,6 +434,14 @@ public struct MainWindowView: View {
             if case .moodboard(let id) = newDest {
                 coordinator.activeMoodboardID = id
                 Task { await moodboards.openBoard(id: id) }
+            }
+        }
+        .onChange(of: library.assetsRevision) { _, _ in
+            if let qlID = coordinator.quickLookAssetID,
+               !library.isLoading,
+               library.allAssetsByID[qlID] == nil,
+               !library.assets.contains(where: { $0.id == qlID }) {
+                coordinator.closeQuickLook()
             }
         }
     }
@@ -453,13 +487,7 @@ public struct MainWindowView: View {
                     folders: library.folders,
                     boards: moodboards.boards,
                     activeMoodboardID: coordinator.activeMoodboardID,
-                    isOverlayPresented: coordinator.quickLookAssetID != nil
-                        || coordinator.isSettingsPresented
-                        || coordinator.isJumpAnywherePresented
-                        || coordinator.isOnboardingPresented
-                        || coordinator.isMoodboardGeneratorPresented
-                        || coordinator.isSmartFolderEditorPresented
-                        || showInboxBatchTriageSheet,
+                    isOverlayPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
                     loader: library.thumbnailLoader,
                     selectedAssetIDs: Binding(
                         get: { library.selectedAssetIDs },
@@ -545,7 +573,7 @@ public struct MainWindowView: View {
                     folders: library.folders,
                     boards: moodboards.boards,
                     activeMoodboardID: coordinator.activeMoodboardID,
-                    isQuickLookPresented: coordinator.quickLookAssetID != nil,
+                    isQuickLookPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
                     loader: library.thumbnailLoader,
                     selectedAssetIDs: Binding(
                         get: { library.selectedAssetIDs },
@@ -636,10 +664,7 @@ public struct MainWindowView: View {
                         }
                     },
                     onPermanentlyDeleteAssets: { ids in
-                        Task {
-                            await library.permanentlyDeleteAssets(ids)
-                            coordinator.showToast("已彻底删除 \(ids.count) 项素材", icon: "trash.slash")
-                        }
+                        pendingPermanentDeleteIDs = ids
                     },
                     onExtractSocialMedia: { postAsset, attachment, idx in
                         Task {
@@ -673,6 +698,9 @@ public struct MainWindowView: View {
                     }
                 )
             } else {
+                let sideChromeWidth: CGFloat =
+                    (isSidebarVisible ? ((coordinator.isSidebarCollapsed ? 76 : 232) + 1) : 0)
+                    + (coordinator.isInspectorVisible ? 300 : 0)
                 VirtualizedMasonryView(
                     assets: library.assets,
                     assetsRevision: library.assetsRevision,
@@ -687,6 +715,7 @@ public struct MainWindowView: View {
                     targetColumnWidth: CGFloat(coordinator.targetColumnWidth),
                     topContentInset: topInset,
                     bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
+                    sideChromeWidth: sideChromeWidth,
                     heroNamespace: heroNamespace,
                     activeQuickLookID: coordinator.quickLookAssetID,
                     revealRequest: coordinator.pendingGalleryReveal,
@@ -699,7 +728,11 @@ public struct MainWindowView: View {
                             }
                             Task {
                                 let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
-                                coordinator.showToast("已导入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
+                                if created.isEmpty {
+                                    coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+                                } else {
+                                    coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
+                                }
                             }
                         },
                         onAddToMoodboard: { ids in
@@ -866,8 +899,14 @@ public struct MainWindowView: View {
         }
         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: library.selectedAssetIDs.count >= 2)
         .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
+            let primaryMods = press.modifiers.intersection([.command, .option, .control, .shift])
             let orderedFolders = library.flattenedFolderHierarchy.map(\.folder)
-            guard isInbox, press.modifiers.isEmpty,
+            guard isInbox, primaryMods.isEmpty,
+                  !coordinator.isModalOverlayPresented,
+                  !showInboxBatchTriageSheet,
+                  !showBatchTagPopover,
+                  !showCreateSubfolderPopover,
+                  !isEditingText(in: NSApp?.keyWindow),
                   let digit = Int(press.characters),
                   digit >= 1, digit <= orderedFolders.count else { return .ignored }
             let targetFolder = orderedFolders[digit - 1]
@@ -1542,7 +1581,7 @@ public struct MainWindowView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("收件箱智能分拣预览 (Choice + Companion Noul)")
+                    Text("收件箱智能分拣预览")
                         .font(.system(size: 15, weight: .semibold))
                     Text("共分析 \(recs.count) 项待整理素材，其中 \(actionable.count) 项匹配到已有目录；高置信度项已默认勾选。")
                         .font(.system(size: 11.5))
@@ -2241,10 +2280,14 @@ public struct MainWindowView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 200)
                                 .onSubmit {
-                                    let val = quickBatchTagDraft
+                                    let val = quickBatchTagDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                                     quickBatchTagDraft = ""
                                     showBatchTagPopover = false
-                                    Task { await library.addTags([val], to: ids) }
+                                    guard !val.isEmpty else { return }
+                                    Task {
+                                        await library.addTags([val], to: ids)
+                                        coordinator.showToast("已为 \(ids.count) 项添加标签 #\(val)", icon: "tag")
+                                    }
                                 }
                         }
                         .padding(12)
@@ -2581,12 +2624,7 @@ public struct MainWindowView: View {
                 swappingNodeID: moodboards.swappingNodeID,
                 canUndo: moodboards.canUndo,
                 canRedo: moodboards.canRedo,
-                isOverlayPresented: coordinator.quickLookAssetID != nil
-                    || coordinator.isSettingsPresented
-                    || coordinator.isJumpAnywherePresented
-                    || coordinator.isOnboardingPresented
-                    || coordinator.isMoodboardGeneratorPresented
-                    || coordinator.isSmartFolderEditorPresented,
+                isOverlayPresented: coordinator.isModalOverlayPresented || showInboxBatchTriageSheet,
                 heroNamespace: heroNamespace,
                 callbacks: MoodboardCanvasCallbacks(
                     onCommitDocument: { nextDoc in
@@ -2649,11 +2687,16 @@ public struct MainWindowView: View {
                         }
                     },
                     onPasteIntoBoard: { dropPoint in
+                        let targetBoardID = board.id
                         Task {
                             if let internalPaste = library.internalPasteboardAssets() {
                                 let resolved = internalPaste.ids.compactMap { library.allAssetsByID[$0] }
                                 guard !resolved.isEmpty else { return }
-                                await moodboards.appendAssets(resolved, at: dropPoint)
+                                if moodboards.activeBoard?.id == targetBoardID {
+                                    await moodboards.appendAssets(resolved, at: dropPoint)
+                                } else {
+                                    await moodboards.addAssetsToSpecificBoard(boardID: targetBoardID, assets: resolved)
+                                }
                                 if internalPaste.isCut {
                                     library.clearCutSelection()
                                 }
@@ -2665,17 +2708,35 @@ public struct MainWindowView: View {
                                     return
                                 }
                                 let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: nil)
-                                await moodboards.appendAssets(created, at: dropPoint)
-                                coordinator.showToast("已粘贴导入并加入情绪板 (\(created.count) 项)", icon: "doc.on.clipboard")
+                                guard !created.isEmpty else {
+                                    coordinator.showToast(library.lastError ?? "粘贴导入失败", icon: "exclamationmark.triangle", tone: .warning)
+                                    return
+                                }
+                                if moodboards.activeBoard?.id == targetBoardID {
+                                    await moodboards.appendAssets(created, at: dropPoint)
+                                } else {
+                                    await moodboards.addAssetsToSpecificBoard(boardID: targetBoardID, assets: created)
+                                }
+                                coordinator.showToast("已粘贴导入并加入情绪板 (\(created.count) 项)", icon: "doc.on.clipboard", tone: .success)
                             }
                         }
                     },
                     onDropExternalInputs: { inputs, dropPoint in
                         // Single Source of Truth: new files go into /Charkle/Inbox/ (folderID = nil) and place at dropPoint
+                        let targetBoardID = board.id
+                        let normalizedInputs = Self.normalizeDroppedCaptureInputs(inputs)
                         Task {
-                            let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: nil)
-                            await moodboards.appendAssets(created, at: dropPoint)
-                            coordinator.showToast("已入收件箱并放置在画布 (\(created.count) 项)", icon: "arrow.down.circle.fill")
+                            let created = await library.ingest(normalizedInputs, targetFolderID: nil, targetBoardID: nil)
+                            guard !created.isEmpty else {
+                                coordinator.showToast(library.lastError ?? "拖入素材导入失败", icon: "exclamationmark.triangle", tone: .warning)
+                                return
+                            }
+                            if moodboards.activeBoard?.id == targetBoardID {
+                                await moodboards.appendAssets(created, at: dropPoint)
+                            } else {
+                                await moodboards.addAssetsToSpecificBoard(boardID: targetBoardID, assets: created)
+                            }
+                            coordinator.showToast("已入收件箱并放置在画布 (\(created.count) 项)", icon: "arrow.down.circle.fill", tone: .success)
                         }
                     },
                     onDropLibraryAssetIDs: { ids, dropPoint in
@@ -2808,11 +2869,16 @@ public struct MainWindowView: View {
     // MARK: - Actions & Navigation
 
     private func navigate(to destination: SidebarDestination) {
+        let wasSame = coordinator.selectedDestination == destination
         coordinator.selectedDestination = destination
         switch destination {
         case .moodboard(let id):
             coordinator.activeMoodboardID = id
-            Task { await moodboards.openBoard(id: id) }
+            // `.onChange(of: coordinator.selectedDestination)` triggers `openBoard(id:)` whenever
+            // the destination changes; only trigger directly when re-selecting an unloaded board.
+            if wasSame && moodboards.activeBoard?.id != id {
+                Task { await moodboards.openBoard(id: id) }
+            }
         case .moodboardsHome:
             Task { await moodboards.refreshBoards() }
         default:
@@ -2915,31 +2981,61 @@ public struct MainWindowView: View {
         return responder is NSTextView || responder is NSTextField || responder is NSText
     }
 
+    private func isComposingIME(in window: NSWindow?) -> Bool {
+        guard let textInput = window?.firstResponder as? any NSTextInputClient else { return false }
+        return textInput.hasMarkedText()
+    }
+
     private func resignTextFocusIfNeeded() {
         if let keyWindow = NSApp.keyWindow, isEditingText(in: keyWindow) {
             keyWindow.makeFirstResponder(nil)
         }
     }
 
-    /// Top-priority window-level Spacebar coordinator for Quick Look open/close across all views.
+    /// Top-priority window-level keyboard coordinator for Overlay `Esc`, Filmstrip/Ring `⌘V`,
+    /// and Quick Look `Space` open/close across all views.
     /// Runs before nested stage monitors (Moodboard, Filmstrip, Masonry, AVPlayerView) and ignores Caps Lock / Fn flags.
     private func handleMainWindowKeyDown(_ event: NSEvent, in hostWindow: NSWindow) -> NSEvent? {
         guard hostWindow.attachedSheet == nil, NSApp.modalWindow == nil else { return event }
 
         let primaryModifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
 
+        // 0. Top-down Escape dismissal for ZStack overlays (works even when no SwiftUI descendant has focus)
+        if event.keyCode == 53, primaryModifiers.isEmpty, event.window === hostWindow, !isComposingIME(in: hostWindow) {
+            if coordinator.isOnboardingPresented {
+                if event.isARepeat { return nil }
+                resignTextFocusIfNeeded()
+                coordinator.showToast("已跳过首次引导 · 随时可在「设置 → 通用」重新查看", icon: "forward.end.fill")
+                withAnimation(CharkleMotion.accessible(CharkleMotion.exitMd, reduced: reduceMotion)) {
+                    coordinator.completeOnboarding()
+                }
+                return nil
+            }
+            if coordinator.isSettingsPresented {
+                if event.isARepeat { return nil }
+                resignTextFocusIfNeeded()
+                withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
+                    coordinator.closeSettings()
+                }
+                return nil
+            }
+            if coordinator.isJumpAnywherePresented {
+                if event.isARepeat { return nil }
+                resignTextFocusIfNeeded()
+                coordinator.isJumpAnywherePresented = false
+                return nil
+            }
+        }
+
+        let isInGalleryStage = !coordinator.isViewingMoodboard && coordinator.selectedDestination != .moodboardsHome
+
         // Support ⌘V paste in Gallery Filmstrip & 3D Ring Gallery (Masonry & Moodboard handle ⌘V directly)
         if primaryModifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "v",
-           coordinator.quickLookAssetID == nil,
            event.window === hostWindow,
-           !coordinator.isViewingMoodboard,
+           isInGalleryStage,
            (coordinator.galleryLayoutMode == .galleryFilmstrip || coordinator.galleryLayoutMode == .ringGallery),
-           !coordinator.isSettingsPresented,
-           !coordinator.isJumpAnywherePresented,
-           !coordinator.isOnboardingPresented,
-           !coordinator.isMoodboardGeneratorPresented,
-           !coordinator.isSmartFolderEditorPresented,
+           !coordinator.isModalOverlayPresented,
            !showInboxBatchTriageSheet,
            !isEditingText(in: hostWindow) {
             if !event.isARepeat {
@@ -2949,6 +3045,16 @@ public struct MainWindowView: View {
         }
 
         guard event.keyCode == 49, primaryModifiers.isEmpty else { return event }
+
+        // Never let Space interact with underlying Quick Look or gallery while higher-z overlays are open.
+        guard !coordinator.isOnboardingPresented,
+              !coordinator.isSettingsPresented,
+              !coordinator.isJumpAnywherePresented,
+              !coordinator.isMoodboardGeneratorPresented,
+              !coordinator.isSmartFolderEditorPresented,
+              !showInboxBatchTriageSheet else {
+            return event
+        }
 
         // 1. Quick Look is OPEN -> Space closes Quick Look (unless user is actively editing in Quick Look's Inspector)
         if coordinator.quickLookAssetID != nil {
@@ -2964,18 +3070,11 @@ public struct MainWindowView: View {
 
         // 2. Quick Look is CLOSED -> Only handle events targeted directly at the main window (never popovers/panels)
         guard event.window === hostWindow else { return event }
-        guard !coordinator.isSettingsPresented,
-              !coordinator.isJumpAnywherePresented,
-              !coordinator.isOnboardingPresented,
-              !coordinator.isMoodboardGeneratorPresented,
-              !coordinator.isSmartFolderEditorPresented,
-              !showInboxBatchTriageSheet else {
-            return event
-        }
         guard !isEditingText(in: hostWindow) else { return event }
 
-        // Moodboard Canvas owns Space (Hold = Hand Pan, Quick Tap = Quick Look selected node)
-        if coordinator.isViewingMoodboard && moodboards.activeBoard != nil {
+        // Moodboard Canvas owns Space (Hold = Hand Pan, Quick Tap = Quick Look selected node);
+        // Moodboards Home is not a gallery asset list.
+        if !isInGalleryStage {
             return event
         }
 
@@ -3021,14 +3120,56 @@ public struct MainWindowView: View {
             }
             Task {
                 let created = await library.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: nil)
+                guard !created.isEmpty else {
+                    coordinator.showToast(library.lastError ?? "粘贴导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+                    return
+                }
                 coordinator.showToast(
                     hasWebURL
-                        ? "已收藏网页书签 (\(max(created.count, inputs.count)) 项)"
-                        : "已粘贴导入 \(max(created.count, inputs.count)) 项素材",
-                    icon: hasWebURL ? "safari" : "doc.on.clipboard"
+                        ? "已收藏网页书签 (\(created.count) 项)"
+                        : "已粘贴导入 \(created.count) 项素材",
+                    icon: hasWebURL ? "safari" : "doc.on.clipboard",
+                    tone: .success
                 )
             }
         }
+    }
+
+    private static func normalizeDroppedCaptureInputs(_ inputs: [CaptureInput]) -> [CaptureInput] {
+        inputs.map { input in
+            guard case .imageData(let data, let suggestedName, let sourceURL) = input else {
+                return input
+            }
+            let ext = detectedImageExtension(for: data)
+            let stem = URL(fileURLWithPath: suggestedName).deletingPathExtension().lastPathComponent
+            let base = stem.isEmpty ? "CanvasDrop" : stem
+            let uniqueName = "\(base)-\(UUID().uuidString.prefix(8)).\(ext)"
+            return .imageData(data, suggestedName: uniqueName, sourceURL: sourceURL)
+        }
+    }
+
+    private static func detectedImageExtension(for data: Data) -> String {
+        let bytes = Array(data.prefix(12))
+        if bytes.count >= 8, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47 {
+            return "png"
+        }
+        if bytes.count >= 3, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF {
+            return "jpg"
+        }
+        if bytes.count >= 6, bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46 {
+            return "gif"
+        }
+        if bytes.count >= 12,
+           bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
+           bytes[8] == 0x57, bytes[9] == 0x45, bytes[10] == 0x42, bytes[11] == 0x50 {
+            return "webp"
+        }
+        if bytes.count >= 4,
+           ((bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00)
+            || (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)) {
+            return "tiff"
+        }
+        return "png"
     }
 
     private func openQuickLook(_ asset: AssetRecord) {
@@ -3141,11 +3282,14 @@ public struct MainWindowView: View {
             if let tag = match.tagName { navigate(to: .tag(tag)) }
         case .asset:
             if let id = match.targetUUID {
-                navigate(to: .allItems)
-                library.selectedAssetIDs = [id]
-                coordinator.requestRevealAssetInGallery(id)
-                if let asset = library.allAssetsByID[id] {
-                    openQuickLook(asset)
+                coordinator.selectedDestination = .allItems
+                Task {
+                    await library.applyDestination(.allItems)
+                    library.selectedAssetIDs = [id]
+                    coordinator.requestRevealAssetInGallery(id)
+                    if let asset = library.allAssetsByID[id] ?? library.assets.first(where: { $0.id == id }) {
+                        openQuickLook(asset)
+                    }
                 }
             }
         }

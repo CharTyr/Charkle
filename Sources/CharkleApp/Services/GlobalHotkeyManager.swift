@@ -9,15 +9,18 @@ private let hotkeyLogger = Logger(subsystem: "com.charkle.app", category: "Hotke
 /// - `⌥⇧S`: Toggle MacBook Notch Shelf anywhere
 /// - `⌥⇧V`: Quick-collect current clipboard into Charkle
 public final class GlobalHotkeyManager {
-    public enum Action: UInt32, Sendable {
+    public enum Action: UInt32, Hashable, Sendable {
         case captureArea = 1
         case toggleNotchShelf = 2
         case quickPasteClipboard = 3
     }
 
+    private nonisolated static let hotKeySignature: OSType = 0x4348_4B4C // 'CHKL'
+
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var onTrigger: ((Action) -> Void)?
+    public private(set) var conflictedActions: Set<Action> = []
 
     public init() {}
 
@@ -34,7 +37,7 @@ public final class GlobalHotkeyManager {
         let status = InstallEventHandler(
             GetApplicationEventTarget(),
             { _, eventRef, userData -> OSStatus in
-                guard let userData, let eventRef else { return noErr }
+                guard let userData, let eventRef else { return OSStatus(eventNotHandledErr) }
                 var hotKeyID = EventHotKeyID()
                 let err = GetEventParameter(
                     eventRef,
@@ -45,8 +48,10 @@ public final class GlobalHotkeyManager {
                     nil,
                     &hotKeyID
                 )
-                guard err == noErr, let action = Action(rawValue: hotKeyID.id) else {
-                    return noErr
+                guard err == noErr,
+                      hotKeyID.signature == GlobalHotkeyManager.hotKeySignature,
+                      let action = Action(rawValue: hotKeyID.id) else {
+                    return OSStatus(eventNotHandledErr)
                 }
                 let manager = Unmanaged<GlobalHotkeyManager>.fromOpaque(userData).takeUnretainedValue()
                 Task { @MainActor in
@@ -66,19 +71,20 @@ public final class GlobalHotkeyManager {
         }
 
         let mods = UInt32(optionKey | shiftKey)
-        registerSingle(keyCode: UInt32(kVK_ANSI_A), modifiers: mods, id: Action.captureArea.rawValue)
-        registerSingle(keyCode: UInt32(kVK_ANSI_S), modifiers: mods, id: Action.toggleNotchShelf.rawValue)
-        registerSingle(keyCode: UInt32(kVK_ANSI_V), modifiers: mods, id: Action.quickPasteClipboard.rawValue)
+        registerSingle(keyCode: UInt32(kVK_ANSI_A), modifiers: mods, action: .captureArea)
+        registerSingle(keyCode: UInt32(kVK_ANSI_S), modifiers: mods, action: .toggleNotchShelf)
+        registerSingle(keyCode: UInt32(kVK_ANSI_V), modifiers: mods, action: .quickPasteClipboard)
     }
 
-    private func registerSingle(keyCode: UInt32, modifiers: UInt32, id: UInt32) {
+    private func registerSingle(keyCode: UInt32, modifiers: UInt32, action: Action) {
         var ref: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4348_4B4C), id: id) // 'CHKL'
+        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: action.rawValue)
         let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
         if status == noErr, let ref {
             hotKeyRefs.append(ref)
         } else {
-            hotkeyLogger.debug("RegisterEventHotKey id=\(id) returned \(status)")
+            conflictedActions.insert(action)
+            hotkeyLogger.warning("RegisterEventHotKey action=\(action.rawValue) failed with status \(status) (possible global shortcut conflict)")
         }
     }
 
@@ -87,6 +93,7 @@ public final class GlobalHotkeyManager {
             UnregisterEventHotKey(ref)
         }
         hotKeyRefs.removeAll()
+        conflictedActions.removeAll()
         if let handler = eventHandlerRef {
             RemoveEventHandler(handler)
             eventHandlerRef = nil

@@ -524,7 +524,11 @@ public struct NotchShelfView: View {
             }
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .onTapGesture {
-                onToggleFullGallery(true)
+                if shelfState.isMinimalCaptureOnly {
+                    onOpenAssetInQuickLook(asset)
+                } else {
+                    onToggleFullGallery(true)
+                }
             }
             .onHover { hovering in
                 withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
@@ -611,6 +615,7 @@ public struct NotchShelfView: View {
                 folders: library.folders,
                 loader: library.thumbnailLoader,
                 selectedAssetIDs: $notchSelectedIDs,
+                cutAssetIDs: library.cutAssetIDs,
                 layoutMode: .verticalMasonry,
                 targetColumnWidth: 158,
                 topContentInset: 8,
@@ -621,13 +626,34 @@ public struct NotchShelfView: View {
                     onOpenQuickLook: { asset in
                         onOpenAssetInQuickLook(asset)
                     },
+                    onDropExternalInputs: { inputs in
+                        let folderID: UUID? = shelfState.targetMode == .folder
+                            ? (shelfState.selectedFolderID ?? library.folders.first?.id)
+                            : nil
+                        let boardID: UUID? = shelfState.targetMode == .activeMoodboard
+                            ? (coordinator.activeMoodboardID ?? moodboards.boards.first?.id)
+                            : nil
+                        Task {
+                            let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: boardID)
+                            if let boardID {
+                                await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                                await moodboards.refreshBoards()
+                            }
+                            coordinator.showToast("已收入 \(max(created.count, inputs.count)) 项素材", icon: "arrow.down.circle.fill")
+                        }
+                    },
                     onAddToMoodboard: { ids in
-                        if let activeID = coordinator.activeMoodboardID {
+                        if let activeID = coordinator.activeMoodboardID ?? moodboards.boards.first?.id {
                             let items = ids.compactMap { library.allAssetsByID[$0] }
                             Task {
                                 await moodboards.addAssetsToSpecificBoard(boardID: activeID, assets: items)
-                                coordinator.showToast("已加入活跃情绪板 (\(items.count) 项)", icon: "rectangle.3.group")
+                                let title = moodboards.boards.first(where: { $0.id == activeID })?.title ?? "情绪板"
+                                coordinator.showToast("已加入「\(title)」(\(items.count) 项)", icon: "rectangle.3.group")
                             }
+                        } else {
+                            onOpenMainWindow()
+                            library.selectedAssetIDs = Set(ids)
+                            coordinator.presentMoodboardGenerator(entry: .selection)
                         }
                     },
                     onMoveToFolder: { ids, folderID in
@@ -636,8 +662,69 @@ public struct NotchShelfView: View {
                             coordinator.showToast("已移动 \(ids.count) 项素材", icon: "folder")
                         }
                     },
+                    onTogglePinOffline: { ids, pinned in
+                        Task {
+                            await library.togglePinOffline(ids: ids, pinned: pinned)
+                            coordinator.showToast(
+                                pinned ? "已设为始终保留在本地" : "已取消始终保留，将按需管理空间",
+                                icon: pinned ? "arrow.down.circle.fill" : "icloud"
+                            )
+                        }
+                    },
+                    onCopyColorHex: { hex in
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(hex, forType: .string)
+                        coordinator.showToast("已复制色值 \(hex)", icon: "paintpalette")
+                    },
+                    onRevealInFinder: { assetID in
+                        Task {
+                            let ok = await library.revealInFinder(assetID: assetID)
+                            if !ok {
+                                coordinator.showToast("无法定位该素材的本地文件", icon: "exclamationmark.triangle", tone: .warning)
+                            }
+                        }
+                    },
                     onCopyAssets: { ids in
-                        Task { _ = await library.copyAssetsToPasteboard(ids) }
+                        Task {
+                            let count = await library.copyAssetsToPasteboard(ids)
+                            coordinator.showToast("已拷贝 \(count) 项素材到剪贴板", icon: "doc.on.doc")
+                        }
+                    },
+                    onCutAssets: { ids in
+                        Task {
+                            let count = await library.cutAssets(ids)
+                            coordinator.showToast("已剪切 \(count) 项素材", icon: "scissors")
+                        }
+                    },
+                    onPasteIntoCurrentFolder: {
+                        onCollectClipboard()
+                    },
+                    onRetagAssets: { ids in
+                        Task {
+                            _ = await library.retagAssetsWithCloudAI(ids: ids)
+                            coordinator.showToast("已完成 AI 重新打标 (\(ids.count) 项)", icon: "sparkles")
+                        }
+                    },
+                    onTrashAssets: { ids in
+                        notchSelectedIDs.subtract(ids)
+                        Task {
+                            await library.trashAssets(ids)
+                            coordinator.showToast("已移至废纸篓 (\(ids.count) 项)", icon: "trash")
+                        }
+                    },
+                    onRestoreAssets: { ids in
+                        Task {
+                            await library.restoreAssets(ids)
+                            coordinator.showToast("已放回原处 (\(ids.count) 项)", icon: "arrow.uturn.backward")
+                        }
+                    },
+                    onPermanentlyDeleteAssets: { ids in
+                        notchSelectedIDs.subtract(ids)
+                        Task {
+                            await library.permanentlyDeleteAssets(ids)
+                            coordinator.showToast("已彻底删除 \(ids.count) 项素材", icon: "trash.slash")
+                        }
                     },
                     onResolveDragFileURL: onResolveDragFileURL
                 )

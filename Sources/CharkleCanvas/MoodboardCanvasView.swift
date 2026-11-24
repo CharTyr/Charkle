@@ -132,73 +132,29 @@ public struct MoodboardCanvasView: View {
     @State private var selectedConnectorID: UUID?
     @State private var isDropTargeted: Bool = false
 
-    // Isolated @Observable camera & hover models so 60-120Hz trackpad panning / zooming
-    // NEVER invalidates MoodboardCanvasView.body or re-renders toolbars / node trees!
+    // Isolated @Observable camera, hover, and live-gesture models so 60-120Hz trackpad pan/zoom,
+    // dragging, resizing, rotating, ink drawing, and marquee selection NEVER invalidate
+    // MoodboardCanvasView.body or unrelated toolbars / node trees!
     @State private var camera = FreeformCameraState()
     @State private var hoverState = FreeformHoverState()
-    @State private var gestureStartZoom: CGFloat?
+    @State private var interaction = FreeformInteractionState()
+    @State private var gestureLastMagnification: CGFloat = 1.0
     @State private var panStartCenter: CGPoint?
     @State private var isSpaceKeyPanning: Bool = false
 
-    // Live interactive edits (1:1 pointer tracking without mutating undo stack every frame)
-    @State private var activeNodeDragID: UUID?
-    @State private var activeNodeDragDelta: CGSize = .zero
-    @State private var activeGroupChildIDs: Set<UUID> = []
-    @State private var snapGuidesX: [CGFloat] = []
-    @State private var snapGuidesY: [CGFloat] = []
-
-    private enum ResizeCorner: CaseIterable {
-        case topLeading
-        case topTrailing
-        case bottomLeading
-        case bottomTrailing
-
-        var signX: Double {
-            switch self {
-            case .topLeading, .bottomLeading: -1
-            case .topTrailing, .bottomTrailing: 1
-            }
-        }
-
-        var signY: Double {
-            switch self {
-            case .topLeading, .topTrailing: -1
-            case .bottomLeading, .bottomTrailing: 1
-            }
-        }
-    }
-
-    @State private var resizingNodeID: UUID?
-    @State private var resizingCorner: ResizeCorner?
-    @State private var resizeStartFrame: BoardRect?
-    @State private var liveResizeFrame: BoardRect?
-    @State private var liveGroupReflowChildIDs: [UUID] = []
-    @State private var liveGroupReflowFrames: [UUID: BoardRect] = [:]
-    @State private var resizingSideEdge: Int = 0 // -1 leading, +1 trailing, 0 corner
-
-    @State private var rotatingNodeID: UUID?
-    @State private var rotationStartDegrees: Double = 0
-    @State private var rotationDragStartAngle: Double = 0
-    @State private var liveRotationDegrees: Double?
-
-    // Connector creation & label editing
-    @State private var pendingConnectorSource: (nodeID: UUID, anchor: ConnectorAnchor, startWorld: CGPoint)?
-    @State private var pendingConnectorCursorWorld: CGPoint = .zero
+    // Connector style & label popover
     @State private var connectorStyle: ConnectorStyle = .curved
     @State private var connectorDashed: Bool = false
     @State private var editingConnectorLabelID: UUID?
     @State private var connectorLabelDraft: String = ""
+    @State private var connectorStyleDraft: ConnectorStyle = .curved
+    @State private var connectorDashedDraft: Bool = false
 
-    // Freehand Ink Pen
+    // Freehand Ink Pen options
     @State private var inkColorHex: String = "#D95D48"
     @State private var inkWidth: Double = 3.5
-    @State private var activeInkPoints: [InkStrokePoint] = []
     @State private var exportIncludeAnnotations: Bool = true
     @State private var exportIncludePalette: Bool = true
-
-    // Marquee selection in Freeform
-    @State private var freeformMarqueeStart: CGPoint?
-    @State private var freeformMarqueeCurrent: CGPoint?
 
     // Experimental TypeSafe Box sheets (semantic crop, visual-match crop & pinpoint annotation)
     @State private var semanticCropTarget: (nodeID: UUID, assetID: UUID)?
@@ -271,6 +227,11 @@ public struct MoodboardCanvasView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
 
+                    if document.nodes.isEmpty && document.inkStrokes.isEmpty {
+                        emptyBoardPlaceholder
+                            .allowsHitTesting(false)
+                    }
+
                     // Top floating Board Palette Strip (positioned below window top chrome, clear of trailing button)
                     VStack {
                         if showTopPaletteStrip && !document.extractedPalette.isEmpty {
@@ -281,7 +242,7 @@ public struct MoodboardCanvasView: View {
                             )
                             .padding(.top, 12)
                             .padding(.leading, 14)
-                            .padding(.trailing, viewportSize.width < 680 ? 124 : 14)
+                            .padding(.trailing, viewportSize.width < 920 ? 124 : 14)
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                         }
                         Spacer(minLength: 0)
@@ -323,13 +284,17 @@ public struct MoodboardCanvasView: View {
             .onAppear {
                 syncCameraFromDocument()
                 ensureFreeformModeIfLegacy()
+                prefetchBoardThumbnails()
             }
             .onChange(of: document.id) { _, _ in
                 selectedNodeIDs.removeAll()
                 selectedConnectorID = nil
+                editingConnectorLabelID = nil
                 activeTool = .select
+                interaction.resetAll()
                 syncCameraFromDocument()
                 ensureFreeformModeIfLegacy()
+                prefetchBoardThumbnails()
             }
             .onDrop(of: [.fileURL, .url, .image, .plainText], isTargeted: $isDropTargeted) { providers, location in
                 handleCanvasDrop(providers: providers, screenLocation: location)
@@ -337,78 +302,74 @@ public struct MoodboardCanvasView: View {
             .focusable()
             .focusEffectDisabled()
             .onKeyPress(.escape) {
-            if pendingConnectorSource != nil {
-                pendingConnectorSource = nil
+                guard !isEditingTextInWindow else { return .ignored }
+                return handleEscapeKey() ? .handled : .ignored
+            }
+            .onKeyPress(.delete) {
+                guard !isEditingTextInWindow else { return .ignored }
+                deleteCurrentSelection()
                 return .handled
             }
-            if activeTool != .select {
-                activeTool = .select
+            .onKeyPress(.deleteForward) {
+                guard !isEditingTextInWindow else { return .ignored }
+                deleteCurrentSelection()
                 return .handled
             }
-            selectedNodeIDs.removeAll()
-            selectedConnectorID = nil
-            callbacks.onSelectSwapTarget(nil)
-            return .handled
-        }
-        .onKeyPress(.delete) {
-            guard !isEditingTextInWindow else { return .ignored }
-            deleteCurrentSelection()
-            return .handled
-        }
-        .onKeyPress(characters: CharacterSet(charactersIn: "acxvhperACXVHPER")) { press in
-            guard !isEditingTextInWindow else { return .ignored }
-            let lower = press.characters.lowercased()
-            if press.modifiers == [.command] {
+            .onKeyPress(characters: CharacterSet(charactersIn: "acxvhperACXVHPER")) { press in
+                guard !isEditingTextInWindow else { return .ignored }
+                let lower = press.characters.lowercased()
+                let mods = press.modifiers.intersection([.command, .option, .control, .shift])
+                if mods == [.command] {
+                    switch lower {
+                    case "a":
+                        selectedNodeIDs = Set(document.nodes.map(\.id))
+                        selectedConnectorID = nil
+                        return .handled
+                    case "c":
+                        let ids = selectedAssetIDs()
+                        guard !ids.isEmpty else { return .ignored }
+                        callbacks.onCopyAssets(ids)
+                        return .handled
+                    case "x":
+                        guard !selectedNodeIDs.isEmpty else { return .ignored }
+                        cutBoardNodes(selectedNodeIDs)
+                        return .handled
+                    case "v":
+                        callbacks.onPasteIntoBoard(defaultPasteLocation())
+                        return .handled
+                    default:
+                        return .ignored
+                    }
+                }
+                // Transform shortcuts work whenever unlocked nodes are selected
+                if !selectedUnlockedNodes.isEmpty {
+                    if lower == "r" && mods.isEmpty {
+                        rotateSelectedNodes(by: 90)
+                        return .handled
+                    }
+                    if lower == "r" && mods == [.shift] {
+                        rotateSelectedNodes(by: -90)
+                        return .handled
+                    }
+                    if lower == "h" && mods == [.shift] {
+                        flipSelectedNodes(horizontal: true)
+                        return .handled
+                    }
+                    if lower == "v" && mods == [.shift] {
+                        flipSelectedNodes(horizontal: false)
+                        return .handled
+                    }
+                }
+                guard mods.isEmpty else { return .ignored }
                 switch lower {
-                case "a":
-                    selectedNodeIDs = Set(document.nodes.map(\.id))
-                    selectedConnectorID = nil
-                    return .handled
-                case "c":
-                    let ids = selectedAssetIDs()
-                    guard !ids.isEmpty else { return .ignored }
-                    callbacks.onCopyAssets(ids)
-                    return .handled
-                case "x":
-                    guard !selectedNodeIDs.isEmpty else { return .ignored }
-                    cutBoardNodes(selectedNodeIDs)
-                    return .handled
-                case "v":
-                    callbacks.onPasteIntoBoard(defaultPasteLocation())
-                    return .handled
-                default:
-                    return .ignored
+                case "v": activeTool = .select; return .handled
+                case "h": activeTool = .pan; return .handled
+                case "c": activeTool = .connector; return .handled
+                case "p": activeTool = .pen; return .handled
+                case "e": activeTool = .eraser; return .handled
+                default: return .ignored
                 }
             }
-            // Transform shortcuts work whenever unlocked nodes are selected (both modes)
-            if !selectedUnlockedNodes.isEmpty {
-                if lower == "r" && press.modifiers.isEmpty {
-                    rotateSelectedNodes(by: 90)
-                    return .handled
-                }
-                if lower == "r" && press.modifiers == [.shift] {
-                    rotateSelectedNodes(by: -90)
-                    return .handled
-                }
-                if lower == "h" && press.modifiers == [.shift] {
-                    flipSelectedNodes(horizontal: true)
-                    return .handled
-                }
-                if lower == "v" && press.modifiers == [.shift] {
-                    flipSelectedNodes(horizontal: false)
-                    return .handled
-                }
-            }
-            guard press.modifiers.isEmpty else { return .ignored }
-            switch lower {
-            case "v": activeTool = .select; return .handled
-            case "h": activeTool = .pan; return .handled
-            case "c": activeTool = .connector; return .handled
-            case "p": activeTool = .pen; return .handled
-            case "e": activeTool = .eraser; return .handled
-            default: return .ignored
-            }
-        }
         .popover(isPresented: Binding(
             get: { editingConnectorLabelID != nil },
             set: { if !$0 { editingConnectorLabelID = nil } }
@@ -437,6 +398,14 @@ public struct MoodboardCanvasView: View {
 
     // MARK: - Freeform Infinite Canvas Mode (GPU-Transformed 120fps Stage)
 
+    private var isAnyLocalModalPresented: Bool {
+        isOverlayPresented
+            || semanticCropTarget != nil
+            || visualMatchTarget != nil
+            || pinpointAnnotateTarget != nil
+            || editingConnectorLabelID != nil
+    }
+
     private var freeformInfiniteStage: some View {
         let sortedNodes = document.nodes.sorted { lhs, rhs in
             let lGroup = if case .groupFrame = lhs.kind { true } else { false }
@@ -444,18 +413,16 @@ public struct MoodboardCanvasView: View {
             if lGroup != rGroup { return lGroup }
             return lhs.zIndex < rhs.zIndex
         }
-        let nodeFramesMap: [UUID: BoardRect] = Dictionary(
-            uniqueKeysWithValues: document.nodes.map { ($0.id, effectiveFrame(for: $0)) }
-        )
+        let nodesByID = Dictionary(uniqueKeysWithValues: document.nodes.map { ($0.id, $0) })
         let allowNodeHitTesting = activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning
 
         return ZStack {
             // 1. GPU-tiled architectural dot grid (1 cached CGImage tile + GPU offset, zero Path loop)
             FreeformDotGridLayer(camera: camera, viewportSize: viewportSize)
 
-            // 2. Native macOS trackpad scroll-pan, Option/Cmd zoom, Middle-mouse drag pan, and Hold-Space drag pan
+            // 2. Native macOS trackpad scroll-pan, Option/Cmd zoom, Middle-mouse drag pan, Hold-Space pan & focus-safe shortcuts
             FreeformInputBridge(
-                isSuspended: isOverlayPresented,
+                isSuspended: isAnyLocalModalPresented,
                 onPanDelta: { dx, dy in
                     hoverState.markPanningActivity()
                     camera.panBy(screenDX: dx, screenDY: dy)
@@ -472,11 +439,14 @@ public struct MoodboardCanvasView: View {
                 },
                 onSpaceQuickTap: {
                     _ = openQuickLookForSelectedNode()
+                },
+                onKeyCommand: { event in
+                    handleWindowKeyCommand(event)
                 }
             )
             .allowsHitTesting(false)
 
-            // 3. Interactive background canvas surface: click empty area to deselect, or drag for pan/marquee/pen/eraser
+            // 3. Interactive background canvas surface: click empty area to deselect/select connector, or drag for pan/marquee/pen/eraser
             Color.clear
                 .contentShape(Rectangle())
                 .gesture(canvasBackgroundGesture)
@@ -504,11 +474,10 @@ public struct MoodboardCanvasView: View {
             FreeformCameraViewport(camera: camera, viewportSize: viewportSize) {
                 FreeformWorldNodesLayer(
                     camera: camera,
+                    interaction: interaction,
                     viewportSize: viewportSize,
                     sortedNodes: sortedNodes,
-                    nodeFramesMap: nodeFramesMap,
                     selectedNodeIDs: selectedNodeIDs,
-                    effectiveRotation: { effectiveRotation(for: $0) },
                     allowNodeHitTesting: allowNodeHitTesting,
                     onHoverChanged: { nodeID, hovering in
                         hoverState.setNodeHovered(nodeID, hovering: hovering)
@@ -538,39 +507,42 @@ public struct MoodboardCanvasView: View {
                 )
             }
 
-            // 5. Vector overlay (snap guides, connectors, ink strokes) — completely skipped (zero Canvas!) when empty
+            // 5. Vector overlay (snap guides, connectors, ink strokes) — completely isolated from MoodboardCanvasView.body
             FreeformVectorOverlay(
                 camera: camera,
+                interaction: interaction,
                 viewportSize: viewportSize,
+                nodesByID: nodesByID,
+                selectedNodeIDs: selectedNodeIDs,
                 connectors: document.connectors,
                 inkStrokes: document.inkStrokes,
-                activeInkPoints: activeInkPoints,
                 inkColorHex: inkColorHex,
                 inkWidth: inkWidth,
-                selectedConnectorID: selectedConnectorID,
-                pendingConnectorSource: pendingConnectorSource,
-                pendingConnectorCursorWorld: pendingConnectorCursorWorld,
-                snapGuidesX: snapGuidesX,
-                snapGuidesY: snapGuidesY,
-                nodeFramesMap: nodeFramesMap
+                selectedConnectorID: selectedConnectorID
             )
 
             // 6. Screen-space constant-size resize / rotation / connector port handles
-            //    (only observes camera when a node is selected/hovered or connector tool is active)
+            //    (culled in connector mode; only observes camera when handles are visible)
             FreeformSelectionHandlesLayer(
                 camera: camera,
                 hoverState: hoverState,
+                interaction: interaction,
                 viewportSize: viewportSize,
                 sortedNodes: sortedNodes,
-                nodeFramesMap: nodeFramesMap,
                 selectedNodeIDs: selectedNodeIDs,
                 activeTool: activeTool,
-                isSpaceKeyPanning: isSpaceKeyPanning,
-                effectiveRotation: { effectiveRotation(for: $0) }
+                isSpaceKeyPanning: isSpaceKeyPanning
             ) { node, worldRect, screenCenter, screenW, screenH, currentRotation, isSelected, isHovered in
                 ZStack {
                     if (activeTool == .connector || isHovered || isSelected) && activeTool != .pen && activeTool != .eraser && !isSpaceKeyPanning {
-                        connectorPortsOverlay(node: node, worldRect: worldRect, width: screenW, height: screenH)
+                        connectorPortsOverlay(
+                            node: node,
+                            worldRect: worldRect,
+                            width: screenW,
+                            height: screenH,
+                            currentRotation: currentRotation,
+                            sortedNodes: sortedNodes
+                        )
                     }
                     if isSelected && !node.isLocked && activeTool == .select && !isSpaceKeyPanning {
                         resizeHandlesOverlay(node: node, width: screenW, height: screenH, currentRotation: currentRotation)
@@ -583,34 +555,26 @@ public struct MoodboardCanvasView: View {
             if !document.connectors.isEmpty {
                 FreeformConnectorLabelsLayer(
                     camera: camera,
+                    interaction: interaction,
                     viewportSize: viewportSize,
+                    nodesByID: nodesByID,
+                    selectedNodeIDs: selectedNodeIDs,
                     connectors: document.connectors,
-                    nodeFramesMap: nodeFramesMap,
                     selectedConnectorID: selectedConnectorID,
                     activeTool: activeTool,
                     onSelectConnector: { connector in
                         selectedConnectorID = connector.id
+                        selectedNodeIDs.removeAll()
                         connectorLabelDraft = connector.label ?? ""
+                        connectorStyleDraft = connector.style
+                        connectorDashedDraft = connector.dashed
                         editingConnectorLabelID = connector.id
                     }
                 )
             }
 
-            // 8. Freeform rubber-band marquee overlay
-            if let s = freeformMarqueeStart, let c = freeformMarqueeCurrent {
-                let rect = CGRect(x: min(s.x, c.x), y: min(s.y, c.y), width: abs(c.x - s.x), height: abs(c.y - s.y))
-                if rect.width > 3 || rect.height > 3 {
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.11))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .strokeBorder(Color.accentColor.opacity(0.68), lineWidth: 1)
-                        )
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
-                        .allowsHitTesting(false)
-                }
-            }
+            // 8. Isolated Freeform rubber-band marquee overlay (never invalidates node tree while dragging)
+            FreeformMarqueeOverlay(interaction: interaction)
         }
         .coordinateSpace(name: "charkle-freeform-stage")
         .clipped()
@@ -618,14 +582,17 @@ public struct MoodboardCanvasView: View {
             MagnifyGesture()
                 .onChanged { value in
                     hoverState.markPanningActivity()
-                    if gestureStartZoom == nil {
-                        gestureStartZoom = camera.zoom
-                    }
-                    let base = gestureStartZoom ?? camera.zoom
-                    camera.setZoom(base * value.magnification)
+                    let prev = gestureLastMagnification > 0 ? gestureLastMagnification : 1.0
+                    let current = max(0.01, value.magnification)
+                    let stepFactor = current / prev
+                    gestureLastMagnification = current
+                    let anchor = (value.startLocation.x.isFinite && value.startLocation.y.isFinite)
+                        ? value.startLocation
+                        : CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5)
+                    camera.applyZoom(factor: stepFactor, anchorScreenPoint: anchor, viewportSize: viewportSize)
                 }
                 .onEnded { _ in
-                    gestureStartZoom = nil
+                    gestureLastMagnification = 1.0
                     persistCameraViewport()
                 }
         )
@@ -637,11 +604,108 @@ public struct MoodboardCanvasView: View {
         document.nodes.filter { selectedNodeIDs.contains($0.id) && !$0.isLocked }
     }
 
-    private func effectiveRotation(for node: BoardNode) -> Double {
-        if rotatingNodeID == node.id, let live = liveRotationDegrees {
-            return live
+    private func prefetchBoardThumbnails() {
+        let ids = Array(Set(document.referencedAssetIDs))
+        if !ids.isEmpty {
+            loader.prefetch(assetIDs: ids, tier: .preview1400)
         }
-        return node.rotationDegrees
+    }
+
+    private func handleEscapeKey() -> Bool {
+        if interaction.pendingConnectorSource != nil {
+            interaction.pendingConnectorSource = nil
+            return true
+        }
+        if editingConnectorLabelID != nil {
+            editingConnectorLabelID = nil
+            return true
+        }
+        if activeTool != .select {
+            activeTool = .select
+            return true
+        }
+        if !selectedNodeIDs.isEmpty || selectedConnectorID != nil || swappingNodeID != nil {
+            selectedNodeIDs.removeAll()
+            selectedConnectorID = nil
+            callbacks.onSelectSwapTarget(nil)
+            return true
+        }
+        return false
+    }
+
+    /// Window-level shortcut dispatcher routed via `CanvasInputCatcherView` so keyboard shortcuts
+    /// keep working reliably regardless of Caps Lock (macOS IME switch) or SwiftUI firstResponder drift.
+    private func handleWindowKeyCommand(_ event: NSEvent) -> Bool {
+        guard !isAnyLocalModalPresented else { return false }
+        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+
+        // Backspace (51) or Forward Delete (117)
+        if (event.keyCode == 51 || event.keyCode == 117) && mods.isEmpty {
+            guard !selectedNodeIDs.isEmpty || selectedConnectorID != nil else { return false }
+            deleteCurrentSelection()
+            return true
+        }
+
+        // Escape (53)
+        if event.keyCode == 53 && mods.isEmpty {
+            return handleEscapeKey()
+        }
+
+        guard let lower = event.charactersIgnoringModifiers?.lowercased(), lower.count == 1 else {
+            return false
+        }
+
+        if mods == [.command] {
+            switch lower {
+            case "a":
+                selectedNodeIDs = Set(document.nodes.map(\.id))
+                selectedConnectorID = nil
+                return true
+            case "c":
+                let ids = selectedAssetIDs()
+                guard !ids.isEmpty else { return false }
+                callbacks.onCopyAssets(ids)
+                return true
+            case "x":
+                guard !selectedNodeIDs.isEmpty else { return false }
+                cutBoardNodes(selectedNodeIDs)
+                return true
+            case "v":
+                callbacks.onPasteIntoBoard(defaultPasteLocation())
+                return true
+            default:
+                return false
+            }
+        }
+
+        if !selectedUnlockedNodes.isEmpty {
+            if lower == "r" && mods.isEmpty {
+                rotateSelectedNodes(by: 90)
+                return true
+            }
+            if lower == "r" && mods == [.shift] {
+                rotateSelectedNodes(by: -90)
+                return true
+            }
+            if lower == "h" && mods == [.shift] {
+                flipSelectedNodes(horizontal: true)
+                return true
+            }
+            if lower == "v" && mods == [.shift] {
+                flipSelectedNodes(horizontal: false)
+                return true
+            }
+        }
+
+        guard mods.isEmpty else { return false }
+        switch lower {
+        case "v": activeTool = .select; return true
+        case "h": activeTool = .pan; return true
+        case "c": activeTool = .connector; return true
+        case "p": activeTool = .pen; return true
+        case "e": activeTool = .eraser; return true
+        default: return false
+        }
     }
 
     private func normalizeDegrees(_ degrees: Double) -> Double {
@@ -722,7 +786,7 @@ public struct MoodboardCanvasView: View {
         height: CGFloat,
         currentRotation: Double
     ) -> some View {
-        let isDraggingThis = rotatingNodeID == node.id
+        let isDraggingThis = interaction.rotatingNodeID == node.id
         return VStack(spacing: 0) {
             ZStack {
                 Circle()
@@ -763,12 +827,12 @@ public struct MoodboardCanvasView: View {
                             Double(value.location.y - screenCenter.y),
                             Double(value.location.x - screenCenter.x)
                         ) * 180.0 / .pi
-                        if rotatingNodeID == nil {
-                            rotatingNodeID = node.id
-                            rotationStartDegrees = node.rotationDegrees
-                            rotationDragStartAngle = angleNow
+                        if interaction.rotatingNodeID == nil {
+                            interaction.rotatingNodeID = node.id
+                            interaction.rotationStartDegrees = node.rotationDegrees
+                            interaction.rotationDragStartAngle = angleNow
                         }
-                        var raw = normalizeDegrees(rotationStartDegrees + (angleNow - rotationDragStartAngle))
+                        var raw = normalizeDegrees(interaction.rotationStartDegrees + (angleNow - interaction.rotationDragStartAngle))
                         if NSEvent.modifierFlags.contains(.shift) {
                             raw = normalizeDegrees((raw / 15.0).rounded() * 15.0)
                         } else {
@@ -779,12 +843,12 @@ public struct MoodboardCanvasView: View {
                                 break
                             }
                         }
-                        liveRotationDegrees = raw
+                        interaction.liveRotationDegrees = raw
                     }
                     .onEnded { _ in
-                        let finalAngle = liveRotationDegrees
-                        rotatingNodeID = nil
-                        liveRotationDegrees = nil
+                        let finalAngle = interaction.liveRotationDegrees
+                        interaction.rotatingNodeID = nil
+                        interaction.liveRotationDegrees = nil
                         if let finalAngle, abs(finalAngle - node.rotationDegrees) > 0.05 {
                             var nextDoc = document
                             if let idx = nextDoc.nodes.firstIndex(where: { $0.id == node.id }) {
@@ -810,7 +874,7 @@ public struct MoodboardCanvasView: View {
     private var selectedTransformBar: some View {
         let targets = selectedUnlockedNodes
         let single = targets.count == 1 ? targets.first : nil
-        let singleAngle = single.map { effectiveRotation(for: $0) } ?? 0
+        let singleAngle = single?.rotationDegrees ?? 0
         let anyFlippedH = targets.contains(where: \.flipHorizontal)
         let anyFlippedV = targets.contains(where: \.flipVertical)
 
@@ -898,7 +962,7 @@ public struct MoodboardCanvasView: View {
 
     private var isEditingTextInWindow: Bool {
         guard let responder = NSApp.keyWindow?.firstResponder else { return false }
-        return responder is NSTextView || responder is NSTextField
+        return responder is NSTextView || responder is NSTextField || responder is NSText
     }
 
     private func defaultPasteLocation() -> BoardPoint? {
@@ -1003,9 +1067,9 @@ public struct MoodboardCanvasView: View {
                         }
                     } else {
                         guard distance >= 4 else { return }
-                        if freeformMarqueeStart == nil { freeformMarqueeStart = value.startLocation }
-                        freeformMarqueeCurrent = value.location
-                        if let s = freeformMarqueeStart {
+                        if interaction.freeformMarqueeStart == nil { interaction.freeformMarqueeStart = value.startLocation }
+                        interaction.freeformMarqueeCurrent = value.location
+                        if let s = interaction.freeformMarqueeStart {
                             let w1 = screenToWorld(s)
                             let w2 = screenToWorld(value.location)
                             let worldBox = BoardRect(
@@ -1020,15 +1084,15 @@ public struct MoodboardCanvasView: View {
                 case .pen:
                     guard distance >= 2 else { return }
                     let worldPt = screenToWorld(value.location)
-                    if let last = activeInkPoints.last {
+                    if let last = interaction.activeInkPoints.last {
                         if hypot(worldPt.x - last.x, worldPt.y - last.y) >= 2.0 / camera.zoom {
-                            activeInkPoints.append(InkStrokePoint(x: worldPt.x, y: worldPt.y, pressure: 0.6))
+                            interaction.activeInkPoints.append(InkStrokePoint(x: worldPt.x, y: worldPt.y, pressure: 0.6))
                         }
                     } else {
-                        activeInkPoints = [InkStrokePoint(x: worldPt.x, y: worldPt.y, pressure: 0.6)]
+                        interaction.activeInkPoints = [InkStrokePoint(x: worldPt.x, y: worldPt.y, pressure: 0.6)]
                     }
                 case .eraser:
-                    eraseNear(worldPoint: screenToWorld(value.location))
+                    markEraseNear(worldPoint: screenToWorld(value.location))
                 case .connector:
                     break
                 }
@@ -1039,25 +1103,41 @@ public struct MoodboardCanvasView: View {
                     panStartCenter = nil
                     persistCameraViewport()
                 }
-                freeformMarqueeStart = nil
-                freeformMarqueeCurrent = nil
-                if activeTool == .pen && activeInkPoints.count >= 2 {
+                interaction.freeformMarqueeStart = nil
+                interaction.freeformMarqueeCurrent = nil
+                if activeTool == .pen && interaction.activeInkPoints.count >= 2 {
                     var nextDoc = document
                     let stroke = InkStroke(
-                        points: activeInkPoints,
+                        points: interaction.activeInkPoints,
                         colorHex: inkColorHex,
                         lineWidth: inkWidth,
                         opacity: 0.92,
                         zIndex: 1000 + nextDoc.inkStrokes.count
                     )
                     nextDoc.inkStrokes.append(stroke)
-                    activeInkPoints = []
+                    interaction.activeInkPoints = []
                     callbacks.onCommitDocument(nextDoc)
+                } else if activeTool == .eraser {
+                    commitPendingErasures()
                 } else {
-                    activeInkPoints = []
-                    // Clean click on empty canvas background deselects nodes, connectors, and text focus
-                    if distance < 4 && activeTool != .eraser {
-                        clearCanvasSelection()
+                    interaction.activeInkPoints = []
+                    // Clean click on background: first hit-test connectors (including unlabeled ones), else deselect
+                    if distance < 4 {
+                        let clickWorld = screenToWorld(value.location)
+                        if (activeTool == .select || activeTool == .connector),
+                           let hitConnector = hitTestConnector(at: clickWorld) {
+                            let wasAlreadySelected = selectedConnectorID == hitConnector.id
+                            selectedNodeIDs.removeAll()
+                            selectedConnectorID = hitConnector.id
+                            if wasAlreadySelected {
+                                connectorLabelDraft = hitConnector.label ?? ""
+                                connectorStyleDraft = hitConnector.style
+                                connectorDashedDraft = hitConnector.dashed
+                                editingConnectorLabelID = hitConnector.id
+                            }
+                        } else {
+                            clearCanvasSelection()
+                        }
                     }
                 }
             }
@@ -1066,9 +1146,9 @@ public struct MoodboardCanvasView: View {
     private func nodeDragGesture(for node: BoardNode) -> some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .named("charkle-freeform-stage"))
             .onChanged { value in
-                guard !node.isLocked, resizingNodeID == nil, rotatingNodeID == nil else { return }
-                if activeNodeDragID == nil {
-                    activeNodeDragID = node.id
+                guard !node.isLocked, interaction.resizingNodeID == nil, interaction.rotatingNodeID == nil else { return }
+                if interaction.activeNodeDragID == nil {
+                    interaction.activeNodeDragID = node.id
                     if !selectedNodeIDs.contains(node.id) {
                         selectedNodeIDs = [node.id]
                     }
@@ -1079,9 +1159,9 @@ public struct MoodboardCanvasView: View {
                             let center = BoardPoint(x: other.frame.midX, y: other.frame.midY)
                             return node.frame.contains(center)
                         }.map(\.id)
-                        activeGroupChildIDs = Set(enclosed)
+                        interaction.activeGroupChildIDs = Set(enclosed)
                     } else {
-                        activeGroupChildIDs = []
+                        interaction.activeGroupChildIDs = []
                     }
                 }
                 var dx = value.translation.width / camera.zoom
@@ -1096,7 +1176,7 @@ public struct MoodboardCanvasView: View {
                 var guidesX: [CGFloat] = []
                 var guidesY: [CGFloat] = []
 
-                let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union([node.id])
+                let movingSet = selectedNodeIDs.union(interaction.activeGroupChildIDs).union([node.id])
                 for other in document.nodes where !movingSet.contains(other.id) {
                     if abs(candidateMinX - other.frame.minX) < snapThreshold {
                         dx = CGFloat(other.frame.minX - node.frame.minX)
@@ -1113,26 +1193,27 @@ public struct MoodboardCanvasView: View {
                         guidesY = [CGFloat(other.frame.midY)]
                     }
                 }
-                snapGuidesX = guidesX
-                snapGuidesY = guidesY
-                activeNodeDragDelta = CGSize(width: dx, height: dy)
+                interaction.snapGuidesX = guidesX
+                interaction.snapGuidesY = guidesY
+                interaction.activeNodeDragDelta = CGSize(width: dx, height: dy)
             }
             .onEnded { _ in
+                let finalDelta = interaction.activeNodeDragDelta
+                let movingSet = selectedNodeIDs.union(interaction.activeGroupChildIDs).union([node.id])
                 defer {
-                    activeNodeDragID = nil
-                    activeNodeDragDelta = .zero
-                    activeGroupChildIDs = []
-                    snapGuidesX = []
-                    snapGuidesY = []
+                    interaction.activeNodeDragID = nil
+                    interaction.activeNodeDragDelta = .zero
+                    interaction.activeGroupChildIDs = []
+                    interaction.snapGuidesX = []
+                    interaction.snapGuidesY = []
                 }
                 guard !node.isLocked,
-                      abs(activeNodeDragDelta.width) > 0.5 || abs(activeNodeDragDelta.height) > 0.5 else { return }
+                      abs(finalDelta.width) > 0.5 || abs(finalDelta.height) > 0.5 else { return }
 
-                let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union([node.id])
                 var nextDoc = document
                 for idx in nextDoc.nodes.indices where movingSet.contains(nextDoc.nodes[idx].id) && !nextDoc.nodes[idx].isLocked {
-                    nextDoc.nodes[idx].frame.x += Double(activeNodeDragDelta.width)
-                    nextDoc.nodes[idx].frame.y += Double(activeNodeDragDelta.height)
+                    nextDoc.nodes[idx].frame.x += Double(finalDelta.width)
+                    nextDoc.nodes[idx].frame.y += Double(finalDelta.height)
                     nextDoc.nodes[idx].updatedAt = Date()
                 }
                 callbacks.onCommitDocument(nextDoc)
@@ -1151,14 +1232,14 @@ public struct MoodboardCanvasView: View {
         case .paletteStrip: (160, 48)
         case .assetRef: (84, 60)
         }
-        let isResizingThis = resizingNodeID == node.id
+        let isResizingThis = interaction.resizingNodeID == node.id
         let isGroupFrame: Bool = if case .groupFrame = node.kind { true } else { false }
 
         return ZStack {
-            // Dedicated Left & Right Side Edge Resize Bars (<|>) for Smart Auto-Layout Group Frames (Img 4)
+            // Dedicated Left & Right Side Edge Resize Bars (<|>) for Smart Auto-Layout Group Frames
             if isGroupFrame {
                 ForEach([-1, 1], id: \.self) { side in
-                    let isActiveEdge = isResizingThis && resizingSideEdge == side
+                    let isActiveEdge = isResizingThis && interaction.resizingSideEdge == side
                     ZStack {
                         Capsule(style: .continuous)
                             .fill(isActiveEdge ? Color.accentColor : Color.white)
@@ -1175,19 +1256,36 @@ public struct MoodboardCanvasView: View {
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .named("charkle-freeform-stage"))
                             .onChanged { value in
-                                if resizingNodeID == nil {
-                                    resizingNodeID = node.id
-                                    resizingSideEdge = side
-                                    resizeStartFrame = node.frame
-                                    liveGroupReflowChildIDs = enclosedChildIDs(in: node)
+                                if interaction.resizingNodeID == nil {
+                                    interaction.resizingNodeID = node.id
+                                    interaction.resizingSideEdge = side
+                                    interaction.resizeStartFrame = node.frame
+                                    interaction.liveGroupReflowChildIDs = enclosedChildIDs(in: node)
                                 }
-                                guard let start = resizeStartFrame else { return }
-                                let dx = Double(value.translation.width / camera.zoom)
-                                let newW = max(minSize.width, start.width + Double(side) * dx)
-                                let newX = side < 0 ? (start.maxX - newW) : start.x
-                                let updatedRect = BoardRect(x: newX, y: start.y, width: newW, height: start.height)
-                                liveResizeFrame = updatedRect
-                                updateLiveGroupReflow(for: updatedRect)
+                                guard let start = interaction.resizeStartFrame else { return }
+                                let stageDX = Double(value.translation.width / camera.zoom)
+                                let stageDY = Double(value.translation.height / camera.zoom)
+                                // Project world drag onto the group frame's local rotated X axis
+                                let rad = node.rotationDegrees * .pi / 180.0
+                                let cosR = cos(rad)
+                                let sinR = sin(rad)
+                                let localDX = stageDX * cosR + stageDY * sinR
+
+                                let newW = max(minSize.width, start.width + Double(side) * localDX)
+                                let deltaW = newW - start.width
+                                let localCenterShiftX = Double(side) * deltaW * 0.5
+                                let newCenterX = start.midX + localCenterShiftX * cosR
+                                let newCenterY = start.midY + localCenterShiftX * sinR
+                                let updatedRect = BoardRect(
+                                    x: newCenterX - newW * 0.5,
+                                    y: newCenterY - start.height * 0.5,
+                                    width: newW,
+                                    height: start.height
+                                )
+                                interaction.liveResizeFrame = updatedRect
+                                if abs(node.rotationDegrees) < 0.1 {
+                                    updateLiveGroupReflow(for: updatedRect)
+                                }
                             }
                             .onEnded { _ in
                                 commitResizeWithGroupReflow(for: node.id)
@@ -1197,8 +1295,8 @@ public struct MoodboardCanvasView: View {
                 }
             }
 
-            ForEach(ResizeCorner.allCases, id: \.self) { corner in
-                let isActiveCorner = isResizingThis && resizingSideEdge == 0 && resizingCorner == corner
+            ForEach(MoodboardResizeCorner.allCases, id: \.self) { corner in
+                let isActiveCorner = isResizingThis && interaction.resizingSideEdge == 0 && interaction.resizingCorner == corner
                 ZStack {
                     Circle()
                         .fill(isActiveCorner ? Color.accentColor : Color.white)
@@ -1209,7 +1307,7 @@ public struct MoodboardCanvasView: View {
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
                 .overlay(alignment: .bottom) {
-                    if isActiveCorner, let live = liveResizeFrame {
+                    if isActiveCorner, let live = interaction.liveResizeFrame {
                         Text("\(Int(live.width.rounded())) × \(Int(live.height.rounded()))")
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .monospacedDigit()
@@ -1229,18 +1327,18 @@ public struct MoodboardCanvasView: View {
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .named("charkle-freeform-stage"))
                         .onChanged { value in
-                            if resizingNodeID == nil {
-                                resizingNodeID = node.id
-                                resizingSideEdge = 0
-                                resizingCorner = corner
-                                resizeStartFrame = node.frame
+                            if interaction.resizingNodeID == nil {
+                                interaction.resizingNodeID = node.id
+                                interaction.resizingSideEdge = 0
+                                interaction.resizingCorner = corner
+                                interaction.resizeStartFrame = node.frame
                                 if case .groupFrame = node.kind {
-                                    liveGroupReflowChildIDs = enclosedChildIDs(in: node)
+                                    interaction.liveGroupReflowChildIDs = enclosedChildIDs(in: node)
                                 } else {
-                                    liveGroupReflowChildIDs = []
+                                    interaction.liveGroupReflowChildIDs = []
                                 }
                             }
-                            guard let start = resizeStartFrame else { return }
+                            guard let start = interaction.resizeStartFrame else { return }
                             let stageDX = Double(value.translation.width / camera.zoom)
                             let stageDY = Double(value.translation.height / camera.zoom)
 
@@ -1290,8 +1388,8 @@ public struct MoodboardCanvasView: View {
                                 width: newW,
                                 height: newH
                             )
-                            liveResizeFrame = updatedRect
-                            if case .groupFrame = node.kind {
+                            interaction.liveResizeFrame = updatedRect
+                            if case .groupFrame = node.kind, abs(node.rotationDegrees) < 0.1 {
                                 updateLiveGroupReflow(for: updatedRect)
                             }
                         }
@@ -1308,12 +1406,20 @@ public struct MoodboardCanvasView: View {
         }
     }
 
-    private func connectorPortsOverlay(node: BoardNode, worldRect: BoardRect, width: CGFloat, height: CGFloat) -> some View {
+    private func connectorPortsOverlay(
+        node: BoardNode,
+        worldRect: BoardRect,
+        width: CGFloat,
+        height: CGFloat,
+        currentRotation: Double,
+        sortedNodes: [BoardNode]
+    ) -> some View {
+        let rectCG = worldRect.cgRect
         let anchors: [(ConnectorAnchor, CGSize, CGPoint)] = [
-            (.top, CGSize(width: 0, height: -height * 0.5), CGPoint(x: worldRect.midX, y: worldRect.minY)),
-            (.bottom, CGSize(width: 0, height: height * 0.5), CGPoint(x: worldRect.midX, y: worldRect.maxY)),
-            (.leading, CGSize(width: -width * 0.5, height: 0), CGPoint(x: worldRect.minX, y: worldRect.midY)),
-            (.trailing, CGSize(width: width * 0.5, height: 0), CGPoint(x: worldRect.maxX, y: worldRect.midY))
+            (.top, CGSize(width: 0, height: -height * 0.5), ConnectorGeometry.anchorPoint(for: rectCG, anchor: .top, towards: rectCG, rotationDegrees: currentRotation)),
+            (.bottom, CGSize(width: 0, height: height * 0.5), ConnectorGeometry.anchorPoint(for: rectCG, anchor: .bottom, towards: rectCG, rotationDegrees: currentRotation)),
+            (.leading, CGSize(width: -width * 0.5, height: 0), ConnectorGeometry.anchorPoint(for: rectCG, anchor: .leading, towards: rectCG, rotationDegrees: currentRotation)),
+            (.trailing, CGSize(width: width * 0.5, height: 0), ConnectorGeometry.anchorPoint(for: rectCG, anchor: .trailing, towards: rectCG, rotationDegrees: currentRotation))
         ]
         return ZStack {
             ForEach(anchors, id: \.0) { anchor, offset, startWorld in
@@ -1332,18 +1438,26 @@ public struct MoodboardCanvasView: View {
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 2, coordinateSpace: .named("charkle-freeform-stage"))
                         .onChanged { value in
-                            if pendingConnectorSource == nil {
-                                pendingConnectorSource = (node.id, anchor, startWorld)
+                            if interaction.pendingConnectorSource == nil {
+                                interaction.pendingConnectorSource = (node.id, anchor, startWorld)
                             }
-                            pendingConnectorCursorWorld = screenToWorld(value.location)
+                            interaction.pendingConnectorCursorWorld = screenToWorld(value.location)
                         }
                         .onEnded { _ in
-                            defer { pendingConnectorSource = nil }
-                            guard let pending = pendingConnectorSource else { return }
-                            let dropWorld = BoardPoint(pendingConnectorCursorWorld)
-                            if let targetNode = document.nodes.first(where: { other in
-                                other.id != pending.nodeID && other.frame.contains(dropWorld)
-                            }) {
+                            defer { interaction.pendingConnectorSource = nil }
+                            guard let pending = interaction.pendingConnectorSource else { return }
+                            let dropCG = interaction.pendingConnectorCursorWorld
+                            // Match topmost node in reverse z-order, preferring non-group cards over background groupFrames
+                            let reversed = sortedNodes.reversed()
+                            let targetNode = reversed.first(where: { other in
+                                guard other.id != pending.nodeID else { return false }
+                                if case .groupFrame = other.kind { return false }
+                                return ConnectorGeometry.containsPoint(dropCG, in: other.frame.cgRect, rotationDegrees: other.rotationDegrees)
+                            }) ?? reversed.first(where: { other in
+                                other.id != pending.nodeID
+                                    && ConnectorGeometry.containsPoint(dropCG, in: other.frame.cgRect, rotationDegrees: other.rotationDegrees)
+                            })
+                            if let targetNode {
                                 var nextDoc = document
                                 let conn = BoardConnector(
                                     fromNodeID: pending.nodeID,
@@ -1355,6 +1469,7 @@ public struct MoodboardCanvasView: View {
                                 )
                                 nextDoc.connectors.append(conn)
                                 selectedConnectorID = conn.id
+                                selectedNodeIDs.removeAll()
                                 callbacks.onCommitDocument(nextDoc)
                             }
                         }
@@ -1363,34 +1478,97 @@ public struct MoodboardCanvasView: View {
         }
     }
 
-    private func eraseNear(worldPoint: CGPoint) {
-        let hitRadius = 18.0 / Double(camera.zoom)
-        var nextDoc = document
-        let oldStrokes = nextDoc.inkStrokes.count
-        nextDoc.inkStrokes.removeAll { stroke in
-            stroke.points.contains { pt in
-                hypot(pt.x - Double(worldPoint.x), pt.y - Double(worldPoint.y)) <= hitRadius
-            }
-        }
-        let oldConnectors = nextDoc.connectors.count
-        let frames = Dictionary(uniqueKeysWithValues: nextDoc.nodes.map { ($0.id, $0.frame.cgRect) })
-        nextDoc.connectors.removeAll { conn in
-            guard let f = frames[conn.fromNodeID], let t = frames[conn.toNodeID] else { return false }
+    private func hitTestConnector(at worldPoint: CGPoint) -> BoardConnector? {
+        let hitThreshold = max(10.0, 12.0 / camera.zoom)
+        let nodesByID = Dictionary(uniqueKeysWithValues: document.nodes.map { ($0.id, $0) })
+        var best: (connector: BoardConnector, distance: CGFloat)?
+        for conn in document.connectors {
+            guard let fromNode = nodesByID[conn.fromNodeID],
+                  let toNode = nodesByID[conn.toNodeID] else { continue }
             let (s, e, c1, c2) = ConnectorGeometry.resolvePathPoints(
-                fromRect: f,
+                fromRect: fromNode.frame.cgRect,
                 fromAnchor: conn.fromAnchor,
                 fromNormalizedPoint: conn.fromNormalizedPoint,
-                toRect: t,
+                fromRotationDegrees: fromNode.rotationDegrees,
+                fromFlipHorizontal: fromNode.flipHorizontal,
+                fromFlipVertical: fromNode.flipVertical,
+                toRect: toNode.frame.cgRect,
                 toAnchor: conn.toAnchor,
                 toNormalizedPoint: conn.toNormalizedPoint,
+                toRotationDegrees: toNode.rotationDegrees,
+                toFlipHorizontal: toNode.flipHorizontal,
+                toFlipVertical: toNode.flipVertical,
                 style: conn.style
             )
-            let mid = ConnectorGeometry.midpoint(start: s, end: e, c1: c1, c2: c2, style: conn.style)
-            return hypot(Double(mid.x) - Double(worldPoint.x), Double(mid.y) - Double(worldPoint.y)) <= hitRadius * 1.4
+            let dist = ConnectorGeometry.distanceToConnector(point: worldPoint, start: s, end: e, c1: c1, c2: c2, style: conn.style)
+            if dist <= hitThreshold {
+                if best == nil || dist < best!.distance {
+                    best = (conn, dist)
+                }
+            }
         }
-        if nextDoc.inkStrokes.count != oldStrokes || nextDoc.connectors.count != oldConnectors {
-            callbacks.onCommitDocument(nextDoc)
+        return best?.connector
+    }
+
+    private func markEraseNear(worldPoint: CGPoint) {
+        let hitRadius = CGFloat(18.0 / Double(camera.zoom))
+        for stroke in document.inkStrokes where !interaction.pendingErasedStrokeIDs.contains(stroke.id) {
+            let pts = stroke.points.map { CGPoint(x: $0.x, y: $0.y) }
+            guard !pts.isEmpty else { continue }
+            var hit = false
+            if pts.count == 1 {
+                hit = hypot(pts[0].x - worldPoint.x, pts[0].y - worldPoint.y) <= hitRadius
+            } else {
+                for i in 0..<(pts.count - 1) {
+                    if ConnectorGeometry.distanceFromPoint(worldPoint, toSegment: pts[i], pts[i + 1]) <= hitRadius {
+                        hit = true
+                        break
+                    }
+                }
+            }
+            if hit {
+                interaction.pendingErasedStrokeIDs.insert(stroke.id)
+            }
         }
+
+        let nodesByID = Dictionary(uniqueKeysWithValues: document.nodes.map { ($0.id, $0) })
+        for conn in document.connectors where !interaction.pendingErasedConnectorIDs.contains(conn.id) {
+            guard let fromNode = nodesByID[conn.fromNodeID],
+                  let toNode = nodesByID[conn.toNodeID] else { continue }
+            let (s, e, c1, c2) = ConnectorGeometry.resolvePathPoints(
+                fromRect: fromNode.frame.cgRect,
+                fromAnchor: conn.fromAnchor,
+                fromNormalizedPoint: conn.fromNormalizedPoint,
+                fromRotationDegrees: fromNode.rotationDegrees,
+                fromFlipHorizontal: fromNode.flipHorizontal,
+                fromFlipVertical: fromNode.flipVertical,
+                toRect: toNode.frame.cgRect,
+                toAnchor: conn.toAnchor,
+                toNormalizedPoint: conn.toNormalizedPoint,
+                toRotationDegrees: toNode.rotationDegrees,
+                toFlipHorizontal: toNode.flipHorizontal,
+                toFlipVertical: toNode.flipVertical,
+                style: conn.style
+            )
+            if ConnectorGeometry.distanceToConnector(point: worldPoint, start: s, end: e, c1: c1, c2: c2, style: conn.style) <= hitRadius {
+                interaction.pendingErasedConnectorIDs.insert(conn.id)
+            }
+        }
+    }
+
+    private func commitPendingErasures() {
+        let erasedStrokes = interaction.pendingErasedStrokeIDs
+        let erasedConnectors = interaction.pendingErasedConnectorIDs
+        interaction.pendingErasedStrokeIDs = []
+        interaction.pendingErasedConnectorIDs = []
+        guard !erasedStrokes.isEmpty || !erasedConnectors.isEmpty else { return }
+        var nextDoc = document
+        nextDoc.inkStrokes.removeAll { erasedStrokes.contains($0.id) }
+        nextDoc.connectors.removeAll { erasedConnectors.contains($0.id) }
+        if let selConn = selectedConnectorID, erasedConnectors.contains(selConn) {
+            selectedConnectorID = nil
+        }
+        callbacks.onCommitDocument(nextDoc)
     }
 
     // MARK: - Shared Node Renderer
@@ -1629,13 +1807,31 @@ public struct MoodboardCanvasView: View {
 
     @ViewBuilder
     private var connectorToolOptionsContent: some View {
-        Picker("", selection: $connectorStyle) {
-            Text("曲线").tag(ConnectorStyle.curved)
-            Text("折线").tag(ConnectorStyle.elbow)
-            Text("直线").tag(ConnectorStyle.straight)
+        HStack(spacing: 6) {
+            Picker("", selection: $connectorStyle) {
+                Text("曲线").tag(ConnectorStyle.curved)
+                Text("折线").tag(ConnectorStyle.elbow)
+                Text("直线").tag(ConnectorStyle.straight)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 120)
+
+            Button {
+                connectorDashed.toggle()
+            } label: {
+                Text("虚线")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(connectorDashed ? Color.accentColor : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        connectorDashed ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06),
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("切换连线实线 / 虚线样式")
         }
-        .pickerStyle(.segmented)
-        .frame(width: 120)
     }
 
     private func floatingToolDock(
@@ -1726,13 +1922,25 @@ public struct MoodboardCanvasView: View {
                     }
                     Divider()
                     Button("复制 2× 高清图（直接 ⌘V 到 Figma / Keynote）") {
-                        callbacks.onCopyExportedImage(currentExportOptions)
+                        let opts = currentExportOptions
+                        Task {
+                            await MoodboardExporter.preloadImages(for: document, loader: loader)
+                            callbacks.onCopyExportedImage(opts)
+                        }
                     }
                     Button("导出 2× Retina PNG…") {
-                        callbacks.onSaveExportedImage(.png, currentExportOptions)
+                        let opts = currentExportOptions
+                        Task {
+                            await MoodboardExporter.preloadImages(for: document, loader: loader)
+                            callbacks.onSaveExportedImage(.png, opts)
+                        }
                     }
                     Button("导出 2× Retina JPG…") {
-                        callbacks.onSaveExportedImage(.jpeg, currentExportOptions)
+                        let opts = currentExportOptions
+                        Task {
+                            await MoodboardExporter.preloadImages(for: document, loader: loader)
+                            callbacks.onSaveExportedImage(.jpeg, opts)
+                        }
                     }
                     Divider()
                     Toggle("包含连线与手绘批注", isOn: $exportIncludeAnnotations)
@@ -1808,12 +2016,21 @@ public struct MoodboardCanvasView: View {
                 .font(.system(size: 12, weight: .semibold))
             TextField("输入说明文字（如：色彩呼应、材质参考）", text: $connectorLabelDraft)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 220)
+                .frame(width: 240)
+            Picker("线型", selection: $connectorStyleDraft) {
+                Text("曲线").tag(ConnectorStyle.curved)
+                Text("折线").tag(ConnectorStyle.elbow)
+                Text("直线").tag(ConnectorStyle.straight)
+            }
+            .pickerStyle(.segmented)
+            Toggle("虚线样式", isOn: $connectorDashedDraft)
+                .font(.system(size: 12))
             HStack {
                 Button("删除连线", role: .destructive) {
                     if let id = editingConnectorLabelID {
                         var nextDoc = document
                         nextDoc.connectors.removeAll { $0.id == id }
+                        if selectedConnectorID == id { selectedConnectorID = nil }
                         callbacks.onCommitDocument(nextDoc)
                     }
                     editingConnectorLabelID = nil
@@ -1825,6 +2042,8 @@ public struct MoodboardCanvasView: View {
                         var nextDoc = document
                         let trimmed = connectorLabelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                         nextDoc.connectors[idx].label = trimmed.isEmpty ? nil : trimmed
+                        nextDoc.connectors[idx].style = connectorStyleDraft
+                        nextDoc.connectors[idx].dashed = connectorDashedDraft
                         nextDoc.connectors[idx].updatedAt = Date()
                         callbacks.onCommitDocument(nextDoc)
                     }
@@ -1842,27 +2061,6 @@ public struct MoodboardCanvasView: View {
         camera.screenToWorld(pt, viewportSize: viewportSize)
     }
 
-    private func effectiveFrame(for node: BoardNode) -> BoardRect {
-        if resizingNodeID == node.id, let live = liveResizeFrame {
-            return live
-        }
-        if let reflowed = liveGroupReflowFrames[node.id] {
-            return reflowed
-        }
-        if activeNodeDragID != nil {
-            let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union(activeNodeDragID.map { [$0] } ?? [])
-            if movingSet.contains(node.id) && !node.isLocked {
-                return BoardRect(
-                    x: node.frame.x + Double(activeNodeDragDelta.width),
-                    y: node.frame.y + Double(activeNodeDragDelta.height),
-                    width: node.frame.width,
-                    height: node.frame.height
-                )
-            }
-        }
-        return node.frame
-    }
-
     private func enclosedChildIDs(in groupNode: BoardNode) -> [UUID] {
         document.nodes.filter { other in
             guard other.id != groupNode.id, !other.isLocked else { return false }
@@ -1873,13 +2071,13 @@ public struct MoodboardCanvasView: View {
     }
 
     private func updateLiveGroupReflow(for groupRect: BoardRect) {
-        guard !liveGroupReflowChildIDs.isEmpty else {
-            liveGroupReflowFrames = [:]
+        guard !interaction.liveGroupReflowChildIDs.isEmpty else {
+            interaction.liveGroupReflowFrames = [:]
             return
         }
-        let idSet = Set(liveGroupReflowChildIDs)
+        let idSet = Set(interaction.liveGroupReflowChildIDs)
         let children = document.nodes.filter { idSet.contains($0.id) }
-        liveGroupReflowFrames = EditorialLayoutSolver.reflowNodesInsideGroupFrame(
+        interaction.liveGroupReflowFrames = EditorialLayoutSolver.reflowNodesInsideGroupFrame(
             groupRect: groupRect,
             childNodes: children,
             assetsByID: assetsByID
@@ -1887,15 +2085,15 @@ public struct MoodboardCanvasView: View {
     }
 
     private func commitResizeWithGroupReflow(for nodeID: UUID) {
-        let finalRect = liveResizeFrame
-        let finalChildren = liveGroupReflowFrames
-        resizingNodeID = nil
-        resizingCorner = nil
-        resizingSideEdge = 0
-        resizeStartFrame = nil
-        liveResizeFrame = nil
-        liveGroupReflowChildIDs = []
-        liveGroupReflowFrames = [:]
+        let finalRect = interaction.liveResizeFrame
+        let finalChildren = interaction.liveGroupReflowFrames
+        interaction.resizingNodeID = nil
+        interaction.resizingCorner = nil
+        interaction.resizingSideEdge = 0
+        interaction.resizeStartFrame = nil
+        interaction.liveResizeFrame = nil
+        interaction.liveGroupReflowChildIDs = []
+        interaction.liveGroupReflowFrames = [:]
 
         guard let finalRect else { return }
         var nextDoc = document
@@ -1966,16 +2164,23 @@ public struct MoodboardCanvasView: View {
     }
 
     private func syncCameraFromDocument() {
-        let initialZoom = max(0.2, min(3.0, CGFloat(document.viewportZoom > 0 ? document.viewportZoom : 1.0)))
+        let rawZoom = (document.viewportZoom.isFinite && document.viewportZoom > 0) ? document.viewportZoom : 1.0
+        let initialZoom = max(0.2, min(3.0, CGFloat(rawZoom)))
         let initialCenter: CGPoint
-        if document.viewportCenter == .zero && !document.nodes.isEmpty {
-            let minX = document.nodes.map(\.frame.minX).min() ?? 0
-            let maxX = document.nodes.map(\.frame.maxX).max() ?? 1000
-            let minY = document.nodes.map(\.frame.minY).min() ?? 0
-            let maxY = document.nodes.map(\.frame.maxY).max() ?? 600
+        let hasFiniteStoredCenter = document.viewportCenter.x.isFinite && document.viewportCenter.y.isFinite
+        if (!hasFiniteStoredCenter || document.viewportCenter == .zero) && !document.nodes.isEmpty {
+            let finiteFrames = document.nodes.map(\.frame).filter {
+                $0.x.isFinite && $0.y.isFinite && $0.width.isFinite && $0.height.isFinite
+            }
+            let minX = finiteFrames.map(\.minX).min() ?? 0
+            let maxX = finiteFrames.map(\.maxX).max() ?? 1000
+            let minY = finiteFrames.map(\.minY).min() ?? 0
+            let maxY = finiteFrames.map(\.maxY).max() ?? 600
             initialCenter = CGPoint(x: (minX + maxX) * 0.5, y: min((minY + maxY) * 0.5, 420))
-        } else {
+        } else if hasFiniteStoredCenter {
             initialCenter = document.viewportCenter.cgPoint
+        } else {
+            initialCenter = CGPoint(x: viewportSize.width * 0.5, y: viewportSize.height * 0.5)
         }
         camera.set(center: initialCenter, zoom: initialZoom)
     }
@@ -2084,12 +2289,13 @@ public struct MoodboardCanvasView: View {
         var seen = Set<UUID>()
         var candidates: [AssetRecord] = []
         for id in boardOtherIDs where seen.insert(id).inserted {
-            if let asset = assetsByID[id], asset.mediaKind == .image || asset.mediaKind == .webBookmark {
+            if let asset = assetsByID[id], !asset.isTrashed, asset.mediaKind == .image || asset.mediaKind == .webBookmark {
                 candidates.append(asset)
             }
         }
         for asset in assetsByID.values.sorted(by: { $0.updatedAt > $1.updatedAt }) where candidates.count < 24 {
             guard asset.id != targetAssetID,
+                  !asset.isTrashed,
                   asset.mediaKind == .image || asset.mediaKind == .webBookmark,
                   seen.insert(asset.id).inserted else { continue }
             candidates.append(asset)
@@ -2308,16 +2514,28 @@ public struct MoodboardCanvasView: View {
         var nextDoc = document
         var changed = false
         if !selectedNodeIDs.isEmpty {
-            let ids = selectedNodeIDs
-            nextDoc.nodes.removeAll { ids.contains($0.id) }
-            nextDoc.connectors.removeAll { ids.contains($0.fromNodeID) || ids.contains($0.toNodeID) }
-            selectedNodeIDs.removeAll()
-            changed = true
+            let removableIDs = Set(
+                nextDoc.nodes
+                    .filter { selectedNodeIDs.contains($0.id) && !$0.isLocked }
+                    .map(\.id)
+            )
+            if !removableIDs.isEmpty {
+                nextDoc.nodes.removeAll { removableIDs.contains($0.id) }
+                nextDoc.connectors.removeAll { removableIDs.contains($0.fromNodeID) || removableIDs.contains($0.toNodeID) }
+                selectedNodeIDs.subtract(removableIDs)
+                if let swapID = swappingNodeID, removableIDs.contains(swapID) {
+                    callbacks.onSelectSwapTarget(nil)
+                }
+                changed = true
+            }
         }
         if let connID = selectedConnectorID {
+            let before = nextDoc.connectors.count
             nextDoc.connectors.removeAll { $0.id == connID }
             selectedConnectorID = nil
-            changed = true
+            if nextDoc.connectors.count != before {
+                changed = true
+            }
         }
         if changed {
             callbacks.onCommitDocument(nextDoc)
@@ -2381,7 +2599,9 @@ public struct MoodboardCanvasView: View {
                 }
                 if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier),
                    let data = await loadData(provider: provider, type: UTType.image) {
-                    externalInputs.append(.imageData(data, suggestedName: "BoardDrop-\(Int(Date().timeIntervalSince1970)).png", sourceURL: nil))
+                    let ext = Self.sniffImageFileExtension(data)
+                    let uniqueSuffix = UUID().uuidString.prefix(8)
+                    externalInputs.append(.imageData(data, suggestedName: "BoardDrop-\(uniqueSuffix).\(ext)", sourceURL: nil))
                     continue
                 }
                 if let text = plainTextCandidate,
@@ -2429,6 +2649,31 @@ public struct MoodboardCanvasView: View {
             }
         }
     }
+
+    private static func sniffImageFileExtension(_ data: Data) -> String {
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.count >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
+            return "png"
+        }
+        if bytes.count >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+            return "jpg"
+        }
+        if bytes.count >= 6 && bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 {
+            return "gif"
+        }
+        if bytes.count >= 12 && bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46
+            && bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50 {
+            return "webp"
+        }
+        if bytes.count >= 4 && ((bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00)
+            || (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)) {
+            return "tiff"
+        }
+        if bytes.count >= 12 && bytes[4] == 0x66 && bytes[5] == 0x74 && bytes[6] == 0x79 && bytes[7] == 0x70 {
+            return "heic"
+        }
+        return "png"
+    }
 }
 
 // MARK: - AppKit Trackpad Scroll, Option/Cmd Zoom, Middle-Mouse Drag Pan & Hold-Space Drag Pan Bridge
@@ -2440,6 +2685,7 @@ private struct FreeformInputBridge: NSViewRepresentable {
     let onZoomDelta: (CGFloat, CGPoint) -> Void
     let onSpacePanStateChanged: (Bool) -> Void
     let onSpaceQuickTap: () -> Void
+    let onKeyCommand: (NSEvent) -> Bool
 
     func makeNSView(context: Context) -> CanvasInputCatcherView {
         let view = CanvasInputCatcherView()
@@ -2449,6 +2695,7 @@ private struct FreeformInputBridge: NSViewRepresentable {
         view.onZoomDelta = onZoomDelta
         view.onSpacePanStateChanged = onSpacePanStateChanged
         view.onSpaceQuickTap = onSpaceQuickTap
+        view.onKeyCommand = onKeyCommand
         return view
     }
 
@@ -2459,6 +2706,7 @@ private struct FreeformInputBridge: NSViewRepresentable {
         nsView.onZoomDelta = onZoomDelta
         nsView.onSpacePanStateChanged = onSpacePanStateChanged
         nsView.onSpaceQuickTap = onSpaceQuickTap
+        nsView.onKeyCommand = onKeyCommand
     }
 }
 
@@ -2475,6 +2723,7 @@ private final class CanvasInputCatcherView: NSView {
     var onZoomDelta: ((CGFloat, CGPoint) -> Void)?
     var onSpacePanStateChanged: ((Bool) -> Void)?
     var onSpaceQuickTap: (() -> Void)?
+    var onKeyCommand: ((NSEvent) -> Bool)?
 
     private var eventMonitor: Any?
     private var resignObserver: NSObjectProtocol?
@@ -2483,6 +2732,7 @@ private final class CanvasInputCatcherView: NSView {
     private var isSpaceHeld = false
     private var isSpaceLeftDragging = false
     private var didDragDuringSpace = false
+    private var spaceDownTimestamp: TimeInterval = 0
     private var lastWindowPoint: NSPoint = .zero
 
     override func viewDidMoveToWindow() {
@@ -2526,6 +2776,16 @@ private final class CanvasInputCatcherView: NSView {
         return false
     }
 
+    private func isPointInsideActiveTextView(_ windowPoint: NSPoint, in window: NSWindow) -> Bool {
+        guard let textView = window.firstResponder as? NSView,
+              textView is NSTextView || textView is NSTextField || textView is NSText else {
+            return false
+        }
+        let targetFrame = textView.enclosingScrollView?.convert(textView.enclosingScrollView?.bounds ?? .zero, to: nil)
+            ?? textView.convert(textView.bounds, to: nil)
+        return targetFrame.contains(windowPoint)
+    }
+
     private func isPointInsideCanvas(_ windowPoint: NSPoint) -> Bool {
         let local = convert(windowPoint, from: nil)
         return bounds.contains(local)
@@ -2535,23 +2795,33 @@ private final class CanvasInputCatcherView: NSView {
         guard !isSuspended else { return event }
         switch event.type {
         case .scrollWheel:
+            guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
             let locInView = convert(event.locationInWindow, from: nil)
             guard bounds.contains(locInView) else { return event }
+            // Let scroll wheel scroll inside an actively edited Sticky Note TextEditor instead of panning canvas
+            if isPointInsideActiveTextView(event.locationInWindow, in: window)
+                && !event.modifierFlags.contains(.option)
+                && !event.modifierFlags.contains(.command) {
+                return event
+            }
             let swiftUIPoint = CGPoint(x: locInView.x, y: bounds.height - locInView.y)
             if event.modifierFlags.contains(.option) || event.modifierFlags.contains(.command) {
-                let factor = max(0.85, min(1.18, 1.0 + event.scrollingDeltaY * 0.008))
+                let sensitivity: CGFloat = event.hasPreciseScrollingDeltas ? 0.008 : 0.08
+                let factor = max(0.82, min(1.22, 1.0 + event.scrollingDeltaY * sensitivity))
                 onZoomDelta?(factor, swiftUIPoint)
             } else {
                 let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
                 onPanDelta?(event.scrollingDeltaX * scale, event.scrollingDeltaY * scale)
             }
-            if event.momentumPhase == .ended || (event.phase == .ended && event.momentumPhase.isEmpty) {
+            let isDiscreteWheel = event.phase.isEmpty && event.momentumPhase.isEmpty
+            if event.momentumPhase == .ended || (event.phase == .ended && event.momentumPhase.isEmpty) || isDiscreteWheel {
                 onPanEnded?()
             }
             return nil
 
         case .otherMouseDown:
             // Middle mouse button (buttonNumber == 2) pans from anywhere over the canvas
+            guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
             guard event.buttonNumber == 2, isPointInsideCanvas(event.locationInWindow) else { return event }
             isMiddleDragging = true
             lastWindowPoint = event.locationInWindow
@@ -2575,21 +2845,28 @@ private final class CanvasInputCatcherView: NSView {
             return nil
 
         case .keyDown:
-            guard event.keyCode == 49 else { return event } // Spacebar
             guard window.attachedSheet == nil && NSApp.modalWindow == nil else { return event }
-            guard event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
             guard !isEditingText(in: window) else { return event }
-            if !isSpaceHeld {
-                isSpaceHeld = true
-                didDragDuringSpace = false
-                onSpacePanStateChanged?(true)
-                NSCursor.openHand.set()
+            if event.keyCode == 49 { // Spacebar
+                guard event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
+                if !isSpaceHeld {
+                    isSpaceHeld = true
+                    didDragDuringSpace = false
+                    spaceDownTimestamp = event.timestamp
+                    onSpacePanStateChanged?(true)
+                    NSCursor.openHand.set()
+                }
+                return nil
             }
-            return nil
+            if !event.isARepeat, onKeyCommand?(event) == true {
+                return nil
+            }
+            return event
 
         case .keyUp:
             guard event.keyCode == 49, isSpaceHeld else { return event }
-            let shouldQuickTap = !didDragDuringSpace
+            let holdDuration = max(0, event.timestamp - spaceDownTimestamp)
+            let shouldQuickTap = !didDragDuringSpace && holdDuration < 0.45
             let wasDragging = isSpaceLeftDragging
             isSpaceHeld = false
             isSpaceLeftDragging = false
@@ -2634,6 +2911,7 @@ private final class CanvasInputCatcherView: NSView {
 
     private func resetActivePanState() {
         let hadPan = isMiddleDragging || isSpaceLeftDragging
+        let wasSpaceHeld = isSpaceHeld
         isMiddleDragging = false
         isSpaceLeftDragging = false
         if isSpaceHeld {
@@ -2641,7 +2919,9 @@ private final class CanvasInputCatcherView: NSView {
             didDragDuringSpace = false
             onSpacePanStateChanged?(false)
         }
-        NSCursor.arrow.set()
+        if hadPan || wasSpaceHeld {
+            NSCursor.arrow.set()
+        }
         if hadPan {
             onPanEnded?()
         }
@@ -2664,7 +2944,117 @@ private final class CanvasInputCatcherView: NSView {
     }
 }
 
-// MARK: - Isolated 120fps Freeform Camera, Hover State & GPU-Accelerated Leaf Views
+// MARK: - Isolated 120fps Freeform Camera, Interaction, Hover State & GPU-Accelerated Leaf Views
+
+private enum MoodboardResizeCorner: CaseIterable {
+    case topLeading
+    case topTrailing
+    case bottomLeading
+    case bottomTrailing
+
+    var signX: Double {
+        switch self {
+        case .topLeading, .bottomLeading: -1
+        case .topTrailing, .bottomTrailing: 1
+        }
+    }
+
+    var signY: Double {
+        switch self {
+        case .topLeading, .topTrailing: -1
+        case .bottomLeading, .bottomTrailing: 1
+        }
+    }
+}
+
+/// Decoupled `@Observable` live-gesture state so 60-120Hz dragging, resizing, rotating,
+/// ink drawing, connector dragging, and marquee selection ONLY invalidate the exact layer
+/// that consumes those properties (never `MoodboardCanvasView.body` or toolbars).
+@Observable
+private final class FreeformInteractionState {
+    var activeNodeDragID: UUID?
+    var activeNodeDragDelta: CGSize = .zero
+    var activeGroupChildIDs: Set<UUID> = []
+    var snapGuidesX: [CGFloat] = []
+    var snapGuidesY: [CGFloat] = []
+
+    var resizingNodeID: UUID?
+    var resizingCorner: MoodboardResizeCorner?
+    var resizeStartFrame: BoardRect?
+    var liveResizeFrame: BoardRect?
+    var liveGroupReflowChildIDs: [UUID] = []
+    var liveGroupReflowFrames: [UUID: BoardRect] = [:]
+    var resizingSideEdge: Int = 0 // -1 leading, +1 trailing, 0 corner
+
+    var rotatingNodeID: UUID?
+    var rotationStartDegrees: Double = 0
+    var rotationDragStartAngle: Double = 0
+    var liveRotationDegrees: Double?
+
+    var pendingConnectorSource: (nodeID: UUID, anchor: ConnectorAnchor, startWorld: CGPoint)?
+    var pendingConnectorCursorWorld: CGPoint = .zero
+
+    var activeInkPoints: [InkStrokePoint] = []
+    var pendingErasedStrokeIDs: Set<UUID> = []
+    var pendingErasedConnectorIDs: Set<UUID> = []
+
+    var freeformMarqueeStart: CGPoint?
+    var freeformMarqueeCurrent: CGPoint?
+
+    func effectiveFrame(for node: BoardNode, selectedNodeIDs: Set<UUID>) -> BoardRect {
+        if resizingNodeID == node.id, let live = liveResizeFrame {
+            return live
+        }
+        if let reflowed = liveGroupReflowFrames[node.id] {
+            return reflowed
+        }
+        if let dragID = activeNodeDragID {
+            let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union([dragID])
+            if movingSet.contains(node.id) && !node.isLocked {
+                return BoardRect(
+                    x: node.frame.x + Double(activeNodeDragDelta.width),
+                    y: node.frame.y + Double(activeNodeDragDelta.height),
+                    width: node.frame.width,
+                    height: node.frame.height
+                )
+            }
+        }
+        return node.frame
+    }
+
+    func effectiveRotation(for node: BoardNode) -> Double {
+        if rotatingNodeID == node.id, let live = liveRotationDegrees {
+            return live
+        }
+        return node.rotationDegrees
+    }
+
+    func resetAll() {
+        activeNodeDragID = nil
+        activeNodeDragDelta = .zero
+        activeGroupChildIDs = []
+        snapGuidesX = []
+        snapGuidesY = []
+        resizingNodeID = nil
+        resizingCorner = nil
+        resizeStartFrame = nil
+        liveResizeFrame = nil
+        liveGroupReflowChildIDs = []
+        liveGroupReflowFrames = [:]
+        resizingSideEdge = 0
+        rotatingNodeID = nil
+        rotationStartDegrees = 0
+        rotationDragStartAngle = 0
+        liveRotationDegrees = nil
+        pendingConnectorSource = nil
+        pendingConnectorCursorWorld = .zero
+        activeInkPoints = []
+        pendingErasedStrokeIDs = []
+        pendingErasedConnectorIDs = []
+        freeformMarqueeStart = nil
+        freeformMarqueeCurrent = nil
+    }
+}
 
 /// Decoupled `@Observable` camera state so high-frequency trackpad scroll/zoom ticks ONLY update
 /// the GPU dot-grid offset and single container transform, leaving toolbars and node views untouched.
@@ -2680,42 +3070,54 @@ private final class FreeformCameraState {
 
     private static let bucketWorldStep: CGFloat = 240
     private static let bucketZoomStep: CGFloat = 0.15
+    private static let maxWorldCoord: CGFloat = 1_000_000
+
+    private static func sanitizedPoint(_ point: CGPoint, fallback: CGPoint) -> CGPoint {
+        CGPoint(
+            x: point.x.isFinite ? max(-maxWorldCoord, min(maxWorldCoord, point.x)) : fallback.x,
+            y: point.y.isFinite ? max(-maxWorldCoord, min(maxWorldCoord, point.y)) : fallback.y
+        )
+    }
+
+    private static func sanitizedZoom(_ value: CGFloat, fallback: CGFloat = 1.0) -> CGFloat {
+        guard value.isFinite, value > 0 else { return fallback }
+        return max(0.2, min(3.0, value))
+    }
 
     func set(center: CGPoint, zoom: CGFloat) {
-        self.center = center
-        self.zoom = max(0.2, min(3.0, zoom))
+        self.center = Self.sanitizedPoint(center, fallback: self.center)
+        self.zoom = Self.sanitizedZoom(zoom, fallback: self.zoom)
         refreshCullBucketsIfNeeded()
     }
 
     func setCenter(_ nextCenter: CGPoint) {
-        self.center = nextCenter
+        self.center = Self.sanitizedPoint(nextCenter, fallback: self.center)
         refreshCullBucketsIfNeeded()
     }
 
     func setZoom(_ nextZoom: CGFloat) {
-        self.zoom = max(0.2, min(3.0, nextZoom))
+        self.zoom = Self.sanitizedZoom(nextZoom, fallback: self.zoom)
         refreshCullBucketsIfNeeded()
     }
 
     func panBy(screenDX: CGFloat, screenDY: CGFloat) {
-        guard screenDX != 0 || screenDY != 0 else { return }
-        center = CGPoint(
+        guard screenDX.isFinite, screenDY.isFinite, screenDX != 0 || screenDY != 0 else { return }
+        setCenter(CGPoint(
             x: center.x - screenDX / zoom,
             y: center.y - screenDY / zoom
-        )
-        refreshCullBucketsIfNeeded()
+        ))
     }
 
     func applyZoom(factor: CGFloat, anchorScreenPoint: CGPoint, viewportSize: CGSize) {
+        guard factor.isFinite, factor > 0, anchorScreenPoint.x.isFinite, anchorScreenPoint.y.isFinite else { return }
         let worldBefore = screenToWorld(anchorScreenPoint, viewportSize: viewportSize)
-        let nextZoom = max(0.2, min(3.0, zoom * factor))
+        let nextZoom = Self.sanitizedZoom(zoom * factor, fallback: zoom)
         zoom = nextZoom
         let worldAfter = screenToWorld(anchorScreenPoint, viewportSize: viewportSize)
-        center = CGPoint(
+        setCenter(CGPoint(
             x: center.x + (worldBefore.x - worldAfter.x),
             y: center.y + (worldBefore.y - worldAfter.y)
-        )
-        refreshCullBucketsIfNeeded()
+        ))
     }
 
     func worldToScreen(_ pt: CGPoint, viewportSize: CGSize) -> CGPoint {
@@ -2759,9 +3161,12 @@ private final class FreeformCameraState {
     }
 
     private func refreshCullBucketsIfNeeded() {
-        let bx = Int(floor(center.x / Self.bucketWorldStep))
-        let by = Int(floor(center.y / Self.bucketWorldStep))
-        let bz = max(1, Int(floor(zoom / Self.bucketZoomStep)))
+        let safeX = center.x.isFinite ? max(-Self.maxWorldCoord, min(Self.maxWorldCoord, center.x)) : 0
+        let safeY = center.y.isFinite ? max(-Self.maxWorldCoord, min(Self.maxWorldCoord, center.y)) : 0
+        let safeZ = Self.sanitizedZoom(zoom)
+        let bx = Int(floor(safeX / Self.bucketWorldStep))
+        let by = Int(floor(safeY / Self.bucketWorldStep))
+        let bz = max(1, Int(floor(safeZ / Self.bucketZoomStep)))
         if bx != cullBucketX { cullBucketX = bx }
         if by != cullBucketY { cullBucketY = by }
         if bz != cullZoomBucket { cullZoomBucket = bz }
@@ -2938,14 +3343,14 @@ private struct FreeformCameraViewport<Content: View>: View {
     }
 }
 
-/// Static world-space node stage: NEVER reads continuous `camera.center` / `camera.zoom`.
+/// Static world-space node stage: NEVER reads continuous `camera.center` / `camera.zoom`
+/// or unrelated pen/marquee/connector interaction state.
 private struct FreeformWorldNodesLayer<NodeView: View>: View {
     let camera: FreeformCameraState
+    let interaction: FreeformInteractionState
     let viewportSize: CGSize
     let sortedNodes: [BoardNode]
-    let nodeFramesMap: [UUID: BoardRect]
     let selectedNodeIDs: Set<UUID>
-    let effectiveRotation: (BoardNode) -> Double
     let allowNodeHitTesting: Bool
     let onHoverChanged: (UUID, Bool) -> Void
     @ViewBuilder let nodeBuilder: (BoardNode) -> NodeView
@@ -2957,7 +3362,7 @@ private struct FreeformWorldNodesLayer<NodeView: View>: View {
             }
             let visibleWorld = camera.bucketedVisibleWorldRect(viewportSize: viewportSize, overscan: 600)
             return sortedNodes.filter { node in
-                let rect = nodeFramesMap[node.id] ?? node.frame
+                let rect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
                 return rect.cgRect.intersects(visibleWorld) || selectedNodeIDs.contains(node.id)
             }
         }()
@@ -2968,10 +3373,10 @@ private struct FreeformWorldNodesLayer<NodeView: View>: View {
                 .allowsHitTesting(false)
 
             ForEach(visibleNodes) { node in
-                let worldRect = nodeFramesMap[node.id] ?? node.frame
+                let worldRect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
                 let worldW = max(24, CGFloat(worldRect.width))
                 let worldH = max(24, CGFloat(worldRect.height))
-                let rot = effectiveRotation(node)
+                let rot = interaction.effectiveRotation(for: node)
 
                 nodeBuilder(node)
                     .frame(width: worldW, height: worldH)
@@ -2986,17 +3391,16 @@ private struct FreeformWorldNodesLayer<NodeView: View>: View {
     }
 }
 
-/// Screen-space constant-size handles for ONLY selected/hovered nodes (skips observing `camera` when idle).
+/// Screen-space constant-size handles for ONLY visible selected/hovered nodes (culled in connector mode).
 private struct FreeformSelectionHandlesLayer<HandleContent: View>: View {
     let camera: FreeformCameraState
     let hoverState: FreeformHoverState
+    let interaction: FreeformInteractionState
     let viewportSize: CGSize
     let sortedNodes: [BoardNode]
-    let nodeFramesMap: [UUID: BoardRect]
     let selectedNodeIDs: Set<UUID>
     let activeTool: MoodboardTool
     let isSpaceKeyPanning: Bool
-    let effectiveRotation: (BoardNode) -> Double
     @ViewBuilder let overlayBuilder: (BoardNode, BoardRect, CGPoint, CGFloat, CGFloat, Double, Bool, Bool) -> HandleContent
 
     var body: some View {
@@ -3004,31 +3408,36 @@ private struct FreeformSelectionHandlesLayer<HandleContent: View>: View {
             EmptyView()
         } else {
             let hovered = hoverState.effectiveHoveredNodeID
-            let activeNodes: [BoardNode] = if activeTool == .connector {
-                sortedNodes
-            } else if selectedNodeIDs.isEmpty && hovered == nil {
-                []
-            } else {
-                sortedNodes.filter { selectedNodeIDs.contains($0.id) || $0.id == hovered }
-            }
+            let activeNodes: [BoardNode] = {
+                if activeTool == .connector {
+                    let visibleWorld = camera.bucketedVisibleWorldRect(viewportSize: viewportSize, overscan: 240)
+                    return sortedNodes.filter { node in
+                        let rect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
+                        return rect.cgRect.intersects(visibleWorld) || selectedNodeIDs.contains(node.id)
+                    }
+                }
+                if selectedNodeIDs.isEmpty && hovered == nil {
+                    return []
+                }
+                return sortedNodes.filter { selectedNodeIDs.contains($0.id) || $0.id == hovered }
+            }()
 
             if !activeNodes.isEmpty {
                 let zoom = camera.zoom
                 ZStack {
                     ForEach(activeNodes) { node in
-                        if let worldRect = nodeFramesMap[node.id] {
-                            let screenCenter = camera.worldToScreen(CGPoint(x: worldRect.midX, y: worldRect.midY), viewportSize: viewportSize)
-                            let screenW = max(24, CGFloat(worldRect.width) * zoom)
-                            let screenH = max(24, CGFloat(worldRect.height) * zoom)
-                            let isSelected = selectedNodeIDs.contains(node.id)
-                            let isHovered = hovered == node.id
-                            let rot = effectiveRotation(node)
+                        let worldRect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
+                        let screenCenter = camera.worldToScreen(CGPoint(x: worldRect.midX, y: worldRect.midY), viewportSize: viewportSize)
+                        let screenW = max(24, CGFloat(worldRect.width) * zoom)
+                        let screenH = max(24, CGFloat(worldRect.height) * zoom)
+                        let isSelected = selectedNodeIDs.contains(node.id)
+                        let isHovered = hovered == node.id
+                        let rot = interaction.effectiveRotation(for: node)
 
-                            overlayBuilder(node, worldRect, screenCenter, screenW, screenH, rot, isSelected, isHovered)
-                                .frame(width: screenW + 44, height: screenH + 88)
-                                .rotationEffect(.degrees(rot))
-                                .position(screenCenter)
-                        }
+                        overlayBuilder(node, worldRect, screenCenter, screenW, screenH, rot, isSelected, isHovered)
+                            .frame(width: screenW + 44, height: screenH + 88)
+                            .rotationEffect(.degrees(rot))
+                            .position(screenCenter)
                     }
                 }
             }
@@ -3036,23 +3445,28 @@ private struct FreeformSelectionHandlesLayer<HandleContent: View>: View {
     }
 }
 
-/// Vector overlay for snap guides, connectors, and ink strokes — completely skipped when empty.
+/// Vector overlay for snap guides, connectors, and ink strokes — isolated from MoodboardCanvasView.body.
 private struct FreeformVectorOverlay: View {
     let camera: FreeformCameraState
+    let interaction: FreeformInteractionState
     let viewportSize: CGSize
+    let nodesByID: [UUID: BoardNode]
+    let selectedNodeIDs: Set<UUID>
     let connectors: [BoardConnector]
     let inkStrokes: [InkStroke]
-    let activeInkPoints: [InkStrokePoint]
     let inkColorHex: String
     let inkWidth: Double
     let selectedConnectorID: UUID?
-    let pendingConnectorSource: (nodeID: UUID, anchor: ConnectorAnchor, startWorld: CGPoint)?
-    let pendingConnectorCursorWorld: CGPoint
-    let snapGuidesX: [CGFloat]
-    let snapGuidesY: [CGFloat]
-    let nodeFramesMap: [UUID: BoardRect]
 
     var body: some View {
+        let activeInkPoints = interaction.activeInkPoints
+        let pendingConnectorSource = interaction.pendingConnectorSource
+        let pendingConnectorCursorWorld = interaction.pendingConnectorCursorWorld
+        let snapGuidesX = interaction.snapGuidesX
+        let snapGuidesY = interaction.snapGuidesY
+        let erasedStrokes = interaction.pendingErasedStrokeIDs
+        let erasedConnectors = interaction.pendingErasedConnectorIDs
+
         let hasVectors = !connectors.isEmpty
             || !inkStrokes.isEmpty
             || activeInkPoints.count >= 2
@@ -3093,19 +3507,27 @@ private struct FreeformVectorOverlay: View {
                 }
 
                 // 2. Connectors & pending connector drag preview
-                for connector in connectors {
-                    guard let fromR = nodeFramesMap[connector.fromNodeID],
-                          let toR = nodeFramesMap[connector.toNodeID] else { continue }
-                    let bounds = fromR.cgRect.union(toR.cgRect).insetBy(dx: -80, dy: -80)
+                for connector in connectors where !erasedConnectors.contains(connector.id) {
+                    guard let fromNode = nodesByID[connector.fromNodeID],
+                          let toNode = nodesByID[connector.toNodeID] else { continue }
+                    let fromR = interaction.effectiveFrame(for: fromNode, selectedNodeIDs: selectedNodeIDs)
+                    let toR = interaction.effectiveFrame(for: toNode, selectedNodeIDs: selectedNodeIDs)
+                    let bounds = fromR.cgRect.union(toR.cgRect).insetBy(dx: -120, dy: -120)
                     guard bounds.intersects(visibleWorld) else { continue }
 
                     let (startW, endW, c1W, c2W) = ConnectorGeometry.resolvePathPoints(
                         fromRect: fromR.cgRect,
                         fromAnchor: connector.fromAnchor,
                         fromNormalizedPoint: connector.fromNormalizedPoint,
+                        fromRotationDegrees: interaction.effectiveRotation(for: fromNode),
+                        fromFlipHorizontal: fromNode.flipHorizontal,
+                        fromFlipVertical: fromNode.flipVertical,
                         toRect: toR.cgRect,
                         toAnchor: connector.toAnchor,
                         toNormalizedPoint: connector.toNormalizedPoint,
+                        toRotationDegrees: interaction.effectiveRotation(for: toNode),
+                        toFlipHorizontal: toNode.flipHorizontal,
+                        toFlipVertical: toNode.flipVertical,
                         style: connector.style
                     )
                     let start = toScreen(startW)
@@ -3196,10 +3618,11 @@ private struct FreeformVectorOverlay: View {
                 }
 
                 // 3. Ink strokes
+                let visiblePersistedStrokes = inkStrokes.filter { !erasedStrokes.contains($0.id) }
                 let allStrokes: [InkStroke] = if activeInkPoints.count >= 2 {
-                    inkStrokes + [InkStroke(points: activeInkPoints, colorHex: inkColorHex, lineWidth: inkWidth)]
+                    visiblePersistedStrokes + [InkStroke(points: activeInkPoints, colorHex: inkColorHex, lineWidth: inkWidth)]
                 } else {
-                    inkStrokes
+                    visiblePersistedStrokes
                 }
 
                 for stroke in allStrokes where stroke.points.count >= 2 {
@@ -3207,16 +3630,21 @@ private struct FreeformVectorOverlay: View {
                     var minY = Double.greatestFiniteMagnitude
                     var maxX = -Double.greatestFiniteMagnitude
                     var maxY = -Double.greatestFiniteMagnitude
-                    for pt in stroke.points {
+                    for pt in stroke.points where pt.x.isFinite && pt.y.isFinite {
                         if pt.x < minX { minX = pt.x }
                         if pt.y < minY { minY = pt.y }
                         if pt.x > maxX { maxX = pt.x }
                         if pt.y > maxY { maxY = pt.y }
                     }
+                    guard minX.isFinite, minY.isFinite, maxX.isFinite, maxY.isFinite else { continue }
                     let box = CGRect(x: minX - 12, y: minY - 12, width: (maxX - minX) + 24, height: (maxY - minY) + 24)
                     guard box.intersects(visibleWorld) else { continue }
 
-                    let screenPts = stroke.points.map { toScreen(CGPoint(x: $0.x, y: $0.y)) }
+                    let screenPts = stroke.points.compactMap { pt -> CGPoint? in
+                        guard pt.x.isFinite, pt.y.isFinite else { return nil }
+                        return toScreen(CGPoint(x: pt.x, y: pt.y))
+                    }
+                    guard screenPts.count >= 2 else { continue }
                     var path = Path()
                     path.move(to: screenPts[0])
                     if screenPts.count == 2 {
@@ -3252,9 +3680,11 @@ private struct FreeformVectorOverlay: View {
 private struct FreeformConnectorLabelsLayer: View {
     @Environment(\.colorScheme) private var colorScheme
     let camera: FreeformCameraState
+    let interaction: FreeformInteractionState
     let viewportSize: CGSize
+    let nodesByID: [UUID: BoardNode]
+    let selectedNodeIDs: Set<UUID>
     let connectors: [BoardConnector]
-    let nodeFramesMap: [UUID: BoardRect]
     let selectedConnectorID: UUID?
     let activeTool: MoodboardTool
     let onSelectConnector: (BoardConnector) -> Void
@@ -3262,18 +3692,28 @@ private struct FreeformConnectorLabelsLayer: View {
     var body: some View {
         let visibleWorld = camera.visibleWorldRect(viewportSize: viewportSize, overscan: 120)
         let zoom = camera.zoom
+        let erasedConnectors = interaction.pendingErasedConnectorIDs
 
         ZStack {
             ForEach(connectors) { connector in
-                if let fromR = nodeFramesMap[connector.fromNodeID],
-                   let toR = nodeFramesMap[connector.toNodeID] {
+                if !erasedConnectors.contains(connector.id),
+                   let fromNode = nodesByID[connector.fromNodeID],
+                   let toNode = nodesByID[connector.toNodeID] {
+                    let fromR = interaction.effectiveFrame(for: fromNode, selectedNodeIDs: selectedNodeIDs)
+                    let toR = interaction.effectiveFrame(for: toNode, selectedNodeIDs: selectedNodeIDs)
                     let (start, end, c1, c2) = ConnectorGeometry.resolvePathPoints(
                         fromRect: fromR.cgRect,
                         fromAnchor: connector.fromAnchor,
                         fromNormalizedPoint: connector.fromNormalizedPoint,
+                        fromRotationDegrees: interaction.effectiveRotation(for: fromNode),
+                        fromFlipHorizontal: fromNode.flipHorizontal,
+                        fromFlipVertical: fromNode.flipVertical,
                         toRect: toR.cgRect,
                         toAnchor: connector.toAnchor,
                         toNormalizedPoint: connector.toNormalizedPoint,
+                        toRotationDegrees: interaction.effectiveRotation(for: toNode),
+                        toFlipHorizontal: toNode.flipHorizontal,
+                        toFlipVertical: toNode.flipVertical,
                         style: connector.style
                     )
                     let midWorld = ConnectorGeometry.midpoint(start: start, end: end, c1: c1, c2: c2, style: connector.style)
@@ -3313,6 +3753,28 @@ private struct FreeformConnectorLabelsLayer: View {
                         .allowsHitTesting(activeTool == .select || activeTool == .connector)
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Isolated marquee selection box so dragging a selection rectangle never re-evaluates MoodboardCanvasView.body.
+private struct FreeformMarqueeOverlay: View {
+    let interaction: FreeformInteractionState
+
+    var body: some View {
+        if let s = interaction.freeformMarqueeStart, let c = interaction.freeformMarqueeCurrent {
+            let rect = CGRect(x: min(s.x, c.x), y: min(s.y, c.y), width: abs(c.x - s.x), height: abs(c.y - s.y))
+            if rect.width > 3 || rect.height > 3 {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.11))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.68), lineWidth: 1)
+                    )
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+                    .allowsHitTesting(false)
             }
         }
     }

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 import {
   arrayBufferToBase64,
@@ -10,6 +11,7 @@ import {
   CharkleApiError,
   createCharkleClient,
   createOrReuseFolder,
+  DEFAULT_DESKTOP_PROBE_PORTS,
   fetchExistingSources,
   ingestImageUrl,
   ingestImageUrlsBatch,
@@ -486,4 +488,434 @@ test('API client supports desktop probing, zero-config auto-pairing, folder crea
       return createJsonResponse({ boards: [] });
     },
   });
+});
+
+// MARK: - 6. Regression Tests: Port Range, Context Menus, Desktop Auto-Heal & XHS Likes Tags
+
+test('probeLocalDesktop default port range matches LocalExtensionBridgeServer (41937..41946)', async () => {
+  assert.deepEqual(DEFAULT_DESKTOP_PROBE_PORTS, [
+    41937, 41938, 41939, 41940, 41941, 41942, 41943, 41944, 41945, 41946,
+  ]);
+
+  const probedPorts = [];
+  const probe = await probeLocalDesktop({
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      const port = Number(parsed.port);
+      probedPorts.push(port);
+      if (port === 41946) {
+        return createJsonResponse({
+          ok: true,
+          app: 'charkle-macos',
+          name: 'Charkle macOS',
+          port: 41946,
+          autoPair: true,
+        });
+      }
+      throw new Error('ECONNREFUSED');
+    },
+  });
+
+  assert.deepEqual(probedPorts, [
+    41937, 41938, 41939, 41940, 41941, 41942, 41943, 41944, 41945, 41946,
+  ]);
+  assert.equal(probe.found, true);
+  assert.equal(probe.port, 41946);
+  assert.equal(probe.serverUrl, 'http://127.0.0.1:41946');
+});
+
+test('registerContextMenus supports both Promise-based browser.* and callback-based chrome.*', async () => {
+  const bg = await import('../background.js?test=context-menus');
+
+  // 1. Promise-only browser.contextMenus (throws TypeError if callback argument is passed)
+  const promiseCreated = [];
+  const promiseApi = {
+    runtime: {},
+    contextMenus: {
+      removeAll(...args) {
+        if (args.length > 0) {
+          throw new TypeError('contextMenus.removeAll: Expected at most 0 arguments');
+        }
+        return Promise.resolve();
+      },
+      create(item, ...rest) {
+        if (rest.length > 0) {
+          throw new TypeError('unexpected callback in promise mode');
+        }
+        promiseCreated.push(item.id);
+        return item.id;
+      },
+    },
+  };
+  await bg.registerContextMenus(promiseApi, { preferPromise: true });
+  assert.equal(promiseCreated.length, 5);
+  assert.deepEqual(promiseCreated, [
+    'charkle-save-image',
+    'charkle-save-link',
+    'charkle-save-selection',
+    'charkle-save-page',
+    'charkle-capture-visible',
+  ]);
+
+  // 2. Callback-based chrome.contextMenus
+  const callbackCreated = [];
+  const callbackApi = {
+    runtime: { lastError: null },
+    contextMenus: {
+      removeAll(cb) {
+        assert.equal(typeof cb, 'function');
+        cb();
+      },
+      create(item, cb) {
+        assert.equal(typeof cb, 'function');
+        callbackCreated.push(item.id);
+        cb();
+      },
+    },
+  };
+  bg.registerContextMenus(callbackApi, { preferPromise: false });
+  assert.equal(callbackCreated.length, 5);
+
+  // 3. Fallback when callback-style call throws on a Promise-only removeAll()
+  const fallbackCreated = [];
+  const fallbackApi = {
+    runtime: {},
+    contextMenus: {
+      removeAll(...args) {
+        if (args.length > 0) {
+          throw new TypeError('callback not allowed');
+        }
+        return Promise.resolve();
+      },
+      create(item) {
+        fallbackCreated.push(item.id);
+      },
+    },
+  };
+  await bg.registerContextMenus(fallbackApi, { preferPromise: false });
+  assert.equal(fallbackCreated.length, 5);
+});
+
+test('background auto-heals screenshot, page capture, all 5 context menus, and batch image save on stale desktop token/port', async () => {
+  const prevBrowser = globalThis.browser;
+  const prevChrome = globalThis.chrome;
+  const prevFetch = globalThis.fetch;
+
+  const mem = new Map();
+  let captureCalls = 0;
+  const toasts = [];
+  const ingestCalls = [];
+  let forceNonRetryableBatchError = false;
+
+  const mockChrome = {
+    storage: {
+      local: {
+        async get(key) {
+          return { [key]: mem.get(key) };
+        },
+        async set(obj) {
+          for (const [k, v] of Object.entries(obj)) mem.set(k, v);
+        },
+      },
+    },
+    action: {
+      setBadgeText() {},
+      setBadgeBackgroundColor() {},
+      setBadgeTextColor() {},
+    },
+    tabs: {
+      async sendMessage(_tabId, payload) {
+        if (payload?.type === 'CHARKLE_TOAST') {
+          toasts.push(payload);
+        }
+        return { ok: true };
+      },
+      async captureVisibleTab(_windowId, _opts) {
+        captureCalls += 1;
+        return 'data:image/png;base64,iVBORw0KGgo=';
+      },
+      async query() {
+        return [{ id: 11, windowId: 7, url: 'https://example.org/post', title: 'Example Post' }];
+      },
+    },
+    runtime: {
+      lastError: null,
+      getURL: (p) => `chrome-extension://test/${p}`,
+      sendMessage: async () => ({ ok: true }),
+      openOptionsPage() {},
+      onInstalled: { addListener() {} },
+      onStartup: { addListener() {} },
+      onMessage: { addListener() {} },
+    },
+    contextMenus: {
+      removeAll(cb) {
+        cb?.();
+      },
+      create(_item, cb) {
+        cb?.();
+      },
+      onClicked: { addListener() {} },
+    },
+    commands: {
+      onCommand: { addListener() {} },
+    },
+    notifications: {
+      create(_opts, cb) {
+        cb?.();
+      },
+    },
+  };
+
+  const seedStaleDesktopConfig = async () => {
+    await saveConfig(
+      {
+        connectionMode: 'desktop',
+        serverUrl: 'http://127.0.0.1:41937',
+        apiToken: 'stale_token',
+        targetMode: 'inbox',
+      },
+      mockChrome.storage.local,
+    );
+  };
+
+  globalThis.browser = undefined;
+  globalThis.chrome = mockChrome;
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(url);
+    const auth = init.headers?.Authorization || init.headers?.authorization || '';
+
+    // External image URLs fail fetchImageBytes so ingestImageUrl falls back to ingestUrl on bridge
+    if (parsed.hostname === 'cdn.example.org') {
+      throw new Error('Blocked external fetch in test');
+    }
+
+    // Old port 41937 rejects with 401 (stale token) or refuses health probe
+    if (parsed.port === '41937') {
+      if (parsed.pathname === '/api/v1/health') {
+        throw new Error('ECONNREFUSED');
+      }
+      if (forceNonRetryableBatchError && parsed.pathname === '/api/v1/assets/ingest') {
+        return createJsonResponse({ error: '图片解码失败', code: 'DECODE_FAILED' }, 500);
+      }
+      return createJsonResponse({ error: '访问令牌已失效', code: 'UNAUTHORIZED' }, 401);
+    }
+
+    // Active desktop bridge moved to port 41945 with new token
+    if (parsed.port === '41945') {
+      if (parsed.pathname === '/api/v1/health') {
+        return createJsonResponse({
+          ok: true,
+          app: 'charkle-macos',
+          name: 'Charkle macOS',
+          port: 41945,
+          autoPair: true,
+        });
+      }
+      if (parsed.pathname === '/api/v1/auth/local-pair') {
+        return createJsonResponse({
+          ok: true,
+          app: 'charkle-macos',
+          name: 'Charkle macOS',
+          port: 41945,
+          serverUrl: 'http://127.0.0.1:41945',
+          token: 'healed_token_41945',
+        });
+      }
+      if (auth !== 'Bearer healed_token_41945') {
+        return createJsonResponse({ error: 'Unauthorized', code: 'UNAUTHORIZED' }, 401);
+      }
+      if (parsed.pathname === '/api/v1/auth/status') {
+        return createJsonResponse({
+          initialized: true,
+          authenticated: true,
+          user: { username: 'desktop', displayName: 'Charkle macOS' },
+        });
+      }
+      if (parsed.pathname === '/api/v1/folders') {
+        return createJsonResponse({ folders: [] });
+      }
+      if (parsed.pathname === '/api/v1/boards') {
+        return createJsonResponse({ boards: [] });
+      }
+      if (parsed.pathname === '/api/v1/assets/ingest') {
+        const body = JSON.parse(init.body);
+        ingestCalls.push({ port: parsed.port, type: body.inputs?.[0]?.type });
+        return createJsonResponse({ assets: [{ id: 'A-HEALED', title: 'Healed Asset' }] }, 201);
+      }
+    }
+
+    throw new Error('ECONNREFUSED');
+  };
+
+  try {
+    const bg = await import('../background.js?test=autoheal');
+    const tab = { id: 11, windowId: 7, url: 'https://example.org/article', title: 'Design Notes' };
+
+    // 1. CAPTURE_VISIBLE_TAB auto-heals and only captures screenshot once
+    await seedStaleDesktopConfig();
+    captureCalls = 0;
+    const shotRes = await bg.handleMessage({ type: 'CAPTURE_VISIBLE_TAB', tab }, {});
+    assert.equal(shotRes.ok, true);
+    assert.equal(shotRes.assets[0].id, 'A-HEALED');
+    assert.equal(captureCalls, 1, 'captureVisibleTab must not be called twice during auto-heal retry');
+
+    // 2. captureCurrentPage (shortcut Alt+Shift+C) auto-heals
+    await seedStaleDesktopConfig();
+    toasts.length = 0;
+    await bg.captureCurrentPage(tab);
+    assert.ok(toasts.some((t) => t.variant === 'success'), 'captureCurrentPage should succeed after auto-heal');
+
+    // 3. All 5 context menu handlers auto-heal
+    const menuCases = [
+      { menuItemId: 'charkle-save-image', srcUrl: 'https://cdn.example.org/pic.png', pageUrl: tab.url },
+      { menuItemId: 'charkle-save-link', linkUrl: 'https://example.org/ref', pageUrl: tab.url },
+      { menuItemId: 'charkle-save-selection', selectionText: '关键设计笔记', pageUrl: tab.url },
+      { menuItemId: 'charkle-save-page', pageUrl: tab.url },
+      { menuItemId: 'charkle-capture-visible', pageUrl: tab.url },
+    ];
+    for (const info of menuCases) {
+      await seedStaleDesktopConfig();
+      toasts.length = 0;
+      await bg.handleContextMenuClick(info, tab);
+      assert.ok(
+        toasts.some((t) => t.variant === 'success'),
+        `Context menu ${info.menuItemId} should auto-heal and show success toast`,
+      );
+      const updatedCfg = await getConfig(mockChrome.storage.local);
+      assert.equal(updatedCfg.serverUrl, 'http://127.0.0.1:41945');
+      assert.equal(updatedCfg.apiToken, 'healed_token_41945');
+    }
+
+    // 4. INGEST_IMAGES_BATCH rethrows retryable error when succeeded === 0, triggering auto-heal
+    await seedStaleDesktopConfig();
+    const healedBatch = await bg.handleMessage(
+      {
+        type: 'INGEST_IMAGES_BATCH',
+        items: [{ url: 'data:image/png;base64,AAAA', title: 'Card 1' }],
+        sourcePageUrl: tab.url,
+      },
+      {},
+    );
+    assert.equal(healedBatch.ok, true);
+    assert.equal(healedBatch.succeeded, 1);
+
+    // 5. INGEST_IMAGES_BATCH returns error message when succeeded === 0 on non-retryable error
+    await seedStaleDesktopConfig();
+    forceNonRetryableBatchError = true;
+    const failedBatch = await bg.handleMessage(
+      {
+        type: 'INGEST_IMAGES_BATCH',
+        items: [{ url: 'data:image/png;base64,BBBB', title: 'Bad Card' }],
+        sourcePageUrl: tab.url,
+      },
+      {},
+    );
+    forceNonRetryableBatchError = false;
+    assert.equal(failedBatch.ok, false);
+    assert.equal(failedBatch.succeeded, 0);
+    assert.equal(failedBatch.error, '图片解码失败');
+    assert.equal(failedBatch.errors[0].status, 500);
+    assert.equal(failedBatch.errors[0].code, 'DECODE_FAILED');
+  } finally {
+    globalThis.browser = prevBrowser;
+    globalThis.chrome = prevChrome;
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('content.js enrichXhsNoteInBrowser preserves cardItem.tags on likes pages instead of hardcoding 小红书收藏', async () => {
+  const contentSource = fs.readFileSync(path.join(EXT_ROOT, 'content.js'), 'utf8');
+  assert.ok(
+    contentSource.includes('Array.isArray(cardItem.tags)'),
+    'enrichXhsNoteInBrowser should inspect cardItem.tags',
+  );
+
+  // Execute the real content.js enrichXhsNoteInBrowser function inside an isolated VM sandbox
+  const instrumented = contentSource.replace(
+    'initConfigSync();',
+    'globalThis.__testExports = { enrichXhsNoteInBrowser }; initConfigSync();',
+  );
+  const noteId = '66a1b2c3d4e5f60718293a4b';
+  const padding = ' '.repeat(600);
+  const detailHtml = `<html><body>${padding}<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"${noteId}":{"note":{"noteId":"${noteId}","type":"normal","title":"配色参考","desc":"室内光线 #设计[话题]#","user":{"nickname":"林清","userId":"u1"},"interactInfo":{"likedCount":"120"},"tagList":[{"name":"设计"}],"imageList":[{"urlDefault":"http://sns-webpic-qc.xhscdn.com/a.jpg"}]}}}}}</script></body></html>`;
+
+  const noop = () => {};
+  const win = {
+    location: { href: 'https://www.xiaohongshu.com/user/profile/u1?tab=like', origin: 'https://www.xiaohongshu.com', hostname: 'www.xiaohongshu.com', pathname: '/user/profile/u1' },
+    addEventListener: noop,
+    history: { pushState: noop, replaceState: noop },
+    setInterval: () => 0,
+    setTimeout,
+    clearTimeout,
+  };
+  win.top = win;
+  const ctx = vm.createContext({
+    window: win,
+    document: {
+      title: '小红书',
+      addEventListener: noop,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      documentElement: {},
+      body: {},
+    },
+    Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
+    Element: class {},
+    URL,
+    Date,
+    Set,
+    Array,
+    Math,
+    JSON,
+    Number,
+    String,
+    Boolean,
+    Promise,
+    console,
+    setTimeout,
+    clearTimeout,
+    setInterval: () => 0,
+    clearInterval: noop,
+    chrome: {
+      storage: { local: { get: async () => ({}) }, onChanged: { addListener: noop } },
+      runtime: { onMessage: { addListener: noop }, sendMessage: async () => ({}), getURL: (p) => p },
+    },
+    fetch: async () => new Response(detailHtml, { status: 200, headers: { 'content-type': 'text/html' } }),
+  });
+  ctx.globalThis = ctx;
+  vm.runInContext(instrumented, ctx);
+
+  const likesCard = {
+    noteId,
+    originalURL: `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=tok1`,
+    dedupKey: `xhs:${noteId}`,
+    tags: ['小红书', '小红书点赞'],
+  };
+  const enrichedLikes = await ctx.__testExports.enrichXhsNoteInBrowser(likesCard);
+  assert.ok(enrichedLikes.tags.includes('小红书'));
+  assert.ok(enrichedLikes.tags.includes('设计'));
+  assert.ok(enrichedLikes.tags.includes('小红书点赞'), 'likes card must preserve 小红书点赞 tag');
+  assert.equal(
+    enrichedLikes.tags.includes('小红书收藏'),
+    false,
+    'likes card must NOT be mis-tagged with 小红书收藏',
+  );
+
+  const collectCard = {
+    noteId,
+    originalURL: `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=tok2`,
+    dedupKey: `xhs:${noteId}`,
+    tags: ['小红书', '小红书收藏'],
+  };
+  const enrichedCollect = await ctx.__testExports.enrichXhsNoteInBrowser(collectCard);
+  assert.ok(enrichedCollect.tags.includes('小红书收藏'));
+  assert.equal(enrichedCollect.tags.includes('小红书点赞'), false);
+
+  const fallbackCard = {
+    noteId,
+    originalURL: `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=tok3`,
+    dedupKey: `xhs:${noteId}`,
+  };
+  const enrichedFallback = await ctx.__testExports.enrichXhsNoteInBrowser(fallbackCard);
+  assert.ok(enrichedFallback.tags.includes('小红书收藏'));
 });

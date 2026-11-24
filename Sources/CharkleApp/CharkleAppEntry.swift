@@ -48,15 +48,18 @@ public final class CharkleRuntime {
 
     public init() {
         let resolvedEngine: any CharkleEngineProtocol
+        var startupError: String?
         do {
             resolvedEngine = try CharkleEngineFactory.makeDefault()
         } catch {
             appLogger.error("Default engine init failed (\(error.localizedDescription, privacy: .public)); falling back to PlaceholderCharkleEngine")
+            startupError = error.localizedDescription
             resolvedEngine = PlaceholderCharkleEngine()
         }
 
         self.engine = resolvedEngine
         self.coordinator = AppCoordinatorStore()
+        self.coordinator.engineStartupError = startupError
         let libraryStore = LibraryStore(engine: resolvedEngine)
         let moodboardStore = MoodboardStore(engine: resolvedEngine)
         let syncStore = SyncAndAIStore(engine: resolvedEngine)
@@ -128,6 +131,7 @@ public final class CharkleRuntime {
 
     public func markTerminating() {
         isTerminating = true
+        moodboards.triggerImmediateSaveFlush()
         extensionBridge.stop()
     }
 
@@ -458,14 +462,20 @@ public final class CharkleRuntime {
             guard let url = await ScreenshotCapturer.capture(mode: .area) else { return }
             let (folderID, boardID, destLabel) = currentCaptureTarget()
             let created = await library.ingest([.fileURL(url)], targetFolderID: folderID, targetBoardID: boardID)
-            if let boardID {
+            if let boardID, !created.isEmpty {
                 if !coordinator.isMinimalCaptureMode {
                     await moodboards.reloadActiveBoardIfNeeded(id: boardID)
                 }
                 await moodboards.refreshBoards()
             }
             try? FileManager.default.removeItem(at: url)
-            let msg = "截图已存入「\(destLabel)」(\(max(created.count, 1)) 项)"
+            guard !created.isEmpty else {
+                let errMsg = library.lastError ?? "截图保存失败"
+                coordinator.showToast(errMsg, icon: "exclamationmark.triangle", tone: .warning)
+                notchController?.flashConfirmation(errMsg)
+                return
+            }
+            let msg = "截图已存入「\(destLabel)」(\(created.count) 项)"
             coordinator.showToast(msg, icon: "camera.viewfinder", tone: .success)
             notchController?.flashConfirmation(msg)
         }
@@ -502,13 +512,19 @@ public final class CharkleRuntime {
         }
         Task {
             let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: boardID)
-            if let boardID {
+            if let boardID, !created.isEmpty {
                 if !coordinator.isMinimalCaptureMode {
                     await moodboards.reloadActiveBoardIfNeeded(id: boardID)
                 }
                 await moodboards.refreshBoards()
             }
-            let count = max(created.count, inputs.count)
+            guard !created.isEmpty else {
+                let errMsg = library.lastError ?? "收藏失败或该素材已存在"
+                coordinator.showToast(errMsg, icon: "exclamationmark.triangle", tone: .warning)
+                notchController?.flashConfirmation(errMsg)
+                return
+            }
+            let count = created.count
             let msg: String
             let icon: String
             if hasSocialPost {
@@ -526,6 +542,30 @@ public final class CharkleRuntime {
             }
             coordinator.showToast(msg, icon: icon, tone: .success)
             notchController?.flashConfirmation(msg)
+        }
+    }
+
+    public func syncNowFromMenuBar() {
+        Task {
+            if let report = await syncAndAI.syncNow() {
+                if coordinator.isMinimalCaptureMode {
+                    await library.refreshMinimalMetadataOnly()
+                } else {
+                    await library.refreshAll()
+                }
+                await moodboards.refreshBoards()
+                let msg = "同步完成 · 上传 \(report.uploadedOps) / 拉取 \(report.downloadedOps) / 新发现 \(report.discoveredRemoteAssets)"
+                coordinator.showToast(msg, icon: "checkmark.icloud.fill", tone: .success)
+                if coordinator.isMinimalCaptureMode {
+                    notchController?.flashConfirmation("云端同步完成")
+                }
+            } else {
+                let err = syncAndAI.errorMessage ?? "同步未完成，请检查存储与同步设置"
+                coordinator.showToast(err, icon: "exclamationmark.icloud", tone: .warning)
+                if coordinator.isMinimalCaptureMode {
+                    notchController?.flashConfirmation(err)
+                }
+            }
         }
     }
 
@@ -575,9 +615,7 @@ final class CharkleAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        Task { @MainActor in
-            CharkleRuntime.shared.markTerminating()
-        }
+        CharkleRuntime.shared.markTerminating()
     }
 }
 
@@ -610,6 +648,14 @@ private struct MainWindowSceneHost: View {
 private struct CharkleMenuBarContentView: View {
     @Environment(\.openWindow) private var openWindow
     let runtime: CharkleRuntime
+
+    private var menuBarSyncLabel: String {
+        switch runtime.syncAndAI.syncConfig.mode {
+        case .localOnly: "立即扫描本地素材库"
+        case .webDAV: "立即同步 WebDAV"
+        case .directAPIWithGDirect, .gdirectMount: "立即同步 Google Drive"
+        }
+    }
 
     private func registerWindowOpener() {
         runtime.openMainWindowHandler = {
@@ -650,16 +696,8 @@ private struct CharkleMenuBarContentView: View {
             runtime.activateMainWindow()
             runtime.coordinator.presentMoodboardGenerator(entry: .prompt)
         }
-        Button("立即同步 Google Drive") {
-            Task {
-                _ = await runtime.syncAndAI.syncNow()
-                if runtime.coordinator.isMinimalCaptureMode {
-                    await runtime.library.refreshMinimalMetadataOnly()
-                } else {
-                    await runtime.library.refreshAll()
-                }
-                await runtime.moodboards.refreshBoards()
-            }
+        Button(menuBarSyncLabel) {
+            runtime.syncNowFromMenuBar()
         }
         Button("重新运行首次引导…") {
             registerWindowOpener()
@@ -727,22 +765,42 @@ struct CharkleApp: App {
             }
 
             CommandGroup(replacing: .undoRedo) {
-                Button("撤销画布编辑") {
-                    runtime.moodboards.undo()
+                Button("撤销") {
+                    if Self.isEditingTextInKeyWindow() {
+                        _ = NSApp?.sendAction(Selector(("undo:")), to: nil, from: nil)
+                    } else if runtime.coordinator.isViewingMoodboard
+                        && !runtime.coordinator.isModalOverlayPresented
+                        && runtime.moodboards.canUndo {
+                        runtime.moodboards.undo()
+                    } else {
+                        _ = NSApp?.sendAction(Selector(("undo:")), to: nil, from: nil)
+                    }
                 }
                 .keyboardShortcut("z", modifiers: .command)
-                .disabled(!runtime.coordinator.isViewingMoodboard || !runtime.moodboards.canUndo)
 
-                Button("重做画布编辑") {
-                    runtime.moodboards.redo()
+                Button("重做") {
+                    if Self.isEditingTextInKeyWindow() {
+                        _ = NSApp?.sendAction(Selector(("redo:")), to: nil, from: nil)
+                    } else if runtime.coordinator.isViewingMoodboard
+                        && !runtime.coordinator.isModalOverlayPresented
+                        && runtime.moodboards.canRedo {
+                        runtime.moodboards.redo()
+                    } else {
+                        _ = NSApp?.sendAction(Selector(("redo:")), to: nil, from: nil)
+                    }
                 }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(!runtime.coordinator.isViewingMoodboard || !runtime.moodboards.canRedo)
             }
 
             CommandMenu("灵感采集") {
                 Button("快速跳转…") {
-                    runtime.coordinator.isJumpAnywherePresented.toggle()
+                    guard !runtime.coordinator.isOnboardingPresented else { return }
+                    let willOpen = !runtime.coordinator.isJumpAnywherePresented
+                    if willOpen {
+                        runtime.coordinator.closeQuickLook()
+                        runtime.coordinator.closeSettings()
+                    }
+                    runtime.coordinator.isJumpAnywherePresented = willOpen
                 }
                 .keyboardShortcut("j", modifiers: .command)
 
@@ -792,5 +850,10 @@ struct CharkleApp: App {
         } label: {
             Image(nsImage: CharkleMenuBarIcon.templateImage())
         }
+    }
+
+    private static func isEditingTextInKeyWindow() -> Bool {
+        guard let responder = NSApp?.keyWindow?.firstResponder else { return false }
+        return responder is NSTextView || responder is NSTextField || responder is NSText
     }
 }

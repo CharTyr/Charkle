@@ -47,7 +47,6 @@ else
 fi
 
 if [[ -d "$ROOT_DIR/dist/Charkle.app" ]]; then
-  cp "$OUT_ICNS" "$ROOT_DIR/dist/Charkle.app/Contents/Resources/AppIcon.icns"
-  touch "$ROOT_DIR/dist/Charkle.app"
-  echo "Updated dist/Charkle.app icon bundle."
+  echo "Note: dist/Charkle.app was not modified in place to preserve its code signature."
+  echo "Re-run ./scripts/build-app.sh release to bundle and re-sign with the updated icon."
 fi

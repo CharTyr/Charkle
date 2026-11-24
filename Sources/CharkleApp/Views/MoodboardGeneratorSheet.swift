@@ -65,12 +65,28 @@ public struct MoodboardGeneratorSheet: View {
         syncAndAI.typeSafeConfig.enabled && syncAndAI.hasStoredTypeSafeKey
     }
 
+    private var isGenerativeProviderReady: Bool {
+        let cfg = syncAndAI.aiConfig
+        switch cfg.provider {
+        case .disabled:
+            return false
+        case .chatGPTSubscription:
+            return syncAndAI.chatGPTSession.status == .connected && syncAndAI.chatGPTSession.sharingEnabled
+        case .gemini:
+            return syncAndAI.hasStoredAIKey
+        case .openAICompatible:
+            let trimmedBase = cfg.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isLocalHost = trimmedBase.lowercased().contains("localhost") || trimmedBase.contains("127.0.0.1")
+            return !trimmedBase.isEmpty && (syncAndAI.hasStoredAIKey || isLocalHost)
+        }
+    }
+
     private var isCloudAIReady: Bool {
-        (syncAndAI.aiConfig.provider != .disabled && syncAndAI.hasStoredAIKey) || isTypeSafeReady
+        isGenerativeProviderReady || isTypeSafeReady
     }
 
     private var activeProviderBadge: String {
-        let hasGenerative = syncAndAI.aiConfig.provider != .disabled && syncAndAI.hasStoredAIKey
+        let hasGenerative = isGenerativeProviderReady
         if !hasGenerative && isTypeSafeReady {
             return "TypeSafe Jev 视觉策展"
         }
@@ -80,7 +96,12 @@ public struct MoodboardGeneratorSheet: View {
         case .disabled: return isTypeSafeReady ? "TypeSafe Jev 视觉策展" : "仅本机离线模式"
         case .chatGPTSubscription: return "ChatGPT 订阅视觉策展\(suffix)"
         case .gemini: return "Gemini 视觉策展\(suffix)"
-        case .openAICompatible: return "云端模型视觉策展\(suffix)"
+        case .openAICompatible:
+            let base = syncAndAI.aiConfig.baseURL.lowercased()
+            if base.contains("localhost") || base.contains("127.0.0.1") {
+                return "本地 Ollama 视觉策展\(suffix)"
+            }
+            return "云端模型视觉策展\(suffix)"
         }
     }
 
@@ -105,9 +126,31 @@ public struct MoodboardGeneratorSheet: View {
         .frame(width: 960, height: 660)
         .background(CharkleTheme.galleryGround(for: colorScheme))
         .onAppear {
-            if !library.selectedAssetIDs.isEmpty {
-                selectedSeedIDs = Set(library.selectedAssetIDs.prefix(4))
+            switch coordinator.generatorInitialEntry {
+            case .selection:
+                if !library.selectedAssetIDs.isEmpty {
+                    let picked = Array(library.selectedAssetIDs.prefix(16))
+                    selectedSeedIDs = Set(picked)
+                    if picked.count > 10 {
+                        preferredCount = 16
+                    }
+                    showSeedPicker = true
+                }
+            case .seedAssets:
+                if !library.selectedAssetIDs.isEmpty {
+                    selectedSeedIDs = Set(library.selectedAssetIDs.prefix(4))
+                }
                 showSeedPicker = true
+            case .palette:
+                showColorPicker = true
+                if selectedPaletteHexes.isEmpty, let primary = library.primarySelectedAsset {
+                    selectedPaletteHexes = Array(primary.dominantColors.prefix(3).map { $0.hex.uppercased() })
+                }
+            case .prompt:
+                if !library.selectedAssetIDs.isEmpty {
+                    selectedSeedIDs = Set(library.selectedAssetIDs.prefix(4))
+                    showSeedPicker = true
+                }
             }
             if case .folder(let folderID) = coordinator.selectedDestination {
                 scopeFolderIDs = [folderID]
@@ -219,12 +262,10 @@ public struct MoodboardGeneratorSheet: View {
 
                 // 3. Optional Seed Images
                 CharkleDisclosureGroup(isExpanded: $showSeedPicker) {
-                    let candidates = library.allAssetsByID.values
-                        .filter { !$0.isTrashed }
-                        .sorted { $0.createdAt > $1.createdAt }
+                    let candidates = library.cachedRecentActivityAssets.prefix(18)
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("点选 1–4 张定调种子图（必入主画布）")
+                            Text("点选定调种子图（必入主画布）")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -239,13 +280,14 @@ public struct MoodboardGeneratorSheet: View {
                             columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
                             spacing: 6
                         ) {
-                            ForEach(candidates.prefix(18)) { asset in
+                            ForEach(candidates) { asset in
                                 let isPicked = selectedSeedIDs.contains(asset.id)
                                 Button {
                                     if isPicked {
                                         selectedSeedIDs.remove(asset.id)
                                     } else {
-                                        if selectedSeedIDs.count >= 4, let first = selectedSeedIDs.first {
+                                        let cap = max(4, preferredCount)
+                                        if selectedSeedIDs.count >= cap, let first = selectedSeedIDs.first {
                                             selectedSeedIDs.remove(first)
                                         }
                                         selectedSeedIDs.insert(asset.id)
@@ -586,7 +628,10 @@ public struct MoodboardGeneratorSheet: View {
 
     @ViewBuilder
     private func curatedProposalView(_ prop: MoodboardProposal) -> some View {
-        let scoredByID = Dictionary(uniqueKeysWithValues: prop.primaryMatches.map { ($0.id, $0) })
+        let scoredByID = Dictionary(
+            prop.primaryMatches.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         // Curator Art-Direction Summary + Palette + Rejections
         VStack(alignment: .leading, spacing: 10) {

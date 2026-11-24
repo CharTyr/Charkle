@@ -34,6 +34,7 @@ public struct GalleryRingView: View {
     @State private var frontAsset: AssetRecord?
     @State private var stepTrigger: Int = 0
     @State private var stepDirection: Int = 0
+    @State private var markOpenedTask: Task<Void, Never>?
 
     private var activeAsset: AssetRecord? {
         if let frontAsset, assets.contains(where: { $0.id == frontAsset.id }) {
@@ -94,10 +95,12 @@ public struct GalleryRingView: View {
             CharkleTheme.galleryGround(for: colorScheme)
                 .ignoresSafeArea()
 
+            let invalidationVersion = loader.invalidationVersion
             RingGalleryMetalSurface(
                 assets: assets,
                 selectedAssetID: selectedAssetIDs.first,
                 loader: loader,
+                loaderInvalidationVersion: invalidationVersion,
                 params: params,
                 isDarkMode: colorScheme == .dark,
                 reduceMotion: reduceMotion,
@@ -112,7 +115,16 @@ public struct GalleryRingView: View {
                             if selectedAssetIDs != [asset.id] {
                                 selectedAssetIDs = [asset.id]
                             }
-                            onMarkOpened(asset.id)
+                            let targetID = asset.id
+                            markOpenedTask?.cancel()
+                            markOpenedTask = Task {
+                                try? await Task.sleep(for: .milliseconds(220))
+                                guard !Task.isCancelled else { return }
+                                onMarkOpened(targetID)
+                            }
+                        } else {
+                            markOpenedTask?.cancel()
+                            markOpenedTask = nil
                         }
                     },
                     onOpenQuickLook: { asset in
@@ -126,6 +138,10 @@ public struct GalleryRingView: View {
                 )
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onDisappear {
+                markOpenedTask?.cancel()
+                markOpenedTask = nil
+            }
 
             // Bottom Navigation Capsule & Collapsible Tuning Control
             VStack {

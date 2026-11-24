@@ -4,7 +4,7 @@ import CharkleCore
 import Foundation
 import os
 
-private let boardStoreLogger = Logger(subsystem: "com.charkle.app", category: "MoodboardStore")
+private nonisolated let boardStoreLogger = Logger(subsystem: "com.charkle.app", category: "MoodboardStore")
 
 /// Domain store for Moodboards: board list, active `MoodboardDocument`, full value-type Undo/Redo stack,
 /// debounced persistence, candidate swap pool, rapid 4-entry generator, and 2× Retina export.
@@ -30,8 +30,11 @@ public final class MoodboardStore {
     public var lastError: String?
 
     private var saveDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingSaveDocument: MoodboardDocument?
     @ObservationIgnored private var viewportSaveTask: Task<Void, Never>?
     @ObservationIgnored private var latestViewportOverride: (boardID: UUID, center: BoardPoint, zoom: Double)?
+    @ObservationIgnored private var openRequestGeneration: UInt64 = 0
+    @ObservationIgnored private var curateRequestGeneration: UInt64 = 0
     private let maxUndoDepth: Int = 45
 
     public init(engine: any CharkleEngineProtocol) {
@@ -49,14 +52,83 @@ public final class MoodboardStore {
         }
     }
 
-    /// Releases the loaded board document, undo/redo history, and candidate pool while retaining tiny
-    /// board summaries so Notch Shelf "Active Moodboard" capture remains functional in Minimal Mode.
-    public func enterMinimalCaptureMode() {
+    /// Collects any unsaved document or dirty viewport override and clears pending debounce timers.
+    private func consumePendingDocumentForSave() -> MoodboardDocument? {
         saveDebounceTask?.cancel()
         saveDebounceTask = nil
         viewportSaveTask?.cancel()
         viewportSaveTask = nil
+
+        var docToSave = pendingSaveDocument
+        pendingSaveDocument = nil
+
+        if let override = latestViewportOverride {
+            if var pending = docToSave, pending.id == override.boardID {
+                pending.viewportCenter = override.center
+                pending.viewportZoom = override.zoom
+                docToSave = pending
+            } else if docToSave == nil,
+                      var current = activeBoard,
+                      current.id == override.boardID,
+                      (current.viewportCenter != override.center || abs(current.viewportZoom - override.zoom) > 0.0001) {
+                current.viewportCenter = override.center
+                current.viewportZoom = override.zoom
+                docToSave = current
+            }
+        }
+        return docToSave
+    }
+
+    /// Awaits persistence of any debounced board edit or viewport change so rapid board switches
+    /// or reloads never drop the user's latest mutations.
+    @MainActor
+    public func flushPendingSave() async {
+        guard let doc = consumePendingDocumentForSave() else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            _ = try await engine.saveBoard(doc)
+        } catch {
+            lastError = error.localizedDescription
+            boardStoreLogger.error("flushPendingSave failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Cancels pending debounce timers and dispatches an immediate save flush.
+    /// When `waitForCompletion` is `true` (default, used by `applicationWillTerminate`), waits up to
+    /// 1.5s for SQLite persistence to finish before process teardown without re-entering MainActor.
+    @MainActor
+    public func triggerImmediateSaveFlush(waitForCompletion: Bool = true) {
+        guard let doc = consumePendingDocumentForSave() else { return }
+        let targetEngine = engine
+        if waitForCompletion {
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached(priority: .userInitiated) {
+                defer { semaphore.signal() }
+                do {
+                    _ = try await targetEngine.saveBoard(doc)
+                } catch {
+                    boardStoreLogger.error("triggerImmediateSaveFlush failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            _ = semaphore.wait(timeout: .now() + 1.5)
+        } else {
+            Task.detached(priority: .userInitiated) {
+                do {
+                    _ = try await targetEngine.saveBoard(doc)
+                } catch {
+                    boardStoreLogger.error("triggerImmediateSaveFlush failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    /// Releases the loaded board document, undo/redo history, and candidate pool while retaining tiny
+    /// board summaries so Notch Shelf "Active Moodboard" capture remains functional in Minimal Mode.
+    public func enterMinimalCaptureMode() {
+        triggerImmediateSaveFlush(waitForCompletion: false)
         latestViewportOverride = nil
+        openRequestGeneration &+= 1
         activeBoard = nil
         candidatePool = []
         swappingNodeID = nil
@@ -69,10 +141,31 @@ public final class MoodboardStore {
     }
 
     public func openBoard(id: UUID) async {
-        viewportSaveTask?.cancel()
+        await flushPendingSave()
         latestViewportOverride = nil
+        openRequestGeneration &+= 1
+        let requestGen = openRequestGeneration
         do {
-            if let doc = try await engine.fetchBoard(id: id) {
+            if var doc = try await engine.fetchBoard(id: id) {
+                guard openRequestGeneration == requestGen else { return }
+                // Silently migrate legacy/MCP `.autoEditorial` boards into `.freeform` BEFORE
+                // publishing `activeBoard` so opening never pushes a bogus Undo entry.
+                if doc.mode.isAutoEditorial {
+                    var assetsByID: [UUID: AssetRecord] = [:]
+                    for refID in Set(doc.referencedAssetIDs) {
+                        if let asset = try? await engine.fetchAsset(id: refID) {
+                            assetsByID[refID] = asset
+                        }
+                    }
+                    guard openRequestGeneration == requestGen else { return }
+                    let frozen = EditorialLayoutSolver.freezeIntoFreeform(
+                        document: doc,
+                        containerWidth: 1080,
+                        assetsByID: assetsByID
+                    )
+                    doc = (try? await engine.saveBoard(frozen)) ?? frozen
+                    guard openRequestGeneration == requestGen else { return }
+                }
                 activeBoard = doc
                 undoStack.removeAll()
                 redoStack.removeAll()
@@ -82,13 +175,24 @@ public final class MoodboardStore {
                 await refreshCandidates(for: nil)
             }
         } catch {
+            guard openRequestGeneration == requestGen else { return }
             lastError = error.localizedDescription
         }
     }
 
     public func reloadActiveBoardIfNeeded(id: UUID) async {
         guard activeBoard?.id == id else { return }
+        if pendingSaveDocument?.id == id {
+            await flushPendingSave()
+        }
+        guard activeBoard?.id == id else { return }
         if let fresh = try? await engine.fetchBoard(id: id) {
+            guard activeBoard?.id == id, pendingSaveDocument == nil else { return }
+            saveDebounceTask?.cancel()
+            saveDebounceTask = nil
+            viewportSaveTask?.cancel()
+            viewportSaveTask = nil
+            latestViewportOverride = nil
             activeBoard = fresh
             await refreshBoards()
         }
@@ -96,6 +200,7 @@ public final class MoodboardStore {
 
     @discardableResult
     public func createBlankBoard(title: String = "未命名情绪板") async -> MoodboardDocument? {
+        await flushPendingSave()
         let doc = MoodboardDocument(
             title: title,
             subtitle: "",
@@ -103,7 +208,9 @@ public final class MoodboardStore {
         )
         do {
             let saved = try await engine.saveBoard(doc)
+            openRequestGeneration &+= 1
             activeBoard = saved
+            latestViewportOverride = nil
             undoStack.removeAll()
             redoStack.removeAll()
             await refreshBoards()
@@ -118,6 +225,7 @@ public final class MoodboardStore {
     @discardableResult
     public func createBoardFromSelection(assetIDs: [UUID], title: String = "精选情绪板") async -> MoodboardDocument? {
         guard !assetIDs.isEmpty else { return await createBlankBoard(title: title) }
+        await flushPendingSave()
         do {
             let prop = try await engine.proposeMoodboard(
                 seed: .manualSelection(assetIDs),
@@ -127,14 +235,17 @@ public final class MoodboardStore {
             var doc = prop.draftDocument
             doc.title = title
             if doc.mode.isAutoEditorial {
+                let assetsMap = Dictionary(uniqueKeysWithValues: prop.primaryMatches.map { ($0.asset.id, $0.asset) })
                 doc = EditorialLayoutSolver.freezeIntoFreeform(
                     document: doc,
                     containerWidth: 1080,
-                    assetsByID: [:]
+                    assetsByID: assetsMap
                 )
             }
             let saved = try await engine.saveBoard(doc)
+            openRequestGeneration &+= 1
             activeBoard = saved
+            latestViewportOverride = nil
             candidatePool = prop.candidatePool
             undoStack.removeAll()
             redoStack.removeAll()
@@ -147,13 +258,31 @@ public final class MoodboardStore {
     }
 
     public func deleteBoard(id: UUID) async {
+        // Cancel any pending debounced save/viewport write for this board before deletion so
+        // it never races with the tombstone and emits spurious fileNotFound errors.
+        if pendingSaveDocument?.id == id || activeBoard?.id == id {
+            saveDebounceTask?.cancel()
+            saveDebounceTask = nil
+            if pendingSaveDocument?.id == id {
+                pendingSaveDocument = nil
+            }
+        }
+        if latestViewportOverride?.boardID == id || activeBoard?.id == id {
+            viewportSaveTask?.cancel()
+            viewportSaveTask = nil
+            if latestViewportOverride?.boardID == id {
+                latestViewportOverride = nil
+            }
+        }
         do {
             try await engine.deleteBoard(id: id)
             if activeBoard?.id == id {
+                openRequestGeneration &+= 1
                 activeBoard = nil
                 undoStack.removeAll()
                 redoStack.removeAll()
                 candidatePool.removeAll()
+                swappingNodeID = nil
                 activeBoardAgentTrace = []
                 activeBoardLastSummary = nil
             }
@@ -186,7 +315,8 @@ public final class MoodboardStore {
 
     public func commitMutation(_ nextDoc: MoodboardDocument, recordUndo: Bool = true) {
         viewportSaveTask?.cancel()
-        if recordUndo, let previous = activeBoard, previous != nextDoc {
+        viewportSaveTask = nil
+        if recordUndo, let previous = activeBoard, previous.id == nextDoc.id, previous != nextDoc {
             undoStack.append(previous)
             if undoStack.count > maxUndoDepth {
                 undoStack.removeFirst(undoStack.count - maxUndoDepth)
@@ -197,15 +327,24 @@ public final class MoodboardStore {
         if let override = latestViewportOverride,
            override.boardID == nextDoc.id,
            let previous = activeBoard,
+           previous.id == nextDoc.id,
            nextDoc.viewportCenter == previous.viewportCenter,
            nextDoc.viewportZoom == previous.viewportZoom {
             stamped.viewportCenter = override.center
             stamped.viewportZoom = override.zoom
         } else {
-            latestViewportOverride = (nextDoc.id, nextDoc.viewportCenter, nextDoc.viewportZoom)
+            let safeCenter = BoardPoint(
+                x: nextDoc.viewportCenter.x.isFinite ? nextDoc.viewportCenter.x : 0,
+                y: nextDoc.viewportCenter.y.isFinite ? nextDoc.viewportCenter.y : 0
+            )
+            let safeZoom = (nextDoc.viewportZoom.isFinite && nextDoc.viewportZoom > 0) ? nextDoc.viewportZoom : 1.0
+            stamped.viewportCenter = safeCenter
+            stamped.viewportZoom = safeZoom
+            latestViewportOverride = (nextDoc.id, safeCenter, safeZoom)
         }
         stamped.updatedAt = Date()
         activeBoard = stamped
+        pendingSaveDocument = stamped
         scheduleSave(stamped)
     }
 
@@ -213,13 +352,17 @@ public final class MoodboardStore {
     /// or re-publishing `@Observable activeBoard` (keeps 120fps panning hitch-free).
     public func persistViewportQuietly(center: BoardPoint, zoom: Double) {
         guard let currentID = activeBoard?.id else { return }
-        latestViewportOverride = (currentID, center, zoom)
+        guard center.x.isFinite, center.y.isFinite, zoom.isFinite, zoom > 0 else { return }
+        let safeZoom = max(0.2, min(3.0, zoom))
+        latestViewportOverride = (currentID, center, safeZoom)
         viewportSaveTask?.cancel()
         viewportSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let self, var snapshot = self.activeBoard, snapshot.id == currentID else { return }
+            // Avoid clobbering a pending document edit save; it already merges latestViewportOverride.
+            guard self.pendingSaveDocument == nil else { return }
             snapshot.viewportCenter = center
-            snapshot.viewportZoom = zoom
+            snapshot.viewportZoom = safeZoom
             do {
                 _ = try await self.engine.saveBoard(snapshot)
             } catch {
@@ -229,16 +372,32 @@ public final class MoodboardStore {
     }
 
     public func undo() {
-        guard let previous = undoStack.popLast(), let current = activeBoard else { return }
+        guard var previous = undoStack.popLast(), let current = activeBoard, previous.id == current.id else { return }
+        viewportSaveTask?.cancel()
+        viewportSaveTask = nil
         redoStack.append(current)
+        if let override = latestViewportOverride, override.boardID == previous.id {
+            previous.viewportCenter = override.center
+            previous.viewportZoom = override.zoom
+        }
+        previous.updatedAt = Date()
         activeBoard = previous
+        pendingSaveDocument = previous
         scheduleSave(previous)
     }
 
     public func redo() {
-        guard let next = redoStack.popLast(), let current = activeBoard else { return }
+        guard var next = redoStack.popLast(), let current = activeBoard, next.id == current.id else { return }
+        viewportSaveTask?.cancel()
+        viewportSaveTask = nil
         undoStack.append(current)
+        if let override = latestViewportOverride, override.boardID == next.id {
+            next.viewportCenter = override.center
+            next.viewportZoom = override.zoom
+        }
+        next.updatedAt = Date()
         activeBoard = next
+        pendingSaveDocument = next
         scheduleSave(next)
     }
 
@@ -247,10 +406,16 @@ public final class MoodboardStore {
         saveDebounceTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(220))
             guard !Task.isCancelled, let self else { return }
+            var toSave = self.pendingSaveDocument ?? doc
+            if let override = self.latestViewportOverride, override.boardID == toSave.id {
+                toSave.viewportCenter = override.center
+                toSave.viewportZoom = override.zoom
+            }
+            self.pendingSaveDocument = nil
             self.isSaving = true
             defer { self.isSaving = false }
             do {
-                _ = try await self.engine.saveBoard(doc)
+                _ = try await self.engine.saveBoard(toSave)
                 await self.refreshBoards()
             } catch {
                 self.lastError = error.localizedDescription
@@ -322,11 +487,12 @@ public final class MoodboardStore {
     public func swapNode(nodeID: UUID, with asset: AssetRecord) async {
         guard var board = activeBoard,
               let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
-              case .assetRef(_, let crop, let weight, _) = board.nodes[idx].kind else { return }
+              case .assetRef(_, _, let weight, _) = board.nodes[idx].kind else { return }
 
+        // Reset `crop` to nil so a previous image's detail crop never clips the replacement asset.
         board.nodes[idx].kind = .assetRef(
             assetID: asset.id,
-            crop: crop,
+            crop: nil,
             weight: weight,
             autoplayLoop: asset.mediaKind == .animatedImage || asset.mediaKind == .video
         )
@@ -405,17 +571,20 @@ public final class MoodboardStore {
     }
 
     public func syncBoardPalette() async {
-        guard var board = activeBoard else { return }
-        let ids = board.referencedAssetIDs
+        guard let initialBoard = activeBoard else { return }
+        let targetBoardID = initialBoard.id
+        let ids = initialBoard.referencedAssetIDs
         guard !ids.isEmpty else { return }
         if let palette = try? await engine.extractBoardPalette(assetIDs: ids, count: 6), !palette.isEmpty {
-            board.extractedPalette = palette
-            for idx in board.nodes.indices {
-                if case .paletteStrip(_, let autoSync) = board.nodes[idx].kind, autoSync {
-                    board.nodes[idx].kind = .paletteStrip(colors: palette, autoSyncWithBoard: true)
+            // Re-read live `activeBoard` after `await` so concurrent edits or board switches are never clobbered.
+            guard var latestBoard = activeBoard, latestBoard.id == targetBoardID else { return }
+            latestBoard.extractedPalette = palette
+            for idx in latestBoard.nodes.indices {
+                if case .paletteStrip(_, let autoSync) = latestBoard.nodes[idx].kind, autoSync {
+                    latestBoard.nodes[idx].kind = .paletteStrip(colors: palette, autoSyncWithBoard: true)
                 }
             }
-            commitMutation(board, recordUndo: false)
+            commitMutation(latestBoard, recordUndo: false)
         }
     }
 
@@ -440,14 +609,20 @@ public final class MoodboardStore {
     }
 
     public func curateProposal(_ request: MoodboardCurationRequest) async {
+        curateRequestGeneration &+= 1
+        let requestGen = curateRequestGeneration
         isGeneratingProposal = true
         lastError = nil
         agentTrace = []
-        defer { isGeneratingProposal = false }
+        defer {
+            if curateRequestGeneration == requestGen {
+                isGeneratingProposal = false
+            }
+        }
         do {
             let result = try await engine.curateMoodboard(request) { [weak self] step in
                 await MainActor.run {
-                    guard let self else { return }
+                    guard let self, self.curateRequestGeneration == requestGen else { return }
                     if let idx = self.agentTrace.firstIndex(where: { $0.id == step.id }) {
                         self.agentTrace[idx] = step
                     } else if let idx = self.agentTrace.lastIndex(where: { $0.phase == step.phase && $0.status == .running }) {
@@ -457,10 +632,14 @@ public final class MoodboardStore {
                     }
                 }
             }
+            guard curateRequestGeneration == requestGen else { return }
             proposal = result
             agentTrace = result.agentTrace
         } catch {
-            lastError = error.localizedDescription
+            guard curateRequestGeneration == requestGen else { return }
+            if !(error is CancellationError) {
+                lastError = error.localizedDescription
+            }
         }
     }
 
@@ -470,7 +649,8 @@ public final class MoodboardStore {
         instruction: String,
         scopeFolderIDs: [UUID] = []
     ) async -> MoodboardProposal? {
-        guard let currentBoard = activeBoard else { return nil }
+        guard !isRefiningActiveBoard, let currentBoard = activeBoard else { return nil }
+        let targetBoardID = currentBoard.id
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -508,7 +688,7 @@ public final class MoodboardStore {
         do {
             let result = try await engine.curateMoodboard(req) { [weak self] step in
                 await MainActor.run {
-                    guard let self else { return }
+                    guard let self, self.activeBoard?.id == targetBoardID else { return }
                     if let idx = self.activeBoardAgentTrace.firstIndex(where: { $0.id == step.id }) {
                         self.activeBoardAgentTrace[idx] = step
                     } else if let idx = self.activeBoardAgentTrace.lastIndex(where: { $0.phase == step.phase && $0.status == .running }) {
@@ -518,6 +698,8 @@ public final class MoodboardStore {
                     }
                 }
             }
+            // Verify user hasn't switched away from or closed this board while AI curation ran
+            guard activeBoard?.id == targetBoardID else { return result }
             activeBoardAgentTrace = result.agentTrace
             activeBoardLastSummary = result.curatedSummary
             if !result.draftDocument.nodes.isEmpty {
@@ -526,7 +708,9 @@ public final class MoodboardStore {
             candidatePool = result.candidatePool
             return result
         } catch {
-            lastError = error.localizedDescription
+            if !(error is CancellationError) {
+                lastError = error.localizedDescription
+            }
             return nil
         }
     }
@@ -534,14 +718,25 @@ public final class MoodboardStore {
     @discardableResult
     public func confirmProposal(title: String, subtitle: String = "") async -> MoodboardDocument? {
         guard let prop = proposal else { return nil }
+        await flushPendingSave()
         var doc = prop.draftDocument
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleaned.isEmpty { doc.title = cleaned }
         let cleanSubtitle = subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanSubtitle.isEmpty { doc.subtitle = cleanSubtitle }
+        if doc.mode.isAutoEditorial {
+            let assetsMap = Dictionary(uniqueKeysWithValues: prop.primaryMatches.map { ($0.asset.id, $0.asset) })
+            doc = EditorialLayoutSolver.freezeIntoFreeform(
+                document: doc,
+                containerWidth: 1080,
+                assetsByID: assetsMap
+            )
+        }
         do {
             let saved = try await engine.saveBoard(doc)
+            openRequestGeneration &+= 1
             activeBoard = saved
+            latestViewportOverride = nil
             candidatePool = prop.candidatePool
             activeBoardLastSummary = prop.curatedSummary
             proposal = nil
@@ -563,9 +758,10 @@ public final class MoodboardStore {
         assetID: UUID,
         query: String?
     ) async -> Result<VisualRegionResult, Error> {
+        let targetBoardID = activeBoard?.id
         do {
             let result = try await engine.locateVisualRegion(assetID: assetID, query: query)
-            if result.found, var board = activeBoard,
+            if result.found, let targetBoardID, var board = activeBoard, board.id == targetBoardID,
                let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
                case .assetRef(let refAssetID, _, let weight, let autoplay) = board.nodes[idx].kind {
                 board.nodes[idx].kind = .assetRef(
@@ -589,9 +785,10 @@ public final class MoodboardStore {
         targetAssetID: UUID,
         referenceAssetID: UUID
     ) async -> Result<VisualRegionResult, Error> {
+        let targetBoardID = activeBoard?.id
         do {
             let result = try await engine.locateVisualMatch(referenceAssetID: referenceAssetID, in: targetAssetID)
-            if result.found, var board = activeBoard,
+            if result.found, let targetBoardID, var board = activeBoard, board.id == targetBoardID,
                let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
                case .assetRef(let refAssetID, _, let weight, let autoplay) = board.nodes[idx].kind {
                 board.nodes[idx].kind = .assetRef(
@@ -614,9 +811,10 @@ public final class MoodboardStore {
         nodeID: UUID,
         assetID: UUID
     ) async -> Result<CleanBoundsResult, Error> {
+        let targetBoardID = activeBoard?.id
         do {
             let result = try await engine.detectCleanContentBounds(assetID: assetID)
-            if let recommended = result.recommendedCrop, var board = activeBoard,
+            if let recommended = result.recommendedCrop, let targetBoardID, var board = activeBoard, board.id == targetBoardID,
                let idx = board.nodes.firstIndex(where: { $0.id == nodeID }),
                case .assetRef(let refAssetID, _, let weight, let autoplay) = board.nodes[idx].kind {
                 board.nodes[idx].kind = .assetRef(
@@ -642,9 +840,10 @@ public final class MoodboardStore {
         noteText: String,
         assetsByID: [UUID: AssetRecord]
     ) async -> Result<VisualRegionResult, Error> {
+        let targetBoardID = activeBoard?.id
         do {
             let result = try await engine.locateVisualRegion(assetID: assetID, query: targetQuery)
-            guard result.found, var board = activeBoard else {
+            guard result.found, let targetBoardID, var board = activeBoard, board.id == targetBoardID else {
                 return .success(result)
             }
 
@@ -677,7 +876,13 @@ public final class MoodboardStore {
                 : targetNode.frame.minX - gap - noteWidth
             let noteY = targetWorldY - noteHeight * 0.5
 
-            let confNote = result.confidence.map { "置信度 \(Int(($0 * 100).rounded()))%" } ?? result.source.localizedLabel
+            let confNote: String = {
+                if let conf = result.confidence, conf.isFinite {
+                    let pct = Int((max(0.0, min(1.0, conf)) * 100.0).rounded())
+                    return "置信度 \(pct)%"
+                }
+                return result.source.localizedLabel
+            }()
             let body = noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "已由 \(result.source.localizedLabel) 精准定位（\(confNote)）"
                 : noteText.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -4,6 +4,7 @@ import CoreGraphics
 import CryptoKit
 import Foundation
 import ImageIO
+import os
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -30,7 +31,7 @@ public nonisolated struct FigmaBridgeExportReport: Sendable {
 
 /// Offline lossless Moodboard -> Figma / FigJam Bridge bundle exporter (`.charkleboard` ZIP).
 ///
-/// Modeled on the proven Freeform-Figma-Bridge architecture:
+/// Key guarantees:
 /// - Independent editable layers for images, styled notes, group frames, vector palette strips,
 ///   connectors (native FigJam connectors / Figma vector arrows), and freehand ink strokes.
 /// - Original pixel fidelity: >4096px images are split into lossless ≤4096×4096 PNG tiles with SHA-256 verification.
@@ -136,7 +137,10 @@ public enum FigmaBridgeExporter {
         }
 
         for node in orderedNodes {
-            guard let frame = resolvedFrames[node.id], frame.width > 0, frame.height > 0 else { continue }
+            guard let frame = resolvedFrames[node.id],
+                  frame.x.isFinite, frame.y.isFinite,
+                  frame.width.isFinite, frame.height.isFinite,
+                  frame.width > 0, frame.height > 0 else { continue }
             let geom = geometryJSON(frame, angle: node.rotationDegrees, flipX: node.flipHorizontal, flipY: node.flipVertical)
 
             switch node.kind {
@@ -192,19 +196,25 @@ public enum FigmaBridgeExporter {
                     continue
                 }
 
-                // Archive original file verbatim in `originals/`
+                // Archive source file verbatim in `originals/` (never mislabel a fallback JPEG thumbnail with the original's .gif extension)
                 let archivedInfo: (file: String, sha256: String, isGIF: Bool)
                 if let existingArchive = archivedOriginals[assetID] {
                     archivedInfo = existingArchive
                 } else {
-                    let rawExt = (asset?.fileName as NSString?)?.pathExtension.lowercased()
-                        ?? sourceURL.pathExtension.lowercased()
+                    let assetExt = ((asset?.fileName as NSString?)?.pathExtension ?? "").lowercased()
+                    let urlExt = sourceURL.pathExtension.lowercased()
+                    let rawExt: String
+                    if originalURL == nil {
+                        rawExt = urlExt.isEmpty ? "jpg" : urlExt
+                    } else {
+                        rawExt = assetExt.isEmpty ? urlExt : assetExt
+                    }
                     let safeExt = rawExt.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
                     let fileName = assetID.uuidString + (safeExt.isEmpty ? "" : ".\(safeExt)")
                     let relPath = "originals/\(fileName)"
                     try fileData.write(to: stagingDir.appending(path: relPath), options: .atomic)
                     let digest = sha256Hex(fileData)
-                    let isGIF = safeExt == "gif" || asset?.mediaKind == .animatedImage
+                    let isGIF = originalURL != nil && (safeExt == "gif" || asset?.mediaKind == .animatedImage)
                     originals.append([
                         "id": assetID.uuidString,
                         "name": asset?.fileName ?? fileName,
@@ -247,15 +257,16 @@ public enum FigmaBridgeExporter {
 
                 // Apply normalized crop if present
                 let cropKey: String
-                if let crop, crop != .full, crop.width > 0.05, crop.height > 0.05 {
-                    let rx = max(0, min(Double(cgImage.width - 1), crop.x * Double(cgImage.width)))
-                    let ry = max(0, min(Double(cgImage.height - 1), crop.y * Double(cgImage.height)))
-                    let rw = max(1, min(Double(cgImage.width) - rx, crop.width * Double(cgImage.width)))
-                    let rh = max(1, min(Double(cgImage.height) - ry, crop.height * Double(cgImage.height)))
+                if let crop, crop != .full, crop.width > 0.04, crop.height > 0.04 {
+                    let safeCrop = crop.clamped()
+                    let rx = max(0, min(Double(max(0, cgImage.width - 1)), safeCrop.x * Double(cgImage.width)))
+                    let ry = max(0, min(Double(max(0, cgImage.height - 1)), safeCrop.y * Double(cgImage.height)))
+                    let rw = max(1, min(Double(cgImage.width) - rx, safeCrop.width * Double(cgImage.width)))
+                    let rh = max(1, min(Double(cgImage.height) - ry, safeCrop.height * Double(cgImage.height)))
                     if let cropped = cgImage.cropping(to: CGRect(x: rx, y: ry, width: rw, height: rh).integral) {
                         cgImage = cropped
                     }
-                    cropKey = String(format: "%.3f-%.3f-%.3f-%.3f", crop.x, crop.y, crop.width, crop.height)
+                    cropKey = String(format: "%.4f-%.4f-%.4f-%.4f", safeCrop.x, safeCrop.y, safeCrop.width, safeCrop.height)
                 } else {
                     cropKey = "full"
                 }
@@ -265,7 +276,8 @@ public enum FigmaBridgeExporter {
                 if let cached = cachedTilePayloads[tileCacheKey] {
                     imagePayload = cached
                 } else {
-                    let prefix = assetID.uuidString + (cropKey == "full" ? "" : "-C\(abs(cropKey.hashValue) % 9999)")
+                    let cropHash = String(sha256Hex(Data(cropKey.utf8)).prefix(8))
+                    let prefix = assetID.uuidString + (cropKey == "full" ? "" : "-C\(cropHash)")
                     let tiles = try writeLosslessTiles(for: cgImage, stagingDir: stagingDir, prefix: prefix)
                     var desc: [String: Any] = [
                         "pixelWidth": cgImage.width,
@@ -298,7 +310,11 @@ public enum FigmaBridgeExporter {
 
             case .note(let title, let text, let style, let fontSize):
                 let hex = noteStyleHex(style)
-                let noteName = (title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? title! : String(text.prefix(24)))
+                let noteName: String = if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    title
+                } else {
+                    String(text.prefix(24))
+                }
                 objects.append([
                     "id": node.id.uuidString,
                     "kind": "note",
@@ -309,7 +325,7 @@ public enum FigmaBridgeExporter {
                         "title": title ?? "",
                         "text": text,
                         "style": style.rawValue,
-                        "fontSize": fontSize,
+                        "fontSize": finiteDouble(fontSize, fallback: 14),
                         "backgroundHex": hex.background,
                         "foregroundHex": hex.foreground,
                         "borderHex": hex.border
@@ -365,7 +381,7 @@ public enum FigmaBridgeExporter {
                 let fromID = conn.fromNodeID.uuidString
                 let toID = conn.toNodeID.uuidString
                 guard exportedIDs.contains(fromID), exportedIDs.contains(toID) else { continue }
-                connectorJSONs.append([
+                var entry: [String: Any] = [
                     "id": conn.id.uuidString,
                     "fromNodeID": fromID,
                     "fromAnchor": conn.fromAnchor.rawValue,
@@ -375,15 +391,33 @@ public enum FigmaBridgeExporter {
                     "colorHex": conn.colorHex,
                     "dashed": conn.dashed,
                     "label": conn.label ?? ""
-                ])
+                ]
+                if let fp = conn.fromNormalizedPoint, fp.x.isFinite, fp.y.isFinite {
+                    entry["fromNormalizedPoint"] = [
+                        "x": max(0.0, min(1.0, fp.x)),
+                        "y": max(0.0, min(1.0, fp.y))
+                    ]
+                }
+                if let tp = conn.toNormalizedPoint, tp.x.isFinite, tp.y.isFinite {
+                    entry["toNormalizedPoint"] = [
+                        "x": max(0.0, min(1.0, tp.x)),
+                        "y": max(0.0, min(1.0, tp.y))
+                    ]
+                }
+                connectorJSONs.append(entry)
             }
             for stroke in document.inkStrokes where stroke.points.count >= 2 {
+                let safePts: [[String: Double]] = stroke.points.compactMap { pt in
+                    guard pt.x.isFinite, pt.y.isFinite else { return nil }
+                    return ["x": pt.x, "y": pt.y]
+                }
+                guard safePts.count >= 2 else { continue }
                 strokeJSONs.append([
                     "id": stroke.id.uuidString,
-                    "points": stroke.points.map { ["x": $0.x, "y": $0.y] },
+                    "points": safePts,
                     "colorHex": stroke.colorHex,
-                    "lineWidth": stroke.lineWidth,
-                    "opacity": stroke.opacity
+                    "lineWidth": max(0.5, finiteDouble(stroke.lineWidth, fallback: 3.0)),
+                    "opacity": max(0.0, min(1.0, finiteDouble(stroke.opacity, fallback: 0.92)))
                 ])
             }
         }
@@ -420,8 +454,10 @@ public enum FigmaBridgeExporter {
         try writeJSON(boardJSON, to: stagingDir.appending(path: "board.json"))
         try writeJSON(reportJSON, to: stagingDir.appending(path: "migration-report.json"))
 
-        // Zip cleanly via macOS `/usr/bin/ditto -c -k` and move atomically to destination
-        let stagingZip = destinationURL.deletingLastPathComponent().appending(path: ".\(UUID().uuidString).zip")
+        // Zip cleanly via macOS `/usr/bin/ditto -c -k --norsrc --noextattr` and move atomically to destination
+        let destParent = destinationURL.deletingLastPathComponent()
+        try fm.createDirectory(at: destParent, withIntermediateDirectories: true)
+        let stagingZip = destParent.appending(path: ".\(UUID().uuidString).zip")
         defer { try? fm.removeItem(at: stagingZip) }
 
         try await runDittoZip(sourceDirectory: stagingDir, destinationZip: stagingZip)
@@ -447,13 +483,17 @@ public enum FigmaBridgeExporter {
 
     // MARK: - Helpers
 
+    private static func finiteDouble(_ value: Double, fallback: Double = 0) -> Double {
+        value.isFinite ? value : fallback
+    }
+
     private static func geometryJSON(_ rect: BoardRect, angle: Double, flipX: Bool, flipY: Bool) -> [String: Any] {
         [
-            "x": rect.x,
-            "y": rect.y,
-            "width": rect.width,
-            "height": rect.height,
-            "angle": angle,
+            "x": finiteDouble(rect.x, fallback: 0),
+            "y": finiteDouble(rect.y, fallback: 0),
+            "width": max(1, finiteDouble(rect.width, fallback: 240)),
+            "height": max(1, finiteDouble(rect.height, fallback: 180)),
+            "angle": finiteDouble(angle, fallback: 0),
             "flipX": flipX,
             "flipY": flipY
         ]
@@ -464,6 +504,9 @@ public enum FigmaBridgeExporter {
     }
 
     private static func writeJSON(_ object: Any, to url: URL) throws {
+        guard JSONSerialization.isValidJSONObject(object) else {
+            throw FigmaBridgeExportError("导出数据结构包含无效数值，无法序列化为 JSON。")
+        }
         let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
     }
@@ -522,15 +565,74 @@ public enum FigmaBridgeExporter {
         return tiles
     }
 
+    private nonisolated final class LockedProcessBox: @unchecked Sendable {
+        let process: Process
+        private struct State {
+            var resumed = false
+            var cancelled = false
+        }
+        private let state = OSAllocatedUnfairLock(initialState: State())
+
+        init(_ process: Process) {
+            self.process = process
+        }
+
+        func tryClaimResume() -> Bool {
+            state.withLock { s in
+                if s.resumed { return false }
+                s.resumed = true
+                return true
+            }
+        }
+
+        var isCancelled: Bool {
+            state.withLock { $0.cancelled }
+        }
+
+        func markCancelledAndTerminateIfRunning() {
+            state.withLock { $0.cancelled = true }
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+    }
+
     @concurrent
     private static func runDittoZip(sourceDirectory: URL, destinationZip: URL) async throws {
+        try Task.checkCancellation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-c", "-k", sourceDirectory.path, destinationZip.path]
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw FigmaBridgeExportError("打包 .charkleboard 文件失败。")
+        process.arguments = ["-c", "-k", "--norsrc", "--noextattr", sourceDirectory.path, destinationZip.path]
+
+        let box = LockedProcessBox(process)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                box.process.terminationHandler = { proc in
+                    guard box.tryClaimResume() else { return }
+                    if box.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if proc.terminationStatus == 0 {
+                        continuation.resume(returning: ())
+                    } else {
+                        continuation.resume(throwing: FigmaBridgeExportError("打包 .charkleboard 文件失败（退出码 \(proc.terminationStatus)）。"))
+                    }
+                }
+                if box.isCancelled {
+                    if box.tryClaimResume() {
+                        continuation.resume(throwing: CancellationError())
+                    }
+                    return
+                }
+                do {
+                    try box.process.run()
+                } catch {
+                    if box.tryClaimResume() {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            box.markCancelledAndTerminateIfRunning()
         }
     }
 

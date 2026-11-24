@@ -259,10 +259,11 @@ public nonisolated struct CharkleAgentTools: Sendable {
             let rest = eligible
                 .filter { !mustSeen.contains($0.id) }
                 .sorted { lhs, rhs in
-                    let ls = scoresByID[lhs.id]?.score ?? 0
-                    let rs = scoresByID[rhs.id]?.score ?? 0
-                    if abs(ls - rs) > 0.001 { return ls > rs }
-                    return lhs.createdAt > rhs.createdAt
+                    let lb = Self.scoreBucket(scoresByID[lhs.id]?.score ?? 0)
+                    let rb = Self.scoreBucket(scoresByID[rhs.id]?.score ?? 0)
+                    if lb != rb { return lb > rb }
+                    if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                    return lhs.id.uuidString < rhs.id.uuidString
                 }
             orderedCandidates = mustAssets + rest
         } else {
@@ -272,11 +273,12 @@ public nonisolated struct CharkleAgentTools: Sendable {
             let rankedRest = eligible
                 .filter { !mustSeen.contains($0.id) }
                 .sorted { lhs, rhs in
-                    let ls = scoresByID[lhs.id]?.score ?? 0
-                    let rs = scoresByID[rhs.id]?.score ?? 0
-                    if abs(ls - rs) > 0.001 { return ls > rs }
+                    let lb = Self.scoreBucket(scoresByID[lhs.id]?.score ?? 0)
+                    let rb = Self.scoreBucket(scoresByID[rhs.id]?.score ?? 0)
+                    if lb != rb { return lb > rb }
                     if lhs.rating != rhs.rating { return lhs.rating > rhs.rating }
-                    return lhs.createdAt > rhs.createdAt
+                    if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                    return lhs.id.uuidString < rhs.id.uuidString
                 }
             orderedCandidates = mustAssets + Array(rankedRest.prefix(remainingBudget))
         }
@@ -510,15 +512,62 @@ public nonisolated struct CharkleAgentTools: Sendable {
         // 5. Compile rich BoardNodes (Curator Note + Palette Strip + Section Headers + Hero/Supporting Cards)
         let assetByID = Dictionary(uniqueKeysWithValues: primaryAssets.map { ($0.id, $0) })
         let effectiveStyle = request.layoutStyle
-        let nodes = Self.buildBoardNodes(
+        var existingAssetNodesByAssetID: [UUID: BoardNode] = [:]
+        var preservedUserNotes: [BoardNode] = []
+        if let existingBoard = request.existingBoard {
+            let generatedNoteTitles: Set<String> = ["视觉定调说明", "策展说明", "视觉策展方向"]
+            for existingNode in existingBoard.nodes {
+                if let refID = existingNode.referencedAssetID {
+                    if existingAssetNodesByAssetID[refID] == nil {
+                        existingAssetNodesByAssetID[refID] = existingNode
+                    }
+                } else if case .note(let noteTitle, _, _, _) = existingNode.kind {
+                    let normalizedTitle = (noteTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if existingNode.isLocked || !generatedNoteTitles.contains(normalizedTitle) {
+                        preservedUserNotes.append(existingNode)
+                    }
+                }
+            }
+        }
+
+        var nodes = Self.buildBoardNodes(
             sections: verifiedSections,
             assetByID: assetByID,
             curatorNote: request.includeCuratorNotes ? plan.curatorNote : nil,
             extractedPalette: extractedPalette,
             includeSectionHeaders: request.includeCuratorNotes && (verifiedSections.count >= 2 || (verifiedSections.count == 1 && !verifiedSections[0].rationale.isEmpty)),
             useFreeformLayout: request.useFreeformLayout,
-            style: effectiveStyle
+            style: effectiveStyle,
+            existingAssetNodesByAssetID: existingAssetNodesByAssetID,
+            lockedAssetIDs: locked
         )
+
+        if !preservedUserNotes.isEmpty {
+            let maxY = nodes.map(\.frame.maxY).max() ?? 32.0
+            var noteX = 32.0
+            var noteY = maxY + 28.0
+            var nextZ = (nodes.map(\.zIndex).max() ?? 0) + 1
+            var nextOrder = nodes.count
+            for var userNote in preservedUserNotes {
+                if request.useFreeformLayout {
+                    let w = max(180.0, userNote.frame.width.isFinite ? userNote.frame.width : 240.0)
+                    let h = max(110.0, userNote.frame.height.isFinite ? userNote.frame.height : 140.0)
+                    if noteX + w > 1140.0 {
+                        noteX = 32.0
+                        noteY += h + 18.0
+                    }
+                    if !userNote.isLocked {
+                        userNote.frame = BoardRect(x: noteX, y: noteY, width: w, height: h)
+                    }
+                    noteX += w + 18.0
+                }
+                userNote.zIndex = nextZ
+                userNote.editorialOrder = nextOrder
+                nextZ += 1
+                nextOrder += 1
+                nodes.append(userNote)
+            }
+        }
 
         let cleanTitle = plan.boardTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackTitle = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -538,10 +587,14 @@ public nonisolated struct CharkleAgentTools: Sendable {
 
         let document: MoodboardDocument
         if var existing = request.existingBoard {
+            let survivingNodeIDs = Set(nodes.map(\.id))
             existing.title = finalTitle
             if !finalSubtitle.isEmpty { existing.subtitle = finalSubtitle }
             existing.mode = boardMode
             existing.nodes = nodes
+            existing.connectors.removeAll {
+                !survivingNodeIDs.contains($0.fromNodeID) || !survivingNodeIDs.contains($0.toNodeID)
+            }
             existing.extractedPalette = extractedPalette
             existing.candidateAssetIDs = candidateScored.map(\.id)
             existing.updatedAt = Date()
@@ -623,7 +676,9 @@ public nonisolated struct CharkleAgentTools: Sendable {
         extractedPalette: [LabColor],
         includeSectionHeaders: Bool,
         useFreeformLayout: Bool,
-        style: EditorialStyle
+        style: EditorialStyle,
+        existingAssetNodesByAssetID: [UUID: BoardNode] = [:],
+        lockedAssetIDs: Set<UUID> = []
     ) -> [BoardNode] {
         var nodes: [BoardNode] = []
         var order = 0
@@ -707,16 +762,26 @@ public nonisolated struct CharkleAgentTools: Sendable {
                     for (idx, asset) in row.enumerated() {
                         let w = rowHeight * weights[idx]
                         let weight = heroSet.contains(asset.id) ? 2 : 1
+                        let prior = existingAssetNodesByAssetID[asset.id]
+                        let priorCrop: NormalizedCropRect? = {
+                            if case .assetRef(_, let c, _, _) = prior?.kind { return c }
+                            return nil
+                        }()
                         nodes.append(
                             BoardNode(
+                                id: prior?.id ?? UUID(),
                                 kind: .assetRef(
                                     assetID: asset.id,
-                                    crop: nil,
+                                    crop: priorCrop,
                                     weight: weight,
                                     autoplayLoop: asset.mediaKind == .animatedImage || asset.mediaKind == .video
                                 ),
                                 frame: BoardRect(x: x, y: cursorY, width: w, height: rowHeight),
                                 zIndex: order,
+                                rotationDegrees: prior?.rotationDegrees ?? 0,
+                                flipHorizontal: prior?.flipHorizontal ?? false,
+                                flipVertical: prior?.flipVertical ?? false,
+                                isLocked: (prior?.isLocked ?? false) || lockedAssetIDs.contains(asset.id),
                                 editorialOrder: order
                             )
                         )
@@ -733,16 +798,26 @@ public nonisolated struct CharkleAgentTools: Sendable {
                     let isHero = heroSet.contains(asset.id) || (sections.first?.id == section.id && idx == 0 && heroSet.isEmpty)
                     let ratio = min(2.0, max(0.62, asset.aspectRatio))
                     let w = isHero ? 420.0 : 260.0
+                    let prior = existingAssetNodesByAssetID[asset.id]
+                    let priorCrop: NormalizedCropRect? = {
+                        if case .assetRef(_, let c, _, _) = prior?.kind { return c }
+                        return nil
+                    }()
                     nodes.append(
                         BoardNode(
+                            id: prior?.id ?? UUID(),
                             kind: .assetRef(
                                 assetID: asset.id,
-                                crop: nil,
+                                crop: priorCrop,
                                 weight: isHero ? 2 : 1,
                                 autoplayLoop: asset.mediaKind == .animatedImage || asset.mediaKind == .video
                             ),
                             frame: BoardRect(x: 32, y: cursorY, width: w, height: w / ratio),
                             zIndex: order,
+                            rotationDegrees: prior?.rotationDegrees ?? 0,
+                            flipHorizontal: prior?.flipHorizontal ?? false,
+                            flipVertical: prior?.flipVertical ?? false,
+                            isLocked: (prior?.isLocked ?? false) || lockedAssetIDs.contains(asset.id),
                             editorialOrder: order
                         )
                     )
@@ -764,6 +839,11 @@ public nonisolated struct CharkleAgentTools: Sendable {
         }
 
         return nodes
+    }
+
+    static func scoreBucket(_ score: Double) -> Int {
+        guard score.isFinite else { return 0 }
+        return Int((max(-1000.0, min(1000.0, score)) * 1000.0).rounded())
     }
 
     static func buildFolderPaths(_ folders: [FolderRecord]) -> [UUID: String] {

@@ -404,12 +404,13 @@ private struct SmartFolderFlowLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxW = proposal.width ?? 480
+        let maxW = max(1, proposal.width ?? 480)
         var x: CGFloat = 0
         var y: CGFloat = 0
         var lineH: CGFloat = 0
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
+            let raw = view.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+            let size = CGSize(width: min(raw.width, maxW), height: raw.height)
             if x + size.width > maxW, x > 0 {
                 x = 0
                 y += lineH + spacing
@@ -422,11 +423,13 @@ private struct SmartFolderFlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxW = max(1, bounds.width)
         var x = bounds.minX
         var y = bounds.minY
         var lineH: CGFloat = 0
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
+            let raw = view.sizeThatFits(ProposedViewSize(width: maxW, height: nil))
+            let size = CGSize(width: min(raw.width, maxW), height: raw.height)
             if x + size.width > bounds.maxX, x > bounds.minX {
                 x = bounds.minX
                 y += lineH + spacing

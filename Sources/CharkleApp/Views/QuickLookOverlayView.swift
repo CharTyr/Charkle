@@ -346,6 +346,7 @@ public struct QuickLookOverlayView: View {
                     }
                 }
             }
+            .id(asset.id)
         } else if let post = asset.richMetadata?.socialPost {
             QuickLookSocialPostCard(
                 asset: asset,
@@ -382,25 +383,25 @@ public struct QuickLookOverlayView: View {
                     }
                 }
             )
+            .id(asset.id)
         } else {
             switch asset.mediaKind {
             case .image, .designFile:
                 zoomableImageStage
             case .animatedImage:
                 if let url = originalURL {
-                    AnimatedGIFPlayerView(url: url)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .rotationEffect(.degrees(rotationDegrees))
-                        .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
-                        .scaleEffect(zoomScale * quarterTurnFitScale)
-                        .offset(panOffset)
-                        .shadow(color: .black.opacity(0.42), radius: 28, y: 12)
+                    interactiveTransformedSurface {
+                        AnimatedGIFPlayerView(url: url)
+                            .id(asset.id)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
                 } else {
                     zoomableImageStage
                 }
             case .video:
                 if let url = originalURL {
                     QuickLookVideoPlayerView(url: url)
+                        .id(asset.id)
                         .frame(maxWidth: 1020, maxHeight: 640)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .shadow(color: .black.opacity(0.45), radius: 28, y: 12)
@@ -409,12 +410,15 @@ public struct QuickLookOverlayView: View {
                 }
             case .audio:
                 QuickLookAudioStudioCard(asset: asset, fileURL: originalURL)
+                    .id(asset.id)
                     .frame(maxWidth: 580)
             case .model3D:
                 QuickLookModel3DViewer(asset: asset, originalURL: originalURL)
+                    .id(asset.id)
             case .document:
                 if let url = originalURL, url.pathExtension.lowercased() == "pdf" {
                     QuickLookPDFView(url: url)
+                        .id(asset.id)
                         .frame(maxWidth: 860, maxHeight: 680)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .shadow(color: .black.opacity(0.40), radius: 24, y: 10)
@@ -425,6 +429,7 @@ public struct QuickLookOverlayView: View {
                         .shadow(color: .black.opacity(0.40), radius: 28, y: 12)
                 } else {
                     QuickLookMarkdownReaderCard(asset: asset, originalURL: originalURL)
+                        .id(asset.id)
                 }
             case .webBookmark:
                 webBookmarkDetailCard
@@ -463,30 +468,43 @@ public struct QuickLookOverlayView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ZStack {
-                if let image = activeImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                        .clipShape(shape)
-                } else {
-                    ProceduralMediaFallbackCard(asset: asset)
-                        .aspectRatio(max(0.65, min(1.85, asset.aspectRatio)), contentMode: .fit)
-                        .frame(maxWidth: 720, maxHeight: 540)
-                        .clipShape(shape)
+            interactiveTransformedSurface {
+                ZStack {
+                    if let image = activeImage {
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .clipShape(shape)
+                    } else {
+                        ProceduralMediaFallbackCard(asset: asset)
+                            .aspectRatio(max(0.65, min(1.85, asset.aspectRatio)), contentMode: .fit)
+                            .frame(maxWidth: 720, maxHeight: 540)
+                            .clipShape(shape)
+                    }
                 }
             }
+        }
+    }
+
+    private func interactiveTransformedSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
             .rotationEffect(.degrees(rotationDegrees))
             .scaleEffect(x: flipHorizontal ? -1 : 1, y: flipVertical ? -1 : 1)
             .scaleEffect(zoomScale * quarterTurnFitScale)
             .offset(panOffset)
             .shadow(color: .black.opacity(0.38), radius: 24, y: 10)
+            .contentShape(Rectangle())
             .gesture(
                 MagnifyGesture()
                     .onChanged { val in
                         if gestureStartScale == nil { gestureStartScale = zoomScale }
-                        zoomScale = max(0.5, min(maxZoomLimit, (gestureStartScale ?? 1.0) * val.magnification))
+                        let next = max(0.5, min(maxZoomLimit, (gestureStartScale ?? 1.0) * val.magnification))
+                        zoomScale = next
+                        if next <= 1.01 {
+                            panOffset = .zero
+                            panStartOffset = .zero
+                        }
                     }
                     .onEnded { _ in
                         gestureStartScale = nil
@@ -494,6 +512,7 @@ public struct QuickLookOverlayView: View {
                             withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
                                 zoomScale = 1.0
                                 panOffset = .zero
+                                panStartOffset = .zero
                             }
                         }
                     }
@@ -508,6 +527,7 @@ public struct QuickLookOverlayView: View {
                         )
                     }
                     .onEnded { _ in
+                        guard zoomScale > 1.01 else { return }
                         panStartOffset = panOffset
                     }
             )
@@ -522,7 +542,6 @@ public struct QuickLookOverlayView: View {
                     }
                 }
             }
-        }
     }
 
     private var webBookmarkDetailCard: some View {
@@ -617,6 +636,9 @@ public struct QuickLookOverlayView: View {
                                     zoomScale = 1.0
                                     panOffset = .zero
                                     panStartOffset = .zero
+                                    rotationDegrees = 0
+                                    flipHorizontal = false
+                                    flipVertical = false
                                 }
                             }
                         } label: {
@@ -642,10 +664,7 @@ public struct QuickLookOverlayView: View {
 
                     HStack(spacing: 4) {
                         hudIconButton("minus.magnifyingglass", help: "缩小") {
-                            isLongStripScrollMode = false
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                                zoomScale = max(0.5, zoomScale * 0.8)
-                            }
+                            stepZoom(by: 0.8)
                         }
                         Text("\(Int((zoomScale * 100).rounded()))%")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -653,10 +672,7 @@ public struct QuickLookOverlayView: View {
                             .foregroundStyle(.white.opacity(0.88))
                             .frame(minWidth: 42)
                         hudIconButton("plus.magnifyingglass", help: "放大") {
-                            isLongStripScrollMode = false
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                                zoomScale = min(maxZoomLimit, zoomScale * 1.25)
-                            }
+                            stepZoom(by: 1.25)
                         }
                         hudIconButton("1.magnifyingglass", help: "重置缩放与变换 (0)") {
                             resetViewTransform()
@@ -836,6 +852,19 @@ public struct QuickLookOverlayView: View {
         }
     }
 
+    private func stepZoom(by factor: CGFloat) {
+        guard supportsVisualTransform else { return }
+        isLongStripScrollMode = false
+        withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
+            let next = max(0.5, min(maxZoomLimit, zoomScale * factor))
+            zoomScale = next
+            if next <= 1.01 {
+                panOffset = .zero
+                panStartOffset = .zero
+            }
+        }
+    }
+
     private func rotatePreview(by screenDelta: Double) {
         guard supportsVisualTransform else { return }
         // Because screen-space flip wraps inner rotation: R(Δ) * S * R(θ) = S * R(θ + sx*sy*Δ)
@@ -940,20 +969,11 @@ public struct QuickLookOverlayView: View {
                 return nil
             }
             if (isUnmodified || isShiftOnly) && (chars == "+" || chars == "=") {
-                withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                    zoomScale = min(5.0, zoomScale * 1.25)
-                }
+                stepZoom(by: 1.25)
                 return nil
             }
             if isUnmodified && chars == "-" {
-                withAnimation(CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)) {
-                    let next = max(0.5, zoomScale * 0.8)
-                    zoomScale = next
-                    if next <= 1.01 {
-                        panOffset = .zero
-                        panStartOffset = .zero
-                    }
-                }
+                stepZoom(by: 0.8)
                 return nil
             }
         }
@@ -1002,6 +1022,32 @@ struct AnimatedGIFPlayerView: NSViewRepresentable {
 
     final class Coordinator {
         var currentURL: URL?
+        var loadTask: Task<Void, Never>?
+
+        func load(url: URL, into view: NSImageView) {
+            loadTask?.cancel()
+            currentURL = url
+            loadTask = Task { @MainActor [weak view] in
+                let data = await AnimatedGIFPlayerView.readDataOffMain(url: url)
+                guard !Task.isCancelled, let view, let data, let image = NSImage(data: data) else { return }
+                view.image = image
+                view.animates = true
+            }
+        }
+
+        func teardown(_ view: NSImageView) {
+            loadTask?.cancel()
+            loadTask = nil
+            currentURL = nil
+            view.animates = false
+            view.image = nil
+        }
+    }
+
+    @concurrent
+    private static func readDataOffMain(url: URL) async -> Data? {
+        guard !Task.isCancelled else { return nil }
+        return try? Data(contentsOf: url)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1012,25 +1058,28 @@ struct AnimatedGIFPlayerView: NSViewRepresentable {
         let view = NSImageView()
         view.animates = true
         view.imageScaling = .scaleProportionallyDown
-        view.image = NSImage(contentsOf: url)
-        context.coordinator.currentURL = url
+        context.coordinator.load(url: url, into: view)
         return view
     }
 
     func updateNSView(_ nsView: NSImageView, context: Context) {
         guard context.coordinator.currentURL != url else { return }
-        context.coordinator.currentURL = url
-        nsView.image = NSImage(contentsOf: url)
-        nsView.animates = true
+        context.coordinator.load(url: url, into: nsView)
+    }
+
+    static func dismantleNSView(_ nsView: NSImageView, coordinator: Coordinator) {
+        coordinator.teardown(nsView)
     }
 }
 
 struct QuickLookVideoPlayerView: NSViewRepresentable {
     let url: URL
     var autoPlay: Bool = true
+    var isPlaybackSuspended: Bool = false
 
     final class Coordinator {
         var currentURL: URL?
+        var wasSuspended: Bool = false
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1043,20 +1092,30 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
         let player = AVPlayer(url: url)
         view.player = player
         context.coordinator.currentURL = url
-        if autoPlay {
+        context.coordinator.wasSuspended = isPlaybackSuspended
+        if autoPlay && !isPlaybackSuspended {
             player.play()
         }
         return view
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
-        guard context.coordinator.currentURL != url else { return }
-        context.coordinator.currentURL = url
-        nsView.player?.pause()
-        let player = AVPlayer(url: url)
-        nsView.player = player
-        if autoPlay {
-            player.play()
+        if context.coordinator.currentURL != url {
+            context.coordinator.currentURL = url
+            context.coordinator.wasSuspended = isPlaybackSuspended
+            nsView.player?.pause()
+            let player = AVPlayer(url: url)
+            nsView.player = player
+            if autoPlay && !isPlaybackSuspended {
+                player.play()
+            }
+            return
+        }
+        if context.coordinator.wasSuspended != isPlaybackSuspended {
+            context.coordinator.wasSuspended = isPlaybackSuspended
+            if isPlaybackSuspended {
+                nsView.player?.pause()
+            }
         }
     }
 
@@ -1067,21 +1126,185 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
     }
 }
 
+private nonisolated final class PDFDocumentBox: @unchecked Sendable {
+    let document: PDFDocument
+    init(_ document: PDFDocument) { self.document = document }
+}
+
 struct QuickLookPDFView: NSViewRepresentable {
     let url: URL
+
+    final class Coordinator {
+        var currentURL: URL?
+        var loadTask: Task<Void, Never>?
+
+        func load(url: URL, into view: PDFView) {
+            loadTask?.cancel()
+            currentURL = url
+            loadTask = Task { @MainActor [weak view] in
+                let box = await QuickLookPDFView.loadDocumentOffMain(url: url)
+                guard !Task.isCancelled, let view else { return }
+                view.document = box?.document
+            }
+        }
+
+        func teardown(_ view: PDFView) {
+            loadTask?.cancel()
+            loadTask = nil
+            currentURL = nil
+            view.document = nil
+        }
+    }
+
+    @concurrent
+    private static func loadDocumentOffMain(url: URL) async -> PDFDocumentBox? {
+        guard !Task.isCancelled, let doc = PDFDocument(url: url) else { return nil }
+        return PDFDocumentBox(doc)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
-        view.document = PDFDocument(url: url)
+        context.coordinator.load(url: url, into: view)
         return view
     }
 
     func updateNSView(_ nsView: PDFView, context: Context) {
-        if nsView.document?.documentURL != url {
-            nsView.document = PDFDocument(url: url)
+        if context.coordinator.currentURL != url {
+            context.coordinator.load(url: url, into: nsView)
         }
+    }
+
+    static func dismantleNSView(_ nsView: PDFView, coordinator: Coordinator) {
+        coordinator.teardown(nsView)
+    }
+}
+
+@Observable
+private final class QuickLookAudioPlaybackController {
+    var isPlaying: Bool = false
+    var progress: Double = 0
+    var isScrubbing: Bool = false
+
+    @ObservationIgnored private var player: AVPlayer?
+    @ObservationIgnored private var currentURL: URL?
+    @ObservationIgnored private var timeObserver: Any?
+    @ObservationIgnored private var endObserver: NSObjectProtocol?
+    @ObservationIgnored private var fallbackDuration: Double?
+
+    func configure(fileURL: URL?, fallbackDuration: Double?) {
+        self.fallbackDuration = fallbackDuration
+        if currentURL != fileURL {
+            stop()
+            currentURL = fileURL
+        }
+    }
+
+    func suspendIfNeeded(_ suspended: Bool) {
+        guard suspended, isPlaying else { return }
+        player?.pause()
+        isPlaying = false
+    }
+
+    func togglePlayback(fileURL: URL?) {
+        guard let fileURL else { return }
+        if currentURL != fileURL {
+            stop()
+            currentURL = fileURL
+        }
+        if player == nil {
+            let item = AVPlayerItem(url: fileURL)
+            let newPlayer = AVPlayer(playerItem: item)
+            player = newPlayer
+
+            let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+            timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+                MainActor.assumeIsolated {
+                    guard let self, !self.isScrubbing else { return }
+                    let duration = self.effectiveDuration()
+                    guard duration > 0 else { return }
+                    let current = time.seconds
+                    if current.isFinite && current >= 0 {
+                        self.progress = max(0, min(1, current / duration))
+                    }
+                }
+            }
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.isPlaying = false
+                    self.progress = 1.0
+                }
+            }
+
+            if progress > 0 && progress < 0.99 {
+                let dur = effectiveDuration()
+                if dur > 0 {
+                    newPlayer.seek(to: CMTime(seconds: dur * progress, preferredTimescale: 600))
+                }
+            }
+        }
+
+        if isPlaying {
+            player?.pause()
+            isPlaying = false
+        } else {
+            if progress >= 0.99 {
+                progress = 0
+                player?.seek(to: .zero)
+            }
+            player?.play()
+            isPlaying = true
+        }
+    }
+
+    func seek(to ratio: Double) {
+        let clamped = max(0, min(1, ratio))
+        progress = clamped
+        let duration = effectiveDuration()
+        if duration > 0, let player {
+            let target = CMTime(seconds: duration * clamped, preferredTimescale: 600)
+            player.seek(to: target)
+        }
+    }
+
+    func stop() {
+        if let token = timeObserver, let player {
+            player.removeTimeObserver(token)
+        }
+        timeObserver = nil
+        if let obs = endObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        endObserver = nil
+        player?.pause()
+        player = nil
+        isPlaying = false
+        progress = 0
+        isScrubbing = false
+    }
+
+    private func effectiveDuration() -> Double {
+        if let itemDur = player?.currentItem?.duration.seconds, itemDur.isFinite, itemDur > 0 {
+            return itemDur
+        }
+        if let fallback = fallbackDuration, fallback.isFinite, fallback > 0 {
+            return fallback
+        }
+        return 0
+    }
+
+    isolated deinit {
+        stop()
     }
 }
 
@@ -1090,10 +1313,9 @@ struct QuickLookAudioStudioCard: View {
 
     let asset: AssetRecord
     let fileURL: URL?
+    var isPlaybackSuspended: Bool = false
 
-    @State private var player: AVPlayer?
-    @State private var isPlaying: Bool = false
-    @State private var progress: Double = 0
+    @State private var playback = QuickLookAudioPlaybackController()
 
     var body: some View {
         let peaks = asset.waveformPeaks.isEmpty
@@ -1104,9 +1326,9 @@ struct QuickLookAudioStudioCard: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
                 Button {
-                    togglePlayback()
+                    playback.togglePlayback(fileURL: fileURL)
                 } label: {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 44, height: 44)
@@ -1134,7 +1356,7 @@ struct QuickLookAudioStudioCard: View {
                     ForEach(Array(peaks.prefix(64).enumerated()), id: \.offset) { idx, peak in
                         let frac = Double(idx) / Double(max(1, min(peaks.count, 64) - 1))
                         Capsule(style: .continuous)
-                            .fill(frac <= progress ? accent : Color.primary.opacity(0.18))
+                            .fill(frac <= playback.progress ? accent : Color.primary.opacity(0.18))
                             .frame(height: max(6, geo.size.height * CGFloat(max(0.15, min(1.0, peak)))))
                     }
                 }
@@ -1143,12 +1365,12 @@ struct QuickLookAudioStudioCard: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
+                            playback.isScrubbing = true
                             let ratio = max(0, min(1, Double(value.location.x / max(1, geo.size.width))))
-                            progress = ratio
-                            if let duration = asset.durationSeconds, let player {
-                                let target = CMTime(seconds: duration * ratio, preferredTimescale: 600)
-                                player.seek(to: target)
-                            }
+                            playback.seek(to: ratio)
+                        }
+                        .onEnded { _ in
+                            playback.isScrubbing = false
                         }
                 )
             }
@@ -1157,23 +1379,17 @@ struct QuickLookAudioStudioCard: View {
         .padding(24)
         .background(CharkleTheme.surfaceElevated(for: colorScheme), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: .black.opacity(0.36), radius: 24, y: 10)
+        .onAppear {
+            playback.configure(fileURL: fileURL, fallbackDuration: asset.durationSeconds)
+        }
+        .onChange(of: fileURL) { _, newURL in
+            playback.configure(fileURL: newURL, fallbackDuration: asset.durationSeconds)
+        }
+        .onChange(of: isPlaybackSuspended) { _, suspended in
+            playback.suspendIfNeeded(suspended)
+        }
         .onDisappear {
-            player?.pause()
-            player = nil
-        }
-    }
-
-    private func togglePlayback() {
-        guard let fileURL else { return }
-        if player == nil {
-            player = AVPlayer(url: fileURL)
-        }
-        if isPlaying {
-            player?.pause()
-            isPlaying = false
-        } else {
-            player?.play()
-            isPlaying = true
+            playback.stop()
         }
     }
 }

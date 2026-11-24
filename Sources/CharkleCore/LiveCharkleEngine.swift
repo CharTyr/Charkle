@@ -1,5 +1,8 @@
 import AppKit
 import Foundation
+import os
+
+private let engineLogger = Logger(subsystem: "com.charkle.core", category: "LiveCharkleEngine")
 
 public final actor LiveCharkleEngine: CharkleEngineProtocol {
     let database: LibraryDatabase
@@ -15,6 +18,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private var backgroundEnrichmentTasks: [UUID: Task<Void, Never>] = [:]
     private var cachedGDirectEndpoints: (endpoints: [GDirectEndpoint], fetchedAt: ContinuousClock.Instant)?
     private var seeding = false
+    private var isMigrating = false
+    private var isUpgradingXHSCovers = false
+    private var cachedWebDAVPassword: String?
+    private var hasLoadedWebDAVPassword = false
 
     public init(database: LibraryDatabase, media: MediaPipeline, intelligence: IntelligenceEngine = IntelligenceEngine(),
                 transport: (any DriveTransport)? = nil) {
@@ -249,20 +256,35 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         if let repoRef = GitHubRepoURLParser.parse(url) {
             let repo = await GitHubRepoResolver.resolve(repoRef)
-            var rich = current.richMetadata ?? AssetRichMetadata()
-            rich.githubRepo = repo
-            current.richMetadata = rich
-            current.title = repo.fullName
-            if let desc = repo.description, !desc.isEmpty {
-                current.notes = desc
-            }
             let ogCard = await GitHubRepoResolver.fetchOpenGraphCardImage(for: repo)
-            if let card = ogCard ?? MediaArtwork.githubRepoCard(repo) {
+            guard (try await database.asset(id: id)) != nil else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
+            let card = ogCard ?? MediaArtwork.githubRepoCard(repo)
+            if let card {
                 try? media.writeCustomPoster(card, for: &current)
             }
-            let updated = current
+            let refreshedWidth = current.pixelWidth
+            let refreshedHeight = current.pixelHeight
+            let refreshedColors = current.dominantColors
+            let didWritePoster = card != nil
             return try await database.transaction { store in
-                try store.saveAssetLocally(updated)
+                guard var latest = try store.asset(id: id) else {
+                    throw DriveTransportError.fileNotFound(id.uuidString)
+                }
+                var rich = latest.richMetadata ?? AssetRichMetadata()
+                rich.githubRepo = repo
+                latest.richMetadata = rich
+                latest.title = repo.fullName
+                if let desc = repo.description, !desc.isEmpty {
+                    latest.notes = desc
+                }
+                if didWritePoster {
+                    latest.pixelWidth = refreshedWidth
+                    latest.pixelHeight = refreshedHeight
+                    latest.dominantColors = refreshedColors
+                }
+                return try store.saveAssetLocally(latest)
             }
         }
 
@@ -281,7 +303,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 let item = XPostMedia(kind: kind, url: mediaURL, thumbnailURL: resolved.primaryThumbnailURL)
                 if let file = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: "Social-\(id.uuidString.prefix(8))") {
                     downloadedFile = file
-                    embeddedPoster = MediaPipeline.raster(file)?.poster
+                    if kind == .video || kind == .gif {
+                        embeddedPoster = await MediaPipeline.videoPosterFrame(file)
+                    } else {
+                        embeddedPoster = MediaPipeline.raster(file)?.poster
+                    }
                 } else {
                     mediaFailed = true
                 }
@@ -295,45 +321,79 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
             let authorAvatar = await avatarTask
 
+            guard (try await database.asset(id: id)) != nil else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
             var meta = resolved.metadata
             meta.mediaFetchFailed = mediaFailed
-            var rich = current.richMetadata ?? AssetRichMetadata()
-            rich.socialPost = meta
-            current.richMetadata = rich
-            current.title = resolved.shortTitle
+            var installedVideoInfo: (fileName: String, mimeType: String, bytes: Int64, sha256: String)?
             if let file = downloadedFile {
                 let ext = file.pathExtension.lowercased()
                 if ["mp4", "mov", "m4v", "webm"].contains(ext) {
-                    current.fileName = file.lastPathComponent
-                    _ = try? media.installOriginal(file, for: current)
+                    var installTarget = current
+                    installTarget.fileName = file.lastPathComponent
+                    if let installed = try? media.installOriginal(file, for: installTarget),
+                       let digests = try? MediaPipeline.digests(installed) {
+                        installedVideoInfo = (
+                            fileName: file.lastPathComponent,
+                            mimeType: MediaPipeline.mimeType(fileName: file.lastPathComponent),
+                            bytes: digests.bytes,
+                            sha256: digests.sha256
+                        )
+                    }
                 }
             }
-            current.mediaKind = .webBookmark
-            current.ocrText = meta.bodyText.isEmpty ? current.ocrText : meta.bodyText
-            if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
+            let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar)
+            if let card {
                 try? media.writeCustomPoster(card, for: &current)
             }
-            let updated = current
+            let refreshedWidth = current.pixelWidth
+            let refreshedHeight = current.pixelHeight
+            let refreshedColors = current.dominantColors
+            let didWritePoster = card != nil
+            let finalMeta = meta
+            let finalVideo = installedVideoInfo
             return try await database.transaction { store in
-                try store.saveAssetLocally(updated)
+                guard var latest = try store.asset(id: id) else {
+                    throw DriveTransportError.fileNotFound(id.uuidString)
+                }
+                var rich = latest.richMetadata ?? AssetRichMetadata()
+                rich.socialPost = finalMeta
+                latest.richMetadata = rich
+                latest.title = resolved.shortTitle
+                latest.mediaKind = .webBookmark
+                if !finalMeta.bodyText.isEmpty {
+                    latest.ocrText = finalMeta.bodyText
+                }
+                if let vid = finalVideo {
+                    latest.fileName = vid.fileName
+                    latest.mimeType = vid.mimeType
+                    latest.fileSizeBytes = vid.bytes
+                    latest.contentHash = vid.sha256
+                    latest.isLocalOriginalCached = true
+                }
+                if didWritePoster {
+                    latest.pixelWidth = refreshedWidth
+                    latest.pixelHeight = refreshedHeight
+                    latest.dominantColors = refreshedColors
+                }
+                return try store.saveAssetLocally(latest)
             }
         }
 
         if current.mediaKind == .webBookmark, WebBookmark.isWebURL(url) {
             let bookmark = await WebBookmark.fetch(url, allowWebViewSnapshot: true)
+            guard (try await database.asset(id: id)) != nil else {
+                throw DriveTransportError.fileNotFound(id.uuidString)
+            }
             let domain = WebURLParser.cleanDomain(for: url) ?? url.host() ?? current.sourceDomain ?? "web.link"
-            current.sourceDomain = domain
-            if let fetchedTitle = bookmark.title, !fetchedTitle.isEmpty {
-                current.title = fetchedTitle
-            }
-            if let desc = bookmark.description, !desc.isEmpty {
-                current.notes = desc
-            }
+            let resolvedTitle = bookmark.title.flatMap { $0.isEmpty ? nil : $0 } ?? current.title
+            let resolvedDesc = bookmark.description.flatMap { $0.isEmpty ? nil : $0 } ?? current.notes
             let poster = bookmark.poster ?? MediaArtwork.webPageCard(
-                title: current.title,
+                title: resolvedTitle,
                 domain: domain,
                 siteName: bookmark.siteName,
-                description: bookmark.description ?? current.notes,
+                description: resolvedDesc,
                 urlString: url.absoluteString,
                 themeColorHex: bookmark.themeColorHex,
                 favicon: bookmark.favicon
@@ -341,9 +401,27 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             if let poster {
                 try? media.writeCustomPoster(poster, for: &current)
             }
-            let updated = current
+            let refreshedWidth = current.pixelWidth
+            let refreshedHeight = current.pixelHeight
+            let refreshedColors = current.dominantColors
+            let didWritePoster = poster != nil
             return try await database.transaction { store in
-                try store.saveAssetLocally(updated)
+                guard var latest = try store.asset(id: id) else {
+                    throw DriveTransportError.fileNotFound(id.uuidString)
+                }
+                latest.sourceDomain = domain
+                if let fetchedTitle = bookmark.title, !fetchedTitle.isEmpty {
+                    latest.title = fetchedTitle
+                }
+                if let desc = bookmark.description, !desc.isEmpty {
+                    latest.notes = desc
+                }
+                if didWritePoster {
+                    latest.pixelWidth = refreshedWidth
+                    latest.pixelHeight = refreshedHeight
+                    latest.dominantColors = refreshedColors
+                }
+                return try store.saveAssetLocally(latest)
             }
         }
 
@@ -355,6 +433,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     /// native Xiaohongshu feed card (`900x1440`: vertical 3:4 `900x1200` cover + bold title/author footer).
     /// Idempotent and zero-overhead once migrated; skips media-bearing notes when offline rather than degrading covers.
     public func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID] {
+        guard !isUpgradingXHSCovers else { return [] }
+        isUpgradingXHSCovers = true
+        defer { isUpgradingXHSCovers = false }
+
         guard let allAssets = try? await database.fetchAssets(matching: FilterCriteria(includeTrashed: true)) else {
             return []
         }
@@ -371,6 +453,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         var upgradedIDs: [UUID] = []
         for var asset in candidates {
+            guard !Task.isCancelled else { break }
             guard var meta = asset.richMetadata?.socialPost else { continue }
             var embeddedPoster: CGImage?
 
@@ -448,20 +531,34 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
             let authorAvatar = await SocialPostResolver.fetchAvatarImage(from: meta.authorAvatarURL)
 
+            guard !Task.isCancelled else { break }
             guard let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) else {
                 continue
             }
 
-            var rich = asset.richMetadata ?? AssetRichMetadata()
-            rich.socialPost = meta
-            asset.richMetadata = rich
             do {
+                // Verify the asset still exists before overwriting its thumbnails on disk.
+                guard (try await database.asset(id: asset.id)) != nil else { continue }
                 try media.writeCustomPoster(card, for: &asset)
-                let saved = asset
-                _ = try await database.transaction { store in
-                    try store.saveAssetLocally(saved)
+                let assetID = asset.id
+                let updatedMeta = meta
+                let newWidth = asset.pixelWidth
+                let newHeight = asset.pixelHeight
+                let newColors = asset.dominantColors
+                let saved = try await database.transaction { store -> AssetRecord? in
+                    // Re-read the latest persisted record so concurrent user edits (tags/notes/folder/trash) are preserved.
+                    guard var latest = try store.asset(id: assetID) else { return nil }
+                    var rich = latest.richMetadata ?? AssetRichMetadata()
+                    rich.socialPost = updatedMeta
+                    latest.richMetadata = rich
+                    latest.pixelWidth = newWidth
+                    latest.pixelHeight = newHeight
+                    latest.dominantColors = newColors
+                    return try store.saveAssetLocally(latest)
                 }
-                upgradedIDs.append(saved.id)
+                if let saved {
+                    upgradedIDs.append(saved.id)
+                }
             } catch {
                 continue
             }
@@ -483,10 +580,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         guard !expandedItems.isEmpty else { return [] }
 
         // 2. Prepare items with bounded concurrency (up to 4 workers) without blocking on Vision OCR or Cloud AI.
-        var prepared: [PreparedAsset] = []
+        var orderedResults = [PreparedAsset?](repeating: nil, count: expandedItems.count)
+        let prepared: [PreparedAsset]
         do {
             let maxConcurrent = 4
-            var orderedResults = [PreparedAsset?](repeating: nil, count: expandedItems.count)
             try await withThrowingTaskGroup(of: (Int, PreparedAsset).self) { group in
                 var nextIndex = 0
                 let initialBatch = min(maxConcurrent, expandedItems.count)
@@ -496,7 +593,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     let work = expandedItems[index]
                     group.addTask {
                         try Task.checkCancellation()
-                        return (index, try await self.prepareExpanded(work.input, folderID: work.folderID))
+                        let item = try await self.prepareExpanded(work.input, folderID: work.folderID)
+                        if Task.isCancelled {
+                            self.media.removeFiles(for: item.asset)
+                            throw CancellationError()
+                        }
+                        return (index, item)
                     }
                 }
                 while let (index, item) = try await group.next() {
@@ -507,14 +609,21 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                         let work = expandedItems[launchIndex]
                         group.addTask {
                             try Task.checkCancellation()
-                            return (launchIndex, try await self.prepareExpanded(work.input, folderID: work.folderID))
+                            let item = try await self.prepareExpanded(work.input, folderID: work.folderID)
+                            if Task.isCancelled {
+                                self.media.removeFiles(for: item.asset)
+                                throw CancellationError()
+                            }
+                            return (launchIndex, item)
                         }
                     }
                 }
             }
             prepared = orderedResults.compactMap { $0 }
         } catch {
-            for item in prepared { media.removeFiles(for: item.asset) }
+            for item in orderedResults.compactMap({ $0 }) {
+                media.removeFiles(for: item.asset)
+            }
             throw error
         }
 
@@ -717,7 +826,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     private struct PreparedAsset: Sendable {
         var asset: AssetRecord
-        let feature: Data?
+        var feature: Data?
     }
 
     private func prepareExpanded(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
@@ -798,20 +907,24 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
     }
 
-    private func prepare(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
+    private func computeFeaturePrint(for id: UUID) async -> Data? {
+        guard let thumbnail = media.thumbnailURL(for: id, tier: .grid520) else { return nil }
+        let analysis = await intelligence.analyze(
+            thumbnailURL: thumbnail,
+            includeColors: false,
+            includeOCR: false,
+            includeFeaturePrint: true
+        )
+        return analysis.featurePrintData
+    }
+
+    private func prepare(_ input: CaptureInput, folderID: UUID?, computeFeaturePrint shouldComputeFeature: Bool = true) async throws -> PreparedAsset {
         let id = UUID()
         do {
             let source = try await media.ingest(input, folderID: folderID, id: id)
             var feature: Data?
-            if source.asset.mediaKind != .audio,
-               let thumbnail = media.thumbnailURL(for: id, tier: .grid520) {
-                let analysis = await intelligence.analyze(
-                    thumbnailURL: thumbnail,
-                    includeColors: false,
-                    includeOCR: false,
-                    includeFeaturePrint: true
-                )
-                feature = analysis.featurePrintData
+            if shouldComputeFeature, source.asset.mediaKind != .audio {
+                feature = await computeFeaturePrint(for: id)
             }
             return PreparedAsset(asset: source.asset, feature: feature)
         } catch {
@@ -831,7 +944,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         var item = try await prepare(
             .webURL(ref.canonicalURL, title: repo.fullName, notes: summaryText),
-            folderID: folderID
+            folderID: folderID,
+            computeFeaturePrint: false
         )
         item.asset.title = repo.fullName
         item.asset.notes = repo.description ?? ""
@@ -846,6 +960,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         if let card = ogCard ?? MediaArtwork.githubRepoCard(repo) {
             try? media.writeCustomPoster(card, for: &item.asset)
         }
+        item.feature = await computeFeaturePrint(for: item.asset.id)
         return item
     }
 
@@ -882,6 +997,9 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 embeddedPoster = MediaPipeline.raster(thumbFile)?.poster
             }
         }
+        if embeddedPoster == nil, let videoFile = downloadedVideoFile {
+            embeddedPoster = await MediaPipeline.videoPosterFrame(videoFile)
+        }
 
         let authorAvatar = await avatarTask
 
@@ -894,11 +1012,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         // while preserving `.webBookmark` + `richMetadata.socialPost`; otherwise store the structured Markdown archive.
         var prepared: PreparedAsset
         if let downloadedVideoFile {
-            prepared = try await prepare(.fileURL(downloadedVideoFile), folderID: folderID)
+            prepared = try await prepare(.fileURL(downloadedVideoFile), folderID: folderID, computeFeaturePrint: false)
         } else {
             prepared = try await prepare(
                 .textSnippet(title: resolved.shortTitle, text: resolved.markdownDocument, sourceURL: meta.originalURL),
-                folderID: folderID
+                folderID: folderID,
+                computeFeaturePrint: false
             )
         }
 
@@ -918,6 +1037,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
             try? media.writeCustomPoster(card, for: &prepared.asset)
         }
+        prepared.feature = await computeFeaturePrint(for: prepared.asset.id)
         return prepared
     }
 
@@ -1008,6 +1128,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
         }
 
+        if embeddedPoster == nil, let videoFile = downloadedVideoFile {
+            embeddedPoster = await MediaPipeline.videoPosterFrame(videoFile)
+        }
+
         let authorAvatar = await avatarTask
         meta.mediaFetchFailed = mediaFailed && embeddedPoster == nil && downloadedVideoFile == nil
 
@@ -1020,11 +1144,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         var prepared: PreparedAsset
         if let downloadedVideoFile {
-            prepared = try await prepare(.fileURL(downloadedVideoFile), folderID: folderID)
+            prepared = try await prepare(.fileURL(downloadedVideoFile), folderID: folderID, computeFeaturePrint: false)
         } else {
             prepared = try await prepare(
                 .textSnippet(title: resolved.shortTitle, text: resolved.markdownDocument, sourceURL: meta.originalURL),
-                folderID: folderID
+                folderID: folderID,
+                computeFeaturePrint: false
             )
         }
 
@@ -1047,6 +1172,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         if let card = MediaArtwork.socialPostCard(meta, embeddedMedia: embeddedPoster, authorAvatar: authorAvatar) {
             try? media.writeCustomPoster(card, for: &prepared.asset)
         }
+        prepared.feature = await computeFeaturePrint(for: prepared.asset.id)
         return prepared
     }
 
@@ -1119,6 +1245,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 guard var asset = try store.asset(id: id) else { continue }
                 if let title = patch.title { asset.title = title }
                 if let notes = patch.notes { asset.notes = notes }
+                if let sourceURL = patch.sourceURL {
+                    let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    asset.sourceURL = trimmed.isEmpty ? nil : trimmed
+                    asset.sourceDomain = URL(string: trimmed).flatMap(WebURLParser.cleanDomain)
+                        ?? URL(string: trimmed)?.host()
+                }
                 if let rating = patch.rating { asset.rating = min(5, max(0, rating)) }
                 var tags = tagMap(asset.tags + patch.addTags)
                 let dismissed = Set(patch.dismissSuggestedTags.map(SearchText.normalize))
@@ -1287,14 +1419,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             try store.touchOriginal(assetID)
             return path
         }) { return url }
-        let transport = try await transport(for: syncConfig())
+        let config = await syncConfig()
+        let allowLocal = config.mode == .localOnly && !config.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let transport = try await transport(for: config, allowLocalFolder: allowLocal)
         let result = try await driveSync.downloadOriginal(for: assetID, using: transport)
         _ = try await evict(keeping: [assetID])
         return result
     }
 
     public func cacheStats() async -> CacheStats {
-        (try? await media.cache(in: database, evict: false, keeping: [])) ?? CacheStats(thumbnailBytes: media.thumbnailBytes())
+        (try? await media.cache(in: database, evict: false, keeping: [], canEvictCloudOriginals: false))
+            ?? CacheStats(thumbnailBytes: media.thumbnailBytes())
     }
 
     public func setCacheBudgetBytes(_ bytes: Int64) async {
@@ -1304,7 +1439,35 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func evictCacheNow() async throws -> CacheStats { try await evict(keeping: []) }
 
-    private func evict(keeping: Set<UUID>) async throws -> CacheStats { try await media.cache(in: database, evict: true, keeping: keeping) }
+    private func canEvictCloudOriginals() async -> Bool {
+        let config = await syncConfig()
+        if config.mode == .localOnly {
+            return false
+        }
+        if injectedTransport != nil {
+            return true
+        }
+        switch config.mode {
+        case .localOnly:
+            return false
+        case .webDAV:
+            return !config.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .gdirectMount:
+            return GDirectIntegration.isMountActive(at: config.mountPath)
+                || GDirectIntegration.activeLoopbackNFSMountPath() != nil
+        case .directAPIWithGDirect:
+            if await oauth.hasStoredToken() {
+                return true
+            }
+            return GDirectIntegration.isMountActive(at: config.mountPath)
+                || GDirectIntegration.activeLoopbackNFSMountPath() != nil
+        }
+    }
+
+    private func evict(keeping: Set<UUID>) async throws -> CacheStats {
+        let allowed = await canEvictCloudOriginals()
+        return try await media.cache(in: database, evict: true, keeping: keeping, canEvictCloudOriginals: allowed)
+    }
 
     private func warmOfflinePins(_ ids: [UUID]) async {
         for id in Set(ids) {
@@ -1521,13 +1684,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             return "ChatGPT 订阅连接正常（可用模型 \(models.count) 个）"
 
         case .gemini:
-            let resolvedKey: String? = {
-                if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
-                    return provided
+            let resolvedKey: String?
+            if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
+                resolvedKey = provided
+            } else {
+                do {
+                    resolvedKey = try intelligence.keychain.read(IntelligenceEngine.key(.gemini))
+                        .flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                } catch {
+                    engineLogger.error("Keychain read failed for Gemini key: \(error.localizedDescription, privacy: .public)")
+                    throw LibraryDatabaseError("无法从 macOS 钥匙串读取 Gemini API 密钥（\(error.localizedDescription)）。")
                 }
-                return try? intelligence.keychain.read(IntelligenceEngine.key(.gemini))
-                    .flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            }()
+            }
             guard let resolvedKey, !resolvedKey.isEmpty else {
                 throw LibraryDatabaseError("请先填写 Gemini API 密钥后再测试连接。")
             }
@@ -1555,14 +1723,19 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             throw LibraryDatabaseError("Gemini 服务返回 HTTP \(status)，请检查 API 密钥或服务地址。")
 
         case .openAICompatible:
-            let resolvedKey: String? = {
-                if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
-                    return provided
+            let resolvedKey: String?
+            if let provided = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !provided.isEmpty {
+                resolvedKey = provided
+            } else {
+                do {
+                    let stored = try intelligence.keychain.read(IntelligenceEngine.key(.openAICompatible))
+                        .flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    resolvedKey = stored?.isEmpty == true ? nil : stored
+                } catch {
+                    engineLogger.error("Keychain read failed for custom AI key: \(error.localizedDescription, privacy: .public)")
+                    throw LibraryDatabaseError("无法从 macOS 钥匙串读取自定义 AI 密钥（\(error.localizedDescription)）。")
                 }
-                let stored = try? intelligence.keychain.read(IntelligenceEngine.key(.openAICompatible))
-                    .flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                return stored?.isEmpty == true ? nil : stored
-            }()
+            }
             let modelName = config.chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
             let labelModel = modelName.isEmpty ? config.customEndpointFormat.defaultChatModel : modelName
 
@@ -2300,15 +2473,38 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func hasWebDAVPassword() async -> Bool {
-        intelligence.keychain.exists(Self.webDAVPasswordKey)
+        if hasLoadedWebDAVPassword {
+            return cachedWebDAVPassword?.isEmpty == false
+        }
+        return intelligence.keychain.exists(Self.webDAVPasswordKey)
     }
 
     public func saveWebDAVPassword(_ password: String) async throws {
         let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             try intelligence.keychain.delete(Self.webDAVPasswordKey)
+            cachedWebDAVPassword = nil
+            hasLoadedWebDAVPassword = true
         } else {
             try intelligence.keychain.save(Data(trimmed.utf8), for: Self.webDAVPasswordKey)
+            cachedWebDAVPassword = trimmed
+            hasLoadedWebDAVPassword = true
+        }
+    }
+
+    private func readWebDAVPassword() throws -> String {
+        if hasLoadedWebDAVPassword {
+            return cachedWebDAVPassword ?? ""
+        }
+        do {
+            let stored = try intelligence.keychain.read(Self.webDAVPasswordKey)
+                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            cachedWebDAVPassword = stored.isEmpty ? nil : stored
+            hasLoadedWebDAVPassword = true
+            return stored
+        } catch {
+            engineLogger.error("Keychain read failed for WebDAV password: \(error.localizedDescription, privacy: .public)")
+            throw DriveTransportError.authenticationRequired("无法从 macOS 钥匙串读取 WebDAV 密码（\(error.localizedDescription)），请检查钥匙串访问权限。")
         }
     }
 
@@ -2317,8 +2513,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         if let password, !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             effectivePassword = password.trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
-            effectivePassword = (try? intelligence.keychain.read(Self.webDAVPasswordKey))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            effectivePassword = try readWebDAVPassword()
         }
         let transport = try WebDAVTransport(
             serverURL: config.webDAVServerURL,
@@ -2327,7 +2522,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             remotePath: config.webDAVRemotePath
         )
         let info = try await transport.accountInfo()
-        if config.mode == .webDAV {
+        // Only reflect the tested account into live sync status if the currently active saved config
+        // already points at this exact WebDAV destination (never clobber active status on candidate probes).
+        let activeSaved = await syncConfig()
+        if activeSaved.mode == .webDAV,
+           activeSaved.webDAVServerURL == config.webDAVServerURL,
+           activeSaved.webDAVUsername == config.webDAVUsername {
             await driveSync.updateSignedInAccount(info, activeMode: .webDAV)
         }
         return info
@@ -2339,21 +2539,35 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         to targetConfig: DriveSyncConfig,
         webDAVPassword: String?
     ) async throws -> StorageMigrationReport {
-        guard syncTask == nil else {
-            throw DriveTransportError.notConfigured("当前正在同步中，请等待同步完成后再执行迁移。")
+        guard !isMigrating, syncTask == nil else {
+            throw DriveTransportError.notConfigured("当前正在同步或迁移中，请等待完成后再执行迁移。")
         }
+        isMigrating = true
+        autoSyncTask?.cancel()
+        autoSyncTask = nil
+        defer {
+            isMigrating = false
+            Task { [weak self] in
+                guard let self else { return }
+                await self.refreshAutoSync(config: await self.syncConfig())
+            }
+        }
+
         let start = ContinuousClock.now
         let sourceConfig = await syncConfig()
+        let trimmedTargetPassword = webDAVPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetPasswordOverride = (trimmedTargetPassword?.isEmpty == false) ? trimmedTargetPassword : nil
 
-        // 1. Persist incoming WebDAV password if provided and validate destination FIRST before mutating local DB
-        if let webDAVPassword, !webDAVPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try await saveWebDAVPassword(webDAVPassword)
-        }
+        // 1. Validate target destination FIRST without mutating saved Keychain password or local DB
         try Self.validatePathSegments(targetConfig.rootFolderName)
         if !targetConfig.webDAVRemotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             try Self.validatePathSegments(targetConfig.webDAVRemotePath)
         }
-        let targetTransport = try await transport(for: targetConfig, allowLocalFolder: true)
+        let targetTransport = try await transport(
+            for: targetConfig,
+            allowLocalFolder: true,
+            webDAVPasswordOverride: targetPasswordOverride
+        )
         _ = try await targetTransport.accountInfo()
 
         // 2. Ensure ALL non-trashed originals are locally downloaded before detaching from an old cloud backend
@@ -2379,9 +2593,23 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             )
         }
 
-        // 4. Switch active config and immediately sync all folders, originals & moodboards to the new destination
+        // 4. Only now persist the new WebDAV password (if provided) and active config, then drain all queued ops
+        if let targetPasswordOverride {
+            try await saveWebDAVPassword(targetPasswordOverride)
+        }
         try await saveSyncConfig(targetConfig)
-        _ = try await driveSync.sync(using: targetTransport, config: targetConfig, allowLocalFolderSync: true)
+
+        let maxDrainPasses = 20
+        var previousPending = Int.max
+        for _ in 0..<maxDrainPasses {
+            try Task.checkCancellation()
+            _ = try await driveSync.sync(using: targetTransport, config: targetConfig, allowLocalFolderSync: true)
+            let remaining = try await database.pendingOpCount()
+            if remaining == 0 || remaining >= previousPending {
+                break
+            }
+            previousPending = remaining
+        }
         if targetConfig.mode != .localOnly {
             _ = try await evict(keeping: [])
         }
@@ -2432,12 +2660,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func syncNow() async throws -> SyncReport {
+        guard !isMigrating else {
+            throw DriveTransportError.notConfigured("正在执行素材库迁移，请等待迁移完成后再同步。")
+        }
         if let syncTask { return try await syncTask.value }
         let config = await syncConfig()
         if config.mode == .localOnly && config.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return SyncReport()
         }
         // Another caller may have started while we waited for the configuration read.
+        guard !isMigrating else {
+            throw DriveTransportError.notConfigured("正在执行素材库迁移，请等待迁移完成后再同步。")
+        }
         if let syncTask { return try await syncTask.value }
         let task = Task {
             let transport = try await self.transport(for: config, allowLocalFolder: true)
@@ -2488,7 +2722,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return try await task.value
     }
 
-    private func transport(for config: DriveSyncConfig, allowLocalFolder: Bool = false) async throws -> any DriveTransport {
+    private func transport(
+        for config: DriveSyncConfig,
+        allowLocalFolder: Bool = false,
+        webDAVPasswordOverride: String? = nil
+    ) async throws -> any DriveTransport {
         if let injectedTransport { return injectedTransport }
         switch config.mode {
         case .localOnly:
@@ -2499,7 +2737,17 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             guard !rawPath.isEmpty else {
                 throw DriveTransportError.notConfigured("请先选择一个本地文件夹作为素材库保存路径。")
             }
-            let expanded = URL(fileURLWithPath: (rawPath as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+            let rawURL = URL(fileURLWithPath: (rawPath as NSString).expandingTildeInPath, isDirectory: true)
+            let expanded: URL
+            if FileManager.default.fileExists(atPath: rawURL.path) {
+                expanded = rawURL.resolvingSymlinksInPath().standardizedFileURL
+            } else {
+                let resolvedParent = rawURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+                expanded = resolvedParent.appending(path: rawURL.lastPathComponent, directoryHint: .isDirectory).standardizedFileURL
+            }
+            guard expanded.path != "/" else {
+                throw DriveTransportError.notConfigured("不能直接将系统根目录作为素材库保存路径，请选择具体文件夹。")
+            }
             let parentDir = expanded.deletingLastPathComponent().path
             let leafName = expanded.lastPathComponent.isEmpty ? "Charkle" : expanded.lastPathComponent
             return MountedVolumeTransport(
@@ -2509,8 +2757,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 requireDedicatedMount: false
             )
         case .webDAV:
-            let password = (try? intelligence.keychain.read(Self.webDAVPasswordKey))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let password: String
+            if let override = webDAVPasswordOverride, !override.isEmpty {
+                password = override
+            } else {
+                password = try readWebDAVPassword()
+            }
             return try WebDAVTransport(
                 serverURL: config.webDAVServerURL,
                 username: config.webDAVUsername,
@@ -2588,6 +2840,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     private func refreshAutoSync(config: DriveSyncConfig) async {
+        guard !isMigrating else { return }
         guard await syncConfig() == config else { return }
         autoSyncTask?.cancel()
         autoSyncTask = nil

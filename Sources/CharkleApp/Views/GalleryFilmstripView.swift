@@ -2,6 +2,7 @@ import AppKit
 import CharkleCanvas
 import CharkleCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// macOS Finder-inspired Gallery / Filmstrip View with full Quick Look parity:
 /// - Live preview for all media kinds (images, GIF, video, audio, PDF, 3D, Markdown, GitHub, Social Posts, bookmarks)
@@ -282,6 +283,11 @@ public struct GalleryFilmstripView: View {
                         }
                         loadPreview(for: newID)
                         onMarkOpened(newID)
+                    } else {
+                        previewLoadTask?.cancel()
+                        previewLoadTask = nil
+                        previewImage = nil
+                        activeOriginalURL = nil
                     }
                 }
                 .onAppear {
@@ -309,6 +315,7 @@ public struct GalleryFilmstripView: View {
             QuickLookGitHubRepoCard(asset: asset, repo: repo) {
                 onRefreshRichAsset(asset.id)
             }
+            .id(asset.id)
             .padding(.vertical, 6)
         } else if let post = asset.richMetadata?.socialPost {
             QuickLookSocialPostCard(
@@ -323,8 +330,10 @@ public struct GalleryFilmstripView: View {
                 },
                 onRetryFetch: {
                     onRefreshRichAsset(asset.id)
-                }
+                },
+                isPlaybackSuspended: isQuickLookPresented
             )
+            .id(asset.id)
             .padding(.vertical, 6)
         } else {
             switch asset.mediaKind {
@@ -334,6 +343,7 @@ public struct GalleryFilmstripView: View {
                 if let url = activeOriginalURL {
                     interactiveTransformContainer(for: asset) {
                         AnimatedGIFPlayerView(url: url)
+                            .id(asset.id)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                 } else {
@@ -341,7 +351,11 @@ public struct GalleryFilmstripView: View {
                 }
             case .video:
                 if let url = activeOriginalURL {
-                    QuickLookVideoPlayerView(url: url, autoPlay: true)
+                    QuickLookVideoPlayerView(
+                        url: url,
+                        autoPlay: !isQuickLookPresented,
+                        isPlaybackSuspended: isQuickLookPresented
+                    )
                         .id(asset.id)
                         .frame(maxWidth: 980, maxHeight: 560)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -350,7 +364,11 @@ public struct GalleryFilmstripView: View {
                     zoomableVisualStage(for: asset)
                 }
             case .audio:
-                QuickLookAudioStudioCard(asset: asset, fileURL: activeOriginalURL)
+                QuickLookAudioStudioCard(
+                    asset: asset,
+                    fileURL: activeOriginalURL,
+                    isPlaybackSuspended: isQuickLookPresented
+                )
                     .id(asset.id)
                     .frame(maxWidth: 560)
             case .model3D:
@@ -419,7 +437,7 @@ public struct GalleryFilmstripView: View {
                 MagnifyGesture()
                     .onChanged { val in
                         if gestureStartScale == nil { gestureStartScale = zoomScale }
-                        let next = max(0.5, min(5.0, (gestureStartScale ?? 1.0) * val.magnification))
+                        let next = max(0.5, min(maxZoomLimit, (gestureStartScale ?? 1.0) * val.magnification))
                         zoomScale = next
                         if next <= 1.01 {
                             panOffset = .zero
@@ -752,7 +770,8 @@ public struct GalleryFilmstripView: View {
             loader: loader,
             tier: .grid520,
             cornerRadius: 7,
-            contentMode: .fill
+            contentMode: .fill,
+            enableHoverPlayback: !isQuickLookPresented
         )
         .frame(width: thumbW, height: 68)
         .overlay(
@@ -774,15 +793,32 @@ public struct GalleryFilmstripView: View {
         .id(item.id)
         .onDrag {
             let ids = effectiveTargetIDs(for: item)
-            return NSItemProvider(object: CharkleDragIdentifiers.encode(assetIDs: ids) as NSString)
+            let provider = NSItemProvider()
+            let encoded = CharkleDragIdentifiers.encode(assetIDs: ids)
+            provider.registerDataRepresentation(forTypeIdentifier: UTType.plainText.identifier, visibility: .all) { completion in
+                completion(Data(encoded.utf8), nil)
+                return nil
+            }
+            if let fileURL = loader.cachedDragFileURL(for: item) {
+                provider.registerFileRepresentation(forTypeIdentifier: UTType.fileURL.identifier, fileOptions: [], visibility: .all) { completion in
+                    completion(fileURL, false, nil)
+                    return nil
+                }
+            }
+            return provider
         }
     }
 
     private func effectiveTargetIDs(for item: AssetRecord) -> [UUID] {
-        if selectedAssetIDs.contains(item.id), !selectedAssetIDs.isEmpty {
-            return Array(selectedAssetIDs)
+        guard selectedAssetIDs.contains(item.id), !selectedAssetIDs.isEmpty else {
+            return [item.id]
         }
-        return [item.id]
+        var ordered: [UUID] = [item.id]
+        ordered.reserveCapacity(selectedAssetIDs.count)
+        for asset in assets where asset.id != item.id && selectedAssetIDs.contains(asset.id) {
+            ordered.append(asset.id)
+        }
+        return ordered
     }
 
     @ViewBuilder
@@ -1046,6 +1082,8 @@ public struct GalleryFilmstripView: View {
 
     private func selectFilmstripItem(_ item: AssetRecord) {
         let mods = NSEvent.modifierFlags
+        // Capture anchor BEFORE updating `focusedAssetID` (which `activeIndex` reads!)
+        let previousAnchor = activeIndex
         focusedAssetID = item.id
         if mods.contains(.command) {
             if selectedAssetIDs.contains(item.id) {
@@ -1053,7 +1091,7 @@ public struct GalleryFilmstripView: View {
             } else {
                 selectedAssetIDs.insert(item.id)
             }
-        } else if mods.contains(.shift), let anchor = activeIndex, let target = assets.firstIndex(where: { $0.id == item.id }) {
+        } else if mods.contains(.shift), let anchor = previousAnchor, let target = assets.firstIndex(where: { $0.id == item.id }) {
             let lo = min(anchor, target)
             let hi = max(anchor, target)
             for idx in lo...hi {

@@ -21,24 +21,18 @@
     <key>CFBundleShortVersionString</key>
     <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>5</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>com.charkle.url</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>charkle</string>
-            </array>
-        </dict>
-    </array>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Charkle captures screenshots from the Notch Shelf or shortcut (⌥⇧A) directly into your reference library or active moodboard.</string>
     <key>NSPrincipalClass</key>

@@ -1,8 +1,10 @@
 import AppKit
 import CoreFoundation
 import CoreGraphics
+import Darwin
 import Foundation
 import ImageIO
+import Synchronization
 import WebKit
 
 /// Parses and extracts arbitrary `http` / `https` web URLs from raw strings or short share text.
@@ -215,20 +217,95 @@ public nonisolated struct WebBookmark: Sendable {
             && url.password() == nil
     }
 
+    /// Validates that a remote fetch destination is a public `http`/`https` host (blocking loopback,
+    /// link-local, RFC 1918 private networks, CGNAT, ULA, and local mDNS/internal names to prevent SSRF).
+    public static func isSafeRemoteFetchURL(_ url: URL) -> Bool {
+        guard isWebURL(url), let rawHost = url.host()?.lowercased(), !rawHost.isEmpty else {
+            return false
+        }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host == "localhost"
+            || host.hasSuffix(".localhost")
+            || host.hasSuffix(".local")
+            || host.hasSuffix(".internal")
+            || host.hasSuffix(".home.arpa") {
+            return false
+        }
+        // Check IPv4 literal (including dotted-quad and integer/hex/octal obfuscations via inet_aton/inet_pton)
+        var addr4 = in_addr()
+        if inet_pton(AF_INET, host, &addr4) == 1 || (host.allSatisfy({ $0.isASCII && ($0.isHexDigit || $0 == "." || $0 == "x" || $0 == "X") }) && inet_aton(host, &addr4) != 0) {
+            return !isPrivateIPv4(UInt32(bigEndian: addr4.s_addr))
+        }
+        // Check IPv6 literal (including IPv4-mapped ::ffff:a.b.c.d)
+        var addr6 = in6_addr()
+        if inet_pton(AF_INET6, host, &addr6) == 1 {
+            return !isPrivateIPv6(addr6)
+        }
+        return true
+    }
+
+    private static func isPrivateIPv4(_ ip: UInt32) -> Bool {
+        let a = (ip >> 24) & 0xFF
+        let b = (ip >> 16) & 0xFF
+        if a == 0 { return true }                         // 0.0.0.0/8
+        if a == 10 { return true }                        // 10.0.0.0/8
+        if a == 100 && (b >= 64 && b <= 127) { return true } // 100.64.0.0/10 (CGNAT)
+        if a == 127 { return true }                       // 127.0.0.0/8 (loopback)
+        if a == 169 && b == 254 { return true }           // 169.254.0.0/16 (link-local / cloud metadata)
+        if a == 172 && (b >= 16 && b <= 31) { return true } // 172.16.0.0/12
+        if a == 192 && b == 168 { return true }           // 192.168.0.0/16
+        if a >= 224 { return true }                       // multicast / reserved
+        return false
+    }
+
+    private static func isPrivateIPv6(_ addr: in6_addr) -> Bool {
+        var copy = addr
+        let bytes: [UInt8] = withUnsafeBytes(of: &copy) { Array($0) }
+        guard bytes.count == 16 else { return true }
+        // :: (unspecified) and ::1 (loopback)
+        if bytes[0..<15].allSatisfy({ $0 == 0 }) && (bytes[15] == 0 || bytes[15] == 1) {
+            return true
+        }
+        // IPv4-mapped ::ffff:0:0/96
+        if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xFF && bytes[11] == 0xFF {
+            let v4 = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) | UInt32(bytes[15])
+            return isPrivateIPv4(v4)
+        }
+        // fc00::/7 (Unique Local Address)
+        if (bytes[0] & 0xFE) == 0xFC { return true }
+        // fe80::/10 (Link-Local)
+        if bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80 { return true }
+        // ff00::/8 (Multicast)
+        if bytes[0] == 0xFF { return true }
+        return false
+    }
+
     public static func url(in file: URL) -> URL? {
         guard let data = try? Data(contentsOf: file), data.count < 256_000 else { return nil }
         if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
            let fields = plist as? [String: Any], let value = fields["URL"] as? String {
-            return URL(string: value)
+            return URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
             .first(where: { $0.lowercased().hasPrefix("url=") })
-            .flatMap { URL(string: String($0.dropFirst(4))) }
+            .flatMap { URL(string: String($0.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 
     /// Fetches webpage metadata and thumbnail image with optional headless `WKWebView` screenshot fallback.
     public static func fetch(_ url: URL?, allowWebViewSnapshot: Bool = false) async -> Self {
         guard let url, isWebURL(url) else { return Self() }
+        // Never issue network requests or headless WebKit navigation to loopback/private/LAN targets (SSRF guard).
+        guard isSafeRemoteFetchURL(url) else {
+            return Self(
+                title: fallbackTitle(for: url),
+                description: nil,
+                siteName: WebURLParser.cleanDomain(for: url),
+                finalURL: url,
+                themeColorHex: nil,
+                poster: nil,
+                favicon: nil
+            )
+        }
 
         var title: String?
         var description: String?
@@ -465,7 +542,7 @@ public nonisolated struct WebBookmark: Sendable {
 
     // MARK: - Networking
 
-    private enum FetchOutcome {
+    private enum FetchOutcome: Sendable {
         case success(data: Data, url: URL, contentType: String?)
         case httpError(statusCode: Int)
         case unreachable
@@ -479,11 +556,13 @@ public nonisolated struct WebBookmark: Sendable {
         imageLimit: Int? = nil,
         timeout: TimeInterval = 7.0
     ) async -> FetchOutcome {
+        guard isSafeRemoteFetchURL(url) else { return .unreachable }
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = timeout + 2.0
-        let session = URLSession(configuration: config)
+        let delegate = BoundedFetchDelegate(limit: limit, imageLimit: imageLimit)
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
         var request = URLRequest(url: url, timeoutInterval: timeout)
@@ -494,38 +573,161 @@ public nonisolated struct WebBookmark: Sendable {
             request.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
         }
 
-        do {
-            let (bytes, response) = try await session.bytes(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  let final = http.url, isWebURL(final) else {
-                return .httpError(statusCode: 0)
+        let task = session.dataTask(with: request)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                delegate.start(task: task, continuation: continuation)
             }
-            guard (200..<300).contains(http.statusCode) else {
-                return .httpError(statusCode: http.statusCode)
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private final class BoundedFetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private struct State {
+            var data = Data()
+            var effectiveLimit: Int
+            var contentType: String?
+            var finalURL: URL?
+            var statusCode: Int = 0
+            var reachedLimit = false
+            var unsafeRedirect = false
+            var continuation: CheckedContinuation<FetchOutcome, Never>?
+            var finishedOutcome: FetchOutcome?
+        }
+
+        private let limit: Int
+        private let imageLimit: Int?
+        private let state: Mutex<State>
+
+        init(limit: Int, imageLimit: Int?) {
+            self.limit = limit
+            self.imageLimit = imageLimit
+            self.state = Mutex(State(effectiveLimit: limit))
+        }
+
+        func start(task: URLSessionDataTask, continuation: CheckedContinuation<FetchOutcome, Never>) {
+            let earlyOutcome: FetchOutcome? = state.withLock { st in
+                if let already = st.finishedOutcome {
+                    st.finishedOutcome = nil
+                    return already
+                }
+                st.continuation = continuation
+                return nil
+            }
+            if let earlyOutcome {
+                continuation.resume(returning: earlyOutcome)
+                return
+            }
+            task.resume()
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard let target = request.url, WebBookmark.isSafeRemoteFetchURL(target) else {
+                state.withLock { $0.unsafeRedirect = true }
+                completionHandler(nil)
+                task.cancel()
+                return
+            }
+            completionHandler(request)
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse,
+            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+        ) {
+            guard let http = response as? HTTPURLResponse,
+                  let final = http.url,
+                  WebBookmark.isSafeRemoteFetchURL(final) else {
+                state.withLock { $0.unsafeRedirect = true }
+                completionHandler(.cancel)
+                return
             }
             let contentType = http.value(forHTTPHeaderField: "Content-Type")
-            let effectiveLimit = (contentType?.lowercased().hasPrefix("image/") == true)
+            let effective = (contentType?.lowercased().hasPrefix("image/") == true)
                 ? (imageLimit ?? limit)
                 : limit
+            state.withLock { st in
+                st.statusCode = http.statusCode
+                st.finalURL = final
+                st.contentType = contentType
+                st.effectiveLimit = effective
+                if http.expectedContentLength > 0 {
+                    st.data.reserveCapacity(min(effective, Int(min(http.expectedContentLength, Int64(effective)))))
+                }
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                completionHandler(.cancel)
+                return
+            }
+            completionHandler(.allow)
+        }
 
-            var data = Data()
-            data.reserveCapacity(min(effectiveLimit, 65_536))
-            for try await byte in bytes {
-                if data.count >= effectiveLimit { break }
-                data.append(byte)
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            let shouldStop = state.withLock { st -> Bool in
+                let remaining = st.effectiveLimit - st.data.count
+                guard remaining > 0 else {
+                    st.reachedLimit = true
+                    return true
+                }
+                if data.count >= remaining {
+                    st.data.append(data.prefix(remaining))
+                    st.reachedLimit = true
+                    return true
+                }
+                st.data.append(data)
+                return false
             }
-            return .success(data: data, url: final, contentType: contentType)
-        } catch let error as URLError {
-            switch error.code {
-            case .cannotFindHost, .cannotConnectToHost, .notConnectedToInternet,
-                 .networkConnectionLost, .dnsLookupFailed, .internationalRoamingOff,
-                 .dataNotAllowed, .unsupportedURL, .badURL:
-                return .unreachable
-            default:
-                return .httpError(statusCode: 0)
+            if shouldStop {
+                dataTask.cancel()
             }
-        } catch {
-            return .unreachable
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+            let snapshot = state.withLock { ($0.data, $0.finalURL, $0.contentType, $0.statusCode, $0.reachedLimit, $0.unsafeRedirect) }
+            let outcome: FetchOutcome
+            if snapshot.5 {
+                outcome = .unreachable
+            } else if snapshot.4, let final = snapshot.1, (200..<300).contains(snapshot.3) {
+                outcome = .success(data: snapshot.0, url: final, contentType: snapshot.2)
+            } else if let error {
+                if snapshot.3 > 0 && !(200..<300).contains(snapshot.3) {
+                    outcome = .httpError(statusCode: snapshot.3)
+                } else if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .cannotFindHost, .cannotConnectToHost, .notConnectedToInternet,
+                         .networkConnectionLost, .dnsLookupFailed, .internationalRoamingOff,
+                         .dataNotAllowed, .unsupportedURL, .badURL:
+                        outcome = .unreachable
+                    default:
+                        outcome = .httpError(statusCode: 0)
+                    }
+                } else {
+                    outcome = .unreachable
+                }
+            } else if let final = snapshot.1, (200..<300).contains(snapshot.3) {
+                outcome = .success(data: snapshot.0, url: final, contentType: snapshot.2)
+            } else {
+                outcome = .httpError(statusCode: snapshot.3)
+            }
+
+            let continuation: CheckedContinuation<FetchOutcome, Never>? = state.withLock { st in
+                if let cont = st.continuation {
+                    st.continuation = nil
+                    return cont
+                }
+                st.finishedOutcome = outcome
+                return nil
+            }
+            continuation?.resume(returning: outcome)
         }
     }
 
@@ -771,6 +973,7 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
     private var timeoutTask: Task<Void, Never>?
     private var settleTask: Task<Void, Never>?
     private var isCompleted = false
+    private var isCapturing = false
 
     static func canCaptureInCurrentProcess() -> Bool {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return false }
@@ -779,13 +982,24 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
     }
 
     static func capture(url: URL, timeoutSeconds: Double = 6.5) async -> WebPageSnapshotResult? {
-        guard canCaptureInCurrentProcess() else { return nil }
+        guard canCaptureInCurrentProcess(), WebBookmark.isSafeRemoteFetchURL(url) else { return nil }
         let runner = WebPageSnapshotter()
-        return await runner.run(url: url, timeoutSeconds: timeoutSeconds)
+        return await withTaskCancellationHandler {
+            await runner.run(url: url, timeoutSeconds: timeoutSeconds)
+        } onCancel: {
+            Task { @MainActor in
+                runner.finish(with: nil)
+            }
+        }
     }
 
     private func run(url: URL, timeoutSeconds: Double) async -> WebPageSnapshotResult? {
-        await withCheckedContinuation { continuation in
+        guard !Task.isCancelled else { return nil }
+        return await withCheckedContinuation { continuation in
+            if Task.isCancelled {
+                continuation.resume(returning: nil)
+                return
+            }
             self.continuation = continuation
 
             let config = WKWebViewConfiguration()
@@ -809,7 +1023,7 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
 
             timeoutTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(timeoutSeconds))
-                guard !Task.isCancelled, let self, !self.isCompleted else { return }
+                guard !Task.isCancelled, let self, !self.isCompleted, !self.isCapturing else { return }
                 // If main document already painted (e.g. third-party trackers stalled didFinish), still take snapshot.
                 if let active = self.webView, active.estimatedProgress >= 0.45 {
                     await self.captureAndFinish()
@@ -820,13 +1034,32 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
         }
     }
 
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction
+    ) async -> WKNavigationActionPolicy {
+        guard let target = navigationAction.request.url else {
+            return .cancel
+        }
+        if target.scheme?.lowercased() == "about" {
+            return .allow
+        }
+        guard WebBookmark.isSafeRemoteFetchURL(target) else {
+            if navigationAction.targetFrame?.isMainFrame == true {
+                finish(with: nil)
+            }
+            return .cancel
+        }
+        return .allow
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard !isCompleted else { return }
+        guard !isCompleted, !isCapturing else { return }
         settleTask?.cancel()
         settleTask = Task { [weak self] in
             // Allow webfonts and hero images a brief paint window before snapshotting.
             try? await Task.sleep(for: .milliseconds(420))
-            guard !Task.isCancelled, let self, !self.isCompleted else { return }
+            guard !Task.isCancelled, let self, !self.isCompleted, !self.isCapturing else { return }
             await self.captureAndFinish()
         }
     }
@@ -842,7 +1075,8 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
     }
 
     private func captureAndFinish() async {
-        guard !isCompleted, let wv = webView else { return }
+        guard !isCompleted, !isCapturing, let wv = webView else { return }
+        isCapturing = true
 
         let domTitle = (try? await wv.evaluateJavaScript("document.title || ''")) as? String
         let domDesc = (try? await wv.evaluateJavaScript(

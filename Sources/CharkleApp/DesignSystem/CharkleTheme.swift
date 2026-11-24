@@ -1,11 +1,163 @@
+import AppKit
 import CharkleCanvas
 import SwiftUI
 
-/// Gallery-First neutral surfaces, continuous concentric radii,
+// MARK: - Dual Accent Source (Studio Cobalt vs. Live macOS System Accent)
+
+public nonisolated enum CharkleAccentSource: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case studio
+    case system
+
+    public var id: String { rawValue }
+
+    public var displayTitle: String {
+        switch self {
+        case .studio: "工作室钴蓝"
+        case .system: "跟随 macOS 系统"
+        }
+    }
+
+    public var shortTitle: String {
+        switch self {
+        case .studio: "工作室钴蓝"
+        case .system: "跟随系统"
+        }
+    }
+
+    public var subtitle: String {
+        switch self {
+        case .studio: "校准工作室钴蓝，保持画布中性专注"
+        case .system: "实时同步 macOS 系统设置中的强调色"
+        }
+    }
+}
+
+extension EnvironmentValues {
+    @Entry public var charkleAccentSource: CharkleAccentSource = .studio
+}
+
+/// Gallery-First neutral surfaces, continuous concentric radii, dual accent tokens,
 /// and Restrained Apple Liquid Glass tokens (macOS 26+ native with calibrated macOS 15
 /// and Reduce Transparency fallbacks).
 public enum CharkleTheme {
-    // MARK: - Gallery-First Neutral Surfaces (Zero Violet / Neon AI Slop)
+    // MARK: - Retina Hairline Geometry
+
+    /// Standard Retina 1px interior divider thickness (`0.5pt`).
+    public static let hairlineWidth: CGFloat = 0.5
+
+    // MARK: - Studio Accent Palette (Zero Violet / Lavender Hues)
+
+    public static let studioAccentLightHex: String = "#2A60E0"
+    public static let studioAccentDarkHex: String = "#5B8DEF"
+    private static let studioAccentDarkButtonFillHex: String = "#3A70E4"
+
+    /// Primary semantic accent color respecting the chosen accent source (`studio` cobalt vs. live macOS `system`).
+    public static func accent(for scheme: ColorScheme, source: CharkleAccentSource = .studio) -> Color {
+        switch source {
+        case .studio:
+            scheme == .dark ? Color(charkleHex: studioAccentDarkHex) : Color(charkleHex: studioAccentLightHex)
+        case .system:
+            Color.accentColor
+        }
+    }
+
+    /// Low-saturation translucent accent wash for subtle active badges, chips, and focus rings.
+    public static func accentSoft(for scheme: ColorScheme, source: CharkleAccentSource = .studio) -> Color {
+        accent(for: scheme, source: source).opacity(scheme == .dark ? 0.18 : 0.11)
+    }
+
+    /// Calibrated accent border stroke for selected outlines and interactive affordances.
+    public static func accentBorder(for scheme: ColorScheme, source: CharkleAccentSource = .studio) -> Color {
+        accent(for: scheme, source: source).opacity(scheme == .dark ? 0.38 : 0.26)
+    }
+
+    /// Solid accent button fill calibrated to maintain >= 4.5:1 foreground contrast in both Light and Dark modes.
+    public static func accentButtonFill(for scheme: ColorScheme, source: CharkleAccentSource = .studio) -> Color {
+        switch source {
+        case .studio:
+            scheme == .dark ? Color(charkleHex: studioAccentDarkButtonFillHex) : Color(charkleHex: studioAccentLightHex)
+        case .system:
+            Color.accentColor
+        }
+    }
+
+    /// High-contrast foreground color on top of `accentButtonFill(for:source:)`,
+    /// adapting automatically when macOS system accent is light (e.g. Yellow).
+    public static func accentButtonForeground(for scheme: ColorScheme, source: CharkleAccentSource = .studio) -> Color {
+        switch source {
+        case .studio:
+            return .white
+        case .system:
+            let appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+            var luminance: Double = 0.25
+            appearance?.performAsCurrentDrawingAppearance {
+                if let rgb = NSColor.controlAccentColor.usingColorSpace(.sRGB) {
+                    luminance = relativeLuminance(
+                        r: Double(rgb.redComponent),
+                        g: Double(rgb.greenComponent),
+                        b: Double(rgb.blueComponent)
+                    )
+                }
+            }
+            return luminance > 0.52 ? Color(charkleHex: "#141517") : .white
+        }
+    }
+
+    // MARK: - Calibrated Semantic Status Colors
+
+    public static func positive(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(charkleHex: "#34C769") : Color(charkleHex: "#249A4B")
+    }
+
+    public static func warning(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(charkleHex: "#F2B23E") : Color(charkleHex: "#C98212")
+    }
+
+    public static func destructive(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(charkleHex: "#F2584D") : Color(charkleHex: "#D93B30")
+    }
+
+    // MARK: - Color Formatting Helpers
+
+    /// Converts an `NSColor` cleanly into an uppercase sRGB `#RRGGBB` hex string.
+    public nonisolated static func hexString(from nsColor: NSColor) -> String? {
+        guard let srgb = nsColor.usingColorSpace(.sRGB) else { return nil }
+        let r = Int((max(0, min(1, srgb.redComponent)) * 255).rounded())
+        let g = Int((max(0, min(1, srgb.greenComponent)) * 255).rounded())
+        let b = Int((max(0, min(1, srgb.blueComponent)) * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+
+    /// Converts a SwiftUI `Color` cleanly into an uppercase sRGB `#RRGGBB` hex string.
+    public static func hexString(from color: Color) -> String? {
+        hexString(from: NSColor(color))
+    }
+
+    /// Normalizes a user-entered hex string (`#RGB`, `RGB`, `#RRGGBB`, or `RRGGBB`) into uppercase `#RRGGBB`.
+    public nonisolated static func normalizedHex(_ raw: String) -> String? {
+        let cleaned = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+            .uppercased()
+        guard cleaned.allSatisfy({ $0.isHexDigit }) else { return nil }
+        if cleaned.count == 6 {
+            return "#\(cleaned)"
+        }
+        if cleaned.count == 3 {
+            let expanded = cleaned.map { "\($0)\($0)" }.joined()
+            return "#\(expanded)"
+        }
+        return nil
+    }
+
+    private nonisolated static func relativeLuminance(r: Double, g: Double, b: Double) -> Double {
+        func linearize(_ c: Double) -> Double {
+            c <= 0.03928 ? (c / 12.92) : pow((c + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
+    }
+
+    // MARK: - Gallery-First Neutral Surfaces (Zero Violet / Neon Slop)
 
     public static func galleryGround(for scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(charkleHex: "#141517") : Color(charkleHex: "#F6F6F5")
@@ -520,13 +672,14 @@ public nonisolated struct CharkleFlowLayout: Layout {
     }
 
     public func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? 600
+        let maxWidth = max(1, proposal.width ?? 600)
         var cursorX: CGFloat = 0
         var cursorY: CGFloat = 0
         var rowHeight: CGFloat = 0
 
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
+            let raw = view.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
+            let size = CGSize(width: min(raw.width, maxWidth), height: raw.height)
             if cursorX > 0 && cursorX + size.width > maxWidth {
                 cursorX = 0
                 cursorY += rowHeight + lineSpacing
@@ -539,12 +692,14 @@ public nonisolated struct CharkleFlowLayout: Layout {
     }
 
     public func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxWidth = max(1, bounds.width)
         var cursorX = bounds.minX
         var cursorY = bounds.minY
         var rowHeight: CGFloat = 0
 
         for view in subviews {
-            let size = view.sizeThatFits(.unspecified)
+            let raw = view.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
+            let size = CGSize(width: min(raw.width, maxWidth), height: raw.height)
             if cursorX > bounds.minX && cursorX + size.width > bounds.maxX {
                 cursorX = bounds.minX
                 cursorY += rowHeight + lineSpacing

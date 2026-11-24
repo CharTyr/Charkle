@@ -192,13 +192,22 @@ fragment float4 ring_card_fragment(
 private final class RingTextureEntry {
     let texture: MTLTexture
     let aspect: Float
+    let isFullPreview: Bool
     var lastUsedTick: UInt64
 
-    init(texture: MTLTexture, aspect: Float, tick: UInt64) {
+    init(texture: MTLTexture, aspect: Float, isFullPreview: Bool, tick: UInt64) {
         self.texture = texture
         self.aspect = aspect
+        self.isFullPreview = isFullPreview
         self.lastUsedTick = tick
     }
+}
+
+private nonisolated struct RingRasterizedBitmap: Sendable {
+    let data: Data
+    let width: Int
+    let height: Int
+    let aspect: Float
 }
 
 private final class RingTexturePool {
@@ -209,7 +218,10 @@ private final class RingTexturePool {
 
     private var entries: [UUID: RingTextureEntry] = [:]
     private var loadingTasks: [UUID: Task<Void, Never>] = [:]
+    private var settledPreviewIDs: Set<UUID> = []
+    private var generation: UInt64 = 0
     private var tick: UInt64 = 0
+    var isDarkMode: Bool = false
     var onTextureReady: (() -> Void)?
 
     init(device: MTLDevice, commandQueue: MTLCommandQueue, loader: ThumbnailImageLoader) {
@@ -222,55 +234,112 @@ private final class RingTexturePool {
         tick &+= 1
         if let hit = entries[asset.id] {
             hit.lastUsedTick = tick
+            if !hit.isFullPreview && loadingTasks[asset.id] == nil && !settledPreviewIDs.contains(asset.id) {
+                requestAsync(asset: asset, onlyUpgradePreview: true)
+            }
             return (hit.texture, hit.aspect)
         }
-        // Fast synchronous path if ThumbnailImageLoader already holds a decoded CGImage
-        if let cg = loader.cachedCGImage(for: asset.id, tier: .preview1400)
-            ?? loader.cachedCGImage(for: asset.id, tier: .grid520) {
-            if let entry = upload(cgImage: cg, assetID: asset.id) {
-                return (entry.texture, entry.aspect)
-            }
-        }
-        requestAsync(assetID: asset.id)
+        requestAsync(asset: asset, onlyUpgradePreview: false)
         return nil
     }
 
     func prefetch(assets: [AssetRecord]) {
         for asset in assets {
-            if entries[asset.id] != nil || loadingTasks[asset.id] != nil { continue }
-            if let cg = loader.cachedCGImage(for: asset.id, tier: .preview1400)
-                ?? loader.cachedCGImage(for: asset.id, tier: .grid520) {
-                _ = upload(cgImage: cg, assetID: asset.id)
-            } else {
-                requestAsync(assetID: asset.id)
+            if let existing = entries[asset.id] {
+                if !existing.isFullPreview && loadingTasks[asset.id] == nil && !settledPreviewIDs.contains(asset.id) {
+                    requestAsync(asset: asset, onlyUpgradePreview: true)
+                }
+                continue
             }
+            if loadingTasks[asset.id] != nil { continue }
+            requestAsync(asset: asset, onlyUpgradePreview: false)
         }
     }
 
     func purgeAll() {
+        generation &+= 1
         for task in loadingTasks.values { task.cancel() }
         loadingTasks.removeAll()
         entries.removeAll()
+        settledPreviewIDs.removeAll()
     }
 
-    private func requestAsync(assetID: UUID) {
+    private func requestAsync(asset: AssetRecord, onlyUpgradePreview: Bool) {
+        let assetID = asset.id
         guard loadingTasks[assetID] == nil else { return }
         let loader = self.loader
+        let targetGen = self.generation
+        let darkMode = self.isDarkMode
+
         loadingTasks[assetID] = Task { @MainActor [weak self] in
             defer { self?.loadingTasks.removeValue(forKey: assetID) }
-            // Load preview1400 first, falling back cleanly to grid520
-            var cg = await loader.loadCGImage(for: assetID, tier: .preview1400)
-            if cg == nil {
-                cg = await loader.loadCGImage(for: assetID, tier: .grid520)
+
+            // 1. Immediate cached preview1400 fast path (rasterized off-main-thread)
+            if let cachedFull = loader.cachedCGImage(for: assetID, tier: .preview1400) {
+                if let bmp = await Self.rasterizeOffMain(cgImage: cachedFull) {
+                    guard !Task.isCancelled, let self, self.generation == targetGen else { return }
+                    self.settledPreviewIDs.insert(assetID)
+                    if self.upload(bitmap: bmp, assetID: assetID, isFullPreview: true) != nil {
+                        self.onTextureReady?()
+                    }
+                    return
+                }
             }
-            guard !Task.isCancelled, let self, let cg else { return }
-            if self.upload(cgImage: cg, assetID: assetID) != nil {
-                self.onTextureReady?()
+
+            // 2. Provisional cached grid520 pass so already-warm Masonry cards appear instantly
+            //    while preview1400 upgrades seamlessly in the background.
+            var hasProvisional = onlyUpgradePreview
+            if !onlyUpgradePreview, let cachedGrid = loader.cachedCGImage(for: assetID, tier: .grid520) {
+                if let bmp = await Self.rasterizeOffMain(cgImage: cachedGrid) {
+                    guard !Task.isCancelled, let self, self.generation == targetGen else { return }
+                    if self.upload(bitmap: bmp, assetID: assetID, isFullPreview: false) != nil {
+                        hasProvisional = true
+                        self.onTextureReady?()
+                    }
+                }
+            }
+
+            // 3. Async full preview1400 upgrade
+            if let fullCG = await loader.loadCGImage(for: assetID, tier: .preview1400) {
+                if let bmp = await Self.rasterizeOffMain(cgImage: fullCG) {
+                    guard !Task.isCancelled, let self, self.generation == targetGen else { return }
+                    self.settledPreviewIDs.insert(assetID)
+                    if self.upload(bitmap: bmp, assetID: assetID, isFullPreview: true) != nil {
+                        self.onTextureReady?()
+                    }
+                    return
+                }
+            }
+
+            guard !Task.isCancelled, let self, self.generation == targetGen else { return }
+            self.settledPreviewIDs.insert(assetID)
+
+            // 4. Fallback to grid520 if preview1400 unavailable
+            if !hasProvisional, let gridCG = await loader.loadCGImage(for: assetID, tier: .grid520) {
+                if let bmp = await Self.rasterizeOffMain(cgImage: gridCG) {
+                    guard !Task.isCancelled, self.generation == targetGen else { return }
+                    if self.upload(bitmap: bmp, assetID: assetID, isFullPreview: true) != nil {
+                        self.onTextureReady?()
+                    }
+                    return
+                }
+            }
+
+            // 5. Procedural card texture for non-raster assets (audio, swatch, docs, bookmarks without thumb)
+            if !hasProvisional, let procCG = Self.renderProceduralCard(for: asset, isDark: darkMode) {
+                if let bmp = await Self.rasterizeOffMain(cgImage: procCG) {
+                    guard !Task.isCancelled, self.generation == targetGen else { return }
+                    if self.upload(bitmap: bmp, assetID: assetID, isFullPreview: true) != nil {
+                        self.onTextureReady?()
+                    }
+                }
             }
         }
     }
 
-    private func upload(cgImage: CGImage, assetID: UUID) -> RingTextureEntry? {
+    @concurrent
+    private static func rasterizeOffMain(cgImage: CGImage) async -> RingRasterizedBitmap? {
+        guard !Task.isCancelled else { return nil }
         let maxSide = 768
         let srcW = max(1, cgImage.width)
         let srcH = max(1, cgImage.height)
@@ -300,6 +369,106 @@ private final class RingTexturePool {
             return true
         }
         guard rendered else { return nil }
+        return RingRasterizedBitmap(data: raw, width: dstW, height: dstH, aspect: aspect)
+    }
+
+    private static func renderProceduralCard(for asset: AssetRecord, isDark: Bool) -> CGImage? {
+        let aspect = RingGalleryMath.effectiveAspectRatio(for: asset)
+        let height: CGFloat = 480
+        let width: CGFloat = max(240, min(720, (height * CGFloat(aspect)).rounded()))
+        let size = CGSize(width: width, height: height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+
+        let prev = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        defer { NSGraphicsContext.current = prev }
+
+        let bounds = CGRect(origin: .zero, size: size)
+        let primaryHex = asset.dominantColors.first?.hex ?? (isDark ? "#2B2F36" : "#DCDAD4")
+        let isSwatch = asset.fileName.lowercased().hasSuffix(".swatch")
+        let elevated = isDark ? NSColor.charkleHex("#1E2024") : NSColor.white
+        let primaryText: NSColor = isDark ? NSColor.white.withAlphaComponent(0.92) : NSColor.black.withAlphaComponent(0.86)
+        let secondaryText: NSColor = isDark ? NSColor.white.withAlphaComponent(0.56) : NSColor.black.withAlphaComponent(0.54)
+
+        if isSwatch {
+            NSColor.charkleHex(primaryHex).setFill()
+            ctx.fill(bounds)
+            let isLight = Color.charkleIsLightHex(primaryHex)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 24, weight: .semibold),
+                .foregroundColor: isLight ? NSColor.black.withAlphaComponent(0.84) : NSColor.white.withAlphaComponent(0.92)
+            ]
+            (primaryHex.uppercased() as NSString).draw(at: CGPoint(x: 24, y: bounds.height - 58), withAttributes: attrs)
+        } else {
+            elevated.setFill()
+            ctx.fill(bounds)
+            let accent = NSColor.charkleHex(primaryHex)
+            accent.withAlphaComponent(0.85).setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: 6))
+
+            if asset.mediaKind == .audio {
+                let peaks: [Float] = asset.waveformPeaks.isEmpty
+                    ? (0..<32).map { i in Float(0.22 + 0.65 * sin(Double(i) / 31.0 * .pi)) }
+                    : asset.waveformPeaks
+                let barCount = min(peaks.count, 32)
+                let barW: CGFloat = 6
+                let gap = max(4, (bounds.width - 56 - CGFloat(barCount) * barW) / CGFloat(max(1, barCount - 1)))
+                let midY = bounds.height * 0.48
+                let maxH = bounds.height * 0.34
+                for i in 0..<barCount {
+                    let amp = max(0.16, min(1.0, CGFloat(peaks[i * peaks.count / max(1, barCount)])))
+                    let h = max(10, maxH * amp)
+                    let rect = CGRect(x: 28 + CGFloat(i) * (barW + gap), y: midY - h * 0.5, width: barW, height: h)
+                    accent.withAlphaComponent(0.55 + amp * 0.45).setFill()
+                    NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
+                }
+            }
+
+            let badge: String = switch asset.mediaKind {
+            case .audio: "AUDIO"
+            case .model3D: "3D · \(asset.richMetadata?.model3DFormat ?? "MODEL")"
+            case .webBookmark:
+                asset.isGitHubRepo ? "GITHUB" : (asset.richMetadata?.socialPost?.platform.displayName.uppercased() ?? asset.sourceDomain ?? "WEB")
+            default:
+                CanvasFormatters.fileExtensionBadge(for: asset.fileName)
+            }
+            let badgeAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .bold),
+                .foregroundColor: secondaryText
+            ]
+            (badge as NSString).draw(at: CGPoint(x: 28, y: 28), withAttributes: badgeAttrs)
+
+            let para = NSMutableParagraphStyle()
+            para.lineBreakMode = .byTruncatingTail
+            let titleAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 22, weight: .semibold),
+                .foregroundColor: primaryText,
+                .paragraphStyle: para
+            ]
+            (asset.title as NSString).draw(
+                in: CGRect(x: 28, y: bounds.height - 96, width: bounds.width - 56, height: 72),
+                withAttributes: titleAttrs
+            )
+        }
+        return ctx.makeImage()
+    }
+
+    private func upload(bitmap: RingRasterizedBitmap, assetID: UUID, isFullPreview: Bool) -> RingTextureEntry? {
+        let dstW = bitmap.width
+        let dstH = bitmap.height
+        let bytesPerRow = dstW * 4
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm,
@@ -311,7 +480,7 @@ private final class RingTexturePool {
         desc.storageMode = .shared
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
 
-        raw.withUnsafeBytes { ptr in
+        bitmap.data.withUnsafeBytes { ptr in
             if let base = ptr.baseAddress {
                 tex.replace(
                     region: MTLRegionMake2D(0, 0, dstW, dstH),
@@ -330,7 +499,7 @@ private final class RingTexturePool {
         }
 
         tick &+= 1
-        let entry = RingTextureEntry(texture: tex, aspect: aspect, tick: tick)
+        let entry = RingTextureEntry(texture: tex, aspect: bitmap.aspect, isFullPreview: isFullPreview, tick: tick)
         entries[assetID] = entry
         evictIfNeeded()
         return entry
@@ -377,12 +546,15 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     private var reduceMotion: Bool = false
     private var isOverlayPresented: Bool = false
     private var topSafeInset: CGFloat = 64
+    private var loaderInvalidationVersion: Int = -1
     private var callbacks: RingGalleryInteractionCallbacks?
 
     // Continuous arc offset (px along the ring)
     private var offset: Double = 0
     private var cardTrack: RingCardTrack = RingCardTrack(cardWidths: [], cardHeight: 300, cardGap: 18)
     private var lastReportedFrontAssetID: UUID?
+    private var frontReportGeneration: UInt64 = 0
+    private var lastRenderedDrawableSize: CGSize = .zero
 
     // Cubic-bezier offset animation
     private struct OffsetAnim {
@@ -432,6 +604,13 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         self.preferredFramesPerSecond = 120
         self.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         self.layer?.isOpaque = true
+        self.layer?.actions = [
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "frame": NSNull(),
+            "contents": NSNull()
+        ]
+        (self.layer as? CAMetalLayer)?.presentsWithTransaction = true
 
         if let dev, let queue = dev.makeCommandQueue() {
             self.commandQueue = queue
@@ -470,6 +649,11 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             installKeyMonitorIfNeeded()
             requestFrame()
         } else {
+            scrollSnapWorkItem?.cancel()
+            scrollSnapWorkItem = nil
+            isDragging = false
+            isPaused = true
+            enableSetNeedsDisplay = true
             if let monitor = keyMonitor {
                 NSEvent.removeMonitor(monitor)
                 keyMonitor = nil
@@ -481,7 +665,12 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
     public override func layout() {
         super.layout()
-        requestFrame()
+        // `super.layout()` updates `drawableSize` and invokes `mtkView(_:drawableSizeWillChange:)`,
+        // which already draws atomically for the new size. Only schedule a redraw if drawableSize
+        // did not just render (avoids 2x synchronous waitUntilScheduled() stalls per resize frame).
+        if bounds.width > 4, bounds.height > 4, drawableSize != lastRenderedDrawableSize {
+            requestFrame()
+        }
     }
 
     private func currentLayoutMetrics() -> (cardScale: Double, verticalBiasPt: Double) {
@@ -571,6 +760,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         reduceMotion: Bool,
         isOverlayPresented: Bool,
         topSafeInset: CGFloat,
+        loaderInvalidationVersion: Int = 0,
         callbacks: RingGalleryInteractionCallbacks
     ) {
         let oldAssetIDs = self.assets.map(\.id)
@@ -580,10 +770,13 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         let oldParams = self.params
         let newTrack = RingCardTrack.build(from: assets, params: params)
         let trackGeometryChanged = newTrack != self.cardTrack
-        let appearanceChanged = (self.isDarkMode != isDarkMode)
+        let darkModeChanged = (self.isDarkMode != isDarkMode)
+        let invalidationChanged = (self.loaderInvalidationVersion != -1 && self.loaderInvalidationVersion != loaderInvalidationVersion)
+        let appearanceChanged = darkModeChanged
             || (self.topSafeInset != topSafeInset)
             || (oldParams != params)
             || trackGeometryChanged
+            || invalidationChanged
 
         let previousFrontVirtual = cardTrack.isEmpty ? 0 : cardTrack.nearestVirtualIndex(to: offset)
 
@@ -594,16 +787,23 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         self.reduceMotion = reduceMotion
         self.isOverlayPresented = isOverlayPresented
         self.topSafeInset = topSafeInset
+        self.loaderInvalidationVersion = loaderInvalidationVersion
         self.callbacks = callbacks
+        texturePool?.isDarkMode = isDarkMode
+
+        if invalidationChanged || darkModeChanged {
+            texturePool?.purgeAll()
+        }
 
         if listChanged {
             offsetAnim = nil
+            pressAnim = nil
             if let selectedAssetID, let idx = assets.firstIndex(where: { $0.id == selectedAssetID }) {
                 offset = cardTrack.centerArc(forVirtualIndex: idx)
             } else {
                 offset = 0
             }
-            reportFrontAssetIfChanged(force: true)
+            reportFrontAssetIfChanged(force: true, deferCallback: true)
             prefetchAroundCurrentOffset()
             requestFrame()
         } else {
@@ -626,6 +826,9 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             offsetAnim = nil
             requestFrame()
         } else if appearanceChanged {
+            if invalidationChanged || darkModeChanged {
+                prefetchAroundCurrentOffset()
+            }
             requestFrame()
         }
     }
@@ -693,6 +896,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     private func startAnimating() {
+        (self.layer as? CAMetalLayer)?.presentsWithTransaction = false
         enableSetNeedsDisplay = false
         isPaused = false
     }
@@ -706,6 +910,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         if !hasOffsetAnim && !hasPressAnim && !isDragging {
             isPaused = true
             enableSetNeedsDisplay = true
+            (self.layer as? CAMetalLayer)?.presentsWithTransaction = true
         }
     }
 
@@ -891,22 +1096,28 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
-    private func reportFrontAssetIfChanged(force: Bool = false) {
-        guard !assets.isEmpty, !cardTrack.isEmpty else {
-            if lastReportedFrontAssetID != nil || force {
-                lastReportedFrontAssetID = nil
-                callbacks?.onFrontAssetChanged(nil)
-            }
-            return
+    private func reportFrontAssetIfChanged(force: Bool = false, deferCallback: Bool = false) {
+        let nextAsset: AssetRecord?
+        if assets.isEmpty || cardTrack.isEmpty {
+            nextAsset = nil
+        } else {
+            let vIdx = cardTrack.nearestVirtualIndex(to: offset)
+            let frontIdx: Int = assets.count <= 3
+                ? max(0, min(assets.count - 1, vIdx))
+                : RingGalleryMath.positiveMod(vIdx, count: assets.count)
+            nextAsset = assets[frontIdx]
         }
-        let vIdx = cardTrack.nearestVirtualIndex(to: offset)
-        let frontIdx: Int = assets.count <= 3
-            ? max(0, min(assets.count - 1, vIdx))
-            : RingGalleryMath.positiveMod(vIdx, count: assets.count)
-        let asset = assets[frontIdx]
-        if force || asset.id != lastReportedFrontAssetID {
-            lastReportedFrontAssetID = asset.id
-            callbacks?.onFrontAssetChanged(asset)
+        guard force || nextAsset?.id != lastReportedFrontAssetID else { return }
+        lastReportedFrontAssetID = nextAsset?.id
+        frontReportGeneration &+= 1
+        let gen = frontReportGeneration
+        if deferCallback {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.frontReportGeneration == gen else { return }
+                self.callbacks?.onFrontAssetChanged(nextAsset)
+            }
+        } else {
+            callbacks?.onFrontAssetChanged(nextAsset)
         }
     }
 
@@ -930,10 +1141,19 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     // MARK: - MTKViewDelegate Render Pass
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        requestFrame()
+        guard size.width > 4, size.height > 4 else { return }
+        let metalLayer = self.layer as? CAMetalLayer
+        let prevPresentWithTx = metalLayer?.presentsWithTransaction ?? false
+        metalLayer?.presentsWithTransaction = true
+        draw()
+        // If a continuous CVDisplayLink animation is still running, restore async presentation for subsequent ticks.
+        if !isPaused {
+            metalLayer?.presentsWithTransaction = prevPresentWithTx
+        }
     }
 
     public func draw(in view: MTKView) {
+        guard bounds.width > 4, bounds.height > 4 else { return }
         let now = CACurrentMediaTime()
 
         // Step active offset glide
@@ -946,7 +1166,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
                 offsetAnim = nil
                 prefetchAroundCurrentOffset()
             }
-            reportFrontAssetIfChanged()
+            reportFrontAssetIfChanged(deferCallback: true)
         }
 
         // Clean up finished press animation
@@ -982,8 +1202,10 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
         guard let cmd = commandQueue.makeCommandBuffer(),
               let encoder = cmd.makeRenderCommandEncoder(descriptor: passDesc) else {
+            stopAnimatingIfSettled(now: now)
             return
         }
+        lastRenderedDrawableSize = drawableSize
 
         let viewportPts = bounds.size
         let retinaScale = Float(max(1.0, window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0))
@@ -1045,8 +1267,14 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         }
 
         encoder.endEncoding()
-        cmd.present(drawable)
-        cmd.commit()
+        if (self.layer as? CAMetalLayer)?.presentsWithTransaction == true {
+            cmd.commit()
+            cmd.waitUntilScheduled()
+            drawable.present()
+        } else {
+            cmd.present(drawable)
+            cmd.commit()
+        }
 
         stopAnimatingIfSettled(now: now)
     }
@@ -1073,6 +1301,7 @@ public struct RingGalleryMetalSurface: NSViewRepresentable {
     public let assets: [AssetRecord]
     public let selectedAssetID: UUID?
     public let loader: ThumbnailImageLoader
+    public let loaderInvalidationVersion: Int
     public let params: RingGalleryParameters
     public let isDarkMode: Bool
     public let reduceMotion: Bool
@@ -1086,6 +1315,7 @@ public struct RingGalleryMetalSurface: NSViewRepresentable {
         assets: [AssetRecord],
         selectedAssetID: UUID?,
         loader: ThumbnailImageLoader,
+        loaderInvalidationVersion: Int = 0,
         params: RingGalleryParameters,
         isDarkMode: Bool,
         reduceMotion: Bool,
@@ -1098,6 +1328,7 @@ public struct RingGalleryMetalSurface: NSViewRepresentable {
         self.assets = assets
         self.selectedAssetID = selectedAssetID
         self.loader = loader
+        self.loaderInvalidationVersion = loaderInvalidationVersion
         self.params = params
         self.isDarkMode = isDarkMode
         self.reduceMotion = reduceMotion
@@ -1124,6 +1355,7 @@ public struct RingGalleryMetalSurface: NSViewRepresentable {
             reduceMotion: reduceMotion,
             isOverlayPresented: isOverlayPresented,
             topSafeInset: topSafeInset,
+            loaderInvalidationVersion: loaderInvalidationVersion,
             callbacks: callbacks
         )
         return view
@@ -1138,6 +1370,7 @@ public struct RingGalleryMetalSurface: NSViewRepresentable {
             reduceMotion: reduceMotion,
             isOverlayPresented: isOverlayPresented,
             topSafeInset: topSafeInset,
+            loaderInvalidationVersion: loaderInvalidationVersion,
             callbacks: callbacks
         )
         if context.coordinator.lastStepTrigger != stepTrigger {

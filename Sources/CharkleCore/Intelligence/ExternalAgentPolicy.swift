@@ -131,9 +131,14 @@ public nonisolated enum ExternalAgentConfigStore {
 
     public static func load(in directory: URL = defaultDirectory()) -> ExternalAgentConfig {
         let url = configURL(in: directory)
+        guard (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil else {
+            return ExternalAgentConfig()
+        }
         guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode(ExternalAgentConfig.self, from: data) else {
-            return ExternalAgentConfig()
+            // Fail closed when an existing policy file is unreadable or corrupt so a damaged
+            // config cannot silently re-enable MCP/CLI after the user disabled them.
+            return ExternalAgentConfig(mcpEnabled: false, cliEnabled: false, accessLevel: .readOnly)
         }
         return decoded
     }

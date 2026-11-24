@@ -50,7 +50,8 @@ public nonisolated enum ContactSheetRenderer {
         jpegQuality: Double = 0.78
     ) -> ContactSheetBatch? {
         guard !entries.isEmpty else { return nil }
-        let count = entries.count
+        let boundedEntries = Array(entries.prefix(64))
+        let count = boundedEntries.count
         let columns: Int = switch count {
         case 1...4: min(2, count)
         case 5...9: 3
@@ -59,9 +60,11 @@ public nonisolated enum ContactSheetRenderer {
         let rows = Int(ceil(Double(count) / Double(columns)))
         let margin: CGFloat = 18
         let gap: CGFloat = 14
-        let canvasWidth = CGFloat(max(640, maxCanvasWidth))
+        let canvasWidth = CGFloat(max(640, min(2560, maxCanvasWidth)))
         let cellWidth = floor((canvasWidth - margin * 2 - gap * CGFloat(columns - 1)) / CGFloat(columns))
-        let cellHeight = floor(cellWidth * 0.82)
+        let maxHeightBudget: CGFloat = 4096
+        let maxCellHeight = floor((maxHeightBudget - margin * 2 - gap * CGFloat(max(0, rows - 1))) / CGFloat(max(1, rows)))
+        let cellHeight = max(64, min(floor(cellWidth * 0.82), maxCellHeight))
         let canvasHeight = margin * 2 + CGFloat(rows) * cellHeight + CGFloat(max(0, rows - 1)) * gap
 
         let pixelWidth = Int(canvasWidth)
@@ -77,76 +80,79 @@ public nonisolated enum ContactSheetRenderer {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        // Flip coordinates so y=0 is top-left for clean grid math
+        // Render grid in CoreGraphics bottom-left coordinates (converting row yTop -> yBottom below)
         ctx.interpolationQuality = .high
         ctx.setFillColor(CGColor(red: 0.094, green: 0.102, blue: 0.122, alpha: 1.0)) // #181A1F studio dark
         ctx.fill(CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight))
 
         var slotMap: [Int: UUID] = [:]
         var ordered: [(Int, UUID)] = []
+        let decodeMaxPixel = max(240, Int((max(cellWidth, cellHeight) * 2).rounded()))
 
-        for (idx, entry) in entries.enumerated() {
-            let col = idx % columns
-            let row = idx / columns
-            let x = margin + CGFloat(col) * (cellWidth + gap)
-            // CoreGraphics origin is bottom-left
-            let yTop = margin + CGFloat(row) * (cellHeight + gap)
-            let yBottom = canvasHeight - yTop - cellHeight
-            let tileRect = CGRect(x: x, y: yBottom, width: cellWidth, height: cellHeight)
+        for (idx, entry) in boundedEntries.enumerated() {
+            autoreleasepool {
+                let col = idx % columns
+                let row = idx / columns
+                let x = margin + CGFloat(col) * (cellWidth + gap)
+                // CoreGraphics origin is bottom-left
+                let yTop = margin + CGFloat(row) * (cellHeight + gap)
+                let yBottom = canvasHeight - yTop - cellHeight
+                let tileRect = CGRect(x: x, y: yBottom, width: cellWidth, height: cellHeight)
 
-            // Subtle neutral tile backing
-            let tilePath = CGPath(roundedRect: tileRect, cornerWidth: 10, cornerHeight: 10, transform: nil)
-            ctx.saveGState()
-            ctx.addPath(tilePath)
-            ctx.clip()
+                // Subtle neutral tile backing
+                let tilePath = CGPath(roundedRect: tileRect, cornerWidth: 10, cornerHeight: 10, transform: nil)
+                ctx.saveGState()
+                ctx.addPath(tilePath)
+                ctx.clip()
 
-            ctx.setFillColor(CGColor(red: 0.145, green: 0.155, blue: 0.180, alpha: 1.0))
-            ctx.fill(tileRect)
+                ctx.setFillColor(CGColor(red: 0.145, green: 0.155, blue: 0.180, alpha: 1.0))
+                ctx.fill(tileRect)
 
-            if let thumbURL = entry.thumbnailURL, let image = loadCGImage(at: thumbURL) {
-                let insetRect = tileRect.insetBy(dx: 4, dy: 4)
-                let drawRect = aspectFitRect(imageWidth: CGFloat(image.width), imageHeight: CGFloat(image.height), inside: insetRect)
-                ctx.draw(image, in: drawRect)
-            } else if let firstColor = entry.asset.dominantColors.first,
-                      let rgb = hexToRGB(firstColor.hex) {
-                ctx.setFillColor(CGColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: 0.85))
-                ctx.fill(tileRect.insetBy(dx: 12, dy: 12))
-            }
-            ctx.restoreGState()
+                if let thumbURL = entry.thumbnailURL, let image = loadCGImage(at: thumbURL, maxPixelSize: decodeMaxPixel) {
+                    let insetRect = tileRect.insetBy(dx: 4, dy: 4)
+                    let drawRect = aspectFitRect(imageWidth: CGFloat(image.width), imageHeight: CGFloat(image.height), inside: insetRect)
+                    ctx.draw(image, in: drawRect)
+                } else if let firstColor = entry.asset.dominantColors.first,
+                          let rgb = hexToRGB(firstColor.hex) {
+                    ctx.setFillColor(CGColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: 0.85))
+                    ctx.fill(tileRect.insetBy(dx: 12, dy: 12))
+                }
+                ctx.restoreGState()
 
-            // Crisp tile hairline border
-            ctx.saveGState()
-            ctx.addPath(tilePath)
-            ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.16))
-            ctx.setLineWidth(1.0)
-            ctx.strokePath()
-            ctx.restoreGState()
+                // Crisp tile hairline border
+                ctx.saveGState()
+                ctx.addPath(tilePath)
+                ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.16))
+                ctx.setLineWidth(1.0)
+                ctx.strokePath()
+                ctx.restoreGState()
 
-            // High-contrast top-left numbered badge `#01`, `#02`, ...
-            let labelText = String(format: "#%02d", entry.slot)
-            drawPillBadge(
-                text: labelText,
-                in: ctx,
-                topLeftX: tileRect.minX + 8,
-                topLeftYFromBottom: tileRect.maxY - 8,
-                fontSize: columns >= 4 ? 17 : 20,
-                background: CGColor(red: 0, green: 0, blue: 0, alpha: 0.88),
-                border: CGColor(red: 1, green: 1, blue: 1, alpha: 0.85),
-                textColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1)
-            )
-
-            // Optional non-image media indicator badge top-right
-            if let mediaBadge = mediaBadgeLabel(for: entry.asset.mediaKind) {
+                // High-contrast top-left numbered badge `#01`, `#02`, ...
+                let labelText = String(format: "#%02d", entry.slot)
                 drawPillBadge(
-                    text: mediaBadge,
+                    text: labelText,
                     in: ctx,
-                    topRightX: tileRect.maxX - 8,
+                    topLeftX: tileRect.minX + 8,
                     topLeftYFromBottom: tileRect.maxY - 8,
-                    fontSize: 12,
-                    background: CGColor(red: 0.12, green: 0.36, blue: 0.78, alpha: 0.90),
-                    border: CGColor(red: 1, green: 1, blue: 1, alpha: 0.45),
+                    fontSize: columns >= 4 ? 17 : 20,
+                    background: CGColor(red: 0, green: 0, blue: 0, alpha: 0.88),
+                    border: CGColor(red: 1, green: 1, blue: 1, alpha: 0.85),
                     textColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1)
                 )
+
+                // Optional non-image media indicator badge top-right
+                if let mediaBadge = mediaBadgeLabel(for: entry.asset.mediaKind) {
+                    drawPillBadge(
+                        text: mediaBadge,
+                        in: ctx,
+                        topRightX: tileRect.maxX - 8,
+                        topLeftYFromBottom: tileRect.maxY - 8,
+                        fontSize: 12,
+                        background: CGColor(red: 0.12, green: 0.36, blue: 0.78, alpha: 0.90),
+                        border: CGColor(red: 1, green: 1, blue: 1, alpha: 0.45),
+                        textColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+                    )
+                }
             }
 
             slotMap[entry.slot] = entry.asset.id
@@ -180,9 +186,16 @@ public nonisolated enum ContactSheetRenderer {
         }
     }
 
-    private static func loadCGImage(at url: URL) -> CGImage? {
+    private static func loadCGImage(at url: URL, maxPixelSize: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(240, maxPixelSize),
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }
 
     private static func aspectFitRect(imageWidth: CGFloat, imageHeight: CGFloat, inside bounds: CGRect) -> CGRect {
@@ -214,7 +227,9 @@ public nonisolated enum ContactSheetRenderer {
             kCTFontAttributeName: font,
             kCTForegroundColorAttributeName: textColor
         ]
-        let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, text as CFString, attrs as CFDictionary)!
+        guard let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, text as CFString, attrs as CFDictionary) else {
+            return
+        }
         let line = CTLineCreateWithAttributedString(attrStr)
         var ascent: CGFloat = 0
         var descent: CGFloat = 0

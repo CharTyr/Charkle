@@ -48,14 +48,21 @@ public struct NormalizedCropRect: Codable, Hashable, Sendable {
 
     /// Construct from TypeSafe `Box` edges (`top`, `bottom`, `left`, `right` in `[0, 1]`, top-left origin).
     public init(boxTop top: Double, bottom: Double, left: Double, right: Double) {
-        let clampedLeft = max(0.0, min(1.0, left))
-        let clampedRight = max(clampedLeft, min(1.0, right))
-        let clampedTop = max(0.0, min(1.0, top))
-        let clampedBottom = max(clampedTop, min(1.0, bottom))
+        guard top.isFinite, bottom.isFinite, left.isFinite, right.isFinite else {
+            self.x = 0
+            self.y = 0
+            self.width = 1
+            self.height = 1
+            return
+        }
+        let clampedLeft = max(0.0, min(0.98, left))
+        let clampedRight = max(clampedLeft + 0.02, min(1.0, right))
+        let clampedTop = max(0.0, min(0.98, top))
+        let clampedBottom = max(clampedTop + 0.02, min(1.0, bottom))
         self.x = clampedLeft
         self.y = clampedTop
-        self.width = max(0.02, clampedRight - clampedLeft)
-        self.height = max(0.02, clampedBottom - clampedTop)
+        self.width = clampedRight - clampedLeft
+        self.height = clampedBottom - clampedTop
     }
 
     public static let full = NormalizedCropRect()
@@ -67,16 +74,24 @@ public struct NormalizedCropRect: Codable, Hashable, Sendable {
     public var area: Double { max(0.0, width) * max(0.0, height) }
 
     public var centerPoint: BoardPoint {
-        BoardPoint(x: max(0.0, min(1.0, x + width * 0.5)), y: max(0.0, min(1.0, y + height * 0.5)))
+        let safe = clamped()
+        return BoardPoint(
+            x: max(0.0, min(1.0, safe.x + safe.width * 0.5)),
+            y: max(0.0, min(1.0, safe.y + safe.height * 0.5))
+        )
     }
 
     /// True when this rect represents a genuine sub-region (not effectively the whole frame).
     public var isMeaningfulSubregion: Bool {
-        width >= 0.04 && height >= 0.04 && area < 0.96
+        x.isFinite && y.isFinite && width.isFinite && height.isFinite
+            && width >= 0.04 && height >= 0.04 && area < 0.96
     }
 
-    /// Clamp edges safely inside `[0, 1]`.
+    /// Clamp edges safely inside `[0, 1]`, falling back to `.full` on non-finite coordinates.
     public func clamped() -> NormalizedCropRect {
+        guard x.isFinite, y.isFinite, width.isFinite, height.isFinite else {
+            return .full
+        }
         let left = max(0.0, min(0.98, x))
         let top = max(0.0, min(0.98, y))
         let right = max(left + 0.02, min(1.0, x + width))
@@ -86,19 +101,23 @@ public struct NormalizedCropRect: Codable, Hashable, Sendable {
 
     /// Expand each edge outward by `fraction` of full image dimensions, clamped inside `[0, 1]`.
     public func padded(by fraction: Double) -> NormalizedCropRect {
-        let pad = max(0.0, min(0.35, fraction))
-        let left = max(0.0, x - pad)
-        let top = max(0.0, y - pad)
-        let right = min(1.0, x + width + pad)
-        let bottom = min(1.0, y + height + pad)
-        return NormalizedCropRect(x: left, y: top, width: max(0.02, right - left), height: max(0.02, bottom - top))
+        let base = clamped()
+        let pad = fraction.isFinite ? max(0.0, min(0.35, fraction)) : 0.0
+        let left = max(0.0, base.x - pad)
+        let top = max(0.0, base.y - pad)
+        let right = min(1.0, base.x + base.width + pad)
+        let bottom = min(1.0, base.y + base.height + pad)
+        return NormalizedCropRect(x: left, y: top, width: max(0.02, right - left), height: max(0.02, bottom - top)).clamped()
     }
 
     /// Map a normalized point in full-image coordinates into the visible coordinate space of this crop.
     public func mappingImagePointToVisible(_ point: BoardPoint) -> BoardPoint {
-        guard width > 0.01, height > 0.01 else { return point }
-        let vx = (point.x - x) / width
-        let vy = (point.y - y) / height
+        let safe = clamped()
+        guard point.x.isFinite, point.y.isFinite, safe.width > 0.01, safe.height > 0.01 else {
+            return BoardPoint(x: 0.5, y: 0.5)
+        }
+        let vx = (point.x - safe.x) / safe.width
+        let vy = (point.y - safe.y) / safe.height
         return BoardPoint(x: max(0.02, min(0.98, vx)), y: max(0.02, min(0.98, vy)))
     }
 }
@@ -219,9 +238,16 @@ public struct BoardNode: Codable, Hashable, Identifiable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         kind = try c.decode(BoardNodeKind.self, forKey: .kind)
-        frame = try c.decode(BoardRect.self, forKey: .frame)
+        let rawFrame = try c.decode(BoardRect.self, forKey: .frame)
+        frame = BoardRect(
+            x: rawFrame.x.isFinite ? rawFrame.x : 0,
+            y: rawFrame.y.isFinite ? rawFrame.y : 0,
+            width: rawFrame.width.isFinite && rawFrame.width > 0 ? rawFrame.width : 240,
+            height: rawFrame.height.isFinite && rawFrame.height > 0 ? rawFrame.height : 180
+        )
         zIndex = try c.decodeIfPresent(Int.self, forKey: .zIndex) ?? 0
-        rotationDegrees = try c.decodeIfPresent(Double.self, forKey: .rotationDegrees) ?? 0
+        let rawRot = try c.decodeIfPresent(Double.self, forKey: .rotationDegrees) ?? 0
+        rotationDegrees = rawRot.isFinite ? rawRot : 0
         flipHorizontal = try c.decodeIfPresent(Bool.self, forKey: .flipHorizontal) ?? false
         flipVertical = try c.decodeIfPresent(Bool.self, forKey: .flipVertical) ?? false
         isLocked = try c.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
@@ -403,6 +429,37 @@ public struct MoodboardDocument: Codable, Hashable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.updatedHLC = updatedHLC
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, subtitle, mode, nodes, connectors, inkStrokes, extractedPalette
+        case candidateAssetIDs, pinnedOffline, viewportCenter, viewportZoom
+        case createdAt, updatedAt, updatedHLC
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "未命名情绪板"
+        subtitle = try c.decodeIfPresent(String.self, forKey: .subtitle) ?? ""
+        mode = try c.decodeIfPresent(BoardLayoutMode.self, forKey: .mode) ?? .freeform
+        nodes = try c.decodeIfPresent([BoardNode].self, forKey: .nodes) ?? []
+        connectors = try c.decodeIfPresent([BoardConnector].self, forKey: .connectors) ?? []
+        inkStrokes = try c.decodeIfPresent([InkStroke].self, forKey: .inkStrokes) ?? []
+        extractedPalette = try c.decodeIfPresent([LabColor].self, forKey: .extractedPalette) ?? []
+        candidateAssetIDs = try c.decodeIfPresent([UUID].self, forKey: .candidateAssetIDs) ?? []
+        pinnedOffline = try c.decodeIfPresent(Bool.self, forKey: .pinnedOffline) ?? false
+        let rawCenter = try c.decodeIfPresent(BoardPoint.self, forKey: .viewportCenter) ?? .zero
+        viewportCenter = BoardPoint(
+            x: rawCenter.x.isFinite ? rawCenter.x : 0,
+            y: rawCenter.y.isFinite ? rawCenter.y : 0
+        )
+        let rawZoom = try c.decodeIfPresent(Double.self, forKey: .viewportZoom) ?? 1.0
+        viewportZoom = (rawZoom.isFinite && rawZoom > 0) ? max(0.1, min(10.0, rawZoom)) : 1.0
+        let now = Date()
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? now
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        updatedHLC = try c.decodeIfPresent(Int64.self, forKey: .updatedHLC) ?? 0
     }
 }
 

@@ -81,6 +81,13 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     }
 
     public func resolveFolder(id: String) async throws -> RemoteDriveFile {
+        try await resolveFolder(id: id, visited: [])
+    }
+
+    private func resolveFolder(id: String, visited: Set<String>) async throws -> RemoteDriveFile {
+        guard visited.count < 8, !visited.contains(id) else {
+            throw DriveTransportError.invalidResponse("Google Drive 快捷方式存在循环引用或嵌套过深：\(id)")
+        }
         let dto: FileDTO = try await get("files/\(try segment(id))", [
             "supportsAllDrives": "true",
             "fields": Self.fileFields
@@ -92,7 +99,7 @@ public nonisolated struct DirectAPITransport: DriveTransport {
            let target = dto.shortcutDetails,
            target.targetMimeType == RemoteDriveFile.folderMimeType,
            let targetID = target.targetId, !targetID.isEmpty {
-            return try await resolveFolder(id: targetID)
+            return try await resolveFolder(id: targetID, visited: visited.union([id]))
         }
         guard dto.mimeType == RemoteDriveFile.folderMimeType else {
             throw DriveTransportError.invalidResponse("指定的 Google Drive 链接不是文件夹（类型为 \(dto.mimeType)）。")
@@ -389,10 +396,32 @@ public nonisolated struct DirectAPITransport: DriveTransport {
             initial.setValue(String(fileSize), forHTTPHeaderField: "X-Upload-Content-Length")
             initial.setValue("application/json", forHTTPHeaderField: "Content-Type")
             initial.httpBody = metadata
-            let (body, response) = try await session.data(for: initial)
-            try validate(response, data: body)
-            guard let location = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"),
-                  let url = Self.uploadURL(location) else {
+            var initAttempt = 0
+            var resolvedLocation: URL?
+            while true {
+                try Task.checkCancellation()
+                do {
+                    let (body, response) = try await session.data(for: initial)
+                    if let http = response as? HTTPURLResponse, (http.statusCode == 429 || http.statusCode >= 500), initAttempt < 3 {
+                        initAttempt += 1
+                        try await Task.sleep(for: .milliseconds(300 * initAttempt * initAttempt))
+                        continue
+                    }
+                    try validate(response, data: body)
+                    guard let location = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"),
+                          let url = Self.uploadURL(location) else {
+                        throw DriveTransportError.invalidResponse("Missing resumable upload URL.")
+                    }
+                    resolvedLocation = url
+                    break
+                } catch {
+                    try Task.checkCancellation()
+                    guard Self.retryable(error), initAttempt < 3 else { throw error }
+                    initAttempt += 1
+                    try await Task.sleep(for: .milliseconds(300 * initAttempt * initAttempt))
+                }
+            }
+            guard let url = resolvedLocation else {
                 throw DriveTransportError.invalidResponse("Missing resumable upload URL.")
             }
             upload = url
@@ -577,19 +606,50 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         }
     }
 
+    private static let curlStatusMarker = Data("\n__CHARKLE_HTTP_STATUS__:".utf8)
+
     private func performViaGDirect(_ request: URLRequest) async throws -> Data? {
         guard let url = request.url, let host = url.host(),
               let header = request.value(forHTTPHeaderField: "Authorization") else {
             return nil
         }
         for endpoint in endpointBreaker.activeEndpoints(from: endpoints) {
+            try Task.checkCancellation()
             let ip = endpoint.ip.contains(":") ? "[\(endpoint.ip)]" : endpoint.ip
-            let args = ["-q", "--silent", "--show-error", "--fail", "--noproxy", "*", "--connect-timeout", "2",
-                        "--max-time", "6", "--resolve", "\(host):443:\(ip)", "--header", "@-", "--", url.absoluteString]
-            if let result = try? await GDirectIntegration.run("/usr/bin/curl", args, timeout: 7,
-                                                              input: Data("Authorization: \(header)\n".utf8)) {
-                endpointBreaker.recordSuccess(ip: endpoint.ip)
-                return result.output
+            let args = ["-q", "--silent", "--show-error", "--noproxy", "*", "--connect-timeout", "3",
+                        "--max-time", "30", "--resolve", "\(host):443:\(ip)", "--header", "@-",
+                        "-w", "\n__CHARKLE_HTTP_STATUS__:%{http_code}", "--", url.absoluteString]
+            if let result = try? await GDirectIntegration.run("/usr/bin/curl", args, timeout: 32,
+                                                              input: Data("Authorization: \(header)\n".utf8)),
+               let markerRange = result.output.range(of: Self.curlStatusMarker, options: .backwards) {
+                let body = Data(result.output[..<markerRange.lowerBound])
+                let statusText = String(decoding: result.output[markerRange.upperBound...], as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let statusCode = Int(statusText), statusCode > 0 {
+                    if (200..<300).contains(statusCode) {
+                        endpointBreaker.recordSuccess(ip: endpoint.ip)
+                        return body
+                    }
+                    if (400..<500).contains(statusCode) && statusCode != 429 {
+                        // The direct IP reached Google cleanly; surface the real HTTP error (e.g. 404/410/401)
+                        // without blacklisting a healthy endpoint so DriveSyncEngine's 410 recovery still runs.
+                        endpointBreaker.recordSuccess(ip: endpoint.ip)
+                        endpointBreaker.markPreferGDirect()
+                        let message = String(decoding: body.prefix(512), as: UTF8.self)
+                        throw DriveTransportError.httpError(
+                            statusCode: statusCode,
+                            message: message.isEmpty ? "Drive request failed." : message
+                        )
+                    }
+                    if statusCode == 429 {
+                        // Rate-limited rather than broken IP: don't blacklist this IP.
+                        let message = String(decoding: body.prefix(512), as: UTF8.self)
+                        throw DriveTransportError.httpError(
+                            statusCode: statusCode,
+                            message: message.isEmpty ? "Drive request rate limited." : message
+                        )
+                    }
+                }
             }
             endpointBreaker.recordFailure(ip: endpoint.ip)
             try Task.checkCancellation()
@@ -598,8 +658,10 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     }
 
     private final class EndpointCircuitBreaker: Sendable {
+        private static let failureCooldown: Duration = .seconds(300)
+
         private struct State {
-            var failedIPs: Set<String> = []
+            var failedIPs: [String: ContinuousClock.Instant] = [:]
             var preferredIP: String?
             var preferGDirect: Bool = false
         }
@@ -615,8 +677,10 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         }
 
         func activeEndpoints(from all: [GDirectEndpoint]) -> [GDirectEndpoint] {
-            state.withLock { s in
-                let available = all.filter { !s.failedIPs.contains($0.ip) }
+            let now = ContinuousClock.now
+            return state.withLock { s in
+                s.failedIPs = s.failedIPs.filter { $0.value.duration(to: now) < Self.failureCooldown }
+                let available = all.filter { s.failedIPs[$0.ip] == nil }
                 if let preferred = s.preferredIP,
                    let idx = available.firstIndex(where: { $0.ip == preferred }),
                    idx > 0 {
@@ -631,13 +695,15 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
         func recordSuccess(ip: String) {
             state.withLock { s in
+                s.failedIPs.removeValue(forKey: ip)
                 s.preferredIP = ip
             }
         }
 
         func recordFailure(ip: String) {
+            let now = ContinuousClock.now
             state.withLock { s in
-                s.failedIPs.insert(ip)
+                s.failedIPs[ip] = now
                 if s.preferredIP == ip {
                     s.preferredIP = nil
                 }

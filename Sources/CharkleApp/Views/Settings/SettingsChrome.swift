@@ -386,6 +386,57 @@ public struct SettingsStatusBadge: View {
     }
 }
 
+/// Inline status/error feedback banner rendered inside Settings modal sheets so test-connection,
+/// migration, and OAuth errors remain immediately visible instead of hiding behind the sheet.
+public struct SettingsSheetFeedbackBanner: View {
+    @Environment(\.colorScheme) private var colorScheme
+    public let syncAndAI: SyncAndAIStore
+
+    public init(syncAndAI: SyncAndAIStore) {
+        self.syncAndAI = syncAndAI
+    }
+
+    public var body: some View {
+        if let err = syncAndAI.errorMessage, !err.isEmpty {
+            bannerRow(text: err, isError: true) {
+                syncAndAI.errorMessage = nil
+            }
+        } else if let status = syncAndAI.statusMessage, !status.isEmpty {
+            bannerRow(text: status, isError: false) {
+                syncAndAI.statusMessage = nil
+            }
+        }
+    }
+
+    private func bannerRow(text: String, isError: Bool, onDismiss: @escaping () -> Void) -> some View {
+        let tint = isError
+            ? SettingsPalette.destructiveInk(for: colorScheme)
+            : SettingsPalette.positiveInk(for: colorScheme)
+        return HStack(spacing: 8) {
+            Image(systemName: isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.system(size: 11.5, weight: .medium))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(tint.opacity(0.22), lineWidth: 0.75)
+        )
+    }
+}
+
 public struct SettingsCodeSnippet: View {
     @Environment(\.colorScheme) private var colorScheme
 

@@ -85,7 +85,7 @@ public struct BoardPaletteHeaderStrip: View {
                     .foregroundStyle(.secondary)
                     .padding(.trailing, 2)
 
-                ForEach(colors.prefix(7), id: \.hex) { swatch in
+                ForEach(Array(colors.prefix(7).enumerated()), id: \.offset) { _, swatch in
                     let hex = swatch.hex.uppercased()
                     let isLight = Color.charkleIsLightHex(hex)
                     Button {
@@ -294,15 +294,17 @@ struct BoardAssetNodeView: View {
                             .help("点击还原完整画面（非破坏性裁切）")
                         }
                         Spacer()
-                        Button(action: onOpenQuickLook) {
-                            Image(systemName: asset?.isExternalWebLink == true ? "safari" : "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(5)
-                                .background(Color.black.opacity(0.54), in: RoundedRectangle(cornerRadius: innerBadgeRadius, style: .continuous))
+                        if asset != nil {
+                            Button(action: onOpenQuickLook) {
+                                Image(systemName: asset?.isExternalWebLink == true ? "safari" : "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(5)
+                                    .background(Color.black.opacity(0.54), in: RoundedRectangle(cornerRadius: innerBadgeRadius, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .help(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)")
                         }
-                        .buttonStyle(.plain)
-                        .help(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)")
                     }
                     .padding(6)
                 }
@@ -331,8 +333,8 @@ struct BoardAssetNodeView: View {
             }
         }
         .contextMenu {
-            Button(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)") { onOpenQuickLook() }
             if asset != nil {
+                Button(asset?.isExternalWebLink == true ? "在默认浏览器中打开 (Space)" : "快速预览 (Space)") { onOpenQuickLook() }
                 Button {
                     onRevealInLibrary()
                 } label: {
@@ -423,6 +425,11 @@ struct BoardAssetNodeView: View {
 // MARK: - Editable Note Card Node (5 Calm Themes)
 
 struct BoardNoteNodeView: View {
+    private enum FocusField: Hashable {
+        case title
+        case body
+    }
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let node: BoardNode
@@ -437,6 +444,32 @@ struct BoardNoteNodeView: View {
     @State private var draftTitle: String = ""
     @State private var draftText: String = ""
     @State private var isHovered: Bool = false
+    @State private var commitTask: Task<Void, Never>?
+    @FocusState private var focusedField: FocusField?
+
+    private func scheduleTextCommit() {
+        commitTask?.cancel()
+        commitTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            flushDraftIfDirty()
+        }
+    }
+
+    private func flushDraftIfDirty() {
+        commitTask?.cancel()
+        commitTask = nil
+        let normalizedTitle = draftTitle.isEmpty ? nil : draftTitle
+        if normalizedTitle != title || draftText != text {
+            onUpdate(normalizedTitle, draftText, style, fontSize)
+        }
+    }
+
+    private func commitStyleChange(style nextStyle: NoteStyle, fontSize nextSize: Double) {
+        commitTask?.cancel()
+        commitTask = nil
+        onUpdate(draftTitle.isEmpty ? nil : draftTitle, draftText, nextStyle, nextSize)
+    }
 
     var body: some View {
         let palette = NoteStylePalette.colors(for: style)
@@ -446,13 +479,14 @@ struct BoardNoteNodeView: View {
             HStack(spacing: 6) {
                 TextField("标题 / 氛围词", text: $draftTitle)
                     .textFieldStyle(.plain)
+                    .focused($focusedField, equals: .title)
                     .font(.system(size: max(13, fontSize), weight: .semibold))
                     .foregroundStyle(palette.foreground)
                     .frame(minWidth: 64)
                     .layoutPriority(1)
                     .onChange(of: draftTitle) { _, newValue in
                         if newValue != (title ?? "") {
-                            onUpdate(newValue.isEmpty ? nil : newValue, draftText, style, fontSize)
+                            scheduleTextCommit()
                         }
                     }
 
@@ -461,7 +495,7 @@ struct BoardNoteNodeView: View {
                         ForEach(NoteStyle.allCases, id: \.self) { candidate in
                             let c = NoteStylePalette.colors(for: candidate)
                             Button {
-                                onUpdate(draftTitle.isEmpty ? nil : draftTitle, draftText, candidate, fontSize)
+                                commitStyleChange(style: candidate, fontSize: fontSize)
                             } label: {
                                 Circle()
                                     .fill(c.background)
@@ -487,6 +521,7 @@ struct BoardNoteNodeView: View {
                 .overlay(palette.foreground.opacity(0.10))
 
             TextEditor(text: $draftText)
+                .focused($focusedField, equals: .body)
                 .font(.system(size: max(11, fontSize - 1)))
                 .foregroundStyle(palette.foreground.opacity(0.90))
                 .scrollContentBackground(.hidden)
@@ -495,7 +530,7 @@ struct BoardNoteNodeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: draftText) { _, newValue in
                     if newValue != text {
-                        onUpdate(draftTitle.isEmpty ? nil : draftTitle, newValue, style, fontSize)
+                        scheduleTextCommit()
                     }
                 }
         }
@@ -510,11 +545,20 @@ struct BoardNoteNodeView: View {
             draftTitle = title ?? ""
             draftText = text
         }
+        .onDisappear {
+            flushDraftIfDirty()
+        }
+        .onChange(of: focusedField) { _, nextFocus in
+            if nextFocus == nil {
+                flushDraftIfDirty()
+            }
+        }
         .onChange(of: title) { _, newVal in
-            if draftTitle != (newVal ?? "") { draftTitle = newVal ?? "" }
+            let target = newVal ?? ""
+            if commitTask == nil && draftTitle != target { draftTitle = target }
         }
         .onChange(of: text) { _, newVal in
-            if draftText != newVal { draftText = newVal }
+            if commitTask == nil && draftText != newVal { draftText = newVal }
         }
         .onHover { hovering in
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {
@@ -525,24 +569,28 @@ struct BoardNoteNodeView: View {
             Menu("便签主题") {
                 ForEach(NoteStyle.allCases, id: \.self) { s in
                     Button(NoteStylePalette.label(for: s)) {
-                        onUpdate(draftTitle.isEmpty ? nil : draftTitle, draftText, s, fontSize)
+                        commitStyleChange(style: s, fontSize: fontSize)
                     }
                 }
             }
             Menu("字号") {
                 ForEach([12.0, 14.0, 16.0, 20.0], id: \.self) { size in
                     Button("\(Int(size)) pt") {
-                        onUpdate(draftTitle.isEmpty ? nil : draftTitle, draftText, style, size)
+                        commitStyleChange(style: style, fontSize: size)
                     }
                 }
             }
             Divider()
-            Button("删除便签", role: .destructive) { onDelete() }
+            Button("删除便签", role: .destructive) {
+                commitTask?.cancel()
+                commitTask = nil
+                onDelete()
+            }
         }
     }
 }
 
-// MARK: - Smart Auto-Layout Group Frame Node (Reference Img 4 Style)
+// MARK: - Smart Auto-Layout Group Frame Node
 
 struct BoardGroupFrameView: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -558,6 +606,31 @@ struct BoardGroupFrameView: View {
 
     @State private var draftTitle: String = ""
     @State private var isHovered: Bool = false
+    @State private var commitTask: Task<Void, Never>?
+    @FocusState private var isEditingTitle: Bool
+
+    private func scheduleTitleCommit() {
+        commitTask?.cancel()
+        commitTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            flushTitleIfDirty()
+        }
+    }
+
+    private func flushTitleIfDirty() {
+        commitTask?.cancel()
+        commitTask = nil
+        if draftTitle != title {
+            onUpdate(draftTitle, tint)
+        }
+    }
+
+    private func commitTintChange(_ nextTint: GroupTint) {
+        commitTask?.cancel()
+        commitTask = nil
+        onUpdate(draftTitle, nextTint)
+    }
 
     var body: some View {
         let accent = GroupTintPalette.accent(for: tint)
@@ -578,11 +651,12 @@ struct BoardGroupFrameView: View {
 
                 TextField("分组名称", text: $draftTitle)
                     .textFieldStyle(.plain)
+                    .focused($isEditingTitle)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(accent.opacity(colorScheme == .dark ? 0.96 : 0.92))
                     .onChange(of: draftTitle) { _, newValue in
                         if newValue != title {
-                            onUpdate(newValue, tint)
+                            scheduleTitleCommit()
                         }
                     }
 
@@ -610,7 +684,7 @@ struct BoardGroupFrameView: View {
                         HStack(spacing: 4) {
                             ForEach(GroupTint.allCases, id: \.self) { candidate in
                                 Button {
-                                    onUpdate(draftTitle, candidate)
+                                    commitTintChange(candidate)
                                 } label: {
                                     Circle()
                                         .fill(GroupTintPalette.accent(for: candidate))
@@ -642,8 +716,12 @@ struct BoardGroupFrameView: View {
             )
         )
         .onAppear { draftTitle = title }
+        .onDisappear { flushTitleIfDirty() }
+        .onChange(of: isEditingTitle) { _, editing in
+            if !editing { flushTitleIfDirty() }
+        }
         .onChange(of: title) { _, newVal in
-            if draftTitle != newVal { draftTitle = newVal }
+            if commitTask == nil && draftTitle != newVal { draftTitle = newVal }
         }
         .onHover { hovering in
             withAnimation(CanvasMotion.accessible(CanvasMotion.hoverPress, reduced: reduceMotion)) {
@@ -661,11 +739,15 @@ struct BoardGroupFrameView: View {
             }
             Menu("分组色标") {
                 ForEach(GroupTint.allCases, id: \.self) { t in
-                    Button(GroupTintPalette.label(for: t)) { onUpdate(draftTitle, t) }
+                    Button(GroupTintPalette.label(for: t)) { commitTintChange(t) }
                 }
             }
             Divider()
-            Button("删除分组框（保留内部元素）", role: .destructive) { onDelete() }
+            Button("删除分组框（保留内部元素）", role: .destructive) {
+                commitTask?.cancel()
+                commitTask = nil
+                onDelete()
+            }
         }
     }
 }
@@ -688,7 +770,7 @@ struct BoardPaletteStripNodeView: View {
         let swatches = colors.isEmpty ? [LabColor.fromHex("#8B95A1"), LabColor.fromHex("#C8B8A6"), LabColor.fromHex("#4F5D6B")] : colors
 
         HStack(spacing: 0) {
-            ForEach(swatches, id: \.hex) { swatch in
+            ForEach(Array(swatches.enumerated()), id: \.offset) { _, swatch in
                 let hex = swatch.hex.uppercased()
                 let isLight = Color.charkleIsLightHex(hex)
                 Button {
@@ -707,6 +789,10 @@ struct BoardPaletteStripNodeView: View {
                 .contextMenu {
                     Button("复制 \(hex)") { onCopyHex(hex) }
                     Button("以此色筛选素材库") { onSearchColor(hex) }
+                    Divider()
+                    Button(autoSync ? "关闭自动同步板内色板" : "开启自动同步板内色板") { onToggleAutoSync() }
+                    Divider()
+                    Button("移除色卡条", role: .destructive) { onDelete() }
                 }
                 .help("点击复制 \(hex)")
             }

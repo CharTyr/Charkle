@@ -45,26 +45,29 @@ for bundle in "$BIN_DIR"/*.bundle; do
   fi
 done
 
-# Embed offline Charkle -> Figma / FigJam Bridge plugin
+# Embed offline Charkle -> Figma / FigJam Bridge plugin (generate ui.html in staging, never mutate tracked source)
 if [[ -d "$ROOT_DIR/Resources/FigmaPlugin" ]]; then
-  python3 - "$ROOT_DIR/Resources/FigmaPlugin" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-tpl = p / 'ui-template.html'
-if tpl.exists():
-    s = tpl.read_text(encoding='utf-8')
-    for marker, file in [('/*__JSZIP__*/', 'jszip.min.js'), ('/*__SHA256__*/', 'sha256.min.js')]:
-        s = s.replace(marker, (p / file).read_text(encoding='utf-8'))
-    (p / 'ui.html').write_text(s, encoding='utf-8')
-PY
-  mkdir -p "$STAGE_BUNDLE/Contents/Resources/FigmaPlugin"
+  STAGE_FIGMA_DIR="$STAGE_BUNDLE/Contents/Resources/FigmaPlugin"
+  mkdir -p "$STAGE_FIGMA_DIR"
   cp -X "$ROOT_DIR/Resources/FigmaPlugin/manifest.json" \
         "$ROOT_DIR/Resources/FigmaPlugin/code.js" \
-        "$ROOT_DIR/Resources/FigmaPlugin/ui.html" \
         "$ROOT_DIR/Resources/FigmaPlugin/JSZIP-LICENSE.md" \
         "$ROOT_DIR/Resources/FigmaPlugin/SHA256-LICENSE.txt" \
-        "$STAGE_BUNDLE/Contents/Resources/FigmaPlugin/"
+        "$STAGE_FIGMA_DIR/"
+  if [[ -f "$ROOT_DIR/Resources/FigmaPlugin/ui-template.html" ]]; then
+    python3 - "$ROOT_DIR/Resources/FigmaPlugin" "$STAGE_FIGMA_DIR/ui.html" <<'PY'
+from pathlib import Path
+import sys
+src = Path(sys.argv[1])
+out = Path(sys.argv[2])
+s = (src / 'ui-template.html').read_text(encoding='utf-8')
+for marker, file in [('/*__JSZIP__*/', 'jszip.min.js'), ('/*__SHA256__*/', 'sha256.min.js')]:
+    s = s.replace(marker, (src / file).read_text(encoding='utf-8'))
+out.write_text(s, encoding='utf-8')
+PY
+  elif [[ -f "$ROOT_DIR/Resources/FigmaPlugin/ui.html" ]]; then
+    cp -X "$ROOT_DIR/Resources/FigmaPlugin/ui.html" "$STAGE_FIGMA_DIR/ui.html"
+  fi
 fi
 
 # Embed Chrome / Arc / Edge / Brave unpacked Browser Extension
@@ -91,10 +94,8 @@ if [[ -f "$ROOT_DIR/Resources/GoogleOAuthClient.json" ]]; then
   cp -X "$ROOT_DIR/Resources/GoogleOAuthClient.json" "$STAGE_BUNDLE/Contents/Resources/GoogleOAuthClient.json"
 fi
 
-# Use prebuilt AppIcon.icns (default Light variant) and bundle switchable AppIcon PNG variants
-if [[ -d "$ROOT_DIR/Resources/AppIcons" ]]; then
-  cp -X "$ROOT_DIR/Resources/AppIcons"/AppIcon-*.png "$STAGE_BUNDLE/Contents/Resources/" 2>/dev/null || true
-fi
+# Use prebuilt AppIcon.icns (default Light variant). Switchable AppIcon-*.png variants are already
+# bundled inside Charkle_CharkleApp.bundle and loaded first via Bundle.module in AppIconManager.
 if [[ -f "$ROOT_DIR/Resources/AppIcon.icns" ]]; then
   cp -X "$ROOT_DIR/Resources/AppIcon.icns" "$STAGE_BUNDLE/Contents/Resources/AppIcon.icns"
 elif [[ -f "$ROOT_DIR/Resources/AppIcon-1024.png" ]]; then
@@ -114,11 +115,23 @@ xattr -cr "$STAGE_BUNDLE"
 # Prefer a stable code-signing certificate (Developer ID or Apple Development) so macOS Keychain
 # binds ACL permissions to a stable Designated Requirement instead of a changing ad-hoc CDHash.
 SIGN_IDENTITY="${CHARKLE_CODESIGN_IDENTITY:-}"
-if [[ -z "$SIGN_IDENTITY" ]]; then
+IS_DEVELOPER_ID=0
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  if [[ "$SIGN_IDENTITY" == Developer\ ID\ Application:* ]]; then
+    IS_DEVELOPER_ID=1
+  elif security find-identity -v -p codesigning 2>/dev/null \
+    | grep -F -- "$SIGN_IDENTITY" \
+    | grep -q 'Developer ID Application:'; then
+    IS_DEVELOPER_ID=1
+  fi
+else
   SIGN_IDENTITY="$(
     security find-identity -v -p codesigning 2>/dev/null \
       | awk '/Developer ID Application:/ {print $2; exit}'
   )"
+  if [[ -n "$SIGN_IDENTITY" ]]; then
+    IS_DEVELOPER_ID=1
+  fi
 fi
 if [[ -z "$SIGN_IDENTITY" ]]; then
   SIGN_IDENTITY="$(
@@ -128,22 +141,29 @@ if [[ -z "$SIGN_IDENTITY" ]]; then
 fi
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
-  echo "==> Signing $APP_NAME.app with stable code-signing certificate..."
+  SIGN_FLAGS=(--force --sign "$SIGN_IDENTITY")
+  if [[ "$IS_DEVELOPER_ID" -eq 1 ]]; then
+    echo "==> Signing $APP_NAME.app with Developer ID certificate (Hardened Runtime + timestamp)..."
+    SIGN_FLAGS+=(--options runtime --timestamp)
+  else
+    echo "==> Signing $APP_NAME.app with stable code-signing certificate..."
+  fi
   if [[ -d "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex" ]]; then
-    codesign --force --sign "$SIGN_IDENTITY" \
+    codesign "${SIGN_FLAGS[@]}" \
       --entitlements "$ROOT_DIR/Resources/SafariExtension/CharkleSafariExtension.entitlements" \
       "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex"
   fi
-  codesign --force --sign "$SIGN_IDENTITY" "$STAGE_BUNDLE/Contents/Helpers/charkle"
-  codesign --force --sign "$SIGN_IDENTITY" "$STAGE_BUNDLE"
+  codesign "${SIGN_FLAGS[@]}" "$STAGE_BUNDLE/Contents/Helpers/charkle"
+  codesign "${SIGN_FLAGS[@]}" "$STAGE_BUNDLE"
 else
   echo "==> No signing certificate found; falling back to ad-hoc signing (-)"
   if [[ -d "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex" ]]; then
     codesign --force --sign - \
       --entitlements "$ROOT_DIR/Resources/SafariExtension/CharkleSafariExtension.entitlements" \
-      "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex" >/dev/null 2>&1 || true
+      "$STAGE_BUNDLE/Contents/PlugIns/CharkleSafariExtension.appex"
   fi
-  codesign --force --deep --sign - "$STAGE_BUNDLE" >/dev/null 2>&1 || true
+  codesign --force --sign - "$STAGE_BUNDLE/Contents/Helpers/charkle"
+  codesign --force --sign - "$STAGE_BUNDLE"
 fi
 
 mkdir -p "$DIST_DIR"

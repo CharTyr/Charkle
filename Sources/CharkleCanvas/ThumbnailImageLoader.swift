@@ -71,6 +71,21 @@ public final class ThumbnailImageLoader {
         }
     }
 
+    private final class OriginalImageBox: @unchecked Sendable {
+        let cgImage: CGImage?
+        let nsImage: NSImage
+
+        init(cgImage: CGImage) {
+            self.cgImage = cgImage
+            self.nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        }
+
+        init(nsImage: NSImage) {
+            self.cgImage = nil
+            self.nsImage = nsImage
+        }
+    }
+
     private final class InFlightEntry {
         let task: Task<CachedImageBox?, Never>
         var activeWaiters: Set<UUID> = []
@@ -80,10 +95,20 @@ public final class ThumbnailImageLoader {
         }
     }
 
+    private final class InFlightOriginalEntry {
+        let task: Task<OriginalImageBox?, Never>
+        var activeWaiters: Set<UUID> = []
+
+        init(task: Task<OriginalImageBox?, Never>) {
+            self.task = task
+        }
+    }
+
     @ObservationIgnored private let engine: any CharkleEngineProtocol
     @ObservationIgnored private let cache = NSCache<NSString, CachedImageBox>()
     @ObservationIgnored private let originalCache = NSCache<NSString, CachedImageBox>()
     @ObservationIgnored private var inFlight: [String: InFlightEntry] = [:]
+    @ObservationIgnored private var originalInFlight: [UUID: InFlightOriginalEntry] = [:]
     @ObservationIgnored private let scheduler = ThumbnailDecodeScheduler(maxConcurrent: 6)
     @ObservationIgnored private var prefetchTasks: [String: Task<Void, Never>] = [:]
 
@@ -94,7 +119,7 @@ public final class ThumbnailImageLoader {
 
     public var currentCacheCountLimit: Int { cache.countLimit }
     public var currentCacheCostLimit: Int { cache.totalCostLimit }
-    public var currentOriginalCacheCountLimit: Int { originalCache.countLimit }
+    public var currentOriginalCacheCountLimit: Int { isLowResourceMode ? 0 : originalCache.countLimit }
 
     public init(engine: any CharkleEngineProtocol, maxCount: Int = 1_500, maxCostBytes: Int = 320 * 1024 * 1024) {
         self.engine = engine
@@ -113,31 +138,78 @@ public final class ThumbnailImageLoader {
     }
 
     public func cachedOriginalImage(for assetID: UUID) -> NSImage? {
-        originalCache.object(forKey: assetID.uuidString as NSString)?.nsImage
+        guard !isLowResourceMode else { return nil }
+        return originalCache.object(forKey: assetID.uuidString as NSString)?.nsImage
     }
 
     /// Loads the true full-resolution original image off the main thread (applying EXIF orientation
     /// and staying safely within Metal's 16,384px texture dimension limit for extreme tall-strip screenshots).
     public func loadOriginalImage(for assetID: UUID, url: URL) async -> NSImage? {
         let key = assetID.uuidString as NSString
-        if let hit = originalCache.object(forKey: key) {
+        if !isLowResourceMode, let hit = originalCache.object(forKey: key) {
             return hit.nsImage
         }
         guard !Task.isCancelled else { return nil }
-        if let cg = await Self.decodeOriginalCGImage(from: url) {
-            guard !Task.isCancelled else { return nil }
-            let box = CachedImageBox(cgImage: cg)
+
+        let generation = invalidationVersion
+        let entry: InFlightOriginalEntry
+        if let existing = originalInFlight[assetID] {
+            entry = existing
+        } else {
+            let task = Task<OriginalImageBox?, Never> {
+                if let cg = await Self.decodeOriginalCGImage(from: url) {
+                    guard !Task.isCancelled else { return nil }
+                    return OriginalImageBox(cgImage: cg)
+                }
+                // Vector fallback (e.g. .svg originals where CGImageSource cannot rasterize directly)
+                if url.pathExtension.lowercased() == "svg",
+                   let data = await Self.readFileDataOffMain(from: url),
+                   !Task.isCancelled,
+                   let vectorImage = NSImage(data: data) {
+                    return OriginalImageBox(nsImage: vectorImage)
+                }
+                return nil
+            }
+            entry = InFlightOriginalEntry(task: task)
+            originalInFlight[assetID] = entry
+        }
+
+        let waiterToken = UUID()
+        entry.activeWaiters.insert(waiterToken)
+        let box: OriginalImageBox? = await withTaskCancellationHandler {
+            await entry.task.value
+        } onCancel: {
+            Task { @MainActor [weak self, weak entry] in
+                guard let self, let entry else { return }
+                self.releaseOriginalWaiter(token: waiterToken, entry: entry, for: assetID)
+            }
+        }
+        releaseOriginalWaiter(token: waiterToken, entry: entry, for: assetID)
+
+        guard !Task.isCancelled, invalidationVersion == generation, let box else { return nil }
+        if !isLowResourceMode, let cg = box.cgImage {
+            let cachedBox = CachedImageBox(cgImage: cg)
             let cost = max(1, cg.width * cg.height * 4)
-            originalCache.setObject(box, forKey: key, cost: cost)
-            return box.nsImage
+            originalCache.setObject(cachedBox, forKey: key, cost: cost)
+            return cachedBox.nsImage
         }
-        // Vector fallback (e.g. .svg originals where CGImageSource cannot rasterize directly)
-        if url.pathExtension.lowercased() == "svg",
-           let data = try? Data(contentsOf: url),
-           let vectorImage = NSImage(data: data) {
-            return vectorImage
+        return box.nsImage
+    }
+
+    private func releaseOriginalWaiter(token: UUID, entry: InFlightOriginalEntry, for assetID: UUID) {
+        guard entry.activeWaiters.remove(token) != nil else { return }
+        if entry.activeWaiters.isEmpty {
+            if originalInFlight[assetID] === entry {
+                originalInFlight.removeValue(forKey: assetID)
+            }
+            entry.task.cancel()
         }
-        return nil
+    }
+
+    @concurrent
+    private static func readFileDataOffMain(from url: URL) async -> Data? {
+        guard !Task.isCancelled else { return nil }
+        return try? Data(contentsOf: url)
     }
 
     /// Zero-bridging `CGImage` cache hit for direct `CALayer.contents` hardware compositing.
@@ -158,6 +230,14 @@ public final class ThumbnailImageLoader {
     public func resolveLocalCachedOriginalURL(for asset: AssetRecord) async -> URL? {
         let engine = self.engine
         return await Self.lookupCachedOriginal(engine: engine, asset: asset)
+    }
+
+    /// Synchronously resolves the best locally cached file URL for drag-out to Finder/external apps:
+    /// prefers the true original file on disk, falling back to cached thumbnails only when cloud-only.
+    public func cachedDragFileURL(for asset: AssetRecord) -> URL? {
+        engine.cachedOriginalURL(for: asset)
+            ?? engine.cachedThumbnailURL(for: asset.id, tier: .preview1400)
+            ?? engine.cachedThumbnailURL(for: asset.id, tier: .grid520)
     }
 
     @concurrent
@@ -196,6 +276,7 @@ public final class ThumbnailImageLoader {
         }
         guard !Task.isCancelled else { return nil }
 
+        let generation = invalidationVersion
         let entry: InFlightEntry
         if let existing = inFlight[key] {
             entry = existing
@@ -215,7 +296,8 @@ public final class ThumbnailImageLoader {
                     url = await engine.thumbnailURL(for: assetID, tier: tier)
                 }
                 guard let url, !Task.isCancelled else { return nil }
-                guard let cg = await Self.decodeCGImage(from: url, maxPixelSize: maxPixel) else { return nil }
+                guard let cg = await Self.decodeCGImage(from: url, maxPixelSize: maxPixel),
+                      !Task.isCancelled else { return nil }
                 return CachedImageBox(cgImage: cg)
             }
             entry = InFlightEntry(task: task)
@@ -234,6 +316,7 @@ public final class ThumbnailImageLoader {
         }
         releaseWaiter(token: waiterToken, entry: entry, forKey: key)
 
+        guard !Task.isCancelled, invalidationVersion == generation else { return nil }
         if let box {
             let cost = box.cgImage.width * box.cgImage.height * 4
             cache.setObject(box, forKey: key as NSString, cost: max(cost, 1))
@@ -253,6 +336,8 @@ public final class ThumbnailImageLoader {
 
     public func invalidate(assetID: UUID) {
         originalCache.removeObject(forKey: assetID.uuidString as NSString)
+        originalInFlight[assetID]?.task.cancel()
+        originalInFlight.removeValue(forKey: assetID)
         for tier in [ThumbnailTier.grid520, .preview1400] {
             let key = cacheKey(assetID: assetID, tier: tier)
             cache.removeObject(forKey: key as NSString)
@@ -269,6 +354,8 @@ public final class ThumbnailImageLoader {
         originalCache.removeAllObjects()
         for entry in inFlight.values { entry.task.cancel() }
         inFlight.removeAll()
+        for entry in originalInFlight.values { entry.task.cancel() }
+        originalInFlight.removeAll()
         for task in prefetchTasks.values { task.cancel() }
         prefetchTasks.removeAll()
         invalidationVersion &+= 1
@@ -283,8 +370,10 @@ public final class ThumbnailImageLoader {
             clearMemoryCache()
             cache.countLimit = 20
             cache.totalCostLimit = 12 * 1024 * 1024
-            originalCache.countLimit = 0
-            originalCache.totalCostLimit = 0
+            // Never set NSCache limits to 0 (0 means unlimited in Foundation); keep minimal cap
+            // and bypass originalCache writes altogether while `isLowResourceMode == true`.
+            originalCache.countLimit = 1
+            originalCache.totalCostLimit = 1
         } else {
             cache.countLimit = 1_500
             cache.totalCostLimit = 320 * 1024 * 1024

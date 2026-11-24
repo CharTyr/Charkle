@@ -31,24 +31,42 @@ public nonisolated enum BoardImageRenderer {
         thumbnailURL: (UUID) -> URL?,
         options: RenderOptions = RenderOptions()
     ) -> Data? {
-        let pad = options.padding
-        let width = max(840, min(2800, options.canvasWidth))
+        let pad = options.padding.isFinite ? max(16, min(120, options.padding)) : 44
+        let rawWidth = options.canvasWidth.isFinite ? options.canvasWidth : 1440
+        let width = max(840, min(2800, rawWidth))
         let contentWidth = width - pad * 2
         let headerHeight: CGFloat = document.subtitle.isEmpty ? 72 : 96
         let paletteHeight: CGFloat = document.extractedPalette.isEmpty ? 0 : 62
 
         // Compute normalized node rectangles in top-down coordinates (y = 0 at top of content area)
-        let laidOutNodes = resolveTopDownLayout(
+        let rawLaidOut = resolveTopDownLayout(
             document: document,
             assetsByID: assetsByID,
             contentWidth: contentWidth
         )
 
-        let bodyHeight = max(240, laidOutNodes.map { $0.rect.maxY }.max() ?? 240)
-        let totalHeight = min(4600, ceil(pad + headerHeight + paletteHeight + bodyHeight + pad))
+        let rawBodyHeight = max(240, rawLaidOut.nodes.map { $0.rect.maxY }.max() ?? 240)
+        let maxBodyBudget = max(240, CGFloat(4600) - pad * 2 - headerHeight - paletteHeight)
+        let verticalScale: CGFloat = rawBodyHeight > maxBodyBudget ? (maxBodyBudget / rawBodyHeight) : 1.0
+        let laidOutNodes: [LaidOutNode] = verticalScale < 1.0
+            ? rawLaidOut.nodes.map { item in
+                LaidOutNode(
+                    node: item.node,
+                    rect: CGRect(
+                        x: item.rect.origin.x * verticalScale,
+                        y: item.rect.origin.y * verticalScale,
+                        width: max(20, item.rect.size.width * verticalScale),
+                        height: max(16, item.rect.size.height * verticalScale)
+                    )
+                )
+            }
+            : rawLaidOut.nodes
+        let bodyHeight = max(240, rawBodyHeight * verticalScale)
+        let totalHeight = min(4600, max(360, ceil(pad + headerHeight + paletteHeight + bodyHeight + pad)))
 
-        let pixelW = Int(width)
-        let pixelH = Int(totalHeight)
+        guard width.isFinite, totalHeight.isFinite else { return nil }
+        let pixelW = max(1, Int(width.rounded()))
+        let pixelH = max(1, Int(totalHeight.rounded()))
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: nil,
@@ -160,6 +178,7 @@ public nonisolated enum BoardImageRenderer {
             return lhs.node.zIndex < rhs.node.zIndex
         }
 
+        var drawnRectsByNodeID: [UUID: (rect: CGRect, node: BoardNode)] = [:]
         for item in sorted {
             let shifted = CGRect(
                 x: pad + item.rect.origin.x,
@@ -168,6 +187,17 @@ public nonisolated enum BoardImageRenderer {
                 height: item.rect.size.height
             )
             let rect = cgRect(shifted)
+            drawnRectsByNodeID[item.node.id] = (rect, item.node)
+
+            let rotDeg = item.node.rotationDegrees.isFinite ? item.node.rotationDegrees : 0
+            ctx.saveGState()
+            if abs(rotDeg) > 0.1 {
+                // CoreGraphics bottom-left coordinates rotate counter-clockwise for positive radians,
+                // so negate SwiftUI clockwise degrees.
+                ctx.translateBy(x: rect.midX, y: rect.midY)
+                ctx.rotate(by: CGFloat(-rotDeg * .pi / 180.0))
+                ctx.translateBy(x: -rect.midX, y: -rect.midY)
+            }
 
             switch item.node.kind {
             case .groupFrame(let title, let tint):
@@ -233,7 +263,7 @@ public nonisolated enum BoardImageRenderer {
                     ctx: ctx
                 )
 
-            case .assetRef(let assetID, _, _, _):
+            case .assetRef(let assetID, let crop, _, _):
                 let path = CGPath(roundedRect: rect, cornerWidth: 10, cornerHeight: 10, transform: nil)
                 ctx.saveGState()
                 ctx.addPath(path)
@@ -245,13 +275,39 @@ public nonisolated enum BoardImageRenderer {
                 ctx.setFillColor(cardFill)
                 ctx.fill(rect)
 
-                if let url = thumbnailURL(assetID), let image = loadCGImage(at: url) {
+                if let url = thumbnailURL(assetID), let baseImage = loadCGImage(at: url) {
+                    let image: CGImage = {
+                        guard let crop, crop != .full, crop.width > 0.04, crop.height > 0.04 else {
+                            return baseImage
+                        }
+                        let clamped = crop.clamped()
+                        let pixelRect = CGRect(
+                            x: (clamped.x * Double(baseImage.width)).rounded(.down),
+                            y: (clamped.y * Double(baseImage.height)).rounded(.down),
+                            width: max(4, (clamped.width * Double(baseImage.width)).rounded()),
+                            height: max(4, (clamped.height * Double(baseImage.height)).rounded())
+                        ).intersection(CGRect(x: 0, y: 0, width: baseImage.width, height: baseImage.height))
+                        if pixelRect.width >= 4, pixelRect.height >= 4, let cropped = baseImage.cropping(to: pixelRect) {
+                            return cropped
+                        }
+                        return baseImage
+                    }()
                     let drawRect = aspectFillRect(
                         imageWidth: CGFloat(image.width),
                         imageHeight: CGFloat(image.height),
                         filling: rect
                     )
+                    ctx.saveGState()
+                    if item.node.flipHorizontal || item.node.flipVertical {
+                        ctx.translateBy(x: rect.midX, y: rect.midY)
+                        ctx.scaleBy(
+                            x: item.node.flipHorizontal ? -1 : 1,
+                            y: item.node.flipVertical ? -1 : 1
+                        )
+                        ctx.translateBy(x: -rect.midX, y: -rect.midY)
+                    }
                     ctx.draw(image, in: drawRect)
+                    ctx.restoreGState()
                 } else if let color = assetsByID[assetID]?.dominantColors.first,
                           let rgb = hexToRGB(color.hex) {
                     ctx.setFillColor(CGColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1.0))
@@ -269,6 +325,40 @@ public nonisolated enum BoardImageRenderer {
             case .paletteStrip:
                 // Palette strip is already rendered cleanly in the header band
                 break
+            }
+
+            ctx.restoreGState()
+        }
+
+        // 4. Connectors & Freehand Ink Strokes
+        for connector in document.connectors {
+            guard let fromEntry = drawnRectsByNodeID[connector.fromNodeID],
+                  let toEntry = drawnRectsByNodeID[connector.toNodeID] else { continue }
+            drawConnector(ctx: ctx, connector: connector, from: fromEntry.rect, fromNode: fromEntry.node, to: toEntry.rect, toNode: toEntry.node)
+        }
+        if case .freeform = document.mode, let worldTransform = rawLaidOut.freeformTransform {
+            let totalScale = worldTransform.scale * verticalScale
+            for stroke in document.inkStrokes where stroke.points.count >= 2 {
+                let rgb = hexToRGB(stroke.colorHex) ?? (0.85, 0.36, 0.28)
+                let alpha = stroke.opacity.isFinite ? max(0.05, min(1.0, stroke.opacity)) : 0.92
+                let lw = stroke.lineWidth.isFinite ? max(1.0, CGFloat(stroke.lineWidth) * totalScale) : 2.5
+                let cgPts: [CGPoint] = stroke.points.compactMap { pt in
+                    guard pt.x.isFinite, pt.y.isFinite else { return nil }
+                    let topX = pad + CGFloat(pt.x - worldTransform.minX) * totalScale
+                    let topY = cursorY + CGFloat(pt.y - worldTransform.minY) * totalScale
+                    return CGPoint(x: topX, y: totalHeight - topY)
+                }
+                guard cgPts.count >= 2 else { continue }
+                ctx.saveGState()
+                ctx.setStrokeColor(CGColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: CGFloat(alpha)))
+                ctx.setLineWidth(lw)
+                ctx.setLineCap(.round)
+                ctx.setLineJoin(.round)
+                ctx.beginPath()
+                ctx.move(to: cgPts[0])
+                for pt in cgPts.dropFirst() { ctx.addLine(to: pt) }
+                ctx.strokePath()
+                ctx.restoreGState()
             }
         }
 
@@ -289,24 +379,31 @@ public nonisolated enum BoardImageRenderer {
         let rect: CGRect
     }
 
+    private struct TopDownLayoutOutput {
+        let nodes: [LaidOutNode]
+        let freeformTransform: (minX: Double, minY: Double, scale: CGFloat)?
+    }
+
     private static func resolveTopDownLayout(
         document: MoodboardDocument,
         assetsByID: [UUID: AssetRecord],
         contentWidth: CGFloat
-    ) -> [LaidOutNode] {
+    ) -> TopDownLayoutOutput {
         switch document.mode {
         case .freeform:
             let visible = document.nodes.filter {
                 if case .paletteStrip = $0.kind { return false }
-                return true
+                return $0.frame.x.isFinite && $0.frame.y.isFinite
+                    && $0.frame.width.isFinite && $0.frame.height.isFinite
+                    && $0.frame.width > 0 && $0.frame.height > 0
             }
-            guard !visible.isEmpty else { return [] }
+            guard !visible.isEmpty else { return TopDownLayoutOutput(nodes: [], freeformTransform: nil) }
             let minX = visible.map { $0.frame.minX }.min() ?? 0
             let minY = visible.map { $0.frame.minY }.min() ?? 0
             let maxX = visible.map { $0.frame.maxX }.max() ?? Double(contentWidth)
             let spanW = max(320, maxX - minX)
             let scale = min(1.0, Double(contentWidth) / spanW)
-            return visible.map { node in
+            let nodes = visible.map { node in
                 let rect = CGRect(
                     x: (node.frame.x - minX) * scale,
                     y: (node.frame.y - minY) * scale,
@@ -315,11 +412,12 @@ public nonisolated enum BoardImageRenderer {
                 )
                 return LaidOutNode(node: node, rect: rect)
             }
+            return TopDownLayoutOutput(nodes: nodes, freeformTransform: (minX, minY, CGFloat(scale)))
 
         case .autoEditorial(let cfg):
             let ordered = document.nodes.sorted { $0.editorialOrder < $1.editorialOrder }
             let cols = max(2, min(5, cfg.columns))
-            let gap = CGFloat(max(10, min(28, cfg.spacing)))
+            let gap = CGFloat(max(10, min(28, cfg.spacing.isFinite ? cfg.spacing : 16)))
             let colW = floor((contentWidth - gap * CGFloat(cols - 1)) / CGFloat(cols))
             var result: [LaidOutNode] = []
             var cursorY: CGFloat = 0
@@ -352,7 +450,8 @@ public nonisolated enum BoardImageRenderer {
                     colHeights = [CGFloat](repeating: cursorY, count: cols)
 
                 case .assetRef(let assetID, _, let weight, _):
-                    let aspect = CGFloat(max(0.55, min(2.0, assetsByID[assetID]?.aspectRatio ?? 1.25)))
+                    let rawRatio = assetsByID[assetID]?.aspectRatio ?? 1.25
+                    let aspect = CGFloat(max(0.55, min(2.0, (rawRatio.isFinite && rawRatio > 0) ? rawRatio : 1.25)))
                     let span = (weight >= 2 && cols >= 2) ? 2 : 1
                     if span == 2 {
                         // Pick adjacent column pair with lowest max height
@@ -382,11 +481,109 @@ public nonisolated enum BoardImageRenderer {
                     }
                 }
             }
-            return result
+            return TopDownLayoutOutput(nodes: result, freeformTransform: nil)
         }
     }
 
     // MARK: - Drawing Utilities
+
+    private static func drawConnector(
+        ctx: CGContext,
+        connector: BoardConnector,
+        from: CGRect,
+        fromNode: BoardNode,
+        to: CGRect,
+        toNode: BoardNode
+    ) {
+        func endpoint(rect: CGRect, node: BoardNode, anchor: ConnectorAnchor, normalized: BoardPoint?, towards other: CGRect) -> CGPoint {
+            let unrotated: CGPoint
+            if let normalized, normalized.x.isFinite, normalized.y.isFinite {
+                var nx = max(0.0, min(1.0, normalized.x))
+                var ny = max(0.0, min(1.0, normalized.y))
+                if node.flipHorizontal { nx = 1.0 - nx }
+                if node.flipVertical { ny = 1.0 - ny }
+                // Convert top-down normalized y into CG bottom-left rect y
+                unrotated = CGPoint(x: rect.minX + rect.width * CGFloat(nx), y: rect.maxY - rect.height * CGFloat(ny))
+            } else {
+                let resolved: ConnectorAnchor
+                if anchor == .auto {
+                    let dx = other.midX - rect.midX
+                    let dy = other.midY - rect.midY
+                    if abs(dx) >= abs(dy) {
+                        resolved = dx >= 0 ? .trailing : .leading
+                    } else {
+                        resolved = dy >= 0 ? .top : .bottom
+                    }
+                } else {
+                    resolved = anchor
+                }
+                unrotated = switch resolved {
+                case .top: CGPoint(x: rect.midX, y: rect.maxY)
+                case .bottom: CGPoint(x: rect.midX, y: rect.minY)
+                case .leading: CGPoint(x: rect.minX, y: rect.midY)
+                case .trailing: CGPoint(x: rect.maxX, y: rect.midY)
+                case .auto: CGPoint(x: rect.midX, y: rect.midY)
+                }
+            }
+            let rotDeg = node.rotationDegrees.isFinite ? node.rotationDegrees : 0
+            guard abs(rotDeg) > 0.1 else { return unrotated }
+            let rad = CGFloat(-rotDeg * .pi / 180.0)
+            let dx = unrotated.x - rect.midX
+            let dy = unrotated.y - rect.midY
+            return CGPoint(
+                x: rect.midX + dx * cos(rad) - dy * sin(rad),
+                y: rect.midY + dx * sin(rad) + dy * cos(rad)
+            )
+        }
+
+        let start = endpoint(rect: from, node: fromNode, anchor: connector.fromAnchor, normalized: connector.fromNormalizedPoint, towards: to)
+        let end = endpoint(rect: to, node: toNode, anchor: connector.toAnchor, normalized: connector.toNormalizedPoint, towards: from)
+        let rgb = hexToRGB(connector.colorHex) ?? (0.36, 0.40, 0.45)
+        let strokeColor = CGColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1.0)
+
+        ctx.saveGState()
+        ctx.setStrokeColor(strokeColor)
+        ctx.setLineWidth(2.0)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        if connector.dashed { ctx.setLineDash(phase: 0, lengths: [6, 5]) }
+
+        let midX = (start.x + end.x) * 0.5
+        ctx.beginPath()
+        ctx.move(to: start)
+        switch connector.style {
+        case .straight:
+            ctx.addLine(to: end)
+        case .elbow:
+            ctx.addLine(to: CGPoint(x: midX, y: start.y))
+            ctx.addLine(to: CGPoint(x: midX, y: end.y))
+            ctx.addLine(to: end)
+        case .curved:
+            let c1 = CGPoint(x: midX, y: start.y)
+            let c2 = CGPoint(x: midX, y: end.y)
+            ctx.addCurve(to: end, control1: c1, control2: c2)
+        }
+        ctx.strokePath()
+
+        // Arrowhead
+        ctx.setLineDash(phase: 0, lengths: [])
+        let tangentSrc = connector.style == .straight ? start : CGPoint(x: midX, y: end.y)
+        let angle = atan2(end.y - tangentSrc.y, end.x - tangentSrc.x)
+        let arrowLen: CGFloat = 9
+        let spread: CGFloat = .pi / 6.5
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: end.x - arrowLen * cos(angle - spread), y: end.y - arrowLen * sin(angle - spread)))
+        ctx.addLine(to: end)
+        ctx.addLine(to: CGPoint(x: end.x - arrowLen * cos(angle + spread), y: end.y - arrowLen * sin(angle + spread)))
+        ctx.strokePath()
+
+        if connector.toNormalizedPoint != nil {
+            let dot = CGRect(x: end.x - 3.5, y: end.y - 3.5, width: 7, height: 7)
+            ctx.setFillColor(strokeColor)
+            ctx.fillEllipse(in: dot)
+        }
+        ctx.restoreGState()
+    }
 
     private static func nodeLayerPriority(_ kind: BoardNodeKind) -> Int {
         switch kind {
@@ -399,7 +596,14 @@ public nonisolated enum BoardImageRenderer {
 
     private static func loadCGImage(at url: URL) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1600,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
     private static func aspectFillRect(imageWidth: CGFloat, imageHeight: CGFloat, filling target: CGRect) -> CGRect {
@@ -437,12 +641,15 @@ public nonisolated enum BoardImageRenderer {
             kCTFontAttributeName: font,
             kCTForegroundColorAttributeName: color
         ]
-        let attrStr = CFAttributedStringCreate(nil, string as CFString, attrs as CFDictionary)!
+        guard let attrStr = CFAttributedStringCreate(nil, string as CFString, attrs as CFDictionary) else {
+            return
+        }
         let line = CTLineCreateWithAttributedString(attrStr)
         let lineWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         let drawX: CGFloat = alignment == .right ? max(rect.minX, rect.maxX - lineWidth) : rect.minX
         let baselineY = rect.minY + (rect.height - fontSize) * 0.5 + 2
         ctx.saveGState()
+        ctx.clip(to: rect)
         ctx.textMatrix = .identity
         ctx.textPosition = CGPoint(x: drawX, y: baselineY)
         CTLineDraw(line, ctx)
@@ -461,7 +668,9 @@ public nonisolated enum BoardImageRenderer {
             kCTFontAttributeName: font,
             kCTForegroundColorAttributeName: color
         ]
-        let attrStr = CFAttributedStringCreate(nil, string as CFString, attrs as CFDictionary)!
+        guard let attrStr = CFAttributedStringCreate(nil, string as CFString, attrs as CFDictionary) else {
+            return
+        }
         let framesetter = CTFramesetterCreateWithAttributedString(attrStr)
         let path = CGPath(rect: rect, transform: nil)
         let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), path, nil)

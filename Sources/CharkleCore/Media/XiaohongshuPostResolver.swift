@@ -165,15 +165,24 @@ public nonisolated enum XiaohongshuPostResolver {
 
     public static func resolve(_ ref: XiaohongshuNoteReference) async -> ResolvedSocialPost? {
         var workingRef = ref
+        var alreadyFetched: Set<String> = []
         if ref.isShortLink {
-            if let redirected = await resolveShortLink(ref.sourceURL),
-               let parsed = XiaohongshuURLParser.parse(redirected) {
-                workingRef = parsed
+            if let (shortHTML, finalURL) = await fetchHTML(ref.sourceURL) {
+                alreadyFetched.insert(ref.sourceURL.absoluteString)
+                alreadyFetched.insert(finalURL.absoluteString)
+                let effectiveRef = XiaohongshuURLParser.parse(finalURL) ?? workingRef
+                workingRef = effectiveRef
+                if let fromState = parseInitialState(html: shortHTML, ref: effectiveRef) {
+                    return fromState
+                }
+                if let fromMeta = parseMetaFallback(html: shortHTML, ref: effectiveRef) {
+                    return fromMeta
+                }
             }
         }
 
         let candidateURLs = buildCandidateFetchURLs(for: workingRef)
-        for fetchURL in candidateURLs {
+        for fetchURL in candidateURLs where !alreadyFetched.contains(fetchURL.absoluteString) {
             guard let (html, finalURL) = await fetchHTML(fetchURL) else { continue }
             let effectiveRef = XiaohongshuURLParser.parse(finalURL) ?? workingRef
             if let fromState = parseInitialState(html: html, ref: effectiveRef) {
@@ -366,11 +375,19 @@ public nonisolated enum XiaohongshuPostResolver {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasSuffix("万") || s.lowercased().hasSuffix("w") {
             let numStr = String(s.dropLast())
-            if let v = Double(numStr) { return max(0, Int((v * 10_000).rounded())) }
+            if let v = Double(numStr), v.isFinite {
+                let scaled = (v * 10_000).rounded()
+                guard scaled.isFinite, scaled >= 0, scaled < Double(Int.max) else { return nil }
+                return Int(scaled)
+            }
         }
         if s.hasSuffix("千") || s.lowercased().hasSuffix("k") {
             let numStr = String(s.dropLast())
-            if let v = Double(numStr) { return max(0, Int((v * 1_000).rounded())) }
+            if let v = Double(numStr), v.isFinite {
+                let scaled = (v * 1_000).rounded()
+                guard scaled.isFinite, scaled >= 0, scaled < Double(Int.max) else { return nil }
+                return Int(scaled)
+            }
         }
         if let v = Int(s) { return max(0, v) }
         return nil
@@ -618,24 +635,8 @@ public nonisolated enum XiaohongshuPostResolver {
         return list
     }
 
-    private static func resolveShortLink(_ url: URL) async -> URL? {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 8
-        config.timeoutIntervalForResource = 10
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-
-        var req = URLRequest(url: url, timeoutInterval: 8)
-        req.setValue(desktopSafariUA, forHTTPHeaderField: "User-Agent")
-        req.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-        guard let (_, response) = try? await session.data(for: req),
-              let finalURL = response.url else {
-            return nil
-        }
-        return finalURL
-    }
-
     private static func fetchHTML(_ url: URL) async -> (String, URL)? {
+        guard WebBookmark.isSafeRemoteFetchURL(url) else { return nil }
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = true
         config.timeoutIntervalForRequest = 10

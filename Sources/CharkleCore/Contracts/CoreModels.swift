@@ -385,7 +385,7 @@ public struct PhotoExifMetadata: Codable, Hashable, Sendable {
     }
 
     public var formattedAperture: String? {
-        guard let fNumber, fNumber > 0 else { return nil }
+        guard let fNumber, fNumber.isFinite, fNumber > 0, fNumber < 10_000 else { return nil }
         let rounded = (fNumber * 10).rounded() / 10
         if abs(rounded - rounded.rounded()) < 0.01 {
             return "f/\(Int(rounded.rounded()))"
@@ -394,7 +394,7 @@ public struct PhotoExifMetadata: Codable, Hashable, Sendable {
     }
 
     public var formattedFocalLength: String? {
-        guard let focalLengthMM, focalLengthMM > 0 else { return nil }
+        guard let focalLengthMM, focalLengthMM.isFinite, focalLengthMM > 0, focalLengthMM < 1_000_000 else { return nil }
         let base: String
         if abs(focalLengthMM - focalLengthMM.rounded()) < 0.05 {
             base = "\(Int(focalLengthMM.rounded()))mm"
@@ -409,7 +409,7 @@ public struct PhotoExifMetadata: Codable, Hashable, Sendable {
 
     public var exposureSummary: String? {
         var parts: [String] = []
-        if let focal = focalLengthMM, focal > 0 {
+        if let focal = focalLengthMM, focal.isFinite, focal > 0, focal < 1_000_000 {
             if abs(focal - focal.rounded()) < 0.05 {
                 parts.append("\(Int(focal.rounded()))mm")
             } else {
@@ -1290,6 +1290,7 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
     public var assetIDs: [UUID]
     public var title: String?
     public var notes: String?
+    public var sourceURL: String?
     public var rating: Int?
     public var addTags: [String]
     public var removeTags: [String]
@@ -1303,6 +1304,7 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
         assetIDs: [UUID],
         title: String? = nil,
         notes: String? = nil,
+        sourceURL: String? = nil,
         rating: Int? = nil,
         addTags: [String] = [],
         removeTags: [String] = [],
@@ -1315,6 +1317,7 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
         self.assetIDs = assetIDs
         self.title = title
         self.notes = notes
+        self.sourceURL = sourceURL
         self.rating = rating
         self.addTags = addTags
         self.removeTags = removeTags
@@ -1323,6 +1326,22 @@ public struct AssetBatchPatch: Codable, Hashable, Sendable {
         self.folderAssignment = folderAssignment
         self.pinnedOffline = pinnedOffline
         self.isTrashed = isTrashed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        assetIDs = try c.decode([UUID].self, forKey: .assetIDs)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        sourceURL = try c.decodeIfPresent(String.self, forKey: .sourceURL)
+        rating = try c.decodeIfPresent(Int.self, forKey: .rating)
+        addTags = try c.decodeIfPresent([String].self, forKey: .addTags) ?? []
+        removeTags = try c.decodeIfPresent([String].self, forKey: .removeTags) ?? []
+        acceptSuggestedTags = try c.decodeIfPresent(Bool.self, forKey: .acceptSuggestedTags) ?? false
+        dismissSuggestedTags = try c.decodeIfPresent([String].self, forKey: .dismissSuggestedTags) ?? []
+        folderAssignment = try c.decodeIfPresent(FolderAssignment.self, forKey: .folderAssignment) ?? .unchanged
+        pinnedOffline = try c.decodeIfPresent(Bool.self, forKey: .pinnedOffline)
+        isTrashed = try c.decodeIfPresent(Bool.self, forKey: .isTrashed)
     }
 }
 

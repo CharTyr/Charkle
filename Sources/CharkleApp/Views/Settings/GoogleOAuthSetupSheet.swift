@@ -43,6 +43,8 @@ public struct GoogleOAuthSetupSheet: View {
                 Spacer()
             }
 
+            SettingsSheetFeedbackBanner(syncAndAI: syncAndAI)
+
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Link(destination: SettingsHelpers.gdirectTutorialURL) {
@@ -155,5 +157,9 @@ public struct GoogleOAuthSetupSheet: View {
         }
         .padding(22)
         .frame(width: 520)
+        .onAppear {
+            syncAndAI.errorMessage = nil
+            syncAndAI.statusMessage = nil
+        }
     }
 }

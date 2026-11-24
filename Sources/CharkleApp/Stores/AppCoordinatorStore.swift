@@ -83,6 +83,10 @@ public final class AppCoordinatorStore {
     public var isSettingsPresented: Bool = false
     public var selectedSettingsTab: CharkleSettingsTab = .general
 
+    /// Non-nil when the persistent SQLite engine failed to initialize on launch and fell back
+    /// to an in-memory placeholder, so MainWindowView can warn the user immediately.
+    public var engineStartupError: String? = nil
+
     /// First-launch & re-runnable onboarding guide presentation state.
     public var isOnboardingPresented: Bool = false
     public var onboardingRunID: UUID = UUID()
@@ -98,6 +102,11 @@ public final class AppCoordinatorStore {
     /// Gallery layout mode: vertical masonry vs. horizontal justified rows.
     public var galleryLayoutMode: GalleryLayoutMode {
         didSet { UserDefaults.standard.set(galleryLayoutMode.rawValue, forKey: Keys.galleryLayoutMode) }
+    }
+
+    /// Dual accent source preference: studio cobalt (default) or live macOS system accent.
+    public var accentSource: CharkleAccentSource {
+        didSet { UserDefaults.standard.set(accentSource.rawValue, forKey: Keys.accentSource) }
     }
 
     /// Target card width in masonry grid (130pt dense – 420pt editorial).
@@ -168,6 +177,7 @@ public final class AppCoordinatorStore {
         static let enterMinimalModeOnWindowClose = "charkle.enterMinimalModeOnWindowClose"
         static let sidebarCollapsed = "charkle.sidebarCollapsed"
         static let galleryLayoutMode = "charkle.galleryLayoutMode"
+        static let accentSource = "charkle.accentSource"
         static let hasCompletedOnboarding = "charkle.hasCompletedOnboarding"
         static let inspectorInfoSectionOrder = "charkle.inspectorInfoSectionOrder"
     }
@@ -186,6 +196,8 @@ public final class AppCoordinatorStore {
         self.isSidebarCollapsed = defaults.object(forKey: Keys.sidebarCollapsed) as? Bool ?? false
         self.galleryLayoutMode = defaults.string(forKey: Keys.galleryLayoutMode)
             .flatMap(GalleryLayoutMode.init(rawValue:)) ?? .verticalMasonry
+        self.accentSource = defaults.string(forKey: Keys.accentSource)
+            .flatMap(CharkleAccentSource.init(rawValue:)) ?? .studio
         self.hasCompletedOnboarding = defaults.object(forKey: Keys.hasCompletedOnboarding) as? Bool ?? false
         let storedOrder = defaults.stringArray(forKey: Keys.inspectorInfoSectionOrder) ?? []
         self.inspectorInfoSectionOrder = InspectorInfoSection.normalizedOrder(from: storedOrder)
@@ -225,11 +237,22 @@ public final class AppCoordinatorStore {
         }
     }
 
+    public var isModalOverlayPresented: Bool {
+        quickLookAssetID != nil
+            || isSettingsPresented
+            || isJumpAnywherePresented
+            || isOnboardingPresented
+            || isMoodboardGeneratorPresented
+            || isSmartFolderEditorPresented
+    }
+
     public func openSettings(tab: CharkleSettingsTab? = nil) {
         if let tab {
             selectedSettingsTab = tab
         }
+        quickLookAssetID = nil
         isJumpAnywherePresented = false
+        isOnboardingPresented = false
         isSettingsPresented = true
     }
 
@@ -288,7 +311,8 @@ public final class AppCoordinatorStore {
         guard let current = quickLookAssetID,
               let idx = quickLookPlaylist.firstIndex(of: current),
               !quickLookPlaylist.isEmpty else { return }
-        let nextIdx = (idx + delta + quickLookPlaylist.count) % quickLookPlaylist.count
+        let count = quickLookPlaylist.count
+        let nextIdx = ((idx + delta) % count + count) % count
         quickLookAssetID = quickLookPlaylist[nextIdx]
     }
 

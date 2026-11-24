@@ -21,6 +21,7 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
 
     public let maxFrameBytes: Int
     private var buffer = Data()
+    private var discardingNDJSONLine = false
 
     private static let crlfSeparator = Data("\r\n\r\n".utf8)
     private static let lfSeparator = Data("\n\n".utf8)
@@ -38,12 +39,21 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
 
     public mutating func finishEOF() -> [Event] {
         var events = drainAvailable()
+        if discardingNDJSONLine {
+            buffer.removeAll(keepingCapacity: false)
+            discardingNDJSONLine = false
+            return events
+        }
         let remaining = Self.trimWhitespace(buffer)
         buffer.removeAll(keepingCapacity: false)
         if !remaining.isEmpty {
             let first = remaining[remaining.startIndex]
             if first == 0x7B || first == 0x5B { // '{' or '['
-                events.append(.message(remaining, framing: .ndjson))
+                if remaining.count > maxFrameBytes {
+                    events.append(.invalidFrame("NDJSON frame exceeds limit \(maxFrameBytes)", framing: .ndjson))
+                } else {
+                    events.append(.message(remaining, framing: .ndjson))
+                }
             } else {
                 events.append(.invalidFrame("Incomplete trailing stdio frame at EOF", framing: .ndjson))
             }
@@ -73,16 +83,35 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
         var events: [Event] = []
 
         while true {
+            if discardingNDJSONLine {
+                if let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    buffer.removeSubrange(buffer.startIndex...newlineIndex)
+                    discardingNDJSONLine = false
+                } else {
+                    buffer.removeAll(keepingCapacity: true)
+                    break
+                }
+            }
+
             trimLeadingBlankBytes()
             guard let firstByte = buffer.first else { break }
 
             // JSON object ('{') or JSON-RPC batch array ('[') -> NDJSON line mode.
             if firstByte == 0x7B || firstByte == 0x5B {
-                guard let newlineIndex = buffer.firstIndex(of: 0x0A) else { break }
+                guard let newlineIndex = buffer.firstIndex(of: 0x0A) else {
+                    if buffer.count > maxFrameBytes {
+                        buffer.removeAll(keepingCapacity: true)
+                        discardingNDJSONLine = true
+                        events.append(.invalidFrame("NDJSON frame exceeds limit \(maxFrameBytes)", framing: .ndjson))
+                    }
+                    break
+                }
                 let rawLine = buffer.subdata(in: buffer.startIndex..<newlineIndex)
                 buffer.removeSubrange(buffer.startIndex...newlineIndex)
                 let trimmed = Self.trimWhitespace(rawLine)
-                if !trimmed.isEmpty {
+                if trimmed.count > maxFrameBytes {
+                    events.append(.invalidFrame("NDJSON frame exceeds limit \(maxFrameBytes)", framing: .ndjson))
+                } else if !trimmed.isEmpty {
                     events.append(.message(trimmed, framing: .ndjson))
                 }
                 continue
@@ -90,7 +119,17 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
 
             // ASCII header start (e.g. `Content-Length:` / `Content-Type:`) -> wait for full header block.
             if Self.isHeaderLeadByte(firstByte) {
-                guard let (headerRange, lineSeparator) = findHeaderTerminator() else {
+                guard let headerRange = findHeaderTerminator() else {
+                    if let firstNewline = buffer.firstIndex(of: 0x0A) {
+                        let firstLine = buffer[buffer.startIndex..<firstNewline]
+                        // Valid LSP/MCP headers always contain `:` on their first line; bare ASCII
+                        // tokens like `null\n` or `true\n` must not stall the stream waiting for `\r\n\r\n`.
+                        if !firstLine.contains(0x3A) {
+                            buffer.removeSubrange(buffer.startIndex...firstNewline)
+                            events.append(.invalidFrame("Unrecognized stdio frame", framing: .ndjson))
+                            continue
+                        }
+                    }
                     if buffer.count > Self.maxHeaderBytes {
                         // Malformed unbounded non-JSON line — drop up to next newline to recover.
                         if let nl = buffer.firstIndex(of: 0x0A) {
@@ -112,7 +151,7 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
                 }
 
                 var parsedLength: Int?
-                for line in headerText.components(separatedBy: lineSeparator) {
+                for line in headerText.split(whereSeparator: \.isNewline) {
                     let parts = line.split(separator: ":", maxSplits: 1)
                     guard parts.count == 2 else { continue }
                     let key = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
@@ -128,14 +167,17 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
                 }
 
                 guard contentLength <= maxFrameBytes else {
-                    buffer.removeSubrange(buffer.startIndex..<headerRange.upperBound)
+                    let bodyStart = headerRange.upperBound
+                    let bufferedBodyBytes = buffer.endIndex - bodyStart
+                    let dropEnd = bodyStart + min(bufferedBodyBytes, contentLength)
+                    buffer.removeSubrange(buffer.startIndex..<dropEnd)
                     events.append(.invalidFrame("Content-Length \(contentLength) exceeds limit \(maxFrameBytes)", framing: .contentLength))
                     continue
                 }
 
                 let bodyStart = headerRange.upperBound
-                let bodyEnd = bodyStart + contentLength
-                guard buffer.count >= bodyEnd else {
+                let (bodyEnd, overflow) = bodyStart.addingReportingOverflow(contentLength)
+                guard !overflow, buffer.endIndex >= bodyEnd else {
                     break // Wait for full framed body to arrive.
                 }
 
@@ -178,16 +220,16 @@ public nonisolated struct MCPStdioFrameParser: Sendable {
         }
     }
 
-    private func findHeaderTerminator() -> (Range<Data.Index>, String)? {
+    private func findHeaderTerminator() -> Range<Data.Index>? {
         let crlf = buffer.range(of: Self.crlfSeparator)
         let lf = buffer.range(of: Self.lfSeparator)
         switch (crlf, lf) {
         case (let a?, let b?):
-            return a.lowerBound <= b.lowerBound ? (a, "\r\n") : (b, "\n")
+            return a.lowerBound <= b.lowerBound ? a : b
         case (let a?, nil):
-            return (a, "\r\n")
+            return a
         case (nil, let b?):
-            return (b, "\n")
+            return b
         case (nil, nil):
             return nil
         }

@@ -69,6 +69,8 @@ public struct LibrarySettingsPane: View {
                         }
 
                         Button("更改或转移…") {
+                            syncAndAI.errorMessage = nil
+                            syncAndAI.statusMessage = nil
                             draftTargetConfig = syncAndAI.syncConfig
                             if draftTargetConfig.mode == .gdirectMount {
                                 draftTargetConfig.mode = .directAPIWithGDirect
@@ -282,6 +284,8 @@ public struct LibrarySettingsPane: View {
                 }
                 Spacer()
             }
+
+            SettingsSheetFeedbackBanner(syncAndAI: syncAndAI)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("操作方式")

@@ -310,8 +310,27 @@ public final actor LibraryDatabase {
             // Numbered color parameters precede all ordinary filter parameters in the statement.
             clauses.insert(clauses.removeLast(), at: 0)
         }
-        let query = SearchText.ftsQuery(filters.searchQuery)
-        if !query.isEmpty { constrain("assets_fts MATCH ?", .text(query)) }
+        let trimmedSearch = filters.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = SearchText.ftsQuery(trimmedSearch)
+        if !query.isEmpty {
+            constrain("assets_fts MATCH ?", .text(query))
+        } else if !trimmedSearch.isEmpty {
+            // Emoji / punctuation / symbol-only search terms have no FTS5 tokens; fall back to
+            // literal substring matching against user-facing fields instead of returning every asset.
+            let escaped = trimmedSearch
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            let pattern = SQLValue.text("%\(escaped)%")
+            constrain("""
+                (a.title LIKE ? ESCAPE '\\'
+                 OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.notes'), '') LIKE ? ESCAPE '\\'
+                 OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.fileName'), '') LIKE ? ESCAPE '\\'
+                 OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.ocrText'), '') LIKE ? ESCAPE '\\'
+                 OR COALESCE(json_extract(CAST(a.payload AS TEXT), '$.aiDescription'), '') LIKE ? ESCAPE '\\'
+                 OR EXISTS (SELECT 1 FROM asset_tags t WHERE t.asset_id=a.id AND t.tag LIKE ? ESCAPE '\\'))
+                """, pattern, pattern, pattern, pattern, pattern, pattern)
+        }
         let source = query.isEmpty ? "assets a" : "assets_fts JOIN assets a ON a.rowid=assets_fts.rowid"
         let order = switch filters.sortBy {
         case .newest: "a.created DESC"
@@ -361,10 +380,34 @@ public final actor LibraryDatabase {
     }
 
     public func fetchTagCounts() throws -> [TagCount] {
-        try connection.query("""
+        let rows = try connection.query("""
             SELECT tag, COUNT(*) n FROM asset_tags t JOIN assets a ON t.asset_id=a.id
             WHERE a.trashed=0 GROUP BY tag ORDER BY n DESC, tag
             """) { TagCount(name: $0.text(0), count: Int($0.integer(1))) }
+        // SQLite COLLATE NOCASE only folds ASCII A-Z; merge non-ASCII case variants (e.g. "Über"/"über")
+        // so downstream lowercased dictionaries never collide on duplicate keys.
+        var merged: [String: (name: String, bestCount: Int, total: Int)] = [:]
+        var keyOrder: [String] = []
+        for row in rows {
+            let key = row.name.lowercased()
+            if var existing = merged[key] {
+                existing.total += row.count
+                if row.count > existing.bestCount {
+                    existing.name = row.name
+                    existing.bestCount = row.count
+                }
+                merged[key] = existing
+            } else {
+                merged[key] = (row.name, row.count, row.count)
+                keyOrder.append(key)
+            }
+        }
+        return keyOrder.compactMap { merged[$0] }
+            .map { TagCount(name: $0.name, count: $0.total) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
     }
 
     public func inboxCount() throws -> Int {
@@ -490,6 +533,17 @@ public final actor LibraryDatabase {
                OR key LIKE 'clock.%'
                OR key LIKE 'projection.%'
             """)
+        // Ensure trashed assets also drop stale old-backend drive bindings during backend migration.
+        for var trashed in try fetchAssets(matching: FilterCriteria(onlyTrashed: true)) where trashed.driveFileID != nil {
+            trashed.driveFileID = nil
+            try put(trashed)
+        }
+    }
+
+    func removeOriginalCacheEntries(_ ids: [UUID]) throws {
+        for id in ids {
+            try connection.execute("DELETE FROM original_cache WHERE asset_id=?", [.text(id.uuidString)])
+        }
     }
 
     func touchOriginal(_ id: UUID, now: Date = Date()) throws {

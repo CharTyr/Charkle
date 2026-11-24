@@ -524,6 +524,7 @@ extension CharkleExternalAgentService {
                     "file_path": ["type": "string", "description": "Single local file or directory path to import."],
                     "file_paths": ["type": "array", "items": ["type": "string"], "description": "Batch of local file or directory paths to import."],
                     "web_url": ["type": "string", "description": "Web, GitHub repo, or X/Threads/Bluesky URL to bookmark/capture."],
+                    "web_urls": ["type": "array", "items": ["type": "string"], "description": "Batch of web, GitHub repo, or X/Threads/Bluesky URLs to bookmark/capture."],
                     "text": ["type": "string", "description": "Text snippet to save as a reference card."],
                     "title": ["type": "string", "description": "Optional title for web_url or text."],
                     "notes": ["type": "string", "description": "Optional initial notes."],

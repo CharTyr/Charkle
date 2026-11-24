@@ -28,11 +28,22 @@ public nonisolated struct KeychainStore: Sendable {
 
     public func save(_ data: Data, for key: String) throws {
         let query = selector(key)
-        let changes = [kSecValueData as String: data]
+        let changes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
         let status = SecItemUpdate(query as CFDictionary, changes as CFDictionary)
-        guard status == errSecItemNotFound else { return try check(status) }
+        if status == errSecSuccess { return }
+        if status == errSecAuthFailed || status == errSecInteractionNotAllowed {
+            // Recover from stale ACL items created by an older app signature/CDHash by replacing the entry.
+            _ = SecItemDelete(query as CFDictionary)
+        } else if status != errSecItemNotFound {
+            try check(status)
+            return
+        }
         var new = query
         new[kSecValueData as String] = data
+        new[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         try check(SecItemAdd(new as CFDictionary, nil))
     }
 

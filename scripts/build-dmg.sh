@@ -15,7 +15,7 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
   exit 1
 fi
 
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "1.0.0")"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "1.1.0")"
 ARCH="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null | tr ' ' '-' || echo "arm64")"
 DMG_NAME="${APP_NAME}-${VERSION}-${ARCH}.dmg"
 FINAL_DMG="$DIST_DIR/$DMG_NAME"
@@ -26,8 +26,12 @@ RW_DMG="$WORK_DIR/${APP_NAME}-rw.dmg"
 STAGE_DIR="$WORK_DIR/stage"
 BG_DIR="$STAGE_DIR/.background"
 MOUNT_POINT=""
+VERIFY_MOUNT=""
 
 cleanup() {
+  if [[ -n "$VERIFY_MOUNT" && -d "$VERIFY_MOUNT" ]]; then
+    hdiutil detach "$VERIFY_MOUNT" -force >/dev/null 2>&1 || true
+  fi
   if [[ -n "$MOUNT_POINT" && -d "$MOUNT_POINT" ]]; then
     hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true
   fi
@@ -210,6 +214,7 @@ mkdir -p "$VERIFY_MOUNT"
 hdiutil attach "$FINAL_DMG" -readonly -nobrowse -noverify -mountpoint "$VERIFY_MOUNT" >/dev/null
 codesign -v --deep --strict "$VERIFY_MOUNT/$APP_NAME.app"
 hdiutil detach "$VERIFY_MOUNT" >/dev/null
+VERIFY_MOUNT=""
 
 DMG_SIZE="$(du -h "$FINAL_DMG" | awk '{print $1}')"
 echo "==> Done: $FINAL_DMG ($DMG_SIZE)"

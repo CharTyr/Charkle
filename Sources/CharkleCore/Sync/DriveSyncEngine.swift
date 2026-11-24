@@ -69,7 +69,12 @@ public final actor DriveSyncEngine {
         try? await database.setState("lastSyncStatus", currentStatus)
     }
 
-    public func sync(using transport: any DriveTransport, config: DriveSyncConfig, allowLocalFolderSync: Bool = false) async throws -> SyncReport {
+    public func sync(
+        using transport: any DriveTransport,
+        config: DriveSyncConfig,
+        allowLocalFolderSync: Bool = false,
+        quietErrors: Bool = false
+    ) async throws -> SyncReport {
         if config.mode == .localOnly && !allowLocalFolderSync { return SyncReport() }
         guard !running else { throw DriveTransportError.notConfigured("当前已有同步任务正在运行，请稍候。") }
         running = true
@@ -131,28 +136,44 @@ public final actor DriveSyncEngine {
 
             if !pending.isEmpty {
                 updateProgress(phase: .uploading(completed: 0, total: pending.count), detail: "准备上传本地新增与变更…", progress: 0.62, forceBroadcast: true)
-                let removedByUpload = try await uploadPhysical(for: pending.map { $0.1 }, layout: layout, transport: transport, scope: scope)
-                if !removedByUpload.isEmpty {
-                    for removedID in removedByUpload {
+                let uploadResult = try await uploadPhysical(for: pending.map { $0.1 }, layout: layout, transport: transport, scope: scope)
+                var inventoryMutated = false
+                if !uploadResult.removedFiles.isEmpty {
+                    for removedID in uploadResult.removedFiles {
                         savedFiles.removeValue(forKey: removedID)
                     }
+                    inventoryMutated = true
+                }
+                if !uploadResult.renamedPrefixes.isEmpty {
+                    savedFiles = Self.applyingRenamedPrefixes(uploadResult.renamedPrefixes, to: savedFiles)
+                    inventoryMutated = true
+                }
+                if inventoryMutated {
                     state = SavedInventory(files: savedFiles, startPageToken: inventory.current.startPageToken)
                     try await database.setState(scope + ".inventory", state)
                 }
             }
-            // Physical uploads can enqueue Drive identity bindings. Each shard has an immutable name.
+            // Physical uploads & folder renames can enqueue Drive identity bindings (assets and folders). Each shard has an immutable name.
             let ready = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
-            let preparedIDs = Set(pending.compactMap { row -> UUID? in
-                if case .asset(let delta) = row.1.change { return delta.id }
-                return nil
-            })
             var publishable: [(Int64, SyncOperation)] = []
             let cutoff = pending.last?.0 ?? 0
             for row in ready {
                 if row.0 > cutoff {
-                    guard case .asset(let delta) = row.1.change, preparedIDs.contains(delta.id),
-                          delta.fields.count == 1, delta.fields["driveFileID"] != nil, delta.tagsAdded.isEmpty,
-                          delta.tagsRemoved.isEmpty else { break }
+                    let isUploadBinding: Bool
+                    switch row.1.change {
+                    case .asset(let delta):
+                        isUploadBinding = row.1.projectLocation == false
+                            && !delta.fields.isEmpty
+                            && delta.fields["driveFileID"] != nil
+                            && delta.fields.keys.allSatisfy { $0 == "driveFileID" || $0 == "fileName" }
+                            && delta.tagsAdded.isEmpty
+                            && delta.tagsRemoved.isEmpty
+                    case .folder:
+                        isUploadBinding = row.1.projectLocation == false
+                    default:
+                        isUploadBinding = false
+                    }
+                    guard isUploadBinding else { break }
                 }
                 publishable.append(row)
                 switch row.1.change {
@@ -193,10 +214,16 @@ public final actor DriveSyncEngine {
             broadcastCurrentStatus()
             return report
         } catch {
-            currentStatus.phase = .error(error.localizedDescription)
-            currentStatus.lastError = error.localizedDescription
-            currentStatus.currentDetail = error.localizedDescription
-            currentStatus.progressFraction = nil
+            if error is CancellationError || quietErrors {
+                currentStatus.phase = .idle
+                currentStatus.currentDetail = nil
+                currentStatus.progressFraction = nil
+            } else {
+                currentStatus.phase = .error(error.localizedDescription)
+                currentStatus.lastError = error.localizedDescription
+                currentStatus.currentDetail = error.localizedDescription
+                currentStatus.progressFraction = nil
+            }
             broadcastCurrentStatus()
             throw error
         }
@@ -237,7 +264,7 @@ public final actor DriveSyncEngine {
             missing.append(id)
         }
         guard !missing.isEmpty else { return }
-        let limit = transport is MountedVolumeTransport ? 2 : 4
+        let limit = Self.concurrencyLimit(for: transport, directDefault: 4)
         let total = missing.count
         var done = 0
         updateProgress(
@@ -550,7 +577,7 @@ public final actor DriveSyncEngine {
         let files = keyedByName(try await transport.listFiles(inFolderID: layout.boards))
         let documents = try await database.fetchBoards()
         // Check the full file checksum so another device's last write cannot leave a stale board projection.
-        let concurrency = transport is MountedVolumeTransport ? 2 : 4
+        let concurrency = Self.concurrencyLimit(for: transport, directDefault: 4)
         var writeJobs: [(id: String, name: String, data: Data, existing: RemoteDriveFile?, mark: String?)] = []
         writeJobs.reserveCapacity(documents.count)
         for document in documents {
@@ -610,7 +637,7 @@ public final actor DriveSyncEngine {
         let vectors = try await database.vectors()
         let grouped = Dictionary(grouping: dirty.keys) { String($0.lowercased().prefix(2)) }
         let shards = Dictionary(grouping: vectors.keys) { String($0.uuidString.lowercased().prefix(2)) }
-        let concurrency = transport is MountedVolumeTransport ? 2 : 6
+        let concurrency = Self.concurrencyLimit(for: transport, directDefault: 6)
 
         struct ShardJob: Sendable {
             let name: String
@@ -667,7 +694,10 @@ public final actor DriveSyncEngine {
                     var shard: [String: EmbeddingBlob] = [:]
                     if let existing = job.existing {
                         let data = try await transport.downloadData(fileID: existing.id)
-                        shard = try PropertyListDecoder().decode([String: EmbeddingBlob].self, from: data)
+                        if !data.isEmpty,
+                           let decoded = try? PropertyListDecoder().decode([String: EmbeddingBlob].self, from: data) {
+                            shard = decoded
+                        }
                     }
                     for (key, value) in job.entries {
                         shard[key] = value
@@ -733,13 +763,14 @@ public final actor DriveSyncEngine {
             files = keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails))
         }
         let dirty: [String: String] = try await database.state("projection.thumbnails") ?? [:]
-        let concurrency = transport is MountedVolumeTransport ? 2 : 8
+        let concurrency = Self.concurrencyLimit(for: transport, directDefault: 8)
 
         // 1. Upload or delete dirty local thumbnails in bounded parallel (with live progress)
         struct ThumbUploadJob: Sendable {
             let id: String
             let version: String
             let name: String
+            let assetExists: Bool
             let localURL: URL?
             let existing: RemoteDriveFile?
         }
@@ -754,6 +785,7 @@ public final actor DriveSyncEngine {
                 id: id,
                 version: version,
                 name: name,
+                assetExists: assetExists,
                 localURL: localURL,
                 existing: files[name]
             ))
@@ -787,7 +819,7 @@ public final actor DriveSyncEngine {
                                 transport: transport,
                                 allowOverwriteExisting: true
                             )
-                        } else if let existing = job.existing {
+                        } else if !job.assetExists, let existing = job.existing {
                             try await Self.trashIfPresentStatic(existing.id, transport: transport)
                         }
                         return (job.id, job.version)
@@ -968,6 +1000,49 @@ public final actor DriveSyncEngine {
         catch DriveTransportError.httpError(statusCode: 403, message: _) { }
     }
 
+    private nonisolated static func concurrencyLimit(for transport: any DriveTransport, directDefault: Int) -> Int {
+        if transport is MountedVolumeTransport { return 2 }
+        if transport is WebDAVTransport { return min(3, directDefault) }
+        return directDefault
+    }
+
+    private nonisolated static func applyingRenamedPrefixes(
+        _ prefixes: [(old: String, new: String)],
+        to files: [String: RemoteDriveFile]
+    ) -> [String: RemoteDriveFile] {
+        guard !prefixes.isEmpty else { return files }
+        func rewrite(_ value: String) -> String {
+            var current = value
+            for (old, new) in prefixes where old != new {
+                if current == old {
+                    current = new
+                } else if current.hasPrefix(old + "/") {
+                    current = new + "/" + current.dropFirst(old.count + 1)
+                }
+            }
+            return current
+        }
+        var updated: [String: RemoteDriveFile] = [:]
+        updated.reserveCapacity(files.count)
+        for (_, file) in files {
+            let newID = rewrite(file.id)
+            let newParents = file.parents.map(rewrite)
+            let newName = newID == file.id ? file.name : (newID as NSString).lastPathComponent
+            updated[newID] = RemoteDriveFile(
+                id: newID,
+                name: newName,
+                mimeType: file.mimeType,
+                size: file.size,
+                modifiedTime: file.modifiedTime,
+                md5Checksum: file.md5Checksum,
+                parents: newParents,
+                trashed: file.trashed,
+                webViewLink: file.webViewLink
+            )
+        }
+        return updated
+    }
+
     /// Executes `work` over `items` with a bounded sliding window of concurrent child tasks.
     private nonisolated static func runBounded<Item: Sendable, Output: Sendable>(
         items: [Item],
@@ -1070,6 +1145,11 @@ extension DriveSyncEngine {
     }
 
     private func crawl(layout: Layout, transport: any DriveTransport) async throws -> Inventory {
+        if let webdav = transport as? WebDAVTransport {
+            let (snapshot, token) = try await webdav.crawlSnapshotWithToken()
+            let visible = snapshot.filter { isVisible($0.value, layout: layout) }
+            return Inventory(files: visible, startPageToken: token)
+        }
         let token = try await transport.fetchStartPageToken()
         var files: [String: RemoteDriveFile] = [:]
         try await collectChildren(of: layout.root, into: &files, layout: layout, transport: transport)
@@ -1078,7 +1158,7 @@ extension DriveSyncEngine {
 
     private func collectChildren(of root: String, into files: inout [String: RemoteDriveFile], layout: Layout,
                                  transport: any DriveTransport) async throws {
-        let concurrency = transport is MountedVolumeTransport ? 2 : 6
+        let concurrency = Self.concurrencyLimit(for: transport, directDefault: 6)
         var frontier = [root]
         var seen = Set<String>()
         while !frontier.isEmpty {
@@ -1382,7 +1462,7 @@ extension DriveSyncEngine {
 
         // Phase 2: bounded parallel remote download + thumbnail rendering + Apple Vision analysis
         if !downloadJobs.isEmpty {
-            let concurrency = transport is MountedVolumeTransport ? 2 : 6
+            let concurrency = Self.concurrencyLimit(for: transport, directDefault: 6)
             let totalDownloads = downloadJobs.count
             var completedDownloads = 0
             let database = self.database
@@ -1659,12 +1739,13 @@ extension DriveSyncEngine {
     }
 
     private func uploadPhysical(for operations: [SyncOperation], layout: Layout, transport: any DriveTransport,
-                                scope: String) async throws -> Set<String> {
+                                scope: String) async throws -> (removedFiles: Set<String>, renamedPrefixes: [(old: String, new: String)]) {
         var changedFolders = Set<UUID>()
         var movedAssets = Set<UUID>()
         var visitedAssets = Set<UUID>()
         var removedFiles = Set<String>()
         var removedFolders = Set<String>()
+        var renamedPrefixes: [(old: String, new: String)] = []
         for operation in operations where operation.projectLocation != false {
             switch operation.change {
             case .folder(let value): changedFolders.insert(value.id)
@@ -1689,10 +1770,11 @@ extension DriveSyncEngine {
         var parents: [UUID: String] = [:]
         for id in changedFolders.sorted(by: { $0.uuidString < $1.uuidString }) {
             if try await database.folder(id: id) != nil {
-                _ = try await resolveFolder(id, layout: layout, transport: transport, path: [], resolved: &parents)
+                _ = try await resolveFolder(id, layout: layout, transport: transport, path: [], resolved: &parents, renamedPrefixes: &renamedPrefixes)
             }
         }
         let inventory: SavedInventory? = try await database.state(scope + ".inventory")
+        let effectiveInventoryFiles = Self.applyingRenamedPrefixes(renamedPrefixes, to: inventory?.files ?? [:])
         let orderedAssets = visitedAssets.sorted(by: { $0.uuidString < $1.uuidString })
 
         struct MoveJob: Sendable {
@@ -1714,10 +1796,10 @@ extension DriveSyncEngine {
 
         for id in orderedAssets {
             guard let asset = try await database.asset(id: id) else { continue }
-            let remote = asset.driveFileID.flatMap { inventory?.files[$0] }
+            let remote = asset.driveFileID.flatMap { effectiveInventoryFiles[$0] }
             if remote != nil, !movedAssets.contains(id) { continue }
             let parent = if let folder = asset.folderID {
-                try await resolveFolder(folder, layout: layout, transport: transport, path: [], resolved: &parents)
+                try await resolveFolder(folder, layout: layout, transport: transport, path: [], resolved: &parents, renamedPrefixes: &renamedPrefixes)
             } else { layout.inbox }
             if let remote {
                 let rename = Self.originalName(remote) == asset.fileName ? nil : asset.fileName
@@ -1738,7 +1820,7 @@ extension DriveSyncEngine {
             parentsToList.insert(parent)
         }
 
-        let apiConcurrency = transport is MountedVolumeTransport ? 2 : 6
+        let apiConcurrency = Self.concurrencyLimit(for: transport, directDefault: 6)
 
         // 1. Execute remote renames/moves in bounded parallel
         if !moveJobs.isEmpty {
@@ -1845,7 +1927,7 @@ extension DriveSyncEngine {
             }
 
             if !uploadQueue.isEmpty {
-                let uploadConcurrency = transport is MountedVolumeTransport ? 2 : 5
+                let uploadConcurrency = Self.concurrencyLimit(for: transport, directDefault: 5)
                 var completed = alreadyBoundCount
                 try await withThrowingTaskGroup(of: (AssetRecord, RemoteDriveFile).self) { group in
                     var nextIndex = 0
@@ -1907,7 +1989,7 @@ extension DriveSyncEngine {
             } catch DriveTransportError.fileNotFound { }
             catch DriveTransportError.httpError(statusCode: 404, message: _) { }
         }
-        return compatibleRemovedFiles
+        return (compatibleRemovedFiles, renamedPrefixes)
     }
 
     private func bindUploadedAsset(asset: AssetRecord, uploaded: RemoteDriveFile) async throws {
@@ -1960,18 +2042,28 @@ extension DriveSyncEngine {
         throw DriveTransportError.fileAlreadyExists(preferredName)
     }
 
-    private func resolveFolder(_ id: UUID, layout: Layout, transport: any DriveTransport, path: Set<UUID>,
-                               resolved: inout [UUID: String]) async throws -> String {
+    private func resolveFolder(
+        _ id: UUID,
+        layout: Layout,
+        transport: any DriveTransport,
+        path: Set<UUID>,
+        resolved: inout [UUID: String],
+        renamedPrefixes: inout [(old: String, new: String)]
+    ) async throws -> String {
         if let result = resolved[id] { return result }
         guard !path.contains(id) else { throw DriveTransportError.invalidResponse("Folder hierarchy contains a cycle.") }
         guard let folder = try await database.folder(id: id) else { return layout.inbox }
         let parent = if let parentID = folder.parentID {
-            try await resolveFolder(parentID, layout: layout, transport: transport, path: path.union([id]), resolved: &resolved)
+            try await resolveFolder(parentID, layout: layout, transport: transport, path: path.union([id]), resolved: &resolved, renamedPrefixes: &renamedPrefixes)
         } else { layout.root }
         let result: RemoteDriveFile
+        var movedFromKnown: String?
         if let known = folder.driveFolderID {
             do {
                 result = try await transport.moveFile(fileID: known, fromParentID: nil, toParentID: parent, newName: folder.name)
+                if result.id != known {
+                    movedFromKnown = known
+                }
             } catch DriveTransportError.fileNotFound {
                 result = try await transport.findOrCreateFolder(named: folder.name, parentID: parent)
             } catch DriveTransportError.httpError(statusCode: 404, message: _) {
@@ -1980,12 +2072,40 @@ extension DriveSyncEngine {
         } else {
             result = try await transport.findOrCreateFolder(named: folder.name, parentID: parent)
         }
+        let isPathBasedTransport = (transport is WebDAVTransport) || (transport is MountedVolumeTransport)
+        let renamedPrefix: (old: String, new: String)? = isPathBasedTransport ? movedFromKnown.map { ($0, result.id) } : nil
         try await database.transaction { store in
             if var current = try store.folder(id: id), current.driveFolderID != result.id {
                 current.driveFolderID = result.id
                 if !result.id.hasPrefix("mounted-") { try store.record(.folder(current), projectLocation: false) }
                 try store.put(current)
             }
+            if let prefix = renamedPrefix {
+                let oldSlash = prefix.old + "/"
+                let newSlash = prefix.new + "/"
+                for var descendant in try store.fetchFolders() where descendant.id != id {
+                    guard let existingID = descendant.driveFolderID, existingID.hasPrefix(oldSlash) else { continue }
+                    let newDescendantID = newSlash + existingID.dropFirst(oldSlash.count)
+                    descendant.driveFolderID = newDescendantID
+                    if !newDescendantID.hasPrefix("mounted-") {
+                        try store.record(.folder(descendant), projectLocation: false)
+                    }
+                    try store.put(descendant)
+                }
+                for var childAsset in try store.fetchAssets(matching: FilterCriteria(includeTrashed: true)) {
+                    guard let existingID = childAsset.driveFileID, existingID.hasPrefix(oldSlash) else { continue }
+                    let newAssetRemoteID = newSlash + existingID.dropFirst(oldSlash.count)
+                    childAsset.driveFileID = newAssetRemoteID
+                    if newAssetRemoteID.hasPrefix("mounted-") {
+                        try store.put(childAsset)
+                    } else if try !store.isTombstoned("asset", id: childAsset.id) {
+                        _ = try store.saveAssetLocally(childAsset, projectLocation: false)
+                    }
+                }
+            }
+        }
+        if let renamedPrefix {
+            renamedPrefixes.append(renamedPrefix)
         }
         resolved[id] = result.id
         return result.id

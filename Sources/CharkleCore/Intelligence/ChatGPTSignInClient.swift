@@ -30,6 +30,10 @@ public actor ChatGPTSignInClient {
     private var cachedDiscovery: OIDCDiscovery?
     private var cachedJWKS: [JWKKey]?
     private var cachedJWKSFetchedAt: Date?
+    private var cachedConnection: StoredConnection?
+    private var hasLoadedConnection = false
+    private var inFlightRefresh: Task<StoredConnection, Error>?
+    private var sessionGeneration: UInt64 = 0
 
     public init(keychain: KeychainStore = KeychainStore(), session: URLSession? = nil) {
         self.keychain = keychain
@@ -120,16 +124,20 @@ public actor ChatGPTSignInClient {
         }
         await loopback.stop()
 
-        // Retain the issued client_id before redeeming the one-time code so retries reuse the same registration.
-        var registrationRecord = existing ?? StoredConnection(
-            clientID: callback.clientID,
-            status: .disconnected,
-            scopes: [],
-            savedAt: Date()
-        )
-        registrationRecord.clientID = callback.clientID
-        registrationRecord.savedAt = Date()
-        try saveStoredConnection(registrationRecord)
+        // Retain the issued client_id before redeeming the one-time code so retries reuse the same registration,
+        // without clobbering an existing connected session when the user is attempting to switch accounts.
+        let priorStored = try? loadStoredConnection()
+        if !(switchAccount && priorStored?.status == .connected) {
+            var registrationRecord = existing ?? StoredConnection(
+                clientID: callback.clientID,
+                status: .disconnected,
+                scopes: [],
+                savedAt: Date()
+            )
+            registrationRecord.clientID = callback.clientID
+            registrationRecord.savedAt = Date()
+            try saveStoredConnection(registrationRecord)
+        }
 
         let tokenJSON = try await postTokenRequest(
             endpoint: provider.tokenEndpoint,
@@ -179,12 +187,18 @@ public actor ChatGPTSignInClient {
             credentials: extracted.credentials,
             pendingRefresh: nil
         )
+        sessionGeneration &+= 1
+        inFlightRefresh?.cancel()
+        inFlightRefresh = nil
         try saveStoredConnection(connected)
         return connected.toPublicSession()
     }
 
     /// Revokes the active refresh token remotely (best-effort) and clears local credentials from Keychain.
     public func disconnect(resetRegistration: Bool = false) async throws {
+        sessionGeneration &+= 1
+        inFlightRefresh?.cancel()
+        inFlightRefresh = nil
         guard var stored = try? loadStoredConnection() else { return }
         let refreshToken = stored.pendingRefresh?.credentials.refreshToken ?? stored.credentials?.refreshToken
 
@@ -214,6 +228,8 @@ public actor ChatGPTSignInClient {
 
         if resetRegistration {
             try keychain.delete(Self.keychainKey)
+            cachedConnection = nil
+            hasLoadedConnection = true
         } else {
             stored.status = .disconnected
             stored.scopes = []
@@ -224,9 +240,23 @@ public actor ChatGPTSignInClient {
         }
     }
 
-    /// Returns a fresh, valid Bearer access token (automatically refreshing via `refresh_token` if needed).
+    /// Returns a fresh, valid Bearer access token (automatically refreshing via `refresh_token` if needed,
+    /// with in-flight deduplication so concurrent requests never double-spend a single-use rotating refresh token).
     public func validAccessToken() async throws -> String {
-        guard var stored = try? loadStoredConnection(), stored.status == .connected else {
+        if let activeRefresh = inFlightRefresh {
+            let waitGeneration = sessionGeneration
+            let refreshed = try await activeRefresh.value
+            guard sessionGeneration == waitGeneration else {
+                throw ChatGPTAuthError(
+                    code: "sign_in_required",
+                    message: "ChatGPT 会话已变更，请重试。",
+                    retryable: true
+                )
+            }
+            return try Self.extractUsableAccessToken(from: refreshed)
+        }
+
+        guard var stored = try loadStoredConnection(), stored.status == .connected else {
             throw ChatGPTAuthError(
                 code: "sign_in_required",
                 message: "请先在「设置 → 智能与搜索」中登录 ChatGPT 订阅账号。",
@@ -260,11 +290,30 @@ public actor ChatGPTSignInClient {
             }
 
             if canRefreshNow {
+                let generation = sessionGeneration
+                let snapshot = stored
+                let refreshTask = Task {
+                    try await self.refreshStoredConnection(snapshot)
+                }
+                inFlightRefresh = refreshTask
+                defer {
+                    if self.sessionGeneration == generation {
+                        self.inFlightRefresh = nil
+                    }
+                }
                 do {
-                    stored = try await refreshStoredConnection(stored)
-                    try saveStoredConnection(stored)
+                    let refreshed = try await refreshTask.value
+                    guard self.sessionGeneration == generation else {
+                        throw ChatGPTAuthError(
+                            code: "sign_in_required",
+                            message: "ChatGPT 会话已变更，请重试。",
+                            retryable: true
+                        )
+                    }
+                    try saveStoredConnection(refreshed)
+                    stored = refreshed
                 } catch let err as ChatGPTAuthError {
-                    if err.requiresReauthentication {
+                    if self.sessionGeneration == generation && err.requiresReauthentication {
                         stored.status = .reauthRequired
                         stored.scopes = []
                         stored.credentials = nil
@@ -283,6 +332,17 @@ public actor ChatGPTSignInClient {
             }
         }
 
+        return try Self.extractUsableAccessToken(from: stored)
+    }
+
+    private static func extractUsableAccessToken(from stored: StoredConnection) throws -> String {
+        guard stored.status == .connected else {
+            throw ChatGPTAuthError(
+                code: "sign_in_required",
+                message: "请先在「设置 → 智能与搜索」中登录 ChatGPT 订阅账号。",
+                retryable: false
+            )
+        }
         guard let activeCreds = stored.credentials, activeCreds.expiresAt > Date() else {
             throw ChatGPTAuthError(
                 code: "refresh_not_ready",
@@ -654,13 +714,23 @@ public actor ChatGPTSignInClient {
     }
 
     private func loadStoredConnection() throws -> StoredConnection? {
-        guard let data = try keychain.read(Self.keychainKey) else { return nil }
-        return try JSONDecoder().decode(StoredConnection.self, from: data)
+        if hasLoadedConnection { return cachedConnection }
+        guard let data = try keychain.read(Self.keychainKey) else {
+            cachedConnection = nil
+            hasLoadedConnection = true
+            return nil
+        }
+        let decoded = try JSONDecoder().decode(StoredConnection.self, from: data)
+        cachedConnection = decoded
+        hasLoadedConnection = true
+        return decoded
     }
 
     private func saveStoredConnection(_ connection: StoredConnection) throws {
         let data = try JSONEncoder().encode(connection)
         try keychain.save(data, for: Self.keychainKey)
+        cachedConnection = connection
+        hasLoadedConnection = true
     }
 
     // MARK: - Testable Static Protocol Parsers & Cryptography
@@ -817,7 +887,7 @@ public actor ChatGPTSignInClient {
         }
 
         let nowSecs = referenceDate.timeIntervalSince1970
-        let clockTolerance: TimeInterval = 5
+        let clockTolerance: TimeInterval = 60
         guard exp + clockTolerance >= nowSecs, iat - clockTolerance <= nowSecs else {
             throw ChatGPTAuthError(code: "invalid_id_token", message: "ChatGPT 身份令牌已过期或时间无效，请重新登录。", retryable: false)
         }
@@ -1290,8 +1360,16 @@ private actor ChatGPTLoopbackServer {
                         flag = true
                         return true
                     }
-                    if shouldResume, let port = listener.port?.rawValue {
-                        cont.resume(returning: port)
+                    if shouldResume {
+                        if let port = listener.port?.rawValue {
+                            cont.resume(returning: port)
+                        } else {
+                            cont.resume(throwing: ChatGPTAuthError(
+                                code: "loopback_failed",
+                                message: "无法绑定本机回调端口，请重试。",
+                                retryable: true
+                            ))
+                        }
                     }
                 case .failed(let error):
                     let shouldResume = resumed.withLock { flag -> Bool in
@@ -1301,6 +1379,19 @@ private actor ChatGPTLoopbackServer {
                     }
                     if shouldResume {
                         cont.resume(throwing: error)
+                    }
+                case .cancelled:
+                    let shouldResume = resumed.withLock { flag -> Bool in
+                        guard !flag else { return false }
+                        flag = true
+                        return true
+                    }
+                    if shouldResume {
+                        cont.resume(throwing: ChatGPTAuthError(
+                            code: "cancelled",
+                            message: "已取消 ChatGPT 登录。",
+                            retryable: false
+                        ))
                     }
                 default:
                     break
@@ -1355,7 +1446,7 @@ private actor ChatGPTLoopbackServer {
         let alreadySettled = self.capturedResult != nil
 
         connection.start(queue: DispatchQueue(label: "com.charkle.chatgpt.oauth.connection"))
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, _, _ in
+        Self.receiveHTTPHeaders(on: connection, accumulated: Data(), maxBytes: 16_384) { [weak self] data in
             guard let data, let raw = String(data: data, encoding: .utf8) else {
                 connection.cancel()
                 return
@@ -1431,6 +1522,32 @@ private actor ChatGPTLoopbackServer {
 
             Self.sendCompletionHTML(connection: connection, success: true)
             Task { await self?.finish(with: .success((codes[0], finalClientID))) }
+        }
+    }
+
+    private static let headerTerminator = Data("\r\n\r\n".utf8)
+
+    private static func receiveHTTPHeaders(
+        on connection: NWConnection,
+        accumulated: Data,
+        maxBytes: Int,
+        completion: @escaping @Sendable (Data?) -> Void
+    ) {
+        let remaining = maxBytes - accumulated.count
+        guard remaining > 0 else {
+            completion(accumulated)
+            return
+        }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { chunk, _, isComplete, error in
+            var next = accumulated
+            if let chunk, !chunk.isEmpty {
+                next.append(chunk)
+            }
+            if next.range(of: headerTerminator) != nil || next.count >= maxBytes || isComplete || error != nil {
+                completion(next.isEmpty ? nil : next)
+                return
+            }
+            receiveHTTPHeaders(on: connection, accumulated: next, maxBytes: maxBytes, completion: completion)
         }
     }
 

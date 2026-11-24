@@ -6,7 +6,14 @@ public nonisolated struct XPostReference: Equatable, Hashable, Sendable {
     public let tweetID: String
 
     public var canonicalURL: URL {
-        URL(string: "https://x.com/\(handle)/status/\(tweetID)")!
+        var comps = URLComponents()
+        comps.scheme = "https"
+        comps.host = "x.com"
+        comps.path = "/\(handle)/status/\(tweetID)"
+        if let url = comps.url {
+            return url
+        }
+        return URL(fileURLWithPath: "/").standardizedFileURL // unreachable for valid ASCII host
     }
 
     public init(handle: String, tweetID: String) {
@@ -44,7 +51,7 @@ public nonisolated enum XPostURLParser {
         }
 
         let rawID = segments[statusIndex + 1]
-        guard !rawID.isEmpty, rawID.count <= 24, rawID.allSatisfy(\.isNumber) else {
+        guard !rawID.isEmpty, rawID.count <= 24, rawID.allSatisfy({ $0.isASCII && $0.isNumber }) else {
             return nil
         }
 
@@ -491,6 +498,52 @@ public nonisolated enum XPostResolver {
         return data
     }
 
+    private final class SafeMediaRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard let target = request.url, WebBookmark.isSafeRemoteFetchURL(target) else {
+                completionHandler(nil)
+                task.cancel()
+                return
+            }
+            completionHandler(request)
+        }
+    }
+
+    private static func sanitizedBaseName(_ raw: String) -> String {
+        let disallowed = CharacterSet(charactersIn: "/:\\*?\"<>|").union(.controlCharacters)
+        let collapsed = raw
+            .components(separatedBy: disallowed)
+            .joined(separator: "-")
+            .replacingOccurrences(of: "..", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = String(collapsed.prefix(80)).trimmingCharacters(in: CharacterSet(charactersIn: ".- "))
+        return prefix.isEmpty ? "Media" : prefix
+    }
+
+    private static func isAcceptableMediaResponse(mimeType: String?, url: URL) -> Bool {
+        let lowerPath = url.path.lowercased()
+        if lowerPath.hasSuffix(".m3u8") || lowerPath.hasSuffix(".mpd") {
+            return false
+        }
+        if let mime = mimeType?.lowercased() {
+            if mime.contains("text/html")
+                || mime.contains("application/json")
+                || mime.contains("text/plain")
+                || mime.contains("application/xml")
+                || mime.contains("text/xml")
+                || mime.contains("mpegurl") {
+                return false
+            }
+        }
+        return true
+    }
+
     private static func downloadSingle(
         url: URL,
         kind: XPostMedia.Kind,
@@ -498,11 +551,13 @@ public nonisolated enum XPostResolver {
         baseName: String,
         maxBytes: Int64
     ) async -> URL? {
-        guard WebBookmark.isWebURL(url) else { return nil }
+        guard WebBookmark.isSafeRemoteFetchURL(url),
+              isAcceptableMediaResponse(mimeType: nil, url: url) else { return nil }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 45
-        let session = URLSession(configuration: config)
+        let delegate = SafeMediaRedirectDelegate()
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
         var request = URLRequest(url: url, timeoutInterval: 15)
@@ -524,11 +579,21 @@ public nonisolated enum XPostResolver {
         }
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
+        let finalURL = http.url ?? url
+        guard WebBookmark.isSafeRemoteFetchURL(finalURL),
+              isAcceptableMediaResponse(mimeType: http.mimeType, url: finalURL) else {
+            return nil
+        }
+        if http.expectedContentLength > 0 && http.expectedContentLength > maxBytes {
+            return nil
+        }
+
         let size = Int64((try? tempURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         guard size > 0, size <= maxBytes else { return nil }
 
-        let ext = resolvedExtension(for: url, mimeType: http.mimeType, kind: kind)
-        let destination = directory.appending(path: "\(baseName).\(ext)")
+        let ext = resolvedExtension(for: finalURL, mimeType: http.mimeType, kind: kind)
+        let safeBase = sanitizedBaseName(baseName)
+        let destination = directory.appending(path: "\(safeBase).\(ext)")
         try? FileManager.default.removeItem(at: destination)
         do {
             try FileManager.default.moveItem(at: tempURL, to: destination)

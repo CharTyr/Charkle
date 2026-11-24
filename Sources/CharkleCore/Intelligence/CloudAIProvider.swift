@@ -19,7 +19,12 @@ public nonisolated struct GeminiProvider: CloudAIProvider {
 
     public func embed(_ text: String) async throws -> [Float] {
         struct Response: Decodable { struct Embedding: Decodable { let values: [Float] }; let embedding: Embedding }
-        let model = config.embeddingModel.replacingOccurrences(of: "models/", with: "", options: .anchored)
+        let model = config.embeddingModel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "models/", with: "", options: .anchored)
+        guard !model.isEmpty else {
+            throw LibraryDatabaseError("请先在设置中填写 Gemini Embedding 模型名称。")
+        }
         let result: Response = try await api.post("models/\(model):embedContent",
                                                   body: ["content": ["parts": [["text": text]]]])
         CloudAIUsageStore.shared.record(
@@ -48,7 +53,10 @@ public nonisolated struct GeminiProvider: CloudAIProvider {
         if let thumbnailJPEG {
             parts.append(["inline_data": ["mime_type": "image/jpeg", "data": thumbnailJPEG.base64EncodedString()]])
         }
-        let model = config.chatModel.replacingOccurrences(of: "models/", with: "", options: .anchored)
+        let rawModel = config.chatModel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "models/", with: "", options: .anchored)
+        let model = rawModel.isEmpty ? "gemini-2.5-flash" : rawModel
         let response: Response = try await api.post("models/\(model):generateContent", body: [
             "contents": [["parts": parts]], "generationConfig": ["responseMimeType": "application/json"]
         ])
@@ -62,7 +70,8 @@ public nonisolated struct GeminiProvider: CloudAIProvider {
         let completion = response.candidates?.first?.content?.parts.compactMap(\.text).joined() ?? ""
         let caption = try AIHTTPClient.caption(completion)
         let extensionText = text + "\n" + caption.description
-        let embedding = config.embeddingModel.isEmpty ? nil : try? await embed(extensionText)
+        let trimmedEmbed = config.embeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let embedding = trimmedEmbed.isEmpty ? nil : try? await embed(extensionText)
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: embedding)
     }
@@ -85,7 +94,10 @@ public nonisolated struct GeminiProvider: CloudAIProvider {
         for jpeg in imagesJPEG {
             parts.append(["inline_data": ["mime_type": "image/jpeg", "data": jpeg.base64EncodedString()]])
         }
-        let model = config.chatModel.replacingOccurrences(of: "models/", with: "", options: .anchored)
+        let rawModel = config.chatModel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "models/", with: "", options: .anchored)
+        let model = rawModel.isEmpty ? "gemini-2.5-flash" : rawModel
         var body: [String: Any] = [
             "contents": [["parts": parts]],
             "generationConfig": ["responseMimeType": "application/json"]
@@ -116,13 +128,26 @@ public nonisolated struct OpenAICompatibleProvider: CloudAIProvider {
                                secret: apiKey.map { "Bearer " + $0 }, session: session)
     }
 
+    private var resolvedChatModel: String {
+        let trimmed = config.chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? config.customEndpointFormat.defaultChatModel : trimmed
+    }
+
+    private var resolvedEmbeddingModel: String {
+        config.embeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public func embed(_ text: String) async throws -> [Float] {
         struct Usage: Decodable { let prompt_tokens: Int?; let total_tokens: Int? }
         struct Response: Decodable { struct Item: Decodable { let embedding: [Float] }; let data: [Item]; let usage: Usage? }
-        let result: Response = try await api.post("embeddings", body: ["model": config.embeddingModel, "input": text])
+        let model = resolvedEmbeddingModel
+        guard !model.isEmpty else {
+            throw LibraryDatabaseError("请先在设置中填写 Embedding 模型名称。")
+        }
+        let result: Response = try await api.post("embeddings", body: ["model": model, "input": text])
         CloudAIUsageStore.shared.record(
             providerLabel: "OpenAI 兼容",
-            model: config.embeddingModel,
+            model: model,
             inputTokens: result.usage?.prompt_tokens ?? 0,
             totalTokens: result.usage?.total_tokens
         )
@@ -144,19 +169,20 @@ public nonisolated struct OpenAICompatibleProvider: CloudAIProvider {
         } else {
             content = prompt
         }
+        let chatModel = resolvedChatModel
         let response: Response = try await api.post("chat/completions", body: [
-            "model": config.chatModel, "messages": [["role": "user", "content": content]]
+            "model": chatModel, "messages": [["role": "user", "content": content]]
         ])
         CloudAIUsageStore.shared.record(
             providerLabel: "OpenAI 兼容",
-            model: config.chatModel,
+            model: chatModel,
             inputTokens: response.usage?.prompt_tokens ?? 0,
             outputTokens: response.usage?.completion_tokens ?? 0,
             totalTokens: response.usage?.total_tokens
         )
         let caption = try AIHTTPClient.caption(response.choices.first?.message.content ?? "")
         let extensionText = text + "\n" + caption.description
-        let embedding = config.embeddingModel.isEmpty ? nil : try? await embed(extensionText)
+        let embedding = resolvedEmbeddingModel.isEmpty ? nil : try? await embed(extensionText)
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: embedding)
     }
@@ -183,13 +209,14 @@ public nonisolated struct OpenAICompatibleProvider: CloudAIProvider {
             messages.append(["role": "system", "content": instructions])
         }
         messages.append(["role": "user", "content": userContent])
+        let chatModel = resolvedChatModel
         let response: Response = try await api.post("chat/completions", body: [
-            "model": config.chatModel,
+            "model": chatModel,
             "messages": messages
         ], timeout: 90)
         CloudAIUsageStore.shared.record(
             providerLabel: "OpenAI 兼容",
-            model: config.chatModel,
+            model: chatModel,
             inputTokens: response.usage?.prompt_tokens ?? 0,
             outputTokens: response.usage?.completion_tokens ?? 0,
             totalTokens: response.usage?.total_tokens
@@ -209,13 +236,58 @@ public nonisolated struct OpenAIResponsesProvider: CloudAIProvider {
                                secret: apiKey.map { "Bearer " + $0 }, session: session)
     }
 
+    private var resolvedChatModel: String {
+        let trimmed = config.chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? CustomAIEndpointFormat.openAIResponses.defaultChatModel : trimmed
+    }
+
+    private var resolvedEmbeddingModel: String {
+        config.embeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct ResponsesOutputItem: Decodable {
+        struct ContentPart: Decodable {
+            let type: String?
+            let text: String?
+        }
+        let type: String?
+        let content: [ContentPart]?
+    }
+
+    private static func extractOutputText(outputText: String?, output: [ResponsesOutputItem]?) -> String {
+        if let direct = outputText, !direct.isEmpty {
+            return direct
+        }
+        let items = output ?? []
+        var preferred: [String] = []
+        var fallback: [String] = []
+        for item in items {
+            let isMessage = (item.type == nil || item.type == "message")
+            for part in item.content ?? [] {
+                guard let text = part.text else { continue }
+                fallback.append(text)
+                if isMessage && (part.type == nil || part.type == "output_text" || part.type == "text") {
+                    preferred.append(text)
+                }
+            }
+        }
+        if !preferred.isEmpty {
+            return preferred.joined(separator: "\n")
+        }
+        return fallback.joined(separator: "\n")
+    }
+
     public func embed(_ text: String) async throws -> [Float] {
         struct Usage: Decodable { let prompt_tokens: Int?; let total_tokens: Int? }
         struct Response: Decodable { struct Item: Decodable { let embedding: [Float] }; let data: [Item]; let usage: Usage? }
-        let result: Response = try await api.post("embeddings", body: ["model": config.embeddingModel, "input": text])
+        let model = resolvedEmbeddingModel
+        guard !model.isEmpty else {
+            throw LibraryDatabaseError("请先在设置中填写 Embedding 模型名称。")
+        }
+        let result: Response = try await api.post("embeddings", body: ["model": model, "input": text])
         CloudAIUsageStore.shared.record(
             providerLabel: "OpenAI Responses",
-            model: config.embeddingModel,
+            model: model,
             inputTokens: result.usage?.prompt_tokens ?? 0,
             totalTokens: result.usage?.total_tokens
         )
@@ -225,16 +297,8 @@ public nonisolated struct OpenAIResponsesProvider: CloudAIProvider {
     public func enrich(text: String, thumbnailJPEG: Data?) async throws -> CloudEnrichmentResult {
         struct Usage: Decodable { let input_tokens: Int?; let output_tokens: Int?; let total_tokens: Int? }
         struct Response: Decodable {
-            struct OutputItem: Decodable {
-                struct ContentPart: Decodable {
-                    let type: String?
-                    let text: String?
-                }
-                let type: String?
-                let content: [ContentPart]?
-            }
             let output_text: String?
-            let output: [OutputItem]?
+            let output: [ResponsesOutputItem]?
             let usage: Usage?
         }
         let prompt = AIHTTPClient.enrichmentInstruction() + "\n\nReference:\n" + text
@@ -243,29 +307,22 @@ public nonisolated struct OpenAIResponsesProvider: CloudAIProvider {
             let image = "data:image/jpeg;base64," + thumbnailJPEG.base64EncodedString()
             contentParts.append(["type": "input_image", "image_url": image])
         }
+        let chatModel = resolvedChatModel
         let response: Response = try await api.post("responses", body: [
-            "model": config.chatModel,
+            "model": chatModel,
             "input": [["role": "user", "content": contentParts]]
         ])
         CloudAIUsageStore.shared.record(
             providerLabel: "OpenAI Responses",
-            model: config.chatModel,
+            model: chatModel,
             inputTokens: response.usage?.input_tokens ?? 0,
             outputTokens: response.usage?.output_tokens ?? 0,
             totalTokens: response.usage?.total_tokens
         )
-        let joinedText: String
-        if let direct = response.output_text, !direct.isEmpty {
-            joinedText = direct
-        } else {
-            joinedText = (response.output ?? [])
-                .flatMap { $0.content ?? [] }
-                .compactMap(\.text)
-                .joined(separator: "\n")
-        }
+        let joinedText = Self.extractOutputText(outputText: response.output_text, output: response.output)
         let caption = try AIHTTPClient.caption(joinedText)
         let extensionText = text + "\n" + caption.description
-        let embedding = config.embeddingModel.isEmpty ? nil : try? await embed(extensionText)
+        let embedding = resolvedEmbeddingModel.isEmpty ? nil : try? await embed(extensionText)
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: embedding)
     }
@@ -273,24 +330,17 @@ public nonisolated struct OpenAIResponsesProvider: CloudAIProvider {
     public func completeJSON(instructions: String, prompt: String, imagesJPEG: [Data]) async throws -> String {
         struct Usage: Decodable { let input_tokens: Int?; let output_tokens: Int?; let total_tokens: Int? }
         struct Response: Decodable {
-            struct OutputItem: Decodable {
-                struct ContentPart: Decodable {
-                    let type: String?
-                    let text: String?
-                }
-                let type: String?
-                let content: [ContentPart]?
-            }
             let output_text: String?
-            let output: [OutputItem]?
+            let output: [ResponsesOutputItem]?
             let usage: Usage?
         }
         var contentParts: [[String: Any]] = [["type": "input_text", "text": prompt]]
         for jpeg in imagesJPEG {
             contentParts.append(["type": "input_image", "image_url": "data:image/jpeg;base64," + jpeg.base64EncodedString()])
         }
+        let chatModel = resolvedChatModel
         var body: [String: Any] = [
-            "model": config.chatModel,
+            "model": chatModel,
             "input": [["role": "user", "content": contentParts]]
         ]
         if !instructions.isEmpty {
@@ -299,18 +349,12 @@ public nonisolated struct OpenAIResponsesProvider: CloudAIProvider {
         let response: Response = try await api.post("responses", body: body, timeout: 90)
         CloudAIUsageStore.shared.record(
             providerLabel: "OpenAI Responses",
-            model: config.chatModel,
+            model: chatModel,
             inputTokens: response.usage?.input_tokens ?? 0,
             outputTokens: response.usage?.output_tokens ?? 0,
             totalTokens: response.usage?.total_tokens
         )
-        if let direct = response.output_text, !direct.isEmpty {
-            return direct
-        }
-        return (response.output ?? [])
-            .flatMap { $0.content ?? [] }
-            .compactMap(\.text)
-            .joined(separator: "\n")
+        return Self.extractOutputText(outputText: response.output_text, output: response.output)
     }
 }
 
@@ -359,18 +403,21 @@ public nonisolated struct AnthropicMessagesProvider: CloudAIProvider {
         }
         blocks.append(["type": "text", "text": prompt])
 
+        let chatModel = config.chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedModel = chatModel.isEmpty ? CustomAIEndpointFormat.anthropicMessages.defaultChatModel : chatModel
+
         let response: Response = try await api.post("messages", body: [
-            "model": config.chatModel,
+            "model": resolvedModel,
             "max_tokens": 1024,
             "messages": [["role": "user", "content": blocks]]
         ])
         CloudAIUsageStore.shared.record(
             providerLabel: "Anthropic",
-            model: config.chatModel,
+            model: resolvedModel,
             inputTokens: response.usage?.input_tokens ?? 0,
             outputTokens: response.usage?.output_tokens ?? 0
         )
-        let joined = response.content.compactMap(\.text).joined(separator: "\n")
+        let joined = response.content.filter { $0.type == nil || $0.type == "text" }.compactMap(\.text).joined(separator: "\n")
         let caption = try AIHTTPClient.caption(joined)
         try Task.checkCancellation()
         return CloudEnrichmentResult(description: caption.description, suggestedTags: caption.tags, embedding: nil)
@@ -398,8 +445,10 @@ public nonisolated struct AnthropicMessagesProvider: CloudAIProvider {
             ])
         }
         blocks.append(["type": "text", "text": prompt])
+        let chatModel = config.chatModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedModel = chatModel.isEmpty ? CustomAIEndpointFormat.anthropicMessages.defaultChatModel : chatModel
         var body: [String: Any] = [
-            "model": config.chatModel,
+            "model": resolvedModel,
             "max_tokens": 4096,
             "messages": [["role": "user", "content": blocks]]
         ]
@@ -409,11 +458,11 @@ public nonisolated struct AnthropicMessagesProvider: CloudAIProvider {
         let response: Response = try await api.post("messages", body: body, timeout: 90)
         CloudAIUsageStore.shared.record(
             providerLabel: "Anthropic",
-            model: config.chatModel,
+            model: resolvedModel,
             inputTokens: response.usage?.input_tokens ?? 0,
             outputTokens: response.usage?.output_tokens ?? 0
         )
-        return response.content.compactMap(\.text).joined(separator: "\n")
+        return response.content.filter { $0.type == nil || $0.type == "text" }.compactMap(\.text).joined(separator: "\n")
     }
 }
 
@@ -527,7 +576,8 @@ nonisolated struct AIHTTPClient: Sendable {
 
     init(config: AIProviderConfig, defaultPath: String, header: String, secret: String?,
          extraHeaders: [String: String] = [:], session: URLSession) throws {
-        guard let url = URL(string: config.baseURL), let host = url.host()?.lowercased(), !host.isEmpty,
+        let trimmedBase = config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmedBase), let host = url.host()?.lowercased(), !host.isEmpty,
               url.user() == nil, url.password() == nil, url.query() == nil, url.fragment() == nil,
               url.scheme == "https" || (url.scheme == "http" && (secret == nil || ["localhost", "127.0.0.1", "::1"].contains(host))) else {
             throw LibraryDatabaseError("无效的服务地址，远程接口请使用 HTTPS。")
@@ -556,12 +606,71 @@ nonisolated struct AIHTTPClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let secret { request.setValue(secret, forHTTPHeaderField: header) }
         for (k, v) in extraHeaders { request.setValue(v, forHTTPHeaderField: k) }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        guard (200..<300).contains(http.statusCode) else {
-            throw LibraryDatabaseError("The AI provider returned HTTP \(http.statusCode).")
+
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+                if (http.statusCode == 429 || http.statusCode >= 500), attempt < 2 {
+                    attempt += 1
+                    try await Task.sleep(for: Self.retryDelay(for: http, attempt: attempt))
+                    continue
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    if let detail = Self.extractErrorMessage(from: data) {
+                        throw LibraryDatabaseError("AI 服务返回 HTTP \(http.statusCode)：\(detail)")
+                    }
+                    throw LibraryDatabaseError("The AI provider returned HTTP \(http.statusCode).")
+                }
+                return try JSONDecoder().decode(T.self, from: data)
+            } catch {
+                try Task.checkCancellation()
+                guard Self.isRetryableError(error), attempt < 2 else { throw error }
+                attempt += 1
+                try await Task.sleep(for: .milliseconds(400 * attempt * attempt))
+            }
         }
-        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func isRetryableError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut, .networkConnectionLost, .notConnectedToInternet, .cannotConnectToHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func retryDelay(for response: HTTPURLResponse, attempt: Int) -> Duration {
+        if let raw = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let seconds = Double(raw), seconds.isFinite, seconds > 0 {
+            return .milliseconds(Int(min(8.0, max(0.25, seconds)) * 1000))
+        }
+        return .milliseconds(400 * attempt * attempt)
+    }
+
+    static func extractErrorMessage(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let errObj = root["error"] as? [String: Any],
+               let msg = errObj["message"] as? String, !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(msg.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+            }
+            if let msg = root["error"] as? String, !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(msg.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+            }
+            if let msg = root["message"] as? String, !msg.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(msg.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+            }
+            if let detail = root["detail"] as? String, !detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return String(detail.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+            }
+        }
+        let raw = String(decoding: data.prefix(240), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : raw
     }
 
     struct Caption: Decodable {
@@ -569,14 +678,78 @@ nonisolated struct AIHTTPClient: Sendable {
         let tags: [String]
     }
 
+    private struct RawCaption: Decodable {
+        let description: String?
+        let tags: [String]?
+    }
+
     static func caption(_ text: String) throws -> Caption {
-        guard let first = text.firstIndex(of: "{"), let last = text.lastIndex(of: "}"), first <= last else {
+        let stripped = stripThinkBlocks(text)
+        for slice in balancedJSONObjects(in: stripped).reversed() {
+            guard let data = slice.data(using: .utf8),
+                  let raw = try? JSONDecoder().decode(RawCaption.self, from: data),
+                  let desc = raw.description?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !desc.isEmpty || !(raw.tags ?? []).isEmpty else {
+                continue
+            }
+            let tags = (raw.tags ?? [])
+                .map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)) }
+                .filter { !$0.isEmpty }
+            return Caption(description: String(desc.prefix(4_000)), tags: Array(tags.prefix(8)))
+        }
+        guard let first = stripped.firstIndex(of: "{"), let last = stripped.lastIndex(of: "}"), first <= last else {
             throw LibraryDatabaseError("The AI provider did not return a caption.")
         }
-        let result = try JSONDecoder().decode(Caption.self, from: Data(text[first...last].utf8))
-        let tags = result.tags.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)) }
+        let raw = try JSONDecoder().decode(RawCaption.self, from: Data(stripped[first...last].utf8))
+        let tags = (raw.tags ?? [])
+            .map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)) }
             .filter { !$0.isEmpty }
-        return Caption(description: String(result.description.prefix(4_000)), tags: Array(tags.prefix(8)))
+        return Caption(description: String((raw.description ?? "").prefix(4_000)), tags: Array(tags.prefix(8)))
+    }
+
+    private static func stripThinkBlocks(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"<think>[\s\S]*?</think>"#, options: [.caseInsensitive]) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
+    }
+
+    private static func balancedJSONObjects(in text: String) -> [String] {
+        var objects: [String] = []
+        var depth = 0
+        var startIndex: String.Index?
+        var inString = false
+        var escaped = false
+
+        var idx = text.startIndex
+        while idx < text.endIndex {
+            let ch = text[idx]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+            } else {
+                if ch == "\"" {
+                    inString = true
+                } else if ch == "{" {
+                    if depth == 0 { startIndex = idx }
+                    depth += 1
+                } else if ch == "}", depth > 0 {
+                    depth -= 1
+                    if depth == 0, let start = startIndex {
+                        objects.append(String(text[start...idx]))
+                        startIndex = nil
+                    }
+                }
+            }
+            idx = text.index(after: idx)
+        }
+        return objects
     }
 
     static func checkedEmbedding(_ values: [Float]) throws -> [Float] {

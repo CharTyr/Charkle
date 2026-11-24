@@ -116,8 +116,26 @@ public struct AISettingsPane: View {
         .sheet(isPresented: $showCloudConfigSheet) {
             cloudAIConfigSheet
         }
+        .onChange(of: showCloudConfigSheet) { wasOpen, isOpen in
+            if isOpen {
+                syncAndAI.errorMessage = nil
+                syncAndAI.statusMessage = nil
+            } else if wasOpen {
+                draftAIConfig = syncAndAI.aiConfig
+                apiKeyInput = ""
+            }
+        }
         .sheet(isPresented: $showTypeSafeSheet) {
             typeSafeConfigSheet
+        }
+        .onChange(of: showTypeSafeSheet) { wasOpen, isOpen in
+            if isOpen {
+                syncAndAI.errorMessage = nil
+                syncAndAI.statusMessage = nil
+            } else if wasOpen {
+                draftTypeSafeConfig = syncAndAI.typeSafeConfig
+                typeSafeKeyInput = ""
+            }
         }
         .sheet(isPresented: $showUsageSheet) {
             usageDetailSheet
@@ -396,6 +414,8 @@ public struct AISettingsPane: View {
                 Spacer()
             }
 
+            SettingsSheetFeedbackBanner(syncAndAI: syncAndAI)
+
             Picker("服务商", selection: $draftAIConfig.provider) {
                 Text("关闭（仅本机）").tag(CloudAIProviderKind.disabled)
                 Text("ChatGPT 订阅账号").tag(CloudAIProviderKind.chatGPTSubscription)
@@ -432,6 +452,8 @@ public struct AISettingsPane: View {
 
             HStack {
                 Button("关闭") {
+                    draftAIConfig = syncAndAI.aiConfig
+                    apiKeyInput = ""
                     showCloudConfigSheet = false
                 }
                 .buttonStyle(SettingsSecondaryButtonStyle())
@@ -740,6 +762,8 @@ public struct AISettingsPane: View {
                 }
             }
 
+            SettingsSheetFeedbackBanner(syncAndAI: syncAndAI)
+
             sheetField("TypeSafe API 密钥") {
                 SecureField(
                     syncAndAI.hasStoredTypeSafeKey ? "••••••••（已存钥匙串，留空不变）" : "粘贴 apikey_…",
@@ -838,6 +862,8 @@ public struct AISettingsPane: View {
 
             HStack {
                 Button("取消") {
+                    draftTypeSafeConfig = syncAndAI.typeSafeConfig
+                    typeSafeKeyInput = ""
                     showTypeSafeSheet = false
                 }
                 .buttonStyle(SettingsSecondaryButtonStyle())
@@ -1090,16 +1116,30 @@ public struct AISettingsPane: View {
     private func applySmartAIDefaults(for provider: CloudAIProviderKind, format: CustomAIEndpointFormat) {
         let knownDefaultURLs: Set<String> = [
             "",
+            ChatGPTSignInClient.resource,
             "https://generativelanguage.googleapis.com",
             "https://api.openai.com",
             "https://api.openai.com/v1",
-            "https://api.anthropic.com"
+            "https://api.anthropic.com",
+            "https://openrouter.ai/api/v1",
+            "https://api.deepseek.com/v1",
+            "http://localhost:11434/v1"
         ]
         let knownDefaultChats: Set<String> = [
-            "", "gemini-2.5-flash", "gpt-4.1-mini", "gpt-5.4-mini", "claude-sonnet-4-5"
+            "",
+            "gemini-2.5-flash",
+            "gpt-4.1-mini",
+            "gpt-5.4-mini",
+            "claude-sonnet-4-5",
+            "google/gemini-2.5-flash",
+            "deepseek-chat",
+            "qwen2.5vl:7b"
         ]
         let knownDefaultEmbeddings: Set<String> = [
-            "", "gemini-embedding-001", "text-embedding-3-small"
+            "",
+            "gemini-embedding-001",
+            "text-embedding-3-small",
+            "nomic-embed-text"
         ]
 
         switch provider {

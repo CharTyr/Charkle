@@ -1896,7 +1896,9 @@
       if (!html || html.length < 512) return cardItem;
       const enriched = parseXhsNoteStateFromHtml(html, cardItem.originalURL, cardItem);
       if (enriched) {
-        enriched.tags = Array.from(new Set([...(enriched.tags || []), '小红书收藏']));
+        const inheritedTags =
+          Array.isArray(cardItem.tags) && cardItem.tags.length > 0 ? cardItem.tags : ['小红书收藏'];
+        enriched.tags = Array.from(new Set([...(enriched.tags || []), ...inheritedTags]));
         return enriched;
       }
     } catch {

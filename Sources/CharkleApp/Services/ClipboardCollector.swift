@@ -48,18 +48,26 @@ public enum ClipboardCollector {
             return paths.map { .fileURL(URL(fileURLWithPath: $0)) }
         }
 
-        // 2. Direct image data (PNG / JPEG / TIFF)
+        // 2. Direct image data (preserve animated GIF & WebP before static PNG / JPEG / TIFF fallbacks)
         let stamp = Int(Date().timeIntervalSince1970)
+        let nonce = String(UUID().uuidString.prefix(6)).lowercased()
+        let accompanyingURL = extractDirectPasteboardWebURL(from: pasteboard)?.absoluteString
+        if let gifData = pasteboard.data(forType: NSPasteboard.PasteboardType(UTType.gif.identifier)) {
+            return [.imageData(gifData, suggestedName: "Clip-\(stamp)-\(nonce).gif", sourceURL: accompanyingURL)]
+        }
+        if let webpData = pasteboard.data(forType: NSPasteboard.PasteboardType(UTType.webP.identifier)) {
+            return [.imageData(webpData, suggestedName: "Clip-\(stamp)-\(nonce).webp", sourceURL: accompanyingURL)]
+        }
         if let pngData = pasteboard.data(forType: .png) {
-            return [.imageData(pngData, suggestedName: "Clip-\(stamp).png", sourceURL: nil)]
+            return [.imageData(pngData, suggestedName: "Clip-\(stamp)-\(nonce).png", sourceURL: accompanyingURL)]
         }
         if let jpgData = pasteboard.data(forType: NSPasteboard.PasteboardType(UTType.jpeg.identifier)) {
-            return [.imageData(jpgData, suggestedName: "Clip-\(stamp).jpg", sourceURL: nil)]
+            return [.imageData(jpgData, suggestedName: "Clip-\(stamp)-\(nonce).jpg", sourceURL: accompanyingURL)]
         }
         if let tiffData = pasteboard.data(forType: .tiff),
            let rep = NSBitmapImageRep(data: tiffData),
            let pngData = rep.representation(using: .png, properties: [:]) {
-            return [.imageData(pngData, suggestedName: "Clip-\(stamp).png", sourceURL: nil)]
+            return [.imageData(pngData, suggestedName: "Clip-\(stamp)-\(nonce).png", sourceURL: accompanyingURL)]
         }
 
         // 3. Web URLs (Safari / Chrome / Arc / Firefox / NSURL / public.url)
@@ -98,16 +106,24 @@ public enum ClipboardCollector {
     }
 
     /// Detects any web URL in the pasteboard (social post, GitHub repo, or arbitrary website link)
-    /// for quick one-click capture hints.
+    /// for quick one-click capture hints. Inspects O(1) pasteboard type metadata rather than copying
+    /// multi-megabyte bitmap payloads over XPC.
     public static func detectedClipboardLink(from pasteboard: NSPasteboard = .general) -> ClipboardDetectedLink? {
-        // Never misclassify local files or copied images as web links.
-        if let fileURLs = pasteboard.readObjects(
-            forClasses: [NSURL.self],
-            options: [.urlReadingFileURLsOnly: true]
-        ) as? [URL], !fileURLs.isEmpty {
-            return nil
-        }
-        if pasteboard.data(forType: .png) != nil || pasteboard.data(forType: .tiff) != nil {
+        let types = Set(pasteboard.types ?? [])
+        guard !types.isEmpty else { return nil }
+
+        // Never misclassify local files or copied images as web links (zero bitmap data transfer).
+        let imageAndFileTypes: Set<NSPasteboard.PasteboardType> = [
+            .fileURL,
+            NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+            .png,
+            .tiff,
+            NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+            NSPasteboard.PasteboardType(UTType.gif.identifier),
+            NSPasteboard.PasteboardType(UTType.webP.identifier),
+            NSPasteboard.PasteboardType(UTType.image.identifier)
+        ]
+        if !types.isDisjoint(with: imageAndFileTypes) {
             return nil
         }
 
@@ -159,9 +175,12 @@ public enum ClipboardCollector {
     }
 
     private static func parseHexColor(_ text: String) -> String? {
-        let cleaned = text.hasPrefix("#") ? String(text.dropFirst()) : text
+        // Require leading `#` so 6-digit codes (`123456`) and English words (`coffee`, `decade`, `facade`)
+        // are preserved as text snippets instead of silently turning into color swatches.
+        guard text.hasPrefix("#") else { return nil }
+        let cleaned = String(text.dropFirst())
         guard cleaned.count == 6,
-              cleaned.allSatisfy({ $0.isHexDigit }) else { return nil }
+              cleaned.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
         return "#\(cleaned.uppercased())"
     }
 }

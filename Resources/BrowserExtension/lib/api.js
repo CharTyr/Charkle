@@ -129,14 +129,17 @@ export function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+export const DEFAULT_DESKTOP_PROBE_PORTS = Object.freeze([
+  41937, 41938, 41939, 41940, 41941, 41942, 41943, 41944, 41945, 41946,
+]);
+
 /**
- * Probes loopback ports (default 41937..41942) for a running Charkle macOS desktop app.
+ * Probes loopback ports (default 41937..41946, matching LocalExtensionBridgeServer.swift)
+ * for a running Charkle macOS desktop app.
  */
 export async function probeLocalDesktop(opts = {}) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  const ports = Array.isArray(opts.ports)
-    ? opts.ports
-    : [41937, 41938, 41939, 41940, 41941, 41942];
+  const ports = Array.isArray(opts.ports) ? opts.ports : DEFAULT_DESKTOP_PROBE_PORTS;
   for (const port of ports) {
     const baseUrl = `http://127.0.0.1:${port}`;
     try {
@@ -727,6 +730,8 @@ export async function ingestImageUrlsBatch(
         errors.push({
           url,
           message: err instanceof Error ? err.message : '收藏失败',
+          ...(typeof err?.status === 'number' ? { status: err.status } : {}),
+          ...(typeof err?.code === 'string' ? { code: err.code } : {}),
         });
       } finally {
         completed++;

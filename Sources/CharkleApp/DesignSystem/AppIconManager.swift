@@ -60,21 +60,17 @@ public final class CharkleAppIconManager {
     public func select(_ variant: CharkleAppIconVariant) {
         currentVariant = variant
         UserDefaults.standard.set(variant.rawValue, forKey: Self.defaultsKey)
-        applyCurrentIcon(updateBundleFileIcon: true)
+        applyCurrentIcon(updateBundleFileIcon: false)
     }
 
     public func applyCurrentIcon(updateBundleFileIcon: Bool = false) {
+        _ = updateBundleFileIcon
         guard let app = NSApp else { return }
+        // Only update the runtime Dock / ⌘Tab icon via `NSApp.applicationIconImage`.
+        // Never mutate the signed `.app` bundle icon on disk so code-signing,
+        // Keychain identity, and macOS TCC permissions remain intact.
         if let dockImg = dockImage(for: currentVariant) {
             app.applicationIconImage = dockImg
-            if updateBundleFileIcon, Bundle.main.bundleURL.pathExtension.lowercased() == "app" {
-                let bundlePath = Bundle.main.bundlePath
-                if currentVariant == .light {
-                    NSWorkspace.shared.setIcon(nil, forFile: bundlePath, options: [])
-                } else {
-                    NSWorkspace.shared.setIcon(dockImg, forFile: bundlePath, options: [])
-                }
-            }
         }
     }
 

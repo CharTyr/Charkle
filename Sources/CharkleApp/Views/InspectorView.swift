@@ -31,6 +31,9 @@ public struct InspectorView: View {
     @State private var quickAddQuery: String = ""
     @State private var notesDraft: String = ""
     @State private var titleDraft: String = ""
+    @State private var notesSaveTask: Task<Void, Never>?
+    @State private var pendingNotesAssetID: UUID?
+    @State private var pendingNotesValue: String?
     @State private var boardTitleDraft: String = ""
     @State private var boardSubtitleDraft: String = ""
     @State private var boardRefinementDraft: String = ""
@@ -40,6 +43,11 @@ public struct InspectorView: View {
     @State private var draggingInspectorSection: InspectorInfoSection? = nil
     @State private var dropTargetInspectorSection: InspectorInfoSection? = nil
     @State private var hoveredInspectorSection: InspectorInfoSection? = nil
+
+    @FocusState private var isTitleFocused: Bool
+    @FocusState private var isNotesFocused: Bool
+    @FocusState private var isBoardTitleFocused: Bool
+    @FocusState private var isBoardSubtitleFocused: Bool
 
     @Namespace private var inspectorTabNamespace
 
@@ -201,10 +209,43 @@ public struct InspectorView: View {
             notesDraft = asset.notes
             library.refreshInspectorContext(for: asset.id)
         }
-        .onChange(of: asset.id) { _, newID in
+        .onChange(of: asset.id) { oldID, newID in
+            if let oldAsset = library.allAssetsByID[oldID] {
+                commitSingleAssetTitle(oldAsset)
+            }
+            flushPendingNotesSave()
             titleDraft = asset.title
             notesDraft = asset.notes
             library.refreshInspectorContext(for: newID)
+        }
+        .onChange(of: asset.title) { _, newTitle in
+            if !isTitleFocused && titleDraft != newTitle {
+                titleDraft = newTitle
+            }
+        }
+        .onChange(of: asset.notes) { _, newNotes in
+            if !isNotesFocused && pendingNotesAssetID != asset.id && notesDraft != newNotes {
+                notesDraft = newNotes
+            }
+        }
+        .onChange(of: isTitleFocused) { wasFocused, nowFocused in
+            if wasFocused && !nowFocused {
+                commitSingleAssetTitle(asset)
+            }
+        }
+        .onChange(of: isNotesFocused) { wasFocused, nowFocused in
+            if wasFocused && !nowFocused {
+                flushPendingNotesSave()
+            }
+        }
+        .onChange(of: coordinator.quickLookAssetID) { oldQL, newQL in
+            if !isQuickLookHosted && oldQL != nil && newQL == nil {
+                library.refreshInspectorContext(for: asset.id)
+            }
+        }
+        .onDisappear {
+            commitSingleAssetTitle(asset)
+            flushPendingNotesSave()
         }
     }
 
@@ -506,6 +547,7 @@ public struct InspectorView: View {
                     TextField("素材标题", text: $titleDraft)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13.5, weight: .semibold))
+                        .focused($isTitleFocused)
                         .onSubmit { commitSingleAssetTitle(asset) }
 
                     HStack(spacing: 8) {
@@ -890,8 +932,9 @@ public struct InspectorView: View {
                             }
 
                             inspectorTextField(placeholder: "添加标签，回车确认…", text: $newTagInput, systemImage: "number") {
-                                let val = newTagInput
+                                let val = newTagInput.trimmingCharacters(in: .whitespacesAndNewlines)
                                 newTagInput = ""
+                                guard !val.isEmpty else { return }
                                 Task { await library.addTags([val], to: [asset.id]) }
                             }
 
@@ -980,6 +1023,7 @@ public struct InspectorView: View {
                                 .font(.system(size: 11.5))
                                 .scrollContentBackground(.hidden)
                                 .scrollIndicators(.hidden)
+                                .focused($isNotesFocused)
                                 .frame(minHeight: 62, maxHeight: 112)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 5)
@@ -991,9 +1035,7 @@ public struct InspectorView: View {
                         )
                         .onChange(of: notesDraft) { _, newValue in
                             if newValue != asset.notes {
-                                Task {
-                                    await library.applyPatch(AssetBatchPatch(assetIDs: [asset.id], notes: newValue))
-                                }
+                                scheduleNotesSave(assetID: asset.id, notes: newValue)
                             }
                         }
 
@@ -1622,8 +1664,9 @@ public struct InspectorView: View {
                                     .font(.system(size: 10.5, weight: .medium))
                                     .foregroundStyle(.secondary)
                                 inspectorTextField(placeholder: "输入标签回车批量添加…", text: $batchTagInput, systemImage: "number") {
-                                    let val = batchTagInput
+                                    let val = batchTagInput.trimmingCharacters(in: .whitespacesAndNewlines)
                                     batchTagInput = ""
+                                    guard !val.isEmpty else { return }
                                     Task {
                                         await library.addTags([val], to: ids)
                                         coordinator.showToast("已为 \(ids.count) 项添加标签 #\(val)")
@@ -1813,12 +1856,14 @@ public struct InspectorView: View {
                         TextField("情绪板名称", text: $boardTitleDraft)
                             .textFieldStyle(.plain)
                             .font(.system(size: 14.5, weight: .semibold))
+                            .focused($isBoardTitleFocused)
                             .onSubmit { commitBoardHeader(board) }
 
                         TextField("补充创作 Brief 或氛围备注…", text: $boardSubtitleDraft)
                             .textFieldStyle(.plain)
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
+                            .focused($isBoardSubtitleFocused)
                             .onSubmit { commitBoardHeader(board) }
 
                         inspectorInnerDivider
@@ -2177,14 +2222,27 @@ public struct InspectorView: View {
             showBoardAgentTrace = false
         }
         .onChange(of: board.title) { _, newTitle in
-            if boardTitleDraft != newTitle {
+            if !isBoardTitleFocused && boardTitleDraft != newTitle {
                 boardTitleDraft = newTitle
             }
         }
         .onChange(of: board.subtitle) { _, newSubtitle in
-            if boardSubtitleDraft != newSubtitle {
+            if !isBoardSubtitleFocused && boardSubtitleDraft != newSubtitle {
                 boardSubtitleDraft = newSubtitle
             }
+        }
+        .onChange(of: isBoardTitleFocused) { wasFocused, nowFocused in
+            if wasFocused && !nowFocused {
+                commitBoardHeader(board)
+            }
+        }
+        .onChange(of: isBoardSubtitleFocused) { wasFocused, nowFocused in
+            if wasFocused && !nowFocused {
+                commitBoardHeader(board)
+            }
+        }
+        .onDisappear {
+            commitBoardHeader(board)
         }
     }
 
@@ -2695,24 +2753,59 @@ public struct InspectorView: View {
         }
     }
 
+    private func scheduleNotesSave(assetID: UUID, notes: String) {
+        pendingNotesAssetID = assetID
+        pendingNotesValue = notes
+        notesSaveTask?.cancel()
+        notesSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            if pendingNotesAssetID == assetID && pendingNotesValue == notes {
+                pendingNotesAssetID = nil
+                pendingNotesValue = nil
+            }
+            await library.applyPatch(AssetBatchPatch(assetIDs: [assetID], notes: notes))
+        }
+    }
+
+    private func flushPendingNotesSave() {
+        notesSaveTask?.cancel()
+        notesSaveTask = nil
+        guard let assetID = pendingNotesAssetID, let notes = pendingNotesValue else { return }
+        pendingNotesAssetID = nil
+        pendingNotesValue = nil
+        if library.allAssetsByID[assetID]?.notes != notes {
+            Task {
+                await library.applyPatch(AssetBatchPatch(assetIDs: [assetID], notes: notes))
+            }
+        }
+    }
+
     private func commitBoardHeader(_ board: MoodboardDocument) {
-        var next = board
         let trimmed = boardTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { next.title = trimmed }
+        let nextTitle = trimmed.isEmpty ? board.title : trimmed
+        guard nextTitle != board.title || boardSubtitleDraft != board.subtitle else { return }
+        var next = board
+        next.title = nextTitle
         next.subtitle = boardSubtitleDraft
         moodboards.commitMutation(next)
     }
 
     private func quickAddFilteredAssets(excluding excluded: Set<UUID>) -> [AssetRecord] {
         let q = quickAddQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return library.allAssetsByID.values
-            .filter { asset in
-                guard !asset.isTrashed, !excluded.contains(asset.id) else { return false }
-                if q.isEmpty { return true }
+        let source = library.cachedRecentActivityAssets
+        var results: [AssetRecord] = []
+        results.reserveCapacity(9)
+        for asset in source {
+            guard !asset.isTrashed, !excluded.contains(asset.id) else { continue }
+            if !q.isEmpty {
                 let hay = ([asset.title, asset.sourceDomain ?? ""] + asset.tags).joined(separator: " ").lowercased()
-                return hay.contains(q)
+                guard hay.contains(q) else { continue }
             }
-            .sorted { $0.createdAt > $1.createdAt }
+            results.append(asset)
+            if results.count >= 9 { break }
+        }
+        return results
     }
 }
 

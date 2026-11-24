@@ -187,13 +187,19 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
     }
 
     private func handleSingleJSONRPCObject(_ obj: [String: Any]) async -> [String: Any]? {
+        let hasID = obj.keys.contains("id")
         let id = obj["id"]
-        let isNotification = (id == nil || id is NSNull)
+        let isNotification = !hasID
         guard let method = obj["method"] as? String else {
             return isNotification ? nil : makeErrorObject(id: id, code: -32600, message: "Invalid Request: missing method")
         }
         let params = obj["params"] as? [String: Any] ?? [:]
+        let response = await dispatchJSONRPCMethod(method, params: params, id: id)
+        // JSON-RPC 2.0 Section 4.1: Servers MUST NOT reply to notifications (requests without `id`).
+        return isNotification ? nil : response
+    }
 
+    private func dispatchJSONRPCMethod(_ method: String, params: [String: Any], id: Any?) async -> [String: Any]? {
         switch method {
         case "initialize":
             let policy = currentPolicy()
@@ -234,8 +240,15 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             return makeResultObject(id: id, result: ["tools": Self.mcpToolDefinitions()])
 
         case "tools/call":
-            guard let name = params["name"] as? String else {
+            let policy = currentPolicy()
+            guard policy.allowsRead(for: .mcp) else {
+                return makeErrorObject(id: id, code: -32001, message: "Charkle MCP service is disabled in Settings.")
+            }
+            guard let name = params["name"] as? String, !name.isEmpty else {
                 return makeErrorObject(id: id, code: -32602, message: "Invalid params: missing tool name")
+            }
+            guard Self.knownToolNames.contains(name) else {
+                return makeErrorObject(id: id, code: -32602, message: "Unknown tool: \(name)")
             }
             let args = params["arguments"] as? [String: Any] ?? [:]
             let output = await callTool(name: name, arguments: args, channel: .mcp)
@@ -291,7 +304,6 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             return makeResultObject(id: id, result: rendered)
 
         default:
-            if isNotification { return nil }
             return makeErrorObject(id: id, code: -32601, message: "Method not found: \(method)")
         }
     }
@@ -371,6 +383,10 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
     // MARK: - Unified Grounded Tool Execution (MCP + CLI)
 
+    private static let knownToolNames: Set<String> = Set(
+        mcpToolDefinitions().compactMap { $0["name"] as? String }
+    )
+
     private static let writeToolNames: Set<String> = [
         "organize_assets",
         "create_folder",
@@ -412,7 +428,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             case "get_asset":
                 return try await handleGetAsset(args)
             case "render_contact_sheet":
-                return try await handleRenderContactSheet(args)
+                return try await handleRenderContactSheet(args, policy: policy, channel: channel)
             case "find_similar_assets":
                 return try await handleFindSimilarAssets(args)
             case "semantic_search":
@@ -426,7 +442,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             case "get_board_context":
                 return try await handleGetBoardContext(args)
             case "export_board_image":
-                return try await handleExportBoardImage(args)
+                return try await handleExportBoardImage(args, policy: policy, channel: channel)
 
             // Safe write tools (8)
             case "organize_assets":
@@ -639,7 +655,21 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         return .json(dict)
     }
 
-    private func handleRenderContactSheet(_ args: [String: Any]) async throws -> ToolOutput {
+    private func handleRenderContactSheet(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
+        var validatedOutURL: URL?
+        if let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
+            switch validateExportOutputPath(outPath, allowedExtensions: ["jpg", "jpeg"], policy: policy, channel: channel) {
+            case .allowed(let resolved):
+                validatedOutURL = resolved
+            case .rejected(let reason):
+                return .error(reason)
+            }
+        }
+
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
         let offset = max(0, Self.intArg(args["offset"]) ?? 0)
@@ -691,8 +721,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
 
         var savedPath: String?
-        if let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
-            let outURL = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
+        if let outURL = validatedOutURL {
             try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try sheet.jpegData.write(to: outURL, options: .atomic)
             savedPath = outURL.path
@@ -1042,7 +1071,21 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         return .json(payload)
     }
 
-    private func handleExportBoardImage(_ args: [String: Any]) async throws -> ToolOutput {
+    private func handleExportBoardImage(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
+        var validatedOutURL: URL?
+        if let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
+            switch validateExportOutputPath(outPath, allowedExtensions: ["png"], policy: policy, channel: channel) {
+            case .allowed(let resolved):
+                validatedOutURL = resolved
+            case .rejected(let reason):
+                return .error(reason)
+            }
+        }
+
         guard let doc = try await resolveBoard(from: args) else {
             return .error("Moodboard not found. Pass a valid `board_id` UUID or matching `title`.")
         }
@@ -1081,8 +1124,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             "bytes": pngData.count,
             "mimeType": "image/png"
         ]
-        if let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
-            let outURL = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
+        if let outURL = validatedOutURL {
             try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try pngData.write(to: outURL, options: .atomic)
             metadata["savedPath"] = outURL.path
@@ -1255,6 +1297,9 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
 
         var inputs: [CaptureInput] = []
+        let singleTitle = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let singleNotes = (args["notes"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
         if let filePaths = Self.stringArrayArg(args["file_paths"]), !filePaths.isEmpty {
             for raw in filePaths {
                 let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1271,20 +1316,34 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                 return .error("File not found at path: \(url.path)")
             }
             inputs.append(.fileURL(url))
-        } else if let webURLString = (args["web_url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  let url = URL(string: webURLString), url.scheme != nil {
-            let title = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let notes = (args["notes"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            inputs.append(.webURL(url, title: title?.isEmpty == false ? title : nil, notes: notes?.isEmpty == false ? notes : nil))
-        } else if let text = (args["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-            let title = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Agent 笔记"
+        }
+
+        if let webURLStrings = Self.stringArrayArg(args["web_urls"]), !webURLStrings.isEmpty {
+            for raw in webURLStrings {
+                let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !clean.isEmpty else { continue }
+                guard let url = URL(string: clean), url.scheme != nil else {
+                    return .error("Invalid URL in `web_urls`: \(clean)")
+                }
+                let titleForURL = (webURLStrings.count == 1 && inputs.isEmpty && singleTitle?.isEmpty == false) ? singleTitle : nil
+                inputs.append(.webURL(url, title: titleForURL, notes: singleNotes?.isEmpty == false ? singleNotes : nil))
+            }
+        } else if let webURLString = (args["web_url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !webURLString.isEmpty {
+            guard let url = URL(string: webURLString), url.scheme != nil else {
+                return .error("Invalid `web_url`: \(webURLString)")
+            }
+            let titleForURL = (inputs.isEmpty && singleTitle?.isEmpty == false) ? singleTitle : nil
+            inputs.append(.webURL(url, title: titleForURL, notes: singleNotes?.isEmpty == false ? singleNotes : nil))
+        }
+
+        if inputs.isEmpty,
+           let text = (args["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            let title = (singleTitle?.isEmpty == false ? singleTitle : nil) ?? "Agent 笔记"
             inputs.append(.textSnippet(title: title, text: text, sourceURL: nil))
-        } else {
-            return .error("Provide one of `file_path`, `file_paths`, `web_url`, or `text`.")
         }
 
         guard !inputs.isEmpty else {
-            return .error("No valid import inputs provided.")
+            return .error("Provide one of `file_path`, `file_paths`, `web_url`, `web_urls`, or `text`.")
         }
 
         var finalAssets = try await engine.ingest(inputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
@@ -1721,6 +1780,88 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
     }
 
     // MARK: - Helpers
+
+    private enum ExportPathCheck {
+        case allowed(URL)
+        case rejected(String)
+    }
+
+    /// Validates external-agent `output_path` disk writes against permission policy, file extension,
+    /// dotfiles, symlink traversal, and protected system/application directories.
+    private func validateExportOutputPath(
+        _ rawPath: String,
+        allowedExtensions: Set<String>,
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) -> ExportPathCheck {
+        guard policy.allowsWrite(for: channel) else {
+            return .rejected("当前 Charkle 外部 Agent 权限为「仅只读检索与导出」，不允许通过 output_path 写入本机文件。请移除 output_path 直接获取内联图像，或在 Charkle「设置 → 外部 Agent」中切换为「允许整理与生成情绪板」。")
+        }
+        guard !rawPath.contains("\0") else {
+            return .rejected("Invalid output_path containing NUL character.")
+        }
+
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        let standardized = URL(fileURLWithPath: expanded).standardizedFileURL
+        let fileName = standardized.lastPathComponent
+        guard !fileName.isEmpty, fileName != ".", fileName != "..", !fileName.hasPrefix(".") else {
+            return .rejected("Refusing to write to hidden or invalid filename: \(fileName)")
+        }
+
+        let ext = standardized.pathExtension.lowercased()
+        guard allowedExtensions.contains(ext) else {
+            let expected = allowedExtensions.sorted().map { ".\($0)" }.joined(separator: ", ")
+            return .rejected("output_path extension must be one of \(expected), got '.\(ext)'.")
+        }
+
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: standardized.path),
+           let fileType = attrs[.type] as? FileAttributeType,
+           fileType == .typeDirectory || fileType == .typeSymbolicLink {
+            return .rejected("Refusing to overwrite an existing directory or symbolic link at output_path.")
+        }
+
+        var trailingComponents: [String] = [fileName]
+        var probe = standardized.deletingLastPathComponent()
+        while !fm.fileExists(atPath: probe.path) {
+            let parent = probe.deletingLastPathComponent()
+            if parent.path == probe.path { break }
+            trailingComponents.insert(probe.lastPathComponent, at: 0)
+            probe = parent
+        }
+        var resolved = probe.resolvingSymlinksInPath()
+        for component in trailingComponents {
+            resolved.appendPathComponent(component)
+        }
+        let resolvedURL = resolved.standardizedFileURL
+        let resolvedPath = resolvedURL.path
+
+        let blockedSegments: Set<String> = [".ssh", ".gnupg", ".aws", ".git", ".kube", ".config"]
+        if resolvedURL.pathComponents.contains(where: { blockedSegments.contains($0) }) {
+            return .rejected("Refusing to write inside a protected hidden directory.")
+        }
+
+        let protectedRoots: [String] = [
+            configDirectory.resolvingSymlinksInPath().standardizedFileURL.path,
+            URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library").resolvingSymlinksInPath().standardizedFileURL.path,
+            "/System",
+            "/Library",
+            "/Applications",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/etc",
+            "/private/etc"
+        ]
+        for root in protectedRoots {
+            let prefix = root.hasSuffix("/") ? root : root + "/"
+            if resolvedPath == root || resolvedPath.hasPrefix(prefix) {
+                return .rejected("Refusing to write inside protected system or application directory.")
+            }
+        }
+
+        return .allowed(resolvedURL)
+    }
 
     private func resolveBoard(from args: [String: Any]) async throws -> MoodboardDocument? {
         if let rawID = (args["board_id"] as? String ?? args["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
