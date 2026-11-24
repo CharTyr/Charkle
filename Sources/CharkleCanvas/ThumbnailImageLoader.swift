@@ -509,16 +509,26 @@ public final class ThumbnailImageLoader {
     }
 
     public func invalidate(assetID: UUID) {
-        originalCache.removeObject(forKey: assetID as NSUUID)
-        originalInFlight[assetID]?.task.cancel()
-        originalInFlight.removeValue(forKey: assetID)
-        for tier in [ThumbnailTier.grid520, .preview1400] {
-            let key = ThumbnailKeyValue(assetID: assetID, tier: tier)
-            cache.removeObject(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier))
-            inFlight[key]?.task.cancel()
-            inFlight.removeValue(forKey: key)
-            prefetchTasks[key]?.task.cancel()
-            prefetchTasks.removeValue(forKey: key)
+        invalidate(assetIDs: [assetID])
+    }
+
+    /// Targeted batch invalidation used when progressive cloud sync downloads fresh thumbnails
+    /// to disk: clears only those IDs and bumps `invalidationVersion` once without flushing
+    /// unrelated cached images.
+    public func invalidate(assetIDs: [UUID]) {
+        guard !assetIDs.isEmpty else { return }
+        for assetID in assetIDs {
+            originalCache.removeObject(forKey: assetID as NSUUID)
+            originalInFlight[assetID]?.task.cancel()
+            originalInFlight.removeValue(forKey: assetID)
+            for tier in [ThumbnailTier.grid520, .preview1400] {
+                let key = ThumbnailKeyValue(assetID: assetID, tier: tier)
+                cache.removeObject(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier))
+                inFlight[key]?.task.cancel()
+                inFlight.removeValue(forKey: key)
+                prefetchTasks[key]?.task.cancel()
+                prefetchTasks.removeValue(forKey: key)
+            }
         }
         CroppedThumbnailCache.clear()
         invalidationVersion &+= 1

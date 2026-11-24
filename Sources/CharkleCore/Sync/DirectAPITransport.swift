@@ -12,15 +12,16 @@ public nonisolated struct DirectAPITransport: DriveTransport {
 
     private static let api = URL(string: "https://www.googleapis.com/drive/v3")!
     private static let uploadAPI = URL(string: "https://www.googleapis.com/upload/drive/v3")!
-    private static let fileFields = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,shortcutDetails(targetId,targetMimeType)"
+    private static let fileFields = "id,name,mimeType,size,modifiedTime,md5Checksum,parents,trashed,webViewLink,thumbnailLink,shortcutDetails(targetId,targetMimeType)"
     private static let shortcutMimeType = "application/vnd.google-apps.shortcut"
     private static let directDataMultipartLimit: Int = 5 * 1_048_576
     private static let singleShotDownloadLimit: Int64 = 16 * 1_048_576
 
-    /// Shared-friendly pooled URLSession tuned for concurrent Google Drive HTTP/2 transfers.
+    /// Shared-friendly pooled URLSession tuned for concurrent Google Drive HTTP/2 transfers
+    /// (fast initial sync bursts of small ops shards and `.grid520` thumbnails).
     public static func makePooledSession() -> URLSession {
         let config = URLSessionConfiguration.default
-        config.httpMaximumConnectionsPerHost = 8
+        config.httpMaximumConnectionsPerHost = 12
         config.timeoutIntervalForRequest = 45
         config.timeoutIntervalForResource = 300
         config.urlCache = nil
@@ -186,6 +187,57 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     public func downloadData(fileID: String) async throws -> Data {
         let request = try await request(Self.api, "files/\(try segment(fileID))", ["alt": "media", "supportsAllDrives": "true"])
         return try await perform(request, accelerate: true)
+    }
+
+    public func downloadThumbnailData(for file: RemoteDriveFile, maxPixelSize: Int = 640) async throws -> Data? {
+        guard let rawLink = file.thumbnailLink,
+              let url = Self.scaledThumbnailURL(from: rawLink, maxPixelSize: maxPixelSize) else {
+            return nil
+        }
+        var req = URLRequest(url: url, timeoutInterval: 20)
+        req.httpMethod = "GET"
+        if let (data, response) = try? await session.data(for: req),
+           let http = response as? HTTPURLResponse {
+            if (200..<300).contains(http.statusCode), !data.isEmpty {
+                return data
+            }
+            if (http.statusCode == 401 || http.statusCode == 403),
+               let token = try? await oauth(),
+               !token.isEmpty,
+               token.utf8.allSatisfy({ $0 > 32 && $0 < 127 }) {
+                req.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+                if let (authedData, authedResponse) = try? await session.data(for: req),
+                   let authedHTTP = authedResponse as? HTTPURLResponse,
+                   (200..<300).contains(authedHTTP.statusCode),
+                   !authedData.isEmpty {
+                    return authedData
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Rewrites a Google Drive `thumbnailLink` (`=s220`) to a higher-resolution HTTPS thumbnail URL
+    /// while strictly limiting target hosts to Google-owned domains.
+    public static func scaledThumbnailURL(from rawLink: String, maxPixelSize: Int = 640) -> URL? {
+        let trimmed = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let initial = URL(string: trimmed),
+              initial.scheme?.lowercased() == "https",
+              let host = initial.host()?.lowercased(),
+              host == "googleusercontent.com" || host.hasSuffix(".googleusercontent.com")
+                || host == "googleapis.com" || host.hasSuffix(".googleapis.com")
+                || host == "google.com" || host.hasSuffix(".google.com") else {
+            return nil
+        }
+        let targetSize = max(220, min(1024, maxPixelSize))
+        if let range = trimmed.range(of: #"=s\d+(?=$|\?)"#, options: .regularExpression) {
+            var rewritten = trimmed
+            rewritten.replaceSubrange(range, with: "=s\(targetSize)")
+            if let upgraded = URL(string: rewritten) {
+                return upgraded
+            }
+        }
+        return initial
     }
 
     public func downloadFile(fileID: String, to destinationURL: URL) async throws {
@@ -738,6 +790,9 @@ public nonisolated struct DirectAPITransport: DriveTransport {
     }
 
     private nonisolated struct FileDTO: Decodable {
+        private static let fractionalISO8601 = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+        private static let regularISO8601 = Date.ISO8601FormatStyle()
+
         struct ShortcutDetails: Decodable {
             let targetId: String?
             let targetMimeType: String?
@@ -753,15 +808,14 @@ public nonisolated struct DirectAPITransport: DriveTransport {
         let parents: [String]?
         let trashed: Bool?
         let webViewLink: String?
+        let thumbnailLink: String?
         let shortcutDetails: ShortcutDetails?
 
         var record: RemoteDriveFile {
-            let fractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-            let regular = Date.ISO8601FormatStyle()
-            let date = modifiedTime.flatMap { (try? fractional.parse($0)) ?? (try? regular.parse($0)) }
+            let date = modifiedTime.flatMap { (try? Self.fractionalISO8601.parse($0)) ?? (try? Self.regularISO8601.parse($0)) }
             return RemoteDriveFile(id: id, name: name, mimeType: mimeType, size: size.flatMap(Int64.init),
                                    modifiedTime: date, md5Checksum: md5Checksum, parents: parents ?? [],
-                                   trashed: trashed ?? false, webViewLink: webViewLink)
+                                   trashed: trashed ?? false, webViewLink: webViewLink, thumbnailLink: thumbnailLink)
         }
     }
 }

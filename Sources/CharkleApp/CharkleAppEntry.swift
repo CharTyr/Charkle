@@ -29,6 +29,14 @@ public final class CharkleRuntime {
     @ObservationIgnored
     private nonisolated(unsafe) var syncCompletedObserver: NSObjectProtocol?
     @ObservationIgnored
+    private nonisolated(unsafe) var syncProgressiveObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var progressiveMetadataRefreshTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var progressiveMetadataPendingBoards: Bool = false
+    @ObservationIgnored
+    private var progressiveMetadataNeedsAnotherPass: Bool = false
+    @ObservationIgnored
     private nonisolated(unsafe) var appBecomeActiveObserver: NSObjectProtocol?
     @ObservationIgnored
     private nonisolated(unsafe) var systemDidWakeObserver: NSObjectProtocol?
@@ -100,6 +108,10 @@ public final class CharkleRuntime {
         if let observer = syncCompletedObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = syncProgressiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        progressiveMetadataRefreshTask?.cancel()
         if let observer = appBecomeActiveObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -304,6 +316,57 @@ public final class CharkleRuntime {
     }
 
     private func setupRemoteSyncObservers() {
+        syncProgressiveObserver = NotificationCenter.default.addObserver(
+            forName: CharkleSyncNotifications.didSyncProgressively,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let kind = notification.userInfo?[CharkleSyncNotifications.progressKindKey] as? String
+            let thumbnailIDs = notification.userInfo?[CharkleSyncNotifications.thumbnailAssetIDsKey] as? [UUID]
+            let hasBoards = notification.userInfo?[CharkleSyncNotifications.hasBoardsKey] as? Bool ?? false
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if kind == CharkleSyncNotifications.progressKindThumbnails, let thumbnailIDs, !thumbnailIDs.isEmpty {
+                    self.library.thumbnailLoader.invalidate(assetIDs: thumbnailIDs)
+                    return
+                }
+                if kind == CharkleSyncNotifications.progressKindMetadata {
+                    if hasBoards {
+                        self.progressiveMetadataPendingBoards = true
+                    }
+                    if self.progressiveMetadataRefreshTask != nil {
+                        self.progressiveMetadataNeedsAnotherPass = true
+                        return
+                    }
+                    self.progressiveMetadataRefreshTask = Task { @MainActor [weak self] in
+                        defer { self?.progressiveMetadataRefreshTask = nil }
+                        while let self, !Task.isCancelled {
+                            self.progressiveMetadataNeedsAnotherPass = false
+                            let refreshBoards = self.progressiveMetadataPendingBoards
+                            self.progressiveMetadataPendingBoards = false
+                            if self.coordinator.isMinimalCaptureMode {
+                                await self.library.refreshMinimalMetadataOnly()
+                                if refreshBoards {
+                                    await self.moodboards.refreshBoards()
+                                }
+                            } else {
+                                await self.library.refreshAll()
+                                if refreshBoards {
+                                    await self.moodboards.refreshBoards()
+                                    if let activeBoardID = self.moodboards.activeBoard?.id {
+                                        await self.moodboards.reloadActiveBoardIfNeeded(id: activeBoardID)
+                                    }
+                                }
+                            }
+                            if !self.progressiveMetadataNeedsAnotherPass {
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         syncCompletedObserver = NotificationCenter.default.addObserver(
             forName: CharkleSyncNotifications.didCompleteSync,
             object: nil,

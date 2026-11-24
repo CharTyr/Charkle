@@ -389,11 +389,20 @@ public struct SyncReport: Codable, Hashable, Sendable {
 public nonisolated enum CharkleSyncNotifications {
     public static let didCompleteSync = Notification.Name("com.charkle.sync.didCompleteSync")
     public static let didUpdateSyncStatus = Notification.Name("com.charkle.sync.didUpdateSyncStatus")
+    /// Posted during long syncs (especially fresh installs) as soon as metadata/folders/boards
+    /// or batches of remote thumbnails land locally so the gallery renders progressively instead
+    /// of waiting for full-resolution originals or the entire sync cycle to finish.
+    public static let didSyncProgressively = Notification.Name("com.charkle.sync.didSyncProgressively")
     public static let statusDataKey = "statusData"
     public static let discoveredCountKey = "discoveredCount"
     public static let downloadedOpsKey = "downloadedOps"
     public static let reconciledRenamesKey = "reconciledRenames"
     public static let updatedBoardsKey = "updatedBoards"
+    public static let progressKindKey = "progressKind"
+    public static let progressKindMetadata = "metadata"
+    public static let progressKindThumbnails = "thumbnails"
+    public static let thumbnailAssetIDsKey = "thumbnailAssetIDs"
+    public static let hasBoardsKey = "hasBoards"
 }
 
 public struct RemoteDriveFile: Codable, Hashable, Sendable {
@@ -408,6 +417,9 @@ public struct RemoteDriveFile: Codable, Hashable, Sendable {
     public let parents: [String]
     public let trashed: Bool
     public let webViewLink: String?
+    /// Transient server-generated thumbnail URL (e.g. Google Drive `thumbnailLink`).
+    /// Intentionally excluded from `Codable`, `Equatable`, and `Hashable` because CDN tokens rotate across listings.
+    public let thumbnailLink: String?
 
     public var isFolder: Bool { mimeType == Self.folderMimeType }
 
@@ -420,7 +432,8 @@ public struct RemoteDriveFile: Codable, Hashable, Sendable {
         md5Checksum: String? = nil,
         parents: [String] = [],
         trashed: Bool = false,
-        webViewLink: String? = nil
+        webViewLink: String? = nil,
+        thumbnailLink: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -431,6 +444,62 @@ public struct RemoteDriveFile: Codable, Hashable, Sendable {
         self.parents = parents
         self.trashed = trashed
         self.webViewLink = webViewLink
+        self.thumbnailLink = thumbnailLink
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, mimeType, size, modifiedTime, md5Checksum, parents, trashed, webViewLink
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        mimeType = try c.decode(String.self, forKey: .mimeType)
+        size = try c.decodeIfPresent(Int64.self, forKey: .size)
+        modifiedTime = try c.decodeIfPresent(Date.self, forKey: .modifiedTime)
+        md5Checksum = try c.decodeIfPresent(String.self, forKey: .md5Checksum)
+        parents = try c.decodeIfPresent([String].self, forKey: .parents) ?? []
+        trashed = try c.decodeIfPresent(Bool.self, forKey: .trashed) ?? false
+        webViewLink = try c.decodeIfPresent(String.self, forKey: .webViewLink)
+        thumbnailLink = nil
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(mimeType, forKey: .mimeType)
+        try c.encodeIfPresent(size, forKey: .size)
+        try c.encodeIfPresent(modifiedTime, forKey: .modifiedTime)
+        try c.encodeIfPresent(md5Checksum, forKey: .md5Checksum)
+        try c.encode(parents, forKey: .parents)
+        try c.encode(trashed, forKey: .trashed)
+        try c.encodeIfPresent(webViewLink, forKey: .webViewLink)
+    }
+
+    public static func == (lhs: RemoteDriveFile, rhs: RemoteDriveFile) -> Bool {
+        lhs.id == rhs.id
+            && lhs.name == rhs.name
+            && lhs.mimeType == rhs.mimeType
+            && lhs.size == rhs.size
+            && lhs.modifiedTime == rhs.modifiedTime
+            && lhs.md5Checksum == rhs.md5Checksum
+            && lhs.parents == rhs.parents
+            && lhs.trashed == rhs.trashed
+            && lhs.webViewLink == rhs.webViewLink
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(mimeType)
+        hasher.combine(size)
+        hasher.combine(modifiedTime)
+        hasher.combine(md5Checksum)
+        hasher.combine(parents)
+        hasher.combine(trashed)
+        hasher.combine(webViewLink)
     }
 }
 
@@ -519,6 +588,7 @@ public protocol DriveTransport: Sendable {
     func trashFile(fileID: String) async throws
     func resolveFolder(id: String) async throws -> RemoteDriveFile
     func listSharedFolders() async throws -> [RemoteDriveFile]
+    func downloadThumbnailData(for file: RemoteDriveFile, maxPixelSize: Int) async throws -> Data?
 }
 
 public extension DriveTransport {
@@ -534,5 +604,9 @@ public extension DriveTransport {
 
     func listSharedFolders() async throws -> [RemoteDriveFile] {
         []
+    }
+
+    func downloadThumbnailData(for file: RemoteDriveFile, maxPixelSize: Int) async throws -> Data? {
+        nil
     }
 }

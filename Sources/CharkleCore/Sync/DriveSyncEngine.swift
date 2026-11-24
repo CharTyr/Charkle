@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 
 public final actor DriveSyncEngine {
@@ -50,6 +51,29 @@ public final actor DriveSyncEngine {
         )
     }
 
+    private func notifyProgressiveMetadata(hasBoards: Bool) {
+        NotificationCenter.default.post(
+            name: CharkleSyncNotifications.didSyncProgressively,
+            object: nil,
+            userInfo: [
+                CharkleSyncNotifications.progressKindKey: CharkleSyncNotifications.progressKindMetadata,
+                CharkleSyncNotifications.hasBoardsKey: hasBoards
+            ]
+        )
+    }
+
+    private func notifyProgressiveThumbnails(_ assetIDs: [UUID]) {
+        guard !assetIDs.isEmpty else { return }
+        NotificationCenter.default.post(
+            name: CharkleSyncNotifications.didSyncProgressively,
+            object: nil,
+            userInfo: [
+                CharkleSyncNotifications.progressKindKey: CharkleSyncNotifications.progressKindThumbnails,
+                CharkleSyncNotifications.thumbnailAssetIDsKey: assetIDs
+            ]
+        )
+    }
+
     public func status() async -> SyncStatus {
         var status = currentStatus
         status.pendingOpCount = (try? await database.pendingOpCount()) ?? status.pendingOpCount
@@ -90,35 +114,64 @@ public final actor DriveSyncEngine {
         updateProgress(phase: .scanning, detail: "正在连接\(config.mode.localizedLabel)…", progress: 0.04, forceBroadcast: true)
         let start = ContinuousClock.now
         do {
-            let account = try await transport.accountInfo()
-            currentStatus.account = account
-            updateProgress(phase: .scanning, detail: "正在检查云端目录结构…", progress: 0.10, forceBroadcast: true)
             let sharedRootID = config.mode == .directAPIWithGDirect ? config.resolvedSharedFolderID : nil
             let rootPath = Self.resolvedRootPath(for: config)
-            let layoutResult = try await makeLayout(using: transport, rootPath: rootPath, sharedRootID: sharedRootID)
+            updateProgress(phase: .scanning, detail: "正在连接\(config.mode.localizedLabel)并检查目录…", progress: 0.06, forceBroadcast: true)
+            async let accountTask = transport.accountInfo()
+            async let layoutTask = makeLayout(using: transport, rootPath: rootPath, sharedRootID: sharedRootID)
+            let (account, layoutResult) = try await (accountTask, layoutTask)
+            currentStatus.account = account
             let layout = layoutResult.layout
             let scope = "remote." + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
-            try await updateManifest(layout, existingManifest: layoutResult.manifestFile, scope: scope, transport: transport)
 
             var report = SyncReport()
-            updateProgress(phase: .downloading(completed: 0, total: 0), detail: "正在拉取其他设备的变更记录…", progress: 0.16, forceBroadcast: true)
-            var pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
-            report.downloadedOps += pulled.count
-            var changedBoards = pulled.boards
+            updateProgress(phase: .downloading(completed: 0, total: 0), detail: "正在并行拉取元数据与目录结构…", progress: 0.12, forceBroadcast: true)
 
-            let pending = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
-            currentStatus.pendingOpCount = pending.count
-            updateProgress(phase: .scanning, detail: "正在扫描云端文件变更…", progress: 0.26, forceBroadcast: true)
-            let inventory = try await fetchInventory(
+            // Run independent read-only cloud discovery concurrently:
+            // manifest verification + thumbnail directory listing + folder inventory crawl + parallel ops pull.
+            async let manifestTask: Void = updateManifest(layout, existingManifest: layoutResult.manifestFile, scope: scope, transport: transport)
+            async let remoteThumbnailsTask: [String: RemoteDriveFile] = {
+                guard config.syncThumbnails else { return [:] }
+                return Self.keyedByNameStatic(try await transport.listFiles(inFolderID: layout.thumbnails))
+            }()
+            async let inventoryTask = fetchInventory(
                 layout,
                 transport: transport,
                 scope: scope,
                 forceFullCrawl: sharedRootID != nil
             )
-            let remoteThumbnails = config.syncThumbnails
-                ? keyedByName(try await transport.listFiles(inFolderID: layout.thumbnails))
-                : [:]
-            updateProgress(phase: .merging, detail: "正在比对云端与本地目录…", progress: 0.32, forceBroadcast: true)
+
+            var pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
+            report.downloadedOps += pulled.count
+            var changedBoards = pulled.boards
+            if pulled.count > 0 {
+                // Immediately surface folders, tags, titles, dimensions, dominant colors, and moodboards in the UI
+                // before waiting on full directory crawls, thumbnails, or any original downloads.
+                notifyProgressiveMetadata(hasBoards: !changedBoards.isEmpty)
+            }
+
+            try await manifestTask
+            let remoteThumbnails = try await remoteThumbnailsTask
+
+            // Stage 2 (Thumbnail-First Fast Hydration): download missing remote thumbnails BEFORE reconcile's
+            // heavy original downloads, uploads, or pinned-original fetches, ordered newest-first so the
+            // visible gallery fills with crisp imagery within seconds on a fresh install.
+            var prefetchedThumbnailStamps: [String: String]?
+            if config.syncThumbnails && !remoteThumbnails.isEmpty {
+                prefetchedThumbnailStamps = try await downloadMissingRemoteThumbnails(
+                    files: remoteThumbnails,
+                    dirty: nil,
+                    scope: scope,
+                    transport: transport,
+                    progressStart: 0.22,
+                    progressSpan: 0.22
+                )
+            }
+
+            let pending = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
+            currentStatus.pendingOpCount = pending.count
+            updateProgress(phase: .scanning, detail: "正在比对云端与本地目录…", progress: 0.46, forceBroadcast: true)
+            let inventory = try await inventoryTask
             let reconciled = try await reconcile(
                 inventory,
                 layout: layout,
@@ -145,7 +198,7 @@ public final actor DriveSyncEngine {
             }
 
             if !pending.isEmpty {
-                updateProgress(phase: .uploading(completed: 0, total: pending.count), detail: "准备上传本地新增与变更…", progress: 0.62, forceBroadcast: true)
+                updateProgress(phase: .uploading(completed: 0, total: pending.count), detail: "准备上传本地新增与变更…", progress: 0.68, forceBroadcast: true)
                 let uploadResult = try await uploadPhysical(for: pending.map { $0.1 }, layout: layout, transport: transport, scope: scope)
                 var inventoryMutated = false
                 if !uploadResult.removedFiles.isEmpty {
@@ -203,11 +256,20 @@ public final actor DriveSyncEngine {
             updateProgress(phase: .merging, detail: "正在同步情绪板与缩略图…", progress: 0.88, forceBroadcast: true)
             try await writeBoards(layout, transport: transport, scope: scope, changedBoards: changedBoards)
             if config.syncThumbnails {
-                try await syncThumbnails(layout, transport: transport, scope: scope, prefetchedRemoteFiles: remoteThumbnails)
+                try await syncThumbnails(
+                    layout,
+                    transport: transport,
+                    scope: scope,
+                    prefetchedRemoteFiles: remoteThumbnails,
+                    knownStamps: prefetchedThumbnailStamps
+                )
             }
             if config.syncEmbeddings {
                 updateProgress(phase: .merging, detail: "正在同步智能搜索索引…", progress: 0.94)
                 try await writeEmbeddings(layout, transport: transport)
+            }
+            if report.discoveredRemoteAssets > 0 || report.reconciledRenames > 0 || !changedBoards.isEmpty {
+                notifyProgressiveMetadata(hasBoards: !changedBoards.isEmpty)
             }
             try await fetchPinnedOriginals(using: transport)
             try await database.removeDeletedMedia(using: media)
@@ -455,7 +517,7 @@ public final actor DriveSyncEngine {
         let operation: SyncOperation
     }
 
-    private struct LogFile {
+    private struct LogFile: Sendable {
         let file: RemoteDriveFile
         let device: String
         let end: Int64
@@ -477,36 +539,105 @@ public final actor DriveSyncEngine {
         let files = try await transport.listFiles(inFolderID: layout.ops).compactMap(LogFile.init)
             .filter { $0.device != device }.sorted { ($0.device, $0.end, $0.file.id) < ($1.device, $1.end, $1.file.id) }
         var cursors: [String: Int64] = try await database.state(scope + ".deviceCursors") ?? [:]
+        let pendingEntries = files.filter { $0.end > (cursors[$0.device] ?? 0) }
         var downloaded = 0
         var boards = Set<UUID>()
-        for entry in files where entry.end > (cursors[entry.device] ?? 0) {
-            try Task.checkCancellation()
-            let data = try await transport.downloadData(fileID: entry.file.id)
-            let lines = try data.split(separator: 0x0A).map { try JSONDecoder().decode(LogLine.self, from: Data($0)) }
-            let previous = cursors[entry.device] ?? 0
-            guard !lines.isEmpty, lines.last?.seq == entry.end, lines.allSatisfy({ $0.operation.stamp.device == entry.device }),
-                  zip(lines, lines.dropFirst()).allSatisfy({ $0.seq < $1.seq }) else {
-                throw DriveTransportError.invalidResponse("Malformed sync operation shard \(entry.file.name).")
-            }
-            let unseen = lines.filter { $0.seq > previous }
-            cursors[entry.device] = entry.end
-            let updated = cursors
-            try await database.transaction { store in
-                for line in unseen {
-                    if case .vector = line.operation.change, !syncEmbeddings {
-                        try store.setState("disabled.vector.\(entry.device).\(line.seq)", line.operation)
-                    } else {
-                        try store.apply(line.operation)
+
+        if !pendingEntries.isEmpty {
+            let concurrency = Self.concurrencyLimit(for: transport, directDefault: 10)
+            let totalShards = pendingEntries.count
+            var completedShards = 0
+            // Download unseen op shards in bounded parallel chunks (keeps memory small & HTTP/2 saturated),
+            // then validate and apply strictly in deterministic `(device, end, file.id)` order inside batched transactions.
+            let chunkSize = 40
+            for chunkStart in stride(from: 0, to: totalShards, by: chunkSize) {
+                try Task.checkCancellation()
+                let chunkEnd = min(totalShards, chunkStart + chunkSize)
+                let indexedSlice = (chunkStart..<chunkEnd).map { (index: $0, entry: pendingEntries[$0]) }
+
+                struct DownloadedShard: Sendable {
+                    let index: Int
+                    let entry: LogFile
+                    let lines: [LogLine]
+                }
+
+                let downloadedChunk = try await Self.runBounded(items: indexedSlice, maxConcurrent: concurrency) { item -> DownloadedShard in
+                    try Task.checkCancellation()
+                    let data = try await transport.downloadData(fileID: item.entry.file.id)
+                    let decoder = JSONDecoder()
+                    let lines = try data.split(separator: 0x0A).map { try decoder.decode(LogLine.self, from: Data($0)) }
+                    guard !lines.isEmpty,
+                          lines.last?.seq == item.entry.end,
+                          lines.allSatisfy({ $0.operation.stamp.device == item.entry.device }),
+                          zip(lines, lines.dropFirst()).allSatisfy({ $0.seq < $1.seq }) else {
+                        throw DriveTransportError.invalidResponse("Malformed sync operation shard \(item.entry.file.name).")
+                    }
+                    return DownloadedShard(index: item.index, entry: item.entry, lines: lines)
+                }.sorted { $0.index < $1.index }
+
+                var pendingBatch: [(device: String, line: LogLine)] = []
+                pendingBatch.reserveCapacity(400)
+                var chunkBoards = Set<UUID>()
+
+                for shard in downloadedChunk {
+                    let previous = cursors[shard.entry.device] ?? 0
+                    let unseen = shard.lines.filter { $0.seq > previous }
+                    cursors[shard.entry.device] = shard.entry.end
+                    for line in unseen {
+                        pendingBatch.append((device: shard.entry.device, line: line))
+                        switch line.operation.change {
+                        case .board(let delta):
+                            boards.insert(delta.id)
+                            chunkBoards.insert(delta.id)
+                        case .deleteBoard(let id):
+                            boards.insert(id)
+                            chunkBoards.insert(id)
+                        default: break
+                        }
+                    }
+                    downloaded += unseen.count
+                    completedShards += 1
+                    if pendingBatch.count >= 400 {
+                        let batch = pendingBatch
+                        pendingBatch.removeAll(keepingCapacity: true)
+                        let updatedCursors = cursors
+                        try await database.transaction { store in
+                            for item in batch {
+                                if case .vector = item.line.operation.change, !syncEmbeddings {
+                                    try store.setState("disabled.vector.\(item.device).\(item.line.seq)", item.line.operation)
+                                } else {
+                                    try store.apply(item.line.operation)
+                                }
+                            }
+                            try store.setState(scope + ".deviceCursors", updatedCursors)
+                        }
                     }
                 }
-                try store.setState(scope + ".deviceCursors", updated)
-            }
-            downloaded += unseen.count
-            for line in unseen {
-                switch line.operation.change {
-                case .board(let delta): boards.insert(delta.id)
-                case .deleteBoard(let id): boards.insert(id)
-                default: break
+                if pendingBatch.isEmpty {
+                    let updatedCursors = cursors
+                    try await database.setState(scope + ".deviceCursors", updatedCursors)
+                } else {
+                    let batch = pendingBatch
+                    let updatedCursors = cursors
+                    try await database.transaction { store in
+                        for item in batch {
+                            if case .vector = item.line.operation.change, !syncEmbeddings {
+                                try store.setState("disabled.vector.\(item.device).\(item.line.seq)", item.line.operation)
+                            } else {
+                                try store.apply(item.line.operation)
+                            }
+                        }
+                        try store.setState(scope + ".deviceCursors", updatedCursors)
+                    }
+                }
+                let ratio = 0.12 + 0.10 * (Double(completedShards) / Double(max(1, totalShards)))
+                updateProgress(
+                    phase: .downloading(completed: completedShards, total: totalShards),
+                    detail: "拉取素材元数据 (\(completedShards)/\(totalShards))",
+                    progress: ratio
+                )
+                if totalShards > chunkSize && chunkEnd < totalShards {
+                    notifyProgressiveMetadata(hasBoards: !chunkBoards.isEmpty)
                 }
             }
         }
@@ -764,7 +895,8 @@ public final actor DriveSyncEngine {
         _ layout: Layout,
         transport: any DriveTransport,
         scope: String,
-        prefetchedRemoteFiles: [String: RemoteDriveFile]? = nil
+        prefetchedRemoteFiles: [String: RemoteDriveFile]? = nil,
+        knownStamps: [String: String]? = nil
     ) async throws {
         let files: [String: RemoteDriveFile]
         if let prefetchedRemoteFiles {
@@ -869,22 +1001,62 @@ public final actor DriveSyncEngine {
             }
         }
 
-        // 2. Download missing or updated remote thumbnails in bounded parallel
-        //    Check local MD5 first so switching transport scopes never re-downloads identical local thumbnails.
-        var stamps: [String: String] = try await database.state(scope + ".thumbnails") ?? [:]
+        // 2. Download any remaining missing or updated remote thumbnails (stragglers discovered after Stage 2)
+        _ = try await downloadMissingRemoteThumbnails(
+            files: files,
+            dirty: dirty,
+            scope: scope,
+            transport: transport,
+            progressStart: 0.91,
+            progressSpan: 0.03,
+            initialStamps: knownStamps
+        )
+    }
+
+    /// Downloads missing or updated `.grid520` remote thumbnails in newest-first (`created_at DESC`)
+    /// priority order with high HTTP/2 concurrency and progressive UI painting notifications so a fresh
+    /// install displays crisp top-of-gallery thumbnails within seconds.
+    @discardableResult
+    private func downloadMissingRemoteThumbnails(
+        files: [String: RemoteDriveFile],
+        dirty: [String: String]?,
+        scope: String,
+        transport: any DriveTransport,
+        progressStart: Double,
+        progressSpan: Double,
+        initialStamps: [String: String]? = nil
+    ) async throws -> [String: String] {
+        let dirtyMap: [String: String]
+        if let dirty {
+            dirtyMap = dirty
+        } else {
+            dirtyMap = try await database.state("projection.thumbnails") ?? [:]
+        }
+        let createdAtByID = try await database.assetCreatedAtByID()
+        var stamps: [String: String]
+        if let initialStamps {
+            stamps = initialStamps
+        } else {
+            stamps = try await database.state(scope + ".thumbnails") ?? [:]
+        }
         var stampsDirty = false
+
         struct ThumbDownloadJob: Sendable {
             let id: UUID
             let key: String
             let stamp: String
             let remoteID: String
             let destination: URL
+            let createdAt: Double
         }
+
         var downloadJobs: [ThumbDownloadJob] = []
+        downloadJobs.reserveCapacity(min(files.count, createdAtByID.count))
         for (name, file) in files where name.hasSuffix(".jpg") && !file.isFolder {
             guard let id = UUID(uuidString: String(name.dropLast(4))) else { continue }
+            guard let createdAt = createdAtByID[id] else { continue }
             let key = id.uuidString
-            guard dirty[key] == nil, existingAssetIDs.contains(id) else { continue }
+            guard dirtyMap[key] == nil else { continue }
             let stamp = file.md5Checksum ?? (file.id + String(file.modifiedTime?.timeIntervalSince1970 ?? 0))
             if let existingLocal = media.thumbnailURL(for: id, tier: .grid520) {
                 if stamps[key] == stamp { continue }
@@ -901,43 +1073,70 @@ public final actor DriveSyncEngine {
                 key: key,
                 stamp: stamp,
                 remoteID: file.id,
-                destination: media.thumbnailPath(id)
+                destination: media.thumbnailPath(id),
+                createdAt: createdAt
             ))
         }
+
+        // Prioritize newest / first-screen assets first so the top viewport becomes visually complete immediately.
+        downloadJobs.sort {
+            if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+            return $0.key < $1.key
+        }
+
         if !downloadJobs.isEmpty {
+            let concurrency = Self.concurrencyLimit(for: transport, directDefault: 12)
             let totalDownloads = downloadJobs.count
             var completedDownloads = 0
             var unsavedCount = 0
+            var pendingNotifyIDs: [UUID] = []
+            pendingNotifyIDs.reserveCapacity(32)
+            var didInitialPaintFlush = false
+            var lastNotifyAt = ContinuousClock.now
+
             updateProgress(
                 phase: .downloading(completed: 0, total: totalDownloads),
-                detail: "拉取缩略图 (0/\(totalDownloads))",
-                progress: 0.91,
+                detail: "优先拉取缩略图 (0/\(totalDownloads))",
+                progress: progressStart,
                 forceBroadcast: true
             )
-            try await withThrowingTaskGroup(of: (String, String).self) { group in
+            try await withThrowingTaskGroup(of: (UUID, String, String).self) { group in
                 var nextIndex = 0
-                let enqueue: (inout ThrowingTaskGroup<(String, String), Error>) -> Void = { grp in
+                let enqueue: (inout ThrowingTaskGroup<(UUID, String, String), Error>) -> Void = { grp in
                     guard nextIndex < totalDownloads else { return }
                     let job = downloadJobs[nextIndex]
                     nextIndex += 1
                     grp.addTask {
                         let data = try await transport.downloadData(fileID: job.remoteID)
                         try data.write(to: job.destination, options: .atomic)
-                        return (job.key, job.stamp)
+                        return (job.id, job.key, job.stamp)
                     }
                 }
                 for _ in 0..<min(concurrency, totalDownloads) { enqueue(&group) }
-                while let (key, stamp) = try await group.next() {
+                while let (assetID, key, stamp) = try await group.next() {
                     enqueue(&group)
                     stamps[key] = stamp
                     stampsDirty = true
                     completedDownloads += 1
                     unsavedCount += 1
-                    if unsavedCount >= 25 {
+                    pendingNotifyIDs.append(assetID)
+
+                    let now = ContinuousClock.now
+                    let flushThreshold = didInitialPaintFlush ? 32 : 12
+                    let elapsedEnough = lastNotifyAt.duration(to: now) >= .milliseconds(500)
+                    if pendingNotifyIDs.count >= flushThreshold || (elapsedEnough && !pendingNotifyIDs.isEmpty) {
+                        let batch = pendingNotifyIDs
+                        pendingNotifyIDs.removeAll(keepingCapacity: true)
+                        didInitialPaintFlush = true
+                        lastNotifyAt = now
+                        notifyProgressiveThumbnails(batch)
+                    }
+
+                    if unsavedCount >= 150 {
                         unsavedCount = 0
                         try await database.setState(scope + ".thumbnails", stamps)
                     }
-                    let ratio = 0.91 + 0.03 * (Double(completedDownloads) / Double(max(1, totalDownloads)))
+                    let ratio = progressStart + progressSpan * (Double(completedDownloads) / Double(max(1, totalDownloads)))
                     updateProgress(
                         phase: .downloading(completed: completedDownloads, total: totalDownloads),
                         detail: "拉取缩略图 (\(completedDownloads)/\(totalDownloads))",
@@ -945,10 +1144,14 @@ public final actor DriveSyncEngine {
                     )
                 }
             }
+            if !pendingNotifyIDs.isEmpty {
+                notifyProgressiveThumbnails(pendingNotifyIDs)
+            }
         }
         if stampsDirty {
             try await database.setState(scope + ".thumbnails", stamps)
         }
+        return stamps
     }
 
     private func write(_ data: Data, name: String, mime: String, parent: String, existing: RemoteDriveFile?,
@@ -1089,9 +1292,47 @@ public final actor DriveSyncEngine {
     }
 
     private func keyedByName(_ files: [RemoteDriveFile]) -> [String: RemoteDriveFile] {
+        Self.keyedByNameStatic(files)
+    }
+
+    private nonisolated static func keyedByNameStatic(_ files: [RemoteDriveFile]) -> [String: RemoteDriveFile] {
         Dictionary(files.filter { !$0.isFolder }.sorted {
             ($0.modifiedTime ?? .distantPast, $0.id) > ($1.modifiedTime ?? .distantPast, $1.id)
         }.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Validates raw image bytes returned by a server-side thumbnail endpoint and normalizes them
+    /// into a compact `<= 520px` JPEG suitable for `.grid520` caching without touching the full original.
+    private nonisolated static func normalizedThumbnailJPEG(from data: Data, maxPixel: Int = 520) -> Data? {
+        autoreleasepool {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary),
+                  CGImageSourceGetCount(source) > 0 else {
+                return nil
+            }
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: false,
+                kCGImageSourceThumbnailMaxPixelSize: max(200, maxPixel)
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                return nil
+            }
+            let output = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(output, UTType.jpeg.identifier as CFString, 1, nil) else {
+                return nil
+            }
+            CGImageDestinationAddImage(
+                destination,
+                cgImage,
+                [kCGImageDestinationLossyCompressionQuality: 0.84] as CFDictionary
+            )
+            guard CGImageDestinationFinalize(destination), output.length > 0 else {
+                return nil
+            }
+            return output as Data
+        }
     }
 
     private func trashIfPresent(_ id: String, transport: any DriveTransport) async throws {
@@ -1366,38 +1607,46 @@ extension DriveSyncEngine {
             }
         }
 
-        var folderIDs: [String: UUID] = [:]
-        var folders = try await database.fetchFolders()
-        for file in update.orderedFolders where file.id != layout.inbox {
-            let parent = file.parents.first.flatMap { folderIDs[$0] }
-            let found = folders.firstIndex(where: { $0.driveFolderID == file.id })
-                ?? folders.firstIndex(where: { $0.parentID == parent && $0.name == file.name })
-            let id = found.map { folders[$0].id } ?? DriveFiles.stableUUID("folder:" + file.id)
-            let sortOrder = folders.count
-            let record = try await database.transaction { [pendingFolders] store -> FolderRecord? in
-                if try store.isTombstoned("folder", id: id) { return nil }
+        // Batch all remote folder reconciliations into a single SQLite transaction (instead of 1 transaction per folder).
+        let folderIDs: [String: UUID] = try await database.transaction { [pendingFolders, layout] store -> [String: UUID] in
+            var map: [String: UUID] = [:]
+            var folders = try store.fetchFolders()
+            map.reserveCapacity(update.orderedFolders.count)
+            for file in update.orderedFolders where file.id != layout.inbox {
+                let parent = file.parents.first.flatMap { map[$0] }
+                let found = folders.firstIndex(where: { $0.driveFolderID == file.id })
+                    ?? folders.firstIndex(where: { $0.parentID == parent && $0.name == file.name })
+                let id = found.map { folders[$0].id } ?? DriveFiles.stableUUID("folder:" + file.id)
+                if try store.isTombstoned("folder", id: id) { continue }
+                let sortOrder = folders.count
                 var folder = try store.folder(id: id) ?? FolderRecord(id: id, name: file.name, parentID: parent, sortOrder: sortOrder)
                 let before = folder
-                if !pendingFolders.contains(id), update.previous[file.id]?.name != file.name || update.previous[file.id]?.parents != file.parents {
+                let prev = update.previous[file.id]
+                let changedMetadata = prev?.name != file.name || prev?.parents != file.parents
+                if !pendingFolders.contains(id), changedMetadata {
                     folder.name = file.name
                     folder.parentID = parent
                 }
+                let driveBindingChanged = folder.driveFolderID != file.id
                 folder.driveFolderID = file.id
-                if before.name != folder.name || before.parentID != folder.parentID || found == nil {
+                let needsRecord = before.name != folder.name || before.parentID != folder.parentID || found == nil
+                if needsRecord {
                     folder.updatedAt = file.modifiedTime ?? .now
                     try store.record(.folder(folder), projectLocation: false)
+                    if let stored = try store.folder(id: id) {
+                        folder = stored
+                        folder.driveFolderID = file.id
+                    }
+                    try store.put(folder)
+                } else if driveBindingChanged {
+                    try store.put(folder)
                 }
-                if let stored = try store.folder(id: id) {
-                    folder = stored
-                    folder.driveFolderID = file.id
-                }
-                try store.put(folder)
-                return folder
+                map[file.id] = folder.id
+                if let found { folders[found] = folder } else { folders.append(folder) }
             }
-            guard let record else { continue }
-            folderIDs[file.id] = record.id
-            if let found { folders[found] = record } else { folders.append(record) }
+            return map
         }
+
         let thumbnails: [String: RemoteDriveFile]
         if let remoteThumbnails {
             thumbnails = remoteThumbnails
@@ -1409,6 +1658,9 @@ extension DriveSyncEngine {
         var renames = 0
         var deferredFileIDs = Set<String>()
         var removedFileIDs = Set<String>()
+
+        // Preload bindings, assets, and deletion/hidden marker prefixes in 4 bulk reads
+        // instead of issuing O(N) individual SQLite queries during fresh-install reconciliation.
         let bindings = try await database.assetDriveBindings()
         var linked = Dictionary(uniqueKeysWithValues: bindings)
         let visible = update.current.files.values.filter { file in
@@ -1418,19 +1670,57 @@ extension DriveSyncEngine {
             return media.thumbnailURL(for: id, tier: .grid520) == nil
         }.sorted { $0.id < $1.id }
 
+        let allLocalAssets = try await database.fetchAssets(matching: FilterCriteria(includeTrashed: true))
+        var assetsByID: [UUID: AssetRecord] = [:]
+        assetsByID.reserveCapacity(allLocalAssets.count)
+        for asset in allLocalAssets { assetsByID[asset.id] = asset }
+
+        let deletedDriveEntries: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.drive.", as: Bool.self)) ?? []
+        var deletedDriveIDs = Set<String>()
+        for (key, value) in deletedDriveEntries where value {
+            deletedDriveIDs.insert(String(key.dropFirst("deleted.drive.".count)))
+        }
+        let deletedMD5Entries: [(String, DeletedAssetFingerprint)] = (try? await database.states(withPrefix: "deleted.md5.", as: DeletedAssetFingerprint.self)) ?? []
+        var deletedMD5s: [String: DeletedAssetFingerprint] = [:]
+        deletedMD5s.reserveCapacity(deletedMD5Entries.count)
+        for (key, fp) in deletedMD5Entries {
+            deletedMD5s[String(key.dropFirst("deleted.md5.".count))] = fp
+        }
+        let remoteHiddenEntries: [(String, Bool)] = (try? await database.states(withPrefix: "remote.hidden.", as: Bool.self)) ?? []
+        var remoteHiddenIDs = Set<String>()
+        for (key, value) in remoteHiddenEntries where value {
+            remoteHiddenIDs.insert(String(key.dropFirst("remote.hidden.".count)))
+        }
+
+        struct PendingLocationUpdate: Sendable {
+            let assetID: UUID
+            let file: RemoteDriveFile
+            let previous: RemoteDriveFile?
+            let folderID: UUID?
+        }
+        struct ThumbnailLinkFallbackJob: Sendable {
+            let file: RemoteDriveFile
+            let existing: AssetRecord
+            let folderID: UUID?
+        }
+
         // Phase 1: fast local metadata reconciliation & filter out assets that don't require remote bytes
         var downloadJobs: [RemoteDownloadJob] = []
         downloadJobs.reserveCapacity(visible.count)
+        var locationUpdates: [PendingLocationUpdate] = []
+        var thumbnailLinkJobs: [ThumbnailLinkFallbackJob] = []
+        var remoteTrashFromDeleted: [(fileID: String, persistDeletedMarker: Bool)] = []
+
         for file in visible {
             try Task.checkCancellation()
             if pendingDeletedDriveIDs.contains(file.id) {
                 removedFileIDs.insert(file.id)
                 continue
             }
-            if try await database.state("deleted.drive." + file.id, as: Bool.self) == true {
+            if deletedDriveIDs.contains(file.id) {
                 let compatibleWithTransport = isMountedTransport ? file.id.hasPrefix("mounted-") : !file.id.hasPrefix("mounted-")
                 if compatibleWithTransport {
-                    try await Self.trashIfPresentStatic(file.id, transport: transport)
+                    remoteTrashFromDeleted.append((file.id, false))
                 }
                 removedFileIDs.insert(file.id)
                 continue
@@ -1441,22 +1731,31 @@ extension DriveSyncEngine {
             }
             let previous = update.previous[file.id]
             let folderID = file.parents.first.flatMap { folderIDs[$0] }
-            let existing = try await linked[file.id].mapAsync { try await database.asset(id: $0) } ?? nil
+            let existing = linked[file.id].flatMap { assetsByID[$0] }
             if existing == nil,
                let md5 = file.md5Checksum, !md5.isEmpty,
-               let deleted = try await database.state("deleted.md5." + md5, as: DeletedAssetFingerprint.self),
+               let deleted = deletedMD5s[md5],
                (try await database.assets(contentHash: deleted.sha256)).isEmpty {
-                try await Self.trashIfPresentStatic(file.id, transport: transport)
-                try? await database.setState("deleted.drive." + file.id, true)
+                remoteTrashFromDeleted.append((file.id, true))
                 removedFileIDs.insert(file.id)
                 continue
             }
             let changedContent = Self.contentChanged(before: previous, after: file)
             if let existing, !changedContent || previous == nil {
-                if previous != file || existing.folderID == nil && folderID != nil {
-                    let outcome = try await reconcileLocation(file, previous: previous, existing: existing, folderID: folderID,
-                                                              pendingMove: pendingMoves.contains(existing.id))
-                    renames += outcome ? 1 : 0
+                // Only enqueue a SQLite location update if fileName, folderID, or hidden-trash restoration actually differs.
+                if !pendingMoves.contains(existing.id), (previous != file || (existing.folderID == nil && folderID != nil)) {
+                    let remoteName = Self.originalName(file)
+                    let nameNeedsUpdate = previous?.name != file.name && existing.fileName != remoteName
+                    let folderNeedsUpdate = previous?.parents != file.parents && existing.folderID != folderID
+                    let unhideNeedsUpdate = remoteHiddenIDs.contains(file.id)
+                    if nameNeedsUpdate || folderNeedsUpdate || unhideNeedsUpdate {
+                        locationUpdates.append(PendingLocationUpdate(
+                            assetID: existing.id,
+                            file: file,
+                            previous: previous,
+                            folderID: folderID
+                        ))
+                    }
                 }
                 // Trashed records keep their metadata and permanent thumbnail without fetching bytes.
                 if existing.isTrashed || media.thumbnailURL(for: existing.id, tier: .grid520) != nil
@@ -1472,8 +1771,88 @@ extension DriveSyncEngine {
                     _ = try await persistRemoteMedia(rendered, matching: existing, temporary: nil, analysis: analysis, config: config)
                     continue
                 }
+                // Fast-path for already-synced Charkle assets missing `.charkle/thumbnails/<uuid>.jpg`:
+                // fetch Google Drive's server-generated thumbnail (~40ms) instead of pulling the multi-MB original.
+                if file.thumbnailLink != nil {
+                    thumbnailLinkJobs.append(ThumbnailLinkFallbackJob(file: file, existing: existing, folderID: folderID))
+                    continue
+                }
             }
             downloadJobs.append(RemoteDownloadJob(file: file, folderID: folderID, existing: existing))
+        }
+
+        if !remoteTrashFromDeleted.isEmpty {
+            let trashConcurrency = Self.concurrencyLimit(for: transport, directDefault: 6)
+            let markerIDsToSave = try await Self.runBounded(items: remoteTrashFromDeleted, maxConcurrent: trashConcurrency) { item -> String? in
+                try await Self.trashIfPresentStatic(item.fileID, transport: transport)
+                return item.persistDeletedMarker ? item.fileID : nil
+            }.compactMap { $0 }
+            if !markerIDsToSave.isEmpty {
+                try? await database.transaction { store in
+                    for fileID in markerIDsToSave {
+                        try store.setState("deleted.drive." + fileID, true)
+                    }
+                }
+            }
+        }
+
+        // Apply all genuine location/rename reconciliations in ONE batched SQLite transaction.
+        if !locationUpdates.isEmpty {
+            let updates = locationUpdates
+            let appliedRenames = try await database.transaction { store -> Int in
+                var count = 0
+                for item in updates {
+                    guard var current = try store.asset(id: item.assetID), current.driveFileID == item.file.id else { continue }
+                    let before = current
+                    let filename = Self.originalName(item.file)
+                    if item.previous?.name != item.file.name, current.fileName != filename {
+                        if current.title == (current.fileName as NSString).deletingPathExtension {
+                            current.title = (filename as NSString).deletingPathExtension
+                        }
+                        current.fileName = filename
+                    }
+                    if item.previous?.parents != item.file.parents {
+                        current.folderID = item.folderID
+                    }
+                    let hiddenKey = "remote.hidden." + item.file.id
+                    if try store.state(hiddenKey, as: Bool.self) == true {
+                        current.isTrashed = false
+                        try store.setState(hiddenKey, Optional<Bool>.none)
+                    }
+                    if current != before {
+                        _ = try store.saveAssetLocally(current, projectLocation: false)
+                        count += 1
+                    }
+                }
+                return count
+            }
+            renames += appliedRenames
+        }
+
+        // Phase 1.5: fast parallel Google Drive `thumbnailLink` hydration for synced assets lacking `.charkle/thumbnails/<uuid>.jpg`.
+        if !thumbnailLinkJobs.isEmpty {
+            let thumbConcurrency = Self.concurrencyLimit(for: transport, directDefault: 12)
+            let media = self.media
+            let fallbackResults = try await Self.runBounded(items: thumbnailLinkJobs, maxConcurrent: thumbConcurrency) { job -> (ThumbnailLinkFallbackJob, Bool) in
+                if let rawData = try? await transport.downloadThumbnailData(for: job.file, maxPixelSize: 640),
+                   let jpeg = Self.normalizedThumbnailJPEG(from: rawData, maxPixel: 520) {
+                    try jpeg.write(to: media.thumbnailPath(job.existing.id), options: .atomic)
+                    return (job, true)
+                }
+                return (job, false)
+            }
+            var hydratedIDs: [UUID] = []
+            hydratedIDs.reserveCapacity(fallbackResults.count)
+            for (job, ok) in fallbackResults {
+                if ok {
+                    hydratedIDs.append(job.existing.id)
+                } else {
+                    downloadJobs.append(RemoteDownloadJob(file: job.file, folderID: job.folderID, existing: job.existing))
+                }
+            }
+            if !hydratedIDs.isEmpty {
+                notifyProgressiveThumbnails(hydratedIDs)
+            }
         }
 
         // Phase 2: bounded parallel remote download + thumbnail rendering + Apple Vision analysis
@@ -1481,6 +1860,8 @@ extension DriveSyncEngine {
             let concurrency = Self.concurrencyLimit(for: transport, directDefault: 6)
             let totalDownloads = downloadJobs.count
             var completedDownloads = 0
+            var sinceLastProgressiveNotify = 0
+            var lastProgressiveNotifyAt = ContinuousClock.now
             let database = self.database
             let media = self.media
             let intelligence = self.intelligence
@@ -1489,7 +1870,7 @@ extension DriveSyncEngine {
             updateProgress(
                 phase: .downloading(completed: 0, total: totalDownloads),
                 detail: "并行拉取 \(totalDownloads) 项素材…",
-                progress: 0.34,
+                progress: 0.48,
                 forceBroadcast: true
             )
 
@@ -1518,7 +1899,7 @@ extension DriveSyncEngine {
                 while let outcome = try await group.next() {
                     launchNext(&group)
                     completedDownloads += 1
-                    let ratio = 0.34 + 0.26 * (Double(completedDownloads) / Double(max(1, totalDownloads)))
+                    let ratio = 0.48 + 0.18 * (Double(completedDownloads) / Double(max(1, totalDownloads)))
                     switch outcome {
                     case .prepared(let prepared):
                         defer { try? FileManager.default.removeItem(at: prepared.folderURL) }
@@ -1538,6 +1919,13 @@ extension DriveSyncEngine {
                             }
                             if let existing = prepared.existing, existing.fileName != saved.fileName || existing.folderID != saved.folderID {
                                 renames += 1
+                            }
+                            sinceLastProgressiveNotify += 1
+                            let now = ContinuousClock.now
+                            if sinceLastProgressiveNotify >= 12 || lastProgressiveNotifyAt.duration(to: now) >= .milliseconds(800) {
+                                sinceLastProgressiveNotify = 0
+                                lastProgressiveNotifyAt = now
+                                notifyProgressiveMetadata(hasBoards: false)
                             }
                         }
                         updateProgress(
@@ -1570,6 +1958,9 @@ extension DriveSyncEngine {
                     }
                 }
             }
+            if sinceLastProgressiveNotify > 0 {
+                notifyProgressiveMetadata(hasBoards: false)
+            }
         }
 
         for (id, gone) in update.previous where update.current.files[id] == nil && !gone.isFolder {
@@ -1589,30 +1980,6 @@ extension DriveSyncEngine {
         if let a = before.md5Checksum, let b = after.md5Checksum { return a != b }
         if let a = before.size, let b = after.size, a != b { return true }
         return before.name == after.name && before.parents == after.parents && before.modifiedTime != after.modifiedTime
-    }
-
-    private func reconcileLocation(_ file: RemoteDriveFile, previous: RemoteDriveFile?, existing asset: AssetRecord,
-                                   folderID: UUID?, pendingMove: Bool) async throws -> Bool {
-        guard !pendingMove else { return false }
-        let filename = Self.originalName(file)
-        return try await database.transaction { store in
-            guard var current = try store.asset(id: asset.id), current.driveFileID == file.id else { return false }
-            let before = current
-            if previous?.name != file.name, current.fileName != filename {
-                if current.title == (current.fileName as NSString).deletingPathExtension {
-                    current.title = (filename as NSString).deletingPathExtension
-                }
-                current.fileName = filename
-            }
-            if previous?.parents != file.parents { current.folderID = folderID }
-            let hiddenKey = "remote.hidden." + file.id
-            if try store.state(hiddenKey, as: Bool.self) == true {
-                current.isTrashed = false
-                try store.setState(hiddenKey, Optional<Bool>.none)
-            }
-            if current != before { _ = try store.saveAssetLocally(current, projectLocation: false) }
-            return current != before
-        }
     }
 
     private static func originalName(_ file: RemoteDriveFile) -> String {

@@ -294,6 +294,20 @@ public final actor LibraryDatabase {
         return set
     }
 
+    /// Lightweight SQLite projection returning `(assetID -> created)` without decoding JSON payloads,
+    /// enabling thumbnail sync to prioritize newest / first-screen gallery cards first.
+    func assetCreatedAtByID() throws -> [UUID: Double] {
+        let rows = try connection.query("SELECT id, created FROM assets") { row in
+            (UUID(uuidString: row.text(0)), row.real(1))
+        }
+        var map: [UUID: Double] = [:]
+        map.reserveCapacity(rows.count)
+        for (id, createdAt) in rows {
+            if let id { map[id] = createdAt }
+        }
+        return map
+    }
+
     func assetsWithPayloadContaining(_ literal: String, includeTrashed: Bool = true) throws -> [AssetRecord] {
         syncExternalDataVersionIfNeeded()
         let sql = includeTrashed
