@@ -2136,6 +2136,15 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     className="pointer-events-none absolute z-30 rounded-[var(--win-radius-control)] border border-[var(--accent)] bg-[var(--accent)]/20"
                   />
                 )}
+
+                {(isDropTargeted || processingMessage || statusMessage) && (
+                  <div
+                    data-testid="shelf-waterfall-drop-overlay"
+                    className="pointer-events-none absolute inset-1.5 z-40 rounded-[var(--win-radius-card)] bg-black/78 backdrop-blur-md border-[1.5px] border-dashed border-[var(--accent)] flex items-center justify-center px-4"
+                  >
+                    {renderDropWellContent(isSideDock)}
+                  </div>
+                )}
               </div>
             </div>
           )}

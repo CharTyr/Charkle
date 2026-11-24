@@ -799,9 +799,9 @@ describe('Round 7 — Moodboard Removal, Multi-Select Portal Isolation & Liquid 
       const topFilterHost = screen.getByTestId('top-filter-host');
       expect(within(topFilterHost).queryByRole('textbox', { name: '搜索素材' })).toBeNull();
 
-      // Visual filter bar uses crisp elevated Fluent card
+      // Visual filter bar uses Fluent 2 translucent .win-acrylic-bar matching sticky header
       const filterBar = screen.getByTestId('visual-filter-bar');
-      expect(filterBar.className).toContain('bg-[var(--bg-elevated)]');
+      expect(filterBar.className).toContain('win-acrylic-bar');
       expect(filterBar.getAttribute('data-adapt-glass')).toBeNull();
 
       // Ring tuning panel uses Fluent 2 .win-acrylic

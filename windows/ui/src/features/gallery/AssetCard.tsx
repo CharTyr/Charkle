@@ -814,6 +814,7 @@ export const AssetCard: React.FC<AssetCardProps> = ({
               <img
                 src={cachedOriginalUrl}
                 alt={asset.title}
+                draggable={false}
                 onLoad={() => setHoverMediaReady(true)}
                 onError={() => setHoverPreviewFailed(true)}
                 className={[

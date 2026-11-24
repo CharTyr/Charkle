@@ -146,7 +146,9 @@ fn normalize_shell_path(path: &Path) -> PathBuf {
 #[cfg(target_os = "windows")]
 mod win_ole {
     use super::*;
-    use crate::shelf_win::{set_shelf_allow_activate, set_shelf_outbound_dragging};
+    use crate::shelf_win::{
+        get_shelf_allow_activate, set_shelf_allow_activate, set_shelf_outbound_dragging,
+    };
     use std::ffi::c_void;
     use windows::core::{implement, HRESULT, PCWSTR};
     use windows::Win32::Foundation::{
@@ -172,9 +174,9 @@ mod win_ole {
         IShellItemArray, SHCreateShellItemArrayFromIDLists, SHDRAGIMAGE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId,
-        PostMessageW, SetForegroundWindow, SetWindowLongPtrW, GWL_EXSTYLE, SM_SWAPBUTTON,
-        WM_CANCELMODE, WS_EX_NOACTIVATE,
+        EnumChildWindows, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
+        GetWindowThreadProcessId, PostMessageW, SetForegroundWindow, SetWindowLongPtrW,
+        GWL_EXSTYLE, SM_SWAPBUTTON, WM_CANCELMODE, WS_EX_NOACTIVATE,
     };
 
     fn primary_mouse_vk() -> i32 {
@@ -208,6 +210,7 @@ mod win_ole {
     struct ShelfDragGuard {
         hwnd_raw: isize,
         orig_ex_style: Option<isize>,
+        orig_allow_activate: bool,
         is_shelf: bool,
     }
 
@@ -217,7 +220,7 @@ mod win_ole {
                 return;
             }
             set_shelf_outbound_dragging(self.hwnd_raw, false);
-            set_shelf_allow_activate(self.hwnd_raw, false);
+            set_shelf_allow_activate(self.hwnd_raw, self.orig_allow_activate);
             if let Some(orig) = self.orig_ex_style {
                 let hwnd = HWND(self.hwnd_raw as *mut c_void);
                 // SAFETY: Restoring original WS_EX_NOACTIVATE style on our own shelf HWND.
@@ -381,6 +384,11 @@ mod win_ole {
         let _ole_guard = OleGuard(init_hr.is_ok());
 
         let mut orig_ex_style = None;
+        let orig_allow_activate = if is_shelf_window && source_hwnd != 0 {
+            get_shelf_allow_activate(source_hwnd)
+        } else {
+            false
+        };
         if source_hwnd != 0 {
             let hwnd = HWND(source_hwnd as *mut c_void);
             unsafe {
@@ -395,35 +403,64 @@ mod win_ole {
                     );
                 }
 
-                // Release any lingering mouse capture and briefly promote our UI thread to foreground
-                // so `ole32!DoDragDrop`'s internal `SetCapture` succeeds globally across all monitors.
-                // Detach `AttachThreadInput` BEFORE `DoDragDrop` so drop targets never deadlock!
-                let fg = GetForegroundWindow();
+                // Collect child WebView2 HWNDs (`Chrome_WidgetWin_0/1`, `Chrome_RenderWidgetHostHWND`)
+                // so we can cleanly cancel cross-process Chromium mouse capture before `DoDragDrop`
+                // calls `SetCapture` on our UI thread!
+                let mut child_hwnds: Vec<HWND> = Vec::new();
+                unsafe extern "system" fn collect_child_hwnd(child: HWND, lparam: LPARAM) -> BOOL {
+                    let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+                    list.push(child);
+                    BOOL::from(true)
+                }
+                let _ = EnumChildWindows(
+                    hwnd,
+                    Some(collect_child_hwnd),
+                    LPARAM(&mut child_hwnds as *mut Vec<HWND> as isize),
+                );
+
+                // Release any lingering mouse capture across foreground AND WebView2 child threads,
+                // then promote our UI thread to foreground so `ole32!DoDragDrop`'s internal
+                // `SetCapture` succeeds globally across all monitors. Always detach
+                // `AttachThreadInput` BEFORE `DoDragDrop` so drop targets never deadlock!
                 let cur_tid = GetCurrentThreadId();
-                let fg_tid = if !fg.0.is_null() {
-                    GetWindowThreadProcessId(fg, None)
-                } else {
-                    0
-                };
-                if fg_tid != 0 && fg_tid != cur_tid {
-                    let attached = AttachThreadInput(cur_tid, fg_tid, true).as_bool();
-                    let _ = SetForegroundWindow(hwnd);
-                    let _ = ReleaseCapture();
-                    if attached {
-                        let _ = AttachThreadInput(cur_tid, fg_tid, false);
+                let mut remote_tids: Vec<u32> = Vec::new();
+                let fg = GetForegroundWindow();
+                if !fg.0.is_null() {
+                    let fg_tid = GetWindowThreadProcessId(fg, None);
+                    if fg_tid != 0 && fg_tid != cur_tid {
+                        remote_tids.push(fg_tid);
                     }
-                } else {
-                    let _ = ReleaseCapture();
+                }
+                for &child in &child_hwnds {
+                    let child_tid = GetWindowThreadProcessId(child, None);
+                    if child_tid != 0 && child_tid != cur_tid && !remote_tids.contains(&child_tid) {
+                        remote_tids.push(child_tid);
+                    }
                 }
 
-                // Inform WebView2 cleanly to cancel its internal pointer capture
+                for &tid in &remote_tids {
+                    let attached = AttachThreadInput(cur_tid, tid, true).as_bool();
+                    let _ = ReleaseCapture();
+                    let _ = SetForegroundWindow(hwnd);
+                    if attached {
+                        let _ = AttachThreadInput(cur_tid, tid, false);
+                    }
+                }
+                let _ = ReleaseCapture();
+                let _ = SetForegroundWindow(hwnd);
+
+                // Inform root and WebView2 child HWNDs cleanly to cancel internal pointer capture
                 let _ = PostMessageW(hwnd, WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                for child in child_hwnds {
+                    let _ = PostMessageW(child, WM_CANCELMODE, WPARAM(0), LPARAM(0));
+                }
             }
         }
 
         let _shelf_guard = ShelfDragGuard {
             hwnd_raw: source_hwnd,
             orig_ex_style,
+            orig_allow_activate,
             is_shelf: is_shelf_window,
         };
 
@@ -482,6 +519,13 @@ mod win_ole {
                 &mut performed,
             )
         };
+        tracing::info!(
+            count = paths.len(),
+            is_shelf = is_shelf_window,
+            hr = format_args!("0x{:08X}", hr.0 as u32),
+            performed = performed.0,
+            "Completed native Win32 OLE outbound DoDragDrop"
+        );
 
         if hr == DRAGDROP_S_DROP {
             if (performed.0 & DROPEFFECT_MOVE.0) != 0 {
@@ -524,5 +568,69 @@ mod tests {
             .map(String::from_utf16_lossy)
             .collect();
         assert_eq!(parts, vec![r"C:\Temp\a.png", r"C:\Temp\海报.jpg"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shell_data_object_builds_valid_hdrop_and_preview_for_real_file() {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Com::{
+            IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL,
+        };
+        use windows::Win32::System::Ole::{
+            OleInitialize, OleUninitialize, ReleaseStgMedium, CF_HDROP,
+        };
+        use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+        use windows::Win32::UI::Shell::{
+            BHID_DataObject, DragQueryFileW, ILCreateFromPathW, ILFree, IShellItemArray,
+            SHCreateShellItemArrayFromIDLists, HDROP,
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_path = dir.path().join("charkle_drag_test.png");
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([42, 96, 224, 255]));
+        img.save(&file_path).expect("save png");
+
+        let clean = normalize_shell_path(&file_path);
+        let init_hr = unsafe { OleInitialize(None) };
+        assert!(init_hr.is_ok(), "OleInitialize failed: {init_hr:?}");
+
+        let wide: Vec<u16> = clean
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let pidl: *mut ITEMIDLIST = unsafe { ILCreateFromPathW(PCWSTR(wide.as_ptr())) };
+        assert!(
+            !pidl.is_null(),
+            "ILCreateFromPathW returned null for {clean:?}"
+        );
+
+        let list = [pidl.cast_const()];
+        let item_array: IShellItemArray =
+            unsafe { SHCreateShellItemArrayFromIDLists(&list) }.expect("shell item array");
+        let data_object: IDataObject =
+            unsafe { item_array.BindToHandler(None, &BHID_DataObject) }.expect("BHID_DataObject");
+
+        let fmt = FORMATETC {
+            cfFormat: CF_HDROP.0,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        };
+        let mut medium = unsafe { data_object.GetData(&fmt) }.expect("CF_HDROP GetData");
+        let hdrop = HDROP(unsafe { medium.u.hGlobal.0 });
+        let count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+        assert_eq!(count, 1);
+
+        let preview = decode_drag_preview_thumbnail(&file_path);
+        assert!(preview.is_some(), "expected decoded drag preview");
+
+        unsafe {
+            ReleaseStgMedium(&mut medium);
+            ILFree(Some(pidl.cast_const()));
+            OleUninitialize();
+        }
     }
 }

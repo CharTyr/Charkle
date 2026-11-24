@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Menu as BaseMenu } from '@base-ui/react/menu';
 import { ContextMenu as BaseContextMenu } from '@base-ui/react/context-menu';
 import { Checkmark16Regular, ChevronRight16Regular } from '@fluentui/react-icons';
@@ -18,6 +18,43 @@ function createVirtualAnchor(point: { x: number; y: number }) {
       toJSON: () => ({}),
     }),
   };
+}
+
+/**
+ * Wraps an imperative `HTMLElement` anchor so if its parent momentarily toggles `display: none`
+ * (e.g. a hover-only row button losing `:hover` while its menu is open), Floating UI keeps the
+ * element's last real non-zero `DOMRect` instead of jumping to `(0, 0)` top-left.
+ */
+function useResilientElementAnchor(
+  anchorEl: HTMLElement | null | undefined,
+  open: boolean | undefined,
+) {
+  const lastRectRef = useRef<DOMRect | null>(null);
+
+  useEffect(() => {
+    if (open === false) {
+      lastRectRef.current = null;
+    }
+  }, [open]);
+
+  return useMemo(() => {
+    if (!anchorEl) return null;
+    const initial = anchorEl.getBoundingClientRect();
+    if (initial.width > 0 || initial.height > 0) {
+      lastRectRef.current = initial;
+    }
+    return {
+      contextElement: anchorEl,
+      getBoundingClientRect: () => {
+        const rect = anchorEl.getBoundingClientRect();
+        if (rect.width > 0 || rect.height > 0) {
+          lastRectRef.current = rect;
+          return rect;
+        }
+        return lastRectRef.current ?? rect;
+      },
+    };
+  }, [anchorEl]);
 }
 
 const stopSurfacePropagation = {
@@ -75,8 +112,9 @@ export const DropdownMenu: React.FC<DropdownMenuProps> = ({
     () => (anchorPoint ? createVirtualAnchor(anchorPoint) : null),
     [anchorPoint?.x, anchorPoint?.y],
   );
+  const resilientAnchor = useResilientElementAnchor(anchorEl, open);
 
-  const anchor = virtualAnchor ?? anchorEl ?? undefined;
+  const anchor = virtualAnchor ?? resilientAnchor ?? undefined;
 
   return (
     <BaseMenu.Root
@@ -106,6 +144,7 @@ export const DropdownMenu: React.FC<DropdownMenuProps> = ({
           align={align}
           sideOffset={anchorPoint ? 2 : sideOffset}
           collisionPadding={10}
+          sticky
           positionMethod="fixed"
           className="z-[150] outline-none"
         >

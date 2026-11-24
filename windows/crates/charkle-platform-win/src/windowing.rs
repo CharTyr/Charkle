@@ -30,6 +30,10 @@ pub const WM_DWMCOLORIZATIONCOLORCHANGED_MSG: u32 = 0x0320;
 /// `WM_NCACTIVATE` `lParam` value (`-1`) telling `DefWindowProcW` to update active state
 /// without repainting any non-client caption bar or title text.
 pub const WM_NCACTIVATE_NO_REPAINT_LPARAM: isize = -1;
+/// `SetWindowThemeAttribute(WTA_NONCLIENT)` mask suppressing `uxtheme.dll` caption bar,
+/// window icon, sysmenu chrome, and help glyph painting (`WTNCA_NODRAWCAPTION |
+/// WTNCA_NODRAWICON | WTNCA_NOSYSMENU | WTNCA_NOMIRRORHELP` = `0x0000_000F`).
+pub const WTNCA_SUPPRESS_ALL_FLAGS: u32 = 0x0000_000F;
 
 /// Standard Win32 `WM_NCHITTEST` resize edge/corner constants (stable ABI across all Windows versions).
 pub const HIT_LEFT: isize = 10; // HTLEFT
@@ -103,6 +107,12 @@ pub const fn should_suppress_nc_paint_message(msg: u32) -> bool {
 /// active/focus state tracking while `DefWindowProcW` skips all non-client caption redraws.
 pub const fn nc_activate_no_repaint_lparam() -> isize {
     WM_NCACTIVATE_NO_REPAINT_LPARAM
+}
+
+/// Returns the `SetWindowThemeAttribute(WTA_NONCLIENT)` flags suppressing all legacy `uxtheme`
+/// non-client titlebar, icon, sysmenu, and help painting behind our frameless Mica surface.
+pub const fn nonclient_theme_suppression_flags() -> u32 {
+    WTNCA_SUPPRESS_ALL_FLAGS
 }
 
 /// Returns `true` for Win32 system appearance messages (`WM_SETTINGCHANGE`, `WM_THEMECHANGED`,
@@ -218,6 +228,12 @@ fn window_dark_modes() -> &'static Mutex<HashMap<isize, bool>> {
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(target_os = "windows")]
+fn window_glass_surfaces() -> &'static Mutex<HashMap<isize, bool>> {
+    static MAP: OnceLock<Mutex<HashMap<isize, bool>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Updates the tracked physical client rect of the custom titlebar's Maximize button
 /// so Win32 `WM_NCHITTEST` returns `HTMAXBUTTON` for native Windows 11 Snap Layouts.
 pub fn update_maximize_button_rect(hwnd: isize, rect: Option<ClientRect>) {
@@ -287,28 +303,88 @@ mod win32_impl {
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
-        DWMSBT_TABBEDWINDOW, DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT, DWMWA_SYSTEMBACKDROP_TYPE,
-        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMNCRENDERINGPOLICY, DWMNCRP_ENABLED,
+        DWMSBT_MAINWINDOW, DWMSBT_TABBEDWINDOW, DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT,
+        DWMWA_NCRENDERING_POLICY, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
-    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::Graphics::Gdi::{
+        FillRect, GetDCEx, GetStockObject, PatBlt, ReleaseDC, ScreenToClient, BLACKNESS,
+        BLACK_BRUSH, DCX_CACHE, DCX_WINDOW, HBRUSH, HDC,
+    };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-    use windows::Win32::UI::Controls::MARGINS;
+    use windows::Win32::UI::Controls::{
+        SetWindowThemeAttribute, MARGINS, WTA_NONCLIENT, WTA_OPTIONS,
+    };
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_F4;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, GetWindowLongW, IsZoomed, PostMessageW, SetWindowLongW, SetWindowPos,
-        ShowWindow, SystemParametersInfoW, GWL_STYLE, HTMAXBUTTON, SC_CLOSE,
+        GetClientRect, GetWindowLongW, GetWindowRect, IsZoomed, PostMessageW, SetWindowLongW,
+        SetWindowPos, ShowWindow, SystemParametersInfoW, GWL_STYLE, HTMAXBUTTON, SC_CLOSE,
         SPI_GETCLIENTAREAANIMATION, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
         SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-        WM_CLOSE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-        WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN,
-        WS_VISIBLE,
+        WM_CLOSE, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
+        WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT, WM_SIZE, WM_STYLECHANGING,
+        WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_WINDOWPOSCHANGED, WS_VISIBLE,
     };
 
     const SNAP_SUBCLASS_ID: usize = 0x4348_4B31; // "CHK1"
+
+    fn is_glass_surface_active(hwnd_key: isize) -> bool {
+        window_glass_surfaces()
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&hwnd_key).copied())
+            .unwrap_or(false)
+    }
+
+    /// Zeros out the parent HWND's GDI redirection bitmap (`BLACKNESS` = `0x00000000` alpha-0 on
+    /// extended DWM glass) without clipping DirectComposition WebView2 children, guaranteeing no
+    /// legacy `uxtheme` Aero Basic titlebar or 7px blue frame pixels can ever bleed through our
+    /// transparent Mica Alt titlebar and sidebar.
+    unsafe fn clear_window_glass_surface(hwnd: HWND) {
+        if !is_glass_surface_active(hwnd.0 as isize) {
+            return;
+        }
+        let mut wr = RECT::default();
+        if GetWindowRect(hwnd, &mut wr).is_err() {
+            return;
+        }
+        let width = wr.right - wr.left;
+        let height = wr.bottom - wr.top;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let hdc = GetDCEx(hwnd, None, DCX_WINDOW | DCX_CACHE);
+        if !hdc.is_invalid() {
+            let _ = PatBlt(hdc, 0, 0, width, height, BLACKNESS);
+            let _ = ReleaseDC(hwnd, hdc);
+        }
+    }
+
+    unsafe fn suppress_nonclient_theme_chrome(hwnd: HWND) {
+        let nc_policy: DWMNCRENDERINGPOLICY = DWMNCRP_ENABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            std::ptr::from_ref(&nc_policy).cast::<c_void>(),
+            size_of::<DWMNCRENDERINGPOLICY>() as u32,
+        );
+
+        let flags = nonclient_theme_suppression_flags();
+        let theme_opts = WTA_OPTIONS {
+            dwFlags: flags,
+            dwMask: flags,
+        };
+        let _ = SetWindowThemeAttribute(
+            hwnd,
+            WTA_NONCLIENT,
+            std::ptr::from_ref(&theme_opts).cast::<c_void>(),
+            size_of::<WTA_OPTIONS>() as u32,
+        );
+    }
 
     #[repr(C)]
     struct RtlOsVersionInfoW {
@@ -443,6 +519,11 @@ mod win32_impl {
             }
             let hwnd = HWND(hwnd_raw as *mut c_void);
             unsafe {
+                // Force DWM non-client rendering enabled + suppress uxtheme caption/icon/sysmenu
+                // chrome BEFORE any SWP_FRAMECHANGED so uxtheme never paints the legacy Aero Basic
+                // blue titlebar or 7px frame behind our transparent Mica Alt surface.
+                suppress_nonclient_theme_chrome(hwnd);
+
                 // Strip WS_SYSMENU once (idempotent) so Windows 11 uDWM.dll never synthesizes
                 // native Minimize/Maximize/Close glyphs behind our custom titlebar buttons on
                 // the transparent Mica Alt surface (especially when maximized).
@@ -471,6 +552,7 @@ mod win32_impl {
                     );
                 }
 
+                let mut glass_enabled = false;
                 if ver.build >= WIN11_22H2_BUILD {
                     let corner = DWMWCP_ROUND;
                     let _ = DwmSetWindowAttribute(
@@ -499,6 +581,7 @@ mod win32_impl {
                         cyBottomHeight: -1,
                     };
                     let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+                    glass_enabled = true;
 
                     // Register Mica Alt (`DWMSBT_TABBEDWINDOW`) on Win11 22H2+ regardless of the
                     // current `EnableTransparency` toggle so Windows DWM manages live wallpaper
@@ -525,6 +608,13 @@ mod win32_impl {
                     if !applied {
                         backdrop = BackdropKind::SolidFallback;
                     }
+                }
+
+                if let Ok(mut glass_map) = window_glass_surfaces().lock() {
+                    glass_map.insert(hwnd_raw, glass_enabled);
+                }
+                if glass_enabled {
+                    clear_window_glass_surface(hwnd);
                 }
             }
         }
@@ -577,17 +667,42 @@ mod win32_impl {
                     return LRESULT(0);
                 }
             }
+            WM_ERASEBKGND => {
+                // Keep the parent HWND's GDI backing surface pure transparent black (`0x00000000`)
+                // whenever DWM extended glass (`Mica Alt`) is active so legacy GDI pixels never bleed.
+                if is_glass_surface_active(hwnd_key) {
+                    let hdc = HDC(wparam.0 as *mut c_void);
+                    if !hdc.is_invalid() {
+                        let mut rc = RECT::default();
+                        if GetClientRect(hwnd, &mut rc).is_ok() {
+                            let black_brush = HBRUSH(GetStockObject(BLACK_BRUSH).0);
+                            let _ = FillRect(hdc, &rc, black_brush);
+                        }
+                    }
+                    return LRESULT(1);
+                }
+            }
             WM_NCACTIVATE => {
                 // Forward lParam = -1 so the windowing layer preserves exact active/focus state
-                // (inspecting wParam) while DefWindowProcW skips all non-client caption redraws
-                // (preventing the classic blue "Charkle" titlebar from bleeding through on focus
-                // transitions).
-                return DefSubclassProc(hwnd, msg, wparam, LPARAM(nc_activate_no_repaint_lparam()));
+                // (inspecting wParam) while DefWindowProcW skips all non-client caption redraws,
+                // then immediately clear any stray GDI redirection pixels back to glass alpha 0.
+                let res =
+                    DefSubclassProc(hwnd, msg, wparam, LPARAM(nc_activate_no_repaint_lparam()));
+                clear_window_glass_surface(hwnd);
+                return res;
             }
             m if should_suppress_nc_paint_message(m) => {
                 // Suppress legacy GDI WM_NCPAINT and uxtheme WM_NCUAHDRAWCAPTION (0x00AE) /
                 // WM_NCUAHDRAWFRAME (0x00AF) painting over the frameless Mica Alt surface.
+                clear_window_glass_surface(hwnd);
                 return LRESULT(0);
+            }
+            WM_SIZE | WM_WINDOWPOSCHANGED => {
+                // Wipe any synchronous uxtheme non-client redraws produced during maximize <->
+                // restored transitions or resize frame adjustments before DWM composites.
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                clear_window_glass_surface(hwnd);
+                return res;
             }
             WM_SETTEXT | WM_SETICON => {
                 // Suppress DefWindowProcW's non-client caption redraw on title/icon updates while
@@ -599,6 +714,7 @@ mod win32_impl {
                     let res = DefSubclassProc(hwnd, msg, wparam, lparam);
                     let after = GetWindowLongW(hwnd, GWL_STYLE) as u32;
                     let _ = SetWindowLongW(hwnd, GWL_STYLE, (after | WS_VISIBLE.0) as i32);
+                    clear_window_glass_surface(hwnd);
                     return res;
                 }
             }
@@ -612,6 +728,13 @@ mod win32_impl {
                 // Keep Taskbar Close working cleanly without WS_SYSMENU.
                 let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
                 return LRESULT(0);
+            }
+            WM_SYSCOMMAND => {
+                // SC_RESTORE / SC_MAXIMIZE / SC_MINIMIZE can invoke DefWindowProcW's internal
+                // DrawFrame path; clear the GDI glass backing surface right after completion.
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
+                clear_window_glass_surface(hwnd);
+                return res;
             }
             WM_NCHITTEST => {
                 // Extract signed 16-bit screen coordinates (supports multi-monitor negative X/Y)
@@ -699,6 +822,9 @@ mod win32_impl {
                 unregister_surface_change_callback(hwnd_key);
                 if let Ok(mut modes) = window_dark_modes().lock() {
                     modes.remove(&hwnd_key);
+                }
+                if let Ok(mut glass_map) = window_glass_surfaces().lock() {
+                    glass_map.remove(&hwnd_key);
                 }
                 let _ = RemoveWindowSubclass(hwnd, Some(snap_subclass_proc), uid_subclass);
             }
@@ -858,10 +984,17 @@ mod tests {
 
         #[cfg(target_os = "windows")]
         {
+            use windows::Win32::UI::Controls::{
+                WTNCA_NODRAWCAPTION, WTNCA_NODRAWICON, WTNCA_NOMIRRORHELP, WTNCA_NOSYSMENU,
+            };
             use windows::Win32::UI::WindowsAndMessaging::{WM_NCACTIVATE, WM_NCPAINT};
             assert_eq!(WM_NCPAINT_MSG, WM_NCPAINT);
             assert!(should_suppress_nc_paint_message(WM_NCPAINT));
             assert!(!should_suppress_nc_paint_message(WM_NCACTIVATE));
+            assert_eq!(
+                nonclient_theme_suppression_flags(),
+                WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON | WTNCA_NOSYSMENU | WTNCA_NOMIRRORHELP
+            );
         }
     }
 

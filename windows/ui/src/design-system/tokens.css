@@ -96,7 +96,9 @@
 
   /* Fluent 2 Elevation & Smoke Scrim */
   --win-acrylic-bg: rgba(252, 252, 252, 0.85);
-  --win-acrylic-header-bg: rgba(246, 246, 245, 0.82);
+  --win-acrylic-header-bg: rgba(246, 246, 245, 0.80);
+  --win-acrylic-bar-bg: rgba(248, 248, 247, 0.76);
+  --win-acrylic-bar-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
   --win-acrylic-shadow:
     0 8px 24px rgba(0, 0, 0, 0.14),
     0 0 0 1px var(--win-stroke-flyout);
@@ -223,7 +225,9 @@
   --danger-soft: rgba(242, 88, 77, 0.16);
 
   --win-acrylic-bg: rgba(36, 38, 44, 0.86);
-  --win-acrylic-header-bg: rgba(20, 21, 23, 0.82);
+  --win-acrylic-header-bg: rgba(20, 21, 23, 0.80);
+  --win-acrylic-bar-bg: rgba(28, 30, 35, 0.76);
+  --win-acrylic-bar-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
   --win-acrylic-shadow:
     0 8px 24px rgba(0, 0, 0, 0.38),
     0 0 0 1px var(--win-stroke-flyout);
@@ -440,6 +444,15 @@ textarea {
   border-bottom: 1px solid var(--win-stroke-divider);
 }
 
+.win-acrylic-bar {
+  color: var(--text-primary);
+  background-color: var(--win-acrylic-bar-bg);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid var(--win-stroke-flyout);
+  box-shadow: var(--win-acrylic-bar-shadow);
+}
+
 .win-acrylic-dark {
   --text-primary: #F5F6F8;
   --text-secondary: rgba(245, 246, 248, 0.78);
@@ -489,6 +502,14 @@ textarea {
     border-bottom: 1px solid var(--win-stroke-divider);
   }
 
+  .win-acrylic-bar {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--win-stroke-card);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  }
+
   .win-acrylic-dark {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -518,6 +539,14 @@ textarea {
   backdrop-filter: none;
   background-color: var(--bg-gallery);
   border-bottom: 1px solid var(--win-stroke-divider);
+}
+
+:root[data-backdrop="solidFallback"] .win-acrylic-bar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--win-stroke-card);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 :root[data-backdrop="solidFallback"] .win-acrylic-dark {
@@ -555,6 +584,7 @@ textarea {
 @media (forced-colors: active) {
   .win-acrylic,
   .win-acrylic-header,
+  .win-acrylic-bar,
   .win-acrylic-dark {
     border: 1px solid CanvasText;
     background-color: Canvas;

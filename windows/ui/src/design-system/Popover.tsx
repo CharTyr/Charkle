@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { Button } from './Button';
 
@@ -87,7 +87,33 @@ export const Popover: React.FC<PopoverProps> = ({
     [anchorPoint?.x, anchorPoint?.y],
   );
 
-  const anchor = virtualAnchor ?? anchorEl ?? undefined;
+  const lastRectRef = useRef<DOMRect | null>(null);
+  useEffect(() => {
+    if (!open) {
+      lastRectRef.current = null;
+    }
+  }, [open]);
+
+  const resilientAnchor = useMemo(() => {
+    if (!anchorEl) return null;
+    const initial = anchorEl.getBoundingClientRect();
+    if (initial.width > 0 || initial.height > 0) {
+      lastRectRef.current = initial;
+    }
+    return {
+      contextElement: anchorEl,
+      getBoundingClientRect: () => {
+        const rect = anchorEl.getBoundingClientRect();
+        if (rect.width > 0 || rect.height > 0) {
+          lastRectRef.current = rect;
+          return rect;
+        }
+        return lastRectRef.current ?? rect;
+      },
+    };
+  }, [anchorEl]);
+
+  const anchor = virtualAnchor ?? resilientAnchor ?? undefined;
 
   return (
     <BasePopover.Root
@@ -116,6 +142,7 @@ export const Popover: React.FC<PopoverProps> = ({
           align={align}
           sideOffset={anchorPoint ? 2 : offset}
           collisionPadding={10}
+          sticky
           positionMethod="fixed"
           className="z-[120] outline-none"
         >

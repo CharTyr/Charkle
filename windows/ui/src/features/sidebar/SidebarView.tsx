@@ -1358,11 +1358,21 @@ export const SidebarView: React.FC = () => {
                       />
                       <span className="truncate flex-1 min-w-0">{sf.name}</span>
                       {matchCount > 0 && (
-                        <span className="text-[11px] text-[var(--text-tertiary)] charkle-tabular group-hover:hidden">
+                        <span
+                          className={[
+                            'text-[11px] text-[var(--text-tertiary)] charkle-tabular',
+                            deletingSmartId === sf.id ? 'hidden' : 'group-hover:hidden',
+                          ].join(' ')}
+                        >
                           {matchCount}
                         </span>
                       )}
-                      <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                      <div
+                        className={[
+                          'items-center gap-0.5 shrink-0',
+                          deletingSmartId === sf.id ? 'flex' : 'hidden group-hover:flex',
+                        ].join(' ')}
+                      >
                         <button
                           type="button"
                           aria-label={`编辑智能文件夹 ${sf.name}`}

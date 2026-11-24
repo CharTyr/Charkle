@@ -363,17 +363,30 @@ const FolderRow: React.FC<FolderRowProps> = ({
             {isPinnedOffline && (
               <span
                 title="文件夹素材始终保留在本地"
-                className="text-[var(--text-tertiary)] shrink-0 group-hover:hidden"
+                className={[
+                  'text-[var(--text-tertiary)] shrink-0',
+                  menuOpen || customOpen ? 'hidden' : 'group-hover:hidden',
+                ].join(' ')}
               >
                 <ArrowDownload16Regular className="w-3 h-3" />
               </span>
             )}
             {liveCount > 0 && (
-              <span className="text-[11px] text-[var(--text-tertiary)] charkle-tabular group-hover:hidden pr-1">
+              <span
+                className={[
+                  'text-[11px] text-[var(--text-tertiary)] charkle-tabular pr-1',
+                  menuOpen || customOpen ? 'hidden' : 'group-hover:hidden',
+                ].join(' ')}
+              >
                 {liveCount}
               </span>
             )}
-            <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+            <div
+              className={[
+                'items-center gap-0.5 shrink-0',
+                menuOpen || customOpen ? 'flex' : 'hidden group-hover:flex',
+              ].join(' ')}
+            >
               <button
                 type="button"
                 title={`在「${folder.name}」内新建子文件夹`}
@@ -390,12 +403,18 @@ const FolderRow: React.FC<FolderRowProps> = ({
                 ref={moreBtnRef}
                 type="button"
                 aria-label={`更多操作：${folder.name}`}
+                aria-expanded={menuOpen}
                 onClick={(e) => {
                   e.stopPropagation();
                   setContextPoint(null);
                   setMenuOpen((v) => !v);
                 }}
-                className="h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+                className={[
+                  'h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] cursor-pointer',
+                  menuOpen || customOpen
+                    ? 'bg-[var(--win-subtle-active)] text-[var(--text-primary)]'
+                    : 'text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)]',
+                ].join(' ')}
               >
                 <MoreHorizontal16Regular className="w-3.5 h-3.5" />
               </button>
@@ -413,8 +432,8 @@ const FolderRow: React.FC<FolderRowProps> = ({
         }}
         anchorEl={contextPoint ? null : moreBtnRef.current}
         anchorPoint={contextPoint}
-        side="bottom"
-        align="end"
+        side={contextPoint ? 'bottom' : 'right'}
+        align="start"
         className="w-[236px]"
       >
         {!isBatch && cutAssetIds.length > 0 && (

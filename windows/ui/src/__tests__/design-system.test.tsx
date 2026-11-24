@@ -12,7 +12,11 @@ import {
 } from '../design-system';
 import { computeMasonryLayout } from '../features/gallery/VerticalMasonryView';
 import { computeJustifiedLayout } from '../features/gallery/HorizontalJustifiedView';
-import type { AssetRecord } from '../types/domain';
+import { TopFilterCapsule } from '../features/gallery/TopFilterCapsule';
+import { FolderTree } from '../features/sidebar/FolderTree';
+import { isPastOutboundBoundary } from '../features/dnd/PointerDragContext';
+import { useCoordinatorStore } from '../stores';
+import type { AssetRecord, FolderRecord } from '../types/domain';
 
 function makeDummyAsset(index: number): AssetRecord {
   return {
@@ -178,5 +182,62 @@ describe('Charkle Design System & Layout Algorithms', () => {
     const justified = computeJustifiedLayout(batch, 1200, 210, 12);
     expect(justified.items.length).toBe(10_000);
     expect(justified.totalHeight).toBeGreaterThan(100_000);
+  });
+
+  it('triggers outbound OLE drag past viewport edges while preserving internal drop targets', () => {
+    // Exiting viewport ALWAYS hands off to native OLE drag even if last target was set
+    expect(isPastOutboundBoundary(-5, 300, 1360, 860, true)).toBe(true);
+    expect(isPastOutboundBoundary(1362, 300, 1360, 860, false)).toBe(true);
+    expect(isPastOutboundBoundary(500, -1, 1360, 860, false)).toBe(true);
+    expect(isPastOutboundBoundary(500, 860, 1360, 860, true)).toBe(true);
+    // 8px outer rim triggers outbound OLE when not over an internal drop target
+    expect(isPastOutboundBoundary(6, 300, 1360, 860, false)).toBe(true);
+    expect(isPastOutboundBoundary(1354, 300, 1360, 860, false)).toBe(true);
+    // Hovering a sidebar folder near the left edge stays internal
+    expect(isPastOutboundBoundary(6, 300, 1360, 860, true)).toBe(false);
+    // Interior drag stays internal
+    expect(isPastOutboundBoundary(400, 400, 1360, 860, false)).toBe(false);
+  });
+
+  it('keeps FolderTree "..." action button laid out while its menu is open and uses acrylic filter bar', () => {
+    const folder: FolderRecord = {
+      id: 'folder-typo',
+      name: 'Typography',
+      parentID: null,
+      sortOrder: 0,
+      colorHex: null,
+      customSymbol: null,
+      assetCount: 2,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    render(
+      <FolderTree
+        folders={[folder]}
+        activeFolderId={null}
+        onSelectFolder={vi.fn()}
+        onCreateSubfolder={vi.fn().mockResolvedValue(undefined)}
+        onRenameFolder={vi.fn().mockResolvedValue(undefined)}
+        onMoveFolder={vi.fn().mockResolvedValue(undefined)}
+        onUpdateAppearance={vi.fn().mockResolvedValue(undefined)}
+        onDeleteFolder={vi.fn().mockResolvedValue(undefined)}
+        onDropAssets={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const moreBtn = screen.getByRole('button', { name: '更多操作：Typography' });
+    const actionsWrapper = moreBtn.parentElement!;
+    expect(actionsWrapper.className).toContain('hidden');
+
+    fireEvent.click(moreBtn);
+    expect(actionsWrapper.className).toContain('flex');
+    expect(actionsWrapper.className).not.toContain('hidden');
+    expect(moreBtn.getAttribute('aria-expanded')).toBe('true');
+
+    useCoordinatorStore.setState({ visualFilterBarOpen: true });
+    render(<TopFilterCapsule galleryViewportWidth={1100} sectionTitle="收件箱" itemCount={7} />);
+    const filterBar = screen.getByTestId('visual-filter-bar');
+    expect(filterBar.className).toContain('win-acrylic-bar');
+    useCoordinatorStore.setState({ visualFilterBarOpen: false });
   });
 });

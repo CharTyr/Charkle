@@ -236,7 +236,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
     <>
       <div
         data-testid="inbox-triage-bar"
-        className="pointer-events-auto charkle-reveal-top min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex items-center gap-2"
+        className="pointer-events-auto charkle-reveal-top win-acrylic-bar min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] flex items-center gap-2"
       >
         {/* Left: Inbox count */}
         <div className="flex items-center gap-1.5 shrink-0">

@@ -487,12 +487,12 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
         </m.div>
       </header>
 
-      {/* Expandable Fluent 2 Visual Filter Card */}
+      {/* Expandable Fluent 2 Visual Filter Card (matching Sticky Header Acrylic glass) */}
       {filterOpen && (
         <div className="pointer-events-none px-4 pb-2">
           <div
             data-testid="visual-filter-bar"
-            className="pointer-events-auto charkle-reveal-top rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_6px_20px_rgba(0,0,0,0.08)] px-3.5 py-2.5 flex flex-col gap-2.5"
+            className="pointer-events-auto charkle-reveal-top win-acrylic-bar rounded-[var(--win-radius-card)] px-3.5 py-2.5 flex flex-col gap-2.5"
           >
             {!showSortInRow && (
               <div className="flex items-center gap-2 flex-wrap">
@@ -751,7 +751,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
               key={kind}
               type="button"
               onClick={() => toggleKind(kind)}
-              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-acrylic-bar inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>{mediaKindLabel(kind)}</span>
               <Dismiss16Regular className="w-3 h-3" />
@@ -762,7 +762,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             <button
               type="button"
               onClick={() => void setCriteria({ selectedColorHex: null }, destination)}
-              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-acrylic-bar inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-[var(--win-radius-control)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span
                 className="h-3 w-3 rounded-full border border-black/15"
@@ -777,7 +777,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             <button
               type="button"
               onClick={() => void setCriteria({ shape: null }, destination)}
-              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-acrylic-bar inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>
                 画幅：
@@ -791,7 +791,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             <button
               type="button"
               onClick={() => void setCriteria({ minRating: 0 }, destination)}
-              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-acrylic-bar inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>评分 {criteria.minRating}+</span>
               <Dismiss16Regular className="w-3 h-3" />
@@ -803,7 +803,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
               key={tag}
               type="button"
               onClick={() => toggleTag(tag)}
-              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-acrylic-bar inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>#{tag}</span>
               <Dismiss16Regular className="w-3 h-3" />
@@ -814,7 +814,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             <button
               type="button"
               onClick={() => void setCriteria({ onlyPinnedOffline: false }, destination)}
-              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-acrylic-bar inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>已保留在本地</span>
               <Dismiss16Regular className="w-3 h-3" />

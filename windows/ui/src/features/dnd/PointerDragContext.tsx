@@ -6,6 +6,7 @@ import {
   ReOrderDotsVertical16Regular,
 } from '@fluentui/react-icons';
 import { getTransport, isTauriRuntime } from '../../api/transport';
+import { useCoordinatorStore } from '../../stores';
 import { useDndStore, type ActivePointerDrag, type DragDropTarget } from './dndStore';
 
 const DRAG_THRESHOLD_PX = 6;
@@ -112,13 +113,28 @@ function hitTestPointerTarget(
   return null;
 }
 
-function isNearWindowBoundary(clientX: number, clientY: number): boolean {
-  const margin = 4;
+export function isPastOutboundBoundary(
+  clientX: number,
+  clientY: number,
+  viewportW: number,
+  viewportH: number,
+  hasInternalTarget: boolean,
+): boolean {
+  // Strictly outside viewport bounds ALWAYS hands off to native Win32 OLE DoDragDrop.
+  if (clientX < 0 || clientY < 0 || clientX >= viewportW || clientY >= viewportH) {
+    return true;
+  }
+  // When NOT hovering an internal sidebar drop target, also hand off within the 8px outer rim
+  // (safely inside the 6px Win32 frameless resize edge so normal drag speeds never slip past).
+  if (hasInternalTarget) {
+    return false;
+  }
+  const margin = 8;
   return (
     clientX <= margin ||
     clientY <= margin ||
-    clientX >= window.innerWidth - margin ||
-    clientY >= window.innerHeight - margin
+    clientX >= viewportW - margin ||
+    clientY >= viewportH - margin
   );
 }
 
@@ -137,18 +153,46 @@ export function beginPointerDrag(
 
   activeDragCleanup?.();
 
+  const pointerId = e.pointerId;
+  const captureRoot = typeof document !== 'undefined' ? document.documentElement : null;
   const startX = e.clientX;
   const startY = e.clientY;
   let active = false;
+  let pointerCaptured = false;
   let oleLaunched = false;
 
+  const acquirePointerCapture = () => {
+    if (pointerCaptured || !captureRoot) return;
+    try {
+      captureRoot.setPointerCapture?.(pointerId);
+      pointerCaptured = true;
+    } catch {
+      // Synthetic test events / non-primary pointers may not support pointer capture
+    }
+  };
+
+  const releasePointerCaptureSafe = () => {
+    if (!pointerCaptured || !captureRoot) return;
+    pointerCaptured = false;
+    try {
+      if (captureRoot.hasPointerCapture?.(pointerId)) {
+        captureRoot.releasePointerCapture?.(pointerId);
+      }
+    } catch {
+      // Ignored
+    }
+  };
+
   const cleanup = () => {
+    releasePointerCaptureSafe();
     window.removeEventListener('pointermove', onMove, true);
     window.removeEventListener('pointerup', onUp, true);
     window.removeEventListener('pointercancel', onCancel, true);
     window.removeEventListener('keydown', onKeyDown, true);
     window.removeEventListener('blur', onCancel);
     window.removeEventListener('contextmenu', onCancel, true);
+    captureRoot?.removeEventListener('pointerleave', onLeaveViewport);
+    captureRoot?.removeEventListener('mouseleave', onLeaveViewport);
     if (activeDragCleanup === cleanup) {
       activeDragCleanup = null;
     }
@@ -163,7 +207,22 @@ export function beginPointerDrag(
     cleanup();
     void getTransport()
       .startOutboundDrag(payload.assetIds)
-      .catch(() => {});
+      .catch((err) => {
+        const msg = err instanceof Error && err.message ? err.message : '无法拖出到外部应用';
+        useCoordinatorStore.getState().pushToast({ message: msg, tone: 'info' });
+      });
+  };
+
+  const onLeaveViewport = (ev: MouseEvent | PointerEvent) => {
+    if (
+      active &&
+      opts?.allowOutboundOle !== false &&
+      payload.kind === 'assets' &&
+      isTauriRuntime() &&
+      (ev.buttons & 1) !== 0
+    ) {
+      launchOleDragOut();
+    }
   };
 
   const onMove = (ev: PointerEvent) => {
@@ -177,10 +236,15 @@ export function beginPointerDrag(
         launchOleDragOut();
         return;
       }
+      // Capture on documentElement once the drag gesture starts so fast mouse movement across
+      // window edges still delivers out-of-bounds pointermove coordinates instead of dropping.
+      acquirePointerCapture();
       const target = hitTestPointerTarget(payload, ev.clientX, ev.clientY);
       useDndStore.getState().setPointerDrag(payload, { x: ev.clientX, y: ev.clientY }, target);
       return;
     }
+
+    const target = hitTestPointerTarget(payload, ev.clientX, ev.clientY);
 
     // If dragging assets out past the window edge while LBUTTON is still held,
     // seamlessly hand off to native Win32 OLE DoDragDrop!
@@ -189,13 +253,18 @@ export function beginPointerDrag(
       payload.kind === 'assets' &&
       isTauriRuntime() &&
       (ev.buttons & 1) !== 0 &&
-      isNearWindowBoundary(ev.clientX, ev.clientY)
+      isPastOutboundBoundary(
+        ev.clientX,
+        ev.clientY,
+        window.innerWidth,
+        window.innerHeight,
+        target !== null,
+      )
     ) {
       launchOleDragOut();
       return;
     }
 
-    const target = hitTestPointerTarget(payload, ev.clientX, ev.clientY);
     useDndStore.getState().updatePointerDrag({ x: ev.clientX, y: ev.clientY }, target);
   };
 
@@ -257,6 +326,8 @@ export function beginPointerDrag(
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('blur', onCancel);
   window.addEventListener('contextmenu', onCancel, true);
+  captureRoot?.addEventListener('pointerleave', onLeaveViewport);
+  captureRoot?.addEventListener('mouseleave', onLeaveViewport);
 }
 
 /**

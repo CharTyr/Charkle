@@ -356,6 +356,15 @@ pub fn set_shelf_allow_activate_state_only(hwnd_raw: isize, allow: bool) {
     }
 }
 
+/// Reads the current in-memory `allow_activate` flag for `hwnd_raw`.
+pub fn get_shelf_allow_activate(hwnd_raw: isize) -> bool {
+    shelf_hit_states()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&hwnd_raw).map(|s| s.allow_activate))
+        .unwrap_or(false)
+}
+
 /// Updates `allow_activate` state AND toggles `WS_EX_NOACTIVATE` on the shelf HWND.
 /// MUST be invoked strictly on the main Win32 UI thread that owns `hwnd_raw`!
 pub fn apply_shelf_no_activate_style(hwnd_raw: isize, allow: bool) {
@@ -932,6 +941,9 @@ where
                     VK_LBUTTON.0 as i32
                 };
                 let lbutton_down = unsafe { (GetAsyncKeyState(primary_vk) as u16) & 0x8000 } != 0;
+                if !lbutton_down {
+                    drag_triggered = false;
+                }
 
                 let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
                 let mut info = MONITORINFO {
@@ -1166,6 +1178,17 @@ pub fn classify_dropped_text(raw: &str) -> Option<ShelfDropPayload> {
     Some(ShelfDropPayload::Text(trimmed.to_string()))
 }
 
+/// Decides whether our native Shelf OLE `IDropTarget` needs to be (re-)installed on an HWND.
+///
+/// Returns `true` when we have never registered on this HWND, when `OleDropTargetInterface` is
+/// absent (`0`), or when WebView2/Chromium replaced the window property with a different pointer.
+pub const fn should_reinstall_drop_target(
+    installed_prop: Option<usize>,
+    current_prop: usize,
+) -> bool {
+    !matches!(installed_prop, Some(expected) if expected != 0 && current_prop == expected)
+}
+
 #[cfg(target_os = "windows")]
 mod drop_target {
     use super::*;
@@ -1186,13 +1209,12 @@ mod drop_target {
         RevokeDragDrop, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
-    use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
     use windows::Win32::UI::Shell::{
         DragQueryFileW, IShellItemArray, SHCreateShellItemArrayFromDataObject, HDROP,
         SIGDN_FILESYSPATH,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, GetClassNameW, GetPropW, GetWindowThreadProcessId, IsWindow,
+        EnumChildWindows, GetClassNameW, GetPropW, IsWindow,
     };
 
     static SHELF_DROP_CALLBACKS: OnceLock<Mutex<HashMap<isize, ShelfDropCallback>>> =
@@ -1202,12 +1224,17 @@ mod drop_target {
         SHELF_DROP_CALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    struct InstalledDropTarget {
+        _target: IDropTarget,
+        installed_prop: usize,
+    }
+
     // STA-bound COM `IDropTarget` references live strictly on the Win32 UI thread that owns the
     // Shelf HWND and registered them, keeping COM lifetimes alive until `WM_NCDESTROY`.
     thread_local! {
         static OLE_INIT_DONE: Cell<bool> = const { Cell::new(false) };
         static REFRESH_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
-        static SHELF_DROP_TARGETS: RefCell<HashMap<isize, HashMap<isize, IDropTarget>>> =
+        static SHELF_DROP_TARGETS: RefCell<HashMap<isize, HashMap<isize, InstalledDropTarget>>> =
             RefCell::new(HashMap::new());
     }
 
@@ -1216,13 +1243,6 @@ mod drop_target {
         fn drop(&mut self) {
             REFRESH_IN_PROGRESS.with(|flag| flag.set(false));
         }
-    }
-
-    fn is_own_thread_hwnd(hwnd: HWND, cur_pid: u32, cur_tid: u32) -> bool {
-        let mut pid = 0u32;
-        // SAFETY: Read-only Win32 thread/process ownership query.
-        let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        pid == cur_pid && tid == cur_tid
     }
 
     struct StgMediumGuard(STGMEDIUM);
@@ -1520,19 +1540,16 @@ mod drop_target {
 
         ensure_sta_ole_initialized();
 
-        let cur_pid = unsafe { GetCurrentProcessId() };
-        let cur_tid = unsafe { GetCurrentThreadId() };
         let root_hwnd = HWND(shelf_hwnd_raw as *mut _);
-        if !unsafe { IsWindow(root_hwnd) }.as_bool()
-            || !is_own_thread_hwnd(root_hwnd, cur_pid, cur_tid)
-        {
+        if !unsafe { IsWindow(root_hwnd) }.as_bool() {
             return 0;
         }
 
-        // Collect the shelf root HWND plus descendants, then STRICTLY filter to HWNDs owned by
-        // our own process & STA UI thread. NEVER call RevokeDragDrop / RegisterDragDrop on
-        // cross-process `msedgewebview2.exe` HWNDs (`Chrome_RenderWidgetHostHWND`), which can
-        // corrupt WebView2 input/click handling or pump re-entrant COM messages.
+        // Collect the shelf root HWND plus ALL descendant HWNDs (including WebView2's
+        // `Chrome_WidgetWin_0`, `Chrome_WidgetWin_1`, and `Chrome_RenderWidgetHostHWND`)
+        // mirroring `wry`'s `DragDropController`. WebView2's child render HWND covers 100%
+        // of the shelf surface and intercepts OLE `WindowFromPoint`, so skipping it causes
+        // WebView2's disabled `AllowExternalDrop(false)` target to reject every drop!
         let mut all_hwnds: Vec<HWND> = vec![root_hwnd];
         unsafe extern "system" fn collect_child(child: HWND, lparam: LPARAM) -> BOOL {
             let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
@@ -1546,30 +1563,31 @@ mod drop_target {
                 LPARAM(&mut all_hwnds as *mut Vec<HWND> as isize),
             );
         }
-        let own_hwnds: Vec<HWND> = all_hwnds
+        let valid_hwnds: Vec<HWND> = all_hwnds
             .into_iter()
-            .filter(|&h| {
-                unsafe { IsWindow(h) }.as_bool() && is_own_thread_hwnd(h, cur_pid, cur_tid)
-            })
+            .filter(|&h| unsafe { IsWindow(h) }.as_bool())
             .collect();
 
-        // Snapshot tracked HWND keys & prune destroyed ones under a SHORT RefCell borrow —
-        // ALWAYS release `SHELF_DROP_TARGETS` BEFORE any COM `RevokeDragDrop`/`RegisterDragDrop`
-        // call (which can pump the Win32 message queue and re-enter!).
-        let tracked_keys: std::collections::HashSet<isize> = SHELF_DROP_TARGETS.with(|cell| {
+        // Snapshot tracked HWND -> installed `OleDropTargetInterface` pointer under a SHORT
+        // RefCell borrow — ALWAYS release `SHELF_DROP_TARGETS` BEFORE any COM
+        // `RevokeDragDrop`/`RegisterDragDrop` call (which can pump Win32 STA messages!).
+        let tracked_props: HashMap<isize, usize> = SHELF_DROP_TARGETS.with(|cell| {
             let Ok(mut root_map) = cell.try_borrow_mut() else {
-                return std::collections::HashSet::new();
+                return HashMap::new();
             };
             let targets = root_map.entry(shelf_hwnd_raw).or_default();
             targets.retain(|&h_raw, _| unsafe { IsWindow(HWND(h_raw as *mut _)) }.as_bool());
-            targets.keys().copied().collect()
+            targets
+                .iter()
+                .map(|(&h_raw, entry)| (h_raw, entry.installed_prop))
+                .collect()
         });
 
-        let mut registered_batch: Vec<(isize, IDropTarget)> = Vec::new();
-        for h in own_hwnds {
+        let mut registered_batch: Vec<(isize, InstalledDropTarget)> = Vec::new();
+        for h in valid_hwnds {
             let h_raw = h.0 as isize;
-            let prop = unsafe { GetPropW(h, w!("OleDropTargetInterface")) };
-            if tracked_keys.contains(&h_raw) && !prop.0.is_null() {
+            let current_prop = unsafe { GetPropW(h, w!("OleDropTargetInterface")) }.0 as usize;
+            if !should_reinstall_drop_target(tracked_props.get(&h_raw).copied(), current_prop) {
                 continue;
             }
 
@@ -1582,7 +1600,15 @@ mod drop_target {
             let drop_target: IDropTarget = ShelfDropTarget::new(Arc::clone(&callback)).into();
             match unsafe { RegisterDragDrop(h, &drop_target) } {
                 Ok(()) => {
-                    registered_batch.push((h_raw, drop_target));
+                    let installed_prop =
+                        unsafe { GetPropW(h, w!("OleDropTargetInterface")) }.0 as usize;
+                    registered_batch.push((
+                        h_raw,
+                        InstalledDropTarget {
+                            _target: drop_target,
+                            installed_prop,
+                        },
+                    ));
                     tracing::info!(
                         hwnd = h_raw,
                         class = %cls,
@@ -1605,8 +1631,8 @@ mod drop_target {
             SHELF_DROP_TARGETS.with(|cell| {
                 if let Ok(mut root_map) = cell.try_borrow_mut() {
                     let targets = root_map.entry(shelf_hwnd_raw).or_default();
-                    for (h_raw, target) in registered_batch {
-                        targets.insert(h_raw, target);
+                    for (h_raw, entry) in registered_batch {
+                        targets.insert(h_raw, entry);
                     }
                 }
             });
@@ -1627,11 +1653,9 @@ mod drop_target {
                 .and_then(|mut root_map| root_map.remove(&shelf_hwnd_raw))
         });
         if let Some(targets) = drained {
-            let cur_pid = unsafe { GetCurrentProcessId() };
-            let cur_tid = unsafe { GetCurrentThreadId() };
-            for (h_raw, _target) in targets {
+            for (h_raw, _entry) in targets {
                 let h = HWND(h_raw as *mut _);
-                if unsafe { IsWindow(h) }.as_bool() && is_own_thread_hwnd(h, cur_pid, cur_tid) {
+                if unsafe { IsWindow(h) }.as_bool() {
                     let _ = unsafe { RevokeDragDrop(h) };
                 }
             }
@@ -1880,5 +1904,20 @@ mod tests {
             None,
             ShelfDockEdge::Right
         ));
+    }
+
+    #[test]
+    fn drop_target_reinstall_detects_missing_or_overwritten_ole_prop() {
+        // Never registered -> must install
+        assert!(should_reinstall_drop_target(None, 0));
+        assert!(should_reinstall_drop_target(None, 0x1234));
+        // Previously registered with matching non-zero OleDropTargetInterface -> skip
+        assert!(!should_reinstall_drop_target(Some(0xABCD), 0xABCD));
+        // WebView2 replaced OleDropTargetInterface with a different pointer -> must reclaim
+        assert!(should_reinstall_drop_target(Some(0xABCD), 0xDEAD));
+        // Property was cleared -> must reinstall
+        assert!(should_reinstall_drop_target(Some(0xABCD), 0));
+        // Recorded zero prop -> must reinstall
+        assert!(should_reinstall_drop_target(Some(0), 0));
     }
 }

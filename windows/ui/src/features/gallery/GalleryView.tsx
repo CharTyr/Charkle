@@ -471,7 +471,7 @@ export const GalleryView: React.FC = () => {
             {isTrash && assets.length > 0 && (
               <div
                 data-testid="trash-action-bar"
-                className="pointer-events-auto charkle-reveal-top min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex items-center justify-between gap-2"
+                className="pointer-events-auto charkle-reveal-top win-acrylic-bar min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] flex items-center justify-between gap-2"
               >
                 <div className="inline-flex items-center gap-2 text-[12.5px] font-medium text-[var(--text-primary)] charkle-tabular min-w-0">
                   <Delete16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
@@ -514,7 +514,7 @@ export const GalleryView: React.FC = () => {
             {activeFolderId && folderBreadcrumbs.length > 0 && (
               <div
                 data-testid="folder-subfolders-bar"
-                className="pointer-events-auto charkle-reveal-top min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex items-center justify-between gap-2"
+                className="pointer-events-auto charkle-reveal-top win-acrylic-bar min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] flex items-center justify-between gap-2"
               >
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   {/* Breadcrumb path */}
