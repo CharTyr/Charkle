@@ -36,20 +36,24 @@ public struct GalleryRingView: View {
     @State private var stepDirection: Int = 0
     @State private var markOpenedTask: Task<Void, Never>?
 
-    private var activeAsset: AssetRecord? {
-        if let frontAsset, assets.contains(where: { $0.id == frontAsset.id }) {
-            return frontAsset
+    private func resolveActiveSelection() -> (asset: AssetRecord, index: Int)? {
+        if let frontAsset, let idx = assets.firstIndex(where: { $0.id == frontAsset.id }) {
+            return (frontAsset, idx)
         }
         if let selectedID = selectedAssetIDs.first,
-           let matched = assets.first(where: { $0.id == selectedID }) {
-            return matched
+           let idx = assets.firstIndex(where: { $0.id == selectedID }) {
+            return (assets[idx], idx)
         }
-        return assets.first
+        guard let first = assets.first else { return nil }
+        return (first, 0)
+    }
+
+    private var activeAsset: AssetRecord? {
+        resolveActiveSelection()?.asset
     }
 
     private var activeIndex: Int? {
-        guard let activeAsset else { return nil }
-        return assets.firstIndex(where: { $0.id == activeAsset.id })
+        resolveActiveSelection()?.index
     }
 
     public init(
@@ -144,11 +148,12 @@ public struct GalleryRingView: View {
             }
 
             // Bottom Navigation Capsule & Collapsible Tuning Control
+            let resolvedActive = resolveActiveSelection()
             VStack {
                 Spacer()
                 ZStack(alignment: .bottomTrailing) {
-                    if let asset = activeAsset {
-                        bottomNavigationCapsule(asset: asset)
+                    if let resolvedActive {
+                        bottomNavigationCapsule(asset: resolvedActive.asset, activeIndex: resolvedActive.index)
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
 
@@ -217,7 +222,7 @@ public struct GalleryRingView: View {
 
     // MARK: - Bottom Center Minimal Navigation Pill
 
-    private func bottomNavigationCapsule(asset: AssetRecord) -> some View {
+    private func bottomNavigationCapsule(asset: AssetRecord, activeIndex: Int?) -> some View {
         HStack(spacing: 8) {
             Button {
                 triggerStep(-1)

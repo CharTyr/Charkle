@@ -460,6 +460,9 @@ public struct QuickLookOverlayView: View {
         .onDisappear {
             dismissTask?.cancel()
             dismissTask = nil
+            highResImage = nil
+            originalURL = nil
+            isLoadingOriginalImage = false
         }
     }
 
@@ -1246,6 +1249,7 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
             context.coordinator.currentURL = url
             context.coordinator.wasSuspended = isPlaybackSuspended
             nsView.player?.pause()
+            nsView.player?.replaceCurrentItem(with: nil)
             let player = AVPlayer(url: url)
             nsView.player = player
             if autoPlay && !isPlaybackSuspended {
@@ -1263,6 +1267,7 @@ struct QuickLookVideoPlayerView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
         nsView.player?.pause()
+        nsView.player?.replaceCurrentItem(with: nil)
         nsView.player = nil
         coordinator.currentURL = nil
     }
@@ -1429,6 +1434,7 @@ private final class QuickLookAudioPlaybackController {
         }
         endObserver = nil
         player?.pause()
+        player?.replaceCurrentItem(with: nil)
         player = nil
         isPlaying = false
         progress = 0

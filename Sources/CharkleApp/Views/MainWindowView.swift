@@ -26,6 +26,8 @@ public struct MainWindowView: View {
     @Namespace private var heroNamespace
 
     @State private var searchDraft: String = ""
+    @State private var searchDebounceTask: Task<Void, Never>?
+    @State private var colorToleranceDebounceTask: Task<Void, Never>?
     @State private var isSidebarVisible: Bool = true
     @State private var quickBatchTagDraft: String = ""
     @State private var showBatchTagPopover: Bool = false
@@ -98,7 +100,7 @@ public struct MainWindowView: View {
                         onDropAssetsOntoFolder: { ids, folderID in
                             Task {
                                 await library.moveAssets(ids, toFolderID: folderID)
-                                let targetName = folderID.flatMap { fid in library.folders.first(where: { $0.id == fid })?.name } ?? "收件箱"
+                                let targetName = folderID.flatMap { library.folder(byID: $0)?.name } ?? "收件箱"
                                 coordinator.showToast("已移动 \(ids.count) 项到「\(targetName)」", icon: "folder")
                             }
                         },
@@ -428,14 +430,27 @@ public struct MainWindowView: View {
             coordinator.presentOnboardingIfFirstLaunch()
         }
         .onChange(of: searchDraft) { _, newValue in
+            searchDebounceTask?.cancel()
             library.filter.searchQuery = newValue
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 library.semanticSearchReport = nil
-                Task { await library.refreshAssets() }
+                searchDebounceTask = Task {
+                    await library.refreshAssets()
+                }
             } else if !library.semanticSearchEnabled {
                 library.semanticSearchReport = nil
-                Task { await library.refreshAssets() }
+                searchDebounceTask = Task {
+                    try? await Task.sleep(for: .milliseconds(120))
+                    guard !Task.isCancelled else { return }
+                    await library.refreshAssets()
+                }
             }
+        }
+        .onDisappear {
+            searchDebounceTask?.cancel()
+            searchDebounceTask = nil
+            colorToleranceDebounceTask?.cancel()
+            colorToleranceDebounceTask = nil
         }
         .onChange(of: coordinator.selectedDestination) { _, newDest in
             if case .moodboard(let id) = newDest {
@@ -1621,7 +1636,12 @@ public struct MainWindowView: View {
                     Task { await library.refreshAssets() }
                 },
                 onToleranceChange: { _ in
-                    Task { await library.refreshAssets() }
+                    colorToleranceDebounceTask?.cancel()
+                    colorToleranceDebounceTask = Task {
+                        try? await Task.sleep(for: .milliseconds(100))
+                        guard !Task.isCancelled else { return }
+                        await library.refreshAssets()
+                    }
                 }
             )
 

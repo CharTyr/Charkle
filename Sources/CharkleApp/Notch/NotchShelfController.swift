@@ -295,10 +295,11 @@ public final class NotchShelfController {
     public let shelfState = NotchShelfState()
 
     private var panel: NotchPanel?
-    private var sensorWindow: NotchPanel?
+    private var sensorWindows: [NotchPanel] = []
     private var pollTimer: Timer?
     private var hideWorkItem: DispatchWorkItem?
     private var hoverExpandWorkItem: DispatchWorkItem?
+    private var panelOrderOutWorkItem: DispatchWorkItem?
     private var bannerResetTask: Task<Void, Never>?
     private let promiseQueue = OperationQueue()
 
@@ -308,12 +309,11 @@ public final class NotchShelfController {
     private var lastObservedDragPasteboardChangeCount: Int = -1
     private var baselineDragChangeCount: Int = NSPasteboard(name: .drag).changeCount
     private var lastBaselineSyncTime: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
-    private var lastMouseMoveScreenCheckTime: CFAbsoluteTime = 0
     private var wasMouseButtonDown: Bool = false
     private var cachedDragPBIsInternal: Bool = false
     private var cachedDragPBHasDroppable: Bool = false
     private var lastAnchoredScreenFrame: NSRect = .zero
-    private var lastSensorScreenFrame: NSRect = .zero
+    private var lastSensorScreenFrames: [NSRect] = []
     private var lastObservedNotchEnabled: Bool = true
     private var screenObserver: (any NSObjectProtocol)?
     private var keyMonitor: Any?
@@ -353,8 +353,10 @@ public final class NotchShelfController {
 
         promiseQueue.name = "com.charkle.notch.filepromises"
         createFixedPanel()
-        setupSensorWindow()
-        installEventDrivenWatchers()
+        repositionSensorWindows()
+        if coordinator.notchShelfEnabled {
+            installEventDrivenWatchers()
+        }
         startObservingNotchSettings()
 
         screenObserver = NotificationCenter.default.addObserver(
@@ -364,7 +366,7 @@ public final class NotchShelfController {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.anchorFixedPanelIfScreenChanged()
-                self?.repositionSensorWindow()
+                self?.repositionSensorWindows()
             }
         }
 
@@ -422,6 +424,7 @@ public final class NotchShelfController {
         guard coordinator.notchShelfEnabled else { return }
         cancelAutoCollapse()
         cancelHoverExpand()
+        cancelPanelOrderOut()
         anchorFixedPanelIfScreenChanged()
         refreshClipboardHint(force: true)
         guard let panel else { return }
@@ -451,11 +454,30 @@ public final class NotchShelfController {
         baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
         lastBaselineSyncTime = CFAbsoluteTimeGetCurrent()
         // Immediately let pointer events pass through to underlying apps even during spring settle.
-        // Never resize the backing NSPanel here so the closing spring never clips or hitches.
+        // Never resize the backing NSPanel here so the closing spring never clips or hitches;
+        // once the closing spring settles, orderOut releases the oversized CoreAnimation backing store.
         panel?.ignoresMouseEvents = true
+        schedulePanelOrderOut()
         if NSEvent.pressedMouseButtons == 0 {
             stopPollTimer()
         }
+    }
+
+    private func schedulePanelOrderOut() {
+        cancelPanelOrderOut()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.panelOrderOutWorkItem = nil
+            guard !self.shelfState.isExpanded else { return }
+            self.panel?.orderOut(nil)
+        }
+        panelOrderOutWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: item)
+    }
+
+    private func cancelPanelOrderOut() {
+        panelOrderOutWorkItem?.cancel()
+        panelOrderOutWorkItem = nil
     }
 
     private func scheduleHoverExpand() {
@@ -648,8 +670,8 @@ public final class NotchShelfController {
         panel.ignoresMouseEvents = true
         self.panel = panel
 
+        // Stay ordered out until first expand() so macOS doesn't retain an ~11 MB backing store while idle.
         anchorFixedPanelIfScreenChanged()
-        panel.orderFrontRegardless()
     }
 
     private func notchMetrics(for screen: NSScreen) -> ScreenNotchMetrics {
@@ -710,7 +732,7 @@ public final class NotchShelfController {
         }
     }
 
-    private func setupSensorWindow() {
+    private func makeSensorWindow() -> NotchPanel {
         let sensorView = NotchSensorView(frame: NSRect(x: 0, y: 0, width: 220, height: 32))
         sensorView.onTriggerOpenForDrag = { [weak self] count in
             guard let self, self.coordinator.notchShelfEnabled else { return }
@@ -754,43 +776,62 @@ public final class NotchShelfController {
         sensor.hidesOnDeactivate = false
         sensor.worksWhenModal = true
         sensor.ignoresMouseEvents = false
-        self.sensorWindow = sensor
-
-        repositionSensorWindow()
-        sensor.orderFrontRegardless()
+        return sensor
     }
 
-    private func repositionSensorWindow(for precomputedScreen: NSScreen? = nil) {
-        guard let sensorWindow else { return }
+    /// Maintains one lightweight top-bezel sensor panel per connected `NSScreen` so hover & drag
+    /// detection works across multi-display setups with zero `.mouseMoved` global event monitoring.
+    private func repositionSensorWindows() {
         let enabled = coordinator.notchShelfEnabled
         guard enabled else {
-            if lastObservedNotchEnabled || sensorWindow.isVisible {
+            if lastObservedNotchEnabled || sensorWindows.contains(where: \.isVisible) {
                 lastObservedNotchEnabled = false
-                sensorWindow.orderOut(nil)
+                for window in sensorWindows {
+                    window.orderOut(nil)
+                }
             }
             return
         }
-        guard let screen = precomputedScreen ?? screenUnderCursor() else { return }
-        if lastObservedNotchEnabled, lastSensorScreenFrame == screen.frame, sensorWindow.isVisible {
+
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+        let targetRects: [NSRect] = screens.map { screen in
+            let metrics = notchMetrics(for: screen)
+            let sensorWidth: CGFloat = metrics.hasPhysicalNotch ? (metrics.notchWidth + 12) : 210
+            let sensorHeight: CGFloat = metrics.hasPhysicalNotch ? max(metrics.notchHeight, 34) : 6
+            return NSRect(
+                x: screen.frame.midX - sensorWidth / 2.0,
+                y: screen.frame.maxY - sensorHeight,
+                width: sensorWidth,
+                height: sensorHeight
+            )
+        }
+
+        if lastObservedNotchEnabled,
+           lastSensorScreenFrames == targetRects,
+           sensorWindows.count == screens.count,
+           sensorWindows.allSatisfy(\.isVisible) {
             return
         }
+
+        while sensorWindows.count < screens.count {
+            sensorWindows.append(makeSensorWindow())
+        }
+        while sensorWindows.count > screens.count {
+            let removed = sensorWindows.removeLast()
+            removed.orderOut(nil)
+        }
+
+        for (window, rect) in zip(sensorWindows, targetRects) {
+            if window.frame != rect {
+                window.setFrame(rect, display: false)
+            }
+            if !window.isVisible {
+                window.orderFrontRegardless()
+            }
+        }
         lastObservedNotchEnabled = true
-        lastSensorScreenFrame = screen.frame
-        let metrics = notchMetrics(for: screen)
-        let sensorWidth: CGFloat = metrics.hasPhysicalNotch ? (metrics.notchWidth + 12) : 210
-        let sensorHeight: CGFloat = metrics.hasPhysicalNotch ? max(metrics.notchHeight, 34) : 6
-        let rect = NSRect(
-            x: screen.frame.midX - sensorWidth / 2.0,
-            y: screen.frame.maxY - sensorHeight,
-            width: sensorWidth,
-            height: sensorHeight
-        )
-        if sensorWindow.frame != rect {
-            sensorWindow.setFrame(rect, display: false)
-        }
-        if !sensorWindow.isVisible {
-            sensorWindow.orderFrontRegardless()
-        }
+        lastSensorScreenFrames = targetRects
     }
 
     // MARK: - Event-Driven Drag & Cursor Watcher (0Hz Idle, Mission Control Avoidance)
@@ -819,21 +860,40 @@ public final class NotchShelfController {
         if !enabled {
             cancelHoverExpand()
             collapse(force: true)
+            cancelPanelOrderOut()
+            panel?.orderOut(nil)
             stopPollTimer()
+            removeEventDrivenWatchers()
+        } else {
+            installEventDrivenWatchers()
         }
-        repositionSensorWindow()
+        repositionSensorWindows()
     }
 
     private func installEventDrivenWatchers() {
-        let dragEvents: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved]
+        guard globalMouseMonitor == nil && localMouseMonitor == nil else { return }
+        // Only observe drag/click lifecycle events — never `.mouseMoved` — so cursor movement
+        // across other apps causes zero wakeups (true 0Hz idle CPU).
+        let dragEvents: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: dragEvents) { [weak self] event in
             MainActor.assumeIsolated {
                 self?.handleObservedMouseEvent(event)
             }
         }
-        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: dragEvents) { [weak self] event in
             self?.handleObservedMouseEvent(event)
             return event
+        }
+    }
+
+    private func removeEventDrivenWatchers() {
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+            self.globalMouseMonitor = nil
+        }
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+            self.localMouseMonitor = nil
         }
     }
 
@@ -841,11 +901,11 @@ public final class NotchShelfController {
         guard coordinator.notchShelfEnabled else { return }
         switch event.type {
         case .leftMouseDown:
+            // Record pre-drag pasteboard baseline without starting the 10Hz poll timer on ordinary clicks.
             if !shelfState.isExpanded && pollTimer == nil {
                 baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
                 lastBaselineSyncTime = CFAbsoluteTimeGetCurrent()
             }
-            ensurePollTimerRunning()
         case .leftMouseDragged:
             ensurePollTimerRunning()
         case .leftMouseUp:
@@ -853,14 +913,6 @@ public final class NotchShelfController {
                 baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
                 lastBaselineSyncTime = CFAbsoluteTimeGetCurrent()
                 stopPollTimer()
-            }
-        case .mouseMoved:
-            guard !shelfState.isExpanded else { return }
-            let now = CFAbsoluteTimeGetCurrent()
-            guard now - lastMouseMoveScreenCheckTime >= 0.25 else { return }
-            lastMouseMoveScreenCheckTime = now
-            if let screen = screenUnderCursor() {
-                repositionSensorWindow(for: screen)
             }
         default:
             break
@@ -936,7 +988,7 @@ public final class NotchShelfController {
         guard enabled else {
             cancelHoverExpand()
             if shelfState.isExpanded { collapse(force: true) }
-            repositionSensorWindow()
+            repositionSensorWindows()
             stopPollTimer()
             return
         }
@@ -962,7 +1014,6 @@ public final class NotchShelfController {
         guard let cursorScreen = screenUnderCursor(at: loc) else { return }
 
         if !shelfState.isExpanded {
-            repositionSensorWindow(for: cursorScreen)
             let metrics = notchMetrics(for: cursorScreen)
             let inDragTrigger = NotchDropGeometry.isPointInDragTriggerZone(
                 loc,
@@ -1216,7 +1267,10 @@ public final class NotchShelfController {
         bannerResetTask?.cancel()
         hideWorkItem?.cancel()
         hoverExpandWorkItem?.cancel()
-        sensorWindow?.orderOut(nil)
+        panelOrderOutWorkItem?.cancel()
+        for window in sensorWindows {
+            window.orderOut(nil)
+        }
         panel?.orderOut(nil)
     }
 }

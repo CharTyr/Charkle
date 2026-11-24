@@ -14,16 +14,63 @@ public final class LibraryStore {
     public let thumbnailLoader: ThumbnailImageLoader
 
     public var assets: [AssetRecord] = [] {
-        didSet { assetsRevision &+= 1 }
+        didSet {
+            if !isUpdatingAssetsInPlace {
+                rebuildVisibleAssetIndex()
+            }
+            if !suppressAssetsRevisionIncrement {
+                assetsRevision &+= 1
+            }
+        }
     }
     public private(set) var assetsRevision: Int = 0
-    public var allAssetsByID: [UUID: AssetRecord] = [:]
+    public var allAssetsByID: [UUID: AssetRecord] = [:] {
+        didSet {
+            if !isBatchUpdating && !suppressDerivedAssetRebuild {
+                rebuildAssetDerivedCaches()
+            }
+        }
+    }
     public private(set) var cachedRecentActivityAssets: [AssetRecord] = []
-    public var folders: [FolderRecord] = []
-    public var smartFolders: [SmartFolderRecord] = []
+    public private(set) var activeAssetCount: Int = 0
+    public private(set) var untaggedAssetCount: Int = 0
+    public var folders: [FolderRecord] = [] {
+        didSet {
+            if !isBatchUpdating {
+                rebuildFolderDerivedCaches()
+                rebuildFolderAssetRollupCaches()
+            }
+        }
+    }
+    public var smartFolders: [SmartFolderRecord] = [] {
+        didSet {
+            if !isBatchUpdating {
+                rebuildSmartFolderCountCaches()
+            }
+        }
+    }
     public var activeSmartFolderID: UUID?
-    public var tagCounts: [TagCount] = []
+    public var tagCounts: [TagCount] = [] {
+        didSet {
+            if !isBatchUpdating {
+                rebuildSidebarTagCaches()
+            }
+        }
+    }
     public var inboxCount: Int = 0
+
+    // Precomputed observable derived caches (O(1) reads during SwiftUI view body passes)
+    private var cachedSubtreeAssetCounts: [UUID: Int] = [:]
+    private var cachedSubtreePinnedOffline: [UUID: Bool] = [:]
+    private var cachedSmartFolderCounts: [UUID: Int] = [:]
+    private var cachedFolderByID: [UUID: FolderRecord] = [:]
+    private var cachedChildFoldersByParent: [UUID?: [FolderRecord]] = [:]
+    private var cachedFolderHierarchyRoots: [FolderHierarchyNode] = []
+    private var cachedFlattenedFolderHierarchy: [FolderHierarchyNode] = []
+    private var cachedFolderBreadcrumbs: [UUID: [FolderRecord]] = [:]
+    private var cachedFolderDisplayPaths: [UUID: String] = [:]
+    private var cachedTopTenSidebarTags: [TagCount] = []
+    private var cachedRecentFrequentSidebarTags: [TagCount] = []
 
     public var filter: FilterCriteria = FilterCriteria()
     public var selectedAssetIDs: Set<UUID> = []
@@ -57,6 +104,8 @@ public final class LibraryStore {
     public var lastError: String?
 
     private var inspectorContextTask: Task<Void, Never>?
+    @ObservationIgnored private var inspectorContextAssetID: UUID?
+    @ObservationIgnored private var inspectorContextLoaded: Bool = false
     @ObservationIgnored private var metadataHydrationAttemptedIDs: Set<UUID> = []
     @ObservationIgnored private var imageMetadataCache: [UUID: ExtractedImageMetadata] = [:]
     private var retagTask: Task<RetagBatchOutcome, Never>?
@@ -66,11 +115,23 @@ public final class LibraryStore {
     @ObservationIgnored private var minimalRefreshGeneration: UInt64 = 0
     @ObservationIgnored private var semanticSearchGeneration: UInt64 = 0
     private var semanticSearchTask: Task<SemanticSearchReport?, Never>?
+    @ObservationIgnored private var activeRefreshAllTask: Task<Void, Never>?
+    @ObservationIgnored private var activeRefreshAssetsTask: Task<Void, Never>?
+    @ObservationIgnored private var enrichmentDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var enrichmentObserver: NSObjectProtocol?
+    @ObservationIgnored private var visibleAssetIndexByID: [UUID: Int] = [:]
+    @ObservationIgnored private var cachedDirectActiveCountByFolder: [UUID: Int] = [:]
+    @ObservationIgnored private var cachedDirectUnpinnedCountByFolder: [UUID: Int] = [:]
+    @ObservationIgnored private var cachedDescendantFolderIDsPostOrder: [UUID: [UUID]] = [:]
+    @ObservationIgnored private var cachedSmartFolderRulesByID: [UUID: SmartFolderRule] = [:]
+    @ObservationIgnored private var isBatchUpdating: Bool = false
+    @ObservationIgnored private var isUpdatingAssetsInPlace: Bool = false
+    @ObservationIgnored private var suppressAssetsRevisionIncrement: Bool = false
+    @ObservationIgnored private var suppressDerivedAssetRebuild: Bool = false
     private static let recentTagsDefaultsKey = "com.charkle.recentlyTouchedTags"
     private static let tagUsageFreqDefaultsKey = "com.charkle.tagUsageFrequency"
-    private var recentlyTouchedTags: [String] = []
-    private var tagUsageFrequency: [String: Int] = [:]
+    @ObservationIgnored private var recentlyTouchedTags: [String] = []
+    @ObservationIgnored private var tagUsageFrequency: [String: Int] = [:]
 
     public init(engine: any CharkleEngineProtocol) {
         self.engine = engine
@@ -84,7 +145,7 @@ public final class LibraryStore {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.isMinimalCaptureMode else { return }
-                await self.refreshAll()
+                self.scheduleCoalescedEnrichmentRefresh()
             }
         }
     }
@@ -93,18 +154,48 @@ public final class LibraryStore {
         inspectorContextTask?.cancel()
         retagTask?.cancel()
         semanticSearchTask?.cancel()
+        activeRefreshAllTask?.cancel()
+        activeRefreshAssetsTask?.cancel()
+        enrichmentDebounceTask?.cancel()
         if let observer = enrichmentObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
 
+    private func scheduleCoalescedEnrichmentRefresh() {
+        enrichmentDebounceTask?.cancel()
+        enrichmentDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self, !self.isMinimalCaptureMode else { return }
+            self.enrichmentDebounceTask = nil
+            await self.refreshAll()
+        }
+    }
+
     public var primarySelectedAsset: AssetRecord? {
         guard selectedAssetIDs.count == 1, let id = selectedAssetIDs.first else { return nil }
-        return assets.first(where: { $0.id == id }) ?? allAssetsByID[id]
+        let list = assets
+        if let idx = visibleAssetIndexByID[id], idx < list.count, list[idx].id == id {
+            return list[idx]
+        }
+        return allAssetsByID[id]
     }
 
     public var selectedAssets: [AssetRecord] {
-        assets.filter { selectedAssetIDs.contains($0.id) }
+        guard !selectedAssetIDs.isEmpty else { return [] }
+        let list = assets
+        if selectedAssetIDs.count < list.count / 4 {
+            var indexed: [(Int, AssetRecord)] = []
+            indexed.reserveCapacity(selectedAssetIDs.count)
+            for id in selectedAssetIDs {
+                if let idx = visibleAssetIndexByID[id], idx < list.count, list[idx].id == id {
+                    indexed.append((idx, list[idx]))
+                }
+            }
+            indexed.sort { $0.0 < $1.0 }
+            return indexed.map(\.1)
+        }
+        return list.filter { selectedAssetIDs.contains($0.id) }
     }
 
     public func bootstrap() async {
@@ -143,21 +234,34 @@ public final class LibraryStore {
         assetsRequestGeneration &+= 1
         fullRefreshGeneration &+= 1
         semanticSearchGeneration &+= 1
+        activeRefreshAllTask?.cancel()
+        activeRefreshAllTask = nil
+        activeRefreshAssetsTask?.cancel()
+        activeRefreshAssetsTask = nil
+        enrichmentDebounceTask?.cancel()
+        enrichmentDebounceTask = nil
         semanticSearchTask?.cancel()
         semanticSearchTask = nil
         isRunningSemanticSearch = false
         inspectorContextTask?.cancel()
         inspectorContextTask = nil
+        inspectorContextAssetID = nil
+        inspectorContextLoaded = false
         retagTask?.cancel()
         retagTask = nil
         activeRetagBatchID = nil
 
         let recentSnapshot = Array(recentActivityAssets(limit: Self.minimalRecentLimit))
+        isBatchUpdating = true
         assets = []
         allAssetsByID = Dictionary(uniqueKeysWithValues: recentSnapshot.map { ($0.id, $0) })
         cachedRecentActivityAssets = recentSnapshot
         smartFolders = []
         tagCounts = []
+        isBatchUpdating = false
+        rebuildAssetDerivedCaches()
+        rebuildSidebarTagCaches()
+
         selectedAssetIDs = []
         cutAssetIDs = []
         copiedAssetIDs = []
@@ -179,6 +283,34 @@ public final class LibraryStore {
         thumbnailLoader.setLowResourceMode(false)
     }
 
+    /// Selects the top `limit` non-trashed assets ordered by `recentActivityDate` in O(N × limit)
+    /// without allocating or sorting a full copy of the library.
+    private static func selectTopRecentAssets(_ source: [AssetRecord], limit: Int) -> [AssetRecord] {
+        guard limit > 0 else { return [] }
+        var top: [AssetRecord] = []
+        top.reserveCapacity(limit + 1)
+        func comesBefore(_ lhs: AssetRecord, _ rhs: AssetRecord) -> Bool {
+            let ld = lhs.recentActivityDate
+            let rd = rhs.recentActivityDate
+            if ld != rd { return ld > rd }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+        for asset in source where !asset.isTrashed {
+            if top.count == limit, let last = top.last, !comesBefore(asset, last) {
+                continue
+            }
+            var insertIdx = top.count
+            while insertIdx > 0 && comesBefore(asset, top[insertIdx - 1]) {
+                insertIdx -= 1
+            }
+            top.insert(asset, at: insertIdx)
+            if top.count > limit {
+                top.removeLast()
+            }
+        }
+        return top
+    }
+
     /// Lightweight metadata refresh used in Minimal Capture Mode (folders, inbox count, and latest 16 recent items only).
     public func refreshMinimalMetadataOnly() async {
         minimalRefreshGeneration &+= 1
@@ -189,21 +321,15 @@ public final class LibraryStore {
             async let fetchedActive = engine.fetchAssets(matching: FilterCriteria(includeTrashed: false, sortBy: .newest))
             let (f, i, active) = try await (folderList, inbox, fetchedActive)
             guard gen == minimalRefreshGeneration, isMinimalCaptureMode else { return }
+            let topRecent = Self.selectTopRecentAssets(active, limit: Self.minimalRecentLimit)
+            isBatchUpdating = true
             folders = f
             inboxCount = i
-            let topRecent = Array(
-                active
-                    .filter { !$0.isTrashed }
-                    .sorted { lhs, rhs in
-                        let ld = lhs.recentActivityDate
-                        let rd = rhs.recentActivityDate
-                        if ld != rd { return ld > rd }
-                        return lhs.id.uuidString < rhs.id.uuidString
-                    }
-                    .prefix(Self.minimalRecentLimit)
-            )
             cachedRecentActivityAssets = topRecent
             allAssetsByID = Dictionary(uniqueKeysWithValues: topRecent.map { ($0.id, $0) })
+            isBatchUpdating = false
+            rebuildFolderDerivedCaches()
+            rebuildAssetDerivedCaches()
         } catch {
             if gen == minimalRefreshGeneration {
                 lastError = error.localizedDescription
@@ -259,67 +385,219 @@ public final class LibraryStore {
         await refreshAssets()
     }
 
+    private static func canDeriveVisibleAssetsInMemory(for criteria: FilterCriteria) -> Bool {
+        criteria.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && criteria.selectedColorHex == nil
+    }
+
+    private static func filterAssetsInMemory(
+        _ all: [AssetRecord],
+        matching criteria: FilterCriteria,
+        folders: [FolderRecord]
+    ) -> [AssetRecord] {
+        let folderSubtreeSet: Set<UUID>? = {
+            guard let folderID = criteria.folderID else { return nil }
+            if !criteria.includeSubfolders { return [folderID] }
+            var byParent: [UUID: [UUID]] = [:]
+            for folder in folders {
+                if let parentID = folder.parentID {
+                    byParent[parentID, default: []].append(folder.id)
+                }
+            }
+            var seen: Set<UUID> = [folderID]
+            var stack: [UUID] = [folderID]
+            while let current = stack.popLast() {
+                for childID in byParent[current] ?? [] where seen.insert(childID).inserted {
+                    stack.append(childID)
+                }
+            }
+            return seen
+        }()
+        let recentCutoff: TimeInterval? = criteria.onlyRecentDays.map { days in
+            Date().timeIntervalSince1970 - Double(max(0, days)) * 86_400
+        }
+        return all.filter { asset in
+            if criteria.onlyTrashed {
+                if !asset.isTrashed { return false }
+            } else if !criteria.includeTrashed {
+                if asset.isTrashed { return false }
+            }
+            if criteria.onlyInbox && (asset.folderID != nil || asset.isTrashed) {
+                return false
+            }
+            if let allowedFolders = folderSubtreeSet {
+                guard let fid = asset.folderID, allowedFolders.contains(fid) else { return false }
+            }
+            if let shape = criteria.shape, asset.aspectShape != shape {
+                return false
+            }
+            if criteria.minRating > 0 && asset.rating < criteria.minRating {
+                return false
+            }
+            if criteria.onlyPinnedOffline && !asset.pinnedOffline {
+                return false
+            }
+            if let cutoff = recentCutoff, asset.createdAt.timeIntervalSince1970 < cutoff {
+                return false
+            }
+            if !criteria.kinds.isEmpty && !criteria.kinds.contains(asset.mediaKind) {
+                return false
+            }
+            if criteria.onlyUntagged && asset.tags.contains(where: { !$0.isEmpty }) {
+                return false
+            }
+            if !criteria.tags.isEmpty {
+                for tag in criteria.tags where !asset.tags.contains(tag) {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
     public func refreshAll() async {
+        activeRefreshAllTask?.cancel()
+        activeRefreshAssetsTask?.cancel()
         fullRefreshGeneration &+= 1
         let fullGen = fullRefreshGeneration
         assetsRequestGeneration &+= 1
         let assetsGen = assetsRequestGeneration
         let requestedFilter = filter
         let requestedSmartID = activeSmartFolderID
-        do {
-            async let fetchedAssets = engine.fetchAssets(matching: requestedFilter)
-            async let fetchedAll = engine.fetchAssets(matching: FilterCriteria(includeTrashed: true))
-            async let fetchedFolders = engine.fetchFolders()
-            async let fetchedSmartFolders = engine.fetchSmartFolders()
-            async let fetchedTags = engine.fetchTagCounts()
-            async let fetchedInbox = engine.inboxCount()
+        let deriveInMemory = Self.canDeriveVisibleAssetsInMemory(for: requestedFilter)
+        let engine = self.engine
 
-            let (visible, all, folderList, smartList, tags, inbox) = try await (
-                fetchedAssets, fetchedAll, fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox
-            )
-            guard !isMinimalCaptureMode else { return }
-            if fullGen == fullRefreshGeneration {
-                smartFolders = smartList
-                allAssetsByID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
-                rebuildRecentActivityCache()
-                folders = folderList
-                tagCounts = sortTagCounts(tags)
-                inboxCount = inbox
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let visible: [AssetRecord]
+                let all: [AssetRecord]
+                let folderList: [FolderRecord]
+                let smartList: [SmartFolderRecord]
+                let tags: [TagCount]
+                let inbox: Int
+
+                if deriveInMemory {
+                    async let fetchedAll = engine.fetchAssets(matching: FilterCriteria(includeTrashed: true, sortBy: requestedFilter.sortBy))
+                    async let fetchedFolders = engine.fetchFolders()
+                    async let fetchedSmartFolders = engine.fetchSmartFolders()
+                    async let fetchedTags = engine.fetchTagCounts()
+                    async let fetchedInbox = engine.inboxCount()
+
+                    (all, folderList, smartList, tags, inbox) = try await (
+                        fetchedAll, fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox
+                    )
+                    visible = Self.filterAssetsInMemory(all, matching: requestedFilter, folders: folderList)
+                } else {
+                    async let fetchedAssets = engine.fetchAssets(matching: requestedFilter)
+                    async let fetchedAll = engine.fetchAssets(matching: FilterCriteria(includeTrashed: true))
+                    async let fetchedFolders = engine.fetchFolders()
+                    async let fetchedSmartFolders = engine.fetchSmartFolders()
+                    async let fetchedTags = engine.fetchTagCounts()
+                    async let fetchedInbox = engine.inboxCount()
+
+                    (visible, all, folderList, smartList, tags, inbox) = try await (
+                        fetchedAssets, fetchedAll, fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox
+                    )
+                }
+
+                guard !Task.isCancelled, !self.isMinimalCaptureMode else { return }
+                if fullGen == self.fullRefreshGeneration {
+                    let prevAll = self.allAssetsByID
+                    var nextAllByID: [UUID: AssetRecord] = Dictionary(minimumCapacity: all.count)
+                    for item in all {
+                        if let existing = prevAll[item.id], existing == item {
+                            nextAllByID[item.id] = existing
+                        } else {
+                            nextAllByID[item.id] = item
+                        }
+                    }
+
+                    self.isBatchUpdating = true
+                    if self.smartFolders != smartList { self.smartFolders = smartList }
+                    self.allAssetsByID = nextAllByID
+                    if self.folders != folderList { self.folders = folderList }
+                    let sortedTags = self.sortTagCounts(tags)
+                    if self.tagCounts != sortedTags { self.tagCounts = sortedTags }
+                    if self.inboxCount != inbox { self.inboxCount = inbox }
+                    self.isBatchUpdating = false
+
+                    self.rebuildFolderDerivedCaches()
+                    self.rebuildAssetDerivedCaches()
+                    self.rebuildSidebarTagCaches()
+                    self.rebuildRecentActivityCache()
+                    self.invalidateInspectorContext()
+                }
+                if assetsGen == self.assetsRequestGeneration,
+                   self.filter == requestedFilter,
+                   self.activeSmartFolderID == requestedSmartID {
+                    let filtered = self.applyActiveSmartFolderIfNeeded(visible)
+                    self.assets = self.canonicalizeAssetsAgainstCache(filtered)
+                }
+            } catch {
+                if !(error is CancellationError) && fullGen == self.fullRefreshGeneration {
+                    self.lastError = error.localizedDescription
+                    libraryStoreLogger.error("refreshAll failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
-            if assetsGen == assetsRequestGeneration,
-               filter == requestedFilter,
-               activeSmartFolderID == requestedSmartID {
-                assets = applyActiveSmartFolderIfNeeded(visible)
-            }
-        } catch {
-            if fullGen == fullRefreshGeneration {
-                lastError = error.localizedDescription
-            }
-            libraryStoreLogger.error("refreshAll failed: \(error.localizedDescription, privacy: .public)")
         }
+        activeRefreshAllTask = task
+        await task.value
     }
 
     public func refreshAssets() async {
+        activeRefreshAssetsTask?.cancel()
         assetsRequestGeneration &+= 1
         let gen = assetsRequestGeneration
         let requestedFilter = filter
         let requestedSmartID = activeSmartFolderID
-        do {
-            let fetched = try await engine.fetchAssets(matching: requestedFilter)
-            guard gen == assetsRequestGeneration,
-                  !isMinimalCaptureMode,
-                  filter == requestedFilter,
-                  activeSmartFolderID == requestedSmartID else {
-                return
+        let engine = self.engine
+
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let fetched = try await engine.fetchAssets(matching: requestedFilter)
+                guard !Task.isCancelled,
+                      gen == self.assetsRequestGeneration,
+                      !self.isMinimalCaptureMode,
+                      self.filter == requestedFilter,
+                      self.activeSmartFolderID == requestedSmartID else {
+                    return
+                }
+                let filtered = self.applyActiveSmartFolderIfNeeded(fetched)
+                var nextByID = self.allAssetsByID
+                var changedAny = false
+                var canonical: [AssetRecord] = []
+                canonical.reserveCapacity(filtered.count)
+                for asset in filtered {
+                    if let existing = nextByID[asset.id], existing == asset {
+                        canonical.append(existing)
+                    } else {
+                        nextByID[asset.id] = asset
+                        canonical.append(asset)
+                        changedAny = true
+                    }
+                }
+                self.assets = canonical
+                if changedAny {
+                    self.allAssetsByID = nextByID
+                }
+            } catch {
+                if !(error is CancellationError) && gen == self.assetsRequestGeneration {
+                    self.lastError = error.localizedDescription
+                }
             }
-            assets = applyActiveSmartFolderIfNeeded(fetched)
-            for asset in assets {
-                allAssetsByID[asset.id] = asset
+        }
+        activeRefreshAssetsTask = task
+        await task.value
+    }
+
+    private func canonicalizeAssetsAgainstCache(_ list: [AssetRecord]) -> [AssetRecord] {
+        list.map { item in
+            if let existing = allAssetsByID[item.id], existing == item {
+                return existing
             }
-        } catch {
-            if gen == assetsRequestGeneration {
-                lastError = error.localizedDescription
-            }
+            return item
         }
     }
 
@@ -332,9 +610,10 @@ public final class LibraryStore {
     }
 
     public func matchingCount(for smartFolder: SmartFolderRecord) -> Int {
-        allAssetsByID.values.reduce(into: 0) { count, asset in
-            if smartFolder.rule.matches(asset) { count += 1 }
+        if let cachedRule = cachedSmartFolderRulesByID[smartFolder.id], cachedRule == smartFolder.rule {
+            return cachedSmartFolderCounts[smartFolder.id] ?? 0
         }
+        return matchingCount(for: smartFolder.rule)
     }
 
     public func matchingCount(for rule: SmartFolderRule) -> Int {
@@ -343,35 +622,14 @@ public final class LibraryStore {
         }
     }
 
-    /// Top 10 tags strictly by asset count for Sidebar quick access.
+    /// Top 10 tags strictly by asset count for Sidebar quick access (O(1) cached read).
     public var topTenSidebarTags: [TagCount] {
-        Array(tagCounts.sorted {
-            if $0.count != $1.count { return $0.count > $1.count }
-            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }.prefix(10))
+        cachedTopTenSidebarTags
     }
 
-    /// Up to 5 recently & frequently used tags for Sidebar quick access.
+    /// Up to 5 recently & frequently used tags for Sidebar quick access (O(1) cached read).
     public var recentFrequentSidebarTags: [TagCount] {
-        let byLower = Dictionary(
-            tagCounts.map { ($0.name.lowercased(), $0) },
-            uniquingKeysWith: { lhs, rhs in lhs.count >= rhs.count ? lhs : rhs }
-        )
-        let ranked = recentlyTouchedTags.enumerated().compactMap { index, name -> (TagCount, Double)? in
-            guard let item = byLower[name.lowercased()] else { return nil }
-            let recencyBonus = Double(max(0, 60 - index)) * 1.5
-            let freqBonus = Double(tagUsageFrequency[name.lowercased()] ?? 1) * 4.0
-            return (item, recencyBonus + freqBonus)
-        }
-        var seen = Set<String>()
-        var result: [TagCount] = []
-        for (item, _) in ranked.sorted(by: { $0.1 > $1.1 }) {
-            if seen.insert(item.name.lowercased()).inserted {
-                result.append(item)
-                if result.count >= 5 { break }
-            }
-        }
-        return result
+        cachedRecentFrequentSidebarTags
     }
 
     /// Rebuilds the cached recent-activity list (called on data mutations, never inside SwiftUI view body).
@@ -404,16 +662,31 @@ public final class LibraryStore {
 
     public func markAssetOpened(_ id: UUID) {
         let now = Date()
+        var openedAsset: AssetRecord?
         if var existing = allAssetsByID[id] {
             existing.lastOpenedAt = now
+            openedAsset = existing
+            suppressDerivedAssetRebuild = true
             allAssetsByID[id] = existing
+            suppressDerivedAssetRebuild = false
         }
-        if let idx = assets.firstIndex(where: { $0.id == id }) {
+        if let idx = visibleAssetIndexByID[id], idx < assets.count, assets[idx].id == id {
+            isUpdatingAssetsInPlace = true
+            suppressAssetsRevisionIncrement = true
             assets[idx].lastOpenedAt = now
+            suppressAssetsRevisionIncrement = false
+            isUpdatingAssetsInPlace = false
+            if openedAsset == nil {
+                openedAsset = assets[idx]
+            }
         }
-        if let existing = allAssetsByID[id], !existing.isTrashed {
-            cachedRecentActivityAssets.removeAll { $0.id == id }
-            cachedRecentActivityAssets.insert(existing, at: 0)
+        if let existing = openedAsset, !existing.isTrashed {
+            var nextRecent = cachedRecentActivityAssets
+            if let existingIdx = nextRecent.firstIndex(where: { $0.id == id }) {
+                nextRecent.remove(at: existingIdx)
+            }
+            nextRecent.insert(existing, at: 0)
+            cachedRecentActivityAssets = nextRecent
         }
         Task {
             await engine.markAssetOpened(id: id)
@@ -425,8 +698,10 @@ public final class LibraryStore {
         do {
             let updated = try await engine.refreshRichAsset(id: id)
             allAssetsByID[updated.id] = updated
-            if let idx = assets.firstIndex(where: { $0.id == updated.id }) {
+            if let idx = visibleAssetIndexByID[updated.id], idx < assets.count, assets[idx].id == updated.id {
+                isUpdatingAssetsInPlace = true
                 assets[idx] = updated
+                isUpdatingAssetsInPlace = false
             }
             rebuildRecentActivityCache()
             thumbnailLoader.invalidate(assetID: updated.id)
@@ -573,10 +848,17 @@ public final class LibraryStore {
             async let fetchedTags = engine.fetchTagCounts()
             async let fetchedInbox = engine.inboxCount()
             let (folderList, smartList, tags, inbox) = try await (fetchedFolders, fetchedSmartFolders, fetchedTags, fetchedInbox)
-            folders = folderList
-            smartFolders = smartList
-            tagCounts = sortTagCounts(tags)
-            inboxCount = inbox
+            let sortedTags = sortTagCounts(tags)
+            isBatchUpdating = true
+            if folders != folderList { folders = folderList }
+            if smartFolders != smartList { smartFolders = smartList }
+            if tagCounts != sortedTags { tagCounts = sortedTags }
+            if inboxCount != inbox { inboxCount = inbox }
+            isBatchUpdating = false
+            rebuildFolderDerivedCaches()
+            rebuildFolderAssetRollupCaches()
+            rebuildSmartFolderCountCaches()
+            rebuildSidebarTagCaches()
         } catch {
             lastError = error.localizedDescription
         }
@@ -627,9 +909,7 @@ public final class LibraryStore {
     }
 
     public func isFolderSubtreePinnedOffline(_ folderID: UUID) -> Bool {
-        let subtreeSet = Set(descendantFolderIDsPostOrder(rootID: folderID))
-        let folderAssets = allAssetsByID.values.filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }
-        return !folderAssets.isEmpty && folderAssets.allSatisfy(\.pinnedOffline)
+        cachedSubtreePinnedOffline[folderID] ?? false
     }
 
     @discardableResult
@@ -709,23 +989,14 @@ public final class LibraryStore {
     }
 
     public func subtreeAssetCount(for folderID: UUID) -> Int {
-        let subtreeSet = Set(descendantFolderIDsPostOrder(rootID: folderID))
-        return allAssetsByID.values.filter { !$0.isTrashed && $0.folderID.map { subtreeSet.contains($0) } == true }.count
+        cachedSubtreeAssetCounts[folderID] ?? 0
     }
 
     private func descendantFolderIDsPostOrder(rootID: UUID) -> [UUID] {
-        let byParent = Dictionary(grouping: folders) { $0.parentID }
-        var result: [UUID] = []
-        var visited = Set<UUID>()
-        func visit(_ id: UUID) {
-            guard visited.insert(id).inserted else { return }
-            for child in byParent[id] ?? [] {
-                visit(child.id)
-            }
-            result.append(id)
+        if let cached = cachedDescendantFolderIDsPostOrder[rootID] {
+            return cached
         }
-        visit(rootID)
-        return result
+        return [rootID]
     }
 
     // MARK: - Finder Reveal, Copy, Cut & Paste Move
@@ -875,33 +1146,237 @@ public final class LibraryStore {
         pb.writeObjects(objects)
     }
 
+    public func folder(byID folderID: UUID) -> FolderRecord? {
+        cachedFolderByID[folderID]
+    }
+
     public func childFolders(of parentID: UUID?) -> [FolderRecord] {
-        FolderHierarchyNode.sortedSiblings(folders.filter { $0.parentID == parentID })
+        cachedChildFoldersByParent[parentID] ?? []
     }
 
     public var folderHierarchyRoots: [FolderHierarchyNode] {
-        FolderHierarchyNode.buildTree(from: folders)
+        cachedFolderHierarchyRoots
     }
 
     public var flattenedFolderHierarchy: [FolderHierarchyNode] {
-        FolderHierarchyNode.flattened(from: folders)
+        cachedFlattenedFolderHierarchy
     }
 
     public func folderBreadcrumbs(for folderID: UUID) -> [FolderRecord] {
-        let byID = Dictionary(uniqueKeysWithValues: folders.map { ($0.id, $0) })
-        var chain: [FolderRecord] = []
-        var visited = Set<UUID>()
-        var cursor: UUID? = folderID
-        while let id = cursor, visited.insert(id).inserted, let folder = byID[id] {
-            chain.append(folder)
-            cursor = folder.parentID
-        }
-        return chain.reversed()
+        cachedFolderBreadcrumbs[folderID] ?? []
     }
 
     public func folderDisplayPath(for folderID: UUID) -> String {
-        let crumbs = folderBreadcrumbs(for: folderID)
-        return crumbs.isEmpty ? "文件夹" : crumbs.map(\.name).joined(separator: " / ")
+        cachedFolderDisplayPaths[folderID] ?? "文件夹"
+    }
+
+    // MARK: - Derived Index Builders
+
+    private func rebuildVisibleAssetIndex() {
+        var index: [UUID: Int] = Dictionary(minimumCapacity: assets.count)
+        for (idx, asset) in assets.enumerated() {
+            index[asset.id] = idx
+        }
+        visibleAssetIndexByID = index
+    }
+
+    private static func flattenHierarchyNodes(_ roots: [FolderHierarchyNode]) -> [FolderHierarchyNode] {
+        var result: [FolderHierarchyNode] = []
+        func visit(_ list: [FolderHierarchyNode]) {
+            for node in list {
+                result.append(node)
+                visit(node.children)
+            }
+        }
+        visit(roots)
+        return result
+    }
+
+    private func rebuildFolderDerivedCaches() {
+        var byID: [UUID: FolderRecord] = Dictionary(minimumCapacity: folders.count)
+        var byParentRaw: [UUID?: [FolderRecord]] = [:]
+        for folder in folders {
+            byID[folder.id] = folder
+            byParentRaw[folder.parentID, default: []].append(folder)
+        }
+        var byParentSorted: [UUID?: [FolderRecord]] = Dictionary(minimumCapacity: byParentRaw.count)
+        for (parentID, children) in byParentRaw {
+            byParentSorted[parentID] = FolderHierarchyNode.sortedSiblings(children)
+        }
+        let roots = FolderHierarchyNode.buildTree(from: folders)
+        let flattened = Self.flattenHierarchyNodes(roots)
+
+        var breadcrumbs: [UUID: [FolderRecord]] = Dictionary(minimumCapacity: folders.count)
+        var displayPaths: [UUID: String] = Dictionary(minimumCapacity: folders.count)
+        var descendants: [UUID: [UUID]] = Dictionary(minimumCapacity: folders.count)
+
+        for folder in folders {
+            var chain: [FolderRecord] = []
+            var visited = Set<UUID>()
+            var cursor: UUID? = folder.id
+            while let id = cursor, visited.insert(id).inserted, let node = byID[id] {
+                chain.append(node)
+                cursor = node.parentID
+            }
+            let ordered = Array(chain.reversed())
+            breadcrumbs[folder.id] = ordered
+            displayPaths[folder.id] = ordered.isEmpty ? "文件夹" : ordered.map(\.name).joined(separator: " / ")
+
+            var postOrder: [UUID] = []
+            var subVisited = Set<UUID>()
+            func visitSubtree(_ id: UUID) {
+                guard subVisited.insert(id).inserted else { return }
+                for child in byParentSorted[id] ?? [] {
+                    visitSubtree(child.id)
+                }
+                postOrder.append(id)
+            }
+            visitSubtree(folder.id)
+            descendants[folder.id] = postOrder
+        }
+
+        cachedDescendantFolderIDsPostOrder = descendants
+        if cachedFolderByID != byID { cachedFolderByID = byID }
+        if cachedChildFoldersByParent != byParentSorted { cachedChildFoldersByParent = byParentSorted }
+        if cachedFolderHierarchyRoots != roots { cachedFolderHierarchyRoots = roots }
+        if cachedFlattenedFolderHierarchy != flattened { cachedFlattenedFolderHierarchy = flattened }
+        if cachedFolderBreadcrumbs != breadcrumbs { cachedFolderBreadcrumbs = breadcrumbs }
+        if cachedFolderDisplayPaths != displayPaths { cachedFolderDisplayPaths = displayPaths }
+    }
+
+    private func rebuildAssetDerivedCaches() {
+        var nextActive = 0
+        var nextUntagged = 0
+        var directActive: [UUID: Int] = [:]
+        var directUnpinned: [UUID: Int] = [:]
+        let currentSmartFolders = smartFolders
+        var smartCounts: [UUID: Int] = Dictionary(minimumCapacity: currentSmartFolders.count)
+        var smartRules: [UUID: SmartFolderRule] = Dictionary(minimumCapacity: currentSmartFolders.count)
+        for sf in currentSmartFolders {
+            smartCounts[sf.id] = 0
+            smartRules[sf.id] = sf.rule
+        }
+
+        for asset in allAssetsByID.values {
+            if !asset.isTrashed {
+                nextActive += 1
+                if asset.tags.isEmpty {
+                    nextUntagged += 1
+                }
+                if let fid = asset.folderID {
+                    directActive[fid, default: 0] += 1
+                    if !asset.pinnedOffline {
+                        directUnpinned[fid, default: 0] += 1
+                    }
+                }
+            }
+            if !currentSmartFolders.isEmpty {
+                for sf in currentSmartFolders where sf.rule.matches(asset) {
+                    smartCounts[sf.id, default: 0] += 1
+                }
+            }
+        }
+
+        cachedDirectActiveCountByFolder = directActive
+        cachedDirectUnpinnedCountByFolder = directUnpinned
+        cachedSmartFolderRulesByID = smartRules
+
+        if activeAssetCount != nextActive { activeAssetCount = nextActive }
+        if untaggedAssetCount != nextUntagged { untaggedAssetCount = nextUntagged }
+        if cachedSmartFolderCounts != smartCounts { cachedSmartFolderCounts = smartCounts }
+        rebuildFolderAssetRollupCaches()
+    }
+
+    private func rebuildFolderAssetRollupCaches() {
+        var nextCounts: [UUID: Int] = Dictionary(minimumCapacity: folders.count)
+        var nextPinned: [UUID: Bool] = Dictionary(minimumCapacity: folders.count)
+        var memoCount: [UUID: Int] = Dictionary(minimumCapacity: folders.count)
+        var memoUnpinned: [UUID: Int] = Dictionary(minimumCapacity: folders.count)
+        var visiting = Set<UUID>()
+
+        func compute(_ id: UUID) -> (count: Int, unpinned: Int) {
+            if let c = memoCount[id], let u = memoUnpinned[id] {
+                return (c, u)
+            }
+            guard visiting.insert(id).inserted else {
+                return (0, 0)
+            }
+            var totalCount = cachedDirectActiveCountByFolder[id] ?? 0
+            var totalUnpinned = cachedDirectUnpinnedCountByFolder[id] ?? 0
+            if let children = cachedChildFoldersByParent[id] {
+                for child in children {
+                    let sub = compute(child.id)
+                    totalCount += sub.count
+                    totalUnpinned += sub.unpinned
+                }
+            }
+            visiting.remove(id)
+            memoCount[id] = totalCount
+            memoUnpinned[id] = totalUnpinned
+            return (totalCount, totalUnpinned)
+        }
+
+        for folder in folders {
+            let (count, unpinned) = compute(folder.id)
+            nextCounts[folder.id] = count
+            nextPinned[folder.id] = count > 0 && unpinned == 0
+        }
+        for (fid, count) in cachedDirectActiveCountByFolder where nextCounts[fid] == nil {
+            let unpinned = cachedDirectUnpinnedCountByFolder[fid] ?? 0
+            nextCounts[fid] = count
+            nextPinned[fid] = count > 0 && unpinned == 0
+        }
+
+        if cachedSubtreeAssetCounts != nextCounts { cachedSubtreeAssetCounts = nextCounts }
+        if cachedSubtreePinnedOffline != nextPinned { cachedSubtreePinnedOffline = nextPinned }
+    }
+
+    private func rebuildSmartFolderCountCaches() {
+        let currentSmartFolders = smartFolders
+        var smartCounts: [UUID: Int] = Dictionary(minimumCapacity: currentSmartFolders.count)
+        var smartRules: [UUID: SmartFolderRule] = Dictionary(minimumCapacity: currentSmartFolders.count)
+        for sf in currentSmartFolders {
+            smartCounts[sf.id] = 0
+            smartRules[sf.id] = sf.rule
+        }
+        if !currentSmartFolders.isEmpty {
+            for asset in allAssetsByID.values {
+                for sf in currentSmartFolders where sf.rule.matches(asset) {
+                    smartCounts[sf.id, default: 0] += 1
+                }
+            }
+        }
+        cachedSmartFolderRulesByID = smartRules
+        if cachedSmartFolderCounts != smartCounts { cachedSmartFolderCounts = smartCounts }
+    }
+
+    private func rebuildSidebarTagCaches() {
+        let nextTopTen = Array(tagCounts.sorted {
+            if $0.count != $1.count { return $0.count > $1.count }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }.prefix(10))
+
+        let byLower = Dictionary(
+            tagCounts.map { ($0.name.lowercased(), $0) },
+            uniquingKeysWith: { lhs, rhs in lhs.count >= rhs.count ? lhs : rhs }
+        )
+        let ranked = recentlyTouchedTags.enumerated().compactMap { index, name -> (TagCount, Double)? in
+            guard let item = byLower[name.lowercased()] else { return nil }
+            let recencyBonus = Double(max(0, 60 - index)) * 1.5
+            let freqBonus = Double(tagUsageFrequency[name.lowercased()] ?? 1) * 4.0
+            return (item, recencyBonus + freqBonus)
+        }
+        var seen = Set<String>()
+        var nextRecentFrequent: [TagCount] = []
+        for (item, _) in ranked.sorted(by: { $0.1 > $1.1 }) {
+            if seen.insert(item.name.lowercased()).inserted {
+                nextRecentFrequent.append(item)
+                if nextRecentFrequent.count >= 5 { break }
+            }
+        }
+
+        if cachedTopTenSidebarTags != nextTopTen { cachedTopTenSidebarTags = nextTopTen }
+        if cachedRecentFrequentSidebarTags != nextRecentFrequent { cachedRecentFrequentSidebarTags = nextRecentFrequent }
     }
 
     // MARK: - Ingestion (Single Source of Truth)
@@ -941,14 +1416,113 @@ public final class LibraryStore {
 
     // MARK: - Asset Patching & Batch Operations
 
+    private func canApplyPatchInMemory(_ patch: AssetBatchPatch) -> Bool {
+        guard !isMinimalCaptureMode else { return false }
+        guard patch.folderAssignment == .unchanged else { return false }
+        guard patch.isTrashed == nil else { return false }
+        guard patch.addTags.isEmpty && patch.removeTags.isEmpty && !patch.acceptSuggestedTags else { return false }
+        if patch.pinnedOffline != nil && filter.onlyPinnedOffline { return false }
+        if !filter.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
+        if activeSmartFolderID != nil { return false }
+        if patch.rating != nil && (filter.minRating > 0 || filter.sortBy == .ratingDesc) { return false }
+        if patch.title != nil && filter.sortBy == .nameAsc { return false }
+        return true
+    }
+
     @discardableResult
     public func applyPatch(_ patch: AssetBatchPatch) async -> Bool {
         guard !patch.assetIDs.isEmpty else { return false }
         do {
             let updated = try await engine.updateAssets(patch)
-            for item in updated {
-                allAssetsByID[item.id] = item
+            guard !updated.isEmpty else { return true }
+
+            if canApplyPatchInMemory(patch) {
+                let updatedByID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
+                let needsDerivedAssetRebuild = patch.pinnedOffline != nil || !smartFolders.isEmpty
+                var nextAll = allAssetsByID
+                for item in updated {
+                    nextAll[item.id] = item
+                }
+                if !needsDerivedAssetRebuild {
+                    suppressDerivedAssetRebuild = true
+                }
+                allAssetsByID = nextAll
+                if !needsDerivedAssetRebuild {
+                    suppressDerivedAssetRebuild = false
+                }
+
+                let affectsGalleryCardVisuals = patch.title != nil
+                    || patch.rating != nil
+                    || patch.pinnedOffline != nil
+                    || patch.sourceURL != nil
+                var nextAssets = assets
+                var visibleChanged = false
+                for item in updated {
+                    if let idx = visibleAssetIndexByID[item.id], idx < nextAssets.count, nextAssets[idx].id == item.id {
+                        if nextAssets[idx] != item {
+                            nextAssets[idx] = item
+                            visibleChanged = true
+                        }
+                    }
+                }
+                if visibleChanged {
+                    isUpdatingAssetsInPlace = true
+                    if !affectsGalleryCardVisuals {
+                        suppressAssetsRevisionIncrement = true
+                    }
+                    assets = nextAssets
+                    if !affectsGalleryCardVisuals {
+                        suppressAssetsRevisionIncrement = false
+                    }
+                    isUpdatingAssetsInPlace = false
+                }
+
+                if !cachedRecentActivityAssets.isEmpty {
+                    var nextRecent = cachedRecentActivityAssets
+                    var recentChanged = false
+                    for idx in nextRecent.indices {
+                        if let replacement = updatedByID[nextRecent[idx].id], nextRecent[idx] != replacement {
+                            nextRecent[idx] = replacement
+                            recentChanged = true
+                        }
+                    }
+                    if recentChanged {
+                        cachedRecentActivityAssets = nextRecent
+                    }
+                }
+
+                if let activeID = inspectorContextAssetID, updatedByID[activeID] != nil {
+                    invalidateInspectorContext()
+                }
+                return true
             }
+
+            if isMinimalCaptureMode {
+                var nextAll = allAssetsByID
+                let updatedByID = Dictionary(uniqueKeysWithValues: updated.map { ($0.id, $0) })
+                for item in updated {
+                    if nextAll[item.id] != nil {
+                        nextAll[item.id] = item
+                    }
+                }
+                allAssetsByID = nextAll
+                var nextRecent = cachedRecentActivityAssets
+                for idx in nextRecent.indices {
+                    if let replacement = updatedByID[nextRecent[idx].id] {
+                        nextRecent[idx] = replacement
+                    }
+                }
+                cachedRecentActivityAssets = nextRecent.filter { !$0.isTrashed }
+                return true
+            }
+
+            var nextAll = allAssetsByID
+            for item in updated {
+                nextAll[item.id] = item
+            }
+            suppressDerivedAssetRebuild = true
+            allAssetsByID = nextAll
+            suppressDerivedAssetRebuild = false
             await refreshAll()
             return true
         } catch {
@@ -1023,6 +1597,7 @@ public final class LibraryStore {
         tagUsageFrequency = freq
         UserDefaults.standard.set(next, forKey: Self.recentTagsDefaultsKey)
         UserDefaults.standard.set(freq, forKey: Self.tagUsageFreqDefaultsKey)
+        rebuildSidebarTagCaches()
     }
 
     private func sortTagCounts(_ tags: [TagCount]) -> [TagCount] {
@@ -1087,19 +1662,32 @@ public final class LibraryStore {
 
     // MARK: - Inspector Intelligence & Quick Jump
 
+    public func invalidateInspectorContext() {
+        inspectorContextLoaded = false
+    }
+
     public func refreshInspectorContext(for assetID: UUID?) {
-        inspectorContextTask?.cancel()
         guard let assetID else {
-            similarAssets = []
-            isLoadingSimilarAssets = false
-            suggestedFolder = nil
+            inspectorContextTask?.cancel()
+            inspectorContextTask = nil
+            inspectorContextAssetID = nil
+            inspectorContextLoaded = false
+            if !similarAssets.isEmpty { similarAssets = [] }
+            if isLoadingSimilarAssets { isLoadingSimilarAssets = false }
+            if suggestedFolder != nil { suggestedFolder = nil }
             return
         }
+        if inspectorContextAssetID == assetID && (inspectorContextLoaded || isLoadingSimilarAssets) {
+            return
+        }
+        inspectorContextTask?.cancel()
+        inspectorContextAssetID = assetID
+        inspectorContextLoaded = false
         isLoadingSimilarAssets = true
         inspectorContextTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                if !Task.isCancelled {
+                if !Task.isCancelled && self.inspectorContextAssetID == assetID {
                     self.isLoadingSimilarAssets = false
                 }
             }
@@ -1107,9 +1695,14 @@ public final class LibraryStore {
                 async let sim = self.engine.similarAssets(to: assetID, limit: 8)
                 async let suggestion = self.engine.suggestFolder(for: assetID)
                 let (simRes, folderRes) = try await (sim, suggestion)
-                guard !Task.isCancelled else { return }
-                self.similarAssets = simRes
-                self.suggestedFolder = folderRes
+                guard !Task.isCancelled, self.inspectorContextAssetID == assetID else { return }
+                if self.similarAssets != simRes {
+                    self.similarAssets = simRes
+                }
+                if self.suggestedFolder != folderRes {
+                    self.suggestedFolder = folderRes
+                }
+                self.inspectorContextLoaded = true
             } catch {
                 // Non-fatal in inspector context
             }
@@ -1251,12 +1844,18 @@ public final class LibraryStore {
                     case .success(let updated):
                         if !updated.isEmpty {
                             succeeded += updated.count
+                            var nextAll = allAssetsByID
                             for item in updated {
-                                allAssetsByID[item.id] = item
-                                if let idx = assets.firstIndex(where: { $0.id == item.id }) {
+                                nextAll[item.id] = item
+                                if let idx = visibleAssetIndexByID[item.id], idx < assets.count, assets[idx].id == item.id {
+                                    isUpdatingAssetsInPlace = true
                                     assets[idx] = item
+                                    isUpdatingAssetsInPlace = false
                                 }
                             }
+                            suppressDerivedAssetRebuild = true
+                            allAssetsByID = nextAll
+                            suppressDerivedAssetRebuild = false
                         } else {
                             failed += 1
                         }
@@ -1341,8 +1940,24 @@ public final class LibraryStore {
                     return nil
                 }
                 self.semanticSearchReport = report
-                self.assets = report.hits.map(\.asset)
-                for asset in self.assets { self.allAssetsByID[asset.id] = asset }
+                let hitAssets = report.hits.map(\.asset)
+                var nextByID = self.allAssetsByID
+                var changedAny = false
+                var canonical: [AssetRecord] = []
+                canonical.reserveCapacity(hitAssets.count)
+                for asset in hitAssets {
+                    if let existing = nextByID[asset.id], existing == asset {
+                        canonical.append(existing)
+                    } else {
+                        nextByID[asset.id] = asset
+                        canonical.append(asset)
+                        changedAny = true
+                    }
+                }
+                self.assets = canonical
+                if changedAny {
+                    self.allAssetsByID = nextByID
+                }
                 return report
             } catch {
                 if !Task.isCancelled && semGen == self.semanticSearchGeneration {

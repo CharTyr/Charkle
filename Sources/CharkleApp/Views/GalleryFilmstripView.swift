@@ -109,25 +109,33 @@ public struct GalleryFilmstripView: View {
         self.onRefreshRichAsset = onRefreshRichAsset
     }
 
+    private func resolveActiveSelection() -> (asset: AssetRecord, index: Int)? {
+        if let id = focusedAssetID, let idx = assets.firstIndex(where: { $0.id == id }) {
+            return (assets[idx], idx)
+        }
+        if let firstSelected = selectedAssetIDs.first, let idx = assets.firstIndex(where: { $0.id == firstSelected }) {
+            return (assets[idx], idx)
+        }
+        guard let first = assets.first else { return nil }
+        return (first, 0)
+    }
+
     private var activeAsset: AssetRecord? {
-        if let id = focusedAssetID, let match = assets.first(where: { $0.id == id }) {
-            return match
-        }
-        if let firstSelected = selectedAssetIDs.first, let match = assets.first(where: { $0.id == firstSelected }) {
-            return match
-        }
-        return assets.first
+        resolveActiveSelection()?.asset
     }
 
     private var activeIndex: Int? {
-        guard let active = activeAsset else { return nil }
-        return assets.firstIndex(where: { $0.id == active.id })
+        resolveActiveSelection()?.index
+    }
+
+    private func supportsVisualTransform(for asset: AssetRecord) -> Bool {
+        !asset.isGitHubRepo && !asset.isSocialPost
+            && (asset.mediaKind == .image || asset.mediaKind == .designFile || asset.mediaKind == .animatedImage)
     }
 
     private var supportsVisualTransform: Bool {
         guard let asset = activeAsset else { return false }
-        return !asset.isGitHubRepo && !asset.isSocialPost
-            && (asset.mediaKind == .image || asset.mediaKind == .designFile || asset.mediaKind == .animatedImage)
+        return supportsVisualTransform(for: asset)
     }
 
     private var displayRotationDegrees: Int {
@@ -170,12 +178,18 @@ public struct GalleryFilmstripView: View {
     }
 
     public var body: some View {
+        let resolved = resolveActiveSelection()
+        let currentAsset = resolved?.asset
+        let currentIndex = resolved?.index
+        let currentAssetID = currentAsset?.id
+        let canTransformCurrent = currentAsset.map(supportsVisualTransform(for:)) ?? false
+
         VStack(spacing: 0) {
             Spacer().frame(height: topContentInset)
 
             // Large Centered Interactive Preview Stage
             ZStack {
-                if let asset = activeAsset {
+                if let asset = currentAsset {
                     VStack(spacing: 10) {
                         ZStack {
                             stageMediaContent(for: asset)
@@ -195,7 +209,7 @@ public struct GalleryFilmstripView: View {
                         }
                         .overlay {
                             StageInteractiveBridge(
-                                isWheelZoomEnabled: supportsVisualTransform && !isQuickLookPresented,
+                                isWheelZoomEnabled: canTransformCurrent && !isQuickLookPresented,
                                 onWheelZoom: { factor in
                                     applyWheelZoom(factor: factor)
                                 },
@@ -212,7 +226,7 @@ public struct GalleryFilmstripView: View {
                         }
 
                         // Preview Controls Bar + Metadata Strip
-                        previewControlAndMetadataBar(for: asset)
+                        previewControlAndMetadataBar(for: asset, activeIndex: currentIndex, supportsTransform: canTransformCurrent)
                             .padding(.horizontal, 18)
                             .padding(.bottom, 10)
                     }
@@ -230,8 +244,8 @@ public struct GalleryFilmstripView: View {
                                     .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
-                            .opacity((activeIndex ?? 0) > 0 ? 1 : 0.25)
-                            .disabled((activeIndex ?? 0) == 0)
+                            .opacity((currentIndex ?? 0) > 0 ? 1 : 0.25)
+                            .disabled((currentIndex ?? 0) == 0)
 
                             Spacer()
 
@@ -245,8 +259,8 @@ public struct GalleryFilmstripView: View {
                                     .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
-                            .opacity((activeIndex ?? assets.count) < assets.count - 1 ? 1 : 0.25)
-                            .disabled((activeIndex ?? assets.count) >= assets.count - 1)
+                            .opacity((currentIndex ?? assets.count) < assets.count - 1 ? 1 : 0.25)
+                            .disabled((currentIndex ?? assets.count) >= assets.count - 1)
                         }
                         .padding(.horizontal, 14)
                     }
@@ -256,52 +270,54 @@ public struct GalleryFilmstripView: View {
 
             Divider()
 
-            // Bottom Horizontal Filmstrip Scrubber (with normal scroll-wheel horizontal scrolling & right-click menu)
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 8) {
-                        ForEach(assets) { item in
-                            filmstripThumbnailCell(item)
-                        }
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
+            // Bottom Horizontal Filmstrip Scrubber (isolated from zoom/pan/rotation stage state)
+            FilmstripScrubberBar(
+                assets: assets,
+                activeAssetID: currentAssetID,
+                selectedAssetIDs: selectedAssetIDs,
+                loader: loader,
+                isQuickLookPresented: isQuickLookPresented,
+                onSelectItem: { item in
+                    selectFilmstripItem(item)
+                },
+                effectiveTargetIDs: { item in
+                    effectiveTargetIDs(for: item)
+                },
+                contextMenuBuilder: { item in
+                    assetContextMenu(for: item)
                 }
-                .background(HorizontalWheelScrollRedirector())
-                .frame(height: 96)
-                .background(CharkleTheme.surfaceElevated(for: colorScheme).opacity(0.86))
-                .onChange(of: selectedAssetIDs) { _, newSelection in
-                    if newSelection.count == 1, let target = newSelection.first, focusedAssetID != target {
-                        focusedAssetID = target
-                    }
+            )
+            .onChange(of: selectedAssetIDs) { _, newSelection in
+                if newSelection.count == 1, let target = newSelection.first, focusedAssetID != target {
+                    focusedAssetID = target
                 }
-                .onChange(of: activeAsset?.id) { _, newID in
-                    resetViewTransform(animated: false)
-                    if let newID {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            proxy.scrollTo(newID, anchor: .center)
-                        }
-                        loadPreview(for: newID)
-                        onMarkOpened(newID)
-                    } else {
-                        previewLoadTask?.cancel()
-                        previewLoadTask = nil
-                        previewImage = nil
-                        activeOriginalURL = nil
-                    }
-                }
-                .onAppear {
-                    if let first = activeAsset {
-                        focusedAssetID = first.id
-                        if selectedAssetIDs.isEmpty {
-                            selectedAssetIDs = [first.id]
-                        }
-                        loadPreview(for: first.id)
-                    }
-                }
-                .onDisappear {
+            }
+            .onChange(of: currentAssetID) { _, newID in
+                resetViewTransform(animated: false)
+                if let newID {
+                    loadPreview(for: newID)
+                    onMarkOpened(newID)
+                } else {
                     previewLoadTask?.cancel()
+                    previewLoadTask = nil
+                    previewImage = nil
+                    activeOriginalURL = nil
                 }
+            }
+            .onAppear {
+                if let first = currentAsset {
+                    focusedAssetID = first.id
+                    if selectedAssetIDs.isEmpty {
+                        selectedAssetIDs = [first.id]
+                    }
+                    loadPreview(for: first.id)
+                }
+            }
+            .onDisappear {
+                previewLoadTask?.cancel()
+                previewLoadTask = nil
+                previewImage = nil
+                activeOriginalURL = nil
             }
         }
         .background(CanvasSurface.ground(for: colorScheme))
@@ -565,10 +581,14 @@ public struct GalleryFilmstripView: View {
 
     // MARK: - Preview Controls & Metadata Bar
 
-    private func previewControlAndMetadataBar(for asset: AssetRecord) -> some View {
+    private func previewControlAndMetadataBar(
+        for asset: AssetRecord,
+        activeIndex: Int?,
+        supportsTransform: Bool
+    ) -> some View {
         VStack(spacing: 8) {
             // Direct Preview Controls Pill (Zoom, Rotate, Flip, Reset, QuickLook)
-            if supportsVisualTransform {
+            if supportsTransform {
                 CharkleGlassContainer(spacing: 8) {
                     HStack(spacing: 6) {
                         // Zoom Controls
@@ -758,56 +778,7 @@ public struct GalleryFilmstripView: View {
             .padding(.horizontal, 2)
     }
 
-    // MARK: - Filmstrip Cell & Full Right-Click Context Menu
-
-    private func filmstripThumbnailCell(_ item: AssetRecord) -> some View {
-        let isFocused = activeAsset?.id == item.id
-        let isSelected = selectedAssetIDs.contains(item.id)
-        let thumbW: CGFloat = max(46, min(116, 68 * CGFloat(max(0.6, min(1.75, item.aspectRatio)))))
-
-        return AssetThumbnailSurface(
-            asset: item,
-            loader: loader,
-            tier: .grid520,
-            cornerRadius: 7,
-            contentMode: .fill,
-            enableHoverPlayback: !isQuickLookPresented
-        )
-        .frame(width: thumbW, height: 68)
-        .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(
-                    isFocused ? Color.accentColor : (isSelected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.12)),
-                    lineWidth: isFocused ? 2.5 : (isSelected ? 1.5 : 0.75)
-                )
-        )
-        .scaleEffect(isFocused && !reduceMotion ? 1.04 : 1.0)
-        .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: isFocused)
-        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .onTapGesture {
-            selectFilmstripItem(item)
-        }
-        .contextMenu {
-            assetContextMenu(for: item)
-        }
-        .id(item.id)
-        .onDrag {
-            let ids = effectiveTargetIDs(for: item)
-            let provider = NSItemProvider()
-            let encoded = CharkleDragIdentifiers.encode(assetIDs: ids)
-            provider.registerDataRepresentation(forTypeIdentifier: UTType.plainText.identifier, visibility: .all) { completion in
-                completion(Data(encoded.utf8), nil)
-                return nil
-            }
-            if let fileURL = loader.cachedDragFileURL(for: item) {
-                provider.registerFileRepresentation(forTypeIdentifier: UTType.fileURL.identifier, fileOptions: [], visibility: .all) { completion in
-                    completion(fileURL, false, nil)
-                    return nil
-                }
-            }
-            return provider
-        }
-    }
+    // MARK: - Full Right-Click Context Menu
 
     private func effectiveTargetIDs(for item: AssetRecord) -> [UUID] {
         guard selectedAssetIDs.contains(item.id), !selectedAssetIDs.isEmpty else {
@@ -1121,7 +1092,21 @@ public struct GalleryFilmstripView: View {
         } else {
             previewImage = nil
         }
-        let targetAsset = assets.first(where: { $0.id == id })
+        let targetIdx = assets.firstIndex(where: { $0.id == id })
+        let targetAsset = targetIdx.map { assets[$0] }
+        if let center = targetIdx {
+            let lo = max(0, center - 6)
+            let hi = min(assets.count - 1, center + 6)
+            if lo <= hi {
+                let neighborIDs = (lo...hi).compactMap { idx -> UUID? in
+                    let candidate = assets[idx].id
+                    return candidate == id ? nil : candidate
+                }
+                if !neighborIDs.isEmpty {
+                    loader.prefetch(assetIDs: neighborIDs, tier: .grid520)
+                }
+            }
+        }
         previewLoadTask = Task {
             let orig = await resolveOriginalURL(id)
             guard !Task.isCancelled else { return }
@@ -1142,6 +1127,94 @@ public struct GalleryFilmstripView: View {
                 guard !Task.isCancelled else { return }
                 previewImage = img
             }
+        }
+    }
+}
+
+/// Isolated bottom filmstrip scrubber so stage zoom/pan/rotation ticks never re-evaluate
+/// the horizontal `LazyHStack` cells and each cell performs an O(1) `activeAssetID == item.id` check.
+private struct FilmstripScrubberBar<ContextMenuContent: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let assets: [AssetRecord]
+    let activeAssetID: UUID?
+    let selectedAssetIDs: Set<UUID>
+    let loader: ThumbnailImageLoader
+    let isQuickLookPresented: Bool
+    let onSelectItem: (AssetRecord) -> Void
+    let effectiveTargetIDs: (AssetRecord) -> [UUID]
+    @ViewBuilder let contextMenuBuilder: (AssetRecord) -> ContextMenuContent
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 8) {
+                    ForEach(assets) { item in
+                        cell(for: item)
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+            }
+            .background(HorizontalWheelScrollRedirector())
+            .frame(height: 96)
+            .background(CharkleTheme.surfaceElevated(for: colorScheme).opacity(0.86))
+            .onChange(of: activeAssetID) { _, newID in
+                guard let newID else { return }
+                withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                    proxy.scrollTo(newID, anchor: .center)
+                }
+            }
+        }
+    }
+
+    private func cell(for item: AssetRecord) -> some View {
+        let isFocused = activeAssetID == item.id
+        let isSelected = selectedAssetIDs.contains(item.id)
+        let thumbW: CGFloat = max(46, min(116, 68 * CGFloat(max(0.6, min(1.75, item.aspectRatio)))))
+
+        return AssetThumbnailSurface(
+            asset: item,
+            loader: loader,
+            tier: .grid520,
+            cornerRadius: 7,
+            contentMode: .fill,
+            enableHoverPlayback: !isQuickLookPresented
+        )
+        .frame(width: thumbW, height: 68)
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(
+                    isFocused ? Color.accentColor : (isSelected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.12)),
+                    lineWidth: isFocused ? 2.5 : (isSelected ? 1.5 : 0.75)
+                )
+        )
+        .scaleEffect(isFocused && !reduceMotion ? 1.04 : 1.0)
+        .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: isFocused)
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onTapGesture {
+            onSelectItem(item)
+        }
+        .contextMenu {
+            contextMenuBuilder(item)
+        }
+        .id(item.id)
+        .onDrag {
+            let ids = effectiveTargetIDs(item)
+            let provider = NSItemProvider()
+            let encoded = CharkleDragIdentifiers.encode(assetIDs: ids)
+            provider.registerDataRepresentation(forTypeIdentifier: UTType.plainText.identifier, visibility: .all) { completion in
+                completion(Data(encoded.utf8), nil)
+                return nil
+            }
+            if let fileURL = loader.cachedDragFileURL(for: item) {
+                provider.registerFileRepresentation(forTypeIdentifier: UTType.fileURL.identifier, fileOptions: [], visibility: .all) { completion in
+                    completion(fileURL, false, nil)
+                    return nil
+                }
+            }
+            return provider
         }
     }
 }

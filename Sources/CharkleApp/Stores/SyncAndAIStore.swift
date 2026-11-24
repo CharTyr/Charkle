@@ -43,6 +43,17 @@ public final class SyncAndAIStore {
     public var isMigrating: Bool = false
 
     @ObservationIgnored
+    private static let syncStatusDecoder = JSONDecoder()
+    @ObservationIgnored
+    private var cachedCLIProbeRevision: Int = -1
+    @ObservationIgnored
+    private var cachedHelperCLIPathValue: String?
+    @ObservationIgnored
+    private var cachedBundledHelperAvailableValue: Bool = false
+    @ObservationIgnored
+    private var cachedCLILinkStatusValue: CLILinkStatus = .notLinked
+
+    @ObservationIgnored
     private nonisolated(unsafe) var syncProgressObserver: NSObjectProtocol?
     @ObservationIgnored
     private nonisolated(unsafe) var aiUsageObserver: NSObjectProtocol?
@@ -63,16 +74,20 @@ public final class SyncAndAIStore {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let data = notification.userInfo?[CharkleSyncNotifications.statusDataKey] as? Data,
-                  let decoded = try? JSONDecoder().decode(SyncStatus.self, from: data) else {
+            guard let data = notification.userInfo?[CharkleSyncNotifications.statusDataKey] as? Data else {
                 return
             }
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self,
+                      let decoded = try? Self.syncStatusDecoder.decode(SyncStatus.self, from: data) else {
+                    return
+                }
                 if self.isQuietSyncInFlight && !self.isSyncingNow, case .error = decoded.phase {
                     return
                 }
-                self.syncStatus = decoded
+                if self.syncStatus != decoded {
+                    self.syncStatus = decoded
+                }
             }
         }
 
@@ -83,7 +98,8 @@ public final class SyncAndAIStore {
         ) { [weak self] _ in
             let latest = CloudAIUsageStore.shared.snapshot()
             MainActor.assumeIsolated {
-                self?.aiUsage = latest
+                guard let self, self.aiUsage != latest else { return }
+                self.aiUsage = latest
             }
         }
     }
@@ -108,11 +124,17 @@ public final class SyncAndAIStore {
     }
 
     public func refreshSyncStatus() async {
-        syncStatus = await engine.syncStatus()
+        let latest = await engine.syncStatus()
+        if syncStatus != latest {
+            syncStatus = latest
+        }
     }
 
     public func refreshAIUsage() {
-        aiUsage = CloudAIUsageStore.shared.snapshot()
+        let latest = CloudAIUsageStore.shared.snapshot()
+        if aiUsage != latest {
+            aiUsage = latest
+        }
     }
 
     public func resetAIUsage(category: CloudAIUsageCategory? = nil) {
@@ -163,7 +185,7 @@ public final class SyncAndAIStore {
         if externalAgentConfig != loadedAgentCfg { externalAgentConfig = loadedAgentCfg }
         if aiUsage != loadedUsage { aiUsage = loadedUsage }
         if hasStoredAIKey != loadedAIKey { hasStoredAIKey = loadedAIKey }
-        hasLoadedInitialState = true
+        if !hasLoadedInitialState { hasLoadedInitialState = true }
 
         if chatGPT.status == .connected && chatGPT.sharingEnabled && chatGPTModels.isEmpty {
             await refreshChatGPTModels(quiet: true)
@@ -695,23 +717,70 @@ public final class SyncAndAIStore {
         }
     }
 
-    public func resolvedHelperCLIPath() -> String {
+    private func ensureCLIProbeCacheFresh() {
+        let rev = cliLinkRevision
+        guard cachedCLIProbeRevision != rev || cachedHelperCLIPathValue == nil else { return }
+        let fm = FileManager.default
         let bundled = Bundle.main.bundleURL
             .appending(path: "Contents/Helpers/charkle")
             .path
-        if FileManager.default.isExecutableFile(atPath: bundled) {
-            return bundled
+        let resolvedPath: String
+        let helperAvailable: Bool
+        if fm.isExecutableFile(atPath: bundled) {
+            resolvedPath = bundled
+            helperAvailable = true
+        } else {
+            let appApplications = "/Applications/Charkle.app/Contents/Helpers/charkle"
+            if fm.isExecutableFile(atPath: appApplications) {
+                resolvedPath = appApplications
+                helperAvailable = true
+            } else {
+                resolvedPath = bundled
+                helperAvailable = false
+            }
         }
-        let appApplications = "/Applications/Charkle.app/Contents/Helpers/charkle"
-        if FileManager.default.isExecutableFile(atPath: appApplications) {
-            return appApplications
+
+        let linkURL = URL(fileURLWithPath: NSHomeDirectory())
+            .appending(path: ".local/bin/charkle")
+        let linkPath = linkURL.path
+        let currentHelper = URL(fileURLWithPath: resolvedPath).resolvingSymlinksInPath().path
+
+        let status: CLILinkStatus
+        if let dest = try? fm.destinationOfSymbolicLink(atPath: linkPath) {
+            if !fm.isExecutableFile(atPath: linkPath) {
+                status = .broken
+            } else {
+                let destURL = dest.hasPrefix("/")
+                    ? URL(fileURLWithPath: dest)
+                    : URL(fileURLWithPath: dest, relativeTo: linkURL.deletingLastPathComponent())
+                let resolvedDest = destURL.resolvingSymlinksInPath().path
+                if helperAvailable && resolvedDest != currentHelper {
+                    status = .linkedStale(target: dest)
+                } else {
+                    status = .linkedCurrent
+                }
+            }
+        } else {
+            status = fm.isExecutableFile(atPath: linkPath) ? .linkedCurrent : .notLinked
         }
-        return bundled
+
+        cachedHelperCLIPathValue = resolvedPath
+        cachedBundledHelperAvailableValue = helperAvailable
+        cachedCLILinkStatusValue = status
+        cachedCLIProbeRevision = rev
+    }
+
+    public func resolvedHelperCLIPath() -> String {
+        ensureCLIProbeCacheFresh()
+        return cachedHelperCLIPathValue ?? Bundle.main.bundleURL
+            .appending(path: "Contents/Helpers/charkle")
+            .path
     }
 
     public var isBundledHelperAvailable: Bool {
         _ = cliLinkRevision
-        return FileManager.default.isExecutableFile(atPath: resolvedHelperCLIPath())
+        ensureCLIProbeCacheFresh()
+        return cachedBundledHelperAvailableValue
     }
 
     public enum CLILinkStatus: Equatable, Sendable {
@@ -723,26 +792,8 @@ public final class SyncAndAIStore {
 
     public var cliLinkStatus: CLILinkStatus {
         _ = cliLinkRevision
-        let fm = FileManager.default
-        let linkURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appending(path: ".local/bin/charkle")
-        let linkPath = linkURL.path
-        let currentHelper = URL(fileURLWithPath: resolvedHelperCLIPath()).resolvingSymlinksInPath().path
-
-        if let dest = try? fm.destinationOfSymbolicLink(atPath: linkPath) {
-            guard fm.isExecutableFile(atPath: linkPath) else {
-                return .broken
-            }
-            let destURL = dest.hasPrefix("/")
-                ? URL(fileURLWithPath: dest)
-                : URL(fileURLWithPath: dest, relativeTo: linkURL.deletingLastPathComponent())
-            let resolvedDest = destURL.resolvingSymlinksInPath().path
-            if fm.isExecutableFile(atPath: currentHelper) && resolvedDest != currentHelper {
-                return .linkedStale(target: dest)
-            }
-            return .linkedCurrent
-        }
-        return fm.isExecutableFile(atPath: linkPath) ? .linkedCurrent : .notLinked
+        ensureCLIProbeCacheFresh()
+        return cachedCLILinkStatusValue
     }
 
     public var isCLILinkedInLocalBin: Bool {

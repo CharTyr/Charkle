@@ -35,6 +35,8 @@ public final class MoodboardStore {
     @ObservationIgnored private var latestViewportOverride: (boardID: UUID, center: BoardPoint, zoom: Double)?
     @ObservationIgnored private var openRequestGeneration: UInt64 = 0
     @ObservationIgnored private var curateRequestGeneration: UInt64 = 0
+    @ObservationIgnored private var candidateRequestGeneration: UInt64 = 0
+    @ObservationIgnored private var candidateRefreshTask: Task<Void, Never>?
     private let maxUndoDepth: Int = 45
 
     public init(engine: any CharkleEngineProtocol) {
@@ -46,7 +48,10 @@ public final class MoodboardStore {
 
     public func refreshBoards() async {
         do {
-            boards = try await engine.fetchBoards()
+            let fetched = try await engine.fetchBoards()
+            if fetched != boards {
+                boards = fetched
+            }
         } catch {
             lastError = error.localizedDescription
         }
@@ -432,56 +437,88 @@ public final class MoodboardStore {
     }
 
     public func refreshCandidates(for nodeID: UUID?) async {
+        candidateRefreshTask?.cancel()
+        candidateRequestGeneration &+= 1
+        let gen = candidateRequestGeneration
         guard let board = activeBoard else {
-            candidatePool = []
+            if !candidatePool.isEmpty {
+                candidatePool = []
+            }
             return
         }
+        let boardID = board.id
         let boardAssetIDs = board.referencedAssetIDs
         let boardAssetSet = Set(boardAssetIDs)
-
-        // When browsing the board generally (not actively swapping a specific card) and the AI curator
-        // saved a curated candidate pool on the document, preserve those curated candidates first
-        // instead of overwriting them with loose fallback matches.
-        if nodeID == nil, !board.candidateAssetIDs.isEmpty {
-            var curated: [ScoredAsset] = []
-            for cid in board.candidateAssetIDs where !boardAssetSet.contains(cid) {
-                if let asset = try? await engine.fetchAsset(id: cid), !asset.isTrashed {
-                    curated.append(ScoredAsset(asset: asset, score: 0.78, matchReasons: ["策展备选"]))
-                }
-            }
-            if !curated.isEmpty {
-                candidatePool = curated
-                return
-            }
-        }
-
+        let candidateAssetIDs = board.candidateAssetIDs
         let targetAssetID: UUID? = {
             if let nodeID, let node = board.nodes.first(where: { $0.id == nodeID }) {
                 return node.referencedAssetID
             }
             return boardAssetIDs.first
         }()
+        let engine = self.engine
 
-        guard let anchorID = targetAssetID else {
-            // Board empty: pull recent library items as candidates
-            if let recent = try? await engine.fetchAssets(matching: FilterCriteria(sortBy: .newest)) {
-                candidatePool = recent.prefix(24).map {
-                    ScoredAsset(asset: $0, score: 0.7, matchReasons: ["素材库推荐"])
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            // When browsing the board generally (not actively swapping a specific card) and the AI curator
+            // saved a curated candidate pool on the document, preserve those curated candidates first
+            // instead of overwriting them with loose fallback matches.
+            if nodeID == nil, !candidateAssetIDs.isEmpty {
+                var curated: [ScoredAsset] = []
+                for cid in candidateAssetIDs where !boardAssetSet.contains(cid) {
+                    if Task.isCancelled || self.candidateRequestGeneration != gen { return }
+                    if let asset = try? await engine.fetchAsset(id: cid), !asset.isTrashed {
+                        curated.append(ScoredAsset(asset: asset, score: 0.78, matchReasons: ["策展备选"]))
+                    }
+                }
+                guard !Task.isCancelled,
+                      self.candidateRequestGeneration == gen,
+                      self.activeBoard?.id == boardID else { return }
+                if !curated.isEmpty {
+                    if self.candidatePool != curated {
+                        self.candidatePool = curated
+                    }
+                    return
                 }
             }
-            return
-        }
 
-        do {
-            candidatePool = try await engine.replacementCandidates(
-                for: anchorID,
-                excluding: boardAssetSet,
-                boardContext: boardAssetIDs,
-                limit: 32
-            )
-        } catch {
-            lastError = error.localizedDescription
+            guard let anchorID = targetAssetID else {
+                // Board empty: pull recent library items as candidates
+                if let recent = try? await engine.fetchAssets(matching: FilterCriteria(sortBy: .newest)) {
+                    guard !Task.isCancelled,
+                          self.candidateRequestGeneration == gen,
+                          self.activeBoard?.id == boardID else { return }
+                    let nextPool = recent.prefix(24).map {
+                        ScoredAsset(asset: $0, score: 0.7, matchReasons: ["素材库推荐"])
+                    }
+                    if self.candidatePool != nextPool {
+                        self.candidatePool = nextPool
+                    }
+                }
+                return
+            }
+
+            do {
+                let fetched = try await engine.replacementCandidates(
+                    for: anchorID,
+                    excluding: boardAssetSet,
+                    boardContext: boardAssetIDs,
+                    limit: 32
+                )
+                guard !Task.isCancelled,
+                      self.candidateRequestGeneration == gen,
+                      self.activeBoard?.id == boardID else { return }
+                if self.candidatePool != fetched {
+                    self.candidatePool = fetched
+                }
+            } catch {
+                if !Task.isCancelled && self.candidateRequestGeneration == gen {
+                    self.lastError = error.localizedDescription
+                }
+            }
         }
+        candidateRefreshTask = task
+        await task.value
     }
 
     public func swapNode(nodeID: UUID, with asset: AssetRecord) async {

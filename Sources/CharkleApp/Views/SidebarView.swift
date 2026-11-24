@@ -70,7 +70,6 @@ public struct SidebarView: View {
 
     @State private var expandedFolderIDs: Set<UUID> = []
     @State private var didSeedInitialExpansion: Bool = false
-    @State private var hoveredFolderID: UUID?
     @State private var selectedFolderIDs: Set<UUID> = []
     @State private var lastClickedFolderID: UUID?
     @State private var customizingFolderID: UUID?
@@ -553,7 +552,7 @@ public struct SidebarView: View {
                         destination: .allItems,
                         symbolName: "square.grid.2x2",
                         title: "全部素材",
-                        badgeCount: library.allAssetsByID.values.filter { !$0.isTrashed }.count
+                        badgeCount: library.activeAssetCount
                     )
                     sidebarRow(
                         destination: .inbox,
@@ -582,7 +581,7 @@ public struct SidebarView: View {
                         destination: .untagged,
                         symbolName: "tag.slash",
                         title: "未打标签",
-                        badgeCount: library.allAssetsByID.values.filter { !$0.isTrashed && $0.tags.isEmpty }.count
+                        badgeCount: library.untaggedAssetCount
                     )
                     sidebarRow(
                         destination: .recent,
@@ -844,7 +843,7 @@ public struct SidebarView: View {
                             if renamingFolderID == folder.id {
                                 inlineFolderRenameRow(folder: folder, depth: node.depth)
                             } else {
-                                folderTreeRow(node)
+                                folderTreeRow(node, visibleTree: tree)
                                     .offset(y: ripple.offset)
                                     .animation(
                                         CharkleMotion.accessible(CharkleMotion.uiSpring, reduced: reduceMotion)
@@ -1229,168 +1228,162 @@ public struct SidebarView: View {
 
     // MARK: - Folder Tree Row & Inline Creator / Renamer (with Click-Outside Dismiss)
 
-    private func folderTreeRow(_ node: FolderTreeNode) -> some View {
+    private func folderTreeRow(_ node: FolderTreeNode, visibleTree: [FolderTreeNode]) -> some View {
         let folder = node.folder
         let destination: SidebarDestination = .folder(folder.id)
         let isDestinationSelected = coordinator.selectedDestination == destination
         let isMultiSelected = selectedFolderIDs.contains(folder.id)
         let isSelected = isDestinationSelected || isMultiSelected
         let isDropHighlighted = dropTargetedFolderID == folder.id
-        let isHovered = hoveredFolderID == folder.id
         let isPinned = library.isFolderSubtreePinnedOffline(folder.id)
         let rowShape = RoundedRectangle(cornerRadius: 8, style: .continuous)
         let indent = CGFloat(min(node.depth, 5)) * 14
 
         let targetFolderIDs: [UUID] = {
             if selectedFolderIDs.contains(folder.id) && selectedFolderIDs.count > 1 {
-                return visibleFolderTree.map(\.folder.id).filter { selectedFolderIDs.contains($0) }
+                return visibleTree.map(\.folder.id).filter { selectedFolderIDs.contains($0) }
             }
             return [folder.id]
         }()
 
-        return HStack(spacing: 2) {
-            // Note: Use `.onTapGesture` instead of `Button` on the row and chevron so macOS SwiftUI `.onDrag`
-            // initiates cleanly from ANY point on the row (including top-level parent folders with children).
-            if node.hasChildren {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8.5, weight: .bold))
-                    .foregroundStyle(.secondary.opacity(0.8))
-                    .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
-                    .frame(width: 22, height: 28)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                            if expandedFolderIDs.contains(folder.id) {
-                                expandedFolderIDs.remove(folder.id)
-                            } else {
-                                expandedFolderIDs.insert(folder.id)
+        return SidebarFolderRowHoverWrapper { isHovered in
+            HStack(spacing: 2) {
+                // Note: Use `.onTapGesture` instead of `Button` on the row and chevron so macOS SwiftUI `.onDrag`
+                // initiates cleanly from ANY point on the row (including top-level parent folders with children).
+                if node.hasChildren {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.8))
+                        .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
+                        .frame(width: 22, height: 28)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                if expandedFolderIDs.contains(folder.id) {
+                                    expandedFolderIDs.remove(folder.id)
+                                } else {
+                                    expandedFolderIDs.insert(folder.id)
+                                }
                             }
                         }
+                } else {
+                    Spacer().frame(width: 22)
+                }
+
+                HStack(spacing: 8) {
+                    CharkleFolderIcon(
+                        colorHex: folder.colorHex,
+                        customSymbol: folder.customSymbol,
+                        size: 18,
+                        isActive: isSelected
+                    )
+                    Text(folder.name)
+                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.86))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+
+                    if isPinned {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .help("文件夹素材始终保留在本地")
                     }
-            } else {
-                Spacer().frame(width: 22)
-            }
 
-            HStack(spacing: 8) {
-                CharkleFolderIcon(
-                    colorHex: folder.colorHex,
-                    customSymbol: folder.customSymbol,
-                    size: 18,
-                    isActive: isSelected
-                )
-                Text(folder.name)
-                    .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.86))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
+                    let displayCount = library.subtreeAssetCount(for: folder.id)
+                    if displayCount > 0 {
+                        Text("\(displayCount)")
+                            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    handleFolderRowClick(folder: folder)
+                }
 
-                if isPinned {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 10))
+                if isHovered {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9.5, weight: .bold))
                         .foregroundStyle(.secondary)
-                        .help("文件夹素材始终保留在本地")
-                }
-
-                let displayCount = library.subtreeAssetCount(for: folder.id)
-                if displayCount > 0 {
-                    Text("\(displayCount)")
-                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
+                        .frame(width: 18, height: 18)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            toggleFolderCreation(target: .subfolder(folder.id))
+                        }
+                        .help("在「\(folder.name)」内新建子文件夹")
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                handleFolderRowClick(folder: folder)
+            .padding(.leading, 4 + indent)
+            .padding(.trailing, 10)
+            .frame(height: 30)
+            .background {
+                if isMultiSelected && selectedFolderIDs.count > 1 {
+                    rowShape
+                        .fill(activeAccent.opacity(colorScheme == .dark ? 0.24 : 0.16))
+                        .overlay(rowShape.strokeBorder(activeAccent.opacity(0.55), lineWidth: 1))
+                } else if isDestinationSelected {
+                    rowShape
+                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
+                        .matchedGeometryEffect(id: "sidebar-expanded-selection-pill", in: expandedSelectionNamespace)
+                } else if isDropHighlighted {
+                    rowShape
+                        .fill(activeAccent.opacity(0.16))
+                        .overlay(rowShape.strokeBorder(activeAccent, lineWidth: 1.5))
+                }
             }
-
-            if isHovered {
-                Image(systemName: "plus")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        toggleFolderCreation(target: .subfolder(folder.id))
+            .contentShape(rowShape)
+            .onDrag {
+                NSItemProvider(object: CharkleDragIdentifiers.encode(folderIDs: targetFolderIDs) as NSString)
+            } preview: {
+                HStack(spacing: 7) {
+                    CharkleFolderIcon(
+                        colorHex: folder.colorHex,
+                        customSymbol: folder.customSymbol,
+                        size: 16,
+                        isActive: true
+                    )
+                    Text(targetFolderIDs.count > 1 ? "\(folder.name) 等 \(targetFolderIDs.count) 个文件夹" : folder.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .onDrop(
+                of: [.plainText, .fileURL, .url, .image],
+                isTargeted: Binding(
+                    get: { dropTargetedFolderID == folder.id },
+                    set: { targeted in
+                        dropTargetedFolderID = targeted ? folder.id : (dropTargetedFolderID == folder.id ? nil : dropTargetedFolderID)
                     }
-                    .help("在「\(folder.name)」内新建子文件夹")
-            }
-        }
-        .padding(.leading, 4 + indent)
-        .padding(.trailing, 10)
-        .frame(height: 30)
-        .background {
-            if isMultiSelected && selectedFolderIDs.count > 1 {
-                rowShape
-                    .fill(activeAccent.opacity(colorScheme == .dark ? 0.24 : 0.16))
-                    .overlay(rowShape.strokeBorder(activeAccent.opacity(0.55), lineWidth: 1))
-            } else if isDestinationSelected {
-                rowShape
-                    .fill(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
-                    .matchedGeometryEffect(id: "sidebar-expanded-selection-pill", in: expandedSelectionNamespace)
-            } else if isDropHighlighted {
-                rowShape
-                    .fill(activeAccent.opacity(0.16))
-                    .overlay(rowShape.strokeBorder(activeAccent, lineWidth: 1.5))
-            }
-        }
-        .contentShape(rowShape)
-        .onDrag {
-            NSItemProvider(object: CharkleDragIdentifiers.encode(folderIDs: targetFolderIDs) as NSString)
-        } preview: {
-            HStack(spacing: 7) {
-                CharkleFolderIcon(
-                    colorHex: folder.colorHex,
-                    customSymbol: folder.customSymbol,
-                    size: 16,
-                    isActive: true
                 )
-                Text(targetFolderIDs.count > 1 ? "\(folder.name) 等 \(targetFolderIDs.count) 个文件夹" : folder.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.primary)
+            ) { providers in
+                handleDrop(providers: providers, folderID: folder.id, boardID: nil)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .onDrop(
-            of: [.plainText, .fileURL, .url, .image],
-            isTargeted: Binding(
-                get: { dropTargetedFolderID == folder.id },
-                set: { targeted in
-                    dropTargetedFolderID = targeted ? folder.id : (dropTargetedFolderID == folder.id ? nil : dropTargetedFolderID)
-                }
-            )
-        ) { providers in
-            handleDrop(providers: providers, folderID: folder.id, boardID: nil)
-        }
-        .padding(.horizontal, 8)
-        .popover(
-            isPresented: Binding(
-                get: { customizingFolderID == folder.id },
-                set: { if !$0 && customizingFolderID == folder.id { customizingFolderID = nil } }
-            ),
-            arrowEdge: .trailing
-        ) {
-            FolderCustomizationPopover(folder: folder) { colorHex, customSymbol in
-                Task {
-                    for fid in targetFolderIDs {
-                        await library.updateFolderAppearance(id: fid, colorHex: colorHex, customSymbol: customSymbol)
+            .padding(.horizontal, 8)
+            .popover(
+                isPresented: Binding(
+                    get: { customizingFolderID == folder.id },
+                    set: { if !$0 && customizingFolderID == folder.id { customizingFolderID = nil } }
+                ),
+                arrowEdge: .trailing
+            ) {
+                FolderCustomizationPopover(folder: folder) { colorHex, customSymbol in
+                    Task {
+                        for fid in targetFolderIDs {
+                            await library.updateFolderAppearance(id: fid, colorHex: colorHex, customSymbol: customSymbol)
+                        }
                     }
                 }
-            }
-            .environment(\.charkleAccentSource, accentSource)
-            .tint(activeAccent)
-        }
-        .onHover { hovering in
-            if hovering {
-                hoveredFolderID = folder.id
-            } else if hoveredFolderID == folder.id {
-                hoveredFolderID = nil
+                .environment(\.charkleAccentSource, accentSource)
+                .tint(activeAccent)
             }
         }
         .contextMenu {
@@ -1687,6 +1680,22 @@ public struct SidebarView: View {
             _ = await library.moveFolder(id: f.id, newParentID: nil, insertAtIndex: idx)
         }
         coordinator.showToast("文件夹已按素材数量排好序", icon: "arrow.up.arrow.down")
+    }
+}
+
+/// Isolates per-row hover state so hovering over folders in the sidebar only re-renders the
+/// entered/exited row instead of invalidating the entire `SidebarView` tree.
+private struct SidebarFolderRowHoverWrapper<Content: View>: View {
+    @State private var isHovered: Bool = false
+    let content: (Bool) -> Content
+
+    var body: some View {
+        content(isHovered)
+            .onHover { hovering in
+                if isHovered != hovering {
+                    isHovered = hovering
+                }
+            }
     }
 }
 

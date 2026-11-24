@@ -43,6 +43,7 @@ public struct JumpAnywhereView: View {
 
     @State private var query: String = ""
     @State private var matches: [QuickJumpMatch] = []
+    @State private var searchTask: Task<Void, Never>?
     @State private var selectedIndex: Int = 0
     @State private var didExecuteSelection: Bool = false
     @FocusState private var isSearchFocused: Bool
@@ -205,6 +206,10 @@ public struct JumpAnywhereView: View {
             selectedIndex = 0
             runSearch()
         }
+        .onDisappear {
+            searchTask?.cancel()
+            searchTask = nil
+        }
         .onKeyPress(.escape) {
             onClose()
             return .handled
@@ -242,6 +247,8 @@ public struct JumpAnywhereView: View {
     }
 
     private func runSearch() {
+        searchTask?.cancel()
+        searchTask = nil
         let currentQuery = query
         let trimmed = currentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -249,8 +256,11 @@ public struct JumpAnywhereView: View {
             selectedIndex = 0
             return
         }
-        Task {
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(75))
+            guard !Task.isCancelled else { return }
             let results = await library.quickJump(query: trimmed, limit: 24)
+            guard !Task.isCancelled else { return }
             if currentQuery == query {
                 matches = results
                 if selectedIndex >= max(1, totalSelectableCount) {

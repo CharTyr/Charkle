@@ -46,7 +46,6 @@ public struct InspectorView: View {
     @State private var confirmSinglePermanentDelete: Bool = false
     @State private var draggingInspectorSection: InspectorInfoSection? = nil
     @State private var dropTargetInspectorSection: InspectorInfoSection? = nil
-    @State private var hoveredInspectorSection: InspectorInfoSection? = nil
 
     @FocusState private var isTitleFocused: Bool
     @FocusState private var isNotesFocused: Bool
@@ -220,7 +219,9 @@ public struct InspectorView: View {
         .onAppear {
             titleDraft = asset.title
             notesDraft = asset.notes
-            library.refreshInspectorContext(for: asset.id)
+            if isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
+                library.refreshInspectorContext(for: asset.id)
+            }
         }
         .onChange(of: asset.id) { oldID, newID in
             if let oldAsset = library.allAssetsByID[oldID] {
@@ -229,7 +230,14 @@ public struct InspectorView: View {
             flushPendingNotesSave()
             titleDraft = asset.title
             notesDraft = asset.notes
-            library.refreshInspectorContext(for: newID)
+            if isQuickLookHosted || coordinator.isInspectorVisible || coordinator.selectedDestination == .inbox {
+                library.refreshInspectorContext(for: newID)
+            }
+        }
+        .onChange(of: coordinator.isInspectorVisible) { _, isVisible in
+            if isVisible {
+                library.refreshInspectorContext(for: asset.id)
+            }
         }
         .onChange(of: asset.title) { _, newTitle in
             if !isTitleFocused && titleDraft != newTitle {
@@ -422,12 +430,7 @@ public struct InspectorView: View {
                                 .allowsHitTesting(false)
                         }
                     }
-                    .onHover { hovering in
-                        if hovering {
-                            hoveredInspectorSection = section
-                        } else if hoveredInspectorSection == section {
-                            hoveredInspectorSection = nil
-                        }
+                    .onHover { _ in
                         if draggingInspectorSection != nil && NSEvent.pressedMouseButtons == 0 {
                             draggingInspectorSection = nil
                             dropTargetInspectorSection = nil
@@ -499,7 +502,7 @@ public struct InspectorView: View {
     }
 
     private func isSectionHighlighted(_ section: InspectorInfoSection) -> Bool {
-        hoveredInspectorSection == section || draggingInspectorSection == section
+        draggingInspectorSection == section
     }
 
     @ViewBuilder
@@ -2474,7 +2477,7 @@ public struct InspectorView: View {
 
     private func folderName(for folderID: UUID?) -> String {
         guard let folderID else { return "收件箱" }
-        return library.folders.first(where: { $0.id == folderID })?.name ?? "文件夹"
+        return library.folder(byID: folderID)?.name ?? "文件夹"
     }
 
     private func commitSingleAssetTitle(_ asset: AssetRecord) {

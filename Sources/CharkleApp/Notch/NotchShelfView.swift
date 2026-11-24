@@ -127,7 +127,6 @@ public struct NotchShelfView: View {
     @Namespace private var targetPillNamespace
     @Namespace private var notchHeroNamespace
 
-    @State private var hoveredRecentID: UUID?
     @State private var notchSelectedIDs: Set<UUID> = []
     @State private var waterfallSearchQuery: String = ""
 
@@ -173,7 +172,7 @@ public struct NotchShelfView: View {
 
     private var selectedFolderName: String {
         if let folderID = shelfState.selectedFolderID,
-           let folder = library.folders.first(where: { $0.id == folderID }) {
+           let folder = library.folder(byID: folderID) {
             return folder.name
         }
         return library.folderHierarchyRoots.first?.folder.name ?? library.folders.first?.name ?? "默认文件夹"
@@ -475,76 +474,25 @@ public struct NotchShelfView: View {
     }
 
     private func recentFilmstripCard(_ asset: AssetRecord) -> some View {
-        let isHovered = hoveredRecentID == asset.id
-        return VStack(alignment: .leading, spacing: 4) {
-            ZStack(alignment: .topTrailing) {
-                AssetThumbnailSurface(
-                    asset: asset,
-                    loader: library.thumbnailLoader,
-                    tier: .grid520,
-                    cornerRadius: 10
-                )
-                .frame(width: 96, height: 82)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(isHovered ? 0.38 : 0.12), lineWidth: isHovered ? 1.25 : 0.75)
-                )
-
-                if isHovered {
-                    HStack(spacing: 4) {
-                        Button {
-                            Task {
-                                _ = await library.copyAssetsToPasteboard([asset.id])
-                            }
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 22, height: 22)
-                                .background(Color.black.opacity(0.72), in: Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("拷贝到剪贴板")
-
-                        Button {
-                            onOpenAssetInQuickLook(asset)
-                        } label: {
-                            Image(systemName: asset.isExternalWebLink ? "safari" : "eye")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 22, height: 22)
-                                .background(Color.black.opacity(0.72), in: Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(asset.isExternalWebLink ? "在默认浏览器中打开" : "在主窗中沉浸预览")
-                    }
-                    .padding(5)
-                    .transition(.opacity)
+        NotchRecentFilmstripCard(
+            asset: asset,
+            loader: library.thumbnailLoader,
+            isMinimalCaptureOnly: shelfState.isMinimalCaptureOnly,
+            onCopyAsset: {
+                Task {
+                    _ = await library.copyAssetsToPasteboard([asset.id])
                 }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .onTapGesture {
-                if shelfState.isMinimalCaptureOnly {
-                    onOpenAssetInQuickLook(asset)
-                } else {
-                    onToggleFullGallery(true)
-                }
-            }
-            .onHover { hovering in
-                withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
-                    hoveredRecentID = hovering ? asset.id : (hoveredRecentID == asset.id ? nil : hoveredRecentID)
-                }
-            }
-            .onDrag {
+            },
+            onOpenAssetInQuickLook: {
+                onOpenAssetInQuickLook(asset)
+            },
+            onToggleFullGallery: {
+                onToggleFullGallery(true)
+            },
+            makeDragProvider: {
                 makeDragItemProvider(for: [asset.id])
             }
-
-            Text(asset.title)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.68))
-                .lineLimit(1)
-                .frame(width: 96, alignment: .leading)
-        }
+        )
     }
 
     // MARK: - Expanded Full-Waterfall Gallery Mode (Img 6: Infinite Scroll + Marquee Multi-Select + Drag-Out)
@@ -989,6 +937,88 @@ public struct NotchShelfView: View {
         case .inbox: "将存入收件箱待整理"
         case .folder: "将直接存入「\(selectedFolderName)」"
         case .activeMoodboard: "将收录素材并直接加入「\(activeBoardTitle)」"
+        }
+    }
+}
+
+/// Isolates per-card hover state so hovering recent items inside the Notch Shelf
+/// does not re-evaluate `NotchShelfView.body` or recompute `recentAssets`.
+private struct NotchRecentFilmstripCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let asset: AssetRecord
+    let loader: ThumbnailImageLoader
+    let isMinimalCaptureOnly: Bool
+    let onCopyAsset: () -> Void
+    let onOpenAssetInQuickLook: () -> Void
+    let onToggleFullGallery: () -> Void
+    let makeDragProvider: () -> NSItemProvider
+
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ZStack(alignment: .topTrailing) {
+                AssetThumbnailSurface(
+                    asset: asset,
+                    loader: loader,
+                    tier: .grid520,
+                    cornerRadius: 10
+                )
+                .frame(width: 96, height: 82)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.white.opacity(isHovered ? 0.38 : 0.12), lineWidth: isHovered ? 1.25 : 0.75)
+                )
+
+                if isHovered {
+                    HStack(spacing: 4) {
+                        Button(action: onCopyAsset) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Color.black.opacity(0.72), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("拷贝到剪贴板")
+
+                        Button(action: onOpenAssetInQuickLook) {
+                            Image(systemName: asset.isExternalWebLink ? "safari" : "eye")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 22, height: 22)
+                                .background(Color.black.opacity(0.72), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help(asset.isExternalWebLink ? "在默认浏览器中打开" : "在主窗中沉浸预览")
+                    }
+                    .padding(5)
+                    .transition(.opacity)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .onTapGesture {
+                if isMinimalCaptureOnly {
+                    onOpenAssetInQuickLook()
+                } else {
+                    onToggleFullGallery()
+                }
+            }
+            .onHover { hovering in
+                withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+                    if isHovered != hovering {
+                        isHovered = hovering
+                    }
+                }
+            }
+            .onDrag(makeDragProvider)
+
+            Text(asset.title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.68))
+                .lineLimit(1)
+                .frame(width: 96, alignment: .leading)
         }
     }
 }

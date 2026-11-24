@@ -623,6 +623,7 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
     private let content: Content
 
     @State private var isHeaderHovered: Bool = false
+    @State private var isSectionHovered: Bool = false
 
     public init(
         _ title: String,
@@ -676,6 +677,12 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
             .padding(.vertical, verticalPadding)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onHover { hovering in
+            guard showReorderGrip || reorderActions != nil else { return }
+            if isSectionHovered != hovering {
+                isSectionHovered = hovering
+            }
+        }
     }
 
     @ViewBuilder
@@ -727,13 +734,13 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
 
                 if shouldShowGrip {
                     if let reorderActions {
-                        CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered)
+                        CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered || isSectionHovered)
                             .help("按住拖拽可自由调整排序 · 右键可快速置顶或恢复默认")
                             .onDrag(reorderActions.onBeginDrag, preview: {
                                 dragPreviewPill
                             })
                     } else {
-                        CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered)
+                        CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered || isSectionHovered)
                     }
                 }
             }
@@ -744,7 +751,7 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
                 Spacer(minLength: 4)
                 headerTrailing
                 if shouldShowGrip {
-                    CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered)
+                    CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered || isSectionHovered)
                         .padding(.leading, 2)
                 }
             }

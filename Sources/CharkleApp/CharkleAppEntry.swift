@@ -45,6 +45,8 @@ public final class CharkleRuntime {
     private var isTerminating: Bool = false
     @ObservationIgnored
     private var isTransitioningMinimalMode: Bool = false
+    @ObservationIgnored
+    private nonisolated(unsafe) var externalRefreshDebounceTask: Task<Void, Never>?
 
     public init() {
         let resolvedEngine: any CharkleEngineProtocol
@@ -108,6 +110,7 @@ public final class CharkleRuntime {
         if let observer = windowWillCloseObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        externalRefreshDebounceTask?.cancel()
     }
 
     /// Starts AppKit windows (`NotchShelfController`), Carbon hotkeys, notification observers,
@@ -185,6 +188,7 @@ public final class CharkleRuntime {
         notchController?.setMinimalCaptureMode(true)
         library.enterMinimalCaptureMode()
         moodboards.enterMinimalCaptureMode()
+        RemoteImageMemoryCache.shared.clearAll()
         URLCache.shared.removeAllCachedResponses()
 
         if let app = NSApp {
@@ -305,7 +309,7 @@ public final class CharkleRuntime {
                 if let activeBoardID = self.moodboards.activeBoard?.id {
                     await self.moodboards.reloadActiveBoardIfNeeded(id: activeBoardID)
                 }
-                self.syncAndAI.syncStatus = await self.engine.syncStatus()
+                await self.syncAndAI.refreshSyncStatus()
                 if discovered > 0 {
                     self.coordinator.showToast("从云端目录发现并导入 \(discovered) 项新素材", icon: "icloud.and.arrow.down.fill", tone: .success)
                 } else if downloaded > 0 || boards > 0 || renames > 0 {
@@ -362,18 +366,24 @@ public final class CharkleRuntime {
             let boardID = boardIDString.flatMap(UUID.init(uuidString:))
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.coordinator.isMinimalCaptureMode {
-                    await self.library.refreshMinimalMetadataOnly()
+                self.externalRefreshDebounceTask?.cancel()
+                self.externalRefreshDebounceTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled, let self else { return }
+                    self.externalRefreshDebounceTask = nil
+                    if self.coordinator.isMinimalCaptureMode {
+                        await self.library.refreshMinimalMetadataOnly()
+                        await self.moodboards.refreshBoards()
+                        return
+                    }
+                    await self.library.refreshAll()
                     await self.moodboards.refreshBoards()
-                    return
-                }
-                await self.library.refreshAll()
-                await self.moodboards.refreshBoards()
-                if let boardID {
-                    await self.moodboards.reloadActiveBoardIfNeeded(id: boardID)
-                }
-                if let summary, !summary.isEmpty {
-                    self.coordinator.showToast(summary, icon: "bolt.horizontal.circle.fill")
+                    if let boardID {
+                        await self.moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                    }
+                    if let summary, !summary.isEmpty {
+                        self.coordinator.showToast(summary, icon: "bolt.horizontal.circle.fill")
+                    }
                 }
             }
         }

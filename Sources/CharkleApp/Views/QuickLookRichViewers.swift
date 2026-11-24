@@ -631,6 +631,7 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
             loadTask?.cancel()
             currentURL = url
             view.player?.pause()
+            view.player?.replaceCurrentItem(with: nil)
             view.player = nil
 
             // Defer AVPlayer / VideoToolbox initialization slightly past the opening animation frame
@@ -650,6 +651,7 @@ private struct SocialPostInlineVideoPlayer: NSViewRepresentable {
             loadTask?.cancel()
             loadTask = nil
             view.player?.pause()
+            view.player?.replaceCurrentItem(with: nil)
             view.player = nil
         }
     }
@@ -785,18 +787,18 @@ struct QuickLookMarkdownReaderCard: View {
 
 // MARK: - Cached Remote Image Loader (Supports SVG, WebP, PNG, JPEG, GIF)
 
-private nonisolated final class RemoteImageBox: @unchecked Sendable {
+nonisolated final class RemoteImageBox: @unchecked Sendable {
     let image: NSImage
     init(_ image: NSImage) { self.image = image }
 }
 
-private nonisolated final class RemoteImageMemoryCache: @unchecked Sendable {
+nonisolated final class RemoteImageMemoryCache: @unchecked Sendable {
     static let shared = RemoteImageMemoryCache()
     private let cache = NSCache<NSString, RemoteImageBox>()
 
     private init() {
-        cache.countLimit = 120
-        cache.totalCostLimit = 96 * 1024 * 1024
+        cache.countLimit = 64
+        cache.totalCostLimit = 32 * 1024 * 1024
     }
 
     func box(for url: URL) -> RemoteImageBox? {
@@ -808,13 +810,19 @@ private nonisolated final class RemoteImageMemoryCache: @unchecked Sendable {
     }
 
     func store(_ box: RemoteImageBox, for url: URL) {
-        let w = max(1, Int(box.image.size.width))
-        let h = max(1, Int(box.image.size.height))
-        cache.setObject(box, forKey: url.absoluteString as NSString, cost: w * h * 4)
+        let rep = box.image.representations.first
+        let pixelW = max(rep?.pixelsWide ?? 0, Int(box.image.size.width * 2))
+        let pixelH = max(rep?.pixelsHigh ?? 0, Int(box.image.size.height * 2))
+        let byteCost = max(1, pixelW) * max(1, pixelH) * 4
+        cache.setObject(box, forKey: url.absoluteString as NSString, cost: byteCost)
     }
 
     func store(_ image: NSImage, for url: URL) {
         store(RemoteImageBox(image), for: url)
+    }
+
+    func clearAll() {
+        cache.removeAllObjects()
     }
 }
 
@@ -948,12 +956,50 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
 
 // MARK: - Native Textual Rich Markdown Renderer (GitHub README, Documents & Social Posts)
 
+private final class PreparedSocialTextBox {
+    let markdown: String
+    let useStructuredBlocks: Bool
+    init(markdown: String, useStructuredBlocks: Bool) {
+        self.markdown = markdown
+        self.useStructuredBlocks = useStructuredBlocks
+    }
+}
+
 private enum CharkleMarkdownNormalizer {
     private static let cache: NSCache<NSString, NSString> = {
         let c = NSCache<NSString, NSString>()
         c.countLimit = 64
         return c
     }()
+
+    private static let socialCache: NSCache<NSString, PreparedSocialTextBox> = {
+        let c = NSCache<NSString, PreparedSocialTextBox>()
+        c.countLimit = 128
+        return c
+    }()
+
+    // Pre-compiled static regular expressions (avoids compiling ~16 ICU regexes per normalization pass)
+    private static let headingLineRegex = try? NSRegularExpression(pattern: #"^#{1,6}[ \t]+\S"#)
+    private static let listLineRegex = try? NSRegularExpression(pattern: #"^([-*+]|[0-9]+\.)[ \t]+\S"#)
+    private static let bareURLRegex = try? NSRegularExpression(pattern: #"(?<!\]\()(?<!<)(https?://[^\s<>\)\]]+)"#)
+    private static let htmlCommentRegex = try? NSRegularExpression(pattern: #"<!--[\s\S]*?-->"#)
+    private static let summaryTagRegex = try? NSRegularExpression(pattern: #"(?is)<summary\b[^>]*>([\s\S]*?)</summary>"#)
+    private static let strongTagRegex = try? NSRegularExpression(pattern: #"(?is)<(?:strong|b)\b[^>]*>([\s\S]*?)</(?:strong|b)>"#)
+    private static let emTagRegex = try? NSRegularExpression(pattern: #"(?is)<(?:em|i)\b[^>]*>([\s\S]*?)</(?:em|i)>"#)
+    private static let codeTagRegex = try? NSRegularExpression(pattern: #"(?is)<(?:code|kbd)\b[^>]*>([\s\S]*?)</(?:code|kbd)>"#)
+    private static let brTagRegex = try? NSRegularExpression(pattern: #"(?i)<br\s*/?>"#)
+    private static let hrTagRegex = try? NSRegularExpression(pattern: #"(?i)<hr\s*/?>"#)
+    private static let inlineSpanTagRegex = try? NSRegularExpression(pattern: #"(?i)</?(?:span|sub|sup)\b[^>]*>"#)
+    private static let blockHTMLTagRegex = try? NSRegularExpression(pattern: #"(?i)</?(?:div|p|picture|source|details|center|section|article|header|footer|figure|figcaption|table|thead|tbody|tr|td|th)\b[^>]*>"#)
+    private static let githubAlertRegex = try? NSRegularExpression(pattern: #"(?m)^([ \t]*>[ \t]*)\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*$"#)
+    private static let linkedImageRegex = try? NSRegularExpression(pattern: #"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>\s*(<img\b[^>]*>)\s*</a>"#)
+    private static let standaloneImageRegex = try? NSRegularExpression(pattern: #"(?i)<img\b[^>]*>"#)
+    private static let htmlHeadingRegex = try? NSRegularExpression(pattern: #"(?is)<h([1-6])\b[^>]*>([\s\S]*?)</h\1>"#)
+    private static let htmlAnchorRegex = try? NSRegularExpression(pattern: #"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>"#)
+    private static let htmlTagStripRegex = try? NSRegularExpression(pattern: #"<[^>]+>"#)
+    private static let srcAttrRegex = try? NSRegularExpression(pattern: #"(?i)\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+    private static let altAttrRegex = try? NSRegularExpression(pattern: #"(?i)\balt\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+    private static let excessBlankLinesRegex = try? NSRegularExpression(pattern: #"\n{3,}"#)
 
     static func normalize(_ markdown: String, urlContext: MarkdownURLContext) -> String {
         var hasher = Hasher()
@@ -971,8 +1017,16 @@ private enum CharkleMarkdownNormalizer {
     static func prepareSocialText(_ raw: String, forceBlockMode: Bool) -> (markdown: String, useStructuredBlocks: Bool) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ("", false) }
+        var hasher = Hasher()
+        hasher.combine(trimmed)
+        hasher.combine(forceBlockMode)
+        let key = "\(trimmed.count)-\(forceBlockMode ? 1 : 0)-\(hasher.finalize())" as NSString
+        if let cached = socialCache.object(forKey: key) {
+            return (cached.markdown, cached.useStructuredBlocks)
+        }
         let useBlocks = forceBlockMode || containsBlockMarkdown(trimmed)
         let linked = autoLinkBareURLs(in: trimmed)
+        socialCache.setObject(PreparedSocialTextBox(markdown: linked, useStructuredBlocks: useBlocks), forKey: key)
         return (linked, useBlocks)
     }
 
@@ -982,13 +1036,14 @@ private enum CharkleMarkdownNormalizer {
         var listLines = 0
         for rawLine in lines {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.range(of: #"^#{1,6}[ \t]+\S"#, options: .regularExpression) != nil {
+            let range = NSRange(location: 0, length: (line as NSString).length)
+            if let headingLineRegex, headingLineRegex.firstMatch(in: line, range: range) != nil {
                 return true
             }
             if line.hasPrefix("> ") {
                 return true
             }
-            if line.range(of: #"^([-*+]|[0-9]+\.)[ \t]+\S"#, options: .regularExpression) != nil {
+            if let listLineRegex, listLineRegex.firstMatch(in: line, range: range) != nil {
                 listLines += 1
                 if listLines >= 2 { return true }
             }
@@ -997,10 +1052,10 @@ private enum CharkleMarkdownNormalizer {
     }
 
     private static func autoLinkBareURLs(in text: String) -> String {
-        // Skip fenced code blocks while converting standalone https?:// URLs into Markdown autolinks.
+        // Fast-path: skip regex scanning completely when no HTTP(S) URL exists in the post.
+        guard text.contains("http://") || text.contains("https://") else { return text }
+        guard let regex = bareURLRegex else { return text }
         let segments = splitFencedCodeBlocks(text)
-        let pattern = #"(?<!\]\()(?<!<)(https?://[^\s<>\)\]]+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
 
         return segments.map { segment in
             guard !segment.isCode else { return segment.text }
@@ -1095,54 +1150,50 @@ private enum CharkleMarkdownNormalizer {
 
     private static func normalizeProseSegment(_ raw: String, urlContext: MarkdownURLContext) -> String {
         var s = raw
-        // Strip HTML comments
-        s = replacingRegex(s, pattern: #"<!--[\s\S]*?-->"#, with: "")
+        // Fast-path skip HTML tag passes when segment contains no angle brackets
+        if s.contains("<") {
+            // Strip HTML comments
+            s = replacingRegex(s, regex: htmlCommentRegex, with: "")
 
-        // Convert linked HTML images: <a href="..."><img ...></a> -> [![alt](src)](href)
-        s = replaceLinkedImages(in: s, urlContext: urlContext)
+            // Convert linked HTML images: <a href="..."><img ...></a> -> [![alt](src)](href)
+            s = replaceLinkedImages(in: s, urlContext: urlContext)
 
-        // Convert standalone HTML images: <img ...> -> ![alt](src)
-        s = replaceStandaloneImages(in: s, urlContext: urlContext)
+            // Convert standalone HTML images: <img ...> -> ![alt](src)
+            s = replaceStandaloneImages(in: s, urlContext: urlContext)
 
-        // Convert HTML headings <h1..h6> -> Markdown headings
-        s = replaceHTMLHeadings(in: s)
+            // Convert HTML headings <h1..h6> -> Markdown headings
+            s = replaceHTMLHeadings(in: s)
 
-        // Convert HTML links <a href="...">label</a> -> [label](url)
-        s = replaceHTMLAnchors(in: s, urlContext: urlContext)
+            // Convert HTML links <a href="...">label</a> -> [label](url)
+            s = replaceHTMLAnchors(in: s, urlContext: urlContext)
 
-        // Convert HTML <summary>title</summary> into bold lead-in
-        s = replacingRegex(s, pattern: #"(?is)<summary\b[^>]*>([\s\S]*?)</summary>"#, with: "\n**$1**\n")
+            // Convert HTML <summary>title</summary> into bold lead-in
+            s = replacingRegex(s, regex: summaryTagRegex, with: "\n**$1**\n")
 
-        // Convert inline emphasis & code tags
-        s = replacingRegex(s, pattern: #"(?is)<(?:strong|b)\b[^>]*>([\s\S]*?)</(?:strong|b)>"#, with: "**$1**")
-        s = replacingRegex(s, pattern: #"(?is)<(?:em|i)\b[^>]*>([\s\S]*?)</(?:em|i)>"#, with: "*$1*")
-        s = replacingRegex(s, pattern: #"(?is)<(?:code|kbd)\b[^>]*>([\s\S]*?)</(?:code|kbd)>"#, with: "`$1`")
-        s = replacingRegex(s, pattern: #"(?i)<br\s*/?>"#, with: "  \n")
-        s = replacingRegex(s, pattern: #"(?i)<hr\s*/?>"#, with: "\n---\n")
+            // Convert inline emphasis & code tags
+            s = replacingRegex(s, regex: strongTagRegex, with: "**$1**")
+            s = replacingRegex(s, regex: emTagRegex, with: "*$1*")
+            s = replacingRegex(s, regex: codeTagRegex, with: "`$1`")
+            s = replacingRegex(s, regex: brTagRegex, with: "  \n")
+            s = replacingRegex(s, regex: hrTagRegex, with: "\n---\n")
 
-        // Remove inline formatting wrapper tags without injecting artificial line breaks
-        s = replacingRegex(s, pattern: #"(?i)</?(?:span|sub|sup)\b[^>]*>"#, with: "")
+            // Remove inline formatting wrapper tags without injecting artificial line breaks
+            s = replacingRegex(s, regex: inlineSpanTagRegex, with: "")
 
-        // Remove purely structural block HTML tags so Markdown inside them renders cleanly
-        s = replacingRegex(
-            s,
-            pattern: #"(?i)</?(?:div|p|picture|source|details|center|section|article|header|footer|figure|figcaption|table|thead|tbody|tr|td|th)\b[^>]*>"#,
-            with: "\n"
-        )
+            // Remove purely structural block HTML tags so Markdown inside them renders cleanly
+            s = replacingRegex(s, regex: blockHTMLTagRegex, with: "\n")
+        }
 
         // Normalize GitHub alert blockquotes (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION])
-        s = replacingRegex(
-            s,
-            pattern: #"(?m)^([ \t]*>[ \t]*)\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*$"#,
-            with: "$1**$2**  "
-        )
+        if s.contains("[!") {
+            s = replacingRegex(s, regex: githubAlertRegex, with: "$1**$2**  ")
+        }
 
         return decodeHTMLEntities(s)
     }
 
     private static func replaceLinkedImages(in input: String, urlContext: MarkdownURLContext) -> String {
-        let pattern = #"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>\s*(<img\b[^>]*>)\s*</a>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        guard let regex = linkedImageRegex else { return input }
         let ns = input as NSString
         let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
         guard !matches.isEmpty else { return input }
@@ -1154,9 +1205,9 @@ private enum CharkleMarkdownNormalizer {
                   let imgRange = Range(match.range(at: 2), in: output) else { continue }
             let href = urlContext.resolveLinkURL(decodeHTMLEntities(String(output[hrefRange])))
             let imgTag = String(output[imgRange])
-            if let rawSrc = extractHTMLAttribute("src", from: imgTag), !rawSrc.isEmpty {
+            if let rawSrc = extractHTMLAttribute(regex: srcAttrRegex, from: imgTag), !rawSrc.isEmpty {
                 let resolvedSrc = urlContext.resolveAssetURL(decodeHTMLEntities(rawSrc))
-                let alt = extractHTMLAttribute("alt", from: imgTag).map(decodeHTMLEntities) ?? ""
+                let alt = extractHTMLAttribute(regex: altAttrRegex, from: imgTag).map(decodeHTMLEntities) ?? ""
                 output.replaceSubrange(fullRange, with: "[![\(alt)](\(resolvedSrc))](\(href))")
             }
         }
@@ -1164,8 +1215,7 @@ private enum CharkleMarkdownNormalizer {
     }
 
     private static func replaceStandaloneImages(in input: String, urlContext: MarkdownURLContext) -> String {
-        let pattern = #"(?i)<img\b[^>]*>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        guard let regex = standaloneImageRegex else { return input }
         let ns = input as NSString
         let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
         guard !matches.isEmpty else { return input }
@@ -1174,20 +1224,19 @@ private enum CharkleMarkdownNormalizer {
         for match in matches.reversed() {
             guard let fullRange = Range(match.range(at: 0), in: output) else { continue }
             let imgTag = String(output[fullRange])
-            guard let rawSrc = extractHTMLAttribute("src", from: imgTag), !rawSrc.isEmpty else {
+            guard let rawSrc = extractHTMLAttribute(regex: srcAttrRegex, from: imgTag), !rawSrc.isEmpty else {
                 output.replaceSubrange(fullRange, with: "")
                 continue
             }
             let resolvedSrc = urlContext.resolveAssetURL(decodeHTMLEntities(rawSrc))
-            let alt = extractHTMLAttribute("alt", from: imgTag).map(decodeHTMLEntities) ?? ""
+            let alt = extractHTMLAttribute(regex: altAttrRegex, from: imgTag).map(decodeHTMLEntities) ?? ""
             output.replaceSubrange(fullRange, with: "![\(alt)](\(resolvedSrc))")
         }
         return output
     }
 
     private static func replaceHTMLHeadings(in input: String) -> String {
-        let pattern = #"(?is)<h([1-6])\b[^>]*>([\s\S]*?)</h\1>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        guard let regex = htmlHeadingRegex else { return input }
         let ns = input as NSString
         let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
         guard !matches.isEmpty else { return input }
@@ -1199,7 +1248,7 @@ private enum CharkleMarkdownNormalizer {
                   let bodyRange = Range(match.range(at: 2), in: output),
                   let level = Int(output[levelRange]) else { continue }
             let hashes = String(repeating: "#", count: max(1, min(6, level)))
-            let text = replacingRegex(String(output[bodyRange]), pattern: #"<[^>]+>"#, with: "")
+            let text = replacingRegex(String(output[bodyRange]), regex: htmlTagStripRegex, with: "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             output.replaceSubrange(fullRange, with: "\n\(hashes) \(text)\n")
         }
@@ -1207,8 +1256,7 @@ private enum CharkleMarkdownNormalizer {
     }
 
     private static func replaceHTMLAnchors(in input: String, urlContext: MarkdownURLContext) -> String {
-        let pattern = #"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        guard let regex = htmlAnchorRegex else { return input }
         let ns = input as NSString
         let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
         guard !matches.isEmpty else { return input }
@@ -1219,7 +1267,7 @@ private enum CharkleMarkdownNormalizer {
                   let hrefRange = Range(match.range(at: 1), in: output),
                   let labelRange = Range(match.range(at: 2), in: output) else { continue }
             let href = urlContext.resolveLinkURL(decodeHTMLEntities(String(output[hrefRange])))
-            let label = replacingRegex(String(output[labelRange]), pattern: #"<[^>]+>"#, with: "")
+            let label = replacingRegex(String(output[labelRange]), regex: htmlTagStripRegex, with: "")
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let replacement = label.isEmpty ? "[\(href)](\(href))" : "[\(label)](\(href))"
@@ -1228,9 +1276,8 @@ private enum CharkleMarkdownNormalizer {
         return output
     }
 
-    private static func extractHTMLAttribute(_ name: String, from tag: String) -> String? {
-        let pattern = #"(?i)\b\#(name)\s*=\s*(?:"([^"]*)"|'([^']*)')"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    private static func extractHTMLAttribute(regex: NSRegularExpression?, from tag: String) -> String? {
+        guard let regex else { return nil }
         let ns = tag as NSString
         guard let match = regex.firstMatch(in: tag, range: NSRange(location: 0, length: ns.length)) else {
             return nil
@@ -1244,8 +1291,8 @@ private enum CharkleMarkdownNormalizer {
         return nil
     }
 
-    private static func replacingRegex(_ input: String, pattern: String, with template: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+    private static func replacingRegex(_ input: String, regex: NSRegularExpression?, with template: String) -> String {
+        guard let regex else { return input }
         let range = NSRange(location: 0, length: (input as NSString).length)
         return regex.stringByReplacingMatches(in: input, range: range, withTemplate: template)
     }
@@ -1273,7 +1320,7 @@ private enum CharkleMarkdownNormalizer {
     }
 
     private static func collapseExcessBlankLines(_ input: String) -> String {
-        replacingRegex(input, pattern: #"\n{3,}"#, with: "\n\n")
+        replacingRegex(input, regex: excessBlankLinesRegex, with: "\n\n")
     }
 }
 
@@ -1786,6 +1833,7 @@ private struct SceneKitInteractiveView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> SCNView {
         let view = SCNView()
+        view.rendersContinuously = false
         view.allowsCameraControl = true
         view.autoenablesDefaultLighting = true
         view.antialiasingMode = .multisampling4X

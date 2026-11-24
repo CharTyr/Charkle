@@ -22,6 +22,7 @@ public struct SmartFolderEditorSheet: View {
     @State private var customPickerColor: Color = Color(charkleHex: "#3B82F6")
     @State private var selectedKinds: Set<MediaKind>
     @State private var minRating: Int
+    @State private var cachedLiveMatchCount: Int = 0
 
     private let quickPalette: [String] = [
         "#E11D48", "#F97316", "#F59E0B", "#10B981",
@@ -76,14 +77,14 @@ public struct SmartFolderEditorSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("当前匹配 \(liveMatchCount) 项")
+                Text("当前匹配 \(cachedLiveMatchCount) 项")
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(liveMatchCount > 0 ? Color.accentColor : .secondary)
+                    .foregroundStyle(cachedLiveMatchCount > 0 ? Color.accentColor : .secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(
-                        (liveMatchCount > 0 ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06)),
+                        (cachedLiveMatchCount > 0 ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06)),
                         in: Capsule(style: .continuous)
                     )
             }
@@ -347,6 +348,12 @@ public struct SmartFolderEditorSheet: View {
         }
         .frame(width: 560, height: 610)
         .background(CharkleTheme.surfaceElevated(for: colorScheme))
+        .onAppear {
+            cachedLiveMatchCount = liveMatchCount
+        }
+        .onChange(of: draftRule) { _, newRule in
+            cachedLiveMatchCount = library.matchingCount(for: newRule)
+        }
     }
 
     private func fieldLabel(_ text: String) -> some View {

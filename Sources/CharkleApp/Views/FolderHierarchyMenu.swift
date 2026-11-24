@@ -9,6 +9,21 @@ import SwiftUI
 /// - Folders with children render as cascading `Menu` submenus whose first item lets the user
 ///   target the parent folder itself (`"放入「父目录」"` / `"选择「父目录」"`), followed by a divider
 ///   and all recursive descendants in deterministic tree order.
+private enum FolderHierarchyMenuTreeCache {
+    static var lastFolders: [FolderRecord] = []
+    static var lastRoots: [FolderHierarchyNode] = []
+
+    static func roots(for folders: [FolderRecord]) -> [FolderHierarchyNode] {
+        if folders == lastFolders {
+            return lastRoots
+        }
+        let built = FolderHierarchyNode.buildTree(from: folders)
+        lastFolders = folders
+        lastRoots = built
+        return built
+    }
+}
+
 public struct CharkleHierarchicalFolderMenuContent: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -36,7 +51,7 @@ public struct CharkleHierarchicalFolderMenuContent: View {
     }
 
     public var body: some View {
-        let roots = FolderHierarchyNode.buildTree(from: folders)
+        let roots = FolderHierarchyMenuTreeCache.roots(for: folders)
         let isDark = colorScheme == .dark
 
         if includeInbox {

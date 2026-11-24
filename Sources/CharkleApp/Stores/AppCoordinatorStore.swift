@@ -247,17 +247,17 @@ public final class AppCoordinatorStore {
     }
 
     public func openSettings(tab: CharkleSettingsTab? = nil) {
-        if let tab {
+        if let tab, selectedSettingsTab != tab {
             selectedSettingsTab = tab
         }
-        quickLookAssetID = nil
-        isJumpAnywherePresented = false
-        isOnboardingPresented = false
-        isSettingsPresented = true
+        closeQuickLook()
+        if isJumpAnywherePresented { isJumpAnywherePresented = false }
+        if isOnboardingPresented { isOnboardingPresented = false }
+        if !isSettingsPresented { isSettingsPresented = true }
     }
 
     public func closeSettings() {
-        isSettingsPresented = false
+        if isSettingsPresented { isSettingsPresented = false }
     }
 
     public static let didRequestOnboardingPresentationNotification = Notification.Name("com.charkle.didRequestOnboardingPresentation")
@@ -300,7 +300,12 @@ public final class AppCoordinatorStore {
     }
 
     public func closeQuickLook() {
-        quickLookAssetID = nil
+        if quickLookAssetID != nil {
+            quickLookAssetID = nil
+        }
+        if !quickLookPlaylist.isEmpty {
+            quickLookPlaylist.removeAll()
+        }
     }
 
     public func requestRevealAssetInGallery(_ assetID: UUID) {
