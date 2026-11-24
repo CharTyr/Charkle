@@ -512,8 +512,9 @@ public enum RingGalleryMath {
         // Collect virtual indices walking outward from front center in both directions without
         // overlapping at the far back seam `s = ±halfCirc`.
         var virtualIndices: [Int] = []
+        virtualIndices.reserveCapacity(min(64, params.slotCount + 8))
         if assetCount <= 3 {
-            virtualIndices = Array(0..<assetCount)
+            for i in 0..<assetCount { virtualIndices.append(i) }
         } else {
             let seamLimit = halfCirc - params.cardGap * 0.5
             virtualIndices.append(centerVirtual)

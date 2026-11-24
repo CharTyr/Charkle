@@ -3,19 +3,21 @@ import CharkleCore
 import ImageIO
 import SwiftUI
 
-/// Bounded LIFO concurrency gate for off-main-thread thumbnail decoding.
-/// Prioritizes the most recently scrolled-into-view cards and immediately drops
+/// Bounded two-lane LIFO concurrency gate for off-main-thread thumbnail decoding.
+/// Always services visible on-screen cards (`highPriority: true`) ahead of lookahead prefetch tasks,
+/// prioritizes the most recently scrolled-into-view cards within each lane, and immediately drops
 /// cancelled waiters when cards scroll offscreen during fast trackpad flings.
 private actor ThumbnailDecodeScheduler {
     private let maxConcurrent: Int
     private var running: Int = 0
-    private var waiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var highPriorityWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
+    private var lowPriorityWaiters: [(id: UUID, continuation: CheckedContinuation<Bool, Never>)] = []
 
     init(maxConcurrent: Int = 6) {
         self.maxConcurrent = max(1, maxConcurrent)
     }
 
-    func acquire() async -> Bool {
+    func acquire(highPriority: Bool = true) async -> Bool {
         if Task.isCancelled { return false }
         if running < maxConcurrent {
             running += 1
@@ -31,8 +33,10 @@ private actor ThumbnailDecodeScheduler {
                 if running < maxConcurrent {
                     running += 1
                     continuation.resume(returning: true)
+                } else if highPriority {
+                    highPriorityWaiters.append((token, continuation))
                 } else {
-                    waiters.append((token, continuation))
+                    lowPriorityWaiters.append((token, continuation))
                 }
             }
         } onCancel: {
@@ -41,7 +45,11 @@ private actor ThumbnailDecodeScheduler {
     }
 
     func release() {
-        while let next = waiters.popLast() {
+        if let next = highPriorityWaiters.popLast() {
+            next.continuation.resume(returning: true)
+            return
+        }
+        if let next = lowPriorityWaiters.popLast() {
             next.continuation.resume(returning: true)
             return
         }
@@ -49,40 +57,138 @@ private actor ThumbnailDecodeScheduler {
     }
 
     private func cancelWaiter(id: UUID) {
-        if let idx = waiters.firstIndex(where: { $0.id == id }) {
-            let removed = waiters.remove(at: idx)
+        if let idx = highPriorityWaiters.firstIndex(where: { $0.id == id }) {
+            let removed = highPriorityWaiters.remove(at: idx)
+            removed.continuation.resume(returning: false)
+            return
+        }
+        if let idx = lowPriorityWaiters.firstIndex(where: { $0.id == id }) {
+            let removed = lowPriorityWaiters.remove(at: idx)
             removed.continuation.resume(returning: false)
         }
     }
 }
 
+private nonisolated struct ThumbnailKeyValue: Hashable, Sendable {
+    let assetID: UUID
+    let tier: ThumbnailTier
+}
+
+private nonisolated final class ThumbnailCacheKey: NSObject, @unchecked Sendable {
+    let assetID: UUID
+    let tier: ThumbnailTier
+    private let cachedHash: Int
+
+    init(assetID: UUID, tier: ThumbnailTier) {
+        self.assetID = assetID
+        self.tier = tier
+        // UUID bytes are already uniformly distributed — direct 64-bit XOR avoids SipHash overhead per lookup
+        let u = assetID.uuid
+        let hi = UInt64(u.0) | (UInt64(u.1) << 8) | (UInt64(u.2) << 16) | (UInt64(u.3) << 24)
+            | (UInt64(u.4) << 32) | (UInt64(u.5) << 40) | (UInt64(u.6) << 48) | (UInt64(u.7) << 56)
+        let lo = UInt64(u.8) | (UInt64(u.9) << 8) | (UInt64(u.10) << 16) | (UInt64(u.11) << 24)
+            | (UInt64(u.12) << 32) | (UInt64(u.13) << 40) | (UInt64(u.14) << 48) | (UInt64(u.15) << 56)
+        let tierSalt: UInt64 = (tier == .grid520) ? 0x9E37_79B9_7F4A_7C15 : 0xBF58_476D_1CE4_E5B9
+        self.cachedHash = Int(truncatingIfNeeded: hi ^ lo ^ tierSalt)
+    }
+
+    override var hash: Int { cachedHash }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? ThumbnailCacheKey else { return false }
+        return assetID == other.assetID && tier == other.tier
+    }
+}
+
+private nonisolated final class CroppedImageCacheKey: NSObject, @unchecked Sendable {
+    let sourceID: ObjectIdentifier
+    let cropX: Int
+    let cropY: Int
+    let cropW: Int
+    let cropH: Int
+    private let cachedHash: Int
+
+    init(sourceID: ObjectIdentifier, crop: NormalizedCropRect) {
+        self.sourceID = sourceID
+        self.cropX = Int((crop.x * 10_000).rounded())
+        self.cropY = Int((crop.y * 10_000).rounded())
+        self.cropW = Int((crop.width * 10_000).rounded())
+        self.cropH = Int((crop.height * 10_000).rounded())
+        var hasher = Hasher()
+        hasher.combine(sourceID)
+        hasher.combine(self.cropX)
+        hasher.combine(self.cropY)
+        hasher.combine(self.cropW)
+        hasher.combine(self.cropH)
+        self.cachedHash = hasher.finalize()
+    }
+
+    override var hash: Int { cachedHash }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? CroppedImageCacheKey else { return false }
+        return sourceID == other.sourceID
+            && cropX == other.cropX
+            && cropY == other.cropY
+            && cropW == other.cropW
+            && cropH == other.cropH
+    }
+}
+
+private enum CroppedThumbnailCache {
+    static let cache: NSCache<CroppedImageCacheKey, NSImage> = {
+        let c = NSCache<CroppedImageCacheKey, NSImage>()
+        c.countLimit = 48
+        c.totalCostLimit = 24 * 1024 * 1024
+        return c
+    }()
+
+    static func clear() {
+        cache.removeAllObjects()
+    }
+}
+
 /// Async cached thumbnail loader using `NSCache` with in-flight deduplication,
-/// shared `CGImage`/`NSImage` backing (zero double-decoding), LIFO bounded off-main-thread decoding,
-/// scroll-ahead prefetching, and zero-overhead scroll reads.
+/// lazy `NSImage` wrapping over shared `CGImage` backing (zero double-decoding and zero
+/// `NSImage` allocation for CoreAnimation-only masonry cards), two-lane LIFO off-main-thread
+/// decoding, scroll-ahead prefetching, and OS memory-pressure trimming.
 @Observable
 public final class ThumbnailImageLoader {
     private final class CachedImageBox: @unchecked Sendable {
         let cgImage: CGImage
-        let nsImage: NSImage
+        private var cachedNSImage: NSImage?
 
         init(cgImage: CGImage) {
             self.cgImage = cgImage
-            self.nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        }
+
+        @MainActor
+        var nsImage: NSImage {
+            if let existing = cachedNSImage {
+                return existing
+            }
+            let created = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            cachedNSImage = created
+            return created
+        }
+
+        var hasMaterializedNSImage: Bool {
+            cachedNSImage != nil
         }
     }
 
     private final class OriginalImageBox: @unchecked Sendable {
         let cgImage: CGImage?
-        let nsImage: NSImage
+        let vectorImage: NSImage?
 
         init(cgImage: CGImage) {
             self.cgImage = cgImage
-            self.nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            self.vectorImage = nil
         }
 
         init(nsImage: NSImage) {
             self.cgImage = nil
-            self.nsImage = nsImage
+            self.vectorImage = nsImage
         }
     }
 
@@ -104,13 +210,19 @@ public final class ThumbnailImageLoader {
         }
     }
 
+    private struct PrefetchEntry {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+
     @ObservationIgnored private let engine: any CharkleEngineProtocol
-    @ObservationIgnored private let cache = NSCache<NSString, CachedImageBox>()
-    @ObservationIgnored private let originalCache = NSCache<NSString, CachedImageBox>()
-    @ObservationIgnored private var inFlight: [String: InFlightEntry] = [:]
+    @ObservationIgnored private let cache = NSCache<ThumbnailCacheKey, CachedImageBox>()
+    @ObservationIgnored private let originalCache = NSCache<NSUUID, CachedImageBox>()
+    @ObservationIgnored private var inFlight: [ThumbnailKeyValue: InFlightEntry] = [:]
     @ObservationIgnored private var originalInFlight: [UUID: InFlightOriginalEntry] = [:]
     @ObservationIgnored private let scheduler = ThumbnailDecodeScheduler(maxConcurrent: 6)
-    @ObservationIgnored private var prefetchTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var prefetchTasks: [ThumbnailKeyValue: PrefetchEntry] = [:]
+    @ObservationIgnored private var memoryPressureSource: (any DispatchSourceMemoryPressure)?
 
     /// Increments ONLY on explicit invalidation / memory cache clear — never during normal image loads,
     /// so scrolling through thousands of cards triggers zero `@Observable` cascade invalidations.
@@ -127,25 +239,60 @@ public final class ThumbnailImageLoader {
         cache.totalCostLimit = maxCostBytes
         originalCache.countLimit = 4
         originalCache.totalCostLimit = 180 * 1024 * 1024
+        installMemoryPressureMonitor()
     }
 
-    private func cacheKey(assetID: UUID, tier: ThumbnailTier) -> String {
-        "\(assetID.uuidString)-\(tier.rawValue)"
+    isolated deinit {
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
+    }
+
+    private func installMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let event = source.data
+                self.handleMemoryPressure(critical: event.contains(.critical))
+            }
+        }
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    internal func handleMemoryPressure(critical: Bool) {
+        originalCache.removeAllObjects()
+        for entry in prefetchTasks.values {
+            entry.task.cancel()
+        }
+        prefetchTasks.removeAll()
+        CroppedThumbnailCache.clear()
+        if critical {
+            cache.removeAllObjects()
+        }
+    }
+
+    internal func hasMaterializedNSImage(for assetID: UUID, tier: ThumbnailTier = .grid520) -> Bool {
+        cache.object(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier))?.hasMaterializedNSImage ?? false
+    }
+
+    private static func estimatedByteCost(for cgImage: CGImage) -> Int {
+        max(1, max(cgImage.bytesPerRow * cgImage.height, cgImage.width * cgImage.height * 4))
     }
 
     public func cachedImage(for assetID: UUID, tier: ThumbnailTier = .grid520) -> NSImage? {
-        cache.object(forKey: cacheKey(assetID: assetID, tier: tier) as NSString)?.nsImage
+        cache.object(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier))?.nsImage
     }
 
     public func cachedOriginalImage(for assetID: UUID) -> NSImage? {
         guard !isLowResourceMode else { return nil }
-        return originalCache.object(forKey: assetID.uuidString as NSString)?.nsImage
+        return originalCache.object(forKey: assetID as NSUUID)?.nsImage
     }
 
     /// Loads the true full-resolution original image off the main thread (applying EXIF orientation
     /// and staying safely within Metal's 16,384px texture dimension limit for extreme tall-strip screenshots).
     public func loadOriginalImage(for assetID: UUID, url: URL) async -> NSImage? {
-        let key = assetID.uuidString as NSString
+        let key = assetID as NSUUID
         if !isLowResourceMode, let hit = originalCache.object(forKey: key) {
             return hit.nsImage
         }
@@ -187,13 +334,15 @@ public final class ThumbnailImageLoader {
         releaseOriginalWaiter(token: waiterToken, entry: entry, for: assetID)
 
         guard !Task.isCancelled, invalidationVersion == generation, let box else { return nil }
-        if !isLowResourceMode, let cg = box.cgImage {
+        if let cg = box.cgImage {
             let cachedBox = CachedImageBox(cgImage: cg)
-            let cost = max(1, cg.width * cg.height * 4)
-            originalCache.setObject(cachedBox, forKey: key, cost: cost)
+            if !isLowResourceMode {
+                let cost = Self.estimatedByteCost(for: cg)
+                originalCache.setObject(cachedBox, forKey: key, cost: cost)
+            }
             return cachedBox.nsImage
         }
-        return box.nsImage
+        return box.vectorImage
     }
 
     private func releaseOriginalWaiter(token: UUID, entry: InFlightOriginalEntry, for assetID: UUID) {
@@ -214,15 +363,15 @@ public final class ThumbnailImageLoader {
 
     /// Zero-bridging `CGImage` cache hit for direct `CALayer.contents` hardware compositing.
     public func cachedCGImage(for assetID: UUID, tier: ThumbnailTier = .grid520) -> CGImage? {
-        cache.object(forKey: cacheKey(assetID: assetID, tier: tier) as NSString)?.cgImage
+        cache.object(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier))?.cgImage
     }
 
     public func loadImage(for assetID: UUID, tier: ThumbnailTier = .grid520) async -> NSImage? {
-        await loadBox(for: assetID, tier: tier)?.nsImage
+        await loadBox(for: assetID, tier: tier, isPrefetch: false)?.nsImage
     }
 
     public func loadCGImage(for assetID: UUID, tier: ThumbnailTier = .grid520) async -> CGImage? {
-        await loadBox(for: assetID, tier: tier)?.cgImage
+        await loadBox(for: assetID, tier: tier, isPrefetch: false)?.cgImage
     }
 
     /// Resolves an already-cached local original file URL off the main thread without ever
@@ -249,33 +398,60 @@ public final class ThumbnailImageLoader {
     /// Low-priority lookahead prefetching so upcoming cards during scrolling hit `cachedCGImage`
     /// synchronously with zero decode stall.
     public func prefetch(assetIDs: [UUID], tier: ThumbnailTier = .grid520) {
-        let wantedKeys = Set(assetIDs.map { cacheKey(assetID: $0, tier: tier) })
-        // Cancel stale prefetch tasks no longer in the lookahead window
-        for (key, task) in prefetchTasks where !wantedKeys.contains(key) {
-            task.cancel()
-            prefetchTasks.removeValue(forKey: key)
+        guard !isLowResourceMode, !assetIDs.isEmpty else {
+            if !prefetchTasks.isEmpty {
+                for entry in prefetchTasks.values { entry.task.cancel() }
+                prefetchTasks.removeAll(keepingCapacity: true)
+            }
+            return
         }
+
+        var wantedKeys = Set<ThumbnailKeyValue>()
+        wantedKeys.reserveCapacity(assetIDs.count)
+        for id in assetIDs {
+            wantedKeys.insert(ThumbnailKeyValue(assetID: id, tier: tier))
+        }
+
+        // Collect stale keys before mutating dictionary to avoid Copy-on-Write buffer clones
+        if !prefetchTasks.isEmpty {
+            var staleKeys: [ThumbnailKeyValue] = []
+            for (key, entry) in prefetchTasks where !wantedKeys.contains(key) {
+                entry.task.cancel()
+                staleKeys.append(key)
+            }
+            for key in staleKeys {
+                prefetchTasks.removeValue(forKey: key)
+            }
+        }
+
         for assetID in assetIDs {
-            let key = cacheKey(assetID: assetID, tier: tier)
-            if cache.object(forKey: key as NSString) != nil || prefetchTasks[key] != nil || inFlight[key] != nil {
+            let key = ThumbnailKeyValue(assetID: assetID, tier: tier)
+            if prefetchTasks[key] != nil || inFlight[key] != nil {
                 continue
             }
+            if cache.object(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier)) != nil {
+                continue
+            }
+            let token = UUID()
             let task = Task(priority: .utility) { [weak self] in
                 guard let self else { return }
-                _ = await self.loadBox(for: assetID, tier: tier)
-                self.prefetchTasks.removeValue(forKey: key)
+                _ = await self.loadBox(for: assetID, tier: tier, isPrefetch: true)
+                if self.prefetchTasks[key]?.token == token {
+                    self.prefetchTasks.removeValue(forKey: key)
+                }
             }
-            prefetchTasks[key] = task
+            prefetchTasks[key] = PrefetchEntry(token: token, task: task)
         }
     }
 
-    private func loadBox(for assetID: UUID, tier: ThumbnailTier) async -> CachedImageBox? {
-        let key = cacheKey(assetID: assetID, tier: tier)
-        if let hit = cache.object(forKey: key as NSString) {
+    private func loadBox(for assetID: UUID, tier: ThumbnailTier, isPrefetch: Bool) async -> CachedImageBox? {
+        let objKey = ThumbnailCacheKey(assetID: assetID, tier: tier)
+        if let hit = cache.object(forKey: objKey) {
             return hit
         }
         guard !Task.isCancelled else { return nil }
 
+        let key = ThumbnailKeyValue(assetID: assetID, tier: tier)
         let generation = invalidationVersion
         let entry: InFlightEntry
         if let existing = inFlight[key] {
@@ -284,20 +460,18 @@ public final class ThumbnailImageLoader {
             let engine = self.engine
             let scheduler = self.scheduler
             let maxPixel = tier == .grid520 ? 720 : 1400
+            let highPriority = !isPrefetch
             let task = Task<CachedImageBox?, Never> {
-                guard await scheduler.acquire() else { return nil }
-                defer { Task { await scheduler.release() } }
-                guard !Task.isCancelled else { return nil }
-
-                let url: URL?
-                if let direct = engine.cachedThumbnailURL(for: assetID, tier: tier) {
-                    url = direct
-                } else {
-                    url = await engine.thumbnailURL(for: assetID, tier: tier)
+                guard let cg = await Self.resolveAndDecodeCGImage(
+                    engine: engine,
+                    assetID: assetID,
+                    tier: tier,
+                    maxPixelSize: maxPixel,
+                    scheduler: scheduler,
+                    highPriority: highPriority
+                ), !Task.isCancelled else {
+                    return nil
                 }
-                guard let url, !Task.isCancelled else { return nil }
-                guard let cg = await Self.decodeCGImage(from: url, maxPixelSize: maxPixel),
-                      !Task.isCancelled else { return nil }
                 return CachedImageBox(cgImage: cg)
             }
             entry = InFlightEntry(task: task)
@@ -318,13 +492,13 @@ public final class ThumbnailImageLoader {
 
         guard !Task.isCancelled, invalidationVersion == generation else { return nil }
         if let box {
-            let cost = box.cgImage.width * box.cgImage.height * 4
-            cache.setObject(box, forKey: key as NSString, cost: max(cost, 1))
+            let cost = Self.estimatedByteCost(for: box.cgImage)
+            cache.setObject(box, forKey: objKey, cost: cost)
         }
         return box
     }
 
-    private func releaseWaiter(token: UUID, entry: InFlightEntry, forKey key: String) {
+    private func releaseWaiter(token: UUID, entry: InFlightEntry, forKey key: ThumbnailKeyValue) {
         guard entry.activeWaiters.remove(token) != nil else { return }
         if entry.activeWaiters.isEmpty {
             if inFlight[key] === entry {
@@ -335,28 +509,30 @@ public final class ThumbnailImageLoader {
     }
 
     public func invalidate(assetID: UUID) {
-        originalCache.removeObject(forKey: assetID.uuidString as NSString)
+        originalCache.removeObject(forKey: assetID as NSUUID)
         originalInFlight[assetID]?.task.cancel()
         originalInFlight.removeValue(forKey: assetID)
         for tier in [ThumbnailTier.grid520, .preview1400] {
-            let key = cacheKey(assetID: assetID, tier: tier)
-            cache.removeObject(forKey: key as NSString)
+            let key = ThumbnailKeyValue(assetID: assetID, tier: tier)
+            cache.removeObject(forKey: ThumbnailCacheKey(assetID: assetID, tier: tier))
             inFlight[key]?.task.cancel()
             inFlight.removeValue(forKey: key)
-            prefetchTasks[key]?.cancel()
+            prefetchTasks[key]?.task.cancel()
             prefetchTasks.removeValue(forKey: key)
         }
+        CroppedThumbnailCache.clear()
         invalidationVersion &+= 1
     }
 
     public func clearMemoryCache() {
         cache.removeAllObjects()
         originalCache.removeAllObjects()
+        CroppedThumbnailCache.clear()
         for entry in inFlight.values { entry.task.cancel() }
         inFlight.removeAll()
         for entry in originalInFlight.values { entry.task.cancel() }
         originalInFlight.removeAll()
-        for task in prefetchTasks.values { task.cancel() }
+        for entry in prefetchTasks.values { entry.task.cancel() }
         prefetchTasks.removeAll()
         invalidationVersion &+= 1
     }
@@ -383,7 +559,36 @@ public final class ThumbnailImageLoader {
     }
 
     @concurrent
-    private static func decodeCGImage(from url: URL, maxPixelSize: Int) async -> CGImage? {
+    private static func resolveAndDecodeCGImage(
+        engine: any CharkleEngineProtocol,
+        assetID: UUID,
+        tier: ThumbnailTier,
+        maxPixelSize: Int,
+        scheduler: ThumbnailDecodeScheduler,
+        highPriority: Bool
+    ) async -> CGImage? {
+        guard await scheduler.acquire(highPriority: highPriority) else { return nil }
+        let decoded: CGImage?
+        if !Task.isCancelled {
+            let url: URL?
+            if let direct = engine.cachedThumbnailURL(for: assetID, tier: tier) {
+                url = direct
+            } else {
+                url = await engine.thumbnailURL(for: assetID, tier: tier)
+            }
+            if let url, !Task.isCancelled {
+                decoded = decodeCGImageSync(from: url, maxPixelSize: maxPixelSize)
+            } else {
+                decoded = nil
+            }
+        } else {
+            decoded = nil
+        }
+        await scheduler.release()
+        return decoded
+    }
+
+    private nonisolated static func decodeCGImageSync(from url: URL, maxPixelSize: Int) -> CGImage? {
         guard !Task.isCancelled else { return nil }
         let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
@@ -443,6 +648,12 @@ public final class ThumbnailImageLoader {
 // MARK: - Gallery-Grade Media Thumbnail Surface (With Procedural 7-Kind Fallbacks)
 
 public struct AssetThumbnailSurface: View {
+    private struct ThumbnailTaskID: Equatable {
+        let assetID: UUID
+        let tier: ThumbnailTier
+        let invalidationVersion: Int
+    }
+
     @Environment(\.colorScheme) private var colorScheme
 
     public let asset: AssetRecord
@@ -524,8 +735,14 @@ public struct AssetThumbnailSurface: View {
                 if isPointerHovering {
                     isPointerHovering = false
                 }
+                // Release strong @State NSImage reference so offscreen SwiftUI cards never pin
+                // evicted CGImages in memory after scrolling away or closing boards/filmstrips.
+                if loadedImage != nil {
+                    loadedImage = nil
+                    loadedAssetID = nil
+                }
             }
-            .task(id: "\(asset.id.uuidString)-\(tier.rawValue)-\(loader.invalidationVersion)") {
+            .task(id: ThumbnailTaskID(assetID: asset.id, tier: tier, invalidationVersion: loader.invalidationVersion)) {
                 let targetID = asset.id
                 if let cached = loader.cachedImage(for: targetID, tier: tier) {
                     if loadedAssetID != targetID || loadedImage !== cached {
@@ -546,7 +763,7 @@ public struct AssetThumbnailSurface: View {
     private func croppedImageView(_ image: NSImage) -> some View {
         let quality: Image.Interpolation = tier == .grid520 ? .medium : .high
         if let crop, crop != .full, crop.width > 0.04, crop.height > 0.04,
-           let croppedNS = Self.cropImage(image, normalized: crop) {
+           let croppedNS = Self.cachedCroppedImage(image, normalized: crop) {
             Image(nsImage: croppedNS)
                 .resizable()
                 .interpolation(quality)
@@ -564,9 +781,13 @@ public struct AssetThumbnailSurface: View {
         }
     }
 
-    private static func cropImage(_ image: NSImage, normalized crop: NormalizedCropRect) -> NSImage? {
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+    private static func cachedCroppedImage(_ image: NSImage, normalized crop: NormalizedCropRect) -> NSImage? {
         let clamped = crop.clamped()
+        let key = CroppedImageCacheKey(sourceID: ObjectIdentifier(image), crop: clamped)
+        if let hit = CroppedThumbnailCache.cache.object(forKey: key) {
+            return hit
+        }
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let pixelRect = CGRect(
             x: (clamped.x * Double(cg.width)).rounded(.down),
             y: (clamped.y * Double(cg.height)).rounded(.down),
@@ -576,7 +797,10 @@ public struct AssetThumbnailSurface: View {
         guard pixelRect.width >= 4, pixelRect.height >= 4, let cropped = cg.cropping(to: pixelRect) else {
             return nil
         }
-        return NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height))
+        let result = NSImage(cgImage: cropped, size: NSSize(width: cropped.width, height: cropped.height))
+        let cost = max(1, max(cropped.bytesPerRow * cropped.height, cropped.width * cropped.height * 4))
+        CroppedThumbnailCache.cache.setObject(result, forKey: key, cost: cost)
+        return result
     }
 }
 

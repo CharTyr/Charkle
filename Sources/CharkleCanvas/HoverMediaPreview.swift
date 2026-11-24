@@ -147,8 +147,15 @@ public final class HoverMediaPreviewLayerController {
     }
 
     public func updateGeometry(frame: CGRect, cornerRadius: CGFloat? = nil, scale: CGFloat? = nil) {
-        if let cornerRadius { currentCornerRadius = cornerRadius }
-        if let scale { currentScale = max(1.0, scale) }
+        let nextRadius = cornerRadius ?? currentCornerRadius
+        let nextScale = scale.map { max(1.0, $0) } ?? currentScale
+        if containerLayer.frame == frame
+            && abs(currentCornerRadius - nextRadius) < 0.01
+            && abs(currentScale - nextScale) < 0.01 {
+            return
+        }
+        currentCornerRadius = nextRadius
+        currentScale = nextScale
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -286,7 +293,7 @@ public final class HoverMediaPreviewLayerController {
             return
         }
 
-        let maxPixel = min(560, max(240, Int(max(containerLayer.bounds.width, containerLayer.bounds.height) * currentScale)))
+        let maxPixel = min(480, max(240, Int(max(containerLayer.bounds.width, containerLayer.bounds.height) * currentScale)))
         let layer = CALayer()
         layer.actions = Self.noImplicitActions
         layer.contentsGravity = currentFillMode ? .resizeAspectFill : .resizeAspect
@@ -302,10 +309,11 @@ public final class HoverMediaPreviewLayerController {
         CATransaction.commit()
         gifFrameLayer = layer
 
-        // Pre-decode compact frame cache off main thread for short/medium GIFs (≤48 frames);
-        // stream frames lazily from the single open CGImageSource for very long GIFs so memory
-        // stays strictly bounded without O(N²) disk/header re-parsing on every tick.
-        if session.frameCount <= 48 {
+        // Pre-decode compact frame cache off main thread for short GIFs (<= 24 frames AND <= 16 MB);
+        // stream frames lazily from the single open CGImageSource for larger/longer GIFs so
+        // CG Raster Data never spikes during hover playback.
+        let estimatedMaxBytes = session.frameCount * maxPixel * maxPixel * 4
+        if session.frameCount <= 24 && estimatedMaxBytes <= 16 * 1024 * 1024 {
             var decoded: [CGImage?] = Array(repeating: nil, count: session.frameCount)
             var frameIndex = 0
             var revealed = false

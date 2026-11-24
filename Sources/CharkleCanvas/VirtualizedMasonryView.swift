@@ -37,7 +37,61 @@ public nonisolated struct MasonryLayoutSnapshot: Sendable, Equatable {
         self.prefixMaxY = prefix
     }
 
+    private init(
+        items: [MasonryItemFrame],
+        totalHeight: CGFloat,
+        columnCount: Int,
+        columnWidth: CGFloat,
+        prefixMaxY: [CGFloat]
+    ) {
+        self.items = items
+        self.totalHeight = totalHeight
+        self.columnCount = columnCount
+        self.columnWidth = columnWidth
+        self.prefixMaxY = prefixMaxY
+    }
+
     public static let empty = MasonryLayoutSnapshot(items: [], totalHeight: 0, columnCount: 1, columnWidth: 240)
+
+    /// O(1) totalHeight update when only `bottomInset` changes (e.g., multi-select action bar toggle),
+    /// sharing `items` and `prefixMaxY` via CoW with zero re-layout.
+    internal func withAdjustedBottomInset(oldBottomInset: CGFloat, newBottomInset: CGFloat) -> MasonryLayoutSnapshot {
+        MasonryLayoutSnapshot(
+            items: items,
+            totalHeight: max(360, totalHeight - oldBottomInset + newBottomInset),
+            columnCount: columnCount,
+            columnWidth: columnWidth,
+            prefixMaxY: prefixMaxY
+        )
+    }
+
+    /// Zero-allocation O(log N + K) visitor over all items intersecting `[minY, maxY]`.
+    @inline(__always)
+    internal func forEachVisibleItem(minY: CGFloat, maxY: CGFloat, _ body: (MasonryItemFrame) -> Void) {
+        guard !items.isEmpty, maxY >= minY else { return }
+
+        var lo = 0
+        var hi = items.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if prefixMaxY[mid] < minY {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        guard lo < items.count else { return }
+
+        for idx in lo..<items.count {
+            let item = items[idx]
+            if item.rect.minY > maxY {
+                break
+            }
+            if item.rect.maxY >= minY {
+                body(item)
+            }
+        }
+    }
 
     /// Returns only the items intersecting `[minY, maxY]` in O(log N + K) time.
     /// Relies on two invariants guaranteed by `MasonryLayoutEngine.compute`:
@@ -75,11 +129,12 @@ public nonisolated struct MasonryLayoutSnapshot: Sendable, Equatable {
 
     /// Returns IDs of all items intersecting `rect` in O(log N + K) time.
     public func intersectingIDs(in rect: CGRect) -> [UUID] {
-        let candidates = visibleItems(minY: rect.minY, maxY: rect.maxY)
         var ids: [UUID] = []
-        ids.reserveCapacity(candidates.count)
-        for item in candidates where item.rect.intersects(rect) {
-            ids.append(item.id)
+        ids.reserveCapacity(32)
+        forEachVisibleItem(minY: rect.minY, maxY: rect.maxY) { item in
+            if item.rect.intersects(rect) {
+                ids.append(item.id)
+            }
         }
         return ids
     }
@@ -600,7 +655,7 @@ public struct MasonryCallbacks {
 
 // MARK: - High-FPS Hardware-Accelerated Native AppKit Recycling Masonry View (10k+ Items, 120 FPS)
 
-private struct MasonryAssetsSignature: Equatable {
+internal struct MasonryAssetsSignature: Equatable {
     let revision: Int
     let count: Int
     let firstID: UUID?
@@ -798,6 +853,10 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             callbacks: callbacks
         )
     }
+
+    static func dismantleNSView(_ scrollView: MasonryScrollView, coordinator: ()) {
+        scrollView.masonryDocument.releaseOffscreenResources()
+    }
 }
 
 // MARK: - AppKit Scroll Container (with macOS Photos-Style Pinch & ⌘+Scroll Zoom)
@@ -844,7 +903,7 @@ private final class MasonryClipView: NSClipView {
     }
 }
 
-private final class MasonryScrollView: NSScrollView {
+internal final class MasonryScrollView: NSScrollView {
     let masonryDocument = MasonryDocumentView()
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
@@ -975,16 +1034,42 @@ private final class MasonryScrollView: NSScrollView {
 
 private final class MasonryCGImageBox {
     let image: CGImage
-    init(_ image: CGImage) { self.image = image }
+    let size: CGSize
+    init(_ image: CGImage, size: CGSize = .zero) {
+        self.image = image
+        self.size = size
+    }
 }
 
 private enum MasonryStaticLayerAssets {
-    private static let badgeCache = NSCache<NSString, MasonryCGImageBox>()
-    private static let proceduralCache: NSCache<NSString, MasonryCGImageBox> = {
+    static let cardSurfaceLightCG: CGColor = NSColor.white.cgColor
+    static let cardSurfaceDarkCG: CGColor = NSColor.charkleHex("#1E2024").cgColor
+    static let hairlineLightCG: CGColor = NSColor.black.withAlphaComponent(0.08).cgColor
+    static let hairlineDarkCG: CGColor = NSColor.white.withAlphaComponent(0.09).cgColor
+    static let defaultTintLightCG: CGColor = NSColor.charkleHex("#EAE9E5").withAlphaComponent(0.35).cgColor
+    static let defaultTintDarkCG: CGColor = NSColor.charkleHex("#262930").withAlphaComponent(0.35).cgColor
+
+    private static let badgeCache: NSCache<NSString, MasonryCGImageBox> = {
         let c = NSCache<NSString, MasonryCGImageBox>()
-        c.countLimit = 400
+        c.countLimit = 64
+        c.totalCostLimit = 2 * 1024 * 1024
         return c
     }()
+    private static let proceduralCache: NSCache<NSString, MasonryCGImageBox> = {
+        let c = NSCache<NSString, MasonryCGImageBox>()
+        c.countLimit = 80
+        c.totalCostLimit = 16 * 1024 * 1024
+        return c
+    }()
+
+    static func clearTransientCaches() {
+        proceduralCache.removeAllObjects()
+        badgeCache.removeAllObjects()
+    }
+
+    private static func imageByteCost(_ cg: CGImage) -> Int {
+        max(1, max(cg.bytesPerRow * cg.height, cg.width * cg.height * 4))
+    }
 
     static let noImplicitActions: [String: CAAction] = [
         "position": NSNull(),
@@ -1036,7 +1121,7 @@ private enum MasonryStaticLayerAssets {
             }
             _ = ctx
         }) else { return nil }
-        badgeCache.setObject(MasonryCGImageBox(cg), forKey: key)
+        badgeCache.setObject(MasonryCGImageBox(cg, size: size), forKey: key, cost: imageByteCost(cg))
         return cg
     }
 
@@ -1052,7 +1137,7 @@ private enum MasonryStaticLayerAssets {
             path.lineWidth = 1
             path.stroke()
         }) else { return nil }
-        badgeCache.setObject(MasonryCGImageBox(cg), forKey: key)
+        badgeCache.setObject(MasonryCGImageBox(cg, size: size), forKey: key, cost: imageByteCost(cg))
         return cg
     }
 
@@ -1082,12 +1167,15 @@ private enum MasonryStaticLayerAssets {
                 ))
             }
         }) else { return nil }
-        badgeCache.setObject(MasonryCGImageBox(cg), forKey: key)
+        badgeCache.setObject(MasonryCGImageBox(cg, size: size), forKey: key, cost: imageByteCost(cg))
         return cg
     }
 
     static func mediaPillBadge(text: String, scale: CGFloat) -> (image: CGImage, size: CGSize)? {
         let key = "pill-\(text)-\(Int((scale * 10).rounded()))" as NSString
+        if let hit = badgeCache.object(forKey: key) {
+            return (hit.image, hit.size)
+        }
         let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
@@ -1095,9 +1183,6 @@ private enum MasonryStaticLayerAssets {
         ]
         let textSize = (text as NSString).size(withAttributes: attrs)
         let pillSize = CGSize(width: ceil(textSize.width) + 12, height: ceil(textSize.height) + 6)
-        if let hit = badgeCache.object(forKey: key) {
-            return (hit.image, pillSize)
-        }
         guard let cg = renderBitmap(size: pillSize, scale: scale, flipped: true, draw: { _ in
             let rect = CGRect(origin: .zero, size: pillSize)
             let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
@@ -1108,7 +1193,7 @@ private enum MasonryStaticLayerAssets {
                 withAttributes: attrs
             )
         }) else { return nil }
-        badgeCache.setObject(MasonryCGImageBox(cg), forKey: key)
+        badgeCache.setObject(MasonryCGImageBox(cg, size: pillSize), forKey: key, cost: imageByteCost(cg))
         return (cg, pillSize)
     }
 
@@ -1211,7 +1296,7 @@ private enum MasonryStaticLayerAssets {
             }
         }) else { return nil }
 
-        proceduralCache.setObject(MasonryCGImageBox(cg), forKey: key)
+        proceduralCache.setObject(MasonryCGImageBox(cg, size: targetSize), forKey: key, cost: imageByteCost(cg))
         return cg
     }
 
@@ -1295,13 +1380,29 @@ private final class MasonryTileLayer {
     private var isShowingProceduralImage: Bool = false
     private var lastProceduralKey: String?
 
-    private let clipLayer = CALayer()
+    private var hasVisualState: Bool = false
+    private var lastVisualSelected: Bool = false
+    private var lastVisualCut: Bool = false
+    private var lastVisualHidden: Bool = false
+    private var lastVisualDark: Bool = false
+    private var lastVisualScale: CGFloat = 0
+
+    // Lean 3-layer baseline (`layer` -> `imageLayer` + `borderLayer`); overlay & shape layers
+    // are allocated lazily ONLY when needed, cutting per-tile CoreAnimation layer count by 62.5%.
     private let imageLayer = CALayer()
     private let borderLayer = CALayer()
-    private let cutDashLayer = CAShapeLayer()
-    private let selectedCheckLayer = CALayer()
-    private let pinBadgeLayer = CALayer()
-    private let mediaBadgeLayer = CALayer()
+    private var cutDashLayer: CAShapeLayer?
+    private var selectedCheckLayer: CALayer?
+    private var pinBadgeLayer: CALayer?
+    private var mediaBadgeLayer: CALayer?
+
+    var sublayerCountForTesting: Int {
+        layer.sublayers?.count ?? 0
+    }
+
+    var hasImageContentsForTesting: Bool {
+        imageLayer.contents != nil
+    }
 
     init() {
         setupSublayers()
@@ -1321,45 +1422,66 @@ private final class MasonryTileLayer {
         layer.shadowRadius = 4
         layer.shadowOpacity = 0.07
 
-        clipLayer.actions = MasonryStaticLayerAssets.noImplicitActions
-        clipLayer.cornerRadius = Self.cornerRad
-        clipLayer.cornerCurve = .continuous
-        clipLayer.masksToBounds = true
-        layer.addSublayer(clipLayer)
-
+        // Clip directly on imageLayer (zero intermediate clipLayer) and use `.linear`
+        // minification to avoid CoreAnimation's +33% trilinear mipmap backing-store bloat.
         imageLayer.actions = MasonryStaticLayerAssets.noImplicitActions
+        imageLayer.cornerRadius = Self.cornerRad
+        imageLayer.cornerCurve = .continuous
+        imageLayer.masksToBounds = true
         imageLayer.contentsGravity = .resizeAspectFill
-        imageLayer.minificationFilter = .trilinear
+        imageLayer.minificationFilter = .linear
         imageLayer.magnificationFilter = .linear
-        clipLayer.addSublayer(imageLayer)
+        layer.addSublayer(imageLayer)
 
         borderLayer.actions = MasonryStaticLayerAssets.noImplicitActions
         borderLayer.cornerRadius = Self.cornerRad
         borderLayer.cornerCurve = .continuous
         borderLayer.backgroundColor = nil
         layer.addSublayer(borderLayer)
+    }
 
-        cutDashLayer.actions = MasonryStaticLayerAssets.noImplicitActions
-        cutDashLayer.fillColor = nil
-        cutDashLayer.lineWidth = 1.25
-        cutDashLayer.lineDashPattern = [5, 4]
-        cutDashLayer.isHidden = true
-        layer.addSublayer(cutDashLayer)
+    private func ensureSelectedCheckLayer() -> CALayer {
+        if let existing = selectedCheckLayer { return existing }
+        let sub = CALayer()
+        sub.actions = MasonryStaticLayerAssets.noImplicitActions
+        sub.contentsGravity = .resizeAspect
+        layer.addSublayer(sub)
+        selectedCheckLayer = sub
+        return sub
+    }
 
-        selectedCheckLayer.actions = MasonryStaticLayerAssets.noImplicitActions
-        selectedCheckLayer.contentsGravity = .resizeAspect
-        selectedCheckLayer.isHidden = true
-        layer.addSublayer(selectedCheckLayer)
+    private func ensurePinBadgeLayer() -> CALayer {
+        if let existing = pinBadgeLayer { return existing }
+        let sub = CALayer()
+        sub.actions = MasonryStaticLayerAssets.noImplicitActions
+        sub.contentsGravity = .resizeAspect
+        layer.addSublayer(sub)
+        pinBadgeLayer = sub
+        return sub
+    }
 
-        pinBadgeLayer.actions = MasonryStaticLayerAssets.noImplicitActions
-        pinBadgeLayer.contentsGravity = .resizeAspect
-        pinBadgeLayer.isHidden = true
-        layer.addSublayer(pinBadgeLayer)
+    private func ensureMediaBadgeLayer() -> CALayer {
+        if let existing = mediaBadgeLayer { return existing }
+        let sub = CALayer()
+        sub.actions = MasonryStaticLayerAssets.noImplicitActions
+        sub.contentsGravity = .resizeAspect
+        layer.addSublayer(sub)
+        mediaBadgeLayer = sub
+        return sub
+    }
 
-        mediaBadgeLayer.actions = MasonryStaticLayerAssets.noImplicitActions
-        mediaBadgeLayer.contentsGravity = .resizeAspect
-        mediaBadgeLayer.isHidden = true
-        layer.addSublayer(mediaBadgeLayer)
+    private func ensureCutDashLayer(bounds localBounds: CGRect) -> CAShapeLayer {
+        if let existing = cutDashLayer { return existing }
+        let sub = CAShapeLayer()
+        sub.actions = MasonryStaticLayerAssets.noImplicitActions
+        sub.fillColor = nil
+        sub.lineWidth = 1.25
+        sub.lineDashPattern = [5, 4]
+        sub.frame = localBounds
+        sub.path = CGPath(roundedRect: localBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+        layer.addSublayer(sub)
+        cutDashLayer = sub
+        return sub
     }
 
     var frame: CGRect {
@@ -1374,13 +1496,28 @@ private final class MasonryTileLayer {
         boundAssetID = nil
         boundAsset = nil
         imageLayer.contents = nil
-        selectedCheckLayer.isHidden = true
-        pinBadgeLayer.isHidden = true
-        mediaBadgeLayer.isHidden = true
-        cutDashLayer.isHidden = true
+        imageLayer.opacity = 1.0
+
+        selectedCheckLayer?.contents = nil
+        selectedCheckLayer?.removeFromSuperlayer()
+        selectedCheckLayer = nil
+
+        pinBadgeLayer?.contents = nil
+        pinBadgeLayer?.removeFromSuperlayer()
+        pinBadgeLayer = nil
+
+        mediaBadgeLayer?.contents = nil
+        mediaBadgeLayer?.removeFromSuperlayer()
+        mediaBadgeLayer = nil
+
+        cutDashLayer?.path = nil
+        cutDashLayer?.removeFromSuperlayer()
+        cutDashLayer = nil
+
         lastBadgeText = nil
         isShowingProceduralImage = false
         lastProceduralKey = nil
+        hasVisualState = false
     }
 
     func stripLayoutAnimations() {
@@ -1391,16 +1528,14 @@ private final class MasonryTileLayer {
         layer.removeAnimation(forKey: "charkle.enterOpacity")
         layer.removeAnimation(forKey: "charkle.revealPulse")
         borderLayer.removeAnimation(forKey: "charkle.revealBorder")
-        clipLayer.removeAnimation(forKey: "charkle.pos")
-        clipLayer.removeAnimation(forKey: "charkle.bounds")
         imageLayer.removeAnimation(forKey: "charkle.pos")
         imageLayer.removeAnimation(forKey: "charkle.bounds")
         borderLayer.removeAnimation(forKey: "charkle.pos")
         borderLayer.removeAnimation(forKey: "charkle.bounds")
-        mediaBadgeLayer.removeAnimation(forKey: "charkle.pos")
-        pinBadgeLayer.removeAnimation(forKey: "charkle.pos")
-        cutDashLayer.removeAnimation(forKey: "charkle.pos")
-        cutDashLayer.removeAnimation(forKey: "charkle.bounds")
+        mediaBadgeLayer?.removeAnimation(forKey: "charkle.pos")
+        pinBadgeLayer?.removeAnimation(forKey: "charkle.pos")
+        cutDashLayer?.removeAnimation(forKey: "charkle.pos")
+        cutDashLayer?.removeAnimation(forKey: "charkle.bounds")
     }
 
     /// GPU-composited Photos-style transition from a scroll/transform-compensated `fromRect` to `newRect`.
@@ -1443,7 +1578,6 @@ private final class MasonryTileLayer {
 
         let fromLocalCenter = CGPoint(x: fromBounds.midX, y: fromBounds.midY)
         let toLocalCenter = CGPoint(x: toBounds.midX, y: toBounds.midY)
-        addPair(on: clipLayer, fromP: fromLocalCenter, toP: toLocalCenter, fromB: fromBounds, toB: toBounds)
         addPair(on: imageLayer, fromP: fromLocalCenter, toP: toLocalCenter, fromB: fromBounds, toB: toBounds)
         addPair(on: borderLayer, fromP: fromLocalCenter, toP: toLocalCenter, fromB: fromBounds, toB: toBounds)
 
@@ -1458,23 +1592,23 @@ private final class MasonryTileLayer {
             // Keep top-right badges anchored to the card edge during bounds resize
             let deltaW = toBounds.width - fromBounds.width
             if abs(deltaW) > 0.5 {
-                if !mediaBadgeLayer.isHidden {
-                    let badgeTo = mediaBadgeLayer.position
+                if let badge = mediaBadgeLayer, !badge.isHidden {
+                    let badgeTo = badge.position
                     let badgeAnim = CABasicAnimation(keyPath: "position")
                     badgeAnim.fromValue = CGPoint(x: badgeTo.x - deltaW, y: badgeTo.y)
                     badgeAnim.toValue = badgeTo
                     badgeAnim.duration = duration
                     badgeAnim.timingFunction = timing
-                    mediaBadgeLayer.add(badgeAnim, forKey: "charkle.pos")
+                    badge.add(badgeAnim, forKey: "charkle.pos")
                 }
-                if !pinBadgeLayer.isHidden {
-                    let pinTo = pinBadgeLayer.position
+                if let pin = pinBadgeLayer, !pin.isHidden {
+                    let pinTo = pin.position
                     let pinAnim = CABasicAnimation(keyPath: "position")
                     pinAnim.fromValue = CGPoint(x: pinTo.x - deltaW, y: pinTo.y)
                     pinAnim.toValue = pinTo
                     pinAnim.duration = duration
                     pinAnim.timingFunction = timing
-                    pinBadgeLayer.add(pinAnim, forKey: "charkle.pos")
+                    pin.add(pinAnim, forKey: "charkle.pos")
                 }
             }
         }
@@ -1528,26 +1662,27 @@ private final class MasonryTileLayer {
     func updateFrameOnly(_ rect: CGRect) {
         layer.frame = rect
         let localBounds = CGRect(origin: .zero, size: rect.size)
-        clipLayer.frame = localBounds
         imageLayer.frame = localBounds
         borderLayer.frame = localBounds
 
         if lastShadowSize != rect.size {
             lastShadowSize = rect.size
             layer.shadowPath = CGPath(roundedRect: localBounds, cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
-            cutDashLayer.frame = localBounds
-            cutDashLayer.path = CGPath(roundedRect: localBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+            if let cutLayer = cutDashLayer {
+                cutLayer.frame = localBounds
+                cutLayer.path = CGPath(roundedRect: localBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+            }
         }
 
         var rightCursor = rect.width - 6
-        if !mediaBadgeLayer.isHidden {
-            let w = mediaBadgeLayer.bounds.width
-            let h = mediaBadgeLayer.bounds.height
-            mediaBadgeLayer.frame = CGRect(x: rightCursor - w, y: 6, width: w, height: h)
+        if let badge = mediaBadgeLayer, !badge.isHidden {
+            let w = badge.bounds.width
+            let h = badge.bounds.height
+            badge.frame = CGRect(x: rightCursor - w, y: 6, width: w, height: h)
             rightCursor -= (w + 4)
         }
-        if !pinBadgeLayer.isHidden {
-            pinBadgeLayer.frame = CGRect(x: rightCursor - 18, y: 6, width: 18, height: 18)
+        if let pin = pinBadgeLayer, !pin.isHidden {
+            pin.frame = CGRect(x: rightCursor - 18, y: 6, width: 18, height: 18)
         }
     }
 
@@ -1565,79 +1700,100 @@ private final class MasonryTileLayer {
         let sameAsset = (boundAssetID == asset.id)
         boundAssetID = asset.id
         boundAsset = asset
-        layer.contentsScale = scale
-        clipLayer.contentsScale = scale
-        imageLayer.contentsScale = scale
+        if layer.contentsScale != scale {
+            layer.contentsScale = scale
+            imageLayer.contentsScale = scale
+        }
 
         layer.frame = rect
         let localBounds = CGRect(origin: .zero, size: rect.size)
-        clipLayer.frame = localBounds
         imageLayer.frame = localBounds
         borderLayer.frame = localBounds
 
-        let cardSurface = isDark ? NSColor.charkleHex("#1E2024") : NSColor.white
-        layer.backgroundColor = cardSurface.cgColor
+        let cardSurfaceCG = isDark ? MasonryStaticLayerAssets.cardSurfaceDarkCG : MasonryStaticLayerAssets.cardSurfaceLightCG
+        layer.backgroundColor = cardSurfaceCG
 
         if lastShadowSize != rect.size {
             lastShadowSize = rect.size
             layer.shadowPath = CGPath(roundedRect: localBounds, cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
-            cutDashLayer.frame = localBounds
-            cutDashLayer.path = CGPath(roundedRect: localBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+            if let cutLayer = cutDashLayer {
+                cutLayer.frame = localBounds
+                cutLayer.path = CGPath(roundedRect: localBounds.insetBy(dx: 0.75, dy: 0.75), cornerWidth: Self.cornerRad, cornerHeight: Self.cornerRad, transform: nil)
+            }
         }
 
         // Selection & cut visuals
         let scaleChanged = abs(lastBadgeScale - scale) > 0.01
         updateVisualStates(isSelected: isSelected, isCut: isCut, isHiddenForHero: isHiddenForHero, isDark: isDark, scale: scale)
 
-        // Badges (top-right)
+        // Badges (top-right, lazily instantiated)
         var rightCursor = rect.width - 6
         let badgeText = Self.mediaBadgeText(for: asset)
         if let badgeText {
-            if lastBadgeText != badgeText || mediaBadgeLayer.contents == nil || scaleChanged,
+            let badgeLayer = ensureMediaBadgeLayer()
+            if lastBadgeText != badgeText || badgeLayer.contents == nil || scaleChanged,
                let pill = MasonryStaticLayerAssets.mediaPillBadge(text: badgeText, scale: scale) {
-                mediaBadgeLayer.contents = pill.image
-                mediaBadgeLayer.contentsScale = scale
-                mediaBadgeLayer.frame = CGRect(x: rightCursor - pill.size.width, y: 6, width: pill.size.width, height: pill.size.height)
+                badgeLayer.contents = pill.image
+                badgeLayer.contentsScale = scale
+                badgeLayer.frame = CGRect(x: rightCursor - pill.size.width, y: 6, width: pill.size.width, height: pill.size.height)
                 lastBadgeText = badgeText
             } else {
-                let w = mediaBadgeLayer.bounds.width
-                let h = mediaBadgeLayer.bounds.height
-                mediaBadgeLayer.frame = CGRect(x: rightCursor - w, y: 6, width: w, height: h)
+                let w = badgeLayer.bounds.width
+                let h = badgeLayer.bounds.height
+                badgeLayer.frame = CGRect(x: rightCursor - w, y: 6, width: w, height: h)
             }
-            mediaBadgeLayer.isHidden = false
-            rightCursor -= (mediaBadgeLayer.frame.width + 4)
-        } else {
-            mediaBadgeLayer.isHidden = true
+            badgeLayer.isHidden = false
+            rightCursor -= (badgeLayer.frame.width + 4)
+        } else if let badgeLayer = mediaBadgeLayer {
+            badgeLayer.contents = nil
+            badgeLayer.removeFromSuperlayer()
+            mediaBadgeLayer = nil
             lastBadgeText = nil
         }
 
         if asset.pinnedOffline {
-            if pinBadgeLayer.contents == nil || scaleChanged {
-                pinBadgeLayer.contents = MasonryStaticLayerAssets.pinOfflineBadge(scale: scale)
-                pinBadgeLayer.contentsScale = scale
+            let pinLayer = ensurePinBadgeLayer()
+            if pinLayer.contents == nil || scaleChanged {
+                pinLayer.contents = MasonryStaticLayerAssets.pinOfflineBadge(scale: scale)
+                pinLayer.contentsScale = scale
             }
-            pinBadgeLayer.frame = CGRect(x: rightCursor - 18, y: 6, width: 18, height: 18)
-            pinBadgeLayer.isHidden = false
-        } else {
-            pinBadgeLayer.isHidden = true
+            pinLayer.frame = CGRect(x: rightCursor - 18, y: 6, width: 18, height: 18)
+            pinLayer.isHidden = false
+        } else if let pinLayer = pinBadgeLayer {
+            pinLayer.contents = nil
+            pinLayer.removeFromSuperlayer()
+            pinBadgeLayer = nil
         }
         lastBadgeScale = scale
 
         // Thumbnail image (synchronous zero-bridging CGImage fast path -> async off-main-thread fallback)
-        let proceduralKey = "\(asset.id.uuidString)-\(asset.title.hashValue)-\(asset.dominantColors.first?.hex ?? "")-\(isDark ? 1 : 0)-\(Int((scale * 10).rounded()))"
-        let proceduralNeedsRefresh = isShowingProceduralImage && lastProceduralKey != proceduralKey
+        // Only compute proceduralKey String when displaying or falling back to a procedural card.
+        func makeProceduralKey() -> String {
+            "\(asset.id.uuidString)-\(asset.title.hashValue)-\(asset.dominantColors.first?.hex ?? "")-\(isDark ? 1 : 0)-\(Int((scale * 10).rounded()))"
+        }
+
+        let proceduralNeedsRefresh: Bool
+        let computedProceduralKey: String?
+        if isShowingProceduralImage {
+            let key = makeProceduralKey()
+            computedProceduralKey = key
+            proceduralNeedsRefresh = (lastProceduralKey != key)
+        } else {
+            computedProceduralKey = nil
+            proceduralNeedsRefresh = false
+        }
         guard !sameAsset || forceReloadImage || imageLayer.contents == nil || proceduralNeedsRefresh else { return }
 
         if proceduralNeedsRefresh && sameAsset && !forceReloadImage {
             if let cached = loader?.cachedCGImage(for: asset.id, tier: .grid520) {
-                clipLayer.backgroundColor = cardSurface.cgColor
+                imageLayer.backgroundColor = cardSurfaceCG
                 imageLayer.contents = cached
                 isShowingProceduralImage = false
                 lastProceduralKey = nil
             } else {
                 imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale)
                 isShowingProceduralImage = true
-                lastProceduralKey = proceduralKey
+                lastProceduralKey = computedProceduralKey
             }
             return
         }
@@ -1646,7 +1802,7 @@ private final class MasonryTileLayer {
         loadTask = nil
 
         if let cached = loader?.cachedCGImage(for: asset.id, tier: .grid520) {
-            clipLayer.backgroundColor = cardSurface.cgColor
+            imageLayer.backgroundColor = cardSurfaceCG
             imageLayer.contents = cached
             isShowingProceduralImage = false
             lastProceduralKey = nil
@@ -1664,10 +1820,13 @@ private final class MasonryTileLayer {
         if isProceduralKind {
             imageLayer.contents = MasonryStaticLayerAssets.proceduralCardImage(for: asset, size: rect.size, isDark: isDark, scale: scale)
             isShowingProceduralImage = true
-            lastProceduralKey = proceduralKey
+            lastProceduralKey = computedProceduralKey ?? makeProceduralKey()
         } else {
-            let tintHex = asset.dominantColors.first?.hex ?? (isDark ? "#262930" : "#EAE9E5")
-            clipLayer.backgroundColor = NSColor.charkleHex(tintHex).withAlphaComponent(0.35).cgColor
+            if let tintHex = asset.dominantColors.first?.hex {
+                imageLayer.backgroundColor = NSColor.charkleHex(tintHex).withAlphaComponent(0.35).cgColor
+            } else {
+                imageLayer.backgroundColor = isDark ? MasonryStaticLayerAssets.defaultTintDarkCG : MasonryStaticLayerAssets.defaultTintLightCG
+            }
             imageLayer.contents = nil
             isShowingProceduralImage = false
             lastProceduralKey = nil
@@ -1683,7 +1842,7 @@ private final class MasonryTileLayer {
             CATransaction.setDisableActions(true)
             if let cg {
                 self.imageLayer.contents = cg
-                self.clipLayer.backgroundColor = cardSurface.cgColor
+                self.imageLayer.backgroundColor = cardSurfaceCG
                 self.isShowingProceduralImage = false
                 self.lastProceduralKey = nil
             } else if self.imageLayer.contents == nil {
@@ -1694,41 +1853,64 @@ private final class MasonryTileLayer {
                     scale: scale
                 )
                 self.isShowingProceduralImage = true
-                self.lastProceduralKey = proceduralKey
+                self.lastProceduralKey = makeProceduralKey()
             }
             CATransaction.commit()
         }
     }
 
     func updateVisualStates(isSelected: Bool, isCut: Bool, isHiddenForHero: Bool, isDark: Bool, scale: CGFloat) {
-        clipLayer.opacity = isHiddenForHero ? 0.0 : (isCut ? 0.52 : 1.0)
+        let scaleSame = abs(lastVisualScale - scale) <= 0.01
+        if hasVisualState
+            && lastVisualSelected == isSelected
+            && lastVisualCut == isCut
+            && lastVisualHidden == isHiddenForHero
+            && lastVisualDark == isDark
+            && scaleSame {
+            return
+        }
+        hasVisualState = true
+        lastVisualSelected = isSelected
+        lastVisualCut = isCut
+        lastVisualHidden = isHiddenForHero
+        lastVisualDark = isDark
+        lastVisualScale = scale
+
+        imageLayer.opacity = isHiddenForHero ? 0.0 : (isCut ? 0.52 : 1.0)
         if isSelected {
             borderLayer.borderColor = NSColor.controlAccentColor.cgColor
             borderLayer.borderWidth = 2.5
             layer.shadowOpacity = isDark ? 0.34 : 0.14
             layer.shadowRadius = 8
             layer.shadowOffset = CGSize(width: 0, height: 3)
-            if selectedCheckLayer.contents == nil || abs(selectedCheckLayer.contentsScale - scale) > 0.01 {
-                selectedCheckLayer.contents = MasonryStaticLayerAssets.selectedCheckmarkBadge(scale: scale)
-                selectedCheckLayer.contentsScale = scale
+            let checkLayer = ensureSelectedCheckLayer()
+            if checkLayer.contents == nil || abs(checkLayer.contentsScale - scale) > 0.01 {
+                checkLayer.contents = MasonryStaticLayerAssets.selectedCheckmarkBadge(scale: scale)
+                checkLayer.contentsScale = scale
             }
-            selectedCheckLayer.frame = CGRect(x: 6, y: 6, width: 22, height: 22)
-            selectedCheckLayer.isHidden = false
+            checkLayer.frame = CGRect(x: 6, y: 6, width: 22, height: 22)
+            checkLayer.isHidden = false
         } else {
-            let hairline = isDark ? NSColor.white.withAlphaComponent(0.09) : NSColor.black.withAlphaComponent(0.08)
-            borderLayer.borderColor = hairline.cgColor
+            borderLayer.borderColor = isDark ? MasonryStaticLayerAssets.hairlineDarkCG : MasonryStaticLayerAssets.hairlineLightCG
             borderLayer.borderWidth = 0.75
             layer.shadowOpacity = isDark ? 0.22 : 0.06
             layer.shadowRadius = 3
             layer.shadowOffset = CGSize(width: 0, height: 1.5)
-            selectedCheckLayer.isHidden = true
+            if let checkLayer = selectedCheckLayer {
+                checkLayer.contents = nil
+                checkLayer.removeFromSuperlayer()
+                selectedCheckLayer = nil
+            }
         }
 
         if isCut {
-            cutDashLayer.strokeColor = NSColor.secondaryLabelColor.withAlphaComponent(0.65).cgColor
-            cutDashLayer.isHidden = false
-        } else {
-            cutDashLayer.isHidden = true
+            let cutLayer = ensureCutDashLayer(bounds: CGRect(origin: .zero, size: layer.bounds.size))
+            cutLayer.strokeColor = NSColor.secondaryLabelColor.withAlphaComponent(0.65).cgColor
+            cutLayer.isHidden = false
+        } else if let cutLayer = cutDashLayer {
+            cutLayer.path = nil
+            cutLayer.removeFromSuperlayer()
+            cutDashLayer = nil
         }
     }
 
@@ -1841,6 +2023,16 @@ private final class MasonryHoverOverlayLayer {
         layer.isHidden = true
         CATransaction.commit()
     }
+
+    func releaseContents() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.isHidden = true
+        checkboxLayer.contents = nil
+        captionLayer.contents = nil
+        lastCaptionKey = ""
+        CATransaction.commit()
+    }
 }
 
 // MARK: - Read-Only Source-Card Geometry Reporter (Quick Look Connected Motion)
@@ -1871,11 +2063,15 @@ private final class MasonryMenuActionTarget: NSObject {
 
 // MARK: - Native Flipped Layer-Backed Recycling Document View
 
-private final class MasonryDocumentView: NSView, NSDraggingSource {
+internal final class MasonryDocumentView: NSView, NSDraggingSource {
     /// `nonisolated` is mandatory under Swift 6: AppKit calls `isFlipped` concurrently via
     /// `dispatch_apply` during multi-item `beginDraggingSession(with:event:source:)`.
     override nonisolated var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    /// Pure `CALayer` sublayer host: prevents AppKit from ever allocating a backing store
+    /// for tall (100,000pt+) virtualized document frames.
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {}
 
     weak var loader: ThumbnailImageLoader?
     var onSelectionChanged: ((Set<UUID>) -> Void)?
@@ -1934,13 +2130,31 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
     private let spacing: CGFloat = 12
     private let horizontalPadding: CGFloat = 20
-    private let tileOverscan: CGFloat = 520
-    private let prefetchLookahead: CGFloat = 960
+    private let tileOverscan: CGFloat = 260
+    private let prefetchLookahead: CGFloat = 640
+    private let maxPrefetchBatch: Int = 12
+    private let maxReusePoolSize: Int = 32
 
     private var layout: MasonryLayoutSnapshot = .empty
     private var lastLayoutWidth: CGFloat = 0
     private var activeTiles: [UUID: MasonryTileLayer] = [:]
     private var reusePool: [MasonryTileLayer] = []
+    private var visibleFramesScratch: [MasonryItemFrame] = []
+    private var neededIDsScratch: Set<UUID> = []
+    private var recycleIDsScratch: [UUID] = []
+    private var prefetchIDsScratch: [UUID] = []
+    private var lastPrefetchIDs: [UUID] = []
+    internal private(set) var layoutRecomputeCountForTesting: Int = 0
+
+    internal var activeTileCountForTesting: Int { activeTiles.count }
+    internal var reusePoolCountForTesting: Int { reusePool.count }
+    internal var maxActiveTileSublayerCountForTesting: Int {
+        activeTiles.values.map(\.sublayerCountForTesting).max() ?? 0
+    }
+    internal var pooledTilesHoldingImageCountForTesting: Int {
+        reusePool.reduce(0) { $0 + ($1.hasImageContentsForTesting ? 1 : 0) }
+    }
+    internal var currentLayoutTotalHeightForTesting: CGFloat { layout.totalHeight }
     private let tilesContainerLayer = CALayer()
     private let hoverMediaPreview = HoverMediaPreviewLayerController()
     private let hoverOverlayLayer = MasonryHoverOverlayLayer()
@@ -2018,24 +2232,40 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
-            if MasonryCardGeometryRegistry.shared.activeDocumentView === self {
-                MasonryCardGeometryRegistry.shared.activeDocumentView = nil
-            }
-            hoverMediaPreview.stop()
-            legacyPinchSettleWorkItem?.cancel()
-            legacyPinchSettleWorkItem = nil
-            paneTransitionSettleWorkItem?.cancel()
-            paneTransitionSettleWorkItem = nil
-            paneTransitionTargetWidth = nil
-            paneTransitionWindowWidth = nil
-            for tile in activeTiles.values {
-                tile.loadTask?.cancel()
-                tile.loadTask = nil
-            }
+            releaseOffscreenResources()
         } else {
             MasonryCardGeometryRegistry.shared.activeDocumentView = self
             handleViewportFrameChanged()
         }
+    }
+
+    internal func releaseOffscreenResources() {
+        if MasonryCardGeometryRegistry.shared.activeDocumentView === self {
+            MasonryCardGeometryRegistry.shared.activeDocumentView = nil
+        }
+        hoveredAssetID = nil
+        hoverMediaPreview.stop()
+        hoverOverlayLayer.releaseContents()
+        legacyPinchSettleWorkItem?.cancel()
+        legacyPinchSettleWorkItem = nil
+        paneTransitionSettleWorkItem?.cancel()
+        paneTransitionSettleWorkItem = nil
+        paneTransitionTargetWidth = nil
+        paneTransitionWindowWidth = nil
+        lastPrefetchIDs.removeAll()
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for tile in activeTiles.values {
+            tile.prepareForReuse()
+            tile.layer.removeFromSuperlayer()
+        }
+        activeTiles.removeAll()
+        for tile in reusePool {
+            tile.prepareForReuse()
+        }
+        reusePool.removeAll()
+        CATransaction.commit()
     }
 
     func visibleCardRectInWindow(for assetID: UUID) -> CGRect? {
@@ -2095,7 +2325,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         let assetsChanged = (self.assetsSignature != signature)
         let layoutModeChanged = (self.layoutMode != layoutMode)
         let columnWidthChanged = abs(self.targetColumnWidth - targetColumnWidth) >= 0.5
-        let insetsChanged = abs(self.topInset - topInset) >= 0.5 || abs(self.bottomInset - bottomInset) >= 0.5
+        let topInsetChanged = abs(self.topInset - topInset) >= 0.5
+        let oldBottomInset = self.bottomInset
+        let bottomInsetChanged = abs(oldBottomInset - bottomInset) >= 0.5
+        let insetsChanged = topInsetChanged || bottomInsetChanged
         let previousSideChrome = self.lastSideChromeWidth
         let sideChromeChanged: Bool = {
             guard let prev = previousSideChrome, let next = sideChromeWidth else { return false }
@@ -2110,6 +2343,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         if assetsChanged || selectionChanged {
             sessionZoomAnchor = nil
+        }
+        if invalidationChanged && self.loaderInvalidationVersion != -1 {
+            MasonryStaticLayerAssets.clearTransientCaches()
+            lastPrefetchIDs.removeAll()
         }
 
         self.assets = assets
@@ -2138,6 +2375,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                 map[item.id] = idx
             }
             self.assetIndexByID = map
+            lastPrefetchIDs.removeAll()
         }
 
         let isSelfZoomEcho = !assetsChanged && !layoutModeChanged && !insetsChanged && !sideChromeChanged && columnWidthChanged
@@ -2206,6 +2444,28 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         }
 
         if isSelfZoomEcho {
+            if invalidationChanged || appearanceChanged {
+                syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
+            } else if visualFlagsChanged {
+                updateVisibleTileStatesOnly()
+            }
+            fulfillPendingRevealIfPossible()
+            return
+        }
+
+        // Fast O(1) path when ONLY `bottomInset` changes (e.g., multi-select bottom action bar
+        // toggling between 44pt and 104pt on every 1 <-> 2 selection change): avoids O(N) re-layout
+        // and redundant tile reconfiguration.
+        if bottomInsetChanged
+            && !assetsChanged
+            && !layoutModeChanged
+            && !topInsetChanged
+            && !columnWidthChanged
+            && layout.items.count == assets.count
+            && layout.totalHeight > 360.5 {
+            layout = layout.withAdjustedBottomInset(oldBottomInset: oldBottomInset, newBottomInset: bottomInset)
+            let clipHeight = enclosingScrollView?.contentView.bounds.height ?? bounds.height
+            updateDocumentHeight(clipHeight: clipHeight)
             if invalidationChanged || appearanceChanged {
                 syncVisibleTiles(forceReconfigure: true, forceReloadImages: invalidationChanged)
             } else if visualFlagsChanged {
@@ -2879,6 +3139,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             lastAppliedJustifiedWidth = effectiveWidth
         }
 
+        layoutRecomputeCountForTesting &+= 1
         layout = MasonryLayoutEngine.compute(
             assets: assets,
             layoutMode: layoutMode,
@@ -3006,6 +3267,7 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             oldRects = snap
         }
 
+        layoutRecomputeCountForTesting &+= 1
         layout = MasonryLayoutEngine.compute(
             assets: assets,
             layoutMode: layoutMode,
@@ -3062,12 +3324,12 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         guard vis.height > 0 || !assets.isEmpty else { return }
         let minY = max(0, vis.minY - tileOverscan)
         let maxY = vis.maxY + tileOverscan
-        let visibleFrames = layout.visibleItems(minY: minY, maxY: maxY)
 
-        var neededIDs = Set<UUID>()
-        neededIDs.reserveCapacity(visibleFrames.count)
-        for item in visibleFrames {
-            neededIDs.insert(item.id)
+        visibleFramesScratch.removeAll(keepingCapacity: true)
+        neededIDsScratch.removeAll(keepingCapacity: true)
+        layout.forEachVisibleItem(minY: minY, maxY: maxY) { item in
+            visibleFramesScratch.append(item)
+            neededIDsScratch.insert(item.id)
         }
 
         // Far-jump settle threshold: non-anchor cards wrapping wildly across columns softly settle in place
@@ -3083,16 +3345,24 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        // 1. Recycle offscreen tiles back into the pool (zero allocations / zero deallocations)
-        for (id, tile) in activeTiles where !neededIDs.contains(id) {
-            tile.prepareForReuse()
-            tile.layer.removeFromSuperlayer()
-            activeTiles.removeValue(forKey: id)
-            reusePool.append(tile)
+        // 1. Collect & recycle offscreen tiles without mutating `activeTiles` during iteration
+        //    (avoids Copy-on-Write dictionary clones) and strictly enforce `maxReusePoolSize`.
+        recycleIDsScratch.removeAll(keepingCapacity: true)
+        for id in activeTiles.keys where !neededIDsScratch.contains(id) {
+            recycleIDsScratch.append(id)
+        }
+        for id in recycleIDsScratch {
+            if let tile = activeTiles.removeValue(forKey: id) {
+                tile.prepareForReuse()
+                tile.layer.removeFromSuperlayer()
+                if reusePool.count < maxReusePoolSize {
+                    reusePool.append(tile)
+                }
+            }
         }
 
         // 2. Mount or update visible tiles
-        for itemFrame in visibleFrames {
+        for itemFrame in visibleFramesScratch {
             guard itemFrame.index < assets.count else { continue }
             let asset = assets[itemFrame.index]
             guard asset.id == itemFrame.id else { continue }
@@ -3105,7 +3375,10 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
             if let existing = activeTiles[asset.id] {
                 let rawPrevious = existing.frame
                 let fromRect = compensatedFromRects?[asset.id] ?? rawPrevious
-                existing.layer.zPosition = (animateMoves && isAnchorTile) ? 40 : 0
+                let targetZ: CGFloat = (animateMoves && isAnchorTile) ? 40 : 0
+                if existing.layer.zPosition != targetZ {
+                    existing.layer.zPosition = targetZ
+                }
                 if forceReconfigure {
                     existing.configure(
                         asset: asset,
@@ -3201,14 +3474,20 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
 
         CATransaction.commit()
 
-        // 3. Background lookahead prefetching in scroll direction
-        if let loader {
+        // 3. Background lookahead prefetching in scroll direction (deduped across 120Hz scroll ticks)
+        if let loader, !loader.isLowResourceMode {
             let lookMin = scrollingDown ? maxY : max(0, minY - prefetchLookahead)
             let lookMax = scrollingDown ? (maxY + prefetchLookahead) : minY
             if lookMax > lookMin {
-                let upcoming = layout.visibleItems(minY: lookMin, maxY: lookMax)
-                if !upcoming.isEmpty {
-                    loader.prefetch(assetIDs: Array(upcoming.prefix(16).map(\.id)), tier: .grid520)
+                prefetchIDsScratch.removeAll(keepingCapacity: true)
+                layout.forEachVisibleItem(minY: lookMin, maxY: lookMax) { item in
+                    if prefetchIDsScratch.count < maxPrefetchBatch {
+                        prefetchIDsScratch.append(item.id)
+                    }
+                }
+                if !prefetchIDsScratch.isEmpty && prefetchIDsScratch != lastPrefetchIDs {
+                    lastPrefetchIDs = prefetchIDsScratch
+                    loader.prefetch(assetIDs: prefetchIDsScratch, tier: .grid520)
                 }
             }
         }
@@ -3242,16 +3521,15 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     // MARK: - O(log N) Hit Testing & Hover
 
     private func hitTestCard(at point: CGPoint) -> (asset: AssetRecord, frame: CGRect)? {
-        let candidates = layout.visibleItems(minY: point.y - 2, maxY: point.y + 2)
-        for item in candidates where item.rect.contains(point) {
-            if item.index < assets.count {
-                let asset = assets[item.index]
-                if asset.id == item.id {
-                    return (asset, item.rect)
-                }
+        var matched: (asset: AssetRecord, frame: CGRect)?
+        layout.forEachVisibleItem(minY: point.y - 2, maxY: point.y + 2) { item in
+            guard matched == nil, item.rect.contains(point), item.index < assets.count else { return }
+            let asset = assets[item.index]
+            if asset.id == item.id {
+                matched = (asset, item.rect)
             }
         }
-        return nil
+        return matched
     }
 
     private func syncHoverMediaPreview(for asset: AssetRecord?, in frame: CGRect?, scale: CGFloat) {
@@ -3345,6 +3623,31 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         guard selectedAssetIDs.contains(id) else {
             return [id]
         }
+        if selectedAssetIDs.count == 1 {
+            return [id]
+        }
+        // O(K log K) via `assetIndexByID` when selection is smaller than the full library,
+        // avoiding an O(N) scan across 10,000+ assets on every right-click or drag start.
+        if selectedAssetIDs.count * 4 < assets.count {
+            var indexed: [(index: Int, id: UUID)] = []
+            var unindexed: [UUID] = []
+            indexed.reserveCapacity(selectedAssetIDs.count)
+            for candidate in selectedAssetIDs where candidate != id {
+                if let idx = assetIndexByID[candidate] {
+                    indexed.append((idx, candidate))
+                } else {
+                    unindexed.append(candidate)
+                }
+            }
+            indexed.sort { $0.index < $1.index }
+            var ordered: [UUID] = []
+            ordered.reserveCapacity(selectedAssetIDs.count)
+            ordered.append(id)
+            for pair in indexed { ordered.append(pair.id) }
+            for extra in unindexed { ordered.append(extra) }
+            return ordered
+        }
+
         var ordered: [UUID] = []
         ordered.reserveCapacity(selectedAssetIDs.count)
         ordered.append(id)
@@ -3790,8 +4093,8 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
         case 49: // Space (fallback when used standalone outside MainWindowView)
             guard activeQuickLookID == nil else { return }
             if event.isARepeat { return }
-            if let asset = assets.first(where: { selectedAssetIDs.contains($0.id) }) {
-                callbacks.onOpenQuickLook(asset)
+            if let firstIdx = selectedAssetIDs.compactMap({ assetIndexByID[$0] }).min(), firstIdx < assets.count {
+                callbacks.onOpenQuickLook(assets[firstIdx])
                 return
             }
         default:

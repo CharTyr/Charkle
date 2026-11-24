@@ -241,39 +241,83 @@ public extension BoardPoint {
 
 // MARK: - Color & Palette Helpers
 
+/// Zero-allocation 6-digit RGB hex parser operating directly on UTF-8 bytes
+/// (avoids Foundation `CharacterSet` bridging and intermediate `String` copies in 120Hz hot paths).
+internal nonisolated enum CanvasHexParser {
+    @inline(__always)
+    private static func hexNibble(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: return byte - 48        // '0'...'9'
+        case 65...70: return byte - 55        // 'A'...'F'
+        case 97...102: return byte - 87       // 'a'...'f'
+        default: return nil
+        }
+    }
+
+    static func parseRGB(_ hex: String) -> (r: UInt8, g: UInt8, b: UInt8)? {
+        var value: UInt32 = 0
+        var digits = 0
+        var started = false
+        var trailingWhitespace = false
+        for byte in hex.utf8 {
+            if byte == 35 { // '#'
+                if trailingWhitespace { return nil }
+                continue
+            }
+            if byte == 32 || byte == 9 || byte == 10 || byte == 13 {
+                if started { trailingWhitespace = true }
+                continue
+            }
+            if trailingWhitespace { return nil }
+            guard let nibble = hexNibble(byte), digits < 6 else { return nil }
+            started = true
+            value = (value << 4) | UInt32(nibble)
+            digits += 1
+        }
+        guard digits == 6 else { return nil }
+        return (
+            r: UInt8((value >> 16) & 0xFF),
+            g: UInt8((value >> 8) & 0xFF),
+            b: UInt8(value & 0xFF)
+        )
+    }
+}
+
 public extension NSColor {
     nonisolated static func charkleHex(_ hex: String, fallback: NSColor = .systemGray) -> NSColor {
-        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
-        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else {
+        guard let rgb = CanvasHexParser.parseRGB(hex) else {
             return fallback
         }
-        let r = CGFloat((value >> 16) & 0xFF) / 255.0
-        let g = CGFloat((value >> 8) & 0xFF) / 255.0
-        let b = CGFloat(value & 0xFF) / 255.0
-        return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+        return NSColor(
+            srgbRed: CGFloat(rgb.r) / 255.0,
+            green: CGFloat(rgb.g) / 255.0,
+            blue: CGFloat(rgb.b) / 255.0,
+            alpha: 1.0
+        )
     }
 }
 
 public extension Color {
     nonisolated init(charkleHex hex: String) {
-        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
-        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else {
+        guard let rgb = CanvasHexParser.parseRGB(hex) else {
             self.init(red: 0.52, green: 0.54, blue: 0.56)
             return
         }
-        let r = Double((value >> 16) & 0xFF) / 255.0
-        let g = Double((value >> 8) & 0xFF) / 255.0
-        let b = Double(value & 0xFF) / 255.0
-        self.init(.sRGB, red: r, green: g, blue: b, opacity: 1.0)
+        self.init(
+            .sRGB,
+            red: Double(rgb.r) / 255.0,
+            green: Double(rgb.g) / 255.0,
+            blue: Double(rgb.b) / 255.0,
+            opacity: 1.0
+        )
     }
 
     /// Relative luminance for picking crisp contrasting ink over swatches.
     nonisolated static func charkleIsLightHex(_ hex: String) -> Bool {
-        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
-        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else { return false }
-        let r = Double((value >> 16) & 0xFF) / 255.0
-        let g = Double((value >> 8) & 0xFF) / 255.0
-        let b = Double(value & 0xFF) / 255.0
+        guard let rgb = CanvasHexParser.parseRGB(hex) else { return false }
+        let r = Double(rgb.r) / 255.0
+        let g = Double(rgb.g) / 255.0
+        let b = Double(rgb.b) / 255.0
         let luminance = 0.299 * r + 0.587 * g + 0.114 * b
         return luminance > 0.62
     }
@@ -445,6 +489,9 @@ public struct HorizontalWheelScrollRedirector: NSViewRepresentable {
                 return event
             }
 
+            guard bounds.width > 0, bounds.height > 0 else {
+                return event
+            }
             let localPoint = convert(event.locationInWindow, from: nil)
             guard bounds.contains(localPoint) else {
                 return event
@@ -604,6 +651,9 @@ public struct StageInteractiveBridge: NSViewRepresentable {
                   !isHiddenOrHasHiddenAncestor else {
                 return event
             }
+            guard bounds.width > 0, bounds.height > 0 else {
+                return event
+            }
             let localPoint = convert(event.locationInWindow, from: nil)
             guard bounds.contains(localPoint) else {
                 return event
@@ -702,12 +752,27 @@ public enum CanvasFormatters {
         let total = Int(seconds.rounded())
         let mins = total / 60
         let secs = total % 60
-        return String(format: "%d:%02d", mins, secs)
+        return secs < 10 ? "\(mins):0\(secs)" : "\(mins):\(secs)"
     }
 
     public static func fileExtensionBadge(for fileName: String) -> String {
-        let ext = URL(fileURLWithPath: fileName).pathExtension.uppercased()
-        return ext.isEmpty ? "FILE" : String(ext.prefix(6))
+        // Direct last-path-component substring scan avoids allocating a Foundation `URL` per card
+        var trimmed = fileName[...]
+        while trimmed.last == "/" {
+            trimmed = trimmed.dropLast()
+        }
+        let baseName: Substring
+        if let slash = trimmed.lastIndex(of: "/") {
+            baseName = trimmed[trimmed.index(after: slash)...]
+        } else {
+            baseName = trimmed
+        }
+        guard let dot = baseName.lastIndex(of: "."), dot > baseName.startIndex else {
+            return "FILE"
+        }
+        let extSlice = baseName[baseName.index(after: dot)...]
+        guard !extSlice.isEmpty else { return "FILE" }
+        return String(extSlice.prefix(6)).uppercased()
     }
 
     /// Safely decodes up to `maxBytes` of UTF-8 text without returning `nil` or emitting a trailing

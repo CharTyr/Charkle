@@ -187,18 +187,20 @@ fragment float4 ring_card_fragment(
 }
 """
 
-// MARK: - GPU Mipmapped Texture Pool (Bounded 48-Slot LRU, Purged on Dismantle)
+// MARK: - GPU Mipmapped Texture Pool (Bounded 32-Slot / 64 MB LRU, Cancels Stale Uploads, Purged on Detach)
 
 private final class RingTextureEntry {
     let texture: MTLTexture
     let aspect: Float
     let isFullPreview: Bool
+    let byteCost: Int
     var lastUsedTick: UInt64
 
-    init(texture: MTLTexture, aspect: Float, isFullPreview: Bool, tick: UInt64) {
+    init(texture: MTLTexture, aspect: Float, isFullPreview: Bool, byteCost: Int, tick: UInt64) {
         self.texture = texture
         self.aspect = aspect
         self.isFullPreview = isFullPreview
+        self.byteCost = byteCost
         self.lastUsedTick = tick
     }
 }
@@ -214,15 +216,21 @@ private final class RingTexturePool {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let loader: ThumbnailImageLoader
-    private let maxEntries: Int = 48
+    private let maxEntries: Int = 32
+    private let maxTotalBytes: Int = 64 * 1024 * 1024
 
     private var entries: [UUID: RingTextureEntry] = [:]
+    private var totalBytes: Int = 0
     private var loadingTasks: [UUID: Task<Void, Never>] = [:]
     private var settledPreviewIDs: Set<UUID> = []
     private var generation: UInt64 = 0
     private var tick: UInt64 = 0
     var isDarkMode: Bool = false
     var onTextureReady: (() -> Void)?
+
+    var entryCount: Int { entries.count }
+    var currentTotalBytes: Int { totalBytes }
+    var activeTaskCount: Int { loadingTasks.count }
 
     init(device: MTLDevice, commandQueue: MTLCommandQueue, loader: ThumbnailImageLoader) {
         self.device = device
@@ -244,6 +252,21 @@ private final class RingTexturePool {
     }
 
     func prefetch(assets: [AssetRecord]) {
+        // Cancel stale off-ring texture upload tasks so fast flings never waste GPU mipmap blits
+        if !loadingTasks.isEmpty {
+            var wantedIDs = Set<UUID>()
+            wantedIDs.reserveCapacity(assets.count)
+            for asset in assets { wantedIDs.insert(asset.id) }
+            var staleIDs: [UUID] = []
+            for (id, task) in loadingTasks where !wantedIDs.contains(id) {
+                task.cancel()
+                staleIDs.append(id)
+            }
+            for id in staleIDs {
+                loadingTasks.removeValue(forKey: id)
+            }
+        }
+
         for asset in assets {
             if let existing = entries[asset.id] {
                 if !existing.isFullPreview && loadingTasks[asset.id] == nil && !settledPreviewIDs.contains(asset.id) {
@@ -261,6 +284,7 @@ private final class RingTexturePool {
         for task in loadingTasks.values { task.cancel() }
         loadingTasks.removeAll()
         entries.removeAll()
+        totalBytes = 0
         settledPreviewIDs.removeAll()
     }
 
@@ -499,18 +523,33 @@ private final class RingTexturePool {
         }
 
         tick &+= 1
-        let entry = RingTextureEntry(texture: tex, aspect: bitmap.aspect, isFullPreview: isFullPreview, tick: tick)
+        // Mipmapped RGBA8 texture footprint is base (w * h * 4) * ~4/3
+        let byteCost = max(1, (dstW * dstH * 4 * 4) / 3)
+        if let previous = entries[assetID] {
+            totalBytes = max(0, totalBytes - previous.byteCost)
+        }
+        let entry = RingTextureEntry(texture: tex, aspect: bitmap.aspect, isFullPreview: isFullPreview, byteCost: byteCost, tick: tick)
         entries[assetID] = entry
-        evictIfNeeded()
+        totalBytes += byteCost
+        if settledPreviewIDs.count > 256 {
+            settledPreviewIDs = settledPreviewIDs.filter { entries[$0] != nil }
+        }
+        evictIfNeeded(protecting: assetID)
         return entry
     }
 
-    private func evictIfNeeded() {
-        guard entries.count > maxEntries else { return }
-        let sorted = entries.sorted { $0.value.lastUsedTick < $1.value.lastUsedTick }
-        let removeCount = entries.count - maxEntries
-        for (id, _) in sorted.prefix(removeCount) {
-            entries.removeValue(forKey: id)
+    private func evictIfNeeded(protecting protectedID: UUID) {
+        while entries.count > maxEntries || (totalBytes > maxTotalBytes && entries.count > 1) {
+            var oldestID: UUID?
+            var oldestTick: UInt64 = .max
+            for (id, entry) in entries where id != protectedID {
+                if entry.lastUsedTick < oldestTick {
+                    oldestTick = entry.lastUsedTick
+                    oldestID = id
+                }
+            }
+            guard let victim = oldestID, let removed = entries.removeValue(forKey: victim) else { break }
+            totalBytes = max(0, totalBytes - removed.byteCost)
         }
     }
 }
@@ -541,13 +580,21 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     private var texturePool: RingTexturePool?
 
     private var assets: [AssetRecord] = []
+    private var assetIndexByID: [UUID: Int] = [:]
     private var params: RingGalleryParameters = .default
     private var isDarkMode: Bool = false
     private var reduceMotion: Bool = false
     private var isOverlayPresented: Bool = false
+    private var isWindowOccluded: Bool = false
     private var topSafeInset: CGFloat = 64
     private var loaderInvalidationVersion: Int = -1
     private var callbacks: RingGalleryInteractionCallbacks?
+    private nonisolated(unsafe) var occlusionObserver: NSObjectProtocol?
+
+    internal private(set) var trackRebuildCountForTesting: Int = 0
+    internal var texturePoolEntryCountForTesting: Int { texturePool?.entryCount ?? 0 }
+    internal var texturePoolActiveTasksForTesting: Int { texturePool?.activeTaskCount ?? 0 }
+    internal var isRenderSuspendedForTesting: Bool { isOverlayPresented || isWindowOccluded }
 
     // Continuous arc offset (px along the ring)
     private var offset: Double = 0
@@ -639,26 +686,84 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
         }
+        if let observer = occlusionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            occlusionObserver = nil
+        }
+        offsetAnim = nil
+        pressAnim = nil
         isPaused = true
+        enableSetNeedsDisplay = true
+        (self.layer as? CAMetalLayer)?.presentsWithTransaction = true
         texturePool?.purgeAll()
     }
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil {
+        if let observer = occlusionObserver {
+            NotificationCenter.default.removeObserver(observer)
+            occlusionObserver = nil
+        }
+        if let hostWindow = window {
+            isWindowOccluded = !hostWindow.occlusionState.contains(.visible)
+            occlusionObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: hostWindow,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.handleWindowOcclusionChanged()
+                }
+            }
             installKeyMonitorIfNeeded()
-            requestFrame()
+            if !isOverlayPresented && !isWindowOccluded {
+                prefetchAroundCurrentOffset()
+                requestFrame()
+            }
         } else {
             scrollSnapWorkItem?.cancel()
             scrollSnapWorkItem = nil
+            offsetAnim = nil
+            pressAnim = nil
             isDragging = false
+            isWindowOccluded = false
             isPaused = true
             enableSetNeedsDisplay = true
+            (self.layer as? CAMetalLayer)?.presentsWithTransaction = true
             if let monitor = keyMonitor {
                 NSEvent.removeMonitor(monitor)
                 keyMonitor = nil
             }
+            // Immediately release shared GPU mipmapped textures when leaving Ring view
+            texturePool?.purgeAll()
         }
+    }
+
+    private func handleWindowOcclusionChanged() {
+        guard let hostWindow = window else { return }
+        let occluded = !hostWindow.occlusionState.contains(.visible)
+        guard occluded != isWindowOccluded else { return }
+        isWindowOccluded = occluded
+        if occluded {
+            suspendRenderLoopForOcclusion()
+        } else if !isOverlayPresented {
+            if offsetAnim != nil || pressAnim != nil {
+                startAnimating()
+            } else {
+                requestFrame()
+            }
+        }
+    }
+
+    private func suspendRenderLoopForOcclusion() {
+        if let anim = offsetAnim {
+            offset = anim.to
+            offsetAnim = nil
+        }
+        pressAnim = nil
+        isPaused = true
+        enableSetNeedsDisplay = true
+        (self.layer as? CAMetalLayer)?.presentsWithTransaction = true
     }
 
     public override var acceptsFirstResponder: Bool { true }
@@ -752,6 +857,43 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
 
     // MARK: - External State Sync
 
+    private static func diffAssetListAndGeometry(
+        oldAssets: [AssetRecord],
+        newAssets: [AssetRecord]
+    ) -> (listChanged: Bool, aspectInputsChanged: Bool) {
+        guard oldAssets.count == newAssets.count else {
+            return (true, true)
+        }
+        // O(1) Copy-on-Write backing buffer identity fast path: when SwiftUI re-renders
+        // `GalleryRingView` (front asset / selection / overlay / tuning) without mutating
+        // `library.assets`, both arrays share the exact same immutable contiguous buffer.
+        let sameBackingBuffer: Bool = oldAssets.withUnsafeBufferPointer { lhsBuf in
+            newAssets.withUnsafeBufferPointer { rhsBuf in
+                lhsBuf.baseAddress == rhsBuf.baseAddress && lhsBuf.count == rhsBuf.count
+            }
+        }
+        if sameBackingBuffer {
+            return (false, false)
+        }
+        var aspectChanged = false
+        for idx in 0..<newAssets.count {
+            if oldAssets[idx].id != newAssets[idx].id {
+                return (true, true)
+            }
+            if !aspectChanged {
+                if oldAssets[idx].pixelWidth != newAssets[idx].pixelWidth
+                    || oldAssets[idx].pixelHeight != newAssets[idx].pixelHeight
+                    || oldAssets[idx].mediaKind != newAssets[idx].mediaKind {
+                    aspectChanged = true
+                } else if newAssets[idx].mediaKind == .document
+                    && oldAssets[idx].fileName != newAssets[idx].fileName {
+                    aspectChanged = true
+                }
+            }
+        }
+        return (false, aspectChanged)
+    }
+
     public func configure(
         assets: [AssetRecord],
         selectedAssetID: UUID?,
@@ -763,14 +905,24 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         loaderInvalidationVersion: Int = 0,
         callbacks: RingGalleryInteractionCallbacks
     ) {
-        let oldAssetIDs = self.assets.map(\.id)
-        let newAssetIDs = assets.map(\.id)
-        let listChanged = oldAssetIDs != newAssetIDs
-
+        let (listChanged, aspectInputsChanged) = Self.diffAssetListAndGeometry(oldAssets: self.assets, newAssets: assets)
         let oldParams = self.params
-        let newTrack = RingCardTrack.build(from: assets, params: params)
-        let trackGeometryChanged = newTrack != self.cardTrack
+        let trackParamsChanged = (oldParams.cardHeight != params.cardHeight) || (oldParams.cardGap != params.cardGap)
+        let needsTrackRebuild = listChanged || aspectInputsChanged || trackParamsChanged || self.cardTrack.count != assets.count
+
+        let newTrack: RingCardTrack
+        let trackGeometryChanged: Bool
+        if needsTrackRebuild {
+            trackRebuildCountForTesting &+= 1
+            newTrack = RingCardTrack.build(from: assets, params: params)
+            trackGeometryChanged = (newTrack != self.cardTrack)
+        } else {
+            newTrack = self.cardTrack
+            trackGeometryChanged = false
+        }
+
         let darkModeChanged = (self.isDarkMode != isDarkMode)
+        let overlayChanged = (self.isOverlayPresented != isOverlayPresented)
         let invalidationChanged = (self.loaderInvalidationVersion != -1 && self.loaderInvalidationVersion != loaderInvalidationVersion)
         let appearanceChanged = darkModeChanged
             || (self.topSafeInset != topSafeInset)
@@ -781,6 +933,14 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         let previousFrontVirtual = cardTrack.isEmpty ? 0 : cardTrack.nearestVirtualIndex(to: offset)
 
         self.assets = assets
+        if listChanged || self.assetIndexByID.count != assets.count {
+            var indexMap: [UUID: Int] = [:]
+            indexMap.reserveCapacity(assets.count)
+            for (idx, asset) in assets.enumerated() {
+                indexMap[asset.id] = idx
+            }
+            self.assetIndexByID = indexMap
+        }
         self.params = params
         self.cardTrack = newTrack
         self.isDarkMode = isDarkMode
@@ -795,17 +955,27 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             texturePool?.purgeAll()
         }
 
+        if overlayChanged {
+            if isOverlayPresented {
+                suspendRenderLoopForOcclusion()
+            } else if !isWindowOccluded {
+                requestFrame()
+            }
+        }
+
         if listChanged {
             offsetAnim = nil
             pressAnim = nil
-            if let selectedAssetID, let idx = assets.firstIndex(where: { $0.id == selectedAssetID }) {
+            if let selectedAssetID, let idx = assetIndexByID[selectedAssetID] {
                 offset = cardTrack.centerArc(forVirtualIndex: idx)
             } else {
                 offset = 0
             }
             reportFrontAssetIfChanged(force: true, deferCallback: true)
-            prefetchAroundCurrentOffset()
-            requestFrame()
+            if !isOverlayPresented && !isWindowOccluded {
+                prefetchAroundCurrentOffset()
+                requestFrame()
+            }
         } else {
             if trackGeometryChanged && !isDragging && offsetAnim == nil && !cardTrack.isEmpty {
                 // Keep the exact same card centered if an asset's natural aspect dimensions refreshed.
@@ -815,9 +985,15 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
                selectedAssetID != lastReportedFrontAssetID,
                !isDragging,
                offsetAnim == nil,
-               let idx = assets.firstIndex(where: { $0.id == selectedAssetID }) {
-                // External selection change (e.g., clicked Similar item in Inspector) -> glide shortest path
-                rotateToAssetIndex(idx, duration: reduceMotion ? 0.18 : 0.76)
+               let idx = assetIndexByID[selectedAssetID] {
+                if isOverlayPresented || isWindowOccluded {
+                    // While covered by Quick Look / Settings, snap silently without waking 120Hz Metal loop
+                    offset = cardTrack.centerArc(forVirtualIndex: idx)
+                    lastReportedFrontAssetID = selectedAssetID
+                } else {
+                    // External selection change (e.g., clicked Similar item in Inspector) -> glide shortest path
+                    rotateToAssetIndex(idx, duration: reduceMotion ? 0.18 : 0.76)
+                }
             }
         }
 
@@ -826,7 +1002,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
             offsetAnim = nil
             requestFrame()
         } else if appearanceChanged {
-            if invalidationChanged || darkModeChanged {
+            if (invalidationChanged || darkModeChanged) && !isOverlayPresented && !isWindowOccluded {
                 prefetchAroundCurrentOffset()
             }
             requestFrame()
@@ -896,6 +1072,10 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     private func startAnimating() {
+        guard !isOverlayPresented, !isWindowOccluded else {
+            suspendRenderLoopForOcclusion()
+            return
+        }
         (self.layer as? CAMetalLayer)?.presentsWithTransaction = false
         enableSetNeedsDisplay = false
         isPaused = false
@@ -915,6 +1095,7 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
     }
 
     public func requestFrame() {
+        guard !isOverlayPresented, !isWindowOccluded, window != nil else { return }
         if isPaused {
             enableSetNeedsDisplay = true
             setNeedsDisplay(bounds)
@@ -1212,15 +1393,16 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         let (cardScale, verticalBias) = currentLayoutMetrics()
         let verticalBiasPt = Float(verticalBias)
 
+        let hasPressAnim = (pressAnim != nil)
         let projected = RingGalleryMath.visibleOutsideCards(
             track: cardTrack,
             offset: offset,
             params: params,
             viewportSize: viewportPts,
             cardScale: cardScale,
-            pressScaleForVirtualIndex: { [weak self] vIdx in
-                self?.currentPressScale(for: vIdx, now: now) ?? 1.0
-            }
+            pressScaleForVirtualIndex: hasPressAnim
+                ? { [weak self] vIdx in self?.currentPressScale(for: vIdx, now: now) ?? 1.0 }
+                : { _ in 1.0 }
         )
         lastProjectedCards = projected
 
@@ -1234,18 +1416,24 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         let blurPad = effectiveBlur + 4.0
         let frontCardW = cardTrack.interpolatedFrontCardWidth(at: offset)
         let sharpHalfPt = Float(min(Double(halfW) * 0.78, max(110.0, frontCardW * 0.54) * cardScale))
+        let neutralFallbackRGB: SIMD4<Float> = isDarkMode
+            ? SIMD4<Float>(0.16, 0.17, 0.20, 1.0)
+            : SIMD4<Float>(0.90, 0.90, 0.88, 1.0)
 
         for card in projected {
             guard card.assetIndex < assets.count else { continue }
             let asset = assets[card.assetIndex]
-            let pScale = Float(currentPressScale(for: card.virtualIndex, now: now))
+            let pScale: Float = hasPressAnim ? Float(currentPressScale(for: card.virtualIndex, now: now)) : 1.0
 
             let texResult = texturePool?.texture(for: asset)
             let activeTex = texResult?.0 ?? fallbackWhiteTex
             let imgAspect = texResult?.1 ?? Float(max(0.2, asset.aspectRatio))
             let hasTexture: Float = texResult != nil ? 1.0 : 0.0
 
-            let placeholderRGB = Self.placeholderTint(for: asset, isDark: isDarkMode)
+            // Skip hex color parsing when a GPU texture is already bound (shader ignores `tintColor`)
+            let placeholderRGB = texResult != nil
+                ? neutralFallbackRGB
+                : Self.placeholderTint(for: asset, isDark: isDarkMode, defaultRGB: neutralFallbackRGB)
 
             var uniforms = RingCardGPUUniforms(
                 geom0: SIMD4<Float>(Float(card.arcS), Float(params.curvature), Float(params.perspective), Float(card.cardWidth)),
@@ -1279,19 +1467,16 @@ public final class RingGalleryMTKView: MTKView, MTKViewDelegate {
         stopAnimatingIfSettled(now: now)
     }
 
-    private static func placeholderTint(for asset: AssetRecord, isDark: Bool) -> SIMD4<Float> {
-        if let hex = asset.dominantColors.first?.hex {
-            let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-            if cleaned.count == 6, let val = UInt32(cleaned, radix: 16) {
-                let r = Float((val >> 16) & 0xFF) / 255.0
-                let g = Float((val >> 8) & 0xFF) / 255.0
-                let b = Float(val & 0xFF) / 255.0
-                // Gently soften placeholder toward neutral ground
-                let base: Float = isDark ? 0.16 : 0.88
-                return SIMD4<Float>(base * 0.72 + r * 0.28, base * 0.72 + g * 0.28, base * 0.72 + b * 0.28, 1.0)
-            }
+    private static func placeholderTint(for asset: AssetRecord, isDark: Bool, defaultRGB: SIMD4<Float>) -> SIMD4<Float> {
+        if let hex = asset.dominantColors.first?.hex, let rgb = CanvasHexParser.parseRGB(hex) {
+            let r = Float(rgb.r) / 255.0
+            let g = Float(rgb.g) / 255.0
+            let b = Float(rgb.b) / 255.0
+            // Gently soften placeholder toward neutral ground
+            let base: Float = isDark ? 0.16 : 0.88
+            return SIMD4<Float>(base * 0.72 + r * 0.28, base * 0.72 + g * 0.28, base * 0.72 + b * 0.28, 1.0)
         }
-        return isDark ? SIMD4<Float>(0.16, 0.17, 0.20, 1.0) : SIMD4<Float>(0.90, 0.90, 0.88, 1.0)
+        return defaultRGB
     }
 }
 

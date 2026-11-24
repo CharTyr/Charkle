@@ -414,6 +414,7 @@ public struct MoodboardCanvasView: View {
             return lhs.zIndex < rhs.zIndex
         }
         let nodesByID = Dictionary(uniqueKeysWithValues: document.nodes.map { ($0.id, $0) })
+        let groupChildCounts = computeGroupChildCounts(nodes: sortedNodes)
         let allowNodeHitTesting = activeTool != .pen && activeTool != .eraser && activeTool != .pan && !isSpaceKeyPanning
 
         return ZStack {
@@ -483,7 +484,7 @@ public struct MoodboardCanvasView: View {
                         hoverState.setNodeHovered(nodeID, hovering: hovering)
                     },
                     nodeBuilder: { node in
-                        renderNodeBody(node: node, isAutoMode: false)
+                        renderNodeBody(node: node, isAutoMode: false, groupChildCounts: groupChildCounts)
                             .contentShape(Rectangle())
                             .simultaneousGesture(
                                 TapGesture(count: 1).onEnded {
@@ -605,9 +606,35 @@ public struct MoodboardCanvasView: View {
     }
 
     private func prefetchBoardThumbnails() {
-        let ids = Array(Set(document.referencedAssetIDs))
-        if !ids.isEmpty {
-            loader.prefetch(assetIDs: ids, tier: .preview1400)
+        // Prefetch ONLY the tier each board node actually renders (`weight >= 2` -> `.preview1400`,
+        // standard cards -> `.grid520`), capped to the initial visible batch so opening a board
+        // never decodes dozens of unused 5.8 MB `.preview1400` bitmaps.
+        var gridIDs: [UUID] = []
+        var heroIDs: [UUID] = []
+        var seenGrid = Set<UUID>()
+        var seenHero = Set<UUID>()
+        for node in document.nodes {
+            guard case .assetRef(let assetID, _, let weight, _) = node.kind else { continue }
+            if weight >= 2 {
+                if heroIDs.count < 8, seenHero.insert(assetID).inserted {
+                    heroIDs.append(assetID)
+                }
+            } else {
+                if gridIDs.count < 24, seenGrid.insert(assetID).inserted {
+                    gridIDs.append(assetID)
+                }
+            }
+            if gridIDs.count >= 24 && heroIDs.count >= 8 { break }
+        }
+        if !gridIDs.isEmpty {
+            loader.prefetch(assetIDs: gridIDs, tier: .grid520)
+        }
+        if !heroIDs.isEmpty {
+            for heroID in heroIDs where loader.cachedImage(for: heroID, tier: .preview1400) == nil {
+                Task(priority: .utility) {
+                    _ = await loader.loadCGImage(for: heroID, tier: .preview1400)
+                }
+            }
         }
     }
 
@@ -1078,7 +1105,10 @@ public struct MoodboardCanvasView: View {
                                 width: abs(w2.x - w1.x),
                                 height: abs(w2.y - w1.y)
                             )
-                            selectedNodeIDs = Set(document.nodes.filter { $0.frame.intersects(worldBox) }.map(\.id))
+                            let nextSelection = Set(document.nodes.filter { $0.frame.intersects(worldBox) }.map(\.id))
+                            if nextSelection != selectedNodeIDs {
+                                selectedNodeIDs = nextSelection
+                            }
                         }
                     }
                 case .pen:
@@ -1176,8 +1206,10 @@ public struct MoodboardCanvasView: View {
                 var guidesX: [CGFloat] = []
                 var guidesY: [CGFloat] = []
 
-                let movingSet = selectedNodeIDs.union(interaction.activeGroupChildIDs).union([node.id])
-                for other in document.nodes where !movingSet.contains(other.id) {
+                for other in document.nodes {
+                    if other.id == node.id || selectedNodeIDs.contains(other.id) || interaction.activeGroupChildIDs.contains(other.id) {
+                        continue
+                    }
                     if abs(candidateMinX - other.frame.minX) < snapThreshold {
                         dx = CGFloat(other.frame.minX - node.frame.minX)
                         guidesX = [CGFloat(other.frame.minX)]
@@ -1193,8 +1225,12 @@ public struct MoodboardCanvasView: View {
                         guidesY = [CGFloat(other.frame.midY)]
                     }
                 }
-                interaction.snapGuidesX = guidesX
-                interaction.snapGuidesY = guidesY
+                if interaction.snapGuidesX != guidesX {
+                    interaction.snapGuidesX = guidesX
+                }
+                if interaction.snapGuidesY != guidesY {
+                    interaction.snapGuidesY = guidesY
+                }
                 interaction.activeNodeDragDelta = CGSize(width: dx, height: dy)
             }
             .onEnded { _ in
@@ -1513,14 +1549,21 @@ public struct MoodboardCanvasView: View {
     private func markEraseNear(worldPoint: CGPoint) {
         let hitRadius = CGFloat(18.0 / Double(camera.zoom))
         for stroke in document.inkStrokes where !interaction.pendingErasedStrokeIDs.contains(stroke.id) {
-            let pts = stroke.points.map { CGPoint(x: $0.x, y: $0.y) }
-            guard !pts.isEmpty else { continue }
+            let count = stroke.points.count
+            guard count > 0 else { continue }
             var hit = false
-            if pts.count == 1 {
-                hit = hypot(pts[0].x - worldPoint.x, pts[0].y - worldPoint.y) <= hitRadius
+            if count == 1 {
+                let p0 = stroke.points[0]
+                hit = hypot(CGFloat(p0.x) - worldPoint.x, CGFloat(p0.y) - worldPoint.y) <= hitRadius
             } else {
-                for i in 0..<(pts.count - 1) {
-                    if ConnectorGeometry.distanceFromPoint(worldPoint, toSegment: pts[i], pts[i + 1]) <= hitRadius {
+                for i in 0..<(count - 1) {
+                    let a = stroke.points[i]
+                    let b = stroke.points[i + 1]
+                    if ConnectorGeometry.distanceFromPoint(
+                        worldPoint,
+                        toSegment: CGPoint(x: a.x, y: a.y),
+                        CGPoint(x: b.x, y: b.y)
+                    ) <= hitRadius {
                         hit = true
                         break
                     }
@@ -1531,6 +1574,7 @@ public struct MoodboardCanvasView: View {
             }
         }
 
+        guard !document.connectors.isEmpty else { return }
         let nodesByID = Dictionary(uniqueKeysWithValues: document.nodes.map { ($0.id, $0) })
         for conn in document.connectors where !interaction.pendingErasedConnectorIDs.contains(conn.id) {
             guard let fromNode = nodesByID[conn.fromNodeID],
@@ -1571,10 +1615,30 @@ public struct MoodboardCanvasView: View {
         callbacks.onCommitDocument(nextDoc)
     }
 
+    private func computeGroupChildCounts(nodes: [BoardNode]) -> [UUID: Int] {
+        var groups: [BoardNode] = []
+        for node in nodes {
+            if case .groupFrame = node.kind {
+                groups.append(node)
+            }
+        }
+        guard !groups.isEmpty else { return [:] }
+        var counts: [UUID: Int] = [:]
+        counts.reserveCapacity(groups.count)
+        for other in nodes where !other.isLocked {
+            if case .groupFrame = other.kind { continue }
+            let center = BoardPoint(x: other.frame.midX, y: other.frame.midY)
+            for group in groups where group.frame.contains(center) {
+                counts[group.id, default: 0] += 1
+            }
+        }
+        return counts
+    }
+
     // MARK: - Shared Node Renderer
 
     @ViewBuilder
-    private func renderNodeBody(node: BoardNode, isAutoMode: Bool) -> some View {
+    private func renderNodeBody(node: BoardNode, isAutoMode: Bool, groupChildCounts: [UUID: Int]) -> some View {
         let isSelected = selectedNodeIDs.contains(node.id)
         switch node.kind {
         case .assetRef(let assetID, _, _, _):
@@ -1650,7 +1714,7 @@ public struct MoodboardCanvasView: View {
                 onDelete: { removeNode(id: node.id) }
             )
         case .groupFrame(let title, let tint):
-            let enclosedCount = enclosedChildIDs(in: node).count
+            let enclosedCount = groupChildCounts[node.id] ?? 0
             BoardGroupFrameView(
                 title: title,
                 tint: tint,
@@ -2946,7 +3010,7 @@ private final class CanvasInputCatcherView: NSView {
 
 // MARK: - Isolated 120fps Freeform Camera, Interaction, Hover State & GPU-Accelerated Leaf Views
 
-private enum MoodboardResizeCorner: CaseIterable {
+internal enum MoodboardResizeCorner: CaseIterable {
     case topLeading
     case topTrailing
     case bottomLeading
@@ -2971,7 +3035,7 @@ private enum MoodboardResizeCorner: CaseIterable {
 /// ink drawing, connector dragging, and marquee selection ONLY invalidate the exact layer
 /// that consumes those properties (never `MoodboardCanvasView.body` or toolbars).
 @Observable
-private final class FreeformInteractionState {
+internal final class FreeformInteractionState {
     var activeNodeDragID: UUID?
     var activeNodeDragDelta: CGSize = .zero
     var activeGroupChildIDs: Set<UUID> = []
@@ -3005,19 +3069,19 @@ private final class FreeformInteractionState {
         if resizingNodeID == node.id, let live = liveResizeFrame {
             return live
         }
-        if let reflowed = liveGroupReflowFrames[node.id] {
+        if !liveGroupReflowFrames.isEmpty, let reflowed = liveGroupReflowFrames[node.id] {
             return reflowed
         }
-        if let dragID = activeNodeDragID {
-            let movingSet = selectedNodeIDs.union(activeGroupChildIDs).union([dragID])
-            if movingSet.contains(node.id) && !node.isLocked {
-                return BoardRect(
-                    x: node.frame.x + Double(activeNodeDragDelta.width),
-                    y: node.frame.y + Double(activeNodeDragDelta.height),
-                    width: node.frame.width,
-                    height: node.frame.height
-                )
-            }
+        if let dragID = activeNodeDragID,
+           !node.isLocked,
+           (node.id == dragID || selectedNodeIDs.contains(node.id) || activeGroupChildIDs.contains(node.id)) {
+            let delta = activeNodeDragDelta
+            return BoardRect(
+                x: node.frame.x + Double(delta.width),
+                y: node.frame.y + Double(delta.height),
+                width: node.frame.width,
+                height: node.frame.height
+            )
         }
         return node.frame
     }
@@ -3059,7 +3123,7 @@ private final class FreeformInteractionState {
 /// Decoupled `@Observable` camera state so high-frequency trackpad scroll/zoom ticks ONLY update
 /// the GPU dot-grid offset and single container transform, leaving toolbars and node views untouched.
 @Observable
-private final class FreeformCameraState {
+internal final class FreeformCameraState {
     var center: CGPoint = CGPoint(x: 540, y: 360)
     var zoom: CGFloat = 1.0
 
@@ -3218,16 +3282,28 @@ private final class FreeformHoverState {
 }
 
 private final class DotGridTileCache {
+    private final class TileBox {
+        let image: CGImage
+        init(_ image: CGImage) { self.image = image }
+    }
+
     static let shared = DotGridTileCache()
-    private var tiles: [String: CGImage] = [:]
+    private let cache: NSCache<NSNumber, TileBox> = {
+        let c = NSCache<NSNumber, TileBox>()
+        c.countLimit = 48
+        c.totalCostLimit = 4 * 1024 * 1024
+        return c
+    }()
 
     private init() {}
 
     func tile(step: CGFloat, isDark: Bool, isDimmed: Bool, dotRadius: CGFloat) -> CGImage? {
-        let radiusKey = Int((dotRadius * 10).rounded())
-        let key = "\(step)-\(isDark ? 1 : 0)-\(isDimmed ? 1 : 0)-\(radiusKey)"
-        if let existing = tiles[key] {
-            return existing
+        let stepKey = Int((step * 2).rounded()) & 0xFFFF
+        let radiusKey = Int((dotRadius * 10).rounded()) & 0xFF
+        let flags = (isDark ? 1 : 0) | (isDimmed ? 2 : 0)
+        let packedKey = NSNumber(value: (stepKey << 10) | (radiusKey << 2) | flags)
+        if let existing = cache.object(forKey: packedKey) {
+            return existing.image
         }
 
         let scale: CGFloat = 2.0
@@ -3263,10 +3339,8 @@ private final class DotGridTileCache {
         ctx.fillEllipse(in: dotRect)
 
         guard let img = ctx.makeImage() else { return nil }
-        if tiles.count >= 96 {
-            tiles.removeAll(keepingCapacity: true)
-        }
-        tiles[key] = img
+        let cost = max(1, max(img.bytesPerRow * img.height, img.width * img.height * 4))
+        cache.setObject(TileBox(img), forKey: packedKey, cost: cost)
         return img
     }
 }
@@ -3343,8 +3417,36 @@ private struct FreeformCameraViewport<Content: View>: View {
     }
 }
 
+/// Per-node transform wrapper: isolates 120Hz drag/resize/rotate `@Observable` dependencies
+/// strictly to the moving node(s), so stationary nodes and `FreeformWorldNodesLayer` do ZERO
+/// work during high-frequency gestures.
+private struct FreeformNodeTransformShell<Content: View>: View {
+    let node: BoardNode
+    let interaction: FreeformInteractionState
+    let selectedNodeIDs: Set<UUID>
+    let allowNodeHitTesting: Bool
+    let onHoverChanged: (UUID, Bool) -> Void
+    let content: Content
+
+    var body: some View {
+        let worldRect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
+        let worldW = max(24, CGFloat(worldRect.width))
+        let worldH = max(24, CGFloat(worldRect.height))
+        let rot = interaction.effectiveRotation(for: node)
+
+        content
+            .frame(width: worldW, height: worldH)
+            .onHover { hovering in
+                onHoverChanged(node.id, hovering)
+            }
+            .allowsHitTesting(allowNodeHitTesting)
+            .rotationEffect(.degrees(rot))
+            .position(x: CGFloat(worldRect.midX), y: CGFloat(worldRect.midY))
+    }
+}
+
 /// Static world-space node stage: NEVER reads continuous `camera.center` / `camera.zoom`
-/// or unrelated pen/marquee/connector interaction state.
+/// or per-tick `interaction.activeNodeDragDelta` / `liveResizeFrame` / `liveRotationDegrees`.
 private struct FreeformWorldNodesLayer<NodeView: View>: View {
     let camera: FreeformCameraState
     let interaction: FreeformInteractionState
@@ -3357,13 +3459,19 @@ private struct FreeformWorldNodesLayer<NodeView: View>: View {
 
     var body: some View {
         let visibleNodes: [BoardNode] = {
-            if sortedNodes.count <= 40 {
+            if sortedNodes.count <= 12 {
                 return sortedNodes
             }
             let visibleWorld = camera.bucketedVisibleWorldRect(viewportSize: viewportSize, overscan: 600)
+            let dragID = interaction.activeNodeDragID
+            let resizeID = interaction.resizingNodeID
+            let rotateID = interaction.rotatingNodeID
             return sortedNodes.filter { node in
-                let rect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
-                return rect.cgRect.intersects(visibleWorld) || selectedNodeIDs.contains(node.id)
+                node.frame.cgRect.intersects(visibleWorld)
+                    || selectedNodeIDs.contains(node.id)
+                    || node.id == dragID
+                    || node.id == resizeID
+                    || node.id == rotateID
             }
         }()
 
@@ -3373,19 +3481,14 @@ private struct FreeformWorldNodesLayer<NodeView: View>: View {
                 .allowsHitTesting(false)
 
             ForEach(visibleNodes) { node in
-                let worldRect = interaction.effectiveFrame(for: node, selectedNodeIDs: selectedNodeIDs)
-                let worldW = max(24, CGFloat(worldRect.width))
-                let worldH = max(24, CGFloat(worldRect.height))
-                let rot = interaction.effectiveRotation(for: node)
-
-                nodeBuilder(node)
-                    .frame(width: worldW, height: worldH)
-                    .onHover { hovering in
-                        onHoverChanged(node.id, hovering)
-                    }
-                    .allowsHitTesting(allowNodeHitTesting)
-                    .rotationEffect(.degrees(rot))
-                    .position(x: CGFloat(worldRect.midX), y: CGFloat(worldRect.midY))
+                FreeformNodeTransformShell(
+                    node: node,
+                    interaction: interaction,
+                    selectedNodeIDs: selectedNodeIDs,
+                    allowNodeHitTesting: allowNodeHitTesting,
+                    onHoverChanged: onHoverChanged,
+                    content: nodeBuilder(node)
+                )
             }
         }
     }
@@ -3617,63 +3720,95 @@ private struct FreeformVectorOverlay: View {
                     )
                 }
 
-                // 3. Ink strokes
-                let visiblePersistedStrokes = inkStrokes.filter { !erasedStrokes.contains($0.id) }
-                let allStrokes: [InkStroke] = if activeInkPoints.count >= 2 {
-                    visiblePersistedStrokes + [InkStroke(points: activeInkPoints, colorHex: inkColorHex, lineWidth: inkWidth)]
-                } else {
-                    visiblePersistedStrokes
+                // 3. Ink strokes (zero per-frame array allocations: streams directly into Path)
+                for stroke in inkStrokes where !erasedStrokes.contains(stroke.id) {
+                    Self.drawInkPoints(
+                        stroke.points,
+                        colorHex: stroke.colorHex,
+                        lineWidth: stroke.lineWidth,
+                        opacity: stroke.opacity,
+                        visibleWorld: visibleWorld,
+                        center: center,
+                        zoom: zoom,
+                        canvasSize: size,
+                        into: &context
+                    )
                 }
-
-                for stroke in allStrokes where stroke.points.count >= 2 {
-                    var minX = Double.greatestFiniteMagnitude
-                    var minY = Double.greatestFiniteMagnitude
-                    var maxX = -Double.greatestFiniteMagnitude
-                    var maxY = -Double.greatestFiniteMagnitude
-                    for pt in stroke.points where pt.x.isFinite && pt.y.isFinite {
-                        if pt.x < minX { minX = pt.x }
-                        if pt.y < minY { minY = pt.y }
-                        if pt.x > maxX { maxX = pt.x }
-                        if pt.y > maxY { maxY = pt.y }
-                    }
-                    guard minX.isFinite, minY.isFinite, maxX.isFinite, maxY.isFinite else { continue }
-                    let box = CGRect(x: minX - 12, y: minY - 12, width: (maxX - minX) + 24, height: (maxY - minY) + 24)
-                    guard box.intersects(visibleWorld) else { continue }
-
-                    let screenPts = stroke.points.compactMap { pt -> CGPoint? in
-                        guard pt.x.isFinite, pt.y.isFinite else { return nil }
-                        return toScreen(CGPoint(x: pt.x, y: pt.y))
-                    }
-                    guard screenPts.count >= 2 else { continue }
-                    var path = Path()
-                    path.move(to: screenPts[0])
-                    if screenPts.count == 2 {
-                        path.addLine(to: screenPts[1])
-                    } else {
-                        for i in 1..<(screenPts.count - 1) {
-                            let mid = CGPoint(
-                                x: (screenPts[i].x + screenPts[i + 1].x) * 0.5,
-                                y: (screenPts[i].y + screenPts[i + 1].y) * 0.5
-                            )
-                            path.addQuadCurve(to: mid, control: screenPts[i])
-                        }
-                        if let last = screenPts.last {
-                            path.addLine(to: last)
-                        }
-                    }
-                    context.stroke(
-                        path,
-                        with: .color(Color(charkleHex: stroke.colorHex).opacity(stroke.opacity)),
-                        style: StrokeStyle(
-                            lineWidth: max(1.2, CGFloat(stroke.lineWidth) * zoom),
-                            lineCap: .round,
-                            lineJoin: .round
-                        )
+                if activeInkPoints.count >= 2 {
+                    Self.drawInkPoints(
+                        activeInkPoints,
+                        colorHex: inkColorHex,
+                        lineWidth: inkWidth,
+                        opacity: 0.92,
+                        visibleWorld: visibleWorld,
+                        center: center,
+                        zoom: zoom,
+                        canvasSize: size,
+                        into: &context
                     )
                 }
             }
             .allowsHitTesting(false)
         }
+    }
+
+    private static func drawInkPoints(
+        _ points: [InkStrokePoint],
+        colorHex: String,
+        lineWidth: Double,
+        opacity: Double,
+        visibleWorld: CGRect,
+        center: CGPoint,
+        zoom: CGFloat,
+        canvasSize: CGSize,
+        into context: inout GraphicsContext
+    ) {
+        guard points.count >= 2 else { return }
+        var minX = Double.greatestFiniteMagnitude
+        var minY = Double.greatestFiniteMagnitude
+        var maxX = -Double.greatestFiniteMagnitude
+        var maxY = -Double.greatestFiniteMagnitude
+        for pt in points where pt.x.isFinite && pt.y.isFinite {
+            if pt.x < minX { minX = pt.x }
+            if pt.y < minY { minY = pt.y }
+            if pt.x > maxX { maxX = pt.x }
+            if pt.y > maxY { maxY = pt.y }
+        }
+        guard minX.isFinite, minY.isFinite, maxX.isFinite, maxY.isFinite else { return }
+        let box = CGRect(x: minX - 12, y: minY - 12, width: (maxX - minX) + 24, height: (maxY - minY) + 24)
+        guard box.intersects(visibleWorld) else { return }
+
+        let halfW = canvasSize.width * 0.5
+        let halfH = canvasSize.height * 0.5
+        var path = Path()
+        var prevPt: CGPoint?
+        var validCount = 0
+        for raw in points where raw.x.isFinite && raw.y.isFinite {
+            let screenPt = CGPoint(
+                x: (CGFloat(raw.x) - center.x) * zoom + halfW,
+                y: (CGFloat(raw.y) - center.y) * zoom + halfH
+            )
+            if validCount == 0 {
+                path.move(to: screenPt)
+            } else if validCount >= 2, let prev = prevPt {
+                let mid = CGPoint(x: (prev.x + screenPt.x) * 0.5, y: (prev.y + screenPt.y) * 0.5)
+                path.addQuadCurve(to: mid, control: prev)
+            }
+            prevPt = screenPt
+            validCount += 1
+        }
+        guard validCount >= 2, let lastPt = prevPt else { return }
+        path.addLine(to: lastPt)
+
+        context.stroke(
+            path,
+            with: .color(Color(charkleHex: colorHex).opacity(opacity)),
+            style: StrokeStyle(
+                lineWidth: max(1.2, CGFloat(lineWidth) * zoom),
+                lineCap: .round,
+                lineJoin: .round
+            )
+        )
     }
 }
 
@@ -3690,69 +3825,97 @@ private struct FreeformConnectorLabelsLayer: View {
     let onSelectConnector: (BoardConnector) -> Void
 
     var body: some View {
+        let erasedConnectors = interaction.pendingErasedConnectorIDs
+        let hasAnyRenderableBadge = activeTool == .connector
+            || selectedConnectorID != nil
+            || connectors.contains { conn in
+                !erasedConnectors.contains(conn.id) && !(conn.label ?? "").isEmpty
+            }
+
+        if hasAnyRenderableBadge {
+            connectorLabelsContent(erasedConnectors: erasedConnectors)
+        }
+    }
+
+    @ViewBuilder
+    private func connectorLabelsContent(erasedConnectors: Set<UUID>) -> some View {
         let visibleWorld = camera.visibleWorldRect(viewportSize: viewportSize, overscan: 120)
         let zoom = camera.zoom
-        let erasedConnectors = interaction.pendingErasedConnectorIDs
 
         ZStack {
             ForEach(connectors) { connector in
-                if !erasedConnectors.contains(connector.id),
-                   let fromNode = nodesByID[connector.fromNodeID],
-                   let toNode = nodesByID[connector.toNodeID] {
-                    let fromR = interaction.effectiveFrame(for: fromNode, selectedNodeIDs: selectedNodeIDs)
-                    let toR = interaction.effectiveFrame(for: toNode, selectedNodeIDs: selectedNodeIDs)
-                    let (start, end, c1, c2) = ConnectorGeometry.resolvePathPoints(
-                        fromRect: fromR.cgRect,
-                        fromAnchor: connector.fromAnchor,
-                        fromNormalizedPoint: connector.fromNormalizedPoint,
-                        fromRotationDegrees: interaction.effectiveRotation(for: fromNode),
-                        fromFlipHorizontal: fromNode.flipHorizontal,
-                        fromFlipVertical: fromNode.flipVertical,
-                        toRect: toR.cgRect,
-                        toAnchor: connector.toAnchor,
-                        toNormalizedPoint: connector.toNormalizedPoint,
-                        toRotationDegrees: interaction.effectiveRotation(for: toNode),
-                        toFlipHorizontal: toNode.flipHorizontal,
-                        toFlipVertical: toNode.flipVertical,
-                        style: connector.style
-                    )
-                    let midWorld = ConnectorGeometry.midpoint(start: start, end: end, c1: c1, c2: c2, style: connector.style)
-                    if visibleWorld.contains(midWorld) {
-                        let midScreen = camera.worldToScreen(midWorld, viewportSize: viewportSize)
-                        let isSel = selectedConnectorID == connector.id
-                        Button {
-                            onSelectConnector(connector)
-                        } label: {
-                            Group {
-                                if let label = connector.label, !label.isEmpty {
-                                    Text(label)
-                                        .font(.system(size: max(9, 11 * min(1.2, zoom)), weight: .medium))
-                                        .foregroundStyle(.primary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(CanvasSurface.elevated(for: colorScheme), in: Capsule(style: .continuous))
-                                        .overlay(
-                                            Capsule(style: .continuous)
-                                                .strokeBorder(isSel ? Color.accentColor : CanvasSurface.hairline(for: colorScheme), lineWidth: isSel ? 1.5 : 0.75)
-                                        )
-                                } else if isSel || activeTool == .connector {
-                                    Circle()
-                                        .fill(CanvasSurface.elevated(for: colorScheme))
-                                        .frame(width: 14, height: 14)
-                                        .overlay(
-                                            Image(systemName: "tag")
-                                                .font(.system(size: 7))
-                                                .foregroundStyle(.secondary)
-                                        )
-                                        .overlay(Circle().strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1))
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .position(midScreen)
-                        .allowsHitTesting(activeTool == .select || activeTool == .connector)
+                connectorBadgeView(
+                    connector: connector,
+                    erasedConnectors: erasedConnectors,
+                    visibleWorld: visibleWorld,
+                    zoom: zoom
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func connectorBadgeView(
+        connector: BoardConnector,
+        erasedConnectors: Set<UUID>,
+        visibleWorld: CGRect,
+        zoom: CGFloat
+    ) -> some View {
+        let isSel = selectedConnectorID == connector.id
+        let hasLabel = !(connector.label ?? "").isEmpty
+        if !erasedConnectors.contains(connector.id),
+           (hasLabel || isSel || activeTool == .connector),
+           let fromNode = nodesByID[connector.fromNodeID],
+           let toNode = nodesByID[connector.toNodeID] {
+            let fromR = interaction.effectiveFrame(for: fromNode, selectedNodeIDs: selectedNodeIDs)
+            let toR = interaction.effectiveFrame(for: toNode, selectedNodeIDs: selectedNodeIDs)
+            let (start, end, c1, c2) = ConnectorGeometry.resolvePathPoints(
+                fromRect: fromR.cgRect,
+                fromAnchor: connector.fromAnchor,
+                fromNormalizedPoint: connector.fromNormalizedPoint,
+                fromRotationDegrees: interaction.effectiveRotation(for: fromNode),
+                fromFlipHorizontal: fromNode.flipHorizontal,
+                fromFlipVertical: fromNode.flipVertical,
+                toRect: toR.cgRect,
+                toAnchor: connector.toAnchor,
+                toNormalizedPoint: connector.toNormalizedPoint,
+                toRotationDegrees: interaction.effectiveRotation(for: toNode),
+                toFlipHorizontal: toNode.flipHorizontal,
+                toFlipVertical: toNode.flipVertical,
+                style: connector.style
+            )
+            let midWorld = ConnectorGeometry.midpoint(start: start, end: end, c1: c1, c2: c2, style: connector.style)
+            if visibleWorld.contains(midWorld) {
+                let midScreen = camera.worldToScreen(midWorld, viewportSize: viewportSize)
+                Button {
+                    onSelectConnector(connector)
+                } label: {
+                    if let label = connector.label, !label.isEmpty {
+                        Text(label)
+                            .font(.system(size: max(9, 11 * min(1.2, zoom)), weight: .medium))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(CanvasSurface.elevated(for: colorScheme), in: Capsule(style: .continuous))
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .strokeBorder(isSel ? Color.accentColor : CanvasSurface.hairline(for: colorScheme), lineWidth: isSel ? 1.5 : 0.75)
+                            )
+                    } else {
+                        Circle()
+                            .fill(CanvasSurface.elevated(for: colorScheme))
+                            .frame(width: 14, height: 14)
+                            .overlay(
+                                Image(systemName: "tag")
+                                    .font(.system(size: 7))
+                                    .foregroundStyle(.secondary)
+                            )
+                            .overlay(Circle().strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1))
                     }
                 }
+                .buttonStyle(.plain)
+                .position(midScreen)
+                .allowsHitTesting(activeTool == .select || activeTool == .connector)
             }
         }
     }
