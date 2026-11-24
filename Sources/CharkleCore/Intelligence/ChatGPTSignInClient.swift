@@ -26,7 +26,8 @@ public actor ChatGPTSignInClient {
     private static let maxResponseBytes = 16 * 1024 * 1024
 
     private let keychain: KeychainStore
-    private let session: URLSession
+    private let injectedSession: URLSession?
+    private var ownedSession: URLSession?
     private var cachedDiscovery: OIDCDiscovery?
     private var cachedJWKS: [JWKKey]?
     private var cachedJWKSFetchedAt: Date?
@@ -35,19 +36,27 @@ public actor ChatGPTSignInClient {
     private var inFlightRefresh: Task<StoredConnection, Error>?
     private var sessionGeneration: UInt64 = 0
 
+    private var session: URLSession {
+        if let injectedSession { return injectedSession }
+        if let ownedSession { return ownedSession }
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 45
+        config.timeoutIntervalForResource = 180
+        let created = URLSession(configuration: config, delegate: NoRedirectSessionDelegate(), delegateQueue: nil)
+        ownedSession = created
+        return created
+    }
+
     public init(keychain: KeychainStore = KeychainStore(), session: URLSession? = nil) {
         self.keychain = keychain
-        if let session {
-            self.session = session
-        } else {
-            let config = URLSessionConfiguration.ephemeral
-            config.httpShouldSetCookies = false
-            config.httpCookieAcceptPolicy = .never
-            config.urlCache = nil
-            config.timeoutIntervalForRequest = 45
-            config.timeoutIntervalForResource = 180
-            self.session = URLSession(configuration: config, delegate: NoRedirectSessionDelegate(), delegateQueue: nil)
-        }
+        self.injectedSession = session
+    }
+
+    deinit {
+        ownedSession?.invalidateAndCancel()
     }
 
     // MARK: - Public Session & Auth API

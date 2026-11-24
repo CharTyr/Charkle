@@ -156,7 +156,7 @@ public nonisolated enum GitHubRepoResolver {
             guard let url = URL(string: rawURL),
                   WebBookmark.isSafeRemoteFetchURL(url),
                   let data = await fetchData(url: url, accept: "image/png,image/webp,image/jpeg,image/*", maxBytes: 8 * 1024 * 1024),
-                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                   let image = MediaPipeline.raster(source)?.poster,
                   image.width >= 200, image.height >= 100 else {
                 continue

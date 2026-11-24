@@ -182,9 +182,14 @@ extension LibraryDatabase {
         let delta = try AssetChanges(asset, diff: prior)
         if !delta.isEmpty { try record(.asset(delta), projectLocation: projectLocation) }
         var saved = try self.asset(id: value.id) ?? value
-        saved.isLocalOriginalCached = value.isLocalOriginalCached
-        saved.driveFileID = value.driveFileID
-        try put(saved)
+        let needsLocalMetadataWrite = (delta.isEmpty && existing == nil)
+            || saved.isLocalOriginalCached != value.isLocalOriginalCached
+            || saved.driveFileID != value.driveFileID
+        if needsLocalMetadataWrite {
+            saved.isLocalOriginalCached = value.isLocalOriginalCached
+            saved.driveFileID = value.driveFileID
+            try put(saved)
+        }
         return saved
     }
 

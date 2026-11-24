@@ -2,12 +2,34 @@ import CoreFoundation
 import Foundation
 
 nonisolated enum SearchText {
-    static func hasHan(_ char: Character) -> Bool {
-        guard let value = char.unicodeScalars.first?.value else { return false }
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+    private static let zhCNLocale = Locale(identifier: "zh_CN")
+
+    @inline(__always)
+    static func hasHanScalar(_ scalar: UnicodeScalar) -> Bool {
+        let value = scalar.value
         return (0x3400...0x9FFF).contains(value) || (0x20000...0x323AF).contains(value)
     }
 
+    static func hasHan(_ char: Character) -> Bool {
+        guard let scalar = char.unicodeScalars.first else { return false }
+        return hasHanScalar(scalar)
+    }
+
+    static func containsHan(_ text: String) -> Bool {
+        if let ascii = text.utf8.withContiguousStorageIfAvailable({ buf -> Bool in
+            for i in 0..<buf.count {
+                if buf[i] >= 0x80 { return false }
+            }
+            return true
+        }), ascii {
+            return false
+        }
+        return text.unicodeScalars.contains(where: hasHanScalar)
+    }
+
     static func tokenize(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
         var tokens: [String] = []
         var word = ""
         for character in text {
@@ -23,6 +45,7 @@ nonisolated enum SearchText {
     }
 
     static func pinyin(_ text: String) -> (full: String, initials: String) {
+        guard containsHan(text) else { return ("", "") }
         var full: [String] = []
         var initials: [String] = []
         for phrase in text.split(whereSeparator: { !hasHan($0) }).map(String.init) {
@@ -52,7 +75,7 @@ nonisolated enum SearchText {
         let text = phrase as NSString
         let range = CFRange(location: 0, length: text.length)
         let flags = kCFStringTokenizerUnitWordBoundary | kCFStringTokenizerAttributeLatinTranscription
-        guard let tokenizer = CFStringTokenizerCreate(nil, phrase as CFString, range, flags, Locale(identifier: "zh_CN") as CFLocale),
+        guard let tokenizer = CFStringTokenizerCreate(nil, phrase as CFString, range, flags, zhCNLocale as CFLocale),
               standard.count == phrase.count else { return [standard] }
         var offset = 0
         var words: [[String]] = []
@@ -138,12 +161,18 @@ nonisolated enum SearchText {
     }
 
     static func fuzzyScore(query: String, candidate: String) -> Double? {
-        let needle = normalize(query)
+        fuzzyScore(normalizedQuery: normalize(query), candidate: candidate)
+    }
+
+    static func fuzzyScore(normalizedQuery needle: String, candidate: String) -> Double? {
         guard !needle.isEmpty else { return 0.4 }
-        let text = normalize(candidate)
+        let (text, candidateIsASCII) = normalizeWithASCIIFlag(candidate)
         if text == needle { return 1 }
         if text.hasPrefix(needle) { return 0.9 }
         if text.contains(needle) { return 0.8 }
+        // Pinyin output is strictly lowercase ASCII Latin letters and spaces; skip when candidate
+        // is pure ASCII, contains no Han characters, or query contains non-ASCII characters.
+        guard !candidateIsASCII, isPureASCII(needle), containsHan(candidate) else { return nil }
         let phonetics = pinyin(candidate)
         let full = normalize(phonetics.full)
         if full.contains(needle) { return 0.75 }
@@ -152,7 +181,60 @@ nonisolated enum SearchText {
     }
 
     static func normalize(_ text: String) -> String {
-        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        normalizeWithASCIIFlag(text).normalized
+    }
+
+    private static func isPureASCII(_ text: String) -> Bool {
+        if let result = text.utf8.withContiguousStorageIfAvailable({ buf -> Bool in
+            for i in 0..<buf.count {
+                if buf[i] >= 0x80 { return false }
+            }
+            return true
+        }) {
+            return result
+        }
+        for byte in text.utf8 where byte >= 0x80 {
+            return false
+        }
+        return true
+    }
+
+    private static func normalizeWithASCIIFlag(_ text: String) -> (normalized: String, isASCII: Bool) {
+        if let fast = text.utf8.withContiguousStorageIfAvailable({ buf -> String? in
+            let count = buf.count
+            var hasUpper = false
+            for i in 0..<count {
+                let b = buf[i]
+                if b >= 0x80 { return nil }
+                if b >= 0x41 && b <= 0x5A { hasUpper = true }
+            }
+            var start = 0
+            var end = count
+            while start < end && isASCIIWhitespace(buf[start]) { start &+= 1 }
+            while end > start && isASCIIWhitespace(buf[end &- 1]) { end &-= 1 }
+            let trimmedCount = end &- start
+            guard trimmedCount > 0 else { return "" }
+            if !hasUpper {
+                if start == 0 && end == count { return text }
+                return String(decoding: UnsafeBufferPointer(rebasing: buf[start..<end]), as: UTF8.self)
+            }
+            return String(unsafeUninitializedCapacity: trimmedCount) { out in
+                for i in 0..<trimmedCount {
+                    let b = buf[start &+ i]
+                    out[i] = (b >= 0x41 && b <= 0x5A) ? (b &+ 32) : b
+                }
+                return trimmedCount
+            }
+        }), let asciiResult = fast {
+            return (asciiResult, true)
+        }
+        let folded = text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: posixLocale)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (folded, false)
+    }
+
+    @inline(__always)
+    private static func isASCIIWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || (byte >= 0x09 && byte <= 0x0D)
     }
 }

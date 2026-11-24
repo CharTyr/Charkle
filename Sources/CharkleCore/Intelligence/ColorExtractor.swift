@@ -44,86 +44,108 @@ public nonisolated enum ColorExtractor: Sendable {
         let labPixels: [(l: Double, a: Double, b: Double)] = pixels.map {
             LabColor.sRGBToLab(r: $0.r, g: $0.g, b: $0.b)
         }
-        centroids.append(labPixels[labPixels.count / 2])
+        let pixelCount = labPixels.count
+        var minDists = Array(repeating: Double.greatestFiniteMagnitude, count: pixelCount)
+        var newest = labPixels[pixelCount / 2]
+        centroids.append(newest)
 
         while centroids.count < k {
             var farthestIndex = 0
             var maxMinDist = -1.0
-            for (idx, p) in labPixels.enumerated() {
-                var minDist = Double.greatestFiniteMagnitude
-                for c in centroids {
-                    let dl = p.l - c.l
-                    let da = p.a - c.a
-                    let db = p.b - c.b
-                    let d = dl * dl + da * da + db * db
-                    if d < minDist { minDist = d }
-                }
-                if minDist > maxMinDist {
-                    maxMinDist = minDist
+            for idx in 0..<pixelCount {
+                let p = labPixels[idx]
+                let dl = p.l - newest.l
+                let da = p.a - newest.a
+                let db = p.b - newest.b
+                let d = dl * dl + da * da + db * db
+                if d < minDists[idx] { minDists[idx] = d }
+                if minDists[idx] > maxMinDist {
+                    maxMinDist = minDists[idx]
                     farthestIndex = idx
                 }
             }
             if maxMinDist <= 1.0 { break }
-            centroids.append(labPixels[farthestIndex])
+            newest = labPixels[farthestIndex]
+            centroids.append(newest)
         }
 
         let clusterCount = centroids.count
-        var assignments = Array(repeating: 0, count: labPixels.count)
+        var assignments = Array(repeating: 0, count: pixelCount)
+        var sumL = Array(repeating: 0.0, count: clusterCount)
+        var sumA = Array(repeating: 0.0, count: clusterCount)
+        var sumB = Array(repeating: 0.0, count: clusterCount)
+        var counts = Array(repeating: 0, count: clusterCount)
 
-        for _ in 0..<8 {
-            var sumL = Array(repeating: 0.0, count: clusterCount)
-            var sumA = Array(repeating: 0.0, count: clusterCount)
-            var sumB = Array(repeating: 0.0, count: clusterCount)
-            var counts = Array(repeating: 0, count: clusterCount)
-
-            for (i, p) in labPixels.enumerated() {
-                var bestIdx = 0
-                var bestDist = Double.greatestFiniteMagnitude
+        if clusterCount > 1 {
+            for iteration in 0..<8 {
                 for cIdx in 0..<clusterCount {
-                    let c = centroids[cIdx]
-                    let dl = p.l - c.l
-                    let da = p.a - c.a
-                    let db = p.b - c.b
-                    let dist = dl * dl + da * da + db * db
-                    if dist < bestDist {
-                        bestDist = dist
-                        bestIdx = cIdx
-                    }
+                    sumL[cIdx] = 0.0
+                    sumA[cIdx] = 0.0
+                    sumB[cIdx] = 0.0
+                    counts[cIdx] = 0
                 }
-                assignments[i] = bestIdx
-                sumL[bestIdx] += p.l
-                sumA[bestIdx] += p.a
-                sumB[bestIdx] += p.b
-                counts[bestIdx] += 1
-            }
 
-            for cIdx in 0..<clusterCount where counts[cIdx] > 0 {
-                let n = Double(counts[cIdx])
-                centroids[cIdx] = (sumL[cIdx] / n, sumA[cIdx] / n, sumB[cIdx] / n)
+                var changed = false
+                for i in 0..<pixelCount {
+                    let p = labPixels[i]
+                    var bestIdx = 0
+                    var bestDist = Double.greatestFiniteMagnitude
+                    for cIdx in 0..<clusterCount {
+                        let c = centroids[cIdx]
+                        let dl = p.l - c.l
+                        let da = p.a - c.a
+                        let db = p.b - c.b
+                        let dist = dl * dl + da * da + db * db
+                        if dist < bestDist {
+                            bestDist = dist
+                            bestIdx = cIdx
+                        }
+                    }
+                    if iteration == 0 || assignments[i] != bestIdx {
+                        assignments[i] = bestIdx
+                        changed = true
+                    }
+                    sumL[bestIdx] += p.l
+                    sumA[bestIdx] += p.a
+                    sumB[bestIdx] += p.b
+                    counts[bestIdx] += 1
+                }
+
+                if !changed { break }
+
+                for cIdx in 0..<clusterCount where counts[cIdx] > 0 {
+                    let n = Double(counts[cIdx])
+                    centroids[cIdx] = (sumL[cIdx] / n, sumA[cIdx] / n, sumB[cIdx] / n)
+                }
             }
         }
 
-        // Compute representative average sRGB per cluster
-        var sumR = Array(repeating: 0.0, count: clusterCount)
-        var sumG = Array(repeating: 0.0, count: clusterCount)
-        var sumBl = Array(repeating: 0.0, count: clusterCount)
-        var clusterSize = Array(repeating: 0, count: clusterCount)
+        // Reuse accumulator buffers to compute representative average sRGB per cluster
+        for cIdx in 0..<clusterCount {
+            sumL[cIdx] = 0.0
+            sumA[cIdx] = 0.0
+            sumB[cIdx] = 0.0
+            counts[cIdx] = 0
+        }
 
-        for (i, rgb) in pixels.enumerated() {
+        for i in pixels.indices {
             let cIdx = assignments[i]
-            sumR[cIdx] += rgb.r
-            sumG[cIdx] += rgb.g
-            sumBl[cIdx] += rgb.b
-            clusterSize[cIdx] += 1
+            let rgb = pixels[i]
+            sumL[cIdx] += rgb.r
+            sumA[cIdx] += rgb.g
+            sumB[cIdx] += rgb.b
+            counts[cIdx] += 1
         }
 
         let total = Double(pixels.count)
         var rawSwatches: [LabColor] = []
         rawSwatches.reserveCapacity(clusterCount)
-        for cIdx in 0..<clusterCount where clusterSize[cIdx] > 0 {
-            let n = Double(clusterSize[cIdx])
-            let rgb = [sumR[cIdx] / n, sumG[cIdx] / n, sumBl[cIdx] / n]
-            let hex = "#" + rgb.map { String(format: "%02X", Int(($0 * 255).rounded())) }.joined()
+        for cIdx in 0..<clusterCount where counts[cIdx] > 0 {
+            let n = Double(counts[cIdx])
+            let rByte = UInt8(max(0, min(255, Int((sumL[cIdx] / n * 255.0).rounded()))))
+            let gByte = UInt8(max(0, min(255, Int((sumA[cIdx] / n * 255.0).rounded()))))
+            let bByte = UInt8(max(0, min(255, Int((sumB[cIdx] / n * 255.0).rounded()))))
+            let hex = Self.formatHex(r: rByte, g: gByte, b: bByte)
             let swatch = LabColor.fromHex(hex, proportion: n / total)
             rawSwatches.append(swatch)
         }
@@ -132,63 +154,94 @@ public nonisolated enum ColorExtractor: Sendable {
         let sorted = rawSwatches.sorted { $0.proportion > $1.proportion }
         var merged: [LabColor] = []
         for swatch in sorted {
-            if !merged.contains(where: { $0.deltaE(to: swatch) < 8.0 }) {
+            if !merged.contains(where: { $0.deltaESquared(to: swatch) < 64.0 }) {
                 merged.append(swatch)
             }
         }
         return Array(merged.prefix(count))
     }
 
+    private static let hexDigits: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) = (
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+        0x38, 0x39, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46
+    )
+
+    private static func hexNibble(_ v: UInt8) -> UInt8 {
+        withUnsafeBytes(of: hexDigits) { $0[Int(v & 0x0F)] }
+    }
+
+    private static func formatHex(r: UInt8, g: UInt8, b: UInt8) -> String {
+        let bytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) = (
+            0x23,
+            hexNibble(r >> 4), hexNibble(r),
+            hexNibble(g >> 4), hexNibble(g),
+            hexNibble(b >> 4), hexNibble(b)
+        )
+        return withUnsafeBytes(of: bytes) { String(decoding: $0, as: UTF8.self) }
+    }
+
     public static func extractDominantColors(from url: URL, count: Int = 6) -> [LabColor] {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return [] }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 96,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return []
+        autoreleasepool {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return [] }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 96,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                return []
+            }
+            return extractDominantColors(from: cgImage, count: count)
         }
-        return extractDominantColors(from: cgImage, count: count)
     }
 
     private static func sampleRGBPixels(from image: CGImage, maxSide: Int) -> [(r: Double, g: Double, b: Double)]? {
-        let origW = image.width
-        let origH = image.height
-        guard origW > 0, origH > 0 else { return nil }
+        autoreleasepool {
+            let origW = image.width
+            let origH = image.height
+            guard origW > 0, origH > 0 else { return nil }
 
-        let scale = min(1.0, Double(maxSide) / Double(max(origW, origH)))
-        let width = max(1, Int((Double(origW) * scale).rounded()))
-        let height = max(1, Int((Double(origH) * scale).rounded()))
+            let scale = min(1.0, Double(maxSide) / Double(max(origW, origH)))
+            let width = max(1, Int((Double(origW) * scale).rounded()))
+            let height = max(1, Int((Double(origH) * scale).rounded()))
 
-        let bytesPerPixel = 4
-        guard let context = MediaArtwork.context(width: width, height: height) else { return nil }
-        context.interpolationQuality = .low
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        guard let data = context.data else { return nil }
-        let buffer = data.assumingMemoryBound(to: UInt8.self)
+            let bytesPerPixel = 4
+            guard let context = MediaArtwork.context(width: width, height: height) else { return nil }
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            guard let data = context.data else { return nil }
+            let buffer = data.assumingMemoryBound(to: UInt8.self)
+            let bytesPerRow = context.bytesPerRow
 
-        var samples: [(r: Double, g: Double, b: Double)] = []
-        samples.reserveCapacity(width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                let i = y * context.bytesPerRow + x * bytesPerPixel
-                let alpha = buffer[i + 3]
-                if alpha < 40 { continue } // ignore transparent backdrop pixels
-                let a = Double(alpha) / 255.0
-                let r = min(Double(buffer[i]) / 255.0 / a, 1.0)
-                let g = min(Double(buffer[i + 1]) / 255.0 / a, 1.0)
-                let b = min(Double(buffer[i + 2]) / 255.0 / a, 1.0)
-                samples.append((r, g, b))
+            var samples: [(r: Double, g: Double, b: Double)] = []
+            samples.reserveCapacity(width * height)
+            for y in 0..<height {
+                let rowOffset = y * bytesPerRow
+                for x in 0..<width {
+                    let i = rowOffset + x * bytesPerPixel
+                    let alpha = buffer[i + 3]
+                    if alpha < 40 { continue } // ignore transparent backdrop pixels
+                    let invAlpha = 1.0 / Double(alpha)
+                    let r = min(Double(buffer[i]) * invAlpha, 1.0)
+                    let g = min(Double(buffer[i + 1]) * invAlpha, 1.0)
+                    let b = min(Double(buffer[i + 2]) * invAlpha, 1.0)
+                    samples.append((r, g, b))
+                }
             }
+            return samples
         }
-        return samples
     }
 
     /// Best perceptual color match distance between a target swatch and an item's palette.
     public static func bestDeltaE(target: LabColor, palette: [LabColor]) -> Double? {
         guard !palette.isEmpty else { return nil }
-        return palette.map { target.deltaE(to: $0) }.min()
+        var bestSq = Double.greatestFiniteMagnitude
+        for swatch in palette {
+            let d = target.deltaESquared(to: swatch)
+            if d < bestSq { bestSq = d }
+        }
+        return bestSq.squareRoot()
     }
 }
 

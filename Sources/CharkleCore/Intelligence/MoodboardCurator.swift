@@ -1,4 +1,5 @@
 import Foundation
+import Vision
 
 public nonisolated struct MoodboardCurator: Sendable {
     private let database: LibraryDatabase
@@ -131,7 +132,27 @@ public nonisolated struct MoodboardCurator: Sendable {
         guard count > 0 else { return [] }
         let poolSize = max(200, count.multipliedReportingOverflow(by: 6).overflow ? pool.count : count * 6)
         if pool.count > poolSize { pool.removeLast(pool.count - poolSize) }
-        var redundancy = pool.map { candidate in seeds.map { evidence.redundancy(candidate.asset, $0) }.max() ?? 0 }
+
+        // Pre-unarchive VNFeaturePrintObservation once for the bounded pool + seeds instead of
+        // repeating NSKeyedUnarchiver inside the O(count * poolSize) diversity loop.
+        var obsCache: [UUID: VNFeaturePrintObservation] = [:]
+        obsCache.reserveCapacity(pool.count + seeds.count)
+        for item in pool {
+            if let data = evidence.vectors[item.id]?.featurePrint,
+               let obs = VisionAnalyzer.unarchiveFeaturePrint(data) {
+                obsCache[item.id] = obs
+            }
+        }
+        for seed in seeds where obsCache[seed.id] == nil {
+            if let data = evidence.vectors[seed.id]?.featurePrint,
+               let obs = VisionAnalyzer.unarchiveFeaturePrint(data) {
+                obsCache[seed.id] = obs
+            }
+        }
+
+        var redundancy = pool.map { candidate in
+            seeds.map { evidence.redundancy(candidate.asset, $0, featurePrints: obsCache) }.max() ?? 0
+        }
         var available = Array(repeating: true, count: pool.count)
         var results: [ScoredAsset] = []
         for _ in 0..<count {
@@ -146,7 +167,10 @@ public nonisolated struct MoodboardCurator: Sendable {
             results.append(pool[best])
             if results.count < count {
                 for index in pool.indices where available[index] {
-                    redundancy[index] = max(redundancy[index], evidence.redundancy(pool[best].asset, pool[index].asset))
+                    redundancy[index] = max(
+                        redundancy[index],
+                        evidence.redundancy(pool[best].asset, pool[index].asset, featurePrints: obsCache)
+                    )
                 }
             }
         }
@@ -214,48 +238,100 @@ public nonisolated struct MoodboardCurator: Sendable {
 private nonisolated struct Evidence {
     static let cloudReason = "语义接近"
     let seeds: [AssetRecord]
-    var colors: [LabColor] = []
-    var tolerance: Double = 28
-    var ranks: [UUID: Double] = [:]
-    var queryVector: [Float]?
-    var embeddingIdentity: String?
+    let colors: [LabColor]
+    let tolerance: Double
+    let ranks: [UUID: Double]
+    let queryVector: [Float]?
+    let embeddingIdentity: String?
     let vectors: [UUID: AssetVector]
+    private let seedFeaturePrints: [VNFeaturePrintObservation]
+    private let seedEmbeddings: [(model: String?, values: [Float])]
+    private let seedTagSets: [Set<String>]
+    private let precomputedTargetColors: [LabColor]
+
+    init(
+        seeds: [AssetRecord],
+        colors: [LabColor] = [],
+        tolerance: Double = 28,
+        ranks: [UUID: Double] = [:],
+        queryVector: [Float]? = nil,
+        embeddingIdentity: String? = nil,
+        vectors: [UUID: AssetVector]
+    ) {
+        self.seeds = seeds
+        self.colors = colors
+        self.tolerance = tolerance
+        self.ranks = ranks
+        self.queryVector = queryVector
+        self.embeddingIdentity = embeddingIdentity
+        self.vectors = vectors
+        self.seedFeaturePrints = seeds.compactMap { seed in
+            vectors[seed.id]?.featurePrint.flatMap(VisionAnalyzer.unarchiveFeaturePrint)
+        }
+        self.seedEmbeddings = seeds.compactMap { seed in
+            guard let vec = vectors[seed.id], let values = vec.embedding else { return nil }
+            return (vec.embeddingModel, values)
+        }
+        self.seedTagSets = seeds.map { seed in
+            Set((seed.tags + seed.suggestedTags).map(SearchText.normalize)).filter { !$0.isEmpty }
+        }
+        if colors.isEmpty {
+            self.precomputedTargetColors = Self.significantSwatches(seeds.flatMap { $0.dominantColors.prefix(3) }, maxCount: 4)
+        } else {
+            self.precomputedTargetColors = colors.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }
+        }
+    }
 
     func score(_ asset: AssetRecord) -> ScoredAsset {
         // Tuple: (signalValue, weight, minDisplayThreshold, label)
         var signals: [(value: Double, weight: Double, threshold: Double, reason: String)] = []
+        signals.reserveCapacity(5)
         if !ranks.isEmpty {
             signals.append((ranks[asset.id] ?? 0, 0.48, 0.15, "关键词匹配"))
         }
         if let vector = vectors[asset.id], let embedding = vector.embedding {
-            var cloud: [Double] = []
+            var bestCloud: Double?
             if let queryVector, vector.embeddingModel == embeddingIdentity {
-                cloud.append(Self.cosine(embedding, queryVector))
+                bestCloud = Self.cosine(embedding, queryVector)
             }
-            for seed in seeds {
-                if let other = vectors[seed.id], other.embeddingModel == vector.embeddingModel, let values = other.embedding {
-                    cloud.append(Self.cosine(embedding, values))
+            for seedEmb in seedEmbeddings where seedEmb.model == vector.embeddingModel {
+                let c = Self.cosine(embedding, seedEmb.values)
+                if let current = bestCloud {
+                    if c > current { bestCloud = c }
+                } else {
+                    bestCloud = c
                 }
             }
-            if let best = cloud.max() {
+            if let best = bestCloud {
                 signals.append((best, 0.40, 0.45, Self.cloudReason))
             }
         }
-        if let print = vectors[asset.id]?.featurePrint, !seeds.isEmpty {
-            let similarities = seeds.compactMap { vectors[$0.id]?.featurePrint }
-                .compactMap { VisionAnalyzer.visualDistance(between: print, and: $0) }
-                .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
-            if let best = similarities.max() {
+        if !seedFeaturePrints.isEmpty, let printData = vectors[asset.id]?.featurePrint {
+            let bestVisual: Double? = autoreleasepool {
+                guard let candidateObs = VisionAnalyzer.unarchiveFeaturePrint(printData) else { return nil }
+                var best: Double?
+                for seedObs in seedFeaturePrints {
+                    if let dist = VisionAnalyzer.visualDistance(between: candidateObs, and: seedObs) {
+                        let sim = VisionAnalyzer.visualSimilarity(forDistance: dist)
+                        if let current = best {
+                            if sim > current { best = sim }
+                        } else {
+                            best = sim
+                        }
+                    }
+                }
+                return best
+            }
+            if let best = bestVisual {
                 signals.append((best, 0.36, 0.22, "图像特征接近"))
             }
         }
-        let targetColors = colors.isEmpty ? seeds.flatMap { $0.dominantColors.prefix(3) } : colors
-        if !targetColors.isEmpty {
+        if !precomputedTargetColors.isEmpty {
             let similarity: Double
             if colors.isEmpty {
                 // Asset-to-asset palette harmony: weighted average CIEDE2000 across dominant swatches
                 // so tiny white/black margins don't falsely match unrelated images.
-                if let avgDelta = Self.weightedPaletteDistance(asset.dominantColors, targetColors) {
+                if let avgDelta = Self.weightedPaletteDistancePrepared(asset.dominantColors, precomputedTargetColors) {
                     if avgDelta <= 6.0 {
                         similarity = 1.0
                     } else if avgDelta < 22.0 {
@@ -268,7 +344,7 @@ private nonisolated struct Evidence {
                 }
             } else {
                 // Explicit target swatch query (palette seed / board palette): match significant swatches
-                let distance = Self.significantSwatchDistance(asset.dominantColors, targetColors)
+                let distance = Self.significantSwatchDistancePrepared(asset.dominantColors, precomputedTargetColors)
                 similarity = distance.map { d in
                     if d <= tolerance { return 1.0 - d / max(1.0, tolerance) * 0.35 }
                     let cutoff = max(tolerance * 1.6, tolerance + 14.0)
@@ -278,13 +354,25 @@ private nonisolated struct Evidence {
             }
             signals.append((similarity, colors.isEmpty ? 0.24 : 0.44, 0.35, "配色相近"))
         }
-        if !seeds.isEmpty {
-            let tags = Set((asset.tags + asset.suggestedTags).map(SearchText.normalize)).filter { !$0.isEmpty }
-            let overlap = seeds.map { seed -> Double in
-                let peers = Set((seed.tags + seed.suggestedTags).map(SearchText.normalize)).filter { !$0.isEmpty }
-                guard !peers.isEmpty, !tags.isEmpty else { return 0 }
-                return Double(peers.intersection(tags).count) / Double(max(1, peers.union(tags).count))
-            }.max() ?? 0
+        if !seedTagSets.isEmpty {
+            let overlap: Double
+            if asset.tags.isEmpty && asset.suggestedTags.isEmpty {
+                overlap = 0
+            } else {
+                let tags = Set((asset.tags + asset.suggestedTags).map(SearchText.normalize)).filter { !$0.isEmpty }
+                var maxOverlap = 0.0
+                if !tags.isEmpty {
+                    for peers in seedTagSets where !peers.isEmpty {
+                        let inter = peers.intersection(tags).count
+                        if inter > 0 {
+                            let unionCount = peers.count + tags.count - inter
+                            let jaccard = Double(inter) / Double(max(1, unionCount))
+                            if jaccard > maxOverlap { maxOverlap = jaccard }
+                        }
+                    }
+                }
+                overlap = maxOverlap
+            }
             signals.append((overlap, 0.18, 0.20, "相同标签"))
         }
         let sum = signals.reduce(0) { $0 + $1.value * $1.weight }
@@ -300,7 +388,11 @@ private nonisolated struct Evidence {
         return ScoredAsset(asset: asset, score: finalScore, matchReasons: qualifiedReasons)
     }
 
-    func redundancy(_ lhs: AssetRecord, _ rhs: AssetRecord) -> Double {
+    func redundancy(
+        _ lhs: AssetRecord,
+        _ rhs: AssetRecord,
+        featurePrints: [UUID: VNFeaturePrintObservation] = [:]
+    ) -> Double {
         if !lhs.contentHash.isEmpty, lhs.contentHash == rhs.contentHash { return 1 }
         let l = vectors[lhs.id]
         let r = vectors[rhs.id]
@@ -308,8 +400,11 @@ private nonisolated struct Evidence {
         if let a = l?.embedding, let b = r?.embedding, l?.embeddingModel == r?.embeddingModel {
             result = max(result, Self.cosine(a, b) * 0.92)
         }
-        if let a = l?.featurePrint, let b = r?.featurePrint,
-           let distance = VisionAnalyzer.visualDistance(between: a, and: b) {
+        if let obsA = featurePrints[lhs.id], let obsB = featurePrints[rhs.id],
+           let distance = VisionAnalyzer.visualDistance(between: obsA, and: obsB) {
+            result = max(result, VisionAnalyzer.visualSimilarity(forDistance: distance))
+        } else if featurePrints.isEmpty, let a = l?.featurePrint, let b = r?.featurePrint,
+                  let distance = VisionAnalyzer.visualDistance(between: a, and: b) {
             result = max(result, VisionAnalyzer.visualSimilarity(forDistance: distance))
         }
         if let distance = Self.weightedPaletteDistance(Array(lhs.dominantColors.prefix(2)), Array(rhs.dominantColors.prefix(2))) {
@@ -330,13 +425,22 @@ private nonisolated struct Evidence {
 
     /// Proportion-weighted average minimum CIEDE2000 from candidate's top dominant swatches to target palette.
     private static func weightedPaletteDistance(_ candidate: [LabColor], _ target: [LabColor]) -> Double? {
-        let a = significantSwatches(candidate, maxCount: 3)
         let b = significantSwatches(target, maxCount: 4)
-        guard !a.isEmpty, !b.isEmpty else { return nil }
+        return weightedPaletteDistancePrepared(candidate, b)
+    }
+
+    private static func weightedPaletteDistancePrepared(_ candidate: [LabColor], _ preparedTarget: [LabColor]) -> Double? {
+        let a = significantSwatches(candidate, maxCount: 3)
+        guard !a.isEmpty, !preparedTarget.isEmpty else { return nil }
         var weightedSum = 0.0
         var totalWeight = 0.0
         for swatch in a {
-            guard let nearest = b.map({ swatch.deltaE2000(to: $0) }).filter(\.isFinite).min() else { continue }
+            var nearest = Double.infinity
+            for targetSwatch in preparedTarget {
+                let d = swatch.deltaE2000(to: targetSwatch)
+                if d.isFinite && d < nearest { nearest = d }
+            }
+            guard nearest.isFinite else { continue }
             let w = swatch.proportion > 0.001 ? swatch.proportion : 1.0
             weightedSum += nearest * w
             totalWeight += w
@@ -345,10 +449,17 @@ private nonisolated struct Evidence {
         return weightedSum / totalWeight
     }
 
-    private static func significantSwatchDistance(_ candidate: [LabColor], _ target: [LabColor]) -> Double? {
+    private static func significantSwatchDistancePrepared(_ candidate: [LabColor], _ preparedTarget: [LabColor]) -> Double? {
         let a = significantSwatches(candidate, maxCount: 5)
-        let b = target.filter { $0.l.isFinite && $0.a.isFinite && $0.b.isFinite }
-        return a.flatMap { lhs in b.map { lhs.deltaE2000(to: $0) } }.filter(\.isFinite).min()
+        guard !a.isEmpty, !preparedTarget.isEmpty else { return nil }
+        var best = Double.infinity
+        for lhs in a {
+            for rhs in preparedTarget {
+                let d = lhs.deltaE2000(to: rhs)
+                if d.isFinite && d < best { best = d }
+            }
+        }
+        return best.isFinite ? best : nil
     }
 
     private static func cosine(_ a: [Float], _ b: [Float]) -> Double {

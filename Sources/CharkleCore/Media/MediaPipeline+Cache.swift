@@ -82,6 +82,7 @@ extension MediaPipeline {
 
         let finalizedIDs = removedIDs
         if !finalizedIDs.isEmpty {
+            invalidateOriginalIndex()
             try await database.transaction { store in
                 for id in finalizedIDs {
                     if var asset = try store.asset(id: id) {

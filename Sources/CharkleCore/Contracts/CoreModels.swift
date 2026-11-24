@@ -511,14 +511,199 @@ public struct AIGenerationMetadata: Codable, Hashable, Sendable {
     }
 }
 
+private final class ImmutableMetadataBox<Value: Hashable & Sendable>: Hashable, Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    static func == (lhs: ImmutableMetadataBox<Value>, rhs: ImmutableMetadataBox<Value>) -> Bool {
+        if lhs === rhs { return true }
+        return lhs.value == rhs.value
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(value)
+    }
+}
+
 public struct AssetRichMetadata: Codable, Hashable, Sendable {
-    public var githubRepo: GitHubRepoMetadata?
-    public var socialPost: SocialPostMetadata?
-    public var photoExif: PhotoExifMetadata?
-    public var aiGeneration: AIGenerationMetadata?
-    public var textExcerpt: String?
-    public var isMarkdown: Bool
-    public var model3DFormat: String?
+    private final class Storage: Hashable, Sendable {
+        static let empty = Storage(
+            githubRepo: nil,
+            socialPost: nil,
+            photoExif: nil,
+            aiGeneration: nil,
+            textExcerpt: nil,
+            isMarkdown: false,
+            model3DFormat: nil
+        )
+
+        let githubRepo: ImmutableMetadataBox<GitHubRepoMetadata>?
+        let socialPost: ImmutableMetadataBox<SocialPostMetadata>?
+        let photoExif: ImmutableMetadataBox<PhotoExifMetadata>?
+        let aiGeneration: ImmutableMetadataBox<AIGenerationMetadata>?
+        let textExcerpt: String?
+        let isMarkdown: Bool
+        let model3DFormat: String?
+
+        init(
+            githubRepo: ImmutableMetadataBox<GitHubRepoMetadata>?,
+            socialPost: ImmutableMetadataBox<SocialPostMetadata>?,
+            photoExif: ImmutableMetadataBox<PhotoExifMetadata>?,
+            aiGeneration: ImmutableMetadataBox<AIGenerationMetadata>?,
+            textExcerpt: String?,
+            isMarkdown: Bool,
+            model3DFormat: String?
+        ) {
+            self.githubRepo = githubRepo
+            self.socialPost = socialPost
+            self.photoExif = photoExif
+            self.aiGeneration = aiGeneration
+            self.textExcerpt = textExcerpt
+            self.isMarkdown = isMarkdown
+            self.model3DFormat = model3DFormat
+        }
+
+        static func == (lhs: Storage, rhs: Storage) -> Bool {
+            if lhs === rhs { return true }
+            return lhs.isMarkdown == rhs.isMarkdown
+                && lhs.textExcerpt == rhs.textExcerpt
+                && lhs.model3DFormat == rhs.model3DFormat
+                && lhs.githubRepo == rhs.githubRepo
+                && lhs.socialPost == rhs.socialPost
+                && lhs.photoExif == rhs.photoExif
+                && lhs.aiGeneration == rhs.aiGeneration
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(githubRepo)
+            hasher.combine(socialPost)
+            hasher.combine(photoExif)
+            hasher.combine(aiGeneration)
+            hasher.combine(textExcerpt)
+            hasher.combine(isMarkdown)
+            hasher.combine(model3DFormat)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case githubRepo
+        case socialPost
+        case photoExif
+        case aiGeneration
+        case textExcerpt
+        case isMarkdown
+        case model3DFormat
+    }
+
+    private var storage: Storage
+
+    public var githubRepo: GitHubRepoMetadata? {
+        get { storage.githubRepo?.value }
+        set {
+            storage = Storage(
+                githubRepo: newValue.map(ImmutableMetadataBox.init),
+                socialPost: storage.socialPost,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var socialPost: SocialPostMetadata? {
+        get { storage.socialPost?.value }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: newValue.map(ImmutableMetadataBox.init),
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var photoExif: PhotoExifMetadata? {
+        get { storage.photoExif?.value }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                photoExif: newValue.map(ImmutableMetadataBox.init),
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var aiGeneration: AIGenerationMetadata? {
+        get { storage.aiGeneration?.value }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                photoExif: storage.photoExif,
+                aiGeneration: newValue.map(ImmutableMetadataBox.init),
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var textExcerpt: String? {
+        get { storage.textExcerpt }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: newValue,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var isMarkdown: Bool {
+        get { storage.isMarkdown }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: newValue,
+                model3DFormat: storage.model3DFormat
+            )
+        }
+    }
+
+    public var model3DFormat: String? {
+        get { storage.model3DFormat }
+        set {
+            storage = Storage(
+                githubRepo: storage.githubRepo,
+                socialPost: storage.socialPost,
+                photoExif: storage.photoExif,
+                aiGeneration: storage.aiGeneration,
+                textExcerpt: storage.textExcerpt,
+                isMarkdown: storage.isMarkdown,
+                model3DFormat: newValue
+            )
+        }
+    }
 
     public init(
         githubRepo: GitHubRepoMetadata? = nil,
@@ -529,24 +714,51 @@ public struct AssetRichMetadata: Codable, Hashable, Sendable {
         isMarkdown: Bool = false,
         model3DFormat: String? = nil
     ) {
-        self.githubRepo = githubRepo
-        self.socialPost = socialPost
-        self.photoExif = photoExif
-        self.aiGeneration = aiGeneration
-        self.textExcerpt = textExcerpt
-        self.isMarkdown = isMarkdown
-        self.model3DFormat = model3DFormat
+        if githubRepo == nil, socialPost == nil, photoExif == nil, aiGeneration == nil,
+           textExcerpt == nil, !isMarkdown, model3DFormat == nil {
+            self.storage = .empty
+        } else {
+            self.storage = Storage(
+                githubRepo: githubRepo.map(ImmutableMetadataBox.init),
+                socialPost: socialPost.map(ImmutableMetadataBox.init),
+                photoExif: photoExif.map(ImmutableMetadataBox.init),
+                aiGeneration: aiGeneration.map(ImmutableMetadataBox.init),
+                textExcerpt: textExcerpt,
+                isMarkdown: isMarkdown,
+                model3DFormat: model3DFormat
+            )
+        }
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.githubRepo = try container.decodeIfPresent(GitHubRepoMetadata.self, forKey: .githubRepo)
-        self.socialPost = try container.decodeIfPresent(SocialPostMetadata.self, forKey: .socialPost)
-        self.photoExif = try container.decodeIfPresent(PhotoExifMetadata.self, forKey: .photoExif)
-        self.aiGeneration = try container.decodeIfPresent(AIGenerationMetadata.self, forKey: .aiGeneration)
-        self.textExcerpt = try container.decodeIfPresent(String.self, forKey: .textExcerpt)
-        self.isMarkdown = try container.decodeIfPresent(Bool.self, forKey: .isMarkdown) ?? false
-        self.model3DFormat = try container.decodeIfPresent(String.self, forKey: .model3DFormat)
+        let githubRepo = try container.decodeIfPresent(GitHubRepoMetadata.self, forKey: .githubRepo)
+        let socialPost = try container.decodeIfPresent(SocialPostMetadata.self, forKey: .socialPost)
+        let photoExif = try container.decodeIfPresent(PhotoExifMetadata.self, forKey: .photoExif)
+        let aiGeneration = try container.decodeIfPresent(AIGenerationMetadata.self, forKey: .aiGeneration)
+        let textExcerpt = try container.decodeIfPresent(String.self, forKey: .textExcerpt)
+        let isMarkdown = try container.decodeIfPresent(Bool.self, forKey: .isMarkdown) ?? false
+        let model3DFormat = try container.decodeIfPresent(String.self, forKey: .model3DFormat)
+        self.init(
+            githubRepo: githubRepo,
+            socialPost: socialPost,
+            photoExif: photoExif,
+            aiGeneration: aiGeneration,
+            textExcerpt: textExcerpt,
+            isMarkdown: isMarkdown,
+            model3DFormat: model3DFormat
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(storage.githubRepo?.value, forKey: .githubRepo)
+        try container.encodeIfPresent(storage.socialPost?.value, forKey: .socialPost)
+        try container.encodeIfPresent(storage.photoExif?.value, forKey: .photoExif)
+        try container.encodeIfPresent(storage.aiGeneration?.value, forKey: .aiGeneration)
+        try container.encodeIfPresent(storage.textExcerpt, forKey: .textExcerpt)
+        try container.encode(storage.isMarkdown, forKey: .isMarkdown)
+        try container.encodeIfPresent(storage.model3DFormat, forKey: .model3DFormat)
     }
 }
 
@@ -593,23 +805,71 @@ public struct LabColor: Codable, Hashable, Sendable {
 
     /// CIE76 Euclidean distance in CIELAB space (fast perceptual proximity).
     public func deltaE(to other: LabColor) -> Double {
+        deltaESquared(to: other).squareRoot()
+    }
+
+    /// Squared CIE76 distance in CIELAB space (avoids `sqrt` in threshold comparisons).
+    @inline(__always)
+    func deltaESquared(to other: LabColor) -> Double {
         let dl = l - other.l
         let da = a - other.a
         let db = b - other.b
-        return (dl * dl + da * da + db * db).squareRoot()
+        return dl * dl + da * da + db * db
     }
 
     /// Construct a LabColor from an sRGB hex string such as "#3B82F6" or "3B82F6".
     public static func fromHex(_ hexString: String, proportion: Double = 1.0) -> LabColor {
-        let cleaned = hexString.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
-        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else {
+        let trimmed = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        var value: UInt32 = 0
+        var digits = 0
+        var hexBytes: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8) = (0x23, 0, 0, 0, 0, 0, 0)
+        var valid = true
+        for byte in trimmed.utf8 {
+            if byte == 0x23 {
+                continue
+            }
+            let nibble: UInt32
+            let upperByte: UInt8
+            if byte >= 0x30 && byte <= 0x39 {
+                nibble = UInt32(byte - 0x30)
+                upperByte = byte
+            } else if byte >= 0x41 && byte <= 0x46 {
+                nibble = UInt32(byte - 0x37)
+                upperByte = byte
+            } else if byte >= 0x61 && byte <= 0x66 {
+                nibble = UInt32(byte - 0x57)
+                upperByte = byte - 32
+            } else {
+                valid = false
+                break
+            }
+            if digits >= 6 {
+                valid = false
+                break
+            }
+            value = (value << 4) | nibble
+            switch digits {
+            case 0: hexBytes.1 = upperByte
+            case 1: hexBytes.2 = upperByte
+            case 2: hexBytes.3 = upperByte
+            case 3: hexBytes.4 = upperByte
+            case 4: hexBytes.5 = upperByte
+            case 5: hexBytes.6 = upperByte
+            default: break
+            }
+            digits += 1
+        }
+        guard valid && digits == 6 else {
             return LabColor(hex: "#808080", l: 53.59, a: 0, b: 0, proportion: proportion)
         }
         let r = Double((value >> 16) & 0xFF) / 255.0
         let g = Double((value >> 8) & 0xFF) / 255.0
         let b = Double(value & 0xFF) / 255.0
         let (lVal, aVal, bVal) = Self.sRGBToLab(r: r, g: g, b: b)
-        return LabColor(hex: "#\(cleaned.uppercased())", l: lVal, a: aVal, b: bVal, proportion: proportion)
+        let formattedHex = withUnsafeBytes(of: hexBytes) { raw in
+            String(decoding: raw, as: UTF8.self)
+        }
+        return LabColor(hex: formattedHex, l: lVal, a: aVal, b: bVal, proportion: proportion)
     }
 
     public static func sRGBToLab(r: Double, g: Double, b: Double) -> (Double, Double, Double) {
@@ -1079,54 +1339,159 @@ public struct SmartFolderRule: Codable, Hashable, Sendable {
     /// Evaluates whether a non-trashed asset satisfies this smart folder rule.
     public func matches(_ asset: AssetRecord) -> Bool {
         guard !asset.isTrashed else { return false }
-        var checks: [Bool] = []
+        var hasCondition = false
 
-        let cleanTags = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
-        if !cleanTags.isEmpty {
-            let assetTags = Set(asset.tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
-            let matched = matchMode == .all
-                ? cleanTags.allSatisfy { assetTags.contains($0) }
-                : cleanTags.contains { assetTags.contains($0) }
-            checks.append(matched)
-        }
-
-        let query = descriptionQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if !query.isEmpty {
-            let tokens = query.split(whereSeparator: \.isWhitespace).map(String.init)
-            let haystack = [
-                asset.title,
-                asset.notes,
-                asset.aiDescription ?? "",
-                asset.ocrText ?? "",
-                asset.richMetadata?.githubRepo?.fullName ?? "",
-                asset.richMetadata?.githubRepo?.description ?? "",
-                asset.richMetadata?.socialPost?.authorName ?? "",
-                asset.richMetadata?.socialPost?.bodyText ?? ""
-            ].joined(separator: "\n").lowercased()
-            let matched = tokens.allSatisfy { haystack.contains($0) }
-            checks.append(matched)
-        }
-
-        let cleanColors = colorHexes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        if !cleanColors.isEmpty {
-            let targetLabs = cleanColors.map { LabColor.fromHex($0) }
-            let tolerance = max(4.0, colorTolerance)
-            let matched = !asset.dominantColors.isEmpty && targetLabs.contains { target in
-                asset.dominantColors.contains { $0.deltaE(to: target) <= tolerance }
+        // 1. Zero-allocation O(1) checks first so `.all` short-circuits immediately.
+        if minRating > 0 {
+            hasCondition = true
+            let passed = asset.rating >= minRating
+            if matchMode == .all {
+                if !passed { return false }
+            } else if passed {
+                return true
             }
-            checks.append(matched)
         }
 
         if !mediaKinds.isEmpty {
-            checks.append(mediaKinds.contains(asset.mediaKind))
+            hasCondition = true
+            let passed = mediaKinds.contains(asset.mediaKind)
+            if matchMode == .all {
+                if !passed { return false }
+            } else if passed {
+                return true
+            }
         }
 
-        if minRating > 0 {
-            checks.append(asset.rating >= minRating)
+        // 2. Tags check without allocating intermediate Sets or lowercased Arrays.
+        if !tags.isEmpty {
+            var activeTagCount = 0
+            var allMatched = true
+            var anyMatched = false
+            for rawTag in tags {
+                let cleanTag = rawTag.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanTag.isEmpty else { continue }
+                activeTagCount += 1
+                let matched = !asset.tags.isEmpty && asset.tags.contains { candidate in
+                    Self.trimmedCaseInsensitiveEquals(candidate, cleanTag)
+                }
+                if matched {
+                    anyMatched = true
+                    if matchMode == .any { break }
+                } else {
+                    allMatched = false
+                    if matchMode == .all { break }
+                }
+            }
+            if activeTagCount > 0 {
+                hasCondition = true
+                let passed = matchMode == .all ? allMatched : anyMatched
+                if matchMode == .all {
+                    if !passed { return false }
+                } else if passed {
+                    return true
+                }
+            }
         }
 
-        guard !checks.isEmpty else { return false }
-        return matchMode == .all ? checks.allSatisfy { $0 } : checks.contains(true)
+        // 3. Description / metadata text query without concatenating an 8-field haystack string.
+        if !descriptionQuery.isEmpty {
+            let trimmedQuery = descriptionQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedQuery.isEmpty {
+                hasCondition = true
+                let passed = Self.matchesDescriptionTokens(trimmedQuery, in: asset)
+                if matchMode == .all {
+                    if !passed { return false }
+                } else if passed {
+                    return true
+                }
+            }
+        }
+
+        // 4. CIELAB color proximity using squared Euclidean distance (skips `LabColor.fromHex` if asset has no colors).
+        if !colorHexes.isEmpty {
+            var hasActiveColor = false
+            var matchedColor = false
+            let tol = max(4.0, colorTolerance)
+            let tolSq = tol * tol
+            for rawHex in colorHexes {
+                let cleanHex = rawHex.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanHex.isEmpty else { continue }
+                hasActiveColor = true
+                if asset.dominantColors.isEmpty { break }
+                let target = LabColor.fromHex(cleanHex)
+                if asset.dominantColors.contains(where: { $0.deltaESquared(to: target) <= tolSq }) {
+                    matchedColor = true
+                    break
+                }
+            }
+            if hasActiveColor {
+                hasCondition = true
+                if matchMode == .all {
+                    if !matchedColor { return false }
+                } else if matchedColor {
+                    return true
+                }
+            }
+        }
+
+        return matchMode == .all ? hasCondition : false
+    }
+
+    private static func trimmedCaseInsensitiveEquals(_ lhs: String, _ rhsTrimmed: String) -> Bool {
+        let lhsTrimmed = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lhsUTF8 = lhsTrimmed.utf8
+        let rhsUTF8 = rhsTrimmed.utf8
+        if lhsUTF8.count == rhsUTF8.count {
+            var allASCII = true
+            var eq = true
+            var li = lhsUTF8.startIndex
+            var ri = rhsUTF8.startIndex
+            while li < lhsUTF8.endIndex {
+                let lb = lhsUTF8[li]
+                let rb = rhsUTF8[ri]
+                if lb >= 0x80 || rb >= 0x80 {
+                    allASCII = false
+                    break
+                }
+                let lf = (lb >= 0x41 && lb <= 0x5A) ? (lb &+ 32) : lb
+                let rf = (rb >= 0x41 && rb <= 0x5A) ? (rb &+ 32) : rb
+                if lf != rf {
+                    eq = false
+                    break
+                }
+                li = lhsUTF8.index(after: li)
+                ri = rhsUTF8.index(after: ri)
+            }
+            if allASCII { return eq }
+        }
+        return lhsTrimmed.lowercased() == rhsTrimmed.lowercased()
+    }
+
+    private static func fieldContainsCaseInsensitive(_ field: String?, token: Substring) -> Bool {
+        guard let field, !field.isEmpty else { return false }
+        return field.range(of: token, options: .caseInsensitive) != nil
+    }
+
+    private static func matchesDescriptionTokens(_ trimmedQuery: String, in asset: AssetRecord) -> Bool {
+        let repo = asset.richMetadata?.githubRepo
+        let post = asset.richMetadata?.socialPost
+        func assetContains(_ token: Substring) -> Bool {
+            fieldContainsCaseInsensitive(asset.title, token: token)
+                || fieldContainsCaseInsensitive(asset.notes, token: token)
+                || fieldContainsCaseInsensitive(asset.aiDescription, token: token)
+                || fieldContainsCaseInsensitive(asset.ocrText, token: token)
+                || fieldContainsCaseInsensitive(repo?.fullName, token: token)
+                || fieldContainsCaseInsensitive(repo?.description, token: token)
+                || fieldContainsCaseInsensitive(post?.authorName, token: token)
+                || fieldContainsCaseInsensitive(post?.bodyText, token: token)
+        }
+        if !trimmedQuery.contains(where: \.isWhitespace) {
+            return assetContains(trimmedQuery[...])
+        }
+        for token in trimmedQuery.split(whereSeparator: \.isWhitespace) {
+            if !assetContains(token) { return false }
+        }
+        return true
     }
 }
 

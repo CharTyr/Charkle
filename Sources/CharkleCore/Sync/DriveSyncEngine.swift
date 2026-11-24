@@ -6,6 +6,12 @@ public final actor DriveSyncEngine {
     private let database: LibraryDatabase
     private let media: MediaPipeline
     private let intelligence: IntelligenceEngine
+    private let statusEncoder = JSONEncoder()
+    private let canonicalEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return encoder
+    }()
     private var currentStatus = SyncStatus()
     private var running = false
     private var originalDownloads: [UUID: Task<URL, Error>] = [:]
@@ -36,7 +42,7 @@ public final actor DriveSyncEngine {
     }
 
     private func broadcastCurrentStatus() {
-        guard let data = try? JSONEncoder().encode(currentStatus) else { return }
+        guard let data = try? statusEncoder.encode(currentStatus) else { return }
         NotificationCenter.default.post(
             name: CharkleSyncNotifications.didUpdateSyncStatus,
             object: nil,
@@ -132,7 +138,11 @@ public final actor DriveSyncEngine {
                 savedFiles.removeValue(forKey: removedID)
             }
             var state = SavedInventory(files: savedFiles, startPageToken: inventory.current.startPageToken)
-            try await database.setState(scope + ".inventory", state)
+            let inventoryUnchanged = inventory.previousStartPageToken == inventory.current.startPageToken
+                && savedFiles == inventory.previous
+            if !inventoryUnchanged {
+                try await database.setState(scope + ".inventory", state)
+            }
 
             if !pending.isEmpty {
                 updateProgress(phase: .uploading(completed: 0, total: pending.count), detail: "准备上传本地新增与变更…", progress: 0.62, forceBroadcast: true)
@@ -765,6 +775,8 @@ public final actor DriveSyncEngine {
         let dirty: [String: String] = try await database.state("projection.thumbnails") ?? [:]
         let concurrency = Self.concurrencyLimit(for: transport, directDefault: 8)
 
+        let existingAssetIDs = try await database.existingAssetIDs()
+
         // 1. Upload or delete dirty local thumbnails in bounded parallel (with live progress)
         struct ThumbUploadJob: Sendable {
             let id: String
@@ -779,7 +791,7 @@ public final actor DriveSyncEngine {
         for (id, version) in dirty {
             guard let uuid = UUID(uuidString: id) else { continue }
             let name = id.lowercased() + ".jpg"
-            let assetExists = try await database.asset(id: uuid) != nil
+            let assetExists = existingAssetIDs.contains(uuid)
             let localURL = assetExists ? media.thumbnailURL(for: uuid, tier: .grid520) : nil
             uploadJobs.append(ThumbUploadJob(
                 id: id,
@@ -870,9 +882,9 @@ public final actor DriveSyncEngine {
         }
         var downloadJobs: [ThumbDownloadJob] = []
         for (name, file) in files where name.hasSuffix(".jpg") && !file.isFolder {
-            guard let id = UUID(uuidString: String(name.dropLast(4))), dirty[id.uuidString] == nil,
-                  try await database.asset(id: id) != nil else { continue }
+            guard let id = UUID(uuidString: String(name.dropLast(4))) else { continue }
             let key = id.uuidString
+            guard dirty[key] == nil, existingAssetIDs.contains(id) else { continue }
             let stamp = file.md5Checksum ?? (file.id + String(file.modifiedTime?.timeIntervalSince1970 ?? 0))
             if let existingLocal = media.thumbnailURL(for: id, tier: .grid520) {
                 if stamps[key] == stamp { continue }
@@ -1073,9 +1085,7 @@ public final actor DriveSyncEngine {
     }
 
     private func encoded<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(value)
+        try canonicalEncoder.encode(value)
     }
 
     private func keyedByName(_ files: [RemoteDriveFile]) -> [String: RemoteDriveFile] {
@@ -1100,6 +1110,7 @@ extension DriveSyncEngine {
 
     private struct InventoryUpdate: Sendable {
         let previous: [String: RemoteDriveFile]
+        let previousStartPageToken: String?
         let current: SavedInventory
         let orderedFolders: [RemoteDriveFile]
     }
@@ -1141,7 +1152,12 @@ extension DriveSyncEngine {
             visible = reachable(inventory.files, layout: layout)
         }
         let current = SavedInventory(files: visible.files, startPageToken: inventory.startPageToken)
-        return InventoryUpdate(previous: known, current: current, orderedFolders: visible.folders)
+        return InventoryUpdate(
+            previous: known,
+            previousStartPageToken: previous?.startPageToken,
+            current: current,
+            orderedFolders: visible.folders
+        )
     }
 
     private func crawl(layout: Layout, transport: any DriveTransport) async throws -> Inventory {

@@ -106,7 +106,7 @@ public nonisolated enum TypeSafeImagePreparer: Sendable {
     /// from an extreme-aspect `cgImage` (>5.6:1). Returns `.full` when unpadded or unavailable.
     public static func inferredContentRect(forPreparedData imageData: Data, sourceCGImage: CGImage?) -> NormalizedCropRect {
         guard let cg = sourceCGImage, cg.width > 0, cg.height > 0, !imageData.isEmpty,
-              let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let source = CGImageSourceCreateWithData(imageData as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let canvasW = props[kCGImagePropertyPixelWidth] as? Int,
               let canvasH = props[kCGImagePropertyPixelHeight] as? Int,

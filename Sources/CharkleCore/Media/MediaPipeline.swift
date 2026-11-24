@@ -2,6 +2,7 @@ import AVFoundation
 import CoreGraphics
 import CoreText
 import CryptoKit
+import Darwin
 import Foundation
 import ImageIO
 import ModelIO
@@ -9,7 +10,99 @@ import PDFKit
 import QuickLookThumbnailing
 import SceneKit
 import SceneKit.ModelIO
+import Synchronization
 import UniformTypeIdentifiers
+
+private nonisolated final class OriginalDirectoryIndex: Sendable {
+    private struct State {
+        var modSec: Int = -1
+        var modNsec: Int = -1
+        var ctimeSec: Int = -1
+        var ctimeNsec: Int = -1
+        var dirSize: Int64 = -1
+        var byStem: [String: String] = [:]
+        var valid: Bool = false
+    }
+
+    private let state = Mutex(State())
+
+    func invalidate() {
+        state.withLock { $0.valid = false }
+    }
+
+    func lookup(stem: String, in directory: URL) -> URL? {
+        var dirStat = stat()
+        let statOK = directory.withUnsafeFileSystemRepresentation { path -> Bool in
+            guard let path else { return false }
+            return stat(path, &dirStat) == 0
+        }
+        guard statOK else { return nil }
+
+        let modSec = dirStat.st_mtimespec.tv_sec
+        let modNsec = dirStat.st_mtimespec.tv_nsec
+        let ctimeSec = dirStat.st_ctimespec.tv_sec
+        let ctimeNsec = dirStat.st_ctimespec.tv_nsec
+        let dirSize = dirStat.st_size
+
+        let cachedName: String?? = state.withLock { st in
+            guard st.valid,
+                  st.modSec == modSec,
+                  st.modNsec == modNsec,
+                  st.ctimeSec == ctimeSec,
+                  st.ctimeNsec == ctimeNsec,
+                  st.dirSize == dirSize else {
+                return nil
+            }
+            return .some(st.byStem[stem])
+        }
+
+        if let resolved = cachedName {
+            guard let fileName = resolved else { return nil }
+            let candidate = directory.appending(path: fileName)
+            return MediaPipeline.fileExistsFast(candidate) ? candidate : nil
+        }
+
+        let scanned = Self.scanDirectory(directory)
+        state.withLock { st in
+            st.modSec = modSec
+            st.modNsec = modNsec
+            st.ctimeSec = ctimeSec
+            st.ctimeNsec = ctimeNsec
+            st.dirSize = dirSize
+            st.byStem = scanned
+            st.valid = true
+        }
+        guard let fileName = scanned[stem] else { return nil }
+        let candidate = directory.appending(path: fileName)
+        return MediaPipeline.fileExistsFast(candidate) ? candidate : nil
+    }
+
+    private static func scanDirectory(_ directory: URL) -> [String: String] {
+        var map: [String: String] = [:]
+        directory.withUnsafeFileSystemRepresentation { path in
+            guard let path, let dir = opendir(path) else { return }
+            defer { closedir(dir) }
+            while let entryPtr = readdir(dir) {
+                let name = withUnsafePointer(to: &entryPtr.pointee.d_name) { ptr in
+                    ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)) { cStr in
+                        String(cString: cStr)
+                    }
+                }
+                if name == "." || name == ".." { continue }
+                let stem: String
+                if let dot = name.lastIndex(of: "."), dot != name.startIndex {
+                    stem = String(name[..<dot])
+                } else {
+                    stem = name
+                }
+                if map[stem] == nil {
+                    map[stem] = name
+                }
+            }
+        }
+        return map
+    }
+}
 
 public nonisolated struct MediaPipeline: Sendable {
     public let directory: URL
@@ -17,6 +110,7 @@ public nonisolated struct MediaPipeline: Sendable {
     let staging: URL
     private let thumbnails: URL
     private let previews: URL
+    private let originalIndex = OriginalDirectoryIndex()
 
     public init(directory: URL) throws {
         self.directory = directory
@@ -29,9 +123,20 @@ public nonisolated struct MediaPipeline: Sendable {
         }
     }
 
+    static func fileExistsFast(_ url: URL) -> Bool {
+        url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            return access(path, F_OK) == 0
+        }
+    }
+
+    func invalidateOriginalIndex() {
+        originalIndex.invalidate()
+    }
+
     public func thumbnailURL(for id: UUID, tier: ThumbnailTier) -> URL? {
         let url = thumbnailPath(id, tier: tier)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        return Self.fileExistsFast(url) ? url : nil
     }
 
     func thumbnailPath(_ id: UUID, tier: ThumbnailTier = .grid520) -> URL {
@@ -47,10 +152,9 @@ public nonisolated struct MediaPipeline: Sendable {
 
     public func cachedOriginal(for asset: AssetRecord) -> URL? {
         let url = originalPath(for: asset)
-        if FileManager.default.fileExists(atPath: url.path) { return url }
+        if Self.fileExistsFast(url) { return url }
         // Drive can rename an existing file's extension while the old cache entry is still useful.
-        return (try? FileManager.default.contentsOfDirectory(at: originals, includingPropertiesForKeys: nil))?
-            .first { $0.deletingPathExtension().lastPathComponent == asset.id.uuidString }
+        return originalIndex.lookup(stem: asset.id.uuidString, in: originals)
     }
 
     func installOriginal(_ source: URL, for asset: AssetRecord, moveSource: Bool = false) throws -> URL {
@@ -58,6 +162,7 @@ public nonisolated struct MediaPipeline: Sendable {
         if source == destination { return destination }
         let previous = cachedOriginal(for: asset)
         let fm = FileManager.default
+        defer { originalIndex.invalidate() }
         if moveSource {
             if fm.fileExists(atPath: destination.path) {
                 _ = try fm.replaceItemAt(destination, withItemAt: source)
@@ -80,15 +185,20 @@ public nonisolated struct MediaPipeline: Sendable {
     }
 
     func removeFiles(for asset: AssetRecord) {
-        for url in [cachedOriginal(for: asset), thumbnailURL(for: asset.id, tier: .grid520), thumbnailURL(for: asset.id, tier: .preview1400)].compactMap({ $0 }) {
+        let orig = cachedOriginal(for: asset)
+        for url in [orig, thumbnailURL(for: asset.id, tier: .grid520), thumbnailURL(for: asset.id, tier: .preview1400)].compactMap({ $0 }) {
             try? FileManager.default.removeItem(at: url)
         }
+        if orig != nil { originalIndex.invalidate() }
     }
 
     func removeFiles(forIDs ids: Set<UUID>) throws {
+        var removedOriginal = false
         for entry in originalEntries() where ids.contains(entry.id) {
             try removeIfPresent(entry.url)
+            removedOriginal = true
         }
+        if removedOriginal { originalIndex.invalidate() }
         for id in ids {
             for tier in [ThumbnailTier.grid520, .preview1400] {
                 try removeIfPresent(thumbnailPath(id, tier: tier))
@@ -149,7 +259,7 @@ public nonisolated struct MediaPipeline: Sendable {
             try FileManager.default.copyItem(at: source, to: file)
         case .imageData(let data, let name, let sourceURL):
             let name = Self.cleanFileName(name)
-            let type = CGImageSourceCreateWithData(data as CFData, nil)
+            let type = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary)
                 .flatMap(CGImageSourceGetType).flatMap { UTType($0 as String) }
             let given = (name as NSString).pathExtension
             let filename: String
@@ -338,26 +448,36 @@ public nonisolated struct MediaPipeline: Sendable {
             asset.durationSeconds = render.duration
             if let text = render.text { asset.ocrText = text }
         }
-        guard let image = render?.poster ?? MediaArtwork.card(title: asset.title, label: asset.sourceDomain ?? asset.mediaKind.localizedLabel,
-                                                                 text: asset.notes, waveform: asset.waveformPeaks),
-              let grid = MediaArtwork.resize(image, maxSide: 520),
-              let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
-            throw LibraryDatabaseError("Could not render thumbnail for \(asset.fileName).")
-        }
-        if render == nil {
-            asset.pixelWidth = image.width
-            asset.pixelHeight = image.height
-        }
-        try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
-        let previewPath = thumbnailPath(asset.id, tier: .preview1400)
-        if max(image.width, image.height) > 520, let large = MediaArtwork.resize(image, maxSide: 1_400),
-           let preview = MediaArtwork.encode(large, type: .jpeg) {
-            try preview.write(to: previewPath, options: .atomic)
-        } else {
-            try removeIfPresent(previewPath)
-        }
-        if asset.mediaKind != .audio {
-            asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
+        try autoreleasepool {
+            guard let image = render?.poster ?? MediaArtwork.card(title: asset.title, label: asset.sourceDomain ?? asset.mediaKind.localizedLabel,
+                                                                     text: asset.notes, waveform: asset.waveformPeaks),
+                  let grid = MediaArtwork.resize(image, maxSide: 520),
+                  let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
+                throw LibraryDatabaseError("Could not render thumbnail for \(asset.fileName).")
+            }
+            if render == nil {
+                asset.pixelWidth = image.width
+                asset.pixelHeight = image.height
+            }
+            try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
+            let previewPath = thumbnailPath(asset.id, tier: .preview1400)
+            if max(image.width, image.height) > 520 {
+                let previewImage: CGImage? = if max(image.width, image.height) <= 1_400 && MediaArtwork.isOpaque(image) {
+                    image
+                } else {
+                    MediaArtwork.resize(image, maxSide: 1_400)
+                }
+                if let large = previewImage, let preview = MediaArtwork.encode(large, type: .jpeg) {
+                    try preview.write(to: previewPath, options: .atomic)
+                } else {
+                    try removeIfPresent(previewPath)
+                }
+            } else {
+                try removeIfPresent(previewPath)
+            }
+            if asset.mediaKind != .audio {
+                asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
+            }
         }
     }
 
@@ -488,21 +608,31 @@ public nonisolated struct MediaPipeline: Sendable {
     }
 
     func writeCustomPoster(_ image: CGImage, for asset: inout AssetRecord) throws {
-        guard let grid = MediaArtwork.resize(image, maxSide: 720),
-              let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
-            return
+        try autoreleasepool {
+            guard let grid = MediaArtwork.resize(image, maxSide: 720),
+                  let jpeg = MediaArtwork.encode(grid, type: .jpeg) else {
+                return
+            }
+            asset.pixelWidth = image.width
+            asset.pixelHeight = image.height
+            try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
+            let previewPath = thumbnailPath(asset.id, tier: .preview1400)
+            if max(image.width, image.height) > 720 {
+                let previewImage: CGImage? = if max(image.width, image.height) <= 1_400 && MediaArtwork.isOpaque(image) {
+                    image
+                } else {
+                    MediaArtwork.resize(image, maxSide: 1_400)
+                }
+                if let large = previewImage, let preview = MediaArtwork.encode(large, type: .jpeg) {
+                    try preview.write(to: previewPath, options: .atomic)
+                } else {
+                    try removeIfPresent(previewPath)
+                }
+            } else {
+                try removeIfPresent(previewPath)
+            }
+            asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
         }
-        asset.pixelWidth = image.width
-        asset.pixelHeight = image.height
-        try jpeg.write(to: thumbnailPath(asset.id), options: .atomic)
-        let previewPath = thumbnailPath(asset.id, tier: .preview1400)
-        if max(image.width, image.height) > 720, let large = MediaArtwork.resize(image, maxSide: 1_400),
-           let preview = MediaArtwork.encode(large, type: .jpeg) {
-            try preview.write(to: previewPath, options: .atomic)
-        } else {
-            try removeIfPresent(previewPath)
-        }
-        asset.dominantColors = ColorExtractor.extractDominantColors(from: grid)
     }
 
     private static func model3D(_ url: URL, title: String, format: String) async -> MediaRender? {

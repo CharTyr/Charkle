@@ -5,10 +5,18 @@ import ImageIO
 import UniformTypeIdentifiers
 
 nonisolated enum MediaArtwork {
+    private static let sRGBColorSpace: CGColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+
     static func context(width: Int, height: Int) -> CGContext? {
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        return CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                         space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                  space: sRGBColorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    }
+
+    static func isOpaque(_ image: CGImage) -> Bool {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast: return true
+        default: return false
+        }
     }
 
     static func resize(_ source: CGImage, maxSide: Int) -> CGImage? {

@@ -17,6 +17,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     private var autoSyncTask: Task<Void, Never>?
     private var backgroundEnrichmentTasks: [UUID: Task<Void, Never>] = [:]
     private var cachedGDirectEndpoints: (endpoints: [GDirectEndpoint], fetchedAt: ContinuousClock.Instant)?
+    private var cachedGDirectAccounts: (accounts: [String], defaultAccount: String?, fetchedAt: ContinuousClock.Instant)?
     private var seeding = false
     private var isMigrating = false
     private var isUpgradingXHSCovers = false
@@ -41,6 +42,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         for task in backgroundEnrichmentTasks.values {
             task.cancel()
         }
+        driveSession.invalidateAndCancel()
     }
 
     public func fetchAssets(matching criteria: FilterCriteria) async throws -> [AssetRecord] {
@@ -437,11 +439,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         isUpgradingXHSCovers = true
         defer { isUpgradingXHSCovers = false }
 
-        guard let allAssets = try? await database.fetchAssets(matching: FilterCriteria(includeTrashed: true)) else {
+        guard let xhsMatches = try? await database.assetsWithPayloadContaining("\"xiaohongshu\"", includeTrashed: true) else {
             return []
         }
 
-        let candidates = allAssets.filter { asset in
+        let candidates = xhsMatches.filter { asset in
             guard asset.richMetadata?.socialPost?.platform == .xiaohongshu else { return false }
             return asset.pixelWidth != 900 || asset.pixelHeight != 1_440
         }
@@ -1096,7 +1098,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var mediaFailed = false
 
         if let coverImageData,
-           let src = CGImageSourceCreateWithData(coverImageData as CFData, nil) {
+           let src = CGImageSourceCreateWithData(coverImageData as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) {
             embeddedPoster = MediaPipeline.raster(src)?.poster
         }
 
@@ -1398,7 +1400,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL? {
-        media.thumbnailURL(for: assetID, tier: tier) ?? media.thumbnailURL(for: assetID, tier: .grid520)
+        if let direct = media.thumbnailURL(for: assetID, tier: tier) {
+            return direct
+        }
+        return tier == .grid520 ? nil : media.thumbnailURL(for: assetID, tier: .grid520)
     }
 
     public nonisolated func cachedOriginalURL(for asset: AssetRecord) -> URL? {
@@ -1988,16 +1993,11 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var usedEmbedding = false
         let cloudCfg = await aiConfig()
         if let provider = try? intelligence.provider(for: cloudCfg) {
-            let vectors = try await database.vectors()
-            let hasCompatibleVectors = vectors.values.contains {
-                $0.embeddingModel == provider.embeddingIdentity && $0.embedding != nil
-            }
-            if hasCompatibleVectors, let queryVec = try? await provider.embed(trimmed) {
+            let embeddings = try await database.embeddings(forModel: provider.embeddingIdentity)
+            if !embeddings.isEmpty, let queryVec = try? await provider.embed(trimmed) {
                 usedEmbedding = true
                 for asset in scopedAssets {
-                    if let vec = vectors[asset.id],
-                       vec.embeddingModel == provider.embeddingIdentity,
-                       let emb = vec.embedding,
+                    if let emb = embeddings[asset.id],
                        let cos = Self.cosineSimilarity(queryVec, emb),
                        cos > 0.22 {
                         // Map cosine ~0.22...0.85 into 0...1
@@ -2347,7 +2347,18 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
         value.autoSyncIntervalSeconds = max(0, config.autoSyncIntervalSeconds)
         try await database.setState("driveConfig", value)
+        cachedGDirectAccounts = nil
         await refreshAutoSync(config: value)
+    }
+
+    private func resolvedGDirectAccounts() async -> (accounts: [String], defaultAccount: String?) {
+        let now = ContinuousClock.now
+        if let cached = cachedGDirectAccounts, cached.fetchedAt.duration(to: now) < .seconds(20) {
+            return (cached.accounts, cached.defaultAccount)
+        }
+        let fetched = await GDirectIntegration.signedInAccounts()
+        cachedGDirectAccounts = (fetched.accounts, fetched.defaultAccount, now)
+        return fetched
     }
 
     public func syncStatus() async -> SyncStatus {
@@ -2375,7 +2386,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
             } else {
                 // Coexistence fallback: surface an existing local `gdirect` account when direct OAuth is not signed in yet
-                let gd = await GDirectIntegration.signedInAccounts()
+                let gd = await resolvedGDirectAccounts()
                 if let email = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
                     status.account = DriveAccountInfo(email: email, displayName: nil, source: "gdirect")
                 } else if status.account?.source == "gdirect" || status.account?.source == "gdirect mount" {
@@ -2383,7 +2394,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 }
             }
         case .gdirectMount:
-            let gd = await GDirectIntegration.signedInAccounts()
+            let gd = await resolvedGDirectAccounts()
             if let email = config.selectedGDirectAccount ?? gd.defaultAccount ?? gd.accounts.first {
                 status.account = DriveAccountInfo(email: email, displayName: nil, source: "gdirect mount")
             } else if status.account?.source != "gdirect mount" {
@@ -2396,12 +2407,15 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func probeGDirectEnvironment() async -> GDirectEnvironmentSnapshot {
-        await GDirectIntegration.inspect(mountPath: syncConfig().mountPath)
+        let snapshot = await GDirectIntegration.inspect(mountPath: syncConfig().mountPath)
+        cachedGDirectAccounts = (snapshot.accounts, snapshot.defaultAccount, .now)
+        return snapshot
     }
 
     public func runGDirectScan() async throws -> GDirectEnvironmentSnapshot {
         let snapshot = try await GDirectIntegration.scan(mountPath: syncConfig().mountPath)
         cachedGDirectEndpoints = (snapshot.endpoints, .now)
+        cachedGDirectAccounts = (snapshot.accounts, snapshot.defaultAccount, .now)
         return snapshot
     }
 
@@ -2409,6 +2423,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var config = await syncConfig()
         let mount = path ?? config.mountPath
         try await GDirectIntegration.mount(path: mount, account: config.selectedGDirectAccount)
+        cachedGDirectAccounts = nil
         if mount != config.mountPath {
             config.mountPath = mount
             try await saveSyncConfig(config)
@@ -2421,6 +2436,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     public func runGDirectUnmount() async throws -> GDirectEnvironmentSnapshot {
         let config = await syncConfig()
         try? await GDirectIntegration.unmount(account: config.selectedGDirectAccount)
+        cachedGDirectAccounts = nil
         await refreshAutoSync(config: config)
         return await GDirectIntegration.inspect(mountPath: config.mountPath)
     }
@@ -2861,9 +2877,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
         guard await syncConfig() == config, autoSyncTask == nil else { return }
         let interval = config.autoSyncIntervalSeconds
+        let tolerance = min(15, max(1, interval / 10))
         autoSyncTask = Task { [weak self] in
             while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(interval)) } catch { return }
+                do { try await Task.sleep(for: .seconds(interval), tolerance: .seconds(tolerance)) } catch { return }
                 guard let self else { return }
                 _ = try? await self.syncNow()
             }

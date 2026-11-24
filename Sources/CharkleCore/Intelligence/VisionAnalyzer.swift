@@ -9,58 +9,80 @@ public nonisolated enum VisionAnalyzer {
     /// Runs OCR and FeaturePrint in a single `VNImageRequestHandler` pass so the decoded pixel buffer
     /// is uploaded to Vision/Metal once instead of twice.
     public static func analyzeSync(in cgImage: CGImage) -> (ocrText: String, featurePrintData: Data?) {
-        let ocrRequest = VNRecognizeTextRequest()
-        ocrRequest.recognitionLevel = .accurate
-        ocrRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-        ocrRequest.usesLanguageCorrection = true
+        autoreleasepool {
+            let ocrRequest = VNRecognizeTextRequest()
+            ocrRequest.recognitionLevel = .accurate
+            ocrRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+            ocrRequest.usesLanguageCorrection = true
 
-        let featureRequest = VNGenerateImageFeaturePrintRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        do {
-            try handler.perform([ocrRequest, featureRequest])
-            let text = (ocrRequest.results ?? [])
-                .compactMap { $0.topCandidates(1).first?.string }
-                .joined(separator: "\n")
-            let featureData = featureRequest.results?.first.flatMap {
-                try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true)
+            let featureRequest = VNGenerateImageFeaturePrintRequest()
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([ocrRequest, featureRequest])
+                let text = (ocrRequest.results ?? [])
+                    .compactMap { $0.topCandidates(1).first?.string }
+                    .joined(separator: "\n")
+                let featureData = featureRequest.results?.first.flatMap {
+                    try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true)
+                }
+                return (text, featureData)
+            } catch {
+                visionLogger.debug("Combined Vision analysis fell back to split pass: \(error.localizedDescription, privacy: .private)")
+                return (recognizeTextSync(in: cgImage), generateFeaturePrint(for: cgImage))
             }
-            return (text, featureData)
-        } catch {
-            visionLogger.debug("Combined Vision analysis fell back to split pass: \(error.localizedDescription, privacy: .private)")
-            return (recognizeTextSync(in: cgImage), generateFeaturePrint(for: cgImage))
         }
     }
 
     public static func recognizeTextSync(in cgImage: CGImage) -> String {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-        request.usesLanguageCorrection = true
+        autoreleasepool {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+            request.usesLanguageCorrection = true
 
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        do {
-            try handler.perform([request])
-            let observations = request.results ?? []
-            let lines = observations.compactMap { $0.topCandidates(1).first?.string }
-            return lines.joined(separator: "\n")
-        } catch {
-            visionLogger.debug("OCR failed: \(error.localizedDescription, privacy: .private)")
-            return ""
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+                let observations = request.results ?? []
+                let lines = observations.compactMap { $0.topCandidates(1).first?.string }
+                return lines.joined(separator: "\n")
+            } catch {
+                visionLogger.debug("OCR failed: \(error.localizedDescription, privacy: .private)")
+                return ""
+            }
         }
     }
 
     /// Generate serialized `VNFeaturePrintObservation` data for offline visual similarity & Search-by-Image.
     public static func generateFeaturePrint(for cgImage: CGImage) -> Data? {
-        let request = VNGenerateImageFeaturePrintRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        do {
-            try handler.perform([request])
-            guard let observation = request.results?.first else {
+        autoreleasepool {
+            let request = VNGenerateImageFeaturePrintRequest()
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+                guard let observation = request.results?.first else {
+                    return nil
+                }
+                return try NSKeyedArchiver.archivedData(withRootObject: observation, requiringSecureCoding: true)
+            } catch {
+                visionLogger.debug("FeaturePrint failed: \(error.localizedDescription, privacy: .private)")
                 return nil
             }
-            return try NSKeyedArchiver.archivedData(withRootObject: observation, requiringSecureCoding: true)
+        }
+    }
+
+    static func unarchiveFeaturePrint(_ data: Data) -> VNFeaturePrintObservation? {
+        autoreleasepool {
+            try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: data)
+        }
+    }
+
+    static func visualDistance(between lhs: VNFeaturePrintObservation, and rhs: VNFeaturePrintObservation) -> Float? {
+        var distance: Float = 0
+        do {
+            try lhs.computeDistance(&distance, to: rhs)
+            return distance
         } catch {
-            visionLogger.debug("FeaturePrint failed: \(error.localizedDescription, privacy: .private)")
             return nil
         }
     }
@@ -68,16 +90,12 @@ public nonisolated enum VisionAnalyzer {
     /// Compute perceptual visual distance between two serialized `VNFeaturePrintObservation` payloads.
     /// Lower is more visually similar (0 = identical; on Revision 2 unrelated images sit around 0.98–1.25).
     public static func visualDistance(between lhsData: Data, and rhsData: Data) -> Float? {
-        guard let lhs = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: lhsData),
-              let rhs = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: rhsData) else {
-            return nil
-        }
-        var distance: Float = 0
-        do {
-            try lhs.computeDistance(&distance, to: rhs)
-            return distance
-        } catch {
-            return nil
+        autoreleasepool {
+            guard let lhs = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: lhsData),
+                  let rhs = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: rhsData) else {
+                return nil
+            }
+            return visualDistance(between: lhs, and: rhs)
         }
     }
 

@@ -1116,6 +1116,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
             guard !completed else { return }
             completed = true
             cancelReadTimeout()
+            buffer.removeAll(keepingCapacity: false)
             connection.cancel()
             onFinish()
         }
@@ -1126,6 +1127,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.completed else { return }
             self.completed = true
+            self.buffer.removeAll(keepingCapacity: false)
             self.connection.cancel()
             self.onFinish()
         }
@@ -1256,7 +1258,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
 
             if let headerEnd = parsedHeaderEnd {
                 if isChunked {
-                    let rawSlice = Data(buffer[headerEnd..<buffer.endIndex])
+                    let rawSlice = buffer[headerEnd..<buffer.endIndex]
                     if rawSlice.count > maxBodyBytes + 1_048_576 {
                         finishWithResponse(HTTPResponse.json(status: 413, body: ["error": "请求体积超出上限。"]))
                         return
@@ -1287,6 +1289,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
             if isComplete || error != nil {
                 completed = true
                 cancelReadTimeout()
+                buffer.removeAll(keepingCapacity: false)
                 connection.cancel()
                 onFinish()
                 return
@@ -1305,6 +1308,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
         )
         completed = true
         cancelReadTimeout()
+        buffer.removeAll(keepingCapacity: false)
         Task { [self] in
             let response = await self.handler(req)
             self.send(response)
@@ -1314,6 +1318,7 @@ private nonisolated final class HTTPConnectionSession: @unchecked Sendable {
     private func finishWithResponse(_ response: HTTPResponse) {
         completed = true
         cancelReadTimeout()
+        buffer.removeAll(keepingCapacity: false)
         send(response)
     }
 

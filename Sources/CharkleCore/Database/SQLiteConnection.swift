@@ -42,11 +42,21 @@ nonisolated struct SQLRow {
         guard let bytes = sqlite3_column_blob(statement, index) else { return Data() }
         return Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, index)))
     }
+    func withBlobBytes<T>(_ index: Int32, _ body: (Data?) throws -> T) rethrows -> T {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return try body(nil) }
+        let count = Int(sqlite3_column_bytes(statement, index))
+        guard count > 0, let bytes = sqlite3_column_blob(statement, index) else { return try body(Data()) }
+        let view = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: bytes), count: count, deallocator: .none)
+        return try body(view)
+    }
 }
 
 // Owned exclusively by LibraryDatabase after initialization.
 nonisolated final class SQLiteConnection {
+    private static let maxCachedStatements = 64
     private let handle: OpaquePointer
+    private var statementCache: [String: OpaquePointer] = [:]
+    private var statementOrder: [String] = []
 
     init(path: String) throws {
         var db: OpaquePointer?
@@ -59,24 +69,77 @@ nonisolated final class SQLiteConnection {
         sqlite3_busy_timeout(db, 5_000)
     }
 
-    deinit { sqlite3_close_v2(handle) }
+    deinit {
+        clearStatementCache()
+        sqlite3_close_v2(handle)
+    }
 
     private var error: LibraryDatabaseError { LibraryDatabaseError(String(cString: sqlite3_errmsg(handle))) }
+
+    func clearStatementCache() {
+        for statement in statementCache.values {
+            sqlite3_finalize(statement)
+        }
+        statementCache.removeAll(keepingCapacity: false)
+        statementOrder.removeAll(keepingCapacity: false)
+    }
+
+    private func borrowStatement(for sql: String) throws -> OpaquePointer {
+        if let cached = statementCache.removeValue(forKey: sql) {
+            if let idx = statementOrder.firstIndex(of: sql) {
+                statementOrder.remove(at: idx)
+            }
+            return cached
+        }
+        var prepared: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &prepared, nil) == SQLITE_OK, let statement = prepared else {
+            throw error
+        }
+        return statement
+    }
+
+    private func returnStatement(_ statement: OpaquePointer, for sql: String, cacheable: Bool) {
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
+        guard cacheable, statementCache[sql] == nil else {
+            sqlite3_finalize(statement)
+            return
+        }
+        if statementCache.count >= Self.maxCachedStatements, let evictedKey = statementOrder.first {
+            statementOrder.removeFirst()
+            if let evicted = statementCache.removeValue(forKey: evictedKey) {
+                sqlite3_finalize(evicted)
+            }
+        }
+        statementCache[sql] = statement
+        statementOrder.append(sql)
+    }
 
     func script(_ sql: String) throws {
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { throw error }
     }
 
-    func execute(_ sql: String, _ values: [SQLValue] = []) throws {
-        _ = try query(sql, values) { _ in () }
+    func execute(_ sql: String, _ values: [SQLValue] = [], cacheStatement: Bool = true) throws {
+        let statement = try borrowStatement(for: sql)
+        defer { returnStatement(statement, for: sql, cacheable: cacheStatement) }
+        for (index, value) in values.enumerated() {
+            guard value.bind(to: statement, at: Int32(index + 1)) == SQLITE_OK else { throw error }
+        }
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw error }
     }
 
-    func query<T>(_ sql: String, _ values: [SQLValue] = [], read: (SQLRow) throws -> T) throws -> [T] {
-        var prepared: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &prepared, nil) == SQLITE_OK, let statement = prepared else {
-            throw error
-        }
-        defer { sqlite3_finalize(statement) }
+    func query<T>(
+        _ sql: String,
+        _ values: [SQLValue] = [],
+        cacheStatement: Bool = true,
+        read: (SQLRow) throws -> T
+    ) throws -> [T] {
+        let statement = try borrowStatement(for: sql)
+        defer { returnStatement(statement, for: sql, cacheable: cacheStatement) }
         for (index, value) in values.enumerated() {
             guard value.bind(to: statement, at: Int32(index + 1)) == SQLITE_OK else { throw error }
         }

@@ -1,16 +1,31 @@
 import Foundation
 
 public final actor LibraryDatabase {
+    private final class CachedAssetBox: NSObject {
+        let record: AssetRecord
+        init(_ record: AssetRecord) { self.record = record }
+    }
+
     private let connection: SQLiteConnection
+    private let isMemoryDatabase: Bool
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let assetCache: NSCache<NSString, CachedAssetBox>
+    private var hasWarmAssetCache = false
+    private var cachedFolderChildren: [UUID: [UUID]]?
+    private var lastDataVersion: Int64 = 0
+    private var transactionDepth = 0
 
     public init(path: String = ":memory:") throws {
         let connection = try SQLiteConnection(path: path)
-        try connection.script("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;")
-        let journalMode = (try? connection.query("PRAGMA journal_mode") { $0.text(0) }.first)?.lowercased()
-        if path != ":memory:", journalMode != "wal" {
-            try connection.script("PRAGMA journal_mode = WAL;")
+        let isMemory = (path == ":memory:")
+        try connection.script("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY; PRAGMA journal_size_limit = 16777216;")
+        if !isMemory {
+            let journalMode = (try? connection.query("PRAGMA journal_mode") { $0.text(0) }.first)?.lowercased()
+            if journalMode != "wal" {
+                try connection.script("PRAGMA journal_mode = WAL;")
+            }
+            try? connection.script("PRAGMA mmap_size = 33554432; PRAGMA cache_size = -2000;")
         }
         let initialVersion = try connection.query("PRAGMA user_version") { $0.integer(0) }.first ?? 0
         guard initialVersion <= Self.schemaVersion else {
@@ -30,18 +45,36 @@ public final actor LibraryDatabase {
                         PRAGMA user_version = 2;
                         """)
                 }
+                if version < 3 {
+                    try connection.script("""
+                        CREATE INDEX IF NOT EXISTS assets_folder_recency ON assets(trashed, folder_id, created DESC);
+                        CREATE INDEX IF NOT EXISTS assets_kind_recency ON assets(trashed, kind, created DESC);
+                        CREATE INDEX IF NOT EXISTS assets_pinned ON assets(id) WHERE pinned = 1;
+                        CREATE INDEX IF NOT EXISTS asset_colors_lab ON asset_colors(l, a, b, asset_id);
+                        PRAGMA user_version = 3;
+                        """)
+                }
                 try connection.script("COMMIT")
             } catch {
                 try? connection.script("ROLLBACK")
                 throw error
             }
+            connection.clearStatementCache()
         }
+        let cache = NSCache<NSString, CachedAssetBox>()
+        cache.countLimit = 4_000
+        cache.totalCostLimit = 8 * 1024 * 1024
+        self.assetCache = cache
+        self.isMemoryDatabase = isMemory
         self.connection = connection
+        if !isMemory {
+            self.lastDataVersion = (try? connection.query("PRAGMA data_version") { $0.integer(0) }.first) ?? 0
+        }
     }
 
     public init(url: URL) throws { try self.init(path: url.path) }
 
-    private static let schemaVersion = 2
+    private static let schemaVersion = 3
 
     private static let initialSchema = """
         CREATE TABLE assets (
@@ -85,14 +118,34 @@ public final actor LibraryDatabase {
         PRAGMA user_version = 1;
         """
 
+    private func invalidateCaches() {
+        assetCache.removeAllObjects()
+        hasWarmAssetCache = false
+        cachedFolderChildren = nil
+    }
+
+    private func syncExternalDataVersionIfNeeded() {
+        guard !isMemoryDatabase, transactionDepth == 0 else { return }
+        if let current = try? connection.query("PRAGMA data_version", read: { $0.integer(0) }).first,
+           current != lastDataVersion {
+            invalidateCaches()
+            lastDataVersion = current
+        }
+    }
+
     func transaction<T: Sendable>(_ work: @Sendable (isolated LibraryDatabase) throws -> T) throws -> T {
         try connection.script("BEGIN IMMEDIATE")
+        syncExternalDataVersionIfNeeded()
+        transactionDepth += 1
         do {
             let result = try work(self)
             try connection.script("COMMIT")
+            transactionDepth -= 1
             return result
         } catch {
             try? connection.script("ROLLBACK")
+            transactionDepth -= 1
+            invalidateCaches()
             throw error
         }
     }
@@ -104,8 +157,10 @@ public final actor LibraryDatabase {
     }
 
     func put(_ asset: AssetRecord) throws {
+        syncExternalDataVersionIfNeeded()
         let id = asset.id.uuidString
         let old = try self.asset(id: asset.id)
+        let encodedPayload: Data = try autoreleasepool { try encoder.encode(asset) }
         try connection.execute("""
             INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET drive_id=excluded.drive_id, content_hash=excluded.content_hash,
@@ -116,7 +171,7 @@ public final actor LibraryDatabase {
                   SQLValue(asset.folderID?.uuidString), .text(asset.mediaKind.rawValue), .text(asset.aspectShape.rawValue),
                   .text(asset.title), .integer(Int64(asset.rating)), .integer(asset.fileSizeBytes),
                   .real(asset.createdAt.timeIntervalSince1970), .integer(asset.pinnedOffline ? 1 : 0),
-                  .integer(asset.isTrashed ? 1 : 0), .blob(try encoder.encode(asset))])
+                  .integer(asset.isTrashed ? 1 : 0), .blob(encodedPayload)])
 
         if old?.tags != asset.tags {
             try connection.execute("DELETE FROM asset_tags WHERE asset_id=?", [.text(id)])
@@ -133,16 +188,20 @@ public final actor LibraryDatabase {
         let fields = Self.searchFields(asset)
         if old.map(Self.searchFields) != fields {
             let rowID = try connection.query("SELECT rowid FROM assets WHERE id=?", [.text(id)]) { $0.integer(0) }[0]
-            let pinyin = fields.map(SearchText.pinyin)
+            let tokens: [String] = autoreleasepool {
+                let pinyin = fields.map(SearchText.pinyin)
+                return fields.map(SearchText.index) + [
+                    pinyin.map(\.full).joined(separator: " "), pinyin.map(\.initials).joined(separator: " ")
+                ]
+            }
             if old != nil { try connection.execute("DELETE FROM assets_fts WHERE rowid=?", [.integer(rowID)]) }
-            let tokens = fields.map(SearchText.index) + [
-                pinyin.map(\.full).joined(separator: " "), pinyin.map(\.initials).joined(separator: " ")
-            ]
             try connection.execute(
                 "INSERT INTO assets_fts(rowid,title,fileName,notes,tags,ocrText,aiDescription,sourceDomain,pinyin,initials) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 [.integer(rowID)] + tokens.map(SQLValue.text)
             )
         }
+        assetCache.setObject(CachedAssetBox(asset), forKey: id as NSString, cost: max(256, encodedPayload.count))
+        hasWarmAssetCache = true
     }
 
     private static func searchFields(_ asset: AssetRecord) -> [String] {
@@ -201,9 +260,53 @@ public final actor LibraryDatabase {
                 extraOCR, asset.aiDescription ?? "", asset.sourceDomain ?? ""]
     }
 
-    public func asset(id: UUID) throws -> AssetRecord? { try asset(where: "id=?", equals: id.uuidString) }
+    public func asset(id: UUID) throws -> AssetRecord? {
+        syncExternalDataVersionIfNeeded()
+        let key = id.uuidString
+        if let hit = assetCache.object(forKey: key as NSString) {
+            return hit.record
+        }
+        let rows = try connection.query("SELECT payload FROM assets WHERE id=?", [.text(key)]) { row -> (AssetRecord, Int) in
+            try decodeWithSize(AssetRecord.self, row)
+        }
+        guard let (record, size) = rows.first else { return nil }
+        assetCache.setObject(CachedAssetBox(record), forKey: key as NSString, cost: max(256, size))
+        hasWarmAssetCache = true
+        return record
+    }
 
-    func asset(driveID: String) throws -> AssetRecord? { try asset(where: "drive_id=?", equals: driveID) }
+    func assetExists(id: UUID) throws -> Bool {
+        syncExternalDataVersionIfNeeded()
+        let key = id.uuidString
+        if assetCache.object(forKey: key as NSString) != nil {
+            return true
+        }
+        return try !connection.query("SELECT 1 FROM assets WHERE id=? LIMIT 1", [.text(key)]) { $0.integer(0) }.isEmpty
+    }
+
+    func existingAssetIDs() throws -> Set<UUID> {
+        let ids = try connection.query("SELECT id FROM assets") { UUID(uuidString: $0.text(0)) }
+        var set = Set<UUID>()
+        set.reserveCapacity(ids.count)
+        for id in ids {
+            if let id { set.insert(id) }
+        }
+        return set
+    }
+
+    func assetsWithPayloadContaining(_ literal: String, includeTrashed: Bool = true) throws -> [AssetRecord] {
+        syncExternalDataVersionIfNeeded()
+        let sql = includeTrashed
+            ? "SELECT id FROM assets WHERE instr(CAST(payload AS TEXT), ?) > 0"
+            : "SELECT id FROM assets WHERE trashed=0 AND instr(CAST(payload AS TEXT), ?) > 0"
+        let ids = try connection.query(sql, [.text(literal)]) { $0.text(0) }
+        return try hydrateAssets(forOrderedIDs: ids)
+    }
+
+    func asset(driveID: String) throws -> AssetRecord? {
+        syncExternalDataVersionIfNeeded()
+        return try asset(where: "drive_id=?", equals: driveID)
+    }
 
     func assetDriveBindings() throws -> [(String, UUID)] {
         try connection.query("SELECT drive_id,id FROM assets WHERE drive_id IS NOT NULL") { row in
@@ -212,25 +315,94 @@ public final actor LibraryDatabase {
     }
 
     func assets(contentHash: String) throws -> [AssetRecord] {
-        try connection.query("SELECT payload FROM assets WHERE content_hash=?", [.text(contentHash)]) {
-            try decode(AssetRecord.self, $0)
-        }
+        syncExternalDataVersionIfNeeded()
+        let ids = try connection.query("SELECT id FROM assets WHERE content_hash=?", [.text(contentHash)]) { $0.text(0) }
+        return try hydrateAssets(forOrderedIDs: ids)
     }
 
     private func asset(where clause: String, equals value: String) throws -> AssetRecord? {
-        try connection.query("SELECT payload FROM assets WHERE \(clause)", [.text(value)]) {
-            try decode(AssetRecord.self, $0)
+        try connection.query("SELECT id, payload FROM assets WHERE \(clause)", [.text(value)]) { row -> AssetRecord in
+            let id = row.text(0)
+            if let hit = assetCache.object(forKey: id as NSString) {
+                return hit.record
+            }
+            let (record, size) = try decodeWithSize(AssetRecord.self, row, column: 1)
+            assetCache.setObject(CachedAssetBox(record), forKey: id as NSString, cost: max(256, size))
+            hasWarmAssetCache = true
+            return record
         }.first
     }
 
     func removeAsset(_ id: UUID) throws {
-        let parameters: [SQLValue] = [.text(id.uuidString)]
+        syncExternalDataVersionIfNeeded()
+        let key = id.uuidString
+        let parameters: [SQLValue] = [.text(key)]
         try connection.execute("DELETE FROM assets_fts WHERE rowid IN (SELECT rowid FROM assets WHERE id=?)", parameters)
         try connection.execute("DELETE FROM assets WHERE id=?", parameters)
+        assetCache.removeObject(forKey: key as NSString)
     }
 
     public func fetchAssets(matching criteria: FilterCriteria, limit: Int? = nil) throws -> [AssetRecord] {
-        try assetQuery(criteria, limit: limit) { try decode(AssetRecord.self, $0) }
+        syncExternalDataVersionIfNeeded()
+        if hasWarmAssetCache {
+            let ids = try assetQuery(criteria, limit: limit, projection: "a.id") { $0.text(0) }
+            return try hydrateAssets(forOrderedIDs: ids)
+        }
+        let decoded = try assetQuery(criteria, limit: limit, projection: "a.id, a.payload") { row -> AssetRecord in
+            let id = row.text(0)
+            let (record, size) = try decodeWithSize(AssetRecord.self, row, column: 1)
+            assetCache.setObject(CachedAssetBox(record), forKey: id as NSString, cost: max(256, size))
+            return record
+        }
+        if !decoded.isEmpty {
+            hasWarmAssetCache = true
+        }
+        return decoded
+    }
+
+    private func hydrateAssets(forOrderedIDs ids: [String]) throws -> [AssetRecord] {
+        guard !ids.isEmpty else { return [] }
+        var resolved: [AssetRecord?] = Array(repeating: nil, count: ids.count)
+        var missingIndicesByID: [String: [Int]] = [:]
+        var missingUniqueIDs: [String] = []
+        for (idx, id) in ids.enumerated() {
+            if let hit = assetCache.object(forKey: id as NSString) {
+                resolved[idx] = hit.record
+            } else {
+                if missingIndicesByID[id] == nil {
+                    missingUniqueIDs.append(id)
+                }
+                missingIndicesByID[id, default: []].append(idx)
+            }
+        }
+        if !missingUniqueIDs.isEmpty {
+            let chunkSize = 400
+            for start in stride(from: 0, to: missingUniqueIDs.count, by: chunkSize) {
+                let slice = missingUniqueIDs[start..<min(missingUniqueIDs.count, start + chunkSize)]
+                let sql = "SELECT id, payload FROM assets WHERE id IN (\(Self.placeholders(slice.count)))"
+                let args = slice.map(SQLValue.text)
+                let rows = try connection.query(sql, args, cacheStatement: slice.count <= 4) { row -> (String, AssetRecord, Int) in
+                    let id = row.text(0)
+                    let (record, size) = try decodeWithSize(AssetRecord.self, row, column: 1)
+                    return (id, record, size)
+                }
+                for (id, record, size) in rows {
+                    assetCache.setObject(CachedAssetBox(record), forKey: id as NSString, cost: max(256, size))
+                    if let positions = missingIndicesByID[id] {
+                        for pos in positions {
+                            resolved[pos] = record
+                        }
+                    }
+                }
+            }
+            hasWarmAssetCache = true
+        }
+        var out: [AssetRecord] = []
+        out.reserveCapacity(ids.count)
+        for item in resolved {
+            if let item { out.append(item) }
+        }
+        return out
     }
 
     func searchRanks(_ query: String) throws -> [UUID: Double] {
@@ -242,14 +414,31 @@ public final actor LibraryDatabase {
         })
     }
 
-    private func folderSubtreeIDs(rootID: UUID) throws -> [UUID] {
-        let all = try connection.query("SELECT payload FROM folders") { try decode(FolderRecord.self, $0) }
+    private func folderChildrenMap() throws -> [UUID: [UUID]] {
+        syncExternalDataVersionIfNeeded()
+        if let cached = cachedFolderChildren {
+            return cached
+        }
+        let rows = try connection.query(
+            "SELECT id, json_extract(CAST(payload AS TEXT), '$.parentID') FROM folders"
+        ) { row -> (UUID?, UUID?) in
+            let id = UUID(uuidString: row.text(0))
+            let parentText = row.text(1)
+            let parentID = parentText.isEmpty ? nil : UUID(uuidString: parentText)
+            return (id, parentID)
+        }
         var childrenByParent: [UUID: [UUID]] = [:]
-        for f in all {
-            if let pid = f.parentID {
-                childrenByParent[pid, default: []].append(f.id)
+        for (id, parentID) in rows {
+            if let id, let parentID {
+                childrenByParent[parentID, default: []].append(id)
             }
         }
+        cachedFolderChildren = childrenByParent
+        return childrenByParent
+    }
+
+    private func folderSubtreeIDs(rootID: UUID) throws -> [UUID] {
+        let childrenByParent = try folderChildrenMap()
         var result: [UUID] = [rootID]
         var seen: Set<UUID> = [rootID]
         var queue: [UUID] = [rootID]
@@ -267,6 +456,7 @@ public final actor LibraryDatabase {
     ) throws -> [T] {
         var clauses: [String] = []
         var args: [SQLValue] = []
+        var hasDynamicList = false
         func constrain(_ predicate: String, _ values: SQLValue...) {
             clauses.append(predicate)
             args.append(contentsOf: values)
@@ -278,8 +468,13 @@ public final actor LibraryDatabase {
         if let folder = filters.folderID {
             if filters.includeSubfolders {
                 let subtreeIDs = try folderSubtreeIDs(rootID: folder)
-                clauses.append("a.folder_id IN (\(Self.placeholders(subtreeIDs.count)))")
-                args += subtreeIDs.map { SQLValue.text($0.uuidString) }
+                if subtreeIDs.count == 1 {
+                    constrain("a.folder_id=?", .text(subtreeIDs[0].uuidString))
+                } else {
+                    if subtreeIDs.count > 4 { hasDynamicList = true }
+                    clauses.append("a.folder_id IN (\(Self.placeholders(subtreeIDs.count)))")
+                    args += subtreeIDs.map { SQLValue.text($0.uuidString) }
+                }
             } else {
                 constrain("a.folder_id=?", .text(folder.uuidString))
             }
@@ -292,8 +487,13 @@ public final actor LibraryDatabase {
         }
         if !filters.kinds.isEmpty {
             let kinds = filters.kinds.map(\.rawValue).sorted()
-            clauses.append("a.kind IN (\(Self.placeholders(kinds.count)))")
-            args += kinds.map(SQLValue.text)
+            if kinds.count == 1 {
+                constrain("a.kind=?", .text(kinds[0]))
+            } else {
+                if kinds.count > 4 { hasDynamicList = true }
+                clauses.append("a.kind IN (\(Self.placeholders(kinds.count)))")
+                args += kinds.map(SQLValue.text)
+            }
         }
         if filters.onlyUntagged { constrain("NOT EXISTS (SELECT 1 FROM asset_tags WHERE asset_id=a.id)") }
         for tag in filters.tags.sorted() {
@@ -302,13 +502,20 @@ public final actor LibraryDatabase {
         if let hex = filters.selectedColorHex {
             let color = LabColor.fromHex(hex)
             let tolerance = max(0, filters.colorTolerance)
-            clauses.append("""
-                EXISTS (SELECT 1 FROM asset_colors c WHERE c.asset_id=a.id
-                    AND (c.l-?1)*(c.l-?1)+(c.a-?2)*(c.a-?2)+(c.b-?3)*(c.b-?3)<=?4)
-                """)
-            args.insert(contentsOf: [.real(color.l), .real(color.a), .real(color.b), .real(tolerance * tolerance)], at: 0)
-            // Numbered color parameters precede all ordinary filter parameters in the statement.
-            clauses.insert(clauses.removeLast(), at: 0)
+            let tolSq = tolerance * tolerance
+            constrain("""
+                a.id IN (SELECT c.asset_id FROM asset_colors c
+                    WHERE c.l BETWEEN ? AND ? AND c.a BETWEEN ? AND ? AND c.b BETWEEN ? AND ?
+                      AND (c.l-?)*(c.l-?)+(c.a-?)*(c.a-?)+(c.b-?)*(c.b-?)<=?)
+                """,
+                .real(color.l - tolerance), .real(color.l + tolerance),
+                .real(color.a - tolerance), .real(color.a + tolerance),
+                .real(color.b - tolerance), .real(color.b + tolerance),
+                .real(color.l), .real(color.l),
+                .real(color.a), .real(color.a),
+                .real(color.b), .real(color.b),
+                .real(tolSq)
+            )
         }
         let trimmedSearch = filters.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let query = SearchText.ftsQuery(trimmedSearch)
@@ -342,8 +549,19 @@ public final actor LibraryDatabase {
             query.isEmpty ? "a.created DESC" : "bm25(assets_fts, 8, 3, 1, 5, 2, 2, 1, 3, 2), a.created DESC"
         }
         let filter = clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND ")
-        let page = limit.map { " LIMIT \(max(0, $0))" } ?? ""
-        return try connection.query("SELECT \(projection) FROM \(source)\(filter) ORDER BY \(order), a.id\(page)", args, read: read)
+        let page: String
+        if let limit {
+            page = " LIMIT ?"
+            args.append(.integer(Int64(max(0, limit))))
+        } else {
+            page = ""
+        }
+        return try connection.query(
+            "SELECT \(projection) FROM \(source)\(filter) ORDER BY \(order), a.id\(page)",
+            args,
+            cacheStatement: !hasDynamicList,
+            read: read
+        )
     }
 
     private static func placeholders(_ count: Int) -> String {
@@ -351,12 +569,19 @@ public final actor LibraryDatabase {
     }
 
     public func fetchFolders() throws -> [FolderRecord] {
-        try connection.query("""
-            SELECT payload, (SELECT COUNT(*) FROM assets WHERE folder_id=f.id AND trashed=0)
-            FROM folders f
+        var countsByFolderID: [String: Int] = [:]
+        _ = try connection.query("""
+            SELECT folder_id, COUNT(*)
+            FROM assets
+            WHERE trashed = 0 AND folder_id IS NOT NULL
+            GROUP BY folder_id
             """) { row in
-            var folder = try decode(FolderRecord.self, row)
-            folder.assetCount = Int(row.integer(1))
+            countsByFolderID[row.text(0)] = Int(row.integer(1))
+        }
+        return try connection.query("SELECT id, payload FROM folders") { row in
+            let id = row.text(0)
+            var folder = try decode(FolderRecord.self, row, column: 1)
+            folder.assetCount = countsByFolderID[id] ?? 0
             return folder
         }.sorted { ($0.sortOrder, $0.name, $0.id.uuidString) < ($1.sortOrder, $1.name, $1.id.uuidString) }
     }
@@ -370,13 +595,17 @@ public final actor LibraryDatabase {
     public func upsertFolder(_ folder: FolderRecord) throws { try put(folder) }
 
     func put(_ folder: FolderRecord) throws {
+        syncExternalDataVersionIfNeeded()
         try connection.execute("""
             INSERT INTO folders VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET drive_id=excluded.drive_id, payload=excluded.payload
             """, [.text(folder.id.uuidString), SQLValue(folder.driveFolderID), .blob(try encoder.encode(folder))])
+        cachedFolderChildren = nil
     }
 
     func removeFolder(_ id: UUID) throws {
+        syncExternalDataVersionIfNeeded()
         try connection.execute("DELETE FROM folders WHERE id=?", [.text(id.uuidString)])
+        cachedFolderChildren = nil
     }
 
     public func fetchTagCounts() throws -> [TagCount] {
@@ -461,20 +690,46 @@ public final actor LibraryDatabase {
 
     public func quickJump(query: String, limit: Int) throws -> [QuickJumpMatch] {
         guard limit > 0 else { return [] }
+        let normalizedQuery = SearchText.normalize(query)
         var matches: [QuickJumpMatch] = []
         func add(_ title: String, _ kind: QuickJumpKind, _ subtitle: String, _ uuid: UUID?, _ tag: String? = nil) {
-            guard let score = SearchText.fuzzyScore(query: query, candidate: title) else { return }
+            guard let score = SearchText.fuzzyScore(normalizedQuery: normalizedQuery, candidate: title) else { return }
             matches.append(QuickJumpMatch(id: kind.rawValue + "-" + (uuid?.uuidString ?? title), kind: kind,
                                           title: title, subtitle: subtitle, targetUUID: uuid, tagName: tag, score: score))
         }
-        for board in try fetchBoards() { add(board.title, .moodboard, "情绪板 · \(board.nodes.count) 项", board.id) }
-        for folder in try fetchFolders() { add(folder.name, .folder, "文件夹", folder.id) }
+        let boardRows = try connection.query("""
+            SELECT id,
+                   COALESCE(json_extract(CAST(payload AS TEXT), '$.title'), ''),
+                   COALESCE(json_array_length(CAST(payload AS TEXT), '$.nodes'), 0)
+            FROM boards
+            """) { row in
+            (UUID(uuidString: row.text(0)), row.text(1), Int(row.integer(2)))
+        }
+        for (id, title, nodeCount) in boardRows {
+            if let id { add(title, .moodboard, "情绪板 · \(nodeCount) 项", id) }
+        }
+        let folderRows = try connection.query(
+            "SELECT id, COALESCE(json_extract(CAST(payload AS TEXT), '$.name'), '') FROM folders"
+        ) { row in
+            (UUID(uuidString: row.text(0)), row.text(1))
+        }
+        for (id, name) in folderRows {
+            if let id { add(name, .folder, "文件夹", id) }
+        }
         for tag in try fetchTagCounts() { add(tag.name, .tag, "标签 · \(tag.count) 项", nil, tag.name) }
         let filters = FilterCriteria(searchQuery: query, sortBy: .relevance)
-        for item in try fetchAssets(matching: filters, limit: max(60, limit)) {
-            let score = SearchText.fuzzyScore(query: query, candidate: item.title) ?? 0.55
-            matches.append(QuickJumpMatch(id: "asset-\(item.id)", kind: .asset, title: item.title,
-                                          subtitle: item.mediaKind.localizedLabel, targetUUID: item.id, score: score))
+        let assetHits = try assetQuery(
+            filters,
+            limit: max(60, limit),
+            projection: "a.id, a.title, a.kind"
+        ) { row -> (UUID?, String, MediaKind) in
+            (UUID(uuidString: row.text(0)), row.text(1), MediaKind(rawValue: row.text(2)) ?? .image)
+        }
+        for (id, title, kind) in assetHits {
+            guard let id else { continue }
+            let score = SearchText.fuzzyScore(normalizedQuery: normalizedQuery, candidate: title) ?? 0.55
+            matches.append(QuickJumpMatch(id: "asset-\(id)", kind: .asset, title: title,
+                                          subtitle: kind.localizedLabel, targetUUID: id, score: score))
         }
         return Array(matches.sorted {
             if $0.score != $1.score { return $0.score > $1.score }
@@ -483,16 +738,50 @@ public final actor LibraryDatabase {
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ row: SQLRow, column: Int32 = 0) throws -> T {
-        guard let data = row.blob(column) else { throw LibraryDatabaseError("Missing persisted \(type) payload.") }
-        return try decoder.decode(type, from: data)
+        try row.withBlobBytes(column) { data in
+            guard let data else { throw LibraryDatabaseError("Missing persisted \(type) payload.") }
+            return try decoder.decode(type, from: data)
+        }
+    }
+
+    private func decodeWithSize<T: Decodable>(_ type: T.Type, _ row: SQLRow, column: Int32 = 0) throws -> (T, Int) {
+        try row.withBlobBytes(column) { data in
+            guard let data else { throw LibraryDatabaseError("Missing persisted \(type) payload.") }
+            return (try decoder.decode(type, from: data), data.count)
+        }
     }
 
     func state<T: Decodable>(_ key: String, as type: T.Type = T.self) throws -> T? {
         try connection.query("SELECT payload FROM sync_state WHERE key=?", [.text(key)]) { try decode(type, $0) }.first
     }
 
+    private static func binaryPrefixUpperBound(_ prefix: String) -> String? {
+        var bytes = Array(prefix.utf8)
+        while let last = bytes.last {
+            if last < 0xFF {
+                bytes[bytes.count - 1] = last &+ 1
+                return String(bytes: bytes, encoding: .utf8)
+            }
+            bytes.removeLast()
+        }
+        return nil
+    }
+
     func states<T: Decodable>(withPrefix prefix: String, as type: T.Type) throws -> [(String, T)] {
-        try connection.query("SELECT key,payload FROM sync_state WHERE substr(key,1,length(?1))=?1", [.text(prefix)]) {
+        if prefix.isEmpty {
+            return try connection.query("SELECT key,payload FROM sync_state") {
+                try ($0.text(0), decode(type, $0, column: 1))
+            }
+        }
+        if let upperBound = Self.binaryPrefixUpperBound(prefix) {
+            return try connection.query(
+                "SELECT key,payload FROM sync_state WHERE key >= ? AND key < ?",
+                [.text(prefix), .text(upperBound)]
+            ) {
+                try ($0.text(0), decode(type, $0, column: 1))
+            }
+        }
+        return try connection.query("SELECT key,payload FROM sync_state WHERE substr(key,1,length(?1))=?1", [.text(prefix)]) {
             try ($0.text(0), decode(type, $0, column: 1))
         }
     }
@@ -585,10 +874,29 @@ public final actor LibraryDatabase {
         return Dictionary(uniqueKeysWithValues: values.compactMap { id, vector in id.map { ($0, vector) } })
     }
 
+    func embeddings(forModel model: String) throws -> [UUID: [Float]] {
+        let rows = try connection.query(
+            "SELECT asset_id, embedding, precision FROM asset_vectors WHERE embedding_model=? AND embedding IS NOT NULL",
+            [.text(model)]
+        ) { row -> (UUID, [Float])? in
+            guard let id = UUID(uuidString: row.text(0)) else { return nil }
+            let precision = EmbeddingPrecision(rawValue: Int(row.integer(2))) ?? .float16
+            guard let values = row.withBlobBytes(1, { $0.map(precision.decode) }) else { return nil }
+            return (id, values)
+        }
+        var out: [UUID: [Float]] = [:]
+        out.reserveCapacity(rows.count)
+        for item in rows {
+            if let (id, vec) = item { out[id] = vec }
+        }
+        return out
+    }
+
     private static func readVector(_ row: SQLRow) -> AssetVector {
         let precision = EmbeddingPrecision(rawValue: Int(row.integer(2))) ?? .float16
         let model = row.text(3)
-        return AssetVector(featurePrint: row.blob(0), embedding: row.blob(1).map(precision.decode),
+        let embedding = row.withBlobBytes(1) { $0.map(precision.decode) }
+        return AssetVector(featurePrint: row.blob(0), embedding: embedding,
                            embeddingModel: model.isEmpty ? nil : model, precision: precision)
     }
 }

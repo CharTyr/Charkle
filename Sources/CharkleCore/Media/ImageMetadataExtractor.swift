@@ -20,27 +20,34 @@ public nonisolated enum ImageMetadataExtractor {
     private static let maxPNGTextChunkBytes = 1_500_000
 
     public static func extract(from url: URL) -> ExtractedImageMetadata {
-        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary)
-        let props = source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
-        let xmpEntries = source.map(extractXMPMetadata(from:)) ?? [:]
+        autoreleasepool {
+            let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary)
+            let props = source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
+            let xmpEntries = source.map(extractXMPMetadata(from:)) ?? [:]
 
-        let photoExif = parsePhotoExif(from: props)
+            let photoExif = parsePhotoExif(from: props)
 
-        // Stream PNG chunk headers (seeking over IDAT payloads) so trailing tEXt/iTXt/zTXt chunks
-        // are always found even on multi-megabyte 4K PNGs.
-        let pngChunks = extractPNGTextChunks(fromFileAt: url)
+            // Only scan PNG binary chunks when ImageIO identifies a PNG (or could not sniff type),
+            // avoiding redundant FileHandle open/read syscalls on JPEG/HEIC/WebP/TIFF assets.
+            let shouldScanPNG: Bool = if let source, let uti = CGImageSourceGetType(source) as String? {
+                uti == "public.png"
+            } else {
+                true
+            }
+            let pngChunks = shouldScanPNG ? extractPNGTextChunks(fromFileAt: url) : [:]
 
-        let aiGen = extractAIGeneration(
-            pngChunks: pngChunks,
-            imageProperties: props,
-            xmpEntries: xmpEntries
-        )
+            let aiGen = extractAIGeneration(
+                pngChunks: pngChunks,
+                imageProperties: props,
+                xmpEntries: xmpEntries
+            )
 
-        return ExtractedImageMetadata(
-            photoExif: photoExif?.isEmpty == false ? photoExif : nil,
-            aiGeneration: aiGen?.isEmpty == false ? aiGen : nil
-        )
+            return ExtractedImageMetadata(
+                photoExif: photoExif?.isEmpty == false ? photoExif : nil,
+                aiGeneration: aiGen?.isEmpty == false ? aiGen : nil
+            )
+        }
     }
 
     // MARK: - 1. Camera EXIF / TIFF / GPS / IPTC Extraction
