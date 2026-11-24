@@ -162,4 +162,8 @@ A：支持 PNG / JPG / WebP / HEIC / SVG / GIF 等常见图片，以及视频、
 
 - **[`gdirect`](https://github.com/mizorewww/gdirect)** — 用于 Google Drive 同步的可选直连与加速支持。
 
+## 社区与友情链接
+
+感谢 [LINUX DO](linux.do) 社区的开源分享氛围与各位佬友的支持与反馈！
+
 [@CharTyr](https://github.com/CharTyr)
