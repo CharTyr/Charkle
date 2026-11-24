@@ -24,11 +24,14 @@ use crate::media::artwork::MediaArtwork;
 use crate::media::metadata::ImageMetadataExtractor;
 use crate::media::resolvers::{
     GitHubRepoResolver, GitHubRepoURLParser, SocialPostResolver, SocialPostURLParser,
+    WebBookmarkResolver,
 };
+use crate::media::xiaohongshu::XiaohongshuURLParser;
 use crate::media::{MediaPipeline, SampleLibrarySeeder};
 use crate::models::core::{
-    AssetBatchPatch, AssetRecord, FilterCriteria, FolderAssignment, FolderRecord, FolderSuggestion,
-    MediaKind, QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind, TagCount,
+    AssetBatchPatch, AssetRecord, FilterCriteria, FolderRecord, FolderSuggestion, MediaKind,
+    QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind, SocialPlatform,
+    TagCount,
 };
 use crate::models::media::{cosine_similarity, CacheStats, CaptureInput, ThumbnailTier};
 use crate::models::moodboard::{
@@ -36,13 +39,13 @@ use crate::models::moodboard::{
     MoodboardCurationRequest, MoodboardDocument, MoodboardProposal, MoodboardSummary,
 };
 use crate::models::sync::{
-    tag_map, DeletedAssetFingerprint, DriveSyncConfig, DriveTransportMode, StorageMigrationReport,
-    SyncOperationChange, SyncReport, SyncStatus,
+    DriveSyncConfig, DriveTransportMode, StorageMigrationReport, SyncOperationChange, SyncReport,
+    SyncStatus,
 };
 use crate::sync::{
     validate_drive_name, validate_path_segments, DirectAPITransport, DriveSyncEngine,
     DriveTransport, GoogleOAuthClient, LocalFolderTransport, MountedVolumeTransport,
-    StorageMigration, WebDAVTransport, MOUNTED_PATH_ID_PREFIX,
+    StorageMigration, WebDAVTransport,
 };
 use crate::traits::{
     BasicVolumeMountInspector, InMemorySecretVault, NativeOcrProvider, NoopOcrProvider,
@@ -292,82 +295,7 @@ impl LiveCharkleEngine {
 
     /// Applies an `AssetBatchPatch` atomically across one or more assets with CRDT delta recording.
     pub fn update_assets(&self, patch: &AssetBatchPatch) -> CoreResult<Vec<AssetRecord>> {
-        if let FolderAssignment::Folder(fid) = patch.folder_assignment {
-            if self.db.folder(fid)?.is_none() {
-                return Err(CoreError::NotFound(format_swift_uuid(&fid)));
-            }
-        }
-
-        let mut changed = Vec::new();
-        for &id in &patch.asset_ids {
-            let Some(mut asset) = self.db.asset(id)? else {
-                continue;
-            };
-            if let Some(ref title) = patch.title {
-                let clean = title.trim();
-                if !clean.is_empty() {
-                    asset.title = clean.to_string();
-                }
-            }
-            if let Some(ref notes) = patch.notes {
-                asset.notes = notes.clone();
-            }
-            if let Some(rating) = patch.rating {
-                asset.rating = rating.clamp(0, 5);
-            }
-
-            let mut tags = tag_map(&asset.tags);
-            if patch.accept_suggested_tags {
-                for sug in &asset.suggested_tags {
-                    let clean = sug.trim();
-                    let key = search_text::normalize(clean);
-                    if !key.is_empty() {
-                        tags.insert(key, clean.to_string());
-                    }
-                }
-                asset.suggested_tags.clear();
-            }
-            if !patch.dismiss_suggested_tags.is_empty() {
-                let dismiss: HashSet<String> = patch
-                    .dismiss_suggested_tags
-                    .iter()
-                    .map(|t| search_text::normalize(t))
-                    .collect();
-                asset
-                    .suggested_tags
-                    .retain(|t| !dismiss.contains(&search_text::normalize(t)));
-            }
-            for tag in &patch.add_tags {
-                let clean = tag.trim();
-                let key = search_text::normalize(clean);
-                if !key.is_empty() {
-                    tags.insert(key.clone(), clean.to_string());
-                    asset
-                        .suggested_tags
-                        .retain(|s| search_text::normalize(s) != key);
-                }
-            }
-            for tag in &patch.remove_tags {
-                tags.remove(&search_text::normalize(tag));
-            }
-            let mut sorted_tags: Vec<String> = tags.into_values().collect();
-            sorted_tags.sort();
-            asset.tags = sorted_tags;
-
-            match patch.folder_assignment {
-                FolderAssignment::Unchanged => {}
-                FolderAssignment::Inbox => asset.folder_id = None,
-                FolderAssignment::Folder(fid) => asset.folder_id = Some(fid),
-            }
-            if let Some(pinned) = patch.pinned_offline {
-                asset.pinned_offline = pinned;
-            }
-            if let Some(trashed) = patch.is_trashed {
-                asset.is_trashed = trashed;
-            }
-
-            changed.push(self.db.save_asset_locally(&asset, true)?);
-        }
+        let changed = self.db.update_assets_locally(patch)?;
 
         if patch.pinned_offline == Some(false) {
             let _ = self
@@ -408,83 +336,14 @@ impl LiveCharkleEngine {
             }
         }
 
-        let folders = self.db.fetch_folders()?;
-        let folder_by_id: HashMap<Uuid, FolderRecord> =
-            folders.into_iter().map(|f| (f.id, f)).collect();
+        let deleted =
+            self.db
+                .permanently_delete_assets_locally(ids, &root_prefix, &precomputed_md5)?;
 
-        for id in unique_ids {
-            let Some(asset) = self.db.asset(id)? else {
-                continue;
-            };
-            let mounted = asset
-                .drive_file_id
-                .as_deref()
-                .is_some_and(|s| s.starts_with("mounted-"));
-            if mounted {
-                if let Some(ref remote) = asset.drive_file_id {
-                    let resolved_remote = if remote.starts_with(MOUNTED_PATH_ID_PREFIX) {
-                        remote.clone()
-                    } else {
-                        let rel_dir = mounted_relative_folder_path(asset.folder_id, &folder_by_id);
-                        format!(
-                            "{MOUNTED_PATH_ID_PREFIX}{root_prefix}/{rel_dir}/{}",
-                            asset.file_name
-                        )
-                    };
-                    self.db.set_state(
-                        &format!("local.delete.asset.{}", format_swift_uuid(&id)),
-                        Some(&resolved_remote),
-                    )?;
-                    self.db
-                        .set_state(&format!("deleted.drive.{resolved_remote}"), Some(&true))?;
-                    if resolved_remote != *remote {
-                        self.db
-                            .set_state(&format!("deleted.drive.{remote}"), Some(&true))?;
-                    }
-                }
-            } else if let Some(ref remote) = asset.drive_file_id {
-                if !remote.is_empty() {
-                    self.db
-                        .set_state(&format!("deleted.drive.{remote}"), Some(&true))?;
-                }
-            }
-
-            if !asset.content_hash.is_empty() {
-                let md5 = precomputed_md5.get(&id).cloned();
-                let fp = DeletedAssetFingerprint {
-                    asset_id: id,
-                    sha256: asset.content_hash.clone(),
-                    md5: md5.clone(),
-                    file_name: asset.file_name.clone(),
-                    deleted_at: Utc::now(),
-                };
-                self.db.set_state(
-                    &format!("deleted.content.{}", asset.content_hash),
-                    Some(&fp),
-                )?;
-                if let Some(m) = md5.filter(|s| !s.is_empty()) {
-                    self.db.set_state(&format!("deleted.md5.{m}"), Some(&fp))?;
-                }
-            }
-
-            self.db.record(
-                SyncOperationChange::DeleteAsset {
-                    id,
-                    drive_id: if mounted {
-                        None
-                    } else {
-                        asset.drive_file_id.clone()
-                    },
-                },
-                true,
-            )?;
+        let _ = self.media.cleanup_deleted_media(&self.db);
+        if deleted > 0 {
+            self.emit(EngineEvent::LibraryChanged);
         }
-
-        let cleanup_ids = self.db.drain_media_cleanup_ids()?;
-        if !cleanup_ids.is_empty() {
-            self.media.remove_files_for_ids(&cleanup_ids)?;
-        }
-        self.emit(EngineEvent::LibraryChanged);
         Ok(())
     }
 
@@ -570,48 +429,7 @@ impl LiveCharkleEngine {
     }
 
     pub fn delete_folder(&self, id: Uuid, trash_contents: bool) -> CoreResult<()> {
-        if trash_contents {
-            self.db.delete_folder(id, true)?;
-            self.emit(EngineEvent::LibraryChanged);
-            return Ok(());
-        }
-
-        let all_folders = self.db.fetch_folders()?;
-        let Some(target) = all_folders.iter().find(|f| f.id == id).cloned() else {
-            return Ok(());
-        };
-        // Reparent direct children to `target.parent_id` with sibling deduplication (matching macOS)
-        let mut siblings: Vec<FolderRecord> = all_folders
-            .iter()
-            .filter(|f| f.parent_id == target.parent_id && f.id != id)
-            .cloned()
-            .collect();
-        let children: Vec<FolderRecord> = all_folders
-            .iter()
-            .filter(|f| f.parent_id == Some(id))
-            .cloned()
-            .collect();
-        for mut child in children {
-            let base = child.name.clone();
-            let mut candidate = base.clone();
-            let mut suffix = 2;
-            while (target.parent_id.is_none() && candidate.eq_ignore_ascii_case("Inbox"))
-                || siblings
-                    .iter()
-                    .any(|s| s.name.eq_ignore_ascii_case(&candidate))
-            {
-                candidate = format!("{base} {suffix}");
-                suffix += 1;
-            }
-            child.name = candidate;
-            child.parent_id = target.parent_id;
-            child.updated_at = Utc::now();
-            self.db
-                .record(SyncOperationChange::Folder(child.clone()), true)?;
-            siblings.push(child);
-        }
-
-        self.db.delete_folder(id, false)?;
+        self.db.delete_folder(id, trash_contents)?;
         self.emit(EngineEvent::LibraryChanged);
         Ok(())
     }
@@ -931,7 +749,7 @@ impl LiveCharkleEngine {
             let mut rich = current.rich_metadata.clone().unwrap_or_default();
             current.title = repo.full_name.clone();
             if let Some(ref desc) = repo.description {
-                if !desc.is_empty() {
+                if !desc.is_empty() && current.notes.trim().is_empty() {
                     current.notes = desc.clone();
                 }
             }
@@ -948,26 +766,96 @@ impl LiveCharkleEngine {
 
         if let Some(social_ref) = SocialPostURLParser::parse(&url) {
             if let Some(resolved) = SocialPostResolver::resolve(&social_ref).await {
+                let merged_meta = match current
+                    .rich_metadata
+                    .as_ref()
+                    .and_then(|r| r.social_post.clone())
+                {
+                    Some(existing) => {
+                        SocialPostResolver::merge_metadata(resolved.metadata, existing)
+                    }
+                    None => resolved.metadata,
+                };
                 let mut cover = None;
+                let mut cover_candidates = Vec::new();
                 if let Some(ref thumb) = resolved.primary_thumbnail_url {
+                    cover_candidates.push(thumb.clone());
+                }
+                if resolved.primary_media_kind == Some(SocialMediaAttachmentKind::Photo) {
+                    if let Some(ref primary_url) = resolved.primary_media_download_url {
+                        if !cover_candidates.contains(primary_url) {
+                            cover_candidates.push(primary_url.clone());
+                        }
+                    }
+                }
+                for att in merged_meta.effective_attachments() {
+                    if att.kind == SocialMediaAttachmentKind::Photo
+                        && !cover_candidates.contains(&att.url)
+                    {
+                        cover_candidates.push(att.url);
+                    }
+                    if let Some(ref t) = att.thumbnail_url {
+                        if !cover_candidates.contains(t) {
+                            cover_candidates.push(t.clone());
+                        }
+                    }
+                }
+                for cand in cover_candidates.iter().take(4) {
                     if let Some((bytes, _)) = SocialPostResolver::download_media_bytes(
-                        thumb,
+                        cand,
                         SocialMediaAttachmentKind::Photo,
                     )
                     .await
                     {
-                        cover = image::load_from_memory(&bytes).ok();
+                        if let Ok(img) = image::load_from_memory(&bytes) {
+                            cover = Some(img);
+                            break;
+                        }
                     }
                 }
-                let card = MediaArtwork::social_post_card(&resolved.metadata, cover.as_ref());
+                let avatar = match merged_meta.author_avatar_url.as_deref() {
+                    Some(av_url) if !av_url.trim().is_empty() => {
+                        SocialPostResolver::fetch_avatar_image(av_url).await
+                    }
+                    _ => None,
+                };
+                let card = MediaArtwork::social_post_card_with_avatar(
+                    &merged_meta,
+                    cover.as_ref(),
+                    avatar.as_ref(),
+                );
                 let _ = self.media.write_custom_poster(&card, &mut current);
-                current.title = resolved.short_title();
+                let title_helper = crate::media::resolvers::ResolvedSocialPost {
+                    metadata: merged_meta.clone(),
+                    primary_media_download_url: None,
+                    primary_media_kind: None,
+                    primary_thumbnail_url: None,
+                    extracted_tags: resolved.extracted_tags.clone(),
+                };
+                current.title = title_helper.short_title();
                 current.media_kind = MediaKind::WebBookmark;
-                if !resolved.metadata.body_text.is_empty() {
-                    current.ocr_text = Some(resolved.metadata.body_text.clone());
+                if !merged_meta.body_text.trim().is_empty() {
+                    current.ocr_text = Some(merged_meta.body_text.clone());
+                }
+                for tag in resolved.extracted_tags {
+                    let clean = tag.trim();
+                    if !clean.is_empty()
+                        && !current.tags.iter().any(|t| t.eq_ignore_ascii_case(clean))
+                    {
+                        current.tags.push(clean.to_string());
+                    }
+                }
+                if XiaohongshuURLParser::parse(&url).is_some_and(|r| r.is_short_link) {
+                    if let Ok(canon) = Url::parse(&merged_meta.original_url) {
+                        if XiaohongshuURLParser::parse(&canon).is_some_and(|r| r.note_id.is_some())
+                        {
+                            current.source_url = Some(canon.to_string());
+                            current.source_domain = canon.host_str().map(String::from);
+                        }
+                    }
                 }
                 let mut rich = current.rich_metadata.clone().unwrap_or_default();
-                rich.social_post = Some(resolved.metadata);
+                rich.social_post = Some(merged_meta);
                 current.rich_metadata = Some(rich);
                 let saved = self.db.save_asset_locally(&current, true)?;
                 self.emit(EngineEvent::AssetEnriched(saved.id));
@@ -975,7 +863,203 @@ impl LiveCharkleEngine {
             }
         }
 
+        if current.media_kind == MediaKind::WebBookmark && WebBookmarkResolver::is_web_url(&url) {
+            let bm =
+                WebBookmarkResolver::fetch_with_snapshot(&url, self.media.web_snapshotter()).await;
+            let clean_domain = url
+                .host_str()
+                .unwrap_or("web")
+                .trim_start_matches("www.")
+                .to_string();
+            if let Some(ref title) = bm.title {
+                if !title.trim().is_empty() {
+                    current.title = title.clone();
+                }
+            }
+            if let Some(ref desc) = bm.description {
+                if !desc.trim().is_empty() {
+                    if current.notes.trim().is_empty() {
+                        current.notes = desc.clone();
+                    }
+                    let mut rich = current.rich_metadata.clone().unwrap_or_default();
+                    rich.text_excerpt = Some(desc.clone());
+                    current.rich_metadata = Some(rich);
+                }
+            }
+            let mut ocr_parts = vec![current.title.clone(), clean_domain.clone()];
+            if let Some(ref site) = bm.site_name {
+                ocr_parts.push(site.clone());
+            }
+            if let Some(ref desc) = bm.description {
+                ocr_parts.push(desc.clone());
+            }
+            current.ocr_text = Some(ocr_parts.join("\n"));
+            // CRITICAL (Pitfall 7): NEVER overwrite `current.source_url` with 302 `/login` redirects;
+            // keep the original collected URL and its host domain intact.
+            current.source_domain = url.host_str().map(String::from);
+            let poster = bm.poster_image.unwrap_or_else(|| {
+                MediaArtwork::web_page_card(
+                    &current.title,
+                    &clean_domain,
+                    bm.site_name.as_deref(),
+                    bm.description.as_deref(),
+                    current.source_url.as_deref(),
+                    bm.theme_color.as_deref(),
+                    bm.favicon_image.as_ref(),
+                )
+            });
+            let _ = self.media.write_custom_poster(&poster, &mut current);
+            let saved = self.db.save_asset_locally(&current, true)?;
+            self.emit(EngineEvent::AssetEnriched(saved.id));
+            return Ok(saved);
+        }
+
         Ok(current)
+    }
+
+    /// Automatically migrates legacy Xiaohongshu social-bookmark assets whose covers were rendered
+    /// with non-native dimensions (not `900×1440`) to the native 3:4 cover + title/author/likes card.
+    /// Idempotent and zero-overhead once migrated; skips media-bearing notes when offline so covers
+    /// are never degraded to text-only cards.
+    pub async fn upgrade_legacy_xiaohongshu_covers_if_needed(&self) -> Vec<Uuid> {
+        let Ok(all_assets) = self.db.fetch_assets(
+            &FilterCriteria {
+                include_trashed: true,
+                ..FilterCriteria::default()
+            },
+            None,
+        ) else {
+            return Vec::new();
+        };
+
+        let candidates: Vec<AssetRecord> = all_assets
+            .into_iter()
+            .filter(|asset| {
+                let is_xhs = asset
+                    .rich_metadata
+                    .as_ref()
+                    .and_then(|r| r.social_post.as_ref())
+                    .is_some_and(|p| p.platform == SocialPlatform::Xiaohongshu);
+                is_xhs && (asset.pixel_width != 900 || asset.pixel_height != 1_440)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let mut upgraded_ids = Vec::new();
+        for mut asset in candidates {
+            let Some(mut meta) = asset
+                .rich_metadata
+                .as_ref()
+                .and_then(|r| r.social_post.clone())
+            else {
+                continue;
+            };
+
+            let has_declared_media = !meta.effective_attachments().is_empty()
+                || !meta.media_urls.is_empty()
+                || !meta.media_thumbnail_urls.is_empty();
+
+            let mut candidate_urls: Vec<String> = Vec::new();
+            for att in meta.effective_attachments() {
+                if att.kind == SocialMediaAttachmentKind::Photo
+                    && !candidate_urls.contains(&att.url)
+                {
+                    candidate_urls.push(att.url);
+                }
+                if let Some(ref thumb) = att.thumbnail_url {
+                    if !candidate_urls.contains(thumb) {
+                        candidate_urls.push(thumb.clone());
+                    }
+                }
+            }
+            for raw in meta
+                .media_urls
+                .iter()
+                .chain(meta.media_thumbnail_urls.iter())
+            {
+                if !candidate_urls.contains(raw) {
+                    candidate_urls.push(raw.clone());
+                }
+            }
+
+            let mut cover_img = None;
+            for photo_url in &candidate_urls {
+                if let Some((bytes, _)) = SocialPostResolver::download_media_bytes(
+                    photo_url,
+                    SocialMediaAttachmentKind::Photo,
+                )
+                .await
+                {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        cover_img = Some(img);
+                        break;
+                    }
+                }
+            }
+
+            // If CDN URLs expired, re-resolve the original Xiaohongshu URL once to obtain a fresh cover.
+            if cover_img.is_none() && has_declared_media {
+                let src_str = asset
+                    .source_url
+                    .as_deref()
+                    .unwrap_or(meta.original_url.as_str());
+                if let Ok(src_url) = Url::parse(src_str) {
+                    if let Some(social_ref) = SocialPostURLParser::parse(&src_url) {
+                        if let Some(live) = SocialPostResolver::resolve(&social_ref).await {
+                            meta = SocialPostResolver::merge_metadata(live.metadata, meta);
+                            if let Some(fresh_url) = live
+                                .primary_thumbnail_url
+                                .or(live.primary_media_download_url)
+                            {
+                                if let Some((bytes, _)) = SocialPostResolver::download_media_bytes(
+                                    &fresh_url,
+                                    SocialMediaAttachmentKind::Photo,
+                                )
+                                .await
+                                {
+                                    cover_img = image::load_from_memory(&bytes).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Never degrade a media-bearing note to text-only if offline / temporarily unreachable.
+            if has_declared_media && cover_img.is_none() {
+                continue;
+            }
+
+            let avatar_img = match meta.author_avatar_url.as_deref() {
+                Some(av_url) if !av_url.trim().is_empty() => {
+                    SocialPostResolver::fetch_avatar_image(av_url).await
+                }
+                _ => None,
+            };
+
+            let card = MediaArtwork::social_post_card_with_avatar(
+                &meta,
+                cover_img.as_ref(),
+                avatar_img.as_ref(),
+            );
+            let mut rich = asset.rich_metadata.clone().unwrap_or_default();
+            rich.social_post = Some(meta);
+            asset.rich_metadata = Some(rich);
+            if self.media.write_custom_poster(&card, &mut asset).is_ok() {
+                if let Ok(saved) = self.db.save_asset_locally(&asset, true) {
+                    upgraded_ids.push(saved.id);
+                    self.emit(EngineEvent::AssetEnriched(saved.id));
+                }
+            }
+        }
+
+        if !upgraded_ids.is_empty() {
+            self.emit(EngineEvent::LibraryChanged);
+        }
+        upgraded_ids
     }
 
     // =========================================================================
@@ -1442,29 +1526,110 @@ fn ensure_unique_folder(
     Ok(())
 }
 
-fn mounted_relative_folder_path(
-    folder_id: Option<Uuid>,
-    folder_by_id: &HashMap<Uuid, FolderRecord>,
-) -> String {
-    let Some(mut cursor) = folder_id else {
-        return "Inbox".to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::core::{
+        AssetRichMetadata, SocialMediaAttachment, SocialMediaAttachmentKind, SocialPostMetadata,
     };
-    let mut parts = Vec::new();
-    let mut visited = HashSet::new();
-    while visited.insert(cursor) {
-        let Some(f) = folder_by_id.get(&cursor) else {
-            break;
-        };
-        parts.push(f.name.clone());
-        match f.parent_id {
-            Some(pid) => cursor = pid,
-            None => break,
-        }
-    }
-    if parts.is_empty() {
-        "Inbox".to_string()
-    } else {
-        parts.reverse();
-        parts.join("/")
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn upgrades_legacy_xiaohongshu_covers_idempotently_without_degrading_offline_media() {
+        let tmp = tempdir().unwrap();
+        let engine = LiveCharkleEngine::open(tmp.path()).unwrap();
+
+        // 1. Legacy text-only Xiaohongshu asset (800×620) -> MUST upgrade to 900×1440
+        let mut text_asset = AssetRecord::new("小红书笔记", "note.md");
+        text_asset.media_kind = MediaKind::WebBookmark;
+        text_asset.pixel_width = 800;
+        text_asset.pixel_height = 620;
+        text_asset.source_url =
+            Some("https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b".to_string());
+        text_asset.rich_metadata = Some(AssetRichMetadata {
+            social_post: Some(SocialPostMetadata {
+                platform: SocialPlatform::Xiaohongshu,
+                author_name: "排版实验室".to_string(),
+                author_handle: "5f11223344556677889900aa".to_string(),
+                author_avatar_url: None,
+                published_at_text: None,
+                body_text: "纯文字排版心得".to_string(),
+                quoted_author: None,
+                quoted_text: None,
+                article_title: Some("极简网格系统".to_string()),
+                media_urls: Vec::new(),
+                media_thumbnail_urls: Vec::new(),
+                attachments: Vec::new(),
+                has_video: false,
+                video_url: None,
+                reply_count: None,
+                repost_count: None,
+                like_count: Some(128),
+                view_count: None,
+                original_url: "https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b"
+                    .to_string(),
+                media_fetch_failed: false,
+            }),
+            ..AssetRichMetadata::default()
+        });
+        let saved_text = engine.db.save_asset_locally(&text_asset, false).unwrap();
+
+        // 2. Legacy media-bearing Xiaohongshu asset (800×920) whose CDN URL is unreachable ->
+        // MUST be skipped rather than degraded to text-only!
+        let mut media_asset = AssetRecord::new("图集笔记", "media.md");
+        media_asset.media_kind = MediaKind::WebBookmark;
+        media_asset.pixel_width = 800;
+        media_asset.pixel_height = 920;
+        media_asset.source_url = Some("http://127.0.0.1:1/unreachable-note".to_string());
+        media_asset.rich_metadata = Some(AssetRichMetadata {
+            social_post: Some(SocialPostMetadata {
+                platform: SocialPlatform::Xiaohongshu,
+                author_name: "光影集".to_string(),
+                author_handle: "5f11223344556677889900bb".to_string(),
+                author_avatar_url: None,
+                published_at_text: None,
+                body_text: "有封面图的笔记".to_string(),
+                quoted_author: None,
+                quoted_text: None,
+                article_title: Some("胶片质感调色".to_string()),
+                media_urls: vec!["http://127.0.0.1:1/cover.jpg".to_string()],
+                media_thumbnail_urls: vec![],
+                attachments: vec![SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Photo,
+                    "http://127.0.0.1:1/cover.jpg",
+                    None,
+                )],
+                has_video: false,
+                video_url: None,
+                reply_count: None,
+                repost_count: None,
+                like_count: Some(520),
+                view_count: None,
+                original_url: "http://127.0.0.1:1/unreachable-note".to_string(),
+                media_fetch_failed: false,
+            }),
+            ..AssetRichMetadata::default()
+        });
+        let saved_media = engine.db.save_asset_locally(&media_asset, false).unwrap();
+
+        let upgraded = engine.upgrade_legacy_xiaohongshu_covers_if_needed().await;
+        assert_eq!(upgraded, vec![saved_text.id]);
+
+        let refreshed_text = engine.fetch_asset(saved_text.id).unwrap().unwrap();
+        assert_eq!(
+            (refreshed_text.pixel_width, refreshed_text.pixel_height),
+            (900, 1440)
+        );
+
+        // Media-bearing offline asset stayed untouched at 800×920 (never downgraded)
+        let refreshed_media = engine.fetch_asset(saved_media.id).unwrap().unwrap();
+        assert_eq!(
+            (refreshed_media.pixel_width, refreshed_media.pixel_height),
+            (800, 920)
+        );
+
+        // Second run is idempotent for already-migrated text asset
+        let second_run = engine.upgrade_legacy_xiaohongshu_covers_if_needed().await;
+        assert!(second_run.is_empty());
     }
 }

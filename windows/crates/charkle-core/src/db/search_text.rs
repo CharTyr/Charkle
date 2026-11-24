@@ -14,11 +14,16 @@ pub fn has_han(ch: char) -> bool {
 }
 
 /// Tokenizes text by separating each Han character individually while preserving
-/// contiguous alphanumeric Latin/digit words.
+/// contiguous alphanumeric Latin/digit words and folding full-width ASCII (`FF01..=FF5E`).
 pub fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut word = String::new();
-    for ch in text.chars() {
+    for raw_ch in text.chars() {
+        let ch = match raw_ch as u32 {
+            0x3000 => ' ',
+            0xFF01..=0xFF5E => char::from_u32(raw_ch as u32 - 0xFEE0).unwrap_or(raw_ch),
+            _ => raw_ch,
+        };
         if has_han(ch) || !ch.is_alphanumeric() {
             if !word.is_empty() {
                 tokens.push(std::mem::take(&mut word));

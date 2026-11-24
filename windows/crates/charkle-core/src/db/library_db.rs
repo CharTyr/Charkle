@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::db::search_text;
 use crate::error::{CoreError, CoreResult};
 use crate::models::core::{
-    AssetRecord, FilterCriteria, FolderRecord, LabColor, QuickJumpKind, QuickJumpMatch,
-    SmartFolderRecord, SortOrder, TagCount,
+    AssetBatchPatch, AssetRecord, FilterCriteria, FolderAssignment, FolderRecord, LabColor,
+    QuickJumpKind, QuickJumpMatch, SmartFolderRecord, SortOrder, TagCount,
 };
 use crate::models::media::{cosine_similarity, AssetVector, EmbeddingPrecision};
 use crate::models::moodboard::{BoardNodeKind, MoodboardDocument};
@@ -27,6 +27,7 @@ use crate::models::sync::{
     tag_map, AssetChanges, BoardChanges, DeletedAssetFingerprint, SyncClocks, SyncOperation,
     SyncOperationChange, SyncStamp,
 };
+use crate::sync::MOUNTED_PATH_ID_PREFIX;
 use crate::wire::swift_codec::{canonical_json_bytes, format_swift_uuid, SyncFields};
 
 const SCHEMA_VERSION: i32 = 2;
@@ -534,6 +535,10 @@ impl LibraryDatabase {
             "DELETE FROM assets_fts WHERE rowid IN (SELECT rowid FROM assets WHERE id=?1)",
             params![id_str],
         )?;
+        conn.execute(
+            "DELETE FROM board_assets WHERE asset_id=?1",
+            params![id_str],
+        )?;
         conn.execute("DELETE FROM assets WHERE id=?1", params![id_str])?;
         Ok(())
     }
@@ -923,14 +928,45 @@ impl LibraryDatabase {
         })
     }
 
-    /// Deletes a folder. When `trash_contents == false`, moves direct assets to Inbox.
-    /// When `trash_contents == true`, trashes all non-trashed assets in subtree and deletes subtree post-order.
+    /// Deletes a folder atomically inside one SQLite transaction.
+    /// - When `trash_contents == false`: reparents direct child folders to `root.parent_id` with
+    ///   sibling deduplication, moves direct assets to Inbox, and deletes only `id`.
+    /// - When `trash_contents == true`: trashes all assets in the subtree and deletes subtree post-order.
     pub fn delete_folder(&self, id: Uuid, trash_contents: bool) -> CoreResult<()> {
         self.with_transaction(|conn| {
             let Some(root) = Self::folder_by_id_conn(conn, id)? else {
                 return Ok(());
             };
             if !trash_contents {
+                let all_folders = Self::fetch_folders_conn(conn)?;
+                let mut siblings: Vec<FolderRecord> = all_folders
+                    .iter()
+                    .filter(|f| f.parent_id == root.parent_id && f.id != id)
+                    .cloned()
+                    .collect();
+                let children: Vec<FolderRecord> = all_folders
+                    .into_iter()
+                    .filter(|f| f.parent_id == Some(id))
+                    .collect();
+                for mut child in children {
+                    let base = child.name.clone();
+                    let mut candidate = base.clone();
+                    let mut suffix = 2;
+                    while (root.parent_id.is_none() && candidate.eq_ignore_ascii_case("Inbox"))
+                        || siblings
+                            .iter()
+                            .any(|s| s.name.eq_ignore_ascii_case(&candidate))
+                    {
+                        candidate = format!("{base} {suffix}");
+                        suffix += 1;
+                    }
+                    child.name = candidate;
+                    child.parent_id = root.parent_id;
+                    child.updated_at = Utc::now();
+                    Self::record_conn(conn, SyncOperationChange::Folder(child.clone()), true)?;
+                    siblings.push(child);
+                }
+
                 let direct_assets = Self::fetch_assets_conn(
                     conn,
                     &FilterCriteria {
@@ -961,7 +997,7 @@ impl LibraryDatabase {
                 &FilterCriteria {
                     folder_id: Some(id),
                     include_subfolders: true,
-                    include_trashed: false,
+                    include_trashed: true,
                     ..FilterCriteria::default()
                 },
                 None,
@@ -1161,6 +1197,23 @@ impl LibraryDatabase {
         Ok(out)
     }
 
+    /// Returns all asset IDs currently indexed in `board_assets` for `board_id`.
+    pub fn board_asset_ids(&self, board_id: Uuid) -> CoreResult<HashSet<Uuid>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT asset_id FROM board_assets WHERE board_id=?1")?;
+        let rows = stmt.query_map(params![format_swift_uuid(&board_id)], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = HashSet::new();
+        for row in rows {
+            let s = row?;
+            if let Ok(uuid) = Uuid::parse_str(&s) {
+                out.insert(uuid);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn quick_jump(&self, query: &str, limit: usize) -> CoreResult<Vec<QuickJumpMatch>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1228,11 +1281,12 @@ impl LibraryDatabase {
         };
         for item in Self::fetch_assets_conn(&conn, &filters, Some(limit.max(60)))? {
             let score = search_text::fuzzy_score(query, &item.title).unwrap_or(0.55);
+            let subtitle = item.display_type_label();
             matches.push(QuickJumpMatch {
                 id: format!("asset-{}", format_swift_uuid(&item.id)),
                 kind: QuickJumpKind::Asset,
                 title: item.title,
-                subtitle: item.media_kind.localized_label().to_string(),
+                subtitle,
                 target_uuid: Some(item.id),
                 tag_name: None,
                 score,
@@ -1508,15 +1562,36 @@ impl LibraryDatabase {
         })
     }
 
-    /// Returns top `limit` assets ranked by embedding cosine similarity above `min_score`.
+    /// Returns top `limit` non-trashed assets ranked by embedding cosine similarity above `min_score`.
     pub fn search_by_embedding(
         &self,
         query_embedding: &[f32],
         limit: usize,
         min_score: f32,
     ) -> CoreResult<Vec<(Uuid, f32)>> {
-        let all = self.vectors()?;
-        let mut scored: Vec<(Uuid, f32)> = all
+        let active_vectors = {
+            let conn = self.lock_conn()?;
+            let mut stmt = conn.prepare(
+                "SELECT v.feature_print, v.embedding, v.precision, v.embedding_model, v.asset_id \
+                 FROM asset_vectors v \
+                 JOIN assets a ON v.asset_id = a.id \
+                 WHERE a.trashed = 0",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let vec = Self::read_vector_row(r)?;
+                let id_str: String = r.get(4)?;
+                Ok((id_str, vec))
+            })?;
+            let mut out = HashMap::new();
+            for row in rows {
+                let (id_str, vec) = row?;
+                if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                    out.insert(uuid, vec);
+                }
+            }
+            out
+        };
+        let mut scored: Vec<(Uuid, f32)> = active_vectors
             .into_iter()
             .filter_map(|(id, vec)| {
                 let emb = vec.embedding.as_deref()?;
@@ -1632,6 +1707,207 @@ impl LibraryDatabase {
         saved.drive_file_id = value.drive_file_id.clone();
         Self::put_asset_conn(conn, &saved)?;
         Ok(saved)
+    }
+
+    /// Applies an `AssetBatchPatch` atomically across all deduplicated assets inside a single
+    /// `BEGIN IMMEDIATE` SQLite transaction, guaranteeing all-or-nothing batch updates and
+    /// strictly monotonic HLC stamps across every asset in the batch.
+    pub fn update_assets_locally(&self, patch: &AssetBatchPatch) -> CoreResult<Vec<AssetRecord>> {
+        self.with_transaction(|conn| {
+            if let FolderAssignment::Folder(fid) = patch.folder_assignment {
+                if Self::folder_by_id_conn(conn, fid)?.is_none() {
+                    return Err(CoreError::NotFound(format_swift_uuid(&fid)));
+                }
+            }
+
+            let mut seen = HashSet::with_capacity(patch.asset_ids.len());
+            let mut changed = Vec::with_capacity(patch.asset_ids.len());
+            for &id in &patch.asset_ids {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let Some(mut asset) = Self::asset_by_id_conn(conn, id)? else {
+                    continue;
+                };
+                if let Some(ref title) = patch.title {
+                    let clean = title.trim();
+                    if !clean.is_empty() {
+                        asset.title = clean.to_string();
+                    }
+                }
+                if let Some(ref notes) = patch.notes {
+                    asset.notes = notes.clone();
+                }
+                if let Some(ref ai_desc) = patch.ai_description {
+                    let clean = ai_desc.trim();
+                    asset.ai_description = if clean.is_empty() {
+                        None
+                    } else {
+                        Some(clean.to_string())
+                    };
+                }
+                if let Some(rating) = patch.rating {
+                    asset.rating = rating.clamp(0, 5);
+                }
+
+                let mut tags = tag_map(&asset.tags);
+                if patch.accept_suggested_tags {
+                    for sug in &asset.suggested_tags {
+                        let clean = sug.trim();
+                        let key = search_text::normalize(clean);
+                        if !key.is_empty() {
+                            tags.insert(key, clean.to_string());
+                        }
+                    }
+                    asset.suggested_tags.clear();
+                }
+                if !patch.dismiss_suggested_tags.is_empty() {
+                    let dismiss: HashSet<String> = patch
+                        .dismiss_suggested_tags
+                        .iter()
+                        .map(|t| search_text::normalize(t))
+                        .collect();
+                    asset
+                        .suggested_tags
+                        .retain(|t| !dismiss.contains(&search_text::normalize(t)));
+                }
+                for tag in &patch.add_tags {
+                    let clean = tag.trim();
+                    let key = search_text::normalize(clean);
+                    if !key.is_empty() {
+                        tags.insert(key.clone(), clean.to_string());
+                        asset
+                            .suggested_tags
+                            .retain(|s| search_text::normalize(s) != key);
+                    }
+                }
+                for tag in &patch.remove_tags {
+                    tags.remove(&search_text::normalize(tag));
+                }
+                let mut sorted_tags: Vec<String> = tags.into_values().collect();
+                sorted_tags.sort();
+                asset.tags = sorted_tags;
+
+                match patch.folder_assignment {
+                    FolderAssignment::Unchanged => {}
+                    FolderAssignment::Inbox => asset.folder_id = None,
+                    FolderAssignment::Folder(fid) => asset.folder_id = Some(fid),
+                }
+                if let Some(pinned) = patch.pinned_offline {
+                    asset.pinned_offline = pinned;
+                }
+                if let Some(trashed) = patch.is_trashed {
+                    asset.is_trashed = trashed;
+                }
+
+                changed.push(Self::save_asset_locally_conn(conn, &asset, true)?);
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Permanently deletes all deduplicated assets inside a single `BEGIN IMMEDIATE` transaction,
+    /// recording tombstones, anti-respawn fingerprints, `board_assets` / `assets_fts` removals,
+    /// and media cleanup markers atomically.
+    pub fn permanently_delete_assets_locally(
+        &self,
+        ids: &[Uuid],
+        root_prefix: &str,
+        precomputed_md5: &HashMap<Uuid, String>,
+    ) -> CoreResult<usize> {
+        self.with_transaction(|conn| {
+            let folders = Self::fetch_folders_conn(conn)?;
+            let folder_by_id: HashMap<Uuid, FolderRecord> =
+                folders.into_iter().map(|f| (f.id, f)).collect();
+
+            let mut seen = HashSet::with_capacity(ids.len());
+            let mut deleted_count = 0usize;
+            for &id in ids {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let Some(asset) = Self::asset_by_id_conn(conn, id)? else {
+                    continue;
+                };
+                let mounted = asset
+                    .drive_file_id
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("mounted-"));
+                if mounted {
+                    if let Some(ref remote) = asset.drive_file_id {
+                        let resolved_remote = if remote.starts_with(MOUNTED_PATH_ID_PREFIX) {
+                            remote.clone()
+                        } else {
+                            let rel_dir =
+                                mounted_relative_folder_path(asset.folder_id, &folder_by_id);
+                            format!(
+                                "{MOUNTED_PATH_ID_PREFIX}{root_prefix}/{rel_dir}/{}",
+                                asset.file_name
+                            )
+                        };
+                        Self::set_state_conn(
+                            conn,
+                            &format!("local.delete.asset.{}", format_swift_uuid(&id)),
+                            Some(&resolved_remote),
+                        )?;
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.drive.{resolved_remote}"),
+                            Some(&true),
+                        )?;
+                        if resolved_remote != *remote {
+                            Self::set_state_conn(
+                                conn,
+                                &format!("deleted.drive.{remote}"),
+                                Some(&true),
+                            )?;
+                        }
+                    }
+                } else if let Some(ref remote) = asset.drive_file_id {
+                    if !remote.is_empty() {
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.drive.{remote}"),
+                            Some(&true),
+                        )?;
+                    }
+                }
+
+                if !asset.content_hash.is_empty() {
+                    let md5 = precomputed_md5.get(&id).cloned();
+                    let fp = DeletedAssetFingerprint {
+                        asset_id: id,
+                        sha256: asset.content_hash.clone(),
+                        md5: md5.clone(),
+                        file_name: asset.file_name.clone(),
+                        deleted_at: Utc::now(),
+                    };
+                    Self::set_state_conn(
+                        conn,
+                        &format!("deleted.content.{}", asset.content_hash),
+                        Some(&fp),
+                    )?;
+                    if let Some(m) = md5.filter(|s| !s.is_empty()) {
+                        Self::set_state_conn(conn, &format!("deleted.md5.{m}"), Some(&fp))?;
+                    }
+                }
+
+                Self::record_conn(
+                    conn,
+                    SyncOperationChange::DeleteAsset {
+                        id,
+                        drive_id: if mounted {
+                            None
+                        } else {
+                            asset.drive_file_id.clone()
+                        },
+                    },
+                    true,
+                )?;
+                deleted_count += 1;
+            }
+            Ok(deleted_count)
+        })
     }
 
     pub fn save_board_locally(&self, board: &MoodboardDocument) -> CoreResult<MoodboardDocument> {
@@ -2193,5 +2469,47 @@ impl LibraryDatabase {
             }
             Ok(ids)
         })
+    }
+
+    /// Re-queues `media.cleanup.*` markers for assets whose on-disk files were transiently locked
+    /// during Windows cleanup so a subsequent sweep finishes unlinking them.
+    pub fn requeue_media_cleanup_ids(&self, ids: &HashSet<Uuid>) -> CoreResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_transaction(|conn| {
+            for id in ids {
+                let key = format!("media.cleanup.{}", format_swift_uuid(id));
+                Self::set_state_conn(conn, &key, Some(&true))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn mounted_relative_folder_path(
+    folder_id: Option<Uuid>,
+    folder_by_id: &HashMap<Uuid, FolderRecord>,
+) -> String {
+    let Some(mut cursor) = folder_id else {
+        return "Inbox".to_string();
+    };
+    let mut parts = Vec::new();
+    let mut visited = HashSet::new();
+    while visited.insert(cursor) {
+        let Some(f) = folder_by_id.get(&cursor) else {
+            break;
+        };
+        parts.push(f.name.clone());
+        match f.parent_id {
+            Some(pid) => cursor = pid,
+            None => break,
+        }
+    }
+    if parts.is_empty() {
+        "Inbox".to_string()
+    } else {
+        parts.reverse();
+        parts.join("/")
     }
 }

@@ -73,7 +73,13 @@ impl FsTransportCore {
         let mut path = self.root_dir.clone();
         if !rel.is_empty() {
             for seg in rel.split('/') {
-                if seg.is_empty() || seg == "." || seg == ".." {
+                if seg.is_empty()
+                    || seg == "."
+                    || seg == ".."
+                    || seg.contains('\\')
+                    || seg.contains(':')
+                    || seg.contains('\0')
+                {
                     return Err(CoreError::InvalidPayload(format!(
                         "Unsafe relative path segment in `{id}`"
                     )));
@@ -327,10 +333,15 @@ impl DriveTransport for LocalFolderTransport {
         }
         let tmp = target.with_file_name(format!(".charkle-write-{}", Uuid::new_v4().simple()));
         fs::write(&tmp, data)?;
-        if target.exists() {
-            let _ = fs::remove_file(&target);
+        if fs::rename(&tmp, &target).is_err() {
+            if target.exists() {
+                let _ = fs::remove_file(&target);
+            }
+            if let Err(err) = fs::rename(&tmp, &target) {
+                let _ = fs::remove_file(&tmp);
+                return Err(err.into());
+            }
         }
-        fs::rename(&tmp, &target)?;
         let actual_name = target
             .file_name()
             .and_then(|n| n.to_str())
@@ -585,5 +596,30 @@ impl DriveTransport for MountedVolumeTransport {
             fs::remove_file(path)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_path_blocks_windows_backslash_and_drive_letter_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transport = LocalFolderTransport::new(tmp.path());
+        for bad in [
+            "../outside.txt",
+            "folder/../../outside.txt",
+            "C:\\Windows\\System32\\cmd.exe",
+            "folder/sub\\..\\escape",
+            "D:evil.txt",
+        ] {
+            assert!(
+                transport.core.resolve_path(bad).is_err(),
+                "expected traversal rejection for `{bad}`"
+            );
+        }
+        let ok = transport.core.resolve_path("Inbox/poster.png").unwrap();
+        assert!(ok.starts_with(tmp.path()));
     }
 }

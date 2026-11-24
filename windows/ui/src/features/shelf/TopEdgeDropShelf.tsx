@@ -1,144 +1,614 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowUpRight,
   Camera,
-  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clipboard,
+  Copy,
   ExternalLink,
-  Folder,
-  Inbox,
+  Eye,
   LayoutGrid,
-  Maximize2,
-  Minimize2,
+  Link2,
   Pin,
   Search,
-  Share2,
   Upload,
   X,
 } from 'lucide-react';
-import { getTransport } from '../../api/transport';
+import { getTransport, isTauriRuntime } from '../../api/transport';
 import { CharkleBrandMark, CustomSelect, type SelectOption } from '../../design-system';
 import {
   buildFolderTree,
   createDefaultFilterCriteria,
   flattenFolderTree,
+  wireDateToMs,
   type AssetRecord,
   type ClipboardPreview,
   type FolderRecord,
   type MoodboardSummary,
+  type ShelfSettings,
   type ShelfTargetMode,
 } from '../../types/domain';
 
+const TOP_EAR_RADIUS = 12;
+const BOTTOM_CORNER_RADIUS = 24;
+const TOP_BAND_HEIGHT = 38;
+const COMPACT_WIDTH = 668;
+const COMPACT_HEIGHT = 330;
+const FULL_WIDTH = 980;
+const FULL_HEIGHT = 564;
+const COLLAPSED_WIDTH = 228;
+const COLLAPSED_HEIGHT = 36;
+const DRAG_OUT_THRESHOLD = 6;
+
+/**
+ * Exact SVG path matching macOS `NotchShellShape` (concave top ears flaring into `y = 0`
+ * and smooth continuous bottom corners).
+ */
+function buildNotchShellPath(w: number, h: number, topEar = TOP_EAR_RADIUS, botCorner = BOTTOM_CORNER_RADIUS): string {
+  const topR = Math.min(topEar, w * 0.25, h * 0.45);
+  const botR = Math.min(botCorner, Math.max(0, (w - topR * 2) * 0.5), Math.max(0, h - topR));
+  const k = 0.55228475;
+  return [
+    `M 0 0`,
+    `C ${(topR * k).toFixed(2)} 0 ${topR.toFixed(2)} ${(topR * (1 - k)).toFixed(2)} ${topR.toFixed(2)} ${topR.toFixed(2)}`,
+    `L ${topR.toFixed(2)} ${(h - botR).toFixed(2)}`,
+    `C ${topR.toFixed(2)} ${(h - botR * (1 - k)).toFixed(2)} ${(topR + botR * (1 - k)).toFixed(2)} ${h.toFixed(2)} ${(topR + botR).toFixed(2)} ${h.toFixed(2)}`,
+    `L ${(w - topR - botR).toFixed(2)} ${h.toFixed(2)}`,
+    `C ${(w - topR - botR * (1 - k)).toFixed(2)} ${h.toFixed(2)} ${(w - topR).toFixed(2)} ${(h - botR * (1 - k)).toFixed(2)} ${(w - topR).toFixed(2)} ${(h - botR).toFixed(2)}`,
+    `L ${(w - topR).toFixed(2)} ${topR.toFixed(2)}`,
+    `C ${(w - topR).toFixed(2)} ${(topR * (1 - k)).toFixed(2)} ${(w - topR * k).toFixed(2)} 0 ${w.toFixed(2)} 0`,
+    `Z`,
+  ].join(' ');
+}
+
+function buildNotchRimPath(w: number, h: number, topEar = TOP_EAR_RADIUS, botCorner = BOTTOM_CORNER_RADIUS): string {
+  const topR = Math.min(topEar, w * 0.25, h * 0.45);
+  const botR = Math.min(botCorner, Math.max(0, (w - topR * 2) * 0.5), Math.max(0, h - topR));
+  const k = 0.55228475;
+  return [
+    `M 0.5 0`,
+    `C ${(topR * k).toFixed(2)} 0 ${topR.toFixed(2)} ${(topR * (1 - k)).toFixed(2)} ${topR.toFixed(2)} ${topR.toFixed(2)}`,
+    `L ${topR.toFixed(2)} ${(h - botR).toFixed(2)}`,
+    `C ${topR.toFixed(2)} ${(h - botR * (1 - k)).toFixed(2)} ${(topR + botR * (1 - k)).toFixed(2)} ${(h - 0.5).toFixed(2)} ${(topR + botR).toFixed(2)} ${(h - 0.5).toFixed(2)}`,
+    `L ${(w - topR - botR).toFixed(2)} ${(h - 0.5).toFixed(2)}`,
+    `C ${(w - topR - botR * (1 - k)).toFixed(2)} ${(h - 0.5).toFixed(2)} ${(w - topR).toFixed(2)} ${(h - botR * (1 - k)).toFixed(2)} ${(w - topR).toFixed(2)} ${(h - botR).toFixed(2)}`,
+    `L ${(w - topR).toFixed(2)} ${topR.toFixed(2)}`,
+    `C ${(w - topR).toFixed(2)} ${(topR * (1 - k)).toFixed(2)} ${(w - topR * k).toFixed(2)} 0 ${(w - 0.5).toFixed(2)} 0`,
+  ].join(' ');
+}
+
+function isPlainWebBookmark(asset: AssetRecord): boolean {
+  return (
+    asset.mediaKind === 'webBookmark' &&
+    !asset.richMetadata?.githubRepo &&
+    !asset.richMetadata?.socialPost &&
+    Boolean(asset.sourceURL?.trim())
+  );
+}
+
+function formatClipboardUrlPrompt(clip: ClipboardPreview): string {
+  const rawUrl = (clip.url || clip.label || '').trim();
+  let parsed: URL | null = null;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    parsed = null;
+  }
+  const host = parsed?.hostname.toLowerCase().replace(/^www\./, '') ?? '';
+  const pathSegments = parsed
+    ? parsed.pathname
+        .split('/')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
+  if (clip.isSocialOrGithubUrl || host === 'xiaohongshu.com' || host.endsWith('.xiaohongshu.com') || host === 'xhslink.com' || host.endsWith('.xhslink.com')) {
+    if (host === 'github.com' && pathSegments.length >= 2) {
+      const repo = pathSegments[1].replace(/\.git$/i, '');
+      return `检测到 GitHub 仓库链接 · ${pathSegments[0]}/${repo}`;
+    }
+    if (
+      host === 'xiaohongshu.com' ||
+      host.endsWith('.xiaohongshu.com') ||
+      host === 'xhslink.com' ||
+      host.endsWith('.xhslink.com')
+    ) {
+      const compact = rawUrl.replace(/^https?:\/\/(www\.)?/i, '');
+      return `检测到小红书链接 · ${compact || clip.label}`;
+    }
+    const compact = rawUrl.replace(/^https?:\/\/(www\.)?/i, '');
+    return `检测到推文链接 · ${compact || clip.label}`;
+  }
+
+  return `检测到网页链接 · ${host || clip.label}`;
+}
+
+interface ShelfAssetThumbProps {
+  asset: AssetRecord;
+  rawThumbUrl: string;
+  fixedHeight?: boolean;
+}
+
+const ShelfAssetThumb: React.FC<ShelfAssetThumbProps> = ({
+  asset,
+  rawThumbUrl,
+  fixedHeight = false,
+}) => {
+  const thumbSrc =
+    rawThumbUrl.startsWith('data:') || rawThumbUrl.startsWith('blob:')
+      ? rawThumbUrl
+      : `${rawThumbUrl}?v=${encodeURIComponent(String(asset.updatedAt))}`;
+  const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [thumbSrc]);
+
+  if (asset.fileName.toLowerCase().endsWith('.swatch')) {
+    const hex = (asset.dominantColors[0]?.hex || '#2A60E0').toUpperCase();
+    return (
+      <div
+        className={
+          fixedHeight
+            ? 'w-full h-full flex items-end p-1.5'
+            : 'w-full aspect-[4/3] flex items-end p-2'
+        }
+        style={{ backgroundColor: hex }}
+      >
+        <span className="px-1.5 py-0.5 rounded-[5px] bg-black/48 text-[9.5px] font-medium charkle-mono text-white/95 truncate max-w-full">
+          {hex}
+        </span>
+      </div>
+    );
+  }
+
+  if (imgFailed) {
+    return (
+      <div
+        className={[
+          'w-full flex items-center justify-center p-2 text-center bg-white/[0.06] text-[10.5px] font-medium text-white/70',
+          fixedHeight ? 'h-full' : 'aspect-[4/3]',
+        ].join(' ')}
+      >
+        <span className="line-clamp-3 break-words">{asset.title}</span>
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={thumbSrc}
+      alt={asset.title}
+      draggable={false}
+      onError={() => setImgFailed(true)}
+      className={fixedHeight ? 'w-full h-full object-cover' : 'w-full h-auto block object-cover'}
+      style={{ backgroundColor: asset.dominantColors[0]?.hex || undefined }}
+    />
+  );
+};
+
 export interface TopEdgeDropShelfProps {
   initialFullGallery?: boolean;
+  initialExpanded?: boolean;
 }
 
 /**
- * Windows Top-Edge Drop Shelf (`shelf.html`):
- * Non-focus-stealing pure-black frosted capsule anchored top-center with dynamic
- * `WM_NCHITTEST` hit-rect reporting, Compact + Expanded Full-Waterfall dual states,
- * target routing (`收件箱 / 指定文件夹 / 当前活跃情绪板`), live clipboard quick-collect chip,
- * and native Win32 OLE `DoDragDrop` outbound file dragging.
+ * Pure-black Hardware Notch Drop Shelf (`shelf.html`) faithful 1:1 to macOS `NotchShelfView.swift`:
+ * - Concave top-ear pure-black bezel silhouette with vertical rim gradient & capsule-only shadow
+ * - Fluid `notchMorphSpring` expand/collapse from top bezel & compact <-> full-waterfall morph
+ * - Zero invented title bar text; exact top wing controls (brand mark + Pin / Open Main / Close)
+ * - Native Tauri v2 OS file/folder drop + 6px-threshold native Win32 OLE `DoDragDrop` drag-out
+ * - Full-Waterfall rubber-band marquee multi-select + live search
  */
 export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
   initialFullGallery = false,
+  initialExpanded,
 }) => {
   const capsuleRef = useRef<HTMLDivElement | null>(null);
+  const filmstripRef = useRef<HTMLDivElement | null>(null);
+  const waterfallGridRef = useRef<HTMLDivElement | null>(null);
+
+  const [expanded, setExpanded] = useState<boolean>(
+    initialExpanded ?? !isTauriRuntime(),
+  );
   const [fullGallery, setFullGallery] = useState(initialFullGallery);
+  const fullGalleryRef = useRef(fullGallery);
+  fullGalleryRef.current = fullGallery;
   const [pinned, setPinned] = useState(false);
+  const [minimalMode, setMinimalMode] = useState(false);
   const [targetMode, setTargetMode] = useState<ShelfTargetMode>('inbox');
   const [selectedFolderId, setSelectedFolderId] = useState<string>('');
   const [assets, setAssets] = useState<AssetRecord[]>([]);
   const [folders, setFolders] = useState<FolderRecord[]>([]);
   const [boards, setBoards] = useState<MoodboardSummary[]>([]);
+  const [inboxCount, setInboxCount] = useState<number>(0);
   const [clipboard, setClipboard] = useState<ClipboardPreview | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [dragHovering, setDragHovering] = useState(false);
+  const [htmlDragHovering, setHtmlDragHovering] = useState(false);
+  const [nativeDragHover, setNativeDragHover] = useState<{ active: boolean; count: number }>({
+    active: false,
+    count: 0,
+  });
+  const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [dismissedClipboardLabel, setDismissedClipboardLabel] = useState<string | null>(null);
+  const [marquee, setMarquee] = useState<{
+    startX: number;
+    startY: number;
+    curX: number;
+    curY: number;
+  } | null>(null);
+  const marqueeRef = useRef(marquee);
+  marqueeRef.current = marquee;
+
+  const shelfSettingsRef = useRef<ShelfSettings>({
+    enabled: true,
+    hoverTriggerEnabled: true,
+    defaultTargetMode: 'inbox',
+    defaultFolderId: null,
+    minimalMode: false,
+  });
+
+  const isDropTargeted = htmlDragHovering || nativeDragHover.active;
+  const dragItemCount = Math.max(1, nativeDragHover.count);
 
   const transport = getTransport();
+  const bannerTimerRef = useRef<number | null>(null);
+  const autoCollapseTimerRef = useRef<number | null>(null);
+
+  // Pitfall 5: Atomic timer cancellation clearing AND nulling handles across every transition
+  // (hover, drag, banner, pin, hide, blur) so an unpinned shelf can NEVER wedge open.
+  const clearBannerTimer = useCallback(() => {
+    if (bannerTimerRef.current !== null) {
+      window.clearTimeout(bannerTimerRef.current);
+      bannerTimerRef.current = null;
+    }
+  }, []);
+
+  const cancelAutoCollapse = useCallback(() => {
+    if (autoCollapseTimerRef.current !== null) {
+      window.clearTimeout(autoCollapseTimerRef.current);
+      autoCollapseTimerRef.current = null;
+    }
+  }, []);
+
+  const showBanner = useCallback(
+    (msg: string) => {
+      clearBannerTimer();
+      cancelAutoCollapse();
+      setStatusMessage(msg);
+      bannerTimerRef.current = window.setTimeout(() => {
+        setStatusMessage((prev) => (prev === msg ? null : prev));
+        bannerTimerRef.current = null;
+      }, 2400);
+    },
+    [clearBannerTimer, cancelAutoCollapse],
+  );
+
+  useEffect(() => {
+    const onBlur = () => {
+      cancelAutoCollapse();
+    };
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('blur', onBlur);
+      clearBannerTimer();
+      cancelAutoCollapse();
+    };
+  }, [clearBannerTimer, cancelAutoCollapse]);
 
   const refreshData = useCallback(async () => {
     try {
-      const [fetchedAssets, fetchedFolders, fetchedBoards, clip] = await Promise.all([
-        transport.fetchAssets(createDefaultFilterCriteria({ sortBy: 'newest' })),
-        transport.fetchFolders(),
-        transport.fetchBoards(),
-        transport.getClipboardPreview(),
-      ]);
-      setAssets(fetchedAssets);
+      const [fetchedAssets, fetchedFolders, fetchedBoards, clip, inbox] =
+        await Promise.all([
+          transport.fetchAssets(createDefaultFilterCriteria({ sortBy: 'newest' })),
+          transport.fetchFolders(),
+          transport.fetchBoards(),
+          transport.getClipboardPreview(),
+          transport.inboxCount(),
+        ]);
+      // Match macOS `recentActivityAssets()` ranking recently saved + recently opened assets
+      const ranked = [...fetchedAssets].sort((a, b) => {
+        const aTime = Math.max(
+          wireDateToMs(a.lastOpenedAt),
+          wireDateToMs(a.createdAt),
+        );
+        const bTime = Math.max(
+          wireDateToMs(b.lastOpenedAt),
+          wireDateToMs(b.createdAt),
+        );
+        return bTime - aTime;
+      });
+      setAssets(ranked);
       setFolders(fetchedFolders);
       setBoards(fetchedBoards);
       setClipboard(clip);
-      if (!selectedFolderId && fetchedFolders[0]) {
-        setSelectedFolderId(fetchedFolders[0].id);
-      }
+      setInboxCount(inbox);
+      setSelectedFolderId((prev) => {
+        if (prev && fetchedFolders.some((f) => f.id === prev)) return prev;
+        return fetchedFolders[0]?.id ?? '';
+      });
     } catch {
-      // Ignore transient refresh error in background shelf
+      // Ignore transient background refresh errors
     }
-  }, [transport, selectedFolderId]);
-
-  useEffect(() => {
-    void refreshData();
-    let unlisten: (() => void) | null = null;
-    void transport
-      .subscribeEvents({
-        onLibraryChanged: () => void refreshData(),
-        onBoardUpdated: () => void refreshData(),
-        onClipboardChanged: (preview) => setClipboard(preview),
-        onShelfState: (s) => {
-          setPinned(s.pinned);
-          if (s.expanded) void refreshData();
-        },
-      })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(() => {});
-    return () => {
-      unlisten?.();
-    };
-  }, [transport, refreshData]);
-
-  // Continuously sync visible capsule bounds to Win32 WM_NCHITTEST so outside pixels stay HTTRANSPARENT
-  const reportHitRect = useCallback(() => {
-    const el = capsuleRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    void transport.setShelfHitRect({
-      x: Math.round(rect.left * dpr),
-      y: Math.round(rect.top * dpr),
-      width: Math.round(rect.width * dpr),
-      height: Math.round(rect.height * dpr),
-    });
   }, [transport]);
-
-  useEffect(() => {
-    reportHitRect();
-    const el = capsuleRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const obs = new ResizeObserver(reportHitRect);
-    obs.observe(el);
-    window.addEventListener('resize', reportHitRect);
-    return () => {
-      obs.disconnect();
-      window.removeEventListener('resize', reportHitRect);
-    };
-  }, [reportHitRect, fullGallery]);
-
-  const showBanner = (msg: string) => {
-    setStatusMessage(msg);
-    window.setTimeout(() => {
-      setStatusMessage((prev) => (prev === msg ? null : prev));
-    }, 2400);
-  };
 
   const resolvedTargets = useMemo(() => {
     const folderId = targetMode === 'folder' && selectedFolderId ? selectedFolderId : null;
     const boardId = targetMode === 'activeMoodboard' ? (boards[0]?.id ?? null) : null;
     return { folderId, boardId };
   }, [targetMode, selectedFolderId, boards]);
+
+  const resolvedTargetsRef = useRef(resolvedTargets);
+  resolvedTargetsRef.current = resolvedTargets;
+
+  const openFullGallery = useCallback(() => {
+    if (minimalMode) {
+      void transport.openMainWindow();
+      if (isTauriRuntime()) {
+        void transport.hideShelf();
+      }
+      return;
+    }
+    cancelAutoCollapse();
+    setFullGallery(true);
+    setPinned(true);
+    void transport.setShelfPinned(true);
+    void transport.setShelfAllowActivate(true);
+  }, [transport, minimalMode, cancelAutoCollapse]);
+
+  const closeFullGallery = useCallback(() => {
+    setSelectedIds([]);
+    setSearchQuery('');
+    setFullGallery(false);
+    void transport.setShelfAllowActivate(false);
+  }, [transport]);
+
+  const openMainWindowAndCollapse = useCallback(() => {
+    cancelAutoCollapse();
+    void transport.openMainWindow();
+    if (isTauriRuntime()) {
+      void transport.hideShelf();
+    }
+  }, [transport, cancelAutoCollapse]);
+
+  const openShelfAsset = useCallback(
+    (asset: AssetRecord) => {
+      if (isPlainWebBookmark(asset) && asset.sourceURL) {
+        void transport.openExternalUrl(asset.sourceURL).catch(() => {});
+        void transport.markAssetOpened(asset.id).catch(() => {});
+        if (isTauriRuntime()) {
+          void transport.hideShelf();
+        }
+        return;
+      }
+      void transport.openAssetInMainWindow(asset.id, true);
+    },
+    [transport],
+  );
+
+  const persistTargetSelection = useCallback(
+    (nextMode: ShelfTargetMode, nextFolderId: string) => {
+      const next: ShelfSettings = {
+        ...shelfSettingsRef.current,
+        defaultTargetMode: nextMode,
+        defaultFolderId: nextFolderId || null,
+      };
+      shelfSettingsRef.current = next;
+      void transport.saveShelfSettings(next).catch(() => {});
+    },
+    [transport],
+  );
+
+  // Sync settled target capsule bounds to Win32 WM_NCHITTEST so outside pixels stay click-through
+  // and mid-CSS-transition measurements NEVER shrink the drop target below the expanded capsule!
+  const reportHitRectFor = useCallback(
+    (isExpanded: boolean, isFullGallery: boolean) => {
+      if (!isExpanded) {
+        void transport.setShelfHitRect(null);
+        return;
+      }
+      const dpr = window.devicePixelRatio || 1;
+      const viewportW = window.innerWidth || 1040;
+      const logicalW = Math.min(
+        isFullGallery ? FULL_WIDTH : COMPACT_WIDTH,
+        Math.max(200, viewportW - 16),
+      );
+      const logicalH = isFullGallery ? FULL_HEIGHT : COMPACT_HEIGHT;
+      const logicalLeft = Math.max(0, (viewportW - logicalW) / 2);
+      void transport.setShelfHitRect({
+        x: Math.round(logicalLeft * dpr),
+        y: 0,
+        width: Math.round(logicalW * dpr),
+        height: Math.round(logicalH * dpr),
+      });
+    },
+    [transport],
+  );
+
+  const reportHitRect = useCallback(() => {
+    reportHitRectFor(expanded, fullGallery);
+  }, [reportHitRectFor, expanded, fullGallery]);
+
+  useEffect(() => {
+    void refreshData();
+    void transport
+      .getShelfSettings()
+      .then((cfg) => {
+        shelfSettingsRef.current = cfg;
+        setTargetMode(cfg.defaultTargetMode);
+        if (cfg.defaultFolderId) setSelectedFolderId(cfg.defaultFolderId);
+      })
+      .catch(() => {});
+
+    let disposed = false;
+    const syncHostVisibility = () => {
+      if (initialExpanded !== undefined || !isTauriRuntime()) return;
+      void transport
+        .getDesktopIntegrationStatus()
+        .then((status) => {
+          if (disposed) return;
+          setPinned(status.shelfPinned);
+          if (status.shelfVisible) {
+            setExpanded(true);
+            reportHitRectFor(true, fullGalleryRef.current);
+            void refreshData();
+          }
+        })
+        .catch(() => {});
+    };
+
+    syncHostVisibility();
+
+    let unlisten: (() => void) | null = null;
+    void transport
+      .subscribeEvents({
+        onLibraryChanged: () => void refreshData(),
+        onBoardUpdated: () => void refreshData(),
+        onClipboardChanged: (preview) => setClipboard(preview),
+        onShelfSettings: (cfg) => {
+          shelfSettingsRef.current = cfg;
+          setTargetMode(cfg.defaultTargetMode);
+          if (cfg.defaultFolderId) setSelectedFolderId(cfg.defaultFolderId);
+        },
+        onShelfDragHover: (payload) => {
+          cancelAutoCollapse();
+          setNativeDragHover({ active: payload.active, count: payload.count });
+        },
+        onShelfDropStatus: (payload) => {
+          cancelAutoCollapse();
+          if (payload.phase === 'processing') {
+            setProcessingMessage(payload.message);
+          } else {
+            setProcessingMessage(null);
+            showBanner(payload.message);
+            void refreshData();
+          }
+        },
+        onShelfState: (s) => {
+          cancelAutoCollapse();
+          setPinned(s.pinned);
+          let nextFullGallery = fullGalleryRef.current;
+          if (typeof s.minimalMode === 'boolean') {
+            setMinimalMode(s.minimalMode);
+            if (s.minimalMode) {
+              setFullGallery(false);
+              nextFullGallery = false;
+            }
+          }
+          if (s.defaultTargetMode) {
+            setTargetMode(s.defaultTargetMode);
+          }
+          if (s.expanded) {
+            // Set expanded directly (never inside requestAnimationFrame, which hidden WebView2 suspends!)
+            setExpanded(true);
+            reportHitRectFor(true, nextFullGallery);
+            void refreshData();
+          } else {
+            clearBannerTimer();
+            setExpanded(false);
+            setFullGallery(false);
+            setNativeDragHover({ active: false, count: 0 });
+            setSelectedIds([]);
+            setSearchQuery('');
+            reportHitRectFor(false, false);
+            void transport.setShelfAllowActivate(false);
+          }
+        },
+      })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+        // Re-sync after listeners are live so a `shelf:state` event emitted during async
+        // startup subscription can never leave a visible shelf stuck at `expanded = false`.
+        syncHostVisibility();
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [
+    transport,
+    refreshData,
+    showBanner,
+    initialExpanded,
+    cancelAutoCollapse,
+    clearBannerTimer,
+    reportHitRectFor,
+  ]);
+
+  useEffect(() => {
+    reportHitRect();
+    window.addEventListener('resize', reportHitRect);
+    return () => {
+      window.removeEventListener('resize', reportHitRect);
+    };
+  }, [reportHitRect]);
+
+  // Keyboard shortcuts inside shelf: Ctrl+V instant paste collect, Escape collapse
+  const handleCollectClipboardRef = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (fullGallery) {
+          closeFullGallery();
+        } else {
+          void transport.hideShelf();
+        }
+        return;
+      }
+      if (!typing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        void handleCollectClipboardRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [fullGallery, closeFullGallery, transport]);
+
+  const handleCollectClipboard = async () => {
+    const { folderId, boardId } = resolvedTargetsRef.current;
+    const savedLabel = clipboard?.kind === 'url' ? clipboard.label : null;
+    setProcessingMessage('正在采集剪贴板…');
+    try {
+      const count = await transport.collectClipboardNow(folderId, boardId);
+      if (count > 0 && savedLabel) {
+        setDismissedClipboardLabel(savedLabel);
+      }
+      showBanner(count > 0 ? `已采集 ${count} 项剪贴板内容` : '剪贴板暂无可采集内容');
+      void refreshData();
+    } catch (err) {
+      showBanner(err instanceof Error ? err.message : '采集剪贴板失败');
+    } finally {
+      setProcessingMessage(null);
+    }
+  };
+  handleCollectClipboardRef.current = handleCollectClipboard;
+
+  // Strictly show the quick-save link banner ONLY for valid http(s) URLs (GitHub / X / generic website),
+  // never for plain text, prompts, images, files, or colors.
+  const activeClipboardUrlPrompt = useMemo(() => {
+    if (!clipboard || clipboard.kind !== 'url' || !clipboard.url?.trim()) {
+      return null;
+    }
+    if (clipboard.label === dismissedClipboardLabel) {
+      return null;
+    }
+    return {
+      clip: clipboard,
+      label: formatClipboardUrlPrompt(clipboard),
+    };
+  }, [clipboard, dismissedClipboardLabel]);
 
   const folderOptions = useMemo<SelectOption<string>[]>(() => {
     return flattenFolderTree(buildFolderTree(folders)).map((node) => ({
@@ -148,39 +618,67 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     }));
   }, [folders]);
 
+  const activeBoardTitle = boards[0]?.title ?? '未选择情绪板';
+  const selectedFolderName =
+    folders.find((f) => f.id === selectedFolderId)?.name ??
+    folders[0]?.name ??
+    '默认文件夹';
+
+  const targetDestinationName = useMemo(() => {
+    if (targetMode === 'inbox') return '收件箱';
+    if (targetMode === 'folder') return selectedFolderName;
+    return boards[0]?.title || '活跃情绪板';
+  }, [targetMode, selectedFolderName, boards]);
+
+  const targetDropHint = useMemo(() => {
+    if (targetMode === 'inbox') return '将保存至收件箱';
+    if (targetMode === 'folder') return `将保存至文件夹「${selectedFolderName}」`;
+    return `将保存并加入情绪板「${activeBoardTitle}」`;
+  }, [targetMode, selectedFolderName, activeBoardTitle]);
+
   const filteredAssets = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return assets;
     return assets.filter(
       (a) =>
         a.title.toLowerCase().includes(q) ||
-        a.tags.some((t) => t.toLowerCase().includes(q)),
+        a.tags.some((t) => t.toLowerCase().includes(q)) ||
+        (a.sourceDomain?.toLowerCase().includes(q) ?? false),
     );
   }, [assets, searchQuery]);
 
-  const handleDrop = async (e: React.DragEvent) => {
+  // HTML5 drag-drop handler for web URLs, text drops, color hexes, and browser/mock preview files.
+  // In Tauri desktop runtime, OS file/folder drops are handled authoritatively in Rust
+  // (`WindowEvent::DragDrop`) so we return early on `dataTransfer.files` to prevent duplicate imports.
+  const handleHtmlDrop = async (e: React.DragEvent) => {
     e.preventDefault();
-    setDragHovering(false);
+    setHtmlDragHovering(false);
     const { folderId, boardId } = resolvedTargets;
 
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) {
-      let count = 0;
-      for (const file of files) {
-        const dataUrl = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result ?? ''));
-          reader.readAsDataURL(file);
-        });
-        const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-        if (b64) {
-          await transport.ingestImageBase64(b64, file.name, null, folderId, boardId);
-          count += 1;
+      if (isTauriRuntime()) return;
+      setProcessingMessage(`正在收藏 ${files.length} 项文件…`);
+      try {
+        let count = 0;
+        for (const file of files) {
+          const dataUrl = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result ?? ''));
+            reader.readAsDataURL(file);
+          });
+          const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+          if (b64) {
+            await transport.ingestImageBase64(b64, file.name, null, folderId, boardId);
+            count += 1;
+          }
         }
-      }
-      if (count > 0) {
-        showBanner(`已采集 ${count} 项文件`);
-        void refreshData();
+        if (count > 0) {
+          showBanner(`已收入「${targetDestinationName}」(${count} 项)`);
+          void refreshData();
+        }
+      } finally {
+        setProcessingMessage(null);
       }
       return;
     }
@@ -188,28 +686,157 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     const droppedText = (
       e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain')
     ).trim();
-    if (/^https?:\/\//i.test(droppedText)) {
-      await transport.ingestUrl(droppedText, null, null, folderId, boardId);
-      showBanner('已采集网页链接');
-      void refreshData();
-    } else if (droppedText) {
-      await transport.ingestText('抽屉速记', droppedText, null, folderId, boardId);
-      showBanner('已保存文本灵感');
-      void refreshData();
+    if (!droppedText) return;
+
+    setProcessingMessage('正在解析并收藏…');
+    try {
+      if (/^#[0-9a-f]{6}$/i.test(droppedText)) {
+        await transport.ingestSwatch(droppedText.toUpperCase(), null, folderId, boardId);
+        showBanner(`已收入「${targetDestinationName}」(色卡)`);
+        void refreshData();
+      } else if (/^https?:\/\//i.test(droppedText)) {
+        await transport.ingestUrl(droppedText, null, null, folderId, boardId);
+        showBanner(`已收入「${targetDestinationName}」(链接)`);
+        void refreshData();
+      } else {
+        const title = droppedText.split(/\r?\n/)[0]?.slice(0, 48) || '速记灵感';
+        await transport.ingestText(title, droppedText, null, folderId, boardId);
+        showBanner(`已收入「${targetDestinationName}」(文本)`);
+        void refreshData();
+      }
+    } catch (err) {
+      showBanner(err instanceof Error ? err.message : '导入失败');
+    } finally {
+      setProcessingMessage(null);
     }
   };
 
-  const handleDragOut = async (ids: string[]) => {
-    if (ids.length === 0) return;
+  // Start native Win32 OLE DoDragDrop ONLY after a 6px drag motion (distinguishing click vs drag!)
+  const startCardDragOut = (e: React.PointerEvent, ids: string[], onClick?: () => void) => {
+    if (e.button !== 0 || ids.length === 0) return;
+    if ((e.target as HTMLElement).closest('button')) return;
+
+    const captureTarget = e.currentTarget as HTMLElement;
+    const pointerId = e.pointerId;
     try {
-      const outcome = await transport.startOutboundDrag(ids);
-      if (outcome !== 'cancelled') {
-        showBanner(`已拖出 ${ids.length} 项原文件`);
-      }
-    } catch (err) {
-      showBanner(err instanceof Error ? err.message : '原文件未本地缓存');
+      captureTarget.setPointerCapture?.(pointerId);
+    } catch {
+      // Ignored in synthetic test events
     }
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let launched = false;
+
+    const releaseCapture = () => {
+      try {
+        if (captureTarget.hasPointerCapture?.(pointerId)) {
+          captureTarget.releasePointerCapture?.(pointerId);
+        }
+      } catch {
+        // Ignored
+      }
+    };
+
+    const cleanup = () => {
+      releaseCapture();
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onCancel, true);
+      window.removeEventListener('blur', onCancel);
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      if (launched) return;
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_OUT_THRESHOLD) return;
+      launched = true;
+      cleanup();
+      void transport
+        .startOutboundDrag(ids)
+        .then((outcome) => {
+          if (outcome !== 'cancelled') {
+            showBanner(`已拖出 ${ids.length} 项原文件`);
+          }
+        })
+        .catch((err) => {
+          showBanner(err instanceof Error ? err.message : '原文件尚未缓存在本地');
+        });
+    };
+
+    const onUp = () => {
+      cleanup();
+      if (!launched) onClick?.();
+    };
+
+    const onCancel = () => {
+      cleanup();
+    };
+
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        cleanup();
+      }
+    };
+
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onCancel, true);
+    window.addEventListener('blur', onCancel);
+    window.addEventListener('keydown', onKeyDown, true);
   };
+
+  // Full Waterfall rubber-band marquee multi-select (ref-stabilized so listeners don't thrash per pixel)
+  const marqueeActive = marquee !== null;
+  useEffect(() => {
+    if (!marqueeActive) return;
+    const onMove = (e: MouseEvent) => {
+      const container = waterfallGridRef.current;
+      const current = marqueeRef.current;
+      if (!container || !current) return;
+      const rect = container.getBoundingClientRect();
+      const curX = e.clientX - rect.left + container.scrollLeft;
+      const curY = e.clientY - rect.top + container.scrollTop;
+      setMarquee((prev) => (prev ? { ...prev, curX, curY } : null));
+
+      const left = Math.min(current.startX, curX);
+      const right = Math.max(current.startX, curX);
+      const top = Math.min(current.startY, curY);
+      const bottom = Math.max(current.startY, curY);
+      if (right - left > 4 || bottom - top > 4) {
+        const hit: string[] = [];
+        const cards = container.querySelectorAll<HTMLElement>('[data-shelf-card-id]');
+        cards.forEach((card) => {
+          const cr = card.getBoundingClientRect();
+          const cx = cr.left - rect.left + container.scrollLeft;
+          const cy = cr.top - rect.top + container.scrollTop;
+          if (cx < right && cx + cr.width > left && cy < bottom && cy + cr.height > top) {
+            const id = card.dataset.shelfCardId;
+            if (id) hit.push(id);
+          }
+        });
+        setSelectedIds(hit);
+      }
+    };
+    const onUp = () => setMarquee(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setMarquee(null);
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onUp);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('blur', onUp);
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [marqueeActive]);
 
   const toggleSelect = (id: string, multi: boolean) => {
     setSelectedIds((prev) => {
@@ -218,309 +845,659 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     });
   };
 
+  const targetW = expanded ? (fullGallery ? FULL_WIDTH : COMPACT_WIDTH) : COLLAPSED_WIDTH;
+  const targetH = expanded ? (fullGallery ? FULL_HEIGHT : COMPACT_HEIGHT) : COLLAPSED_HEIGHT;
+  const botRadius = expanded ? BOTTOM_CORNER_RADIUS : 14;
+  const shellPath = buildNotchShellPath(targetW, targetH, TOP_EAR_RADIUS, botRadius);
+  const rimPath = buildNotchRimPath(targetW, targetH, TOP_EAR_RADIUS, botRadius);
+
+  const marqueeBox = marquee
+    ? {
+        left: Math.min(marquee.startX, marquee.curX),
+        top: Math.min(marquee.startY, marquee.curY),
+        width: Math.abs(marquee.curX - marquee.startX),
+        height: Math.abs(marquee.curY - marquee.startY),
+      }
+    : null;
+
   return (
     <div
       className="w-screen h-screen flex justify-center items-start bg-transparent select-none overflow-hidden"
       onDragOver={(e) => {
         e.preventDefault();
-        setDragHovering(true);
+        setHtmlDragHovering(true);
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragHovering(false);
+        if (e.currentTarget === e.target) setHtmlDragHovering(false);
       }}
-      onDrop={(e) => void handleDrop(e)}
+      onDrop={(e) => void handleHtmlDrop(e)}
     >
+      {/* Pure-Black Hardware Notch Capsule with Concave Top Ears (0px outer DWM frame) */}
       <div
         ref={capsuleRef}
         data-testid="top-edge-drop-shelf"
         data-mode={fullGallery ? 'waterfall' : 'compact'}
+        data-expanded={expanded ? 'true' : 'false'}
         style={{
-          width: fullGallery ? 'min(980px, calc(100vw - 24px))' : 'min(672px, calc(100vw - 24px))',
-          maxHeight: fullGallery ? '580px' : '336px',
-          transition:
-            'width var(--duration-drawer) var(--ease-drawer), max-height var(--duration-drawer) var(--ease-drawer)',
+          width: `min(${targetW}px, calc(100vw - 16px))`,
+          height: `${targetH}px`,
+          opacity: expanded ? 1 : 0,
+          transform: expanded
+            ? 'translate3d(0, 0, 0) scale3d(1, 1, 1)'
+            : 'translate3d(0, -14px, 0) scale3d(0.96, 0.92, 1)',
+          filter: expanded ? 'drop-shadow(0 12px 24px rgba(0, 0, 0, 0.44))' : 'none',
         }}
-        className="charkle-glass-dark rounded-b-[24px] px-4 pt-2.5 pb-3.5 flex flex-col gap-2.5 text-[#F2F3F5] border-x border-b border-white/12"
+        className="charkle-shelf-shell relative flex flex-col text-white overflow-hidden"
       >
-        {/* Top Wing Header */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <CharkleBrandMark size={17} variant="dark" />
-            <span className="text-[12.5px] font-semibold tracking-[-0.01em]">
-              顶部灵感抽屉
-            </span>
+        {/* Pure-Black NotchShellShape Vector Backdrop + Vertical Subtle Rim Stroke */}
+        <svg
+          aria-hidden="true"
+          viewBox={`0 0 ${targetW} ${targetH}`}
+          preserveAspectRatio="none"
+          className="pointer-events-none absolute inset-0 w-full h-full"
+        >
+          <defs>
+            <linearGradient id="charkle-notch-rim" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
+              <stop offset="26%" stopColor="#FFFFFF" stopOpacity="0.08" />
+              <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0.14" />
+            </linearGradient>
+          </defs>
+          <path d={shellPath} fill="#000000" />
+          <path
+            d={rimPath}
+            fill="none"
+            stroke="url(#charkle-notch-rim)"
+            strokeWidth="0.9"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
 
-            {/* Target Routing Pill: Inbox / Folder / Active Moodboard */}
-            <div
-              role="radiogroup"
-              aria-label="采集投递目标"
-              className="inline-flex items-center p-0.5 rounded-full bg-white/8 border border-white/10 text-[11px]"
-            >
-              {(
-                [
-                  { id: 'inbox', label: '收件箱', icon: <Inbox size={11} /> },
-                  { id: 'folder', label: '指定文件夹', icon: <Folder size={11} /> },
-                  { id: 'activeMoodboard', label: '当前活跃情绪板', icon: <LayoutGrid size={11} /> },
-                ] as const
-              ).map((opt) => {
-                const active = targetMode === opt.id;
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    onClick={() => setTargetMode(opt.id)}
-                    className={[
-                      'charkle-pressable h-6 px-2 rounded-full inline-flex items-center gap-1 cursor-pointer',
-                      active
-                        ? 'bg-[#5B8DEF] text-white font-medium'
-                        : 'text-white/70 hover:text-white',
-                    ].join(' ')}
-                  >
-                    {opt.icon}
-                    <span>{opt.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {targetMode === 'folder' && folderOptions.length > 0 && (
-              <CustomSelect<string>
-                value={selectedFolderId}
-                options={folderOptions}
-                onChange={setSelectedFolderId}
-                ariaLabel="选择投递文件夹"
-                size="xs"
-                className="h-6 max-w-[140px] bg-white/10 border-white/15 text-white"
-              />
-            )}
-          </div>
-
-          {/* Right Controls */}
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              type="button"
-              title="区域截图采集 (Alt+Shift+A)"
-              aria-label="区域截图采集"
-              onClick={() =>
-                void transport.startRegionCapture(
-                  resolvedTargets.folderId,
-                  resolvedTargets.boardId,
-                )
-              }
-              className="charkle-pressable h-7 w-7 rounded-full inline-flex items-center justify-center text-white/75 hover:text-white hover:bg-white/10 cursor-pointer"
-            >
-              <Camera size={14} />
-            </button>
-
-            <button
-              type="button"
-              title={pinned ? '取消固定展开' : '固定展开抽屉'}
-              aria-label={pinned ? '取消固定展开' : '固定展开抽屉'}
-              onClick={() => {
-                const next = !pinned;
-                setPinned(next);
-                void transport.setShelfPinned(next);
-              }}
-              className={[
-                'charkle-pressable h-7 w-7 rounded-full inline-flex items-center justify-center cursor-pointer',
-                pinned
-                  ? 'bg-[#5B8DEF]/25 text-[#8EB4FF]'
-                  : 'text-white/75 hover:text-white hover:bg-white/10',
-              ].join(' ')}
-            >
-              <Pin size={13.5} />
-            </button>
-
-            <button
-              type="button"
-              title={fullGallery ? '切换为紧凑抽屉' : '展开为全瀑布流抽屉'}
-              aria-label={fullGallery ? '切换为紧凑抽屉' : '展开为全瀑布流抽屉'}
-              onClick={() => setFullGallery((v) => !v)}
-              className="charkle-pressable h-7 px-2 rounded-full inline-flex items-center gap-1 text-[11.5px] text-white/80 hover:text-white hover:bg-white/10 cursor-pointer"
-            >
-              {fullGallery ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-              <span>{fullGallery ? '紧凑' : '瀑布流'}</span>
-            </button>
-
-            <button
-              type="button"
-              title="打开 Charkle 主窗口"
-              aria-label="打开主窗口"
-              onClick={() => void transport.focusMainWindow()}
-              className="charkle-pressable h-7 w-7 rounded-full inline-flex items-center justify-center text-white/75 hover:text-white hover:bg-white/10 cursor-pointer"
-            >
-              <ExternalLink size={13.5} />
-            </button>
-
-            <button
-              type="button"
-              title="收起抽屉"
-              aria-label="收起抽屉"
-              onClick={() => void transport.hideShelf()}
-              className="charkle-pressable h-7 w-7 rounded-full inline-flex items-center justify-center text-white/75 hover:text-white hover:bg-white/10 cursor-pointer"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-
-        {/* Status or Live Clipboard Quick-Collect Chip */}
-        {(statusMessage || clipboard) && (
-          <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-[12px] bg-white/7 border border-white/10 text-[12px]">
-            {statusMessage ? (
-              <span className="inline-flex items-center gap-1.5 text-emerald-400 font-medium">
-                <Check size={13.5} />
-                {statusMessage}
+        {/* Interior Content padded inside concave top ears (topEar + 16px) */}
+        <div
+          style={{
+            paddingLeft: TOP_EAR_RADIUS + 16,
+            paddingRight: TOP_EAR_RADIUS + 16,
+            paddingBottom: 14,
+          }}
+          className="relative z-10 flex-1 min-h-0 flex flex-col"
+        >
+          {/* Band 1: Minimal Wing Bar (Left: Charkle mark + optional Minimal Mode pill; Right: Pin / Open / Close) */}
+          <div
+            style={{ height: TOP_BAND_HEIGHT }}
+            className="shrink-0 flex items-center justify-between"
+          >
+            <div className="flex items-center gap-1.5 min-w-0">
+              <CharkleBrandMark size={16} variant="dark" />
+              <span className="text-[12.5px] font-semibold tracking-[-0.01em] text-white/94 shrink-0 whitespace-nowrap">
+                Charkle
               </span>
-            ) : clipboard ? (
-              <>
-                <span className="inline-flex items-center gap-1.5 min-w-0 truncate text-white/85">
-                  <Clipboard size={13} className="text-[#5B8DEF] shrink-0" />
-                  <span className="truncate">{clipboard.label}</span>
+              {minimalMode && (
+                <span className="inline-flex items-center gap-1 px-[7px] py-[2px] rounded-full bg-white/11 text-[10px] font-semibold text-white/84 shrink-0 whitespace-nowrap">
+                  <span className="w-[5px] h-[5px] rounded-full bg-[#34C769] shrink-0" />
+                  <span>极简采集</span>
                 </span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const count = await transport.collectClipboardNow(
-                      resolvedTargets.folderId,
-                      resolvedTargets.boardId,
-                    );
-                    showBanner(count > 0 ? `已采集 ${count} 项剪贴板内容` : '剪贴板为空');
-                    void refreshData();
-                  }}
-                  className="charkle-pressable h-6 px-2.5 rounded-full bg-[#5B8DEF] hover:bg-[#74A0F7] text-white text-[11.5px] font-medium shrink-0 cursor-pointer"
-                >
-                  立即采集
-                </button>
-              </>
-            ) : null}
-          </div>
-        )}
-
-        {/* Compact Mode: Drop Well + Horizontal Recent Assets Strip */}
-        {!fullGallery ? (
-          <div className="flex flex-col gap-2.5">
-            <div
-              className={[
-                'h-[84px] rounded-[14px] border border-dashed flex flex-col items-center justify-center gap-1 transition-colors duration-150',
-                dragHovering
-                  ? 'border-[#5B8DEF] bg-[#5B8DEF]/20'
-                  : 'border-white/18 bg-white/[0.04]',
-              ].join(' ')}
-            >
-              <Upload size={18} className="text-[#8EB4FF]" />
-              <div className="text-[12.5px] font-medium text-white/90">
-                拖入图片、文件或网页链接直接入库
-              </div>
-              <div className="text-[11px] text-white/50">
-                不抢占当前应用焦点 · 拖动下方卡片即可原生拖出到 Figma / Photoshop / 资源管理器
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between text-[11px] text-white/55 px-0.5">
-                <span>最近素材（点击拖出原文件）</span>
-                <span className="charkle-tabular">{assets.length} 项</span>
-              </div>
-              <div className="flex items-center gap-2 overflow-x-auto charkle-scroll pb-1">
-                {assets.slice(0, 12).map((asset) => (
-                  <div
-                    key={asset.id}
-                    className="group relative shrink-0 h-[84px] w-[104px] rounded-[10px] overflow-hidden bg-white/8 border border-white/10"
-                  >
-                    <img
-                      src={transport.thumbnailUrl(asset.id, 'grid520')}
-                      alt={asset.title}
-                      draggable={false}
-                      className="w-full h-full object-cover"
-                    />
-                    <button
-                      type="button"
-                      title="原生拖出原文件到外部应用"
-                      aria-label={`拖出 ${asset.title}`}
-                      onMouseDown={(e) => {
-                        if (e.button === 0) void handleDragOut([asset.id]);
-                      }}
-                      className="absolute inset-0 bg-black/55 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1 text-[11px] text-white cursor-grab"
-                    >
-                      <Share2 size={14} />
-                      <span>拖出文件</span>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* Expanded Full-Waterfall Shelf Mode */
-          <div className="flex-1 min-h-0 flex flex-col gap-2.5 overflow-hidden">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 flex-1 h-8 px-2.5 rounded-[10px] bg-white/8 border border-white/10">
-                <Search size={13.5} className="text-white/50 shrink-0" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="快速筛选素材…"
-                  className="flex-1 bg-transparent text-[12.5px] text-white placeholder:text-white/40 outline-none"
-                />
-              </div>
-
-              {selectedIds.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => void handleDragOut(selectedIds)}
-                  className="charkle-pressable h-8 px-3 rounded-[10px] bg-[#5B8DEF] text-white text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer shrink-0"
-                >
-                  <Share2 size={13.5} />
-                  <span>拖出已选 {selectedIds.length} 项原文件</span>
-                </button>
               )}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll pr-1">
-              <div className="columns-4 gap-2.5 space-y-2.5">
-                {filteredAssets.slice(0, 60).map((asset) => {
-                  const selected = selectedIds.includes(asset.id);
-                  return (
-                    <div
-                      key={asset.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => toggleSelect(asset.id, e.ctrlKey || e.metaKey)}
-                      className={[
-                        'group relative break-inside-avoid rounded-[10px] overflow-hidden bg-white/8 cursor-pointer',
-                        selected ? 'ring-2 ring-[#5B8DEF]' : 'ring-1 ring-white/10',
-                      ].join(' ')}
-                    >
-                      <img
-                        src={transport.thumbnailUrl(asset.id, 'grid520')}
-                        alt={asset.title}
-                        draggable={false}
-                        className="w-full h-auto block object-cover"
-                      />
-                      <button
-                        type="button"
-                        aria-label={`原生拖出 ${asset.title}`}
-                        onMouseDown={(e) => {
-                          e.stopPropagation();
-                          const ids = selected && selectedIds.length > 1 ? selectedIds : [asset.id];
-                          void handleDragOut(ids);
-                        }}
-                        className="absolute top-1.5 right-1.5 h-6 px-2 rounded-full bg-black/70 text-[10.5px] text-white opacity-0 group-hover:opacity-100 inline-flex items-center gap-1 cursor-grab"
-                      >
-                        <Share2 size={11} />
-                        拖出
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                title={pinned ? '取消固定展开' : '固定展开托盘'}
+                aria-label={pinned ? '取消固定展开' : '固定展开托盘'}
+                onClick={() => {
+                  cancelAutoCollapse();
+                  const next = !pinned;
+                  setPinned(next);
+                  void transport.setShelfPinned(next);
+                }}
+                className={[
+                  'charkle-pressable w-[22px] h-[22px] rounded-full inline-flex items-center justify-center cursor-pointer',
+                  pinned
+                    ? 'bg-white/16 text-[#3B82F6]'
+                    : 'bg-white/8 text-white/68 hover:text-white hover:bg-white/14',
+                ].join(' ')}
+              >
+                <Pin size={10.5} className={pinned ? 'fill-current' : ''} />
+              </button>
+
+              <button
+                type="button"
+                title="打开 Charkle 主窗口"
+                aria-label="打开主窗口"
+                onClick={openMainWindowAndCollapse}
+                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-white/8 text-white/68 hover:text-white hover:bg-white/14 inline-flex items-center justify-center cursor-pointer"
+              >
+                <ArrowUpRight size={11.5} />
+              </button>
+
+              <button
+                type="button"
+                title="收起顶部托盘"
+                aria-label="收起抽屉"
+                onClick={() => {
+                  cancelAutoCollapse();
+                  void transport.hideShelf();
+                }}
+                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-white/10 text-white/68 hover:text-white hover:bg-white/18 inline-flex items-center justify-center cursor-pointer"
+              >
+                <X size={11} />
+              </button>
             </div>
           </div>
-        )}
+
+          {/* Body: Compact Mode vs Expanded Full-Waterfall Mode */}
+          {!fullGallery || minimalMode ? (
+            <div className="pt-2 flex-1 min-h-0 flex flex-col gap-2.5">
+              {/* Row 2: Quick Capture Actions (Pitfall 3: shrink-0 whitespace-nowrap) + Target Switcher + Truncated Detail Chip */}
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    title="区域截图 (Alt+Shift+A)"
+                    aria-label="区域截图采集"
+                    onClick={() =>
+                      void transport
+                        .startRegionCapture(resolvedTargets.folderId, resolvedTargets.boardId)
+                        .catch((err) =>
+                          showBanner(err instanceof Error && err.message ? err.message : '无法启动区域截图'),
+                        )
+                    }
+                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
+                  >
+                    <Camera size={12} className="shrink-0" />
+                    <span>区域截图</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    title="采集剪贴板 (Alt+Shift+V)"
+                    aria-label="采集剪贴板"
+                    onClick={() => void handleCollectClipboard()}
+                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
+                  >
+                    <Clipboard size={12} className="shrink-0" />
+                    <span>剪贴板</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    title={minimalMode ? '退出极简模式并打开主窗' : '打开 Charkle 主窗'}
+                    onClick={openMainWindowAndCollapse}
+                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
+                  >
+                    <LayoutGrid size={12} className="shrink-0" />
+                    <span>{minimalMode ? '恢复主窗' : '主窗'}</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+                  <div
+                    role="radiogroup"
+                    aria-label="采集投递目标"
+                    className="inline-flex items-center p-[2.5px] gap-0.5 rounded-[9px] bg-white/8 shrink-0"
+                  >
+                    {(
+                      [
+                        { id: 'inbox', label: '收件箱' },
+                        { id: 'folder', label: '文件夹' },
+                        { id: 'activeMoodboard', label: '活跃情绪板' },
+                      ] as const
+                    ).map((opt) => {
+                      const active = targetMode === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={() => {
+                            const nextFolderId =
+                              opt.id === 'folder'
+                                ? selectedFolderId || folders[0]?.id || ''
+                                : selectedFolderId;
+                            if (opt.id === 'folder' && nextFolderId && !selectedFolderId) {
+                              setSelectedFolderId(nextFolderId);
+                            }
+                            setTargetMode(opt.id);
+                            persistTargetSelection(opt.id, nextFolderId);
+                          }}
+                          className={[
+                            'charkle-pressable shrink-0 px-2 py-[3.5px] rounded-[7px] text-[10.5px] cursor-pointer whitespace-nowrap',
+                            active
+                              ? 'bg-white/18 text-white font-semibold'
+                              : 'text-white/62 hover:text-white/90 font-medium',
+                          ].join(' ')}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {targetMode === 'inbox' && (
+                    <span className="px-2 py-1 rounded-[7px] bg-white/6 text-[10.5px] text-white/68 charkle-tabular shrink-0 whitespace-nowrap">
+                      {inboxCount} 项
+                    </span>
+                  )}
+
+                  {targetMode === 'folder' && folderOptions.length > 0 && (
+                    <CustomSelect<string>
+                      value={selectedFolderId}
+                      options={folderOptions}
+                      onChange={(fid) => {
+                        setSelectedFolderId(fid);
+                        persistTargetSelection('folder', fid);
+                      }}
+                      ariaLabel="选择投递文件夹"
+                      size="xs"
+                      className="h-[24px] min-w-0 max-w-[160px] bg-white/11 border-white/12 text-white text-[10.5px]"
+                    />
+                  )}
+
+                  {targetMode === 'activeMoodboard' && (
+                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[7px] bg-white/6 text-[10.5px] text-white/86 min-w-0 max-w-[160px]">
+                      <span className="w-[5px] h-[5px] rounded-full bg-emerald-400 shrink-0" />
+                      <span className="truncate">{activeBoardTitle}</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Row 3: Slim 52px Drop Well / Live Clipboard / Status Banner */}
+              <div
+                className={[
+                  'h-[52px] shrink-0 rounded-[13px] flex items-center justify-center transition-colors duration-150 px-3.5',
+                  isDropTargeted
+                    ? 'bg-[#3B82F6]/24 border-[1.5px] border-[#3B82F6]/92'
+                    : 'bg-white/[0.06] border border-dashed border-white/14 hover:bg-white/[0.08]',
+                ].join(' ')}
+              >
+                {processingMessage ? (
+                  <div className="flex items-center gap-2 text-[12px] font-semibold text-white">
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+                    <span>{processingMessage}</span>
+                  </div>
+                ) : statusMessage ? (
+                  <div className="flex items-center gap-2 text-[12.5px] font-semibold text-white">
+                    <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
+                    <span>{statusMessage}</span>
+                  </div>
+                ) : isDropTargeted ? (
+                  <div className="flex items-center gap-2.5">
+                    <Upload size={17} className="text-[#3B82F6] shrink-0" />
+                    <div className="flex flex-col leading-tight">
+                      <span className="text-[12.5px] font-semibold text-white">
+                        松开立即收藏 {dragItemCount} 项素材
+                      </span>
+                      <span className="text-[10.5px] text-white/74">{targetDropHint}</span>
+                    </div>
+                  </div>
+                ) : activeClipboardUrlPrompt ? (
+                  <div className="w-full h-full flex items-center gap-2">
+                    <button
+                      type="button"
+                      aria-label={`检测到剪贴板链接 · ${activeClipboardUrlPrompt.label}`}
+                      onClick={() => void handleCollectClipboard()}
+                      className="flex-1 min-w-0 h-full flex items-center justify-between gap-2.5 cursor-pointer text-left"
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <Link2 size={15} className="text-[#3B82F6] shrink-0" />
+                        <span className="text-[12px] font-medium text-white truncate">
+                          {activeClipboardUrlPrompt.label}
+                        </span>
+                      </span>
+                      <span className="px-2.5 py-1 rounded-full bg-[#3B82F6] text-[11px] font-semibold text-white shrink-0">
+                        保存
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      title="忽略剪贴板链接"
+                      aria-label="忽略剪贴板链接"
+                      onClick={() =>
+                        setDismissedClipboardLabel(activeClipboardUrlPrompt.clip.label)
+                      }
+                      className="charkle-pressable w-6 h-6 rounded-full bg-white/8 hover:bg-white/16 text-white/62 hover:text-white inline-flex items-center justify-center shrink-0 cursor-pointer"
+                    >
+                      <X size={11.5} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void handleCollectClipboard()}
+                    className="w-full h-full flex items-center gap-2.5 cursor-pointer text-left"
+                  >
+                    <Upload size={14.5} className="text-white/72 shrink-0" />
+                    <span className="text-[12px] font-medium text-white/84 truncate">
+                      拖入文件、整个文件夹、网页、推文或 GitHub 链接，或按 Ctrl+V 粘贴
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* Row 4: Recent Assets Header + Horizontal Wheel-Scrollable Filmstrip */}
+              <div className="flex-1 min-h-0 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="px-2.5 py-[3px] rounded-full bg-white/14 text-[11px] font-semibold text-white shrink-0">
+                      最近素材
+                    </span>
+                    <span className="text-[10.5px] text-white/48 truncate">
+                      最近保存与查看 · 拖动可放入其他应用、情绪板或文件夹
+                    </span>
+                  </div>
+
+                  {minimalMode ? (
+                    <button
+                      type="button"
+                      title="退出极简模式并打开主窗口浏览全部素材"
+                      aria-label="恢复主窗看全部"
+                      onClick={openMainWindowAndCollapse}
+                      className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/9 hover:bg-white/16 text-[10.5px] font-semibold text-white/78 inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                    >
+                      <span>恢复主窗看全部</span>
+                      <ArrowUpRight size={10.5} />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      title="展开全画面瀑布流浏览最近素材（支持框选多选）"
+                      aria-label="展开为全瀑布流抽屉"
+                      onClick={openFullGallery}
+                      className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/10 hover:bg-white/16 text-[11px] font-semibold text-white/84 inline-flex items-center gap-1 cursor-pointer shrink-0 charkle-tabular"
+                    >
+                      <span>全部 ({assets.length})</span>
+                      <ChevronDown size={11} />
+                    </button>
+                  )}
+                </div>
+
+                {assets.length === 0 ? (
+                  <div className="flex-1 flex items-center justify-center text-[11.5px] text-white/45">
+                    暂无最近素材，拖入文件或按 Alt+Shift+V 粘贴收藏
+                  </div>
+                ) : (
+                  <div
+                    ref={filmstripRef}
+                    onWheel={(e) => {
+                      const el = filmstripRef.current;
+                      if (!el) return;
+                      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                        e.preventDefault();
+                        el.scrollLeft += e.deltaY;
+                      }
+                    }}
+                    className="flex items-start gap-[9px] overflow-x-auto charkle-scroll-hidden py-0.5 flex-1"
+                  >
+                    {assets.slice(0, minimalMode ? 16 : 24).map((asset) => (
+                      <div
+                        key={asset.id}
+                        className="group shrink-0 w-[96px] flex flex-col gap-1"
+                      >
+                        <div
+                          onPointerDown={(e) =>
+                            startCardDragOut(e, [asset.id], openFullGallery)
+                          }
+                          className="relative w-[96px] h-[82px] rounded-[10px] overflow-hidden bg-white/8 ring-1 ring-white/12 group-hover:ring-white/38 cursor-grab active:cursor-grabbing transition-shadow duration-150"
+                        >
+                          <ShelfAssetThumb
+                            asset={asset}
+                            rawThumbUrl={transport.thumbnailUrl(asset.id, 'grid520')}
+                            fixedHeight
+                          />
+
+                          {/* Hover Quick Actions: Copy File + Open in Main Quick Look */}
+                          <div className="absolute top-1.5 right-1.5 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                            <button
+                              type="button"
+                              title="拷贝文件到剪贴板"
+                              aria-label={`拷贝 ${asset.title}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void transport
+                                  .copyAssetsToClipboard([asset.id])
+                                  .then(() => showBanner('已拷贝文件到剪贴板'))
+                                  .catch((err) =>
+                                    showBanner(
+                                      err instanceof Error ? err.message : '无法拷贝该素材',
+                                    ),
+                                  );
+                              }}
+                              className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                            >
+                              <Copy size={10} />
+                            </button>
+                            <button
+                              type="button"
+                              title={
+                                isPlainWebBookmark(asset)
+                                  ? '在默认浏览器中打开'
+                                  : '在主窗中沉浸预览'
+                              }
+                              aria-label={
+                                isPlainWebBookmark(asset)
+                                  ? `在默认浏览器中打开 ${asset.title}`
+                                  : `预览 ${asset.title}`
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openShelfAsset(asset);
+                              }}
+                              className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                            >
+                              {isPlainWebBookmark(asset) ? (
+                                <ExternalLink size={10.5} />
+                              ) : (
+                                <Eye size={10.5} />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        <span className="text-[10px] font-medium text-white/68 truncate">
+                          {asset.title}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* Expanded Full-Waterfall Gallery Mode (Pure-black masonry + rubber-band marquee + multi-drag) */
+            <div className="pt-2 flex-1 min-h-0 flex flex-col gap-2.5 overflow-hidden">
+              <div className="flex items-center gap-2.5 shrink-0">
+                <span className="px-2.5 py-1 rounded-full bg-white/16 text-[12px] font-semibold text-white shrink-0">
+                  最近素材
+                </span>
+
+                <div className="flex items-center gap-1.5 w-[210px] h-[28px] px-2.5 rounded-full bg-white/9 border border-white/8 focus-within:border-[#3B82F6]/70">
+                  <Search size={11.5} className="text-white/55 shrink-0" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onPointerDown={() => void transport.setShelfAllowActivate(true)}
+                    onFocus={() => void transport.setShelfAllowActivate(true)}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="搜索最近素材…"
+                    className="flex-1 min-w-0 bg-transparent text-[12px] text-white placeholder:text-white/45 outline-none"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      aria-label="清除搜索"
+                      onClick={() => setSearchQuery('')}
+                      className="text-white/50 hover:text-white cursor-pointer"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+
+                {selectedIds.length > 0 ? (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="px-2.5 py-1 rounded-full bg-[#3B82F6]/20 text-[#60A5FA] text-[11px] font-semibold charkle-tabular">
+                      已选 {selectedIds.length} 项 · 拖动卡片可直接拖出
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void transport
+                          .copyAssetsToClipboard(selectedIds)
+                          .then(() => showBanner(`已拷贝 ${selectedIds.length} 项文件`))
+                          .catch((err) =>
+                            showBanner(err instanceof Error ? err.message : '无法拷贝所选素材'),
+                          )
+                      }
+                      className="charkle-pressable px-2 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-medium text-white/88 inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Copy size={10.5} />
+                      <span>拷贝</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds([])}
+                      className="charkle-pressable px-2 py-1 rounded-full bg-white/8 hover:bg-white/14 text-[11px] text-white/70 hover:text-white cursor-pointer"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <span className="text-[11px] text-white/48 truncate">
+                    拖拽空白处框选多选 · 拖动卡片至其他应用 / 情绪板 / 文件夹
+                  </span>
+                )}
+
+                <div className="flex-1" />
+
+                <button
+                  type="button"
+                  aria-label="切换为紧凑抽屉"
+                  onClick={closeFullGallery}
+                  className="charkle-pressable px-2.5 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-semibold text-white/88 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <span>收起</span>
+                  <ChevronUp size={11} />
+                </button>
+              </div>
+
+              <div
+                ref={waterfallGridRef}
+                onMouseDown={(e) => {
+                  if (e.button !== 0) return;
+                  if ((e.target as HTMLElement).closest('[data-shelf-card-id]')) return;
+                  const el = waterfallGridRef.current;
+                  if (!el) return;
+                  const rect = el.getBoundingClientRect();
+                  const x = e.clientX - rect.left + el.scrollLeft;
+                  const y = e.clientY - rect.top + el.scrollTop;
+                  if (!e.ctrlKey && !e.metaKey) setSelectedIds([]);
+                  setMarquee({ startX: x, startY: y, curX: x, curY: y });
+                }}
+                className="relative flex-1 min-h-0 overflow-y-auto charkle-scroll rounded-[14px] bg-black p-1"
+              >
+                {filteredAssets.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center gap-2 text-[12px] text-white/52">
+                    <span>{searchQuery ? '未找到匹配的最近素材' : '暂无最近素材'}</span>
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery('')}
+                        className="charkle-pressable px-3 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] text-white/85 cursor-pointer"
+                      >
+                        清除搜索
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                <div className="columns-5 gap-2.5 space-y-2.5">
+                  {filteredAssets.slice(0, 80).map((asset) => {
+                    const selected = selectedIds.includes(asset.id);
+                    const dragIds =
+                      selected && selectedIds.length > 1 ? selectedIds : [asset.id];
+                    return (
+                      <div
+                        key={asset.id}
+                        data-shelf-card-id={asset.id}
+                        role="button"
+                        tabIndex={0}
+                        onPointerDown={(e) =>
+                          startCardDragOut(e, dragIds, () =>
+                            toggleSelect(asset.id, e.ctrlKey || e.metaKey),
+                          )
+                        }
+                        onDoubleClick={() => openShelfAsset(asset)}
+                        className={[
+                          'group relative break-inside-avoid rounded-[10px] overflow-hidden bg-white/8 cursor-grab active:cursor-grabbing',
+                          selected ? 'ring-2 ring-[#3B82F6]' : 'ring-1 ring-white/10 hover:ring-white/30',
+                        ].join(' ')}
+                      >
+                        <ShelfAssetThumb
+                          asset={asset}
+                          rawThumbUrl={transport.thumbnailUrl(asset.id, 'grid520')}
+                        />
+
+                        <div className="absolute top-1.5 right-1.5 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                          <button
+                            type="button"
+                            title="拷贝文件到剪贴板"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void transport
+                                .copyAssetsToClipboard(dragIds)
+                                .then(() => showBanner(`已拷贝 ${dragIds.length} 项文件`))
+                                .catch((err) =>
+                                  showBanner(err instanceof Error ? err.message : '无法拷贝该素材'),
+                                );
+                            }}
+                            className="charkle-pressable w-6 h-6 rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                          >
+                            <Copy size={11} />
+                          </button>
+                          <button
+                            type="button"
+                            title={
+                              isPlainWebBookmark(asset)
+                                ? '在默认浏览器中打开'
+                                : '在主窗中沉浸预览'
+                            }
+                            aria-label={
+                              isPlainWebBookmark(asset)
+                                ? `在默认浏览器中打开 ${asset.title}`
+                                : `预览 ${asset.title}`
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openShelfAsset(asset);
+                            }}
+                            className="charkle-pressable w-6 h-6 rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                          >
+                            {isPlainWebBookmark(asset) ? (
+                              <ExternalLink size={11.5} />
+                            ) : (
+                              <Eye size={11.5} />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                )}
+
+                {marqueeBox && (marqueeBox.width > 4 || marqueeBox.height > 4) && (
+                  <div
+                    aria-hidden="true"
+                    style={marqueeBox}
+                    className="pointer-events-none absolute z-30 rounded-[4px] border border-[#3B82F6] bg-[#3B82F6]/20"
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

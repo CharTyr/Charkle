@@ -25,17 +25,19 @@ use crate::media::audio::analyze_audio;
 use crate::media::color::ColorExtractor;
 use crate::media::metadata::ImageMetadataExtractor;
 use crate::media::resolvers::{
-    GitHubRepoResolver, GitHubRepoURLParser, SocialPostResolver, SocialPostURLParser,
-    WebBookmarkResolver,
+    GitHubRepoResolver, GitHubRepoURLParser, ResolvedSocialPost, SocialPostResolver,
+    SocialPostURLParser, WebBookmarkResolver, WebURLParser,
 };
+use crate::media::xiaohongshu::XiaohongshuURLParser;
 use crate::models::core::{
     AssetRecord, AssetRichMetadata, FolderRecord, LabColor, MediaKind, SocialMediaAttachmentKind,
+    SocialPlatform,
 };
 use crate::models::media::{CacheStats, CaptureInput, ThumbnailTier};
 use crate::models::moodboard::{
     BoardLayoutMode, BoardNode, BoardNodeKind, BoardPoint, BoardRect, MoodboardDocument, NoteStyle,
 };
-use crate::traits::{NoopShellThumbnailProvider, ShellThumbnailProvider};
+use crate::traits::{NoopShellThumbnailProvider, ShellThumbnailProvider, WebPageSnapshotProvider};
 use crate::wire::swift_codec::format_swift_uuid;
 
 pub const MIN_CACHE_BUDGET_BYTES: i64 = 2 * 1024 * 1024 * 1024;
@@ -72,6 +74,7 @@ pub struct MediaPipeline {
     thumbnails: PathBuf,
     previews: PathBuf,
     shell_thumb: Arc<dyn ShellThumbnailProvider>,
+    web_snapshotter: Option<Arc<dyn WebPageSnapshotProvider>>,
 }
 
 impl MediaPipeline {
@@ -98,7 +101,18 @@ impl MediaPipeline {
             thumbnails,
             previews,
             shell_thumb,
+            web_snapshotter: None,
         })
+    }
+
+    /// Attaches an optional offscreen browser snapshot provider (Tier 2 web bookmark fallback).
+    pub fn with_web_snapshotter(mut self, provider: Arc<dyn WebPageSnapshotProvider>) -> Self {
+        self.web_snapshotter = Some(provider);
+        self
+    }
+
+    pub fn web_snapshotter(&self) -> Option<&dyn WebPageSnapshotProvider> {
+        self.web_snapshotter.as_deref()
     }
 
     pub fn thumbnail_path(&self, id: Uuid, tier: ThumbnailTier) -> PathBuf {
@@ -193,14 +207,74 @@ impl MediaPipeline {
     }
 
     pub fn remove_files_for_ids(&self, ids: &HashSet<Uuid>) -> CoreResult<()> {
+        let mut first_err: Option<CoreError> = None;
         for entry in self.original_entries() {
             if ids.contains(&entry.id) {
-                remove_if_present(&entry.path)?;
+                if let Err(err) = remove_if_present(&entry.path) {
+                    first_err.get_or_insert(err);
+                }
             }
         }
         for &id in ids {
-            remove_if_present(&self.thumbnail_path(id, ThumbnailTier::Grid520))?;
-            remove_if_present(&self.thumbnail_path(id, ThumbnailTier::Preview1400))?;
+            for tier in [ThumbnailTier::Grid520, ThumbnailTier::Preview1400] {
+                if let Err(err) = remove_if_present(&self.thumbnail_path(id, tier)) {
+                    first_err.get_or_insert(err);
+                }
+            }
+        }
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Best-effort deletion of cached originals and thumbnails across all `ids`.
+    ///
+    /// On Windows, an open preview handle or antivirus scan can transiently lock a single file
+    /// (`ERROR_SHARING_VIOLATION`). Rather than aborting mid-batch and stranding all remaining
+    /// deletions, every ID is attempted and only IDs with locked files are returned for retry.
+    pub fn remove_files_for_ids_best_effort(&self, ids: &HashSet<Uuid>) -> HashSet<Uuid> {
+        let mut retry_ids = HashSet::new();
+        for entry in self.original_entries() {
+            if ids.contains(&entry.id) {
+                if let Err(err) = remove_if_present(&entry.path) {
+                    tracing::warn!(
+                        asset_id = %entry.id,
+                        path = %entry.path.display(),
+                        error = %err,
+                        "Deferred locked original media cleanup on Windows"
+                    );
+                    retry_ids.insert(entry.id);
+                }
+            }
+        }
+        for &id in ids {
+            for tier in [ThumbnailTier::Grid520, ThumbnailTier::Preview1400] {
+                let path = self.thumbnail_path(id, tier);
+                if let Err(err) = remove_if_present(&path) {
+                    tracing::warn!(
+                        asset_id = %id,
+                        path = %path.display(),
+                        error = %err,
+                        "Deferred locked thumbnail cleanup on Windows"
+                    );
+                    retry_ids.insert(id);
+                }
+            }
+        }
+        retry_ids
+    }
+
+    /// Drains `media.cleanup.*` markers, removes files best-effort across the entire batch, and
+    /// re-queues only IDs whose files were transiently locked so later sweeps finish cleanup.
+    pub fn cleanup_deleted_media(&self, db: &LibraryDatabase) -> CoreResult<()> {
+        let cleanup_ids = db.drain_media_cleanup_ids()?;
+        if cleanup_ids.is_empty() {
+            return Ok(());
+        }
+        let locked_ids = self.remove_files_for_ids_best_effort(&cleanup_ids);
+        if !locked_ids.is_empty() {
+            db.requeue_media_cleanup_ids(&locked_ids)?;
         }
         Ok(())
     }
@@ -305,6 +379,32 @@ impl MediaPipeline {
         let mut pre_poster: Option<DynamicImage> = None;
         let mut pre_ocr: Option<String> = None;
 
+        // Delegate `.url` / `.webloc` shortcut file drops through the full rich URL resolution pipeline
+        // so GitHub repos, X/Threads/Bluesky posts, and universal websites get covers, metadata & FTS5 text.
+        let input = match input {
+            CaptureInput::FilePath(ref path) if path.is_file() => {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(ext.as_str(), "url" | "webloc") {
+                    if let Some(extracted_url) = WebBookmarkResolver::url_in_file(path) {
+                        CaptureInput::WebUrl {
+                            url: extracted_url.to_string(),
+                            title: None,
+                            notes: None,
+                        }
+                    } else {
+                        input
+                    }
+                } else {
+                    input
+                }
+            }
+            other => other,
+        };
+
         let staged_file: PathBuf = match input {
             CaptureInput::FilePath(path) => {
                 if !path.is_file() {
@@ -345,28 +445,54 @@ impl MediaPipeline {
                 title,
                 notes: supplied_notes,
             } => {
-                let parsed = Url::parse(raw_url.trim()).map_err(|e| {
-                    CoreError::Media(format!("Invalid bookmark URL `{raw_url}`: {e}"))
-                })?;
+                let parsed = XiaohongshuURLParser::extract_note_url(&raw_url)
+                    .or_else(|| WebURLParser::parse(&raw_url))
+                    .or_else(|| Url::parse(raw_url.trim()).ok())
+                    .ok_or_else(|| CoreError::Media(format!("Invalid bookmark URL `{raw_url}`")))?;
                 if !WebBookmarkResolver::is_web_url(&parsed) {
                     return Err(CoreError::Media(
                         "Unsupported bookmark URL scheme.".to_string(),
                     ));
                 }
+                // CRITICAL (Pitfall 7): ALWAYS preserve the user's original collected URL as
+                // `source_url` — never overwrite with 302 `/login` redirects.
                 source_url = Some(parsed.clone());
                 preferred_title = title.filter(|s| !s.trim().is_empty());
                 notes = supplied_notes.unwrap_or_default();
                 forced_media_kind = Some(MediaKind::WebBookmark);
 
-                // Social Post (X / Threads / Bluesky) — Cohesive Storage Invariant:
+                // Social Post (X / Threads / Bluesky / Xiaohongshu) — Cohesive Storage Invariant:
                 // ALWAYS 1 asset with mediaKind = webBookmark + richMetadata.socialPost
                 if let Some(social_ref) = SocialPostURLParser::parse(&parsed) {
+                    let is_xhs_short_link = matches!(
+                        &social_ref,
+                        crate::media::resolvers::SocialPostReference::Xiaohongshu(r)
+                            if r.is_short_link
+                    );
                     let resolved = SocialPostResolver::resolve(&social_ref).await;
                     if let Some(post) = resolved {
                         let platform_tag = post.metadata.platform.display_name().to_string();
                         extra_tags.push(platform_tag);
+                        for tag in post.extracted_tags.iter().take(12) {
+                            let clean = tag.trim();
+                            if !clean.is_empty() {
+                                extra_tags.push(clean.to_string());
+                            }
+                        }
+                        if is_xhs_short_link {
+                            if let Ok(resolved_url) = Url::parse(&post.metadata.original_url) {
+                                if XiaohongshuURLParser::parse(&resolved_url)
+                                    .is_some_and(|r| r.note_id.is_some())
+                                {
+                                    source_url = Some(resolved_url);
+                                }
+                            }
+                        }
                         if preferred_title.is_none() {
                             preferred_title = Some(post.short_title());
+                        }
+                        if notes.trim().is_empty() && !post.metadata.body_text.trim().is_empty() {
+                            notes = post.metadata.body_text.clone();
                         }
                         let mut cover_img = None;
                         let mut downloaded_video: Option<(Vec<u8>, String)> = None;
@@ -399,11 +525,32 @@ impl MediaPipeline {
                             }
                         }
 
-                        pre_poster = Some(MediaArtwork::social_post_card(
+                        let avatar_img = match post.metadata.author_avatar_url.as_deref() {
+                            Some(av_url) if !av_url.trim().is_empty() => {
+                                SocialPostResolver::fetch_avatar_image(av_url).await
+                            }
+                            _ => None,
+                        };
+                        pre_poster = Some(MediaArtwork::social_post_card_with_avatar(
                             &post.metadata,
                             cover_img.as_ref(),
+                            avatar_img.as_ref(),
                         ));
-                        pre_ocr = Some(post.metadata.body_text.clone());
+                        let mut ocr_parts = Vec::new();
+                        if let Some(ref h) = post.metadata.article_title {
+                            if !h.trim().is_empty() {
+                                ocr_parts.push(h.trim().to_string());
+                            }
+                        }
+                        if !post.metadata.body_text.trim().is_empty() {
+                            ocr_parts.push(post.metadata.body_text.trim().to_string());
+                        }
+                        if !post.extracted_tags.is_empty() {
+                            ocr_parts.push(post.extracted_tags.join(" "));
+                        }
+                        if !ocr_parts.is_empty() {
+                            pre_ocr = Some(ocr_parts.join("\n"));
+                        }
                         let md_doc = post.markdown_document();
                         pre_rich = Some(AssetRichMetadata {
                             social_post: Some(post.metadata),
@@ -444,6 +591,27 @@ impl MediaPipeline {
                     if preferred_title.is_none() {
                         preferred_title = Some(repo_meta.full_name.clone());
                     }
+                    if notes.trim().is_empty() {
+                        if let Some(ref desc) = repo_meta.description {
+                            if !desc.trim().is_empty() {
+                                notes = desc.clone();
+                            }
+                        }
+                    }
+                    let mut gh_ocr_parts = vec![repo_meta.full_name.clone()];
+                    if let Some(ref desc) = repo_meta.description {
+                        gh_ocr_parts.push(desc.clone());
+                    }
+                    if !repo_meta.topics.is_empty() {
+                        gh_ocr_parts.push(repo_meta.topics.join(" "));
+                    }
+                    if let Some(ref readme) = repo_meta.readme_markdown {
+                        let plain = MediaArtwork::markdown_to_plain_text(readme);
+                        if !plain.is_empty() {
+                            gh_ocr_parts.push(plain.chars().take(4_000).collect());
+                        }
+                    }
+                    pre_ocr = Some(gh_ocr_parts.join("\n"));
                     let og_img = GitHubRepoResolver::fetch_open_graph_image(&repo_meta).await;
                     pre_poster =
                         Some(og_img.unwrap_or_else(|| MediaArtwork::github_repo_card(&repo_meta)));
@@ -456,14 +624,233 @@ impl MediaPipeline {
                     });
                     dst
                 } else {
-                    let base = Self::clean_name(
+                    let bm =
+                        WebBookmarkResolver::fetch_with_snapshot(&parsed, self.web_snapshotter())
+                            .await;
+                    let clean_domain = WebURLParser::clean_domain(&parsed).unwrap_or_else(|| {
+                        parsed
+                            .host_str()
+                            .unwrap_or("web")
+                            .trim_start_matches("www.")
+                            .to_string()
+                    });
+                    if preferred_title.is_none() {
+                        preferred_title = bm
+                            .title
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                            .or_else(|| Some(WebBookmarkResolver::fallback_title(&parsed)));
+                    }
+                    if notes.trim().is_empty() {
+                        if let Some(ref desc) = bm.description {
+                            if !desc.trim().is_empty() {
+                                notes = desc.clone();
+                            }
+                        }
+                    }
+                    let mut web_ocr_parts = vec![
                         preferred_title
-                            .as_deref()
-                            .or_else(|| parsed.host_str())
-                            .unwrap_or("Bookmark"),
-                    );
+                            .clone()
+                            .unwrap_or_else(|| clean_domain.clone()),
+                        clean_domain.clone(),
+                    ];
+                    if let Some(ref site) = bm.site_name {
+                        web_ocr_parts.push(site.clone());
+                    }
+                    if let Some(ref desc) = bm.description {
+                        web_ocr_parts.push(desc.clone());
+                    }
+                    pre_ocr = Some(web_ocr_parts.join("\n"));
+                    if let Some(ref desc) = bm.description {
+                        pre_rich = Some(AssetRichMetadata {
+                            text_excerpt: Some(desc.clone()),
+                            ..AssetRichMetadata::default()
+                        });
+                    }
+                    let card_title = preferred_title.as_deref().unwrap_or(&clean_domain);
+                    pre_poster = Some(bm.poster_image.unwrap_or_else(|| {
+                        MediaArtwork::web_page_card(
+                            card_title,
+                            &clean_domain,
+                            bm.site_name.as_deref(),
+                            bm.description.as_deref(),
+                            Some(parsed.as_str()),
+                            bm.theme_color.as_deref(),
+                            bm.favicon_image.as_ref(),
+                        )
+                    }));
+                    let base = Self::clean_name(card_title);
                     let dst = temp_dir.join(format!("{base}.url"));
                     fs::write(&dst, format!("[InternetShortcut]\r\nURL={parsed}\r\n"))?;
+                    dst
+                }
+            }
+            CaptureInput::SocialBookmark {
+                metadata,
+                cover_image_data,
+                tags,
+            } => {
+                let mut meta = *metadata;
+                forced_media_kind = Some(MediaKind::WebBookmark);
+
+                // Opportunistically enrich sparse browser-extension payloads without ever degrading
+                // supplied data if remote sites throttle or are unreachable.
+                let needs_live_enrich = match meta.platform {
+                    SocialPlatform::X => {
+                        meta.effective_attachments().is_empty()
+                            || meta.has_video
+                            || meta.body_text.trim().is_empty()
+                    }
+                    SocialPlatform::Xiaohongshu => {
+                        let body_trimmed = meta.body_text.trim();
+                        let title_trimmed =
+                            meta.article_title.as_deref().map(str::trim).unwrap_or("");
+                        meta.effective_attachments().len() <= 1
+                            && (body_trimmed.is_empty() || body_trimmed == title_trimmed)
+                    }
+                    SocialPlatform::Threads | SocialPlatform::Bluesky => false,
+                };
+
+                let mut live_extracted_tags = Vec::new();
+                let mut resolved_video_url: Option<String> = None;
+                if needs_live_enrich {
+                    if let Ok(parsed_orig) = Url::parse(&meta.original_url) {
+                        if let Some(social_ref) = SocialPostURLParser::parse(&parsed_orig) {
+                            if let Some(live) = SocialPostResolver::resolve(&social_ref).await {
+                                if matches!(
+                                    live.primary_media_kind,
+                                    Some(
+                                        SocialMediaAttachmentKind::Video
+                                            | SocialMediaAttachmentKind::Gif
+                                    )
+                                ) {
+                                    resolved_video_url = live.primary_media_download_url.clone();
+                                }
+                                live_extracted_tags = live.extracted_tags;
+                                meta = SocialPostResolver::merge_metadata(live.metadata, meta);
+                            }
+                        }
+                    }
+                }
+
+                extra_tags.push(meta.platform.display_name().to_string());
+                for tag in tags.into_iter().chain(live_extracted_tags).take(16) {
+                    let clean = tag.trim();
+                    if !clean.is_empty() {
+                        extra_tags.push(clean.to_string());
+                    }
+                }
+
+                let mut cover_img = cover_image_data
+                    .as_deref()
+                    .and_then(|bytes| image::load_from_memory(bytes).ok());
+
+                if cover_img.is_none() {
+                    let mut cover_urls = Vec::new();
+                    for att in meta.effective_attachments() {
+                        if att.kind == SocialMediaAttachmentKind::Photo
+                            && !cover_urls.contains(&att.url)
+                        {
+                            cover_urls.push(att.url);
+                        }
+                        if let Some(ref thumb) = att.thumbnail_url {
+                            if !cover_urls.contains(thumb) {
+                                cover_urls.push(thumb.clone());
+                            }
+                        }
+                    }
+                    for raw in meta
+                        .media_urls
+                        .iter()
+                        .chain(meta.media_thumbnail_urls.iter())
+                    {
+                        if !cover_urls.contains(raw) {
+                            cover_urls.push(raw.clone());
+                        }
+                    }
+                    for cand in cover_urls.iter().take(4) {
+                        if let Some((bytes, _)) = SocialPostResolver::download_media_bytes(
+                            cand,
+                            SocialMediaAttachmentKind::Photo,
+                        )
+                        .await
+                        {
+                            if let Ok(img) = image::load_from_memory(&bytes) {
+                                cover_img = Some(img);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let mut downloaded_video: Option<(Vec<u8>, String)> = None;
+                let video_candidate = resolved_video_url.or_else(|| meta.video_url.clone());
+                if meta.has_video {
+                    if let Some(ref v_url) = video_candidate {
+                        downloaded_video = SocialPostResolver::download_media_bytes(
+                            v_url,
+                            SocialMediaAttachmentKind::Video,
+                        )
+                        .await;
+                    }
+                }
+
+                let avatar_img = match meta.author_avatar_url.as_deref() {
+                    Some(av_url) if !av_url.trim().is_empty() => {
+                        SocialPostResolver::fetch_avatar_image(av_url).await
+                    }
+                    _ => None,
+                };
+
+                let resolved = ResolvedSocialPost {
+                    metadata: meta.clone(),
+                    primary_media_download_url: None,
+                    primary_media_kind: None,
+                    primary_thumbnail_url: None,
+                    extracted_tags: Vec::new(),
+                };
+                let short_title = resolved.short_title();
+                let md_doc = resolved.markdown_document();
+
+                preferred_title = Some(short_title.clone());
+                notes = meta.body_text.clone();
+                source_url = Url::parse(&meta.original_url).ok();
+                pre_poster = Some(MediaArtwork::social_post_card_with_avatar(
+                    &meta,
+                    cover_img.as_ref(),
+                    avatar_img.as_ref(),
+                ));
+
+                let mut ocr_parts = Vec::new();
+                if let Some(ref h) = meta.article_title {
+                    if !h.trim().is_empty() {
+                        ocr_parts.push(h.trim().to_string());
+                    }
+                }
+                if !meta.body_text.trim().is_empty() {
+                    ocr_parts.push(meta.body_text.trim().to_string());
+                }
+                if !extra_tags.is_empty() {
+                    ocr_parts.push(extra_tags.join(" "));
+                }
+                if !ocr_parts.is_empty() {
+                    pre_ocr = Some(ocr_parts.join("\n"));
+                }
+
+                pre_rich = Some(AssetRichMetadata {
+                    social_post: Some(meta),
+                    is_markdown: true,
+                    ..AssetRichMetadata::default()
+                });
+
+                let base = Self::clean_name(&short_title);
+                if let Some((video_bytes, ext)) = downloaded_video {
+                    let dst = temp_dir.join(format!("{base}.{ext}"));
+                    fs::write(&dst, video_bytes)?;
+                    dst
+                } else {
+                    let dst = temp_dir.join(format!("{base}.md"));
+                    fs::write(&dst, md_doc.as_bytes())?;
                     dst
                 }
             }
@@ -609,15 +996,48 @@ impl MediaPipeline {
                         .and_then(|s| Url::parse(s).ok())
                         .or_else(|| WebBookmarkResolver::url_in_file(file));
                     if let Some(ref u) = url {
-                        asset.source_url = Some(u.to_string());
+                        // Preserve original source URL; only populate when previously absent.
+                        if asset.source_url.is_none() {
+                            asset.source_url = Some(u.to_string());
+                        }
                         asset.source_domain = u.host_str().map(String::from);
-                        let bm = WebBookmarkResolver::fetch(u).await;
+                        let clean_domain = WebURLParser::clean_domain(u).unwrap_or_else(|| {
+                            u.host_str()
+                                .unwrap_or("web")
+                                .trim_start_matches("www.")
+                                .to_string()
+                        });
+                        let bm =
+                            WebBookmarkResolver::fetch_with_snapshot(u, self.web_snapshotter())
+                                .await;
                         if preferred_title.is_none() {
-                            if let Some(t) = bm.title {
-                                asset.title = t;
+                            if let Some(ref t) = bm.title {
+                                if !t.trim().is_empty() {
+                                    asset.title = t.clone();
+                                }
                             }
                         }
-                        poster = bm.poster_image;
+                        if let Some(ref desc) = bm.description {
+                            if !desc.trim().is_empty() {
+                                if asset.notes.trim().is_empty() {
+                                    asset.notes = desc.clone();
+                                }
+                                let mut rich = asset.rich_metadata.clone().unwrap_or_default();
+                                rich.text_excerpt = Some(desc.clone());
+                                asset.rich_metadata = Some(rich);
+                            }
+                        }
+                        poster = Some(bm.poster_image.unwrap_or_else(|| {
+                            MediaArtwork::web_page_card(
+                                &asset.title,
+                                &clean_domain,
+                                bm.site_name.as_deref(),
+                                bm.description.as_deref(),
+                                asset.source_url.as_deref(),
+                                bm.theme_color.as_deref(),
+                                bm.favicon_image.as_ref(),
+                            )
+                        }));
                     }
                 }
                 MediaKind::Document => {
@@ -691,7 +1111,12 @@ impl MediaPipeline {
         asset.pixel_width = w;
         asset.pixel_height = h;
 
-        let grid = MediaArtwork::resize(&image, ThumbnailTier::Grid520.max_side());
+        let grid_max_side = if asset.media_kind == MediaKind::WebBookmark {
+            720
+        } else {
+            ThumbnailTier::Grid520.max_side()
+        };
+        let grid = MediaArtwork::resize(&image, grid_max_side);
         let grid_jpeg = MediaArtwork::encode_jpeg(&grid, 86)?;
         write_atomic(
             &self.thumbnail_path(asset.id, ThumbnailTier::Grid520),
@@ -699,7 +1124,7 @@ impl MediaPipeline {
         )?;
 
         let preview_path = self.thumbnail_path(asset.id, ThumbnailTier::Preview1400);
-        if image.width().max(image.height()) > ThumbnailTier::Grid520.max_side() {
+        if image.width().max(image.height()) > grid_max_side {
             let preview = MediaArtwork::resize(&image, ThumbnailTier::Preview1400.max_side());
             let preview_jpeg = MediaArtwork::encode_jpeg(&preview, 88)?;
             write_atomic(&preview_path, &preview_jpeg)?;
@@ -858,10 +1283,7 @@ impl MediaPipeline {
         keeping: &HashSet<Uuid>,
         budget_override: Option<i64>,
     ) -> CoreResult<CacheStats> {
-        let cleanup_ids = db.drain_media_cleanup_ids()?;
-        if !cleanup_ids.is_empty() {
-            self.remove_files_for_ids(&cleanup_ids)?;
-        }
+        self.cleanup_deleted_media(db)?;
 
         let default_budget = CacheStats::default().budget_bytes;
         let budget = match budget_override {

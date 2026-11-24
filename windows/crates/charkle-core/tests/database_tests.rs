@@ -482,3 +482,139 @@ fn vectors_cosine_search_quick_jump_and_local_open_timestamp() {
     assert!(qj.iter().any(|m| m.kind == QuickJumpKind::Moodboard));
     assert!(qj.iter().any(|m| m.kind == QuickJumpKind::Asset));
 }
+
+#[test]
+fn search_by_embedding_excludes_trashed_assets() {
+    let db = LibraryDatabase::open_in_memory().unwrap();
+    let active = db
+        .save_asset_locally(&AssetRecord::new("Active Ref", "active.png"), true)
+        .unwrap();
+    let mut trashed = AssetRecord::new("Trashed Ref", "trashed.png");
+    trashed.is_trashed = true;
+    let trashed = db.save_asset_locally(&trashed, true).unwrap();
+
+    let vec_data = AssetVector {
+        feature_print: None,
+        embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+        embedding_model: Some("test-emb".to_string()),
+        precision: EmbeddingPrecision::Float32,
+    };
+    db.save_vector(active.id, &vec_data).unwrap();
+    db.save_vector(trashed.id, &vec_data).unwrap();
+
+    let hits = db
+        .search_by_embedding(&[1.0, 0.0, 0.0, 0.0], 10, 0.5)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, active.id);
+}
+
+#[test]
+fn delete_folder_without_trashing_atomically_reparents_children_and_deduplicates() {
+    let db = LibraryDatabase::open_in_memory().unwrap();
+    let parent = FolderRecord::new("Parent", None);
+    let existing_sibling = FolderRecord::new("Posters", None);
+    let child_dup = FolderRecord::new("Posters", Some(parent.id));
+    let child_inbox = FolderRecord::new("Inbox", Some(parent.id));
+    for f in [&parent, &existing_sibling, &child_dup, &child_inbox] {
+        db.record(SyncOperationChange::Folder(f.clone()), true)
+            .unwrap();
+    }
+
+    let mut direct_asset = AssetRecord::new("Inside Parent", "inside.png");
+    direct_asset.folder_id = Some(parent.id);
+    db.save_asset_locally(&direct_asset, true).unwrap();
+
+    db.delete_folder(parent.id, false).unwrap();
+
+    assert!(db.folder(parent.id).unwrap().is_none());
+    let moved_dup = db
+        .folder(child_dup.id)
+        .unwrap()
+        .expect("child_dup survives");
+    assert_eq!(moved_dup.parent_id, None);
+    assert_eq!(moved_dup.name, "Posters 2");
+
+    let moved_inbox = db
+        .folder(child_inbox.id)
+        .unwrap()
+        .expect("child_inbox survives");
+    assert_eq!(moved_inbox.parent_id, None);
+    assert_eq!(moved_inbox.name, "Inbox 2");
+
+    let moved_asset = db.asset(direct_asset.id).unwrap().expect("asset survives");
+    assert!(!moved_asset.is_trashed);
+    assert_eq!(moved_asset.folder_id, None);
+}
+
+#[test]
+fn fts5_handles_fullwidth_ime_and_special_punctuation_and_quick_jump_uses_rich_subtitle() {
+    let db = LibraryDatabase::open_in_memory().unwrap();
+    let mut xhs = AssetRecord::new("Figma 极简网格画册", "xhs-note.url");
+    xhs.media_kind = MediaKind::WebBookmark;
+    xhs.rich_metadata = Some(AssetRichMetadata {
+        social_post: Some(SocialPostMetadata {
+            platform: SocialPlatform::Xiaohongshu,
+            author_name: "纸感研究所".to_string(),
+            author_handle: "paperlab".to_string(),
+            author_avatar_url: None,
+            published_at_text: None,
+            body_text: "C++ & Rust OR NOT \"quoted\" (study)".to_string(),
+            quoted_author: None,
+            quoted_text: None,
+            article_title: Some("Figma 极简网格画册".to_string()),
+            media_urls: Vec::new(),
+            media_thumbnail_urls: Vec::new(),
+            attachments: Vec::new(),
+            has_video: false,
+            video_url: None,
+            reply_count: None,
+            repost_count: None,
+            like_count: None,
+            view_count: None,
+            original_url: "https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b"
+                .to_string(),
+            media_fetch_failed: false,
+        }),
+        ..AssetRichMetadata::default()
+    });
+    db.upsert_assets(&[xhs.clone()]).unwrap();
+
+    // Full-width IME Latin query (`ＦＩＧＭＡ`) must match ASCII `Figma`
+    let fw_hits = db
+        .fetch_assets(
+            &FilterCriteria {
+                search_query: "ＦＩＧＭＡ".to_string(),
+                ..FilterCriteria::default()
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(fw_hits.len(), 1);
+    assert_eq!(fw_hits[0].id, xhs.id);
+
+    // Special FTS5 operator / punctuation queries must NEVER error
+    for nasty in [
+        "\"unclosed",
+        "OR NOT NEAR * : -",
+        "---***!!!",
+        "C++ (Figma)",
+    ] {
+        let res = db.fetch_assets(
+            &FilterCriteria {
+                search_query: nasty.to_string(),
+                ..FilterCriteria::default()
+            },
+            None,
+        );
+        assert!(res.is_ok(), "FTS5 query `{nasty}` must not fail");
+    }
+
+    // Quick Jump uses rich platform display type label ("小红书 笔记"), not generic "网页"
+    let qj = db.quick_jump("Figma", 10).unwrap();
+    let asset_hit = qj
+        .iter()
+        .find(|m| m.kind == QuickJumpKind::Asset && m.target_uuid == Some(xhs.id))
+        .expect("quick jump hit");
+    assert_eq!(asset_hit.subtitle, "小红书 笔记");
+}

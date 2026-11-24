@@ -103,12 +103,18 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
     expect(screen.getByTestId('settings-pane-library')).toBeInTheDocument();
     expect(screen.getByLabelText('本地缓存预算 GB')).toBeInTheDocument();
 
-    // Pane 3: Sync + Lossless Storage Migration Wizard
+    // Pane 3: Sync + Lossless Storage Migration Wizard (macOS modal sheet flow)
     fireEvent.click(screen.getByRole('tab', { name: '云同步' }));
     expect(screen.getByTestId('settings-pane-sync')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('radio', { name: 'WebDAV' }));
-    const migrateBtn = await screen.findByRole('button', { name: /无损迁移现有素材/ });
-    fireEvent.click(migrateBtn);
+    fireEvent.click(screen.getByRole('button', { name: /更改或转移…/ }));
+    await waitFor(() => {
+      expect(screen.getByText('更改或转移素材库位置')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'WebDAV 云盘' }));
+    fireEvent.change(screen.getByPlaceholderText(/服务器地址/), {
+      target: { value: 'https://dav.example.com/dav/' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /开始无损迁移/ }));
     await waitFor(() => {
       expect(screen.getByTestId('storage-migration-report')).toBeInTheDocument();
     });
@@ -120,12 +126,15 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
     fireEvent.click(screen.getByRole('tab', { name: '采集与快捷键' }));
     expect(screen.getByTestId('settings-pane-captureShortcuts')).toBeInTheDocument();
 
-    // Pane 6: Hybrid Cloud AI + Usage Telemetry + WinRT OCR + TypeSafe Jev
+    // Pane 6: Hybrid Cloud AI + TypeSafe Visual Enhancement (macOS progressive modal sheets)
     fireEvent.click(screen.getByRole('tab', { name: 'AI 智能' }));
     await waitFor(() => {
       expect(screen.getByTestId('settings-pane-ai')).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Gemini' }));
+    fireEvent.click(screen.getByRole('button', { name: /Gemini \/ 自定义 API…/ }));
+    await waitFor(() => {
+      expect(screen.getByText('配置云端 AI 服务')).toBeInTheDocument();
+    });
     const keyInput = screen.getByLabelText('云端 AI API 密钥');
     fireEvent.change(keyInput, { target: { value: 'AIza-mock-secret' } });
     fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
@@ -133,13 +142,22 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
       expect(screen.getByTestId('ai-test-result')).toBeInTheDocument();
     });
     expect(useSyncAIStore.getState().aiState?.hasApiKey).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => {
+      expect(screen.queryByText('配置云端 AI 服务')).not.toBeInTheDocument();
+    });
 
-    // Enable TypeSafe Jev
-    fireEvent.click(screen.getByLabelText('启用 TypeSafe Jev'));
+    // Enable TypeSafe visual grounding & save API key in modal
+    fireEvent.click(screen.getByLabelText('启用精准画面定位'));
+    const tsModalBtn = await screen.findByRole('button', { name: /密钥与功能开关…/ });
+    fireEvent.click(tsModalBtn);
+    await waitFor(() => {
+      expect(screen.getByText('进阶视觉定位引擎配置')).toBeInTheDocument();
+    });
     fireEvent.change(screen.getByLabelText('TypeSafe API 密钥'), {
       target: { value: 'ts-mock-key' },
     });
-    fireEvent.click(screen.getByRole('button', { name: '保存 Jev 配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => {
       expect(useSyncAIStore.getState().typesafeState?.config.enabled).toBe(true);
       expect(useSyncAIStore.getState().typesafeState?.hasApiKey).toBe(true);
@@ -158,7 +176,7 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
       expect(useSyncAIStore.getState().agentState?.config.cliEnabled).toBe(true);
     });
 
-    fireEvent.click(screen.getByRole('radio', { name: '允许整理与生成情绪板' }));
+    fireEvent.click(screen.getByRole('radio', { name: '允许整理与生板' }));
     await waitFor(() => {
       expect(useSyncAIStore.getState().agentState?.config.accessLevel).toBe('readWriteOrganize');
     });
@@ -178,9 +196,9 @@ describe('Charkle Windows M5 9-Pane Settings Overlay, Hybrid AI, TypeSafe Jev, E
     });
 
     // Step through and skip Onboarding cleanly
-    fireEvent.click(screen.getByRole('button', { name: '下一步' }));
-    expect(screen.getByText(/第 1 步 · 素材库存储/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '跳过引导' }));
+    fireEvent.click(screen.getByRole('button', { name: /开始快速配置/ }));
+    expect(screen.getByText(/素材库保存在哪里？/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /跳过引导/ }));
     await waitFor(() => {
       expect(screen.queryByTestId('onboarding-studio')).not.toBeInTheDocument();
     });

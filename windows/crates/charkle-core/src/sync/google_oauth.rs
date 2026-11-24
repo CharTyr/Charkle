@@ -408,46 +408,104 @@ struct TokenResponse {
 }
 
 async fn wait_for_loopback_code(listener: TcpListener) -> CoreResult<(String, Option<String>)> {
-    let (mut stream, _) = listener.accept().await?;
-    let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await?;
-    let req_text = String::from_utf8_lossy(&buf[..n]);
-    let first_line = req_text.lines().next().unwrap_or("");
-    let path_and_query = first_line.split_whitespace().nth(1).unwrap_or("/");
-    let parsed = Url::parse(&format!("http://127.0.0.1{path_and_query}"))
-        .map_err(|_| CoreError::AuthenticationRequired("无效的 OAuth 回调请求".to_string()))?;
-
-    let mut code: Option<String> = None;
-    let mut state: Option<String> = None;
-    let mut error: Option<String> = None;
-    for (k, v) in parsed.query_pairs() {
-        match k.as_ref() {
-            "code" => code = Some(v.into_owned()),
-            "state" => state = Some(v.into_owned()),
-            "error" => error = Some(v.into_owned()),
-            _ => {}
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut buf = vec![0u8; 8192];
+        let n = stream.read(&mut buf).await.unwrap_or(0);
+        if n == 0 {
+            continue;
         }
-    }
+        let req_text = String::from_utf8_lossy(&buf[..n]);
+        let first_line = req_text.lines().next().unwrap_or("");
+        let path_and_query = first_line.split_whitespace().nth(1).unwrap_or("/");
+        let req_path = path_and_query.split('?').next().unwrap_or("");
+        if req_path != "/oauth2callback" {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            let _ = stream.shutdown().await;
+            continue;
+        }
+        let parsed = Url::parse(&format!("http://127.0.0.1{path_and_query}"))
+            .map_err(|_| CoreError::AuthenticationRequired("无效的 OAuth 回调请求".to_string()))?;
 
-    let html = if error.is_some() || code.is_none() {
-        "<html><body><h3>Authorization failed. You may close this tab.</h3></body></html>"
-    } else {
-        "<html><body><h3>Charkle connected to Google Drive. You may close this tab.</h3></body></html>"
-    };
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        html.len(),
-        html
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
+        let mut code: Option<String> = None;
+        let mut state: Option<String> = None;
+        let mut error: Option<String> = None;
+        for (k, v) in parsed.query_pairs() {
+            match k.as_ref() {
+                "code" if !v.is_empty() => code = Some(v.into_owned()),
+                "state" => state = Some(v.into_owned()),
+                "error" => error = Some(v.into_owned()),
+                _ => {}
+            }
+        }
 
-    if let Some(err) = error {
-        return Err(CoreError::AuthenticationRequired(format!(
-            "Google OAuth 授权被拒绝：{err}"
-        )));
+        let html = if error.is_some() || code.is_none() {
+            "<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:system-ui;padding:48px;text-align:center\"><h2>Google Drive 登录未完成</h2><p>请关闭此页面并在 Charkle 中重试。</p></body></html>"
+        } else {
+            "<html><head><meta charset=\"utf-8\"></head><body style=\"font-family:system-ui;padding:48px;text-align:center\"><h2>已连接 Google Drive</h2><p>请返回 Charkle 继续使用。</p></body></html>"
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            html.len(),
+            html
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+
+        if let Some(err) = error {
+            return Err(CoreError::AuthenticationRequired(format!(
+                "Google OAuth 授权被拒绝：{err}"
+            )));
+        }
+        let code = code.ok_or_else(|| {
+            CoreError::AuthenticationRequired("OAuth 回调中缺少授权码。".to_string())
+        })?;
+        return Ok((code, state));
     }
-    let code = code
-        .ok_or_else(|| CoreError::AuthenticationRequired("OAuth 回调中缺少授权码。".to_string()))?;
-    Ok((code, state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn loopback_callback_ignores_favicon_and_preconnect_before_real_code() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(wait_for_loopback_code(listener));
+
+        // 1. Speculative preconnect that closes with 0 bytes
+        let pre = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        drop(pre);
+
+        // 2. Browser /favicon.ico probe must receive 404 and NOT abort the callback listener
+        let mut fav = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        fav.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut fav_resp = Vec::new();
+        fav.read_to_end(&mut fav_resp).await.unwrap();
+        assert!(String::from_utf8_lossy(&fav_resp).starts_with("HTTP/1.1 404"));
+
+        // 3. Real /oauth2callback arrives and succeeds
+        let mut cb = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        cb.write_all(
+            b"GET /oauth2callback?code=auth-code-42&state=st-99 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut cb_resp = Vec::new();
+        cb.read_to_end(&mut cb_resp).await.unwrap();
+        assert!(String::from_utf8_lossy(&cb_resp).starts_with("HTTP/1.1 200"));
+
+        let (code, state) = server.await.unwrap().unwrap();
+        assert_eq!(code, "auth-code-42");
+        assert_eq!(state.as_deref(), Some("st-99"));
+    }
 }

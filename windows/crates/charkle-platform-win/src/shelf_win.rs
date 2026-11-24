@@ -1,15 +1,18 @@
 //! Top-Edge Drop Shelf Win32 window controller (`shelf_win.rs`).
 //!
 //! Implements a fixed oversized transparent topmost non-activating window
-//! (`WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED`) anchored
+//! (`WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`) anchored
 //! top-center of the active cursor monitor, with dynamic `WM_NCHITTEST` click-through
-//! outside the visible capsule bounds and a 3px x 320px top-center drag hotstrip.
+//! outside the visible capsule bounds, ZERO Windows 11 1px border (while keeping DWM
+//! active so Windows never falls back to classic titlebar painting!), and top-edge drag/hover triggers.
 
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +20,8 @@ use crate::windowing::ClientRect;
 
 pub const SHELF_LOGICAL_WIDTH: i32 = 1040;
 pub const SHELF_LOGICAL_HEIGHT: i32 = 620;
+pub const SHELF_COMPACT_LOGICAL_WIDTH: i32 = 668;
+pub const SHELF_COMPACT_LOGICAL_HEIGHT: i32 = 330;
 pub const TOP_HOTSTRIP_LOGICAL_WIDTH: i32 = 320;
 pub const TOP_HOTSTRIP_LOGICAL_HEIGHT: i32 = 4;
 
@@ -68,6 +73,26 @@ pub fn compute_shelf_window_rect(monitor: MonitorRect, dpi_scale: f64) -> ShelfW
     }
 }
 
+/// Computes the initial physical-pixel interactive rect for the compact expanded capsule
+/// centered at the top edge (`y = 0`) of `placement`, seeded synchronously before showing
+/// the shelf window so OS drag-and-drop hits immediately on frame 0 without waiting for
+/// CSS transitions or a JS IPC round-trip.
+pub fn default_compact_capsule_rect(placement: ShelfWindowPlacement) -> ClientRect {
+    let scale = (placement.dpi_scale_percent as f64 / 100.0).clamp(1.0, 4.0);
+    let margin = (16.0 * scale).round() as i32;
+    let max_w = (placement.width - margin).max(200);
+    let width = ((SHELF_COMPACT_LOGICAL_WIDTH as f64 * scale).round() as i32).min(max_w);
+    let height = ((SHELF_COMPACT_LOGICAL_HEIGHT as f64 * scale).round() as i32)
+        .min(placement.height.max(160));
+    let x = ((placement.width - width) / 2).max(0);
+    ClientRect {
+        x,
+        y: 0,
+        width,
+        height,
+    }
+}
+
 /// Evaluates whether client-coordinate pixel `(x, y)` inside the fixed shelf window
 /// should receive mouse/drag events rather than returning `HTTRANSPARENT`.
 pub fn shelf_point_is_interactive(
@@ -103,7 +128,10 @@ pub fn shelf_point_is_interactive(
 #[derive(Debug, Clone, Copy)]
 struct ShelfHitState {
     capsule_rect: Option<ClientRect>,
+    window_origin: (i32, i32),
     dpi_scale: f64,
+    allow_activate: bool,
+    outbound_dragging: bool,
 }
 
 static SHELF_HIT_STATES: OnceLock<Mutex<HashMap<isize, ShelfHitState>>> = OnceLock::new();
@@ -118,47 +146,256 @@ pub fn set_shelf_hit_rect(hwnd_raw: isize, rect: Option<ClientRect>) {
     if let Ok(mut map) = shelf_hit_states().lock() {
         let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
             capsule_rect: None,
+            window_origin: (0, 0),
             dpi_scale: 1.0,
+            allow_activate: false,
+            outbound_dragging: false,
         });
         entry.capsule_rect = rect;
     }
 }
 
+/// Temporarily permits the shelf window to accept keyboard focus (e.g. while typing in
+/// Full-Waterfall search) while keeping normal expand/drag strictly non-activating.
+pub fn set_shelf_allow_activate(hwnd_raw: isize, allow: bool) {
+    if let Ok(mut map) = shelf_hit_states().lock() {
+        let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
+            capsule_rect: None,
+            window_origin: (0, 0),
+            dpi_scale: 1.0,
+            allow_activate: false,
+            outbound_dragging: false,
+        });
+        entry.allow_activate = allow;
+    }
+
+    #[cfg(target_os = "windows")]
+    if hwnd_raw != 0 {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+        };
+        let hwnd = HWND(hwnd_raw as *mut _);
+        // SAFETY: Toggles `WS_EX_NOACTIVATE` on our owned shelf HWND so Full-Waterfall search
+        // inputs can receive keyboard focus on click, and restores non-activating mode afterward.
+        unsafe {
+            let cur_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let next_ex = if allow {
+                cur_ex & !(WS_EX_NOACTIVATE.0 as isize)
+            } else {
+                cur_ex | (WS_EX_NOACTIVATE.0 as isize)
+            };
+            if next_ex != cur_ex {
+                let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex);
+            }
+        }
+    }
+}
+
+/// Marks whether an outbound OLE `DoDragDrop` initiated from the shelf is currently active.
+/// While true, `WM_NCHITTEST` returns `HTTRANSPARENT` across the shelf so apps underneath
+/// (Desktop, Explorer, Figma, Charkle main window) can receive drops anywhere on screen.
+pub fn set_shelf_outbound_dragging(hwnd_raw: isize, dragging: bool) {
+    if let Ok(mut map) = shelf_hit_states().lock() {
+        let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
+            capsule_rect: None,
+            window_origin: (0, 0),
+            dpi_scale: 1.0,
+            allow_activate: false,
+            outbound_dragging: false,
+        });
+        entry.outbound_dragging = dragging;
+    }
+}
+
+/// Returns whether an outbound OLE `DoDragDrop` from the shelf HWND is currently active.
+pub fn is_shelf_outbound_dragging(hwnd_raw: isize) -> bool {
+    shelf_hit_states()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&hwnd_raw).map(|s| s.outbound_dragging))
+        .unwrap_or(false)
+}
+
+/// Returns the active capsule bounds in virtual-screen physical pixels (for cursor-leave auto-collapse).
+pub fn active_shelf_screen_rect(hwnd_raw: isize) -> Option<ClientRect> {
+    let map = shelf_hit_states().lock().ok()?;
+    let state = map.get(&hwnd_raw)?;
+    let rc = state.capsule_rect?;
+    Some(ClientRect {
+        x: state.window_origin.0 + rc.x,
+        y: state.window_origin.1 + rc.y,
+        width: rc.width,
+        height: rc.height,
+    })
+}
+
 #[cfg(target_os = "windows")]
 const SHELF_SUBCLASS_ID: usize = 0x4348_5348; // "CHSH"
 
-/// Configures the shelf HWND with non-activating topmost transparent extended styles.
+/// Configures the shelf HWND as a pure borderless topmost transparent DWM popup with ZERO
+/// Windows 11 1px outer border and ZERO classic titlebar fallback.
+///
+/// IMPORTANT: Never set `DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED` — doing so disables DWM
+/// non-client composition and causes Windows to paint a legacy GDI `"Charkle Shelf"` titlebar!
 #[cfg(target_os = "windows")]
 pub fn configure_shelf_window(hwnd_raw: isize) -> Result<ShelfWindowPlacement, String> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use windows::Win32::Foundation::{BOOL, HWND};
+    use windows::Win32::Graphics::Dwm::{
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+        DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, WS_BORDER,
+        WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW,
+        WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
     };
 
     let hwnd = HWND(hwnd_raw as *mut _);
-    // SAFETY: Configuring Win32 extended styles on our own Tauri shelf HWND.
+    // SAFETY: Configuring Win32 popup styles & disabling Win11 DWM border on our own shelf HWND.
     unsafe {
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let desired = (current & !(WS_EX_APPWINDOW.0 as isize))
+        // 1. Strip any frame/caption/thickframe/border styles into a pure WS_POPUP window.
+        let cur_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let strip_style = (WS_CAPTION.0
+            | WS_THICKFRAME.0
+            | WS_BORDER.0
+            | WS_DLGFRAME.0
+            | WS_SYSMENU.0
+            | WS_MINIMIZEBOX.0
+            | WS_MAXIMIZEBOX.0) as isize;
+        let desired_style = (cur_style & !strip_style)
+            | (WS_POPUP.0 as isize)
+            | (WS_CLIPCHILDREN.0 as isize)
+            | (WS_CLIPSIBLINGS.0 as isize);
+        let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, desired_style);
+
+        // 2. Non-activating topmost tool window without edge borders (keep Tauri DirectComposition).
+        let cur_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let strip_ex =
+            (WS_EX_APPWINDOW.0 | WS_EX_WINDOWEDGE.0 | WS_EX_CLIENTEDGE.0 | WS_EX_DLGMODALFRAME.0)
+                as isize;
+        let desired_ex = (cur_ex & !strip_ex)
             | (WS_EX_TOPMOST.0 as isize)
             | (WS_EX_TOOLWINDOW.0 as isize)
-            | (WS_EX_NOACTIVATE.0 as isize)
-            | (WS_EX_LAYERED.0 as isize);
-        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
+            | (WS_EX_NOACTIVATE.0 as isize);
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_ex);
 
-        let margins = MARGINS {
+        // 3. Keep DWM composition ACTIVE, but explicitly suppress Win11 rounded frame, 1px border,
+        // and OS window-show transitions so only our CSS/SVG notch renders cleanly.
+        let corner_pref: u32 = DWMWCP_DONOTROUND.0 as u32;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner_pref as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        );
+
+        let no_border: u32 = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &no_border as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        );
+
+        let disable_transitions = BOOL::from(true);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disable_transitions as *const BOOL as *const c_void,
+            size_of::<BOOL>() as u32,
+        );
+
+        // Flush style changes once on creation
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+        );
+
+        // Keep DWM glass sheet extended across the full client area for per-pixel alpha transparency.
+        let full_sheet = MARGINS {
             cxLeftWidth: -1,
             cxRightWidth: -1,
             cyTopHeight: -1,
             cyBottomHeight: -1,
         };
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &full_sheet);
     }
 
     reposition_shelf_to_cursor_monitor(hwnd_raw)
+}
+
+/// Shows the shelf HWND topmost without activating or stealing foreground focus (`SW_SHOWNOACTIVATE`).
+#[cfg(target_os = "windows")]
+pub fn show_shelf_no_activate(hwnd_raw: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    };
+    let hwnd = HWND(hwnd_raw as *mut _);
+    // SAFETY: Showing & raising our owned topmost shelf window without stealing foreground focus.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn show_shelf_no_activate(_hwnd_raw: isize) {}
+
+/// Hides the shelf HWND cleanly without blocking on cross-thread Tauri window proxies.
+#[cfg(target_os = "windows")]
+pub fn hide_shelf_native(hwnd_raw: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut _);
+    // SAFETY: Hiding our owned shelf window.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn hide_shelf_native(_hwnd_raw: isize) {}
+
+/// Returns `true` when the shelf HWND is actually visible on screen (`IsWindowVisible`).
+#[cfg(target_os = "windows")]
+pub fn is_shelf_window_visible(hwnd_raw: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    if hwnd_raw == 0 {
+        return false;
+    }
+    let hwnd = HWND(hwnd_raw as *mut _);
+    // SAFETY: Queries Win32 visibility state of our own shelf HWND.
+    unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_shelf_window_visible(_hwnd_raw: isize) -> bool {
+    false
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -225,13 +462,17 @@ pub fn reposition_shelf_to_cursor_monitor(hwnd_raw: isize) -> Result<ShelfWindow
     if let Ok(mut map) = shelf_hit_states().lock() {
         let entry = map.entry(hwnd_raw).or_insert(ShelfHitState {
             capsule_rect: None,
+            window_origin: (placement.x, placement.y),
             dpi_scale,
+            allow_activate: false,
+            outbound_dragging: false,
         });
+        entry.window_origin = (placement.x, placement.y);
         entry.dpi_scale = dpi_scale;
     }
 
     let hwnd = HWND(hwnd_raw as *mut _);
-    // SAFETY: Moves shelf window without activating it.
+    // SAFETY: Moves shelf window without activating it (no SWP_FRAMECHANGED storm).
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -254,15 +495,16 @@ pub fn reposition_shelf_to_cursor_monitor(
     configure_shelf_window(0)
 }
 
-/// Installs the Win32 subclass handling `WM_NCHITTEST` click-through and `WM_MOUSEACTIVATE`
-/// non-focus-stealing behavior on the shelf window.
+/// Installs the Win32 subclass handling zero-nonclient-area suppression, `WM_NCHITTEST`
+/// click-through, and `WM_MOUSEACTIVATE` non-focus-stealing behavior on the shelf window.
 #[cfg(target_os = "windows")]
 pub fn install_shelf_subclass(hwnd_raw: isize) -> bool {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::ScreenToClient;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, HTTRANSPARENT, MA_NOACTIVATE, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_NCHITTEST,
+        GetClientRect, HTTRANSPARENT, MA_ACTIVATE, MA_NOACTIVATE, WM_ERASEBKGND, WM_MOUSEACTIVATE,
+        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
     };
 
     unsafe extern "system" fn shelf_subclass_proc(
@@ -274,11 +516,52 @@ pub fn install_shelf_subclass(hwnd_raw: isize) -> bool {
         _ref_data: usize,
     ) -> LRESULT {
         match msg {
+            WM_NCCALCSIZE => {
+                // Eliminate ALL non-client border/caption pixels so Windows never reserves a titlebar.
+                return LRESULT(0);
+            }
+            WM_NCACTIVATE => {
+                // Never allow DefWindowProc to paint a classic active/inactive titlebar strip.
+                return LRESULT(1);
+            }
+            m if crate::windowing::should_suppress_nc_paint_message(m) => {
+                // Swallow WM_NCPAINT, WM_NCUAHDRAWCAPTION (0x00AE), and WM_NCUAHDRAWFRAME (0x00AF).
+                return LRESULT(0);
+            }
+            WM_ERASEBKGND => {
+                return LRESULT(1);
+            }
             WM_MOUSEACTIVATE => {
-                // Strictly prevent the Drop Shelf from ever stealing foreground window focus.
-                return LRESULT(MA_NOACTIVATE as isize);
+                let allow_activate = shelf_hit_states()
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&(hwnd.0 as isize)).map(|s| s.allow_activate))
+                    .unwrap_or(false);
+                return LRESULT(if allow_activate {
+                    MA_ACTIVATE as isize
+                } else {
+                    MA_NOACTIVATE as isize
+                });
             }
             WM_NCHITTEST => {
+                let state = shelf_hit_states()
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&(hwnd.0 as isize)).copied())
+                    .unwrap_or(ShelfHitState {
+                        capsule_rect: None,
+                        window_origin: (0, 0),
+                        dpi_scale: 1.0,
+                        allow_activate: false,
+                        outbound_dragging: false,
+                    });
+
+                // During an active outbound OLE drag from the shelf, let all hit tests pass through
+                // so the user can drop files onto ANY window or desktop area behind the shelf!
+                if state.outbound_dragging {
+                    return LRESULT(HTTRANSPARENT as isize);
+                }
+
                 let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let mut pt = POINT {
@@ -289,14 +572,6 @@ pub fn install_shelf_subclass(hwnd_raw: isize) -> bool {
                     let mut rc = RECT::default();
                     let _ = unsafe { GetClientRect(hwnd, &mut rc) };
                     let win_w = (rc.right - rc.left).max(1);
-                    let state = shelf_hit_states()
-                        .lock()
-                        .ok()
-                        .and_then(|m| m.get(&(hwnd.0 as isize)).copied())
-                        .unwrap_or(ShelfHitState {
-                            capsule_rect: None,
-                            dpi_scale: 1.0,
-                        });
                     if !shelf_point_is_interactive(
                         pt.x,
                         pt.y,
@@ -312,6 +587,7 @@ pub fn install_shelf_subclass(hwnd_raw: isize) -> bool {
                 if let Ok(mut map) = shelf_hit_states().lock() {
                     map.remove(&(hwnd.0 as isize));
                 }
+                cleanup_shelf_drop_targets(hwnd.0 as isize);
                 let _ =
                     unsafe { RemoveWindowSubclass(hwnd, Some(shelf_subclass_proc), uid_subclass) };
             }
@@ -342,37 +618,70 @@ impl Drop for TopEdgeDragMonitorHandle {
     }
 }
 
-/// Starts a lightweight background cursor monitor that detects when the user drags an item
-/// (left mouse button pressed) into the top-center trigger strip of any display so the Drop Shelf
-/// springs open immediately without stealing foreground focus.
-pub fn start_top_edge_drag_monitor<F>(on_drag_hover_top: F) -> TopEdgeDragMonitorHandle
+/// Shared live control flags for the Top-Edge Drop Shelf monitor.
+#[derive(Clone)]
+pub struct ShelfMonitorConfig {
+    pub enabled: Arc<AtomicBool>,
+    pub hover_trigger_enabled: Arc<AtomicBool>,
+    pub shelf_expanded: Arc<AtomicBool>,
+    pub shelf_pinned: Arc<AtomicBool>,
+    pub shelf_drag_hovering: Arc<AtomicBool>,
+    pub shelf_busy: Arc<AtomicBool>,
+    pub shelf_hold_until_ms: Arc<AtomicU64>,
+    pub shelf_hwnd: Arc<AtomicIsize>,
+}
+
+fn current_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Starts a lightweight background cursor monitor that:
+/// 1. Springs the Drop Shelf open immediately when dragging (`VK_LBUTTON` pressed) into any display's top-center strip.
+/// 2. Optionally springs the Drop Shelf open when hovering at the top-center bezel for ~180ms (`hover_trigger_enabled`).
+/// 3. Smoothly auto-collapses an unpinned Drop Shelf after the cursor leaves the active capsule for ~320ms.
+pub fn start_top_edge_monitor<FOpen, FClose>(
+    config: ShelfMonitorConfig,
+    on_open: FOpen,
+    on_auto_collapse: FClose,
+) -> TopEdgeDragMonitorHandle
 where
-    F: Fn() + Send + 'static,
+    FOpen: Fn() + Send + 'static,
+    FClose: Fn() + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
 
     #[cfg(target_os = "windows")]
     let _ = std::thread::Builder::new()
-        .name("charkle-top-edge-drag".to_string())
+        .name("charkle-top-edge-monitor".to_string())
         .spawn(move || {
-            use std::time::Duration;
+            use std::time::{Duration, Instant};
             use windows::Win32::Foundation::POINT;
             use windows::Win32::Graphics::Gdi::{
                 GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
             };
-            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+            };
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetCursorPos, GetSystemMetrics, SM_SWAPBUTTON,
+            };
 
-            let mut was_triggered = false;
+            let mut drag_triggered = false;
+            let mut hover_since: Option<Instant> = None;
+            let mut outside_since: Option<Instant> = None;
+            let mut stale_drag_since: Option<Instant> = None;
+
             while !stop_clone.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(45));
+                std::thread::sleep(Duration::from_millis(35));
 
-                // SAFETY: Stateless Win32 input state probes.
-                let lbutton_down =
-                    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16) & 0x8000 } != 0;
-                if !lbutton_down {
-                    was_triggered = false;
+                if !config.enabled.load(Ordering::Relaxed) {
+                    drag_triggered = false;
+                    hover_since = None;
+                    outside_since = None;
                     continue;
                 }
 
@@ -380,6 +689,14 @@ where
                 if unsafe { GetCursorPos(&mut pt) }.is_err() {
                     continue;
                 }
+
+                // SAFETY: Stateless Win32 input state probe; respects left-handed swapped mouse buttons.
+                let primary_vk = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+                    VK_RBUTTON.0 as i32
+                } else {
+                    VK_LBUTTON.0 as i32
+                };
+                let lbutton_down = unsafe { (GetAsyncKeyState(primary_vk) as u16) & 0x8000 } != 0;
 
                 let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
                 let mut info = MONITORINFO {
@@ -392,22 +709,620 @@ where
 
                 let mon = info.rcMonitor;
                 let center_x = (mon.left + mon.right) / 2;
-                let in_top_strip =
-                    pt.y >= mon.top && pt.y <= mon.top + 8 && (pt.x - center_x).abs() <= 210;
+                let is_expanded = config.shelf_expanded.load(Ordering::Relaxed);
+                let is_pinned = config.shelf_pinned.load(Ordering::Relaxed);
 
-                if in_top_strip && !was_triggered {
-                    was_triggered = true;
-                    on_drag_hover_top();
-                } else if !in_top_strip {
-                    was_triggered = false;
+                if !is_expanded {
+                    outside_since = None;
+                    let in_drag_strip =
+                        pt.y >= mon.top && pt.y <= mon.top + 10 && (pt.x - center_x).abs() <= 220;
+                    if lbutton_down && in_drag_strip {
+                        if !drag_triggered {
+                            drag_triggered = true;
+                            hover_since = None;
+                            on_open();
+                        }
+                        continue;
+                    }
+                    if !lbutton_down {
+                        drag_triggered = false;
+                    }
+
+                    // Optional top-center hover dwell trigger (~180ms) matching macOS NotchShelfController
+                    if !lbutton_down && config.hover_trigger_enabled.load(Ordering::Relaxed) {
+                        let in_hover_strip = pt.y >= mon.top
+                            && pt.y <= mon.top + 3
+                            && (pt.x - center_x).abs() <= 140;
+                        if in_hover_strip {
+                            let started = hover_since.get_or_insert_with(Instant::now);
+                            if started.elapsed() >= Duration::from_millis(180) {
+                                hover_since = None;
+                                on_open();
+                            }
+                        } else {
+                            hover_since = None;
+                        }
+                    } else {
+                        hover_since = None;
+                    }
+                } else {
+                    hover_since = None;
+                    // Guard against a missed `DragLeave` (e.g. drag cancelled off-screen):
+                    // if mouse button is released for >= 150ms, clear stale `shelf_drag_hovering`
+                    // so an unpinned shelf can NEVER wedge open permanently (Pitfall 5).
+                    if config.shelf_drag_hovering.load(Ordering::Relaxed) && !lbutton_down {
+                        let started = stale_drag_since.get_or_insert_with(Instant::now);
+                        if started.elapsed() >= Duration::from_millis(150) {
+                            config.shelf_drag_hovering.store(false, Ordering::SeqCst);
+                            stale_drag_since = None;
+                        }
+                    } else {
+                        stale_drag_since = None;
+                    }
+                    let hwnd_raw = config.shelf_hwnd.load(Ordering::Relaxed);
+                    let hold_until = config.shelf_hold_until_ms.load(Ordering::Relaxed);
+                    let hold_active = hold_until > 0 && current_epoch_ms() < hold_until;
+                    if is_pinned
+                        || config.shelf_drag_hovering.load(Ordering::Relaxed)
+                        || config.shelf_busy.load(Ordering::Relaxed)
+                        || hold_active
+                        || is_shelf_outbound_dragging(hwnd_raw)
+                    {
+                        outside_since = None;
+                        continue;
+                    }
+
+                    // Auto-collapse unpinned shelf once cursor leaves the active capsule rect (+24px grace)
+                    let inside_capsule = if let Some(rc) = active_shelf_screen_rect(hwnd_raw) {
+                        let margin = 24;
+                        pt.x >= rc.x - margin
+                            && pt.x <= rc.x + rc.width + margin
+                            && pt.y >= rc.y - 8
+                            && pt.y <= rc.y + rc.height + margin
+                    } else {
+                        // Capsule still animating in; keep it open until hit rect arrives
+                        true
+                    };
+
+                    if inside_capsule {
+                        outside_since = None;
+                    } else if !lbutton_down {
+                        let started = outside_since.get_or_insert_with(Instant::now);
+                        if started.elapsed() >= Duration::from_millis(320) {
+                            outside_since = None;
+                            on_auto_collapse();
+                        }
+                    }
                 }
             }
         });
 
     #[cfg(not(target_os = "windows"))]
-    let _ = (on_drag_hover_top, stop_clone);
+    let _ = (config, on_open, on_auto_collapse, stop_clone);
 
     TopEdgeDragMonitorHandle { stop }
+}
+
+/// Backward-compatible wrapper starting drag-only top-edge monitoring.
+pub fn start_top_edge_drag_monitor<F>(on_drag_hover_top: F) -> TopEdgeDragMonitorHandle
+where
+    F: Fn() + Send + 'static,
+{
+    start_top_edge_monitor(
+        ShelfMonitorConfig {
+            enabled: Arc::new(AtomicBool::new(true)),
+            hover_trigger_enabled: Arc::new(AtomicBool::new(false)),
+            shelf_expanded: Arc::new(AtomicBool::new(false)),
+            shelf_pinned: Arc::new(AtomicBool::new(false)),
+            shelf_drag_hovering: Arc::new(AtomicBool::new(false)),
+            shelf_busy: Arc::new(AtomicBool::new(false)),
+            shelf_hold_until_ms: Arc::new(AtomicU64::new(0)),
+            shelf_hwnd: Arc::new(AtomicIsize::new(0)),
+        },
+        on_drag_hover_top,
+        || {},
+    )
+}
+
+// =============================================================================
+// Native Win32 OLE IDropTarget Injector for Top-Edge Drop Shelf
+// =============================================================================
+
+/// Authoritative payload delivered by the Shelf's native Win32 OLE `IDropTarget`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShelfDropPayload {
+    Files(Vec<PathBuf>),
+    Url(String),
+    Text(String),
+}
+
+impl ShelfDropPayload {
+    pub fn item_count(&self) -> usize {
+        match self {
+            Self::Files(paths) => paths.len().max(1),
+            Self::Url(_) | Self::Text(_) => 1,
+        }
+    }
+}
+
+/// Lifecycle events delivered by the Shelf's native Win32 OLE `IDropTarget`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShelfDropEvent {
+    Enter { count: usize },
+    Over,
+    Leave,
+    Drop(ShelfDropPayload),
+}
+
+pub type ShelfDropCallback = Arc<dyn Fn(ShelfDropEvent) + Send + Sync>;
+
+/// Classifies dropped URL / Unicode text payloads into either a web URL (`http://`/`https://`)
+/// or plain text / `#RRGGBB` color swatch text, sharing the canonical `WebURLParser`.
+pub fn classify_dropped_text(raw: &str) -> Option<ShelfDropPayload> {
+    let trimmed = raw.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(social_url) =
+        charkle_core::media::resolvers::SocialPostURLParser::extract_post_url(trimmed)
+    {
+        return Some(ShelfDropPayload::Url(social_url.to_string()));
+    }
+    if let Some(gh_url) =
+        charkle_core::media::resolvers::GitHubRepoURLParser::extract_repo_url(trimmed)
+    {
+        return Some(ShelfDropPayload::Url(gh_url.to_string()));
+    }
+    if let Some(web_url) =
+        charkle_core::media::resolvers::WebURLParser::extract_web_url(trimmed, true)
+    {
+        return Some(ShelfDropPayload::Url(web_url.to_string()));
+    }
+    Some(ShelfDropPayload::Text(trimmed.to_string()))
+}
+
+#[cfg(target_os = "windows")]
+mod drop_target {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::ptr;
+
+    use windows::core::{implement, w};
+    use windows::Win32::Foundation::{BOOL, DRAGDROP_E_INVALIDHWND, HGLOBAL, HWND, LPARAM, POINTL};
+    use windows::Win32::System::Com::{
+        CoTaskMemFree, IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL,
+    };
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Ole::{
+        IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
+        RevokeDragDrop, CF_HDROP, CF_UNICODETEXT, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+    };
+    use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    use windows::Win32::UI::Shell::{
+        DragQueryFileW, IShellItemArray, SHCreateShellItemArrayFromDataObject, HDROP,
+        SIGDN_FILESYSPATH,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, GetClassNameW, GetPropW, IsWindow,
+    };
+
+    static SHELF_DROP_CALLBACKS: OnceLock<Mutex<HashMap<isize, ShelfDropCallback>>> =
+        OnceLock::new();
+
+    fn drop_callbacks() -> &'static Mutex<HashMap<isize, ShelfDropCallback>> {
+        SHELF_DROP_CALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    // STA-bound COM `IDropTarget` references live strictly on the Win32 UI thread that owns the
+    // Shelf HWND and registered them, keeping COM lifetimes alive until `WM_NCDESTROY`.
+    thread_local! {
+        static OLE_INIT_DONE: Cell<bool> = const { Cell::new(false) };
+        static SHELF_DROP_TARGETS: RefCell<HashMap<isize, HashMap<isize, IDropTarget>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    struct StgMediumGuard(STGMEDIUM);
+    impl Drop for StgMediumGuard {
+        fn drop(&mut self) {
+            // SAFETY: Releases the OS `STGMEDIUM` acquired from `IDataObject::GetData`.
+            unsafe {
+                ReleaseStgMedium(&mut self.0);
+            }
+        }
+    }
+
+    struct GlobalLockGuard(HGLOBAL);
+    impl Drop for GlobalLockGuard {
+        fn drop(&mut self) {
+            // SAFETY: Pairs with a successful `GlobalLock` call.
+            unsafe {
+                let _ = GlobalUnlock(self.0);
+            }
+        }
+    }
+
+    fn ensure_sta_ole_initialized() {
+        OLE_INIT_DONE.with(|done| {
+            if !done.get() {
+                // SAFETY: Initializes OLE on the current Win32 STA UI thread once.
+                let _ = unsafe { OleInitialize(None) };
+                done.set(true);
+            }
+        });
+    }
+
+    fn hwnd_class_name(hwnd: HWND) -> String {
+        let mut buf = [0u16; 128];
+        // SAFETY: Valid stack buffer for Win32 class name query.
+        let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+        if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+
+    fn extract_hdrop_paths(data_obj: &IDataObject) -> Vec<PathBuf> {
+        let fmt = FORMATETC {
+            cfFormat: CF_HDROP.0,
+            ptd: ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        };
+        // SAFETY: Standard `CF_HDROP` extraction with RAII `ReleaseStgMedium` cleanup.
+        let Ok(medium) = (unsafe { data_obj.GetData(&fmt) }) else {
+            return Vec::new();
+        };
+        let guard = StgMediumGuard(medium);
+        let hglobal = unsafe { guard.0.u.hGlobal };
+        if hglobal.0.is_null() {
+            return Vec::new();
+        }
+        let hdrop = HDROP(hglobal.0);
+        let count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+        let mut out = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let char_len = unsafe { DragQueryFileW(hdrop, i, None) } as usize;
+            if char_len == 0 {
+                continue;
+            }
+            let mut buf = vec![0u16; char_len + 1];
+            let written = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) } as usize;
+            if written > 0 {
+                out.push(PathBuf::from(OsString::from_wide(&buf[..written])));
+            }
+        }
+        out
+    }
+
+    fn extract_shell_item_paths(data_obj: &IDataObject) -> Vec<PathBuf> {
+        // SAFETY: Shell fallback for long (>260 char) paths when Explorer omits `CF_HDROP`.
+        let Ok(items) =
+            (unsafe { SHCreateShellItemArrayFromDataObject::<_, IShellItemArray>(data_obj) })
+        else {
+            return Vec::new();
+        };
+        let count = unsafe { items.GetCount() }.unwrap_or(0);
+        let mut out = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let Ok(item) = (unsafe { items.GetItemAt(i) }) else {
+                continue;
+            };
+            let Ok(name) = (unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }) else {
+                continue;
+            };
+            let path_str = unsafe { OsString::from_wide(name.as_wide()) };
+            unsafe { CoTaskMemFree(Some(name.0 as _)) };
+            if !path_str.is_empty() {
+                out.push(PathBuf::from(path_str));
+            }
+        }
+        out
+    }
+
+    fn read_hglobal_utf16_format(data_obj: &IDataObject, cf_format: u16) -> Option<String> {
+        let fmt = FORMATETC {
+            cfFormat: cf_format,
+            ptd: ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        };
+        // SAFETY: Reads UTF-16LE `TYMED_HGLOBAL` clipboard format and releases `STGMEDIUM`.
+        let medium = unsafe { data_obj.GetData(&fmt) }.ok()?;
+        let guard = StgMediumGuard(medium);
+        let hglobal = unsafe { guard.0.u.hGlobal };
+        if hglobal.0.is_null() {
+            return None;
+        }
+        const MAX_DROP_UTF16_BYTES: usize = 4 * 1024 * 1024;
+        let size = unsafe { GlobalSize(hglobal) };
+        if size < 2 {
+            return None;
+        }
+        let bounded_bytes = size.min(MAX_DROP_UTF16_BYTES);
+        let ptr = unsafe { GlobalLock(hglobal) };
+        if ptr.is_null() {
+            return None;
+        }
+        let _lock = GlobalLockGuard(hglobal);
+        let units = unsafe { std::slice::from_raw_parts(ptr as *const u16, bounded_bytes / 2) };
+        let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+        Some(String::from_utf16_lossy(&units[..len]))
+    }
+
+    fn extract_shelf_drop_payload(data_obj: Option<&IDataObject>) -> Option<ShelfDropPayload> {
+        let data_obj = data_obj?;
+
+        // 1. OS file & folder drops (`CF_HDROP` + `IShellItemArray` fallback for >260-char paths)
+        let mut paths = extract_hdrop_paths(data_obj);
+        if paths.is_empty() {
+            paths = extract_shell_item_paths(data_obj);
+        }
+        if !paths.is_empty() {
+            return Some(ShelfDropPayload::Files(paths));
+        }
+
+        // 2. Browser dragged links (`UniformResourceLocatorW`)
+        let url_fmt = unsafe { RegisterClipboardFormatW(w!("UniformResourceLocatorW")) };
+        if url_fmt != 0 {
+            if let Some(raw_url) = read_hglobal_utf16_format(data_obj, url_fmt as u16) {
+                if let Some(payload) = classify_dropped_text(&raw_url) {
+                    return Some(payload);
+                }
+            }
+        }
+
+        // 3. Unicode text / URL / `#RRGGBB` color drops (`CF_UNICODETEXT`)
+        if let Some(raw_text) = read_hglobal_utf16_format(data_obj, CF_UNICODETEXT.0) {
+            if let Some(payload) = classify_dropped_text(&raw_text) {
+                return Some(payload);
+            }
+        }
+
+        None
+    }
+
+    #[implement(IDropTarget)]
+    struct ShelfDropTarget {
+        callback: ShelfDropCallback,
+        enter_is_valid: Cell<bool>,
+        cursor_effect: Cell<DROPEFFECT>,
+    }
+
+    impl ShelfDropTarget {
+        fn new(callback: ShelfDropCallback) -> Self {
+            Self {
+                callback,
+                enter_is_valid: Cell::new(false),
+                cursor_effect: Cell::new(DROPEFFECT_NONE),
+            }
+        }
+    }
+
+    #[allow(non_snake_case)]
+    impl IDropTarget_Impl for ShelfDropTarget_Impl {
+        fn DragEnter(
+            &self,
+            pdataobj: Option<&IDataObject>,
+            _grfkeystate: MODIFIERKEYS_FLAGS,
+            _pt: &POINTL,
+            pdweffect: *mut DROPEFFECT,
+        ) -> windows::core::Result<()> {
+            self.enter_is_valid.set(false);
+            self.cursor_effect.set(DROPEFFECT_NONE);
+
+            if let Some(payload) = extract_shelf_drop_payload(pdataobj) {
+                let count = payload.item_count();
+                self.enter_is_valid.set(true);
+                self.cursor_effect.set(DROPEFFECT_COPY);
+                if !pdweffect.is_null() {
+                    // SAFETY: Out-pointer validated non-null per COM `IDropTarget::DragEnter`.
+                    unsafe { *pdweffect = DROPEFFECT_COPY };
+                }
+                (self.callback)(ShelfDropEvent::Enter { count });
+            } else if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            Ok(())
+        }
+
+        fn DragOver(
+            &self,
+            _grfkeystate: MODIFIERKEYS_FLAGS,
+            _pt: &POINTL,
+            pdweffect: *mut DROPEFFECT,
+        ) -> windows::core::Result<()> {
+            if self.enter_is_valid.get() {
+                if !pdweffect.is_null() {
+                    unsafe { *pdweffect = self.cursor_effect.get() };
+                }
+                (self.callback)(ShelfDropEvent::Over);
+            } else if !pdweffect.is_null() {
+                unsafe { *pdweffect = DROPEFFECT_NONE };
+            }
+            Ok(())
+        }
+
+        fn DragLeave(&self) -> windows::core::Result<()> {
+            let was_valid = self.enter_is_valid.replace(false);
+            self.cursor_effect.set(DROPEFFECT_NONE);
+            if was_valid {
+                (self.callback)(ShelfDropEvent::Leave);
+            }
+            Ok(())
+        }
+
+        fn Drop(
+            &self,
+            pdataobj: Option<&IDataObject>,
+            _grfkeystate: MODIFIERKEYS_FLAGS,
+            _pt: &POINTL,
+            pdweffect: *mut DROPEFFECT,
+        ) -> windows::core::Result<()> {
+            self.enter_is_valid.set(false);
+            self.cursor_effect.set(DROPEFFECT_NONE);
+
+            if let Some(payload) = extract_shelf_drop_payload(pdataobj) {
+                if !pdweffect.is_null() {
+                    unsafe { *pdweffect = DROPEFFECT_COPY };
+                }
+                (self.callback)(ShelfDropEvent::Drop(payload));
+            } else {
+                if !pdweffect.is_null() {
+                    unsafe { *pdweffect = DROPEFFECT_NONE };
+                }
+                (self.callback)(ShelfDropEvent::Leave);
+            }
+            Ok(())
+        }
+    }
+
+    pub fn install(shelf_hwnd_raw: isize, callback: ShelfDropCallback) -> usize {
+        if shelf_hwnd_raw == 0 {
+            return 0;
+        }
+        if let Ok(mut map) = drop_callbacks().lock() {
+            map.insert(shelf_hwnd_raw, callback);
+        }
+        refresh(shelf_hwnd_raw)
+    }
+
+    pub fn refresh(shelf_hwnd_raw: isize) -> usize {
+        if shelf_hwnd_raw == 0 {
+            return 0;
+        }
+        let callback = drop_callbacks()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&shelf_hwnd_raw).cloned());
+        let Some(callback) = callback else {
+            return 0;
+        };
+
+        ensure_sta_ole_initialized();
+
+        let root_hwnd = HWND(shelf_hwnd_raw as *mut _);
+        if !unsafe { IsWindow(root_hwnd) }.as_bool() {
+            return 0;
+        }
+
+        // Collect the shelf root HWND plus EVERY descendant HWND (including WebView2's lazily
+        // created `Chrome_WidgetWin_1` and `Chrome_RenderWidgetHostHWND` child HWNDs).
+        let mut all_hwnds: Vec<HWND> = vec![root_hwnd];
+        unsafe extern "system" fn collect_child(child: HWND, lparam: LPARAM) -> BOOL {
+            let list = unsafe { &mut *(lparam.0 as *mut Vec<HWND>) };
+            list.push(child);
+            BOOL::from(true)
+        }
+        unsafe {
+            let _ = EnumChildWindows(
+                root_hwnd,
+                Some(collect_child),
+                LPARAM(&mut all_hwnds as *mut Vec<HWND> as isize),
+            );
+        }
+
+        let mut newly_installed = 0usize;
+        SHELF_DROP_TARGETS.with(|cell| {
+            let mut root_map = cell.borrow_mut();
+            let targets = root_map.entry(shelf_hwnd_raw).or_default();
+
+            // Prune destroyed child HWNDs
+            targets.retain(|&h_raw, _| unsafe { IsWindow(HWND(h_raw as *mut _)) }.as_bool());
+
+            for h in all_hwnds {
+                let h_raw = h.0 as isize;
+                let prop = unsafe { GetPropW(h, w!("OleDropTargetInterface")) };
+                if targets.contains_key(&h_raw) && !prop.0.is_null() {
+                    continue;
+                }
+
+                let cls = hwnd_class_name(h);
+                let revoke_res = unsafe { RevokeDragDrop(h) };
+                if revoke_res == Err(DRAGDROP_E_INVALIDHWND.into()) {
+                    continue;
+                }
+
+                let drop_target: IDropTarget = ShelfDropTarget::new(Arc::clone(&callback)).into();
+                match unsafe { RegisterDragDrop(h, &drop_target) } {
+                    Ok(()) => {
+                        targets.insert(h_raw, drop_target);
+                        newly_installed += 1;
+                        tracing::info!(
+                            hwnd = h_raw,
+                            class = %cls,
+                            "Installed native Shelf IDropTarget"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            hwnd = h_raw,
+                            class = %cls,
+                            %err,
+                            "Skipped native Shelf IDropTarget registration"
+                        );
+                    }
+                }
+            }
+        });
+
+        newly_installed
+    }
+
+    pub fn cleanup(shelf_hwnd_raw: isize) {
+        if let Ok(mut map) = drop_callbacks().lock() {
+            map.remove(&shelf_hwnd_raw);
+        }
+        SHELF_DROP_TARGETS.with(|cell| {
+            if let Some(targets) = cell.borrow_mut().remove(&shelf_hwnd_raw) {
+                for (h_raw, _target) in targets {
+                    let h = HWND(h_raw as *mut _);
+                    if unsafe { IsWindow(h) }.as_bool() {
+                        let _ = unsafe { RevokeDragDrop(h) };
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Registers our native Win32 OLE `IDropTarget` across the Shelf HWND and all current child HWNDs.
+/// MUST be called on the Win32 STA UI thread.
+pub fn install_shelf_drop_target(shelf_hwnd_raw: isize, callback: ShelfDropCallback) -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        drop_target::install(shelf_hwnd_raw, callback)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (shelf_hwnd_raw, callback);
+        0
+    }
+}
+
+/// Re-scans the Shelf HWND hierarchy and injects our native `IDropTarget` onto any newly spawned
+/// WebView2 child HWNDs (`Chrome_WidgetWin_1`, `Chrome_RenderWidgetHostHWND`) lacking
+/// `OleDropTargetInterface`. MUST be called on the Win32 STA UI thread.
+pub fn refresh_shelf_drop_targets(shelf_hwnd_raw: isize) -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        drop_target::refresh(shelf_hwnd_raw)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = shelf_hwnd_raw;
+        0
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_shelf_drop_targets(shelf_hwnd_raw: isize) {
+    drop_target::cleanup(shelf_hwnd_raw);
 }
 
 #[cfg(test)]
@@ -466,5 +1381,64 @@ mod tests {
             1.0,
             Some(capsule)
         ));
+    }
+
+    #[test]
+    fn default_compact_capsule_rect_seeds_centered_physical_bounds() {
+        let mon = MonitorRect {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        let placement = compute_shelf_window_rect(mon, 1.5);
+        let rc = default_compact_capsule_rect(placement);
+        assert_eq!(rc.y, 0);
+        assert_eq!(rc.width, (668.0 * 1.5_f64).round() as i32);
+        assert_eq!(rc.height, (330.0 * 1.5_f64).round() as i32);
+        assert_eq!(rc.x, (placement.width - rc.width) / 2);
+        // Center of compact drop well must immediately be interactive at frame 0
+        assert!(shelf_point_is_interactive(
+            placement.width / 2,
+            rc.height / 2,
+            placement.width,
+            1.5,
+            Some(rc)
+        ));
+    }
+
+    #[test]
+    fn classifies_dropped_urls_hex_colors_and_plain_text_cleanly() {
+        assert_eq!(
+            classify_dropped_text("https://tauri.app\0"),
+            Some(ShelfDropPayload::Url("https://tauri.app/".to_string()))
+        );
+        assert_eq!(
+            classify_dropped_text("https://github.com/tauri-apps/tauri"),
+            Some(ShelfDropPayload::Url(
+                "https://github.com/tauri-apps/tauri".to_string()
+            ))
+        );
+        assert_eq!(
+            classify_dropped_text("Look at this tweet https://x.com/charkle/status/123456!"),
+            Some(ShelfDropPayload::Url(
+                "https://x.com/charkle/status/123456".to_string()
+            ))
+        );
+        assert_eq!(
+            classify_dropped_text("#2A60E0"),
+            Some(ShelfDropPayload::Text("#2A60E0".to_string()))
+        );
+        assert_eq!(
+            classify_dropped_text("Liquid glass surface notes"),
+            Some(ShelfDropPayload::Text(
+                "Liquid glass surface notes".to_string()
+            ))
+        );
+        assert_eq!(classify_dropped_text("   \0\n "), None);
+
+        let files = ShelfDropPayload::Files(vec![PathBuf::from("a.png"), PathBuf::from("b.png")]);
+        assert_eq!(files.item_count(), 2);
+        assert_eq!(ShelfDropPayload::Files(Vec::new()).item_count(), 1);
     }
 }

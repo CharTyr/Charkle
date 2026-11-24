@@ -1,11 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Folder, Inbox, LayoutGrid, X } from 'lucide-react';
 import { getTransport } from '../../api/transport';
-import type {
-  CaptureSessionInfo,
-  FolderRecord,
-  MoodboardSummary,
-  ShelfTargetMode,
+import { CustomSelect, type SelectOption } from '../../design-system';
+import {
+  buildFolderTree,
+  flattenFolderTree,
+  type CaptureSessionInfo,
+  type FolderRecord,
+  type MoodboardSummary,
+  type ShelfTargetMode,
 } from '../../types/domain';
 
 interface SelectionBox {
@@ -45,6 +48,9 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
   const [box, setBox] = useState<SelectionBox | null>(null);
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const commitLockRef = useRef(false);
+  const cancelLockRef = useRef(false);
 
   useEffect(() => {
     if (!token) return;
@@ -76,36 +82,53 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
     return { left, top, width, height };
   }, [box]);
 
-  const toPhysicalRect = (rect: { left: number; top: number; width: number; height: number }) => {
+  const physicalCrop = useMemo(() => {
+    if (!normalized) return null;
     const vw = Math.max(1, window.innerWidth || session?.width || 1920);
     const vh = Math.max(1, window.innerHeight || session?.height || 1080);
-    const fw = session?.width || vw;
-    const fh = session?.height || vh;
+    const fw = Math.max(1, session?.width || vw);
+    const fh = Math.max(1, session?.height || vh);
     const sx = fw / vw;
     const sy = fh / vh;
-    return {
-      x: Math.max(0, Math.round(rect.left * sx)),
-      y: Math.max(0, Math.round(rect.top * sy)),
-      width: Math.max(1, Math.round(rect.width * sx)),
-      height: Math.max(1, Math.round(rect.height * sy)),
-    };
-  };
+    const x = Math.max(0, Math.min(fw - 1, Math.round(normalized.left * sx)));
+    const y = Math.max(0, Math.min(fh - 1, Math.round(normalized.top * sy)));
+    const width = Math.max(1, Math.min(fw - x, Math.round(normalized.width * sx)));
+    const height = Math.max(1, Math.min(fh - y, Math.round(normalized.height * sy)));
+    return { x, y, width, height };
+  }, [normalized, session]);
 
-  const physicalCrop = normalized ? toPhysicalRect(normalized) : null;
+  const folderOptions = useMemo<SelectOption<string>[]>(() => {
+    return flattenFolderTree(buildFolderTree(folders)).map((node) => ({
+      value: node.folder.id,
+      label: node.folder.name,
+      depth: node.depth,
+    }));
+  }, [folders]);
 
-  const handleCancel = async () => {
-    if (token) {
-      await transport.cancelRegionCapture(token);
+  const handleCancel = useCallback(async () => {
+    if (cancelLockRef.current || commitLockRef.current) return;
+    cancelLockRef.current = true;
+    try {
+      if (token) {
+        await transport.cancelRegionCapture(token);
+      }
+    } catch {
+      cancelLockRef.current = false;
     }
-  };
+  }, [token, transport]);
 
-  const handleCommit = async () => {
-    if (!token || !physicalCrop || submitting) return;
-    if (physicalCrop.width < 2 || physicalCrop.height < 2) return;
+  const handleCommit = useCallback(async () => {
+    if (!token || !physicalCrop || submitting || commitLockRef.current) return;
+    if (physicalCrop.width < 4 || physicalCrop.height < 4) return;
+    commitLockRef.current = true;
     setSubmitting(true);
+    setErrorMessage(null);
     try {
       const folderId = targetMode === 'folder' && selectedFolderId ? selectedFolderId : null;
-      const boardId = targetMode === 'activeMoodboard' ? (boards[0]?.id ?? null) : null;
+      const boardId =
+        targetMode === 'activeMoodboard'
+          ? (session?.targetBoardId ?? boards[0]?.id ?? null)
+          : null;
       await transport.commitRegionCapture(
         token,
         physicalCrop.x,
@@ -115,10 +138,13 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
         folderId,
         boardId,
       );
+    } catch (err) {
+      commitLockRef.current = false;
+      setErrorMessage(err instanceof Error && err.message ? err.message : '保存截图失败，请重试');
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [token, physicalCrop, submitting, targetMode, selectedFolderId, session?.targetBoardId, boards, transport]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -132,7 +158,27 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  });
+  }, [handleCancel, handleCommit, physicalCrop]);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const finishDrag = () => {
+      setDragging(false);
+      setBox((prev) => {
+        if (!prev) return null;
+        if (Math.abs(prev.endX - prev.startX) < 4 || Math.abs(prev.endY - prev.startY) < 4) {
+          return null;
+        }
+        return prev;
+      });
+    };
+    window.addEventListener('mouseup', finishDrag);
+    window.addEventListener('blur', finishDrag);
+    return () => {
+      window.removeEventListener('mouseup', finishDrag);
+      window.removeEventListener('blur', finishDrag);
+    };
+  }, [dragging]);
 
   // Render live 8x zoom pixel loupe near cursor
   useEffect(() => {
@@ -174,8 +220,11 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
   }, [cursor]);
 
   const frameUrl = token ? transport.captureFrameUrl(token) : '';
-  const loupeLeft = Math.min((window.innerWidth || 1920) - 144, cursor.x + 20);
-  const loupeTop = Math.min((window.innerHeight || 1080) - 168, cursor.y + 20);
+  const hasActiveSelection = Boolean(normalized && normalized.width >= 4 && normalized.height >= 4);
+  const vw = window.innerWidth || 1920;
+  const vh = window.innerHeight || 1080;
+  const loupeLeft = cursor.x + 20 + 132 > vw ? Math.max(12, cursor.x - 144) : cursor.x + 20;
+  const loupeTop = cursor.y + 20 + 156 > vh ? Math.max(12, cursor.y - 168) : cursor.y + 20;
 
   return (
     <div
@@ -186,7 +235,9 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
       }}
       onMouseDown={(e) => {
         if (e.button !== 0) return;
+        if (!e.currentTarget.contains(e.target as Node)) return;
         if ((e.target as HTMLElement).closest('[data-capture-toolbar="true"]')) return;
+        setErrorMessage(null);
         setDragging(true);
         setBox({
           startX: e.clientX,
@@ -201,7 +252,16 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
           setBox((prev) => (prev ? { ...prev, endX: e.clientX, endY: e.clientY } : null));
         }
       }}
-      onMouseUp={() => setDragging(false)}
+      onMouseUp={() => {
+        setDragging(false);
+        setBox((prev) => {
+          if (!prev) return null;
+          if (Math.abs(prev.endX - prev.startX) < 4 || Math.abs(prev.endY - prev.startY) < 4) {
+            return null;
+          }
+          return prev;
+        });
+      }}
       className="relative w-screen h-screen overflow-hidden select-none cursor-crosshair bg-[#0b0c0f]"
     >
       {/* Frozen 1:1 physical desktop frame */}
@@ -215,11 +275,30 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
         />
       )}
 
-      {/* Calm dim overlay */}
-      <div className="pointer-events-none absolute inset-0 bg-black/38" />
+      {/* Calm dim overlay only before selection begins; active selection dims exclusively outside via box-shadow */}
+      {!hasActiveSelection && (
+        <div className="pointer-events-none absolute inset-0 bg-black/38" />
+      )}
+
+      {/* Inline error feedback if screenshot commit fails */}
+      {errorMessage && (
+        <div
+          role="alert"
+          className="pointer-events-none charkle-glass-dark absolute top-6 left-1/2 -translate-x-1/2 z-40 rounded-full px-3.5 py-1.5 text-[12px] text-rose-300 border border-rose-400/35 whitespace-nowrap"
+        >
+          {errorMessage}
+        </div>
+      )}
+
+      {/* Minimal top-center hint before dragging begins */}
+      {!hasActiveSelection && !errorMessage && (
+        <div className="pointer-events-none charkle-glass-dark absolute top-6 left-1/2 -translate-x-1/2 z-30 rounded-full px-3.5 py-1.5 text-[12px] text-white/90 whitespace-nowrap">
+          拖拽框选截图区域 · 右键或 Esc 取消
+        </div>
+      )}
 
       {/* Precision Crosshair Guides */}
-      {cursor.visible && !normalized && (
+      {cursor.visible && !hasActiveSelection && (
         <>
           <div
             aria-hidden="true"
@@ -235,7 +314,7 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
       )}
 
       {/* Active Crop Selection Rectangle */}
-      {normalized && normalized.width > 1 && normalized.height > 1 && (
+      {hasActiveSelection && normalized && (
         <div
           data-testid="capture-selection-rect"
           style={{
@@ -249,7 +328,10 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
           {physicalCrop && (
             <div
               data-testid="capture-size-badge"
-              className="charkle-glass-dark absolute -top-7 left-0 px-2 py-0.5 rounded-[6px] text-[11.5px] font-medium charkle-tabular whitespace-nowrap"
+              className={[
+                'charkle-glass-dark absolute px-2 py-0.5 rounded-[6px] text-[11.5px] font-medium charkle-tabular whitespace-nowrap',
+                normalized.top < 32 ? 'top-1.5 left-1.5' : '-top-7 left-0',
+              ].join(' ')}
             >
               {physicalCrop.width} × {physicalCrop.height} px
             </div>
@@ -296,7 +378,12 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
             <button
               key={opt.id}
               type="button"
-              onClick={() => setTargetMode(opt.id)}
+              onClick={() => {
+                setTargetMode(opt.id);
+                if (opt.id === 'folder' && !selectedFolderId && folders[0]) {
+                  setSelectedFolderId(folders[0].id);
+                }
+              }}
               className={[
                 'charkle-pressable h-6 px-2 rounded-full inline-flex items-center gap-1 cursor-pointer text-[11.5px]',
                 targetMode === opt.id ? 'bg-[#5B8DEF] text-white font-medium' : 'text-white/75 hover:text-white',
@@ -307,6 +394,17 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
             </button>
           ))}
         </div>
+
+        {targetMode === 'folder' && folderOptions.length > 1 && (
+          <CustomSelect<string>
+            value={selectedFolderId}
+            options={folderOptions}
+            onChange={(fid) => setSelectedFolderId(fid)}
+            ariaLabel="选择截图目标文件夹"
+            size="xs"
+            className="h-6 max-w-[132px] bg-white/12 border-white/15 text-white text-[11px]"
+          />
+        )}
 
         <button
           type="button"

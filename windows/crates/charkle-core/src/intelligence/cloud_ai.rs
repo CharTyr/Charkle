@@ -63,7 +63,7 @@ fn validate_and_normalize_base(raw_base: &str, default_path: &str) -> CoreResult
         .host_str()
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    let is_local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let is_local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
     if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_local) {
         return Err(CoreError::InvalidOperation(
             "远程 AI 接口必须使用 HTTPS（仅 localhost 允许 HTTP）。".to_string(),
@@ -82,14 +82,9 @@ fn validate_and_normalize_base(raw_base: &str, default_path: &str) -> CoreResult
 
 fn parse_caption_json(raw: &str) -> CoreResult<(String, Vec<String>)> {
     let trimmed = raw.trim();
-    let cleaned = if let Some(start) = trimmed.find('{') {
-        if let Some(end) = trimmed.rfind('}') {
-            &trimmed[start..=end]
-        } else {
-            trimmed
-        }
-    } else {
-        trimmed
+    let cleaned = match (trimmed.find('{'), trimmed.rfind('}')) {
+        (Some(start), Some(end)) if start <= end => &trimmed[start..=end],
+        _ => trimmed,
     };
     let val: Value = serde_json::from_str(cleaned).unwrap_or_else(|_| {
         json!({

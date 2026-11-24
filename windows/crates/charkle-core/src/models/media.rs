@@ -7,11 +7,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use crate::models::core::{AssetRecord, LabColor};
+use crate::models::core::{AssetRecord, LabColor, SocialPostMetadata};
 use crate::models::moodboard::NormalizedCropRect;
 use crate::wire::swift_codec::{base64_data_opt, cocoa_date_opt, upper_uuid, upper_uuid_opt};
 
-/// All 5 supported asset ingestion forms matching `CaptureInput` in Swift.
+/// All supported asset ingestion forms matching `CaptureInput` in Swift.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureInput {
     FilePath(PathBuf),
@@ -24,6 +24,11 @@ pub enum CaptureInput {
         url: String,
         title: Option<String>,
         notes: Option<String>,
+    },
+    SocialBookmark {
+        metadata: Box<SocialPostMetadata>,
+        cover_image_data: Option<Vec<u8>>,
+        tags: Vec<String>,
     },
     TextSnippet {
         title: String,

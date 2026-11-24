@@ -133,13 +133,23 @@ impl FigmaBridgeExporter {
             let Some(&frame) = resolved_frames.get(&node.id) else {
                 continue;
             };
-            if frame.width <= 0.0 || frame.height <= 0.0 {
+            if !frame.x.is_finite()
+                || !frame.y.is_finite()
+                || !frame.width.is_finite()
+                || !frame.height.is_finite()
+                || frame.width <= 0.0
+                || frame.height <= 0.0
+            {
                 continue;
             }
             let node_id_str = format_swift_uuid(&node.id);
             let geom = geometry_json(
                 frame,
-                node.rotation_degrees,
+                if node.rotation_degrees.is_finite() {
+                    node.rotation_degrees
+                } else {
+                    0.0
+                },
                 node.flip_horizontal,
                 node.flip_vertical,
             );
@@ -253,7 +263,8 @@ impl FigmaBridgeExporter {
                         }
                     }
 
-                    let Some(mut img) = decoded else {
+                    let Some(mut img) = decoded.filter(|d| d.width() >= 1 && d.height() >= 1)
+                    else {
                         item_warnings.push(
                             "无法解码该素材的画面像素，原始文件已归档在 originals/".to_string(),
                         );
@@ -270,15 +281,38 @@ impl FigmaBridgeExporter {
                     };
 
                     let crop_key = if let Some(c) = crop {
-                        if *c != NormalizedCropRect::FULL && c.width > 0.05 && c.height > 0.05 {
-                            let iw = img.width() as f64;
-                            let ih = img.height() as f64;
-                            let rx = (c.x * iw).round().clamp(0.0, iw - 1.0) as u32;
-                            let ry = (c.y * ih).round().clamp(0.0, ih - 1.0) as u32;
-                            let rw = (c.width * iw).round().clamp(1.0, iw - rx as f64) as u32;
-                            let rh = (c.height * ih).round().clamp(1.0, ih - ry as f64) as u32;
-                            img = img.crop_imm(rx, ry, rw, rh);
-                            format!("{:.3}-{:.3}-{:.3}-{:.3}", c.x, c.y, c.width, c.height)
+                        let iw = img.width() as f64;
+                        let ih = img.height() as f64;
+                        if iw >= 2.0
+                            && ih >= 2.0
+                            && *c != NormalizedCropRect::FULL
+                            && c.x.is_finite()
+                            && c.y.is_finite()
+                            && c.width.is_finite()
+                            && c.height.is_finite()
+                            && c.width > 0.05
+                            && c.height > 0.05
+                        {
+                            let clamped = c.clamped();
+                            let max_rx = (iw - 1.0).max(0.0);
+                            let max_ry = (ih - 1.0).max(0.0);
+                            let rx = (clamped.x * iw).floor().clamp(0.0, max_rx) as u32;
+                            let ry = (clamped.y * ih).floor().clamp(0.0, max_ry) as u32;
+                            let avail_w = (iw - rx as f64).max(1.0);
+                            let avail_h = (ih - ry as f64).max(1.0);
+                            let rw = (clamped.width * iw).round().clamp(1.0, avail_w) as u32;
+                            let rh = (clamped.height * ih).round().clamp(1.0, avail_h) as u32;
+                            if rw >= 1
+                                && rh >= 1
+                                && rx.saturating_add(rw) <= img.width()
+                                && ry.saturating_add(rh) <= img.height()
+                            {
+                                img = img.crop_imm(rx, ry, rw, rh);
+                            }
+                            format!(
+                                "{:.3}-{:.3}-{:.3}-{:.3}",
+                                clamped.x, clamped.y, clamped.width, clamped.height
+                            )
                         } else {
                             "full".to_string()
                         }
@@ -293,7 +327,8 @@ impl FigmaBridgeExporter {
                         let prefix = if crop_key == "full" {
                             asset_uuid_str.clone()
                         } else {
-                            let hash_suffix = &sha256_hex(crop_key.as_bytes())[..6];
+                            let digest = sha256_hex(crop_key.as_bytes());
+                            let hash_suffix = digest.get(..6).unwrap_or("crop");
                             format!("{asset_uuid_str}-C{hash_suffix}")
                         };
                         let tiles = build_lossless_tiles(&img, &prefix, &mut zip_entries)?;
@@ -516,7 +551,7 @@ impl FigmaBridgeExporter {
             std::fs::create_dir_all(parent)?;
         }
         let tmp_path = PathBuf::from(format!("{}.tmp", destination_path.display()));
-        {
+        let write_result: CoreResult<()> = (|| {
             let file = File::create(&tmp_path)?;
             let mut zip = ZipWriter::new(file);
             let deflate_opts =
@@ -544,11 +579,19 @@ impl FigmaBridgeExporter {
             }
             zip.finish()
                 .map_err(|e| CoreError::Media(format!("ZIP finalize failed: {e}")))?;
+            Ok(())
+        })();
+        if let Err(err) = write_result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
         }
         if destination_path.exists() {
             let _ = std::fs::remove_file(destination_path);
         }
-        std::fs::rename(&tmp_path, destination_path)?;
+        if let Err(err) = std::fs::rename(&tmp_path, destination_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err.into());
+        }
 
         Ok(FigmaBridgeExportReport {
             object_count: objects.len(),
@@ -601,12 +644,13 @@ fn build_lossless_tiles(
 }
 
 fn geometry_json(rect: BoardRect, angle: f64, flip_x: bool, flip_y: bool) -> Value {
+    let finite = |v: f64, fb: f64| if v.is_finite() { v } else { fb };
     json!({
-        "x": rect.x,
-        "y": rect.y,
-        "width": rect.width,
-        "height": rect.height,
-        "angle": angle,
+        "x": finite(rect.x, 0.0),
+        "y": finite(rect.y, 0.0),
+        "width": finite(rect.width, 1.0).max(1.0),
+        "height": finite(rect.height, 1.0).max(1.0),
+        "angle": finite(angle, 0.0),
         "flipX": flip_x,
         "flipY": flip_y
     })
@@ -638,31 +682,31 @@ fn is_multiframe_gif(data: &[u8]) -> bool {
                 if frames >= 2 {
                     return true;
                 }
-                i += 10;
+                i = i.saturating_add(10);
                 if i > data.len() {
                     break;
                 }
                 let l_packed = data[i - 1];
                 if (l_packed & 0x80) != 0 {
                     let lct = 3 * (1usize << ((l_packed & 0x07) + 1));
-                    i += lct;
+                    i = i.saturating_add(lct);
                 }
-                i += 1; // LZW min code size
+                i = i.saturating_add(1); // LZW min code size
                 while i < data.len() && data[i] != 0 {
-                    i += 1 + data[i] as usize;
+                    i = i.saturating_add(1 + data[i] as usize);
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             0x21 => {
                 // Extension block
-                i += 2;
+                i = i.saturating_add(2);
                 while i < data.len() && data[i] != 0 {
-                    i += 1 + data[i] as usize;
+                    i = i.saturating_add(1 + data[i] as usize);
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             0x3B => break, // Trailer
-            _ => i += 1,
+            _ => i = i.saturating_add(1),
         }
     }
     frames >= 2
@@ -1059,5 +1103,94 @@ mod tests {
             img_obj["image"]["animation"]["sha256"].as_str().unwrap()
         );
         assert!(gif_zip_bytes.starts_with(b"GIF8"));
+    }
+
+    #[test]
+    fn handles_1x1_image_extreme_crop_nan_values_and_non_ascii_hex_without_panicking() {
+        let dir = tempdir().unwrap();
+        let media = MediaPipeline::new(dir.path()).unwrap();
+
+        let tiny = RgbaImage::from_pixel(1, 1, Rgba([180, 120, 90, 255]));
+        let tiny_path = dir.path().join("tiny1x1.png");
+        DynamicImage::ImageRgba8(tiny)
+            .save_with_format(&tiny_path, ImageFormat::Png)
+            .unwrap();
+
+        let mut asset = AssetRecord::new("Tiny 1x1", "tiny1x1.png");
+        asset.media_kind = MediaKind::Image;
+        asset.mime_type = "image/png".to_string();
+        asset.content_hash = "tinyhash".to_string();
+        asset.pixel_width = 1;
+        asset.pixel_height = 1;
+        media.install_original(&tiny_path, &asset, false).unwrap();
+
+        let mut assets = HashMap::new();
+        assets.insert(asset.id, asset.clone());
+
+        let node_id = Uuid::new_v4();
+        let mut doc = MoodboardDocument::new("边界健壮性测试");
+        doc.mode = BoardLayoutMode::Freeform;
+        doc.extracted_palette = vec![LabColor {
+            hex: "中文色".to_string(),
+            l: 50.0,
+            a: 0.0,
+            b: 0.0,
+            proportion: 1.0,
+        }];
+        doc.nodes = vec![BoardNode {
+            id: node_id,
+            kind: BoardNodeKind::AssetRef {
+                asset_id: asset.id,
+                crop: Some(NormalizedCropRect {
+                    x: 1.0,
+                    y: 1.0,
+                    width: 0.5,
+                    height: 0.5,
+                }),
+                weight: 1,
+                autoplay_loop: false,
+            },
+            frame: BoardRect::new(10.0, 10.0, 120.0, 120.0),
+            z_index: 1,
+            rotation_degrees: f64::NAN,
+            flip_horizontal: false,
+            flip_vertical: false,
+            is_locked: false,
+            editorial_order: 0,
+            updated_at: Utc::now(),
+        }];
+
+        let png_bytes = BoardImageExporter::render_bytes(
+            &doc,
+            &assets,
+            &media,
+            &MoodboardExportOptions::default(),
+        )
+        .unwrap();
+        assert!(png_bytes.starts_with(b"\x89PNG"));
+
+        let zip_path = dir.path().join("tiny.charkleboard");
+        let report = FigmaBridgeExporter::export_bundle(
+            &doc,
+            &assets,
+            &media,
+            &MoodboardExportOptions::default(),
+            &zip_path,
+        )
+        .unwrap();
+        assert_eq!(report.image_count, 1);
+
+        // Verify NormalizedCropRect NaN safety
+        let clamped_nan = NormalizedCropRect {
+            x: f64::NAN,
+            y: f64::INFINITY,
+            width: f64::NAN,
+            height: -5.0,
+        }
+        .clamped();
+        assert!(clamped_nan.x.is_finite());
+        assert!(clamped_nan.y.is_finite());
+        assert!(clamped_nan.width >= 0.02);
+        assert!(clamped_nan.height >= 0.02);
     }
 }

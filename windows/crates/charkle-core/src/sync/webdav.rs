@@ -115,7 +115,7 @@ impl WebDAVTransport {
     }
 
     fn is_local_or_lan_host(host: &str) -> bool {
-        if matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".local") {
+        if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") || host.ends_with(".local") {
             return true;
         }
         if host.starts_with("192.168.") || host.starts_with("10.") {
@@ -658,4 +658,17 @@ fn parse_webdav_date(raw: &str) -> Option<DateTime<Utc>> {
         return Some(dt.with_timezone(&Utc));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_ipv6_loopback_and_rejects_plaintext_remote_http() {
+        assert!(WebDAVTransport::new("http://[::1]:8080/dav/", "u", "p", "/Charkle").is_ok());
+        assert!(WebDAVTransport::new("http://127.0.0.1:8080/dav/", "u", "p", "/Charkle").is_ok());
+        assert!(WebDAVTransport::new("https://dav.example.com/dav/", "u", "p", "/Charkle").is_ok());
+        assert!(WebDAVTransport::new("http://dav.example.com/dav/", "u", "p", "/Charkle").is_err());
+    }
 }

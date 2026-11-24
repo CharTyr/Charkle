@@ -5,10 +5,13 @@ export type EmptyVignetteKind =
   | 'inboxZero'
   | 'noResults'
   | 'emptyFolder'
-  | 'emptyMoodboards';
+  | 'emptyMoodboards'
+  | 'emptyTrash'
+  | 'emptyInspector';
 
 export interface EmptyStateVignetteProps {
   kind: EmptyVignetteKind;
+  compact?: boolean;
   className?: string;
 }
 
@@ -19,13 +22,17 @@ export interface EmptyStateVignetteProps {
  * - At most 1 accent focal point when a clear next action exists
  * - Automatically adapts to Light & Dark themes via CSS custom properties
  */
-export const EmptyStateVignette: React.FC<EmptyStateVignetteProps> = ({ kind, className = '' }) => {
-  const patternId = `charkle-hatch-${kind}`;
+export const EmptyStateVignette: React.FC<EmptyStateVignetteProps> = ({
+  kind,
+  compact = false,
+  className = '',
+}) => {
+  const patternId = `charkle-hatch-${kind}-${compact ? 'sm' : 'md'}`;
   return (
     <svg
       viewBox="0 0 160 120"
-      width={160}
-      height={120}
+      width={compact ? 132 : 160}
+      height={compact ? 98 : 120}
       aria-hidden="true"
       className={`select-none shrink-0 ${className}`}
     >
@@ -114,15 +121,17 @@ export const EmptyStateVignette: React.FC<EmptyStateVignetteProps> = ({ kind, cl
             stroke="var(--vignette-stroke)"
             strokeWidth="1"
           />
-          <circle cx="80" cy="48" r="11" fill="var(--success-soft)" />
-          <path
-            d="M75.5 48.2l3.1 3.1 6.2-6.4"
-            fill="none"
-            stroke="var(--success)"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          <g className="charkle-micro-pop" style={{ transformOrigin: '80px 48px' }}>
+            <circle cx="80" cy="48" r="11" fill="var(--success-soft)" />
+            <path
+              d="M75.5 48.2l3.1 3.1 6.2-6.4"
+              fill="none"
+              stroke="var(--success)"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </g>
         </g>
       )}
 
@@ -189,6 +198,29 @@ export const EmptyStateVignette: React.FC<EmptyStateVignetteProps> = ({ kind, cl
           <rect x="78" y="66" width="54" height="28" rx="7" fill="var(--vignette-card)" stroke="var(--accent)" strokeWidth="1.2" />
           <circle cx="91" cy="80" r="4" fill="var(--accent)" />
           <rect x="101" y="78" width="22" height="4" rx="2" fill="var(--vignette-muted)" />
+        </g>
+      )}
+
+      {kind === 'emptyTrash' && (
+        <g>
+          <rect x="34" y="28" width="92" height="54" rx="10" fill="var(--vignette-muted)" stroke="var(--vignette-stroke)" strokeWidth="1" />
+          <rect x="28" y="34" width="104" height="58" rx="11" fill="var(--vignette-card)" stroke="var(--vignette-stroke)" strokeWidth="1" />
+          <path d="M71 53h18M76 53v-3h8v3M74 56l1 14h10l1-14" fill="none" stroke="var(--text-tertiary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          <rect x="56" y="77" width="48" height="4" rx="2" fill="var(--vignette-muted)" />
+        </g>
+      )}
+
+      {kind === 'emptyInspector' && (
+        <g>
+          <rect x="26" y="28" width="44" height="64" rx="9" fill="var(--vignette-muted)" stroke="var(--vignette-stroke)" strokeWidth="1" />
+          <rect x="31" y="33" width="34" height="54" rx="5" fill="var(--vignette-bg)" />
+          <rect x="78" y="28" width="56" height="64" rx="10" fill="var(--vignette-card)" stroke="var(--vignette-stroke)" strokeWidth="1" />
+          <rect x="86" y="37" width="34" height="4.5" rx="2.2" fill="var(--vignette-stroke)" />
+          <circle cx="90" cy="50" r="4" fill="var(--accent)" />
+          <circle cx="101" cy="50" r="4" fill="var(--vignette-stroke)" />
+          <circle cx="112" cy="50" r="4" fill="var(--vignette-muted)" />
+          <rect x="86" y="61" width="40" height="4" rx="2" fill="var(--vignette-muted)" />
+          <rect x="86" y="70" width="28" height="4" rx="2" fill="var(--vignette-muted)" />
         </g>
       )}
     </svg>

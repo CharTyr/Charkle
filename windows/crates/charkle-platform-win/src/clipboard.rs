@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Arc;
 
+use charkle_core::media::resolvers::{GitHubRepoURLParser, SocialPostURLParser, WebURLParser};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 
@@ -74,12 +75,7 @@ impl ClipboardSnapshot {
                 is_social_or_github_url: false,
             },
             ClipboardSnapshot::Url { url } => {
-                let lower = url.to_ascii_lowercase();
-                let is_rich = lower.contains("x.com/")
-                    || lower.contains("twitter.com/")
-                    || lower.contains("threads.net/")
-                    || lower.contains("bsky.app/")
-                    || lower.contains("github.com/");
+                let is_rich = is_directly_parsable_rich_url(url);
                 ClipboardPreview {
                     kind: "url".to_string(),
                     label: url.clone(),
@@ -117,6 +113,17 @@ impl ClipboardSnapshot {
     }
 }
 
+fn is_directly_parsable_rich_url(candidate: &str) -> bool {
+    SocialPostURLParser::extract_post_url(candidate).is_some()
+        || GitHubRepoURLParser::extract_repo_url(candidate).is_some()
+}
+
+fn extract_embedded_rich_url(raw: &str) -> Option<String> {
+    SocialPostURLParser::extract_post_url(raw)
+        .or_else(|| GitHubRepoURLParser::extract_repo_url(raw))
+        .map(|u| u.to_string())
+}
+
 /// Classifies plain clipboard text into a URL, `#RRGGBB` color swatch, or text snippet.
 pub fn classify_clipboard_text(raw: &str) -> Option<ClipboardSnapshot> {
     let trimmed = raw.trim();
@@ -124,7 +131,7 @@ pub fn classify_clipboard_text(raw: &str) -> Option<ClipboardSnapshot> {
         return None;
     }
 
-    // Color hex (`#RRGGBB` or `RRGGBB` when standalone)
+    // Color hex (`#RRGGBB`)
     let hex_candidate = trimmed.strip_prefix('#').unwrap_or(trimmed);
     if trimmed.starts_with('#')
         && hex_candidate.len() == 6
@@ -135,13 +142,21 @@ pub fn classify_clipboard_text(raw: &str) -> Option<ClipboardSnapshot> {
         });
     }
 
-    // Single-line URL
-    if !trimmed.contains(char::is_whitespace)
-        && (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
-    {
-        return Some(ClipboardSnapshot::Url {
-            url: trimmed.to_string(),
-        });
+    // Single-line or short share-copy web URL parsed via canonical `WebURLParser`
+    // (accepts case-insensitive http(s), standalone `www.`, balanced parens, and <= 320 chars / <= 5 lines
+    // share text while rejecting long prose, bare filenames, and local `localhost` dev URLs).
+    if let Some(url) = WebURLParser::extract_web_url(trimmed, true) {
+        let host = url.host_str().unwrap_or("");
+        if host.contains('.') && !host.eq_ignore_ascii_case("localhost") {
+            return Some(ClipboardSnapshot::Url {
+                url: url.to_string(),
+            });
+        }
+    }
+
+    // Embedded X/Threads/Bluesky/GitHub URL inside a share snippet (parity with macOS ClipboardCollector)
+    if let Some(url) = extract_embedded_rich_url(trimmed) {
+        return Some(ClipboardSnapshot::Url { url });
     }
 
     Some(ClipboardSnapshot::Text {
@@ -154,43 +169,57 @@ pub fn dib_bytes_to_png(dib: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     if dib.len() < 40 {
         return Err("CF_DIB buffer smaller than BITMAPINFOHEADER".to_string());
     }
-    let header_size = u32::from_le_bytes(dib[0..4].try_into().unwrap()) as usize;
-    let width_i = i32::from_le_bytes(dib[4..8].try_into().unwrap());
-    let height_i = i32::from_le_bytes(dib[8..12].try_into().unwrap());
-    let bit_count = u16::from_le_bytes(dib[14..16].try_into().unwrap());
-    let compression = u32::from_le_bytes(dib[16..20].try_into().unwrap());
-    let clr_used = u32::from_le_bytes(dib[32..36].try_into().unwrap()) as usize;
+    let header_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]) as usize;
+    let width_i = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
+    let height_i = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+    let bit_count = u16::from_le_bytes([dib[14], dib[15]]);
+    let compression = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    let clr_used = u32::from_le_bytes([dib[32], dib[33], dib[34], dib[35]]) as usize;
 
-    if width_i <= 0 || height_i == 0 {
+    if header_size < 40 || width_i <= 0 || height_i == 0 {
         return Err("Invalid DIB dimensions".to_string());
     }
     let width = width_i as u32;
     let height = height_i.unsigned_abs();
+    if width > 16_384 || height > 16_384 {
+        return Err("DIB dimensions exceed safe maximum".to_string());
+    }
     let top_down = height_i < 0;
 
     // BI_RGB (0) or BI_BITFIELDS (3)
     let extra_masks = if compression == 3 && header_size == 40 {
-        12
+        12usize
     } else {
-        0
+        0usize
     };
     let palette_bytes = if bit_count <= 8 {
         let entries = if clr_used > 0 {
             clr_used
         } else {
-            1usize << bit_count
+            1usize.checked_shl(bit_count as u32).unwrap_or(0)
         };
-        entries * 4
+        entries
+            .checked_mul(4)
+            .ok_or_else(|| "DIB palette overflow".to_string())?
     } else {
-        clr_used * 4
+        clr_used
+            .checked_mul(4)
+            .ok_or_else(|| "DIB palette overflow".to_string())?
     };
-    let pixel_offset = header_size + extra_masks + palette_bytes;
+    let pixel_offset = header_size
+        .checked_add(extra_masks)
+        .and_then(|v| v.checked_add(palette_bytes))
+        .ok_or_else(|| "CF_DIB pixel offset overflow".to_string())?;
     if pixel_offset >= dib.len() {
         return Err("CF_DIB pixel offset out of range".to_string());
     }
     let pixels = &dib[pixel_offset..];
 
-    let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    let rgba_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "DIB pixel buffer overflow".to_string())?;
+    let mut rgba = vec![0u8; rgba_len];
     match bit_count {
         32 => {
             let row_stride = (width as usize) * 4;
@@ -256,12 +285,14 @@ pub fn dib_bytes_to_png(dib: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((png, width, height))
 }
 
-/// Reads the current Windows clipboard snapshot (`CF_HDROP` -> `CF_DIB` -> `CF_UNICODETEXT`).
+/// Reads the current Windows clipboard snapshot (`CF_HDROP` -> `"PNG"` -> `CF_DIB` -> `CF_UNICODETEXT`).
 #[cfg(target_os = "windows")]
 pub fn read_current_clipboard() -> Result<Option<ClipboardSnapshot>, String> {
+    use windows::core::w;
     use windows::Win32::Foundation::{HGLOBAL, HWND};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
     };
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
@@ -316,38 +347,80 @@ pub fn read_current_clipboard() -> Result<Option<ClipboardSnapshot>, String> {
             }
         }
 
-        // 2. Bitmap image (CF_DIB)
-        if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
-            if let Ok(handle) = GetClipboardData(CF_DIB.0 as u32) {
+        // 2. Registered "PNG" clipboard format (preserves transparency from Figma / Chrome / Electron)
+        let png_fmt = RegisterClipboardFormatW(w!("PNG"));
+        if png_fmt != 0 && IsClipboardFormatAvailable(png_fmt).is_ok() {
+            if let Ok(handle) = GetClipboardData(png_fmt) {
                 let hglobal = HGLOBAL(handle.0);
                 let size = GlobalSize(hglobal);
-                let ptr = GlobalLock(hglobal);
-                if !ptr.is_null() && size >= 40 {
-                    let _lock = GlobalLockGuard(hglobal);
-                    let slice = std::slice::from_raw_parts(ptr as *const u8, size);
-                    if let Ok((png_bytes, width, height)) = dib_bytes_to_png(slice) {
-                        return Ok(Some(ClipboardSnapshot::ImagePng {
-                            png_bytes,
-                            width,
-                            height,
-                        }));
+                if (24..=64 * 1024 * 1024).contains(&size) {
+                    let ptr = GlobalLock(hglobal);
+                    if !ptr.is_null() {
+                        let _lock = GlobalLockGuard(hglobal);
+                        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                        if slice.starts_with(b"\x89PNG\r\n\x1a\n") {
+                            if let Ok(reader) =
+                                image::ImageReader::new(Cursor::new(slice)).with_guessed_format()
+                            {
+                                if let Ok((width, height)) = reader.into_dimensions() {
+                                    if width > 0
+                                        && height > 0
+                                        && width <= 16_384
+                                        && height <= 16_384
+                                    {
+                                        return Ok(Some(ClipboardSnapshot::ImagePng {
+                                            png_bytes: slice.to_vec(),
+                                            width,
+                                            height,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // 3. Unicode text / URL / Hex color (CF_UNICODETEXT)
+        // 3. Bitmap image (CF_DIB)
+        if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
+            if let Ok(handle) = GetClipboardData(CF_DIB.0 as u32) {
+                let hglobal = HGLOBAL(handle.0);
+                let size = GlobalSize(hglobal);
+                if (40..=128 * 1024 * 1024).contains(&size) {
+                    let ptr = GlobalLock(hglobal);
+                    if !ptr.is_null() {
+                        let _lock = GlobalLockGuard(hglobal);
+                        let slice = std::slice::from_raw_parts(ptr as *const u8, size);
+                        if let Ok((png_bytes, width, height)) = dib_bytes_to_png(slice) {
+                            return Ok(Some(ClipboardSnapshot::ImagePng {
+                                png_bytes,
+                                width,
+                                height,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Unicode text / URL / Hex color (CF_UNICODETEXT)
+        const MAX_CLIPBOARD_UTF16_BYTES: usize = 4 * 1024 * 1024;
         if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_ok() {
             if let Ok(handle) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
                 let hglobal = HGLOBAL(handle.0);
                 let size = GlobalSize(hglobal);
-                let ptr = GlobalLock(hglobal);
-                if !ptr.is_null() && size >= 2 {
-                    let _lock = GlobalLockGuard(hglobal);
-                    let units = std::slice::from_raw_parts(ptr as *const u16, size / 2);
-                    let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
-                    let text = String::from_utf16_lossy(&units[..len]);
-                    return Ok(classify_clipboard_text(&text));
+                if size >= 2 {
+                    let bounded_bytes = size.min(MAX_CLIPBOARD_UTF16_BYTES);
+                    let ptr = GlobalLock(hglobal);
+                    if !ptr.is_null() {
+                        let _lock = GlobalLockGuard(hglobal);
+                        let units =
+                            std::slice::from_raw_parts(ptr as *const u16, bounded_bytes / 2);
+                        let len = units.iter().position(|&c| c == 0).unwrap_or(units.len());
+                        let text = String::from_utf16_lossy(&units[..len]);
+                        return Ok(classify_clipboard_text(&text));
+                    }
                 }
             }
         }
@@ -581,6 +654,77 @@ where
     ClipboardListenerHandle { hwnd_raw }
 }
 
+/// Writes one or more existing local file paths to the Windows system clipboard as `CF_HDROP`
+/// so users can press `Ctrl+V` directly in Windows Explorer, Figma, Photoshop, or PowerPoint.
+pub fn copy_files_to_clipboard(paths: &[PathBuf]) -> Result<usize, String> {
+    let existing: Vec<PathBuf> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+    if existing.is_empty() {
+        return Err("No cached local files available to copy".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use crate::drag_out::build_hdrop_bytes;
+        use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
+        use windows::Win32::System::Ole::CF_HDROP;
+
+        let normalized: Vec<PathBuf> = existing
+            .iter()
+            .map(|p| {
+                let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                let s = abs.to_string_lossy();
+                if let Some(stripped) = s.strip_prefix(r"\\?\UNC\") {
+                    PathBuf::from(format!(r"\\{stripped}"))
+                } else if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                    PathBuf::from(stripped)
+                } else {
+                    abs
+                }
+            })
+            .collect();
+        let hdrop_bytes = build_hdrop_bytes(&normalized);
+
+        // SAFETY: Standard Win32 clipboard ownership transfer for CF_HDROP global buffer.
+        unsafe {
+            OpenClipboard(HWND::default()).map_err(|e| format!("OpenClipboard failed: {e}"))?;
+            let result = (|| -> Result<usize, String> {
+                EmptyClipboard().map_err(|e| format!("EmptyClipboard failed: {e}"))?;
+                let hmem = GlobalAlloc(GMEM_MOVEABLE, hdrop_bytes.len())
+                    .map_err(|e| format!("GlobalAlloc failed: {e}"))?;
+                let ptr = GlobalLock(hmem);
+                if ptr.is_null() {
+                    let _ = GlobalFree(hmem);
+                    return Err("GlobalLock failed".to_string());
+                }
+                std::ptr::copy_nonoverlapping(
+                    hdrop_bytes.as_ptr(),
+                    ptr as *mut u8,
+                    hdrop_bytes.len(),
+                );
+                let _ = GlobalUnlock(hmem);
+                if let Err(err) = SetClipboardData(CF_HDROP.0 as u32, HANDLE(hmem.0)) {
+                    let _ = GlobalFree(hmem);
+                    return Err(format!("SetClipboardData(CF_HDROP) failed: {err}"));
+                }
+                Ok(normalized.len())
+            })();
+            let _ = CloseClipboard();
+            result
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(existing.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,7 +749,75 @@ mod tests {
                 text: "design system notes".to_string()
             })
         );
+        assert_eq!(
+            classify_clipboard_text("Check this post: https://x.com/user/status/987654321!"),
+            Some(ClipboardSnapshot::Url {
+                url: "https://x.com/user/status/987654321".to_string()
+            })
+        );
         assert_eq!(classify_clipboard_text("   "), None);
+    }
+
+    #[test]
+    fn filters_clipboard_preview_banner_flags_strictly() {
+        // Plain English prompt text MUST stay kind == "text" and never trigger URL banner flags
+        let prompt = classify_clipboard_text("Give the cards and panels in my product a liquid")
+            .expect("plain text classifies");
+        let prompt_preview = prompt.to_preview();
+        assert_eq!(prompt_preview.kind, "text");
+        assert!(prompt_preview.url.is_none());
+        assert!(!prompt_preview.is_social_or_github_url);
+
+        // Non-dotted bare URL MUST stay plain text (not a valid web bookmark link)
+        let bare = classify_clipboard_text("http://localhost:3000/test").expect("bare text");
+        assert_eq!(bare.to_preview().kind, "text");
+
+        // Generic website URL classifies as "url" (eligible for universal web link banner)
+        let web = classify_clipboard_text("https://tauri.app").expect("generic website");
+        let web_preview = web.to_preview();
+        assert_eq!(web_preview.kind, "url");
+        assert_eq!(web_preview.url.as_deref(), Some("https://tauri.app/"));
+        assert!(!web_preview.is_social_or_github_url);
+
+        // Non-repo GitHub settings URL classifies as generic "url", NOT a GitHub repo card
+        let gh_settings =
+            classify_clipboard_text("https://github.com/settings/profile").expect("gh settings");
+        let gh_settings_preview = gh_settings.to_preview();
+        assert_eq!(gh_settings_preview.kind, "url");
+        assert!(!gh_settings_preview.is_social_or_github_url);
+
+        // Canonical GitHub repository URL sets is_social_or_github_url = true
+        let gh_repo =
+            classify_clipboard_text("https://github.com/tauri-apps/tauri").expect("gh repo");
+        let gh_repo_preview = gh_repo.to_preview();
+        assert_eq!(gh_repo_preview.kind, "url");
+        assert!(gh_repo_preview.is_social_or_github_url);
+
+        // Canonical X post URL sets is_social_or_github_url = true
+        let x_post = classify_clipboard_text("https://x.com/charkle_design/status/1900000001")
+            .expect("x post");
+        let x_preview = x_post.to_preview();
+        assert_eq!(x_preview.kind, "url");
+        assert!(x_preview.is_social_or_github_url);
+
+        // Xiaohongshu share copy (short link & canonical note URL) classifies as rich social URL
+        let xhs_share = classify_clipboard_text(
+            "67 设计师发布了一篇小红书笔记，快来看吧！😆 http://xhslink.com/a/K9xYzAbC12 复制本条信息，打开【小红书】App查看精彩内容！",
+        )
+        .expect("xhs share copy");
+        let xhs_preview = xhs_share.to_preview();
+        assert_eq!(xhs_preview.kind, "url");
+        assert_eq!(
+            xhs_preview.url.as_deref(),
+            Some("http://xhslink.com/a/K9xYzAbC12")
+        );
+        assert!(xhs_preview.is_social_or_github_url);
+
+        let xhs_note = classify_clipboard_text(
+            "https://www.xiaohongshu.com/explore/67a1b2c3d4e5f60718293a4b?xsec_token=ABC123",
+        )
+        .expect("xhs note");
+        assert!(xhs_note.to_preview().is_social_or_github_url);
     }
 
     #[test]

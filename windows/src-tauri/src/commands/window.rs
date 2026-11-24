@@ -1,6 +1,7 @@
 use charkle_platform_win::windowing::{
-    apply_window_chrome, update_maximize_button_rect, ClientRect, WindowSurfaceState,
+    apply_window_chrome, update_maximize_button_rect, BackdropKind, ClientRect, WindowSurfaceState,
 };
+use tauri::window::Color;
 use tauri::WebviewWindow;
 
 use super::{IpcError, IpcResult};
@@ -17,7 +18,19 @@ fn raw_hwnd(_window: &WebviewWindow) -> isize {
 
 #[tauri::command]
 pub fn set_window_theme(window: WebviewWindow, is_dark: bool) -> WindowSurfaceState {
-    apply_window_chrome(raw_hwnd(&window), is_dark)
+    let surface = apply_window_chrome(raw_hwnd(&window), is_dark);
+    let bg = match surface.backdrop {
+        BackdropKind::Mica => Color(0, 0, 0, 0),
+        BackdropKind::SolidFallback => {
+            if is_dark {
+                Color(28, 30, 34, 255)
+            } else {
+                Color(246, 246, 246, 255)
+            }
+        }
+    };
+    let _ = window.set_background_color(Some(bg));
+    surface
 }
 
 #[tauri::command]

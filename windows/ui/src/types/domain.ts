@@ -52,9 +52,10 @@ export type SortOrder =
 export type GalleryLayoutMode =
   | 'verticalMasonry'
   | 'horizontalJustified'
-  | 'galleryFilmstrip';
+  | 'galleryFilmstrip'
+  | 'ringGallery';
 
-export type SocialPlatform = 'x' | 'threads' | 'bluesky';
+export type SocialPlatform = 'x' | 'threads' | 'bluesky' | 'xiaohongshu';
 export type SocialMediaAttachmentKind = 'photo' | 'video' | 'gif';
 export type SmartFolderMatchMode = 'all' | 'any';
 export type NoteStyle = 'paper' | 'ink' | 'warm' | 'sage' | 'slate';
@@ -73,11 +74,14 @@ export interface GitHubRepoMetadata {
   owner: string;
   repo: string;
   fullName: string;
+  ownerAvatarURL?: string | null;
   description?: string | null;
   language?: string | null;
   stars: number;
   forks: number;
-  openIssues: number;
+  watchers?: number | null;
+  openIssues?: number;
+  licenseName?: string | null;
   license?: string | null;
   topics: string[];
   homepageURL?: string | null;
@@ -118,6 +122,54 @@ export interface SocialPostMetadata {
   mediaFetchFailed?: boolean;
 }
 
+/**
+ * Formats a clean social handle subtitle, omitting empty handles and internal
+ * 24-character hex Xiaohongshu userIds, generic `'xiaohongshu'`, or duplicate nicknames.
+ */
+export function formatSocialDisplayHandle(
+  post: Pick<SocialPostMetadata, 'platform' | 'authorName' | 'authorHandle'>,
+): string | null {
+  const clean = (post.authorHandle ?? '').trim().replace(/^@+/, '').trim();
+  if (!clean) return null;
+  if (post.platform === 'xiaohongshu') {
+    if (
+      /^[0-9a-f]{24}$/i.test(clean) ||
+      clean.toLowerCase() === 'xiaohongshu' ||
+      clean === (post.authorName ?? '').trim()
+    ) {
+      return null;
+    }
+  }
+  return `@${clean}`;
+}
+
+/**
+ * Routes Xiaohongshu CDN media/avatar URLs through the local Tauri media proxy
+ * so Rust injects `Referer: https://www.xiaohongshu.com/` and prevents HTTP 403.
+ */
+export function resolveSocialMediaUrl(
+  rawUrl: string | null | undefined,
+  isTauri: boolean,
+): string | undefined {
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) return undefined;
+  if (!isTauri) return trimmed;
+  try {
+    const host = new URL(trimmed).hostname.toLowerCase();
+    if (
+      host === 'xhscdn.com' ||
+      host.endsWith('.xhscdn.com') ||
+      host === 'xiaohongshu.com' ||
+      host.endsWith('.xiaohongshu.com')
+    ) {
+      return `http://charkle-media.localhost/proxy-xhs?url=${encodeURIComponent(trimmed)}`;
+    }
+  } catch {
+    // Preserve raw URL if not parseable as absolute URL
+  }
+  return trimmed;
+}
+
 export interface PhotoExifMetadata {
   cameraMake?: string | null;
   cameraModel?: string | null;
@@ -141,6 +193,7 @@ export interface PhotoExifMetadata {
   copyright?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  altitudeMeters?: number | null;
 }
 
 export interface AIGenerationMetadata {
@@ -1066,4 +1119,44 @@ export interface SystemDiagnosticsDto {
   databasePath: string;
   gdirect: GDirectEnvironmentSnapshot;
   ocr: OcrDiagnostics;
+}
+
+export interface SyncAuthStateDto {
+  hasGoogleOAuthClient: boolean;
+  hasWebdavPassword: boolean;
+}
+
+export interface WebdavTestResultDto {
+  ok: boolean;
+  message: string;
+}
+
+export interface ExternalAgentSelfCheckDto {
+  ok: boolean;
+  summary: string;
+}
+
+export interface RebuildIndexResultDto {
+  processed: number;
+  total: number;
+}
+
+export interface ShelfSettings {
+  enabled: boolean;
+  hoverTriggerEnabled: boolean;
+  defaultTargetMode: ShelfTargetMode;
+  defaultFolderId?: string | null;
+  minimalMode?: boolean;
+}
+
+export interface ExtensionBridgeStateDto {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  baseUrl: string;
+  allowLocalAutoPair: boolean;
+  accessToken: string;
+  lastError?: string | null;
+  bundledExtensionDir?: string | null;
+  bundledExtensionManifestPath?: string | null;
 }

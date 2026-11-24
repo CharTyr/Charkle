@@ -133,12 +133,60 @@ export function resolveEffectiveTheme(mode: ThemeMode): 'light' | 'dark' {
   return mode;
 }
 
+const GLASS_TINT_STORAGE_KEYS: Record<'light' | 'dark', string> = {
+  light: 'charkle:glass-tint-light',
+  dark: 'charkle:glass-tint-dark',
+};
+
+const GLASS_TINT_CSS_VARS: Record<'light' | 'dark', string> = {
+  light: '--l-k',
+  dark: '--d-k',
+};
+
+function clampGlassTintScale(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(0, Math.min(1.5, Math.round(value * 100) / 100));
+}
+
+export function getGlassTintScale(mode: 'light' | 'dark'): number {
+  if (typeof window === 'undefined' || !window.localStorage) return 1;
+  try {
+    const raw = window.localStorage.getItem(GLASS_TINT_STORAGE_KEYS[mode]);
+    if (raw === null) return 1;
+    return clampGlassTintScale(Number.parseFloat(raw));
+  } catch {
+    return 1;
+  }
+}
+
+export function setGlassTintScale(mode: 'light' | 'dark', value: number): void {
+  const clamped = clampGlassTintScale(value);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(GLASS_TINT_STORAGE_KEYS[mode], String(clamped));
+    } catch {
+      // Ignore storage quota errors in restricted WebView environments.
+    }
+  }
+  if (typeof document !== 'undefined') {
+    document.documentElement.style.setProperty(GLASS_TINT_CSS_VARS[mode], String(clamped));
+  }
+}
+
+export function applySavedGlassTintScales(): void {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  root.style.setProperty(GLASS_TINT_CSS_VARS.light, String(getGlassTintScale('light')));
+  root.style.setProperty(GLASS_TINT_CSS_VARS.dark, String(getGlassTintScale('dark')));
+}
+
 export function applyThemeToDocument(mode: ThemeMode): 'light' | 'dark' {
   const effective = resolveEffectiveTheme(mode);
   if (typeof document !== 'undefined') {
     const root = document.documentElement;
     root.dataset.theme = effective;
     root.classList.toggle('dark', effective === 'dark');
+    applySavedGlassTintScales();
     const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
     if (favicon) {
       favicon.href = effective === 'dark' ? '/app-icons/Charkle-Dark.svg' : '/app-icons/Charkle-Light.svg';
@@ -202,6 +250,18 @@ export function hasMeaningfulCameraExif(exif: PhotoExifMetadata | null | undefin
       exif.artist ||
       exif.copyright,
   );
+}
+
+export function isLightHex(rawHex: string | null | undefined): boolean {
+  if (!rawHex) return false;
+  const cleaned = rawHex.replace(/#/g, '').trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) return false;
+  const val = Number.parseInt(cleaned, 16);
+  const r = ((val >> 16) & 0xff) / 255;
+  const g = ((val >> 8) & 0xff) / 255;
+  const b = (val & 0xff) / 255;
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance > 0.62;
 }
 
 export function formatBytes(bytes: number): string {

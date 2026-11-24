@@ -460,7 +460,7 @@ impl VisualGroundingEngine {
                         best = Some((f, score));
                     }
                 }
-                let (folder, conf) = best.unwrap();
+                let (folder, conf) = best.unwrap_or((&folders[0], 0.32));
                 InboxTriageRecommendation {
                     asset_id: asset.id,
                     asset_title: asset.title.clone(),

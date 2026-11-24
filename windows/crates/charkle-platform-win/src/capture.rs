@@ -207,6 +207,129 @@ pub fn capture_virtual_desktop() -> Result<CapturedDesktopFrame, String> {
     })
 }
 
+#[cfg(target_os = "windows")]
+const CAPTURE_SUBCLASS_ID: usize = 0x4348_4350; // "CHCP"
+
+/// Configures a borderless fullscreen Region Capture overlay HWND in exact physical virtual-desktop
+/// pixels across mixed-DPI monitors (bypassing Tauri's logical-pixel scaling).
+#[cfg(target_os = "windows")]
+pub fn configure_capture_window_physical(hwnd_raw: isize, bounds: VirtualDesktopBounds) {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+        DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
+        SWP_FRAMECHANGED, SWP_SHOWWINDOW, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WS_BORDER,
+        WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW,
+        WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_WINDOWEDGE,
+        WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    };
+
+    unsafe extern "system" fn capture_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        uid_subclass: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        match msg {
+            WM_NCCALCSIZE => return LRESULT(0),
+            WM_NCACTIVATE => {
+                // Keep overlay activation intact so Escape cancels immediately, while preventing
+                // DefWindowProcW from painting any classic non-client caption/frame strip.
+                return DefSubclassProc(
+                    hwnd,
+                    msg,
+                    wparam,
+                    LPARAM(crate::windowing::nc_activate_no_repaint_lparam()),
+                );
+            }
+            m if crate::windowing::should_suppress_nc_paint_message(m) => {
+                return LRESULT(0);
+            }
+            WM_NCDESTROY => {
+                let _ = RemoveWindowSubclass(hwnd, Some(capture_subclass_proc), uid_subclass);
+            }
+            _ => {}
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    if hwnd_raw == 0 {
+        return;
+    }
+    let _dpi_guard = PerMonitorV2DpiGuard::enter();
+    let hwnd = HWND(hwnd_raw as *mut _);
+    // SAFETY: Configures our owned capture overlay HWND in exact physical screen coordinates.
+    unsafe {
+        // Guard non-client painting BEFORE SWP_FRAMECHANGED / show so no titlebar can flash.
+        let _ = SetWindowSubclass(hwnd, Some(capture_subclass_proc), CAPTURE_SUBCLASS_ID, 0);
+
+        let cur_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let strip_style = (WS_CAPTION.0
+            | WS_THICKFRAME.0
+            | WS_BORDER.0
+            | WS_DLGFRAME.0
+            | WS_SYSMENU.0
+            | WS_MINIMIZEBOX.0
+            | WS_MAXIMIZEBOX.0) as isize;
+        let desired_style = (cur_style & !strip_style)
+            | (WS_POPUP.0 as isize)
+            | (WS_CLIPCHILDREN.0 as isize)
+            | (WS_CLIPSIBLINGS.0 as isize);
+        let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, desired_style);
+
+        let cur_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let strip_ex =
+            (WS_EX_APPWINDOW.0 | WS_EX_WINDOWEDGE.0 | WS_EX_CLIENTEDGE.0 | WS_EX_DLGMODALFRAME.0)
+                as isize;
+        let desired_ex =
+            (cur_ex & !strip_ex) | (WS_EX_TOPMOST.0 as isize) | (WS_EX_TOOLWINDOW.0 as isize);
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired_ex);
+
+        let corner_pref: u32 = DWMWCP_DONOTROUND.0 as u32;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner_pref as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        );
+        let no_border: u32 = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &no_border as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        );
+        let disable_transitions = BOOL::from(true);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disable_transitions as *const BOOL as *const c_void,
+            size_of::<BOOL>() as u32,
+        );
+
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            bounds.left,
+            bounds.top,
+            bounds.width as i32,
+            bounds.height as i32,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn configure_capture_window_physical(_hwnd_raw: isize, _bounds: VirtualDesktopBounds) {}
+
 /// Crops an exact 1:1 physical-pixel region from a frozen [`CapturedDesktopFrame`] into PNG bytes.
 pub fn crop_captured_frame(
     frame: &CapturedDesktopFrame,
@@ -215,8 +338,15 @@ pub fn crop_captured_frame(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
-    if width == 0 || height == 0 {
+    if width == 0 || height == 0 || frame.width == 0 || frame.height == 0 {
         return Err("Crop region cannot be empty".to_string());
+    }
+    let expected_len = (frame.width as usize)
+        .checked_mul(frame.height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "Capture frame dimensions overflow".to_string())?;
+    if frame.rgba.len() < expected_len {
+        return Err("Capture frame pixel buffer is truncated".to_string());
     }
     let sx = x.min(frame.width.saturating_sub(1));
     let sy = y.min(frame.height.saturating_sub(1));
@@ -247,8 +377,15 @@ fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Stri
     Ok(png)
 }
 
+/// Returns `true` only for 8-bit BGRA desktop surfaces (`DXGI_FORMAT_B8G8R8A8_UNORM = 87` and
+/// `DXGI_FORMAT_B8G8R8A8_UNORM_SRGB = 91`). HDR outputs (`R16G16B16A16_FLOAT = 10`,
+/// `R10G10B10A2_UNORM = 24`) return `false` so capture falls back to DWM tone-mapped GDI `BitBlt`.
+pub fn is_supported_dxgi_bgra8_format(dxgi_format: u32) -> bool {
+    matches!(dxgi_format, 87 | 91)
+}
+
 /// Attempts fast GPU DXGI Desktop Duplication on single-monitor setups; falls back to
-/// multi-monitor GDI `BitBlt` automatically on multi-GPU / RDP / timeout environments.
+/// multi-monitor GDI `BitBlt` automatically on multi-GPU / HDR / RDP / timeout environments.
 #[cfg(target_os = "windows")]
 fn try_capture_dxgi_primary(
     bounds: &VirtualDesktopBounds,
@@ -299,11 +436,25 @@ fn try_capture_dxgi_primary(
         let duplication = output1.DuplicateOutput(&device).ok()?;
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
-        // Acquire frame with short 120ms timeout so capture stays instant
-        if duplication
-            .AcquireNextFrame(120, &mut frame_info, &mut resource)
-            .is_err()
-        {
+        // Acquire frame with short timeout; retry once if first DXGI frame has LastPresentTime == 0
+        // (black/empty initial frame before DWM presents), otherwise fall back cleanly to GDI BitBlt.
+        let mut acquired = false;
+        for attempt in 0..2 {
+            let timeout = if attempt == 0 { 120 } else { 80 };
+            if duplication
+                .AcquireNextFrame(timeout, &mut frame_info, &mut resource)
+                .is_err()
+            {
+                return None;
+            }
+            if frame_info.LastPresentTime != 0 && resource.is_some() {
+                acquired = true;
+                break;
+            }
+            resource = None;
+            let _ = duplication.ReleaseFrame();
+        }
+        if !acquired {
             return None;
         }
         let resource = match resource {
@@ -323,7 +474,10 @@ fn try_capture_dxgi_primary(
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         tex.GetDesc(&mut desc);
-        if desc.Width != bounds.width || desc.Height != bounds.height {
+        if desc.Width != bounds.width
+            || desc.Height != bounds.height
+            || !is_supported_dxgi_bgra8_format(desc.Format.0 as u32)
+        {
             let _ = duplication.ReleaseFrame();
             return None;
         }
@@ -348,7 +502,10 @@ fn try_capture_dxgi_primary(
             let _ = duplication.ReleaseFrame();
             return None;
         }
-        let staging = staging?;
+        let Some(staging) = staging else {
+            let _ = duplication.ReleaseFrame();
+            return None;
+        };
         context.CopyResource(&staging, &tex);
         let _ = duplication.ReleaseFrame();
 
@@ -360,8 +517,13 @@ fn try_capture_dxgi_primary(
         let w = bounds.width as usize;
         let h = bounds.height as usize;
         let pitch = mapped.RowPitch as usize;
-        let mut rgba = vec![0u8; w * h * 4];
         let src_ptr = mapped.pData as *const u8;
+        let row_bytes = w.checked_mul(4);
+        if src_ptr.is_null() || row_bytes.is_none_or(|rb| pitch < rb) {
+            context.Unmap(&staging, 0);
+            return None;
+        }
+        let mut rgba = vec![0u8; w * h * 4];
         for row in 0..h {
             let src_row = std::slice::from_raw_parts(src_ptr.add(row * pitch), w * 4);
             let dst_row = &mut rgba[row * w * 4..(row + 1) * w * 4];
@@ -623,5 +785,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dxgi_bgra8_format_guard_rejects_hdr_surfaces() {
+        assert!(is_supported_dxgi_bgra8_format(87)); // DXGI_FORMAT_B8G8R8A8_UNORM
+        assert!(is_supported_dxgi_bgra8_format(91)); // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        assert!(!is_supported_dxgi_bgra8_format(10)); // DXGI_FORMAT_R16G16B16A16_FLOAT (HDR)
+        assert!(!is_supported_dxgi_bgra8_format(24)); // DXGI_FORMAT_R10G10B10A2_UNORM (10-bit HDR)
+        assert!(!is_supported_dxgi_bgra8_format(0)); // DXGI_FORMAT_UNKNOWN
     }
 }

@@ -37,6 +37,32 @@ pub trait VolumeMountInspector: Send + Sync {
     fn is_mount_available(&self, path: &Path) -> bool;
 }
 
+/// Captured offscreen webpage screenshot + DOM metadata (Tier 2 web bookmark fallback).
+#[derive(Debug, Clone)]
+pub struct WebPageSnapshot {
+    pub png_bytes: Vec<u8>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub final_url: Option<String>,
+}
+
+/// Offscreen browser webpage snapshot seam (ephemeral hidden WebView2 in `src-tauri`).
+#[async_trait]
+pub trait WebPageSnapshotProvider: Send + Sync {
+    async fn capture_snapshot(&self, url: &str) -> Option<WebPageSnapshot>;
+}
+
+/// No-op webpage snapshot provider used in headless tests and CLI.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopWebPageSnapshotProvider;
+
+#[async_trait]
+impl WebPageSnapshotProvider for NoopWebPageSnapshotProvider {
+    async fn capture_snapshot(&self, _url: &str) -> Option<WebPageSnapshot> {
+        None
+    }
+}
+
 /// In-memory `SecretVault` default for tests and headless usage.
 #[derive(Debug, Default)]
 pub struct InMemorySecretVault {

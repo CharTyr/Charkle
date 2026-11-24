@@ -131,7 +131,10 @@ mod tests {
         });
         std::thread::sleep(std::time::Duration::from_millis(80));
         pulse_library_changed(Some(dir.path()));
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while hits.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         assert!(hits.load(Ordering::SeqCst) >= 1);
     }
 }

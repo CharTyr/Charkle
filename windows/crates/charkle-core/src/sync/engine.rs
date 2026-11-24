@@ -487,10 +487,7 @@ impl DriveSyncEngine {
 
         self.fetch_pinned_originals(transport).await?;
 
-        let cleanup_ids = self.db.drain_media_cleanup_ids()?;
-        if !cleanup_ids.is_empty() {
-            self.media.remove_files_for_ids(&cleanup_ids)?;
-        }
+        self.media.cleanup_deleted_media(&self.db)?;
 
         report.updated_boards = changed_boards.len();
         Ok(report)
@@ -2165,10 +2162,12 @@ impl DriveSyncEngine {
         let mut stamps_dirty = false;
 
         for (name, file) in files {
-            if file.is_folder() || !name.ends_with(".jpg") {
+            if file.is_folder() {
                 continue;
             }
-            let stem = &name[..name.len() - 4];
+            let Some(stem) = name.strip_suffix(".jpg") else {
+                continue;
+            };
             let Ok(uuid) = Uuid::parse_str(stem) else {
                 continue;
             };

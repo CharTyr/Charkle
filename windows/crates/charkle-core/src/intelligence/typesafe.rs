@@ -28,10 +28,26 @@ pub struct TypeSafeBoxCoordinates {
 
 impl TypeSafeBoxCoordinates {
     pub fn normalized_crop_rect(self) -> NormalizedCropRect {
-        let x = self.left.clamp(0.0, 1.0);
-        let y = self.top.clamp(0.0, 1.0);
-        let r = self.right.clamp(x, 1.0);
-        let b = self.bottom.clamp(y, 1.0);
+        let left = if self.left.is_finite() {
+            self.left
+        } else {
+            0.0
+        };
+        let top = if self.top.is_finite() { self.top } else { 0.0 };
+        let right = if self.right.is_finite() {
+            self.right
+        } else {
+            1.0
+        };
+        let bottom = if self.bottom.is_finite() {
+            self.bottom
+        } else {
+            1.0
+        };
+        let x = left.clamp(0.0, 1.0);
+        let y = top.clamp(0.0, 1.0);
+        let r = right.clamp(x, 1.0);
+        let b = bottom.clamp(y, 1.0);
         NormalizedCropRect {
             x,
             y,
@@ -197,7 +213,7 @@ impl TypeSafeSystemOneClient {
             .host_str()
             .map(str::to_ascii_lowercase)
             .unwrap_or_default();
-        let is_local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+        let is_local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
         if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_local) {
             return Err(CoreError::InvalidOperation(
                 "无效的 TypeSafe 服务地址，远程接口请使用 HTTPS。".to_string(),

@@ -198,6 +198,46 @@ impl DirectAPITransport {
         });
         Ok(items.into_iter().next())
     }
+    async fn resolve_folder_depth(
+        &self,
+        id: &str,
+        remaining_depth: usize,
+    ) -> CoreResult<RemoteDriveFile> {
+        let seg = Self::validate_segment(id)?;
+        let dto: FileDto = self
+            .get_json(
+                &format!("files/{seg}"),
+                &[("supportsAllDrives", "true"), ("fields", FILE_FIELDS)],
+            )
+            .await?;
+        if dto.trashed == Some(true) {
+            return Err(CoreError::NotFound(format!("共享目录已在回收站中：{id}")));
+        }
+        if dto.mime_type == SHORTCUT_MIME_TYPE {
+            if remaining_depth == 0 {
+                return Err(CoreError::InvalidOperation(
+                    "检测到循环或过深的 Google Drive 快捷方式，无法解析共享目录。".to_string(),
+                ));
+            }
+            if let Some(target) = dto.shortcut_details.as_ref() {
+                if target.target_mime_type.as_deref() == Some(RemoteDriveFile::FOLDER_MIME_TYPE) {
+                    if let Some(ref tid) = target.target_id {
+                        if !tid.is_empty() {
+                            return Box::pin(self.resolve_folder_depth(tid, remaining_depth - 1))
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
+        if dto.mime_type != RemoteDriveFile::FOLDER_MIME_TYPE {
+            return Err(CoreError::InvalidPayload(format!(
+                "指定的 Google Drive 链接不是文件夹（类型为 {}）。",
+                dto.mime_type
+            )));
+        }
+        Ok(dto.into_record())
+    }
 }
 
 #[async_trait]
@@ -277,34 +317,7 @@ impl DriveTransport for DirectAPITransport {
     }
 
     async fn resolve_folder(&self, id: &str) -> CoreResult<RemoteDriveFile> {
-        let seg = Self::validate_segment(id)?;
-        let dto: FileDto = self
-            .get_json(
-                &format!("files/{seg}"),
-                &[("supportsAllDrives", "true"), ("fields", FILE_FIELDS)],
-            )
-            .await?;
-        if dto.trashed == Some(true) {
-            return Err(CoreError::NotFound(format!("共享目录已在回收站中：{id}")));
-        }
-        if dto.mime_type == SHORTCUT_MIME_TYPE {
-            if let Some(target) = dto.shortcut_details.as_ref() {
-                if target.target_mime_type.as_deref() == Some(RemoteDriveFile::FOLDER_MIME_TYPE) {
-                    if let Some(ref tid) = target.target_id {
-                        if !tid.is_empty() {
-                            return Box::pin(self.resolve_folder(tid)).await;
-                        }
-                    }
-                }
-            }
-        }
-        if dto.mime_type != RemoteDriveFile::FOLDER_MIME_TYPE {
-            return Err(CoreError::InvalidPayload(format!(
-                "指定的 Google Drive 链接不是文件夹（类型为 {}）。",
-                dto.mime_type
-            )));
-        }
-        Ok(dto.into_record())
+        self.resolve_folder_depth(id, 5).await
     }
 
     async fn list_shared_folders(&self) -> CoreResult<Vec<RemoteDriveFile>> {

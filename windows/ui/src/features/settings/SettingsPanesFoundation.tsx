@@ -1,44 +1,733 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
+  ArrowUpCircle,
+  ArrowUpRight,
+  BookOpen,
   CheckCircle2,
-  Cloud,
+  Clock,
+  FileJson,
   FolderOpen,
-  HardDrive,
+  Info,
+  KeyRound,
+  Monitor,
+  Moon,
   RefreshCw,
-  Trash2,
+  Sun,
+  UserCheck,
+  UserCircle2,
 } from 'lucide-react';
 import { getTransport } from '../../api/transport';
-import { Button, SegmentedControl, type ThemeMode } from '../../design-system';
+import {
+  CharkleSlider,
+  getGlassTintScale,
+  SegmentedControl,
+  setGlassTintScale,
+  type ThemeMode,
+} from '../../design-system';
 import { useCoordinatorStore, useSyncAIStore } from '../../stores';
 import type {
   DriveSyncConfig,
   DriveTransportMode,
   GalleryLayoutMode,
   StorageMigrationReport,
+  SyncStatus,
 } from '../../types/domain';
+import {
+  activeStorageLocationSummary,
+  formatBytes,
+  GDIRECT_TUTORIAL_URL,
+  InlineGuideDisclosure,
+  isValidHttpUrl,
+  relativeTimeText,
+  resolveSharedFolderID,
+  SettingsButton,
+  SettingsCardDivider,
+  SettingsGuideStep,
+  SettingsInput,
+  SettingsRow,
+  SettingsSection,
+  SettingsStatusBadge,
+  SettingsSubModal,
+  SettingsSwitch,
+  storageModeHeadline,
+} from './SettingsChrome';
 
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let val = bytes;
-  let idx = 0;
-  while (val >= 1024 && idx < units.length - 1) {
-    val /= 1024;
-    idx += 1;
+const DEFAULT_SYNC_CONFIG: DriveSyncConfig = {
+  mode: 'localOnly',
+  rootFolderName: 'Charkle',
+  sharedFolderURLOrID: '',
+  mountPath: 'G:\\',
+  selectedGDirectAccount: null,
+  useGDirectIPAcceleration: true,
+  webDAVServerURL: '',
+  webDAVUsername: '',
+  webDAVRemotePath: '/Charkle',
+  localLibraryPath: '',
+  autoSyncIntervalSeconds: 120,
+  syncThumbnails: true,
+  syncEmbeddings: true,
+};
+
+function isSyncPhaseBusy(status: SyncStatus | null): boolean {
+  if (!status) return false;
+  if (typeof status.phase === 'string') {
+    return status.phase === 'scanning' || status.phase === 'merging';
   }
-  return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+  return 'uploading' in status.phase || 'downloading' in status.phase;
 }
+
+function localizedSyncPhaseTitle(status: SyncStatus | null): string {
+  if (!status) return '同步中…';
+  const p = status.phase;
+  if (typeof p === 'string') {
+    if (p === 'scanning') return '正在扫描目录变更…';
+    if (p === 'merging') return '正在合并增量索引…';
+    return '同步中…';
+  }
+  if ('uploading' in p) {
+    return `正在上传素材（${p.uploading.completed}/${p.uploading.total}）…`;
+  }
+  if ('downloading' in p) {
+    return `正在下载云端素材（${p.downloading.completed}/${p.downloading.total}）…`;
+  }
+  return '上次同步遇到异常';
+}
+
+function syncIdleHeadline(status: SyncStatus | null): string {
+  if (!status) return '等待首次同步';
+  if (typeof status.phase === 'object' && 'error' in status.phase) {
+    return '上次同步遇到异常';
+  }
+  if (status.pendingOpCount > 0) {
+    return `有 ${status.pendingOpCount} 项本地变更待同步`;
+  }
+  return status.lastSyncedAt ? '已与云端保持同步' : '等待首次同步';
+}
+
+function syncIndicatorColor(status: SyncStatus | null): string {
+  if (!status) return 'var(--text-tertiary)';
+  if (typeof status.phase === 'object' && 'error' in status.phase) {
+    return 'var(--settings-destructive)';
+  }
+  if (isSyncPhaseBusy(status) || status.pendingOpCount > 0) {
+    return 'var(--settings-warning)';
+  }
+  return status.lastSyncedAt ? 'var(--settings-positive)' : 'var(--text-tertiary)';
+}
+
+// =========================================================================
+// Shared Sheet 1: Google OAuth Credential Setup (mirrors GoogleOAuthSetupSheet.swift)
+// =========================================================================
+
+export const GoogleOAuthSetupModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  autoSignInAfterSave?: boolean;
+  onCompleted?: () => void;
+}> = ({ open, onClose, autoSignInAfterSave = true, onCompleted }) => {
+  const saveGoogleOAuthClient = useSyncAIStore((s) => s.saveGoogleOAuthClient);
+  const importGoogleOAuthSecretFile = useSyncAIStore((s) => s.importGoogleOAuthSecretFile);
+  const signInGoogleDrive = useSyncAIStore((s) => s.signInGoogleDrive);
+  const signingInGoogle = useSyncAIStore((s) => s.signingInGoogle);
+
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setClientId('');
+      setClientSecret('');
+    }
+  }, [open]);
+
+  const busy = saving || signingInGoogle;
+
+  const handleImportJson = async () => {
+    setSaving(true);
+    try {
+      const ok = await importGoogleOAuthSecretFile();
+      if (ok) {
+        onClose();
+        onCompleted?.();
+        if (autoSignInAfterSave) {
+          void signInGoogleDrive();
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleManualSave = async () => {
+    const cid = clientId.trim();
+    if (!cid) return;
+    setSaving(true);
+    try {
+      const ok = await saveGoogleOAuthClient(cid, clientSecret.trim());
+      if (ok) {
+        onClose();
+        onCompleted?.();
+        if (autoSignInAfterSave) {
+          void signInGoogleDrive();
+        }
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingsSubModal
+      open={open}
+      onClose={onClose}
+      title={
+        <span className="inline-flex items-center gap-2">
+          <KeyRound size={16} />
+          <span>配置 Google Drive 登录凭据</span>
+        </span>
+      }
+      subtitle="Charkle 直连你自己的 Google Drive，仅首次需要配置一次桌面端凭据，密钥安全保存于 Windows 凭据管理器。"
+      width="md"
+      footer={
+        <>
+          <SettingsButton variant="secondary" disabled={busy} onClick={onClose}>
+            取消
+          </SettingsButton>
+          <SettingsButton
+            variant="primary"
+            loading={busy}
+            disabled={!clientId.trim()}
+            onClick={() => void handleManualSave()}
+          >
+            {autoSignInAfterSave ? '保存并前往 Google 登录' : '保存凭据'}
+          </SettingsButton>
+        </>
+      }
+    >
+      <div className="rounded-[10px] bg-[var(--settings-subtle)] border border-[var(--settings-border)] p-3 flex flex-col gap-2.5">
+        <button
+          type="button"
+          onClick={() => void getTransport().openExternalUrl(GDIRECT_TUTORIAL_URL)}
+          className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] hover:underline cursor-pointer self-start"
+        >
+          <BookOpen size={13} />
+          <span>查看 Google Cloud 桌面端凭据 3 分钟图文教程</span>
+          <ArrowUpRight size={11} />
+        </button>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <SettingsButton
+            variant="secondary"
+            loading={busy}
+            onClick={() => void handleImportJson()}
+          >
+            <FileJson size={13} />
+            导入 client_secret.json…
+          </SettingsButton>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2.5">
+        <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+          或手动粘贴创建的桌面端凭据
+        </span>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">Client ID</span>
+          <SettingsInput
+            type="text"
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            placeholder="例如：1234567890-xxxx.apps.googleusercontent.com"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+            Client Secret
+          </span>
+          <SettingsInput
+            type="password"
+            value={clientSecret}
+            onChange={(e) => setClientSecret(e.target.value)}
+            placeholder="例如：GOCSPX-xxxxxxxx"
+          />
+        </label>
+      </div>
+    </SettingsSubModal>
+  );
+};
+
+// =========================================================================
+// Shared Sheet 2: WebDAV Editor Modal (mirrors SyncSettingsPane.webDAVEditorSheet)
+// =========================================================================
+
+export const WebDAVEditorModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  initialConfig: DriveSyncConfig;
+  onSaved?: () => void;
+}> = ({ open, onClose, initialConfig, onSaved }) => {
+  const hasWebdavPassword = useSyncAIStore((s) => s.hasWebdavPassword);
+  const testingWebdav = useSyncAIStore((s) => s.testingWebdav);
+  const testWebdavConnection = useSyncAIStore((s) => s.testWebdavConnection);
+  const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
+
+  const [url, setUrl] = useState(initialConfig.webDAVServerURL);
+  const [username, setUsername] = useState(initialConfig.webDAVUsername);
+  const [remotePath, setRemotePath] = useState(initialConfig.webDAVRemotePath || '/Charkle');
+  const [password, setPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [inlineMsg, setInlineMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const wasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      setUrl(initialConfig.webDAVServerURL);
+      setUsername(initialConfig.webDAVUsername);
+      setRemotePath(initialConfig.webDAVRemotePath || '/Charkle');
+      setPassword('');
+      setInlineMsg(null);
+    }
+    wasOpenRef.current = open;
+  }, [open, initialConfig]);
+
+  const trimmedUrl = url.trim();
+  const isUrlValid = isValidHttpUrl(trimmedUrl);
+  const showUrlError = trimmedUrl.length > 0 && !isUrlValid;
+  const buildDraft = (): DriveSyncConfig => ({
+    ...initialConfig,
+    mode: 'webDAV',
+    webDAVServerURL: trimmedUrl,
+    webDAVUsername: username.trim(),
+    webDAVRemotePath: remotePath.trim() || '/Charkle',
+  });
+
+  const handleTest = async () => {
+    if (!isUrlValid) {
+      setInlineMsg({ ok: false, text: '请输入以 https:// 或 http:// 开头的有效 WebDAV 服务器地址' });
+      return;
+    }
+    const res = await testWebdavConnection(buildDraft(), password || null);
+    setInlineMsg({ ok: res.ok, text: res.message });
+    if (res.ok) setPassword('');
+  };
+
+  const handleSave = async () => {
+    if (!isUrlValid) {
+      setInlineMsg({ ok: false, text: '请输入以 https:// 或 http:// 开头的有效 WebDAV 服务器地址' });
+      return;
+    }
+    setSaving(true);
+    try {
+      const ok = await saveSyncConfig(buildDraft(), password || undefined);
+      if (ok) {
+        setPassword('');
+        onSaved?.();
+        onClose();
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingsSubModal
+      open={open}
+      onClose={onClose}
+      title="配置 WebDAV 云盘"
+      subtitle="兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务"
+      width="md"
+      footer={
+        <>
+          <SettingsButton variant="secondary" disabled={saving || testingWebdav} onClick={onClose}>
+            取消
+          </SettingsButton>
+          <SettingsButton
+            variant="secondary"
+            loading={testingWebdav}
+            disabled={!isUrlValid || saving}
+            onClick={() => void handleTest()}
+          >
+            {testingWebdav ? '测试中…' : '测试连接'}
+          </SettingsButton>
+          <SettingsButton
+            variant="primary"
+            loading={saving}
+            disabled={!isUrlValid || testingWebdav}
+            onClick={() => void handleSave()}
+          >
+            保存配置
+          </SettingsButton>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-2.5">
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">服务器地址</span>
+          <SettingsInput
+            type="text"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://dav.jianguoyun.com/dav/"
+          />
+          {showUrlError && (
+            <span className="text-[11px] text-[var(--settings-warning)]">
+              请输入以 https:// 或 http:// 开头的有效服务器地址
+            </span>
+          )}
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+            账号 / 用户名
+          </span>
+          <SettingsInput
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="邮箱或用户名"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+            应用密码（保存至 Windows 凭据管理器）
+          </span>
+          <SettingsInput
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={hasWebdavPassword ? '••••••••（留空保持不变）' : '输入密码或应用授权码'}
+          />
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+            云端保存路径
+          </span>
+          <SettingsInput
+            type="text"
+            value={remotePath}
+            onChange={(e) => setRemotePath(e.target.value)}
+            placeholder="/Charkle"
+          />
+        </label>
+      </div>
+
+      {inlineMsg && (
+        <div
+          className={[
+            'rounded-[9px] px-3 py-2 text-[11.5px] border',
+            inlineMsg.ok
+              ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
+              : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
+          ].join(' ')}
+        >
+          {inlineMsg.text}
+        </div>
+      )}
+    </SettingsSubModal>
+  );
+};
+
+// =========================================================================
+// Shared Sheet 3: Unified Storage Location Migration / Switch Wizard
+// (mirrors LibrarySettingsPane.storageLocationWizardSheet)
+// =========================================================================
+
+type LocationWizardAction = 'migrate' | 'switchOnly';
+
+export const StorageLocationWizardModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  initialMode?: DriveTransportMode;
+  onMigrated?: (report: StorageMigrationReport) => void;
+}> = ({ open, onClose, initialMode, onMigrated }) => {
+  const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
+  const syncConfig = useSyncAIStore((s) => s.syncConfig);
+  const syncStatus = useSyncAIStore((s) => s.syncStatus);
+  const diagnostics = useSyncAIStore((s) => s.diagnostics);
+  const hasWebdavPassword = useSyncAIStore((s) => s.hasWebdavPassword);
+  const migrating = useSyncAIStore((s) => s.migrating);
+  const runStorageMigration = useSyncAIStore((s) => s.runStorageMigration);
+  const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
+
+  const [action, setAction] = useState<LocationWizardAction>('migrate');
+  const [draft, setDraft] = useState<DriveSyncConfig>(syncConfig ?? DEFAULT_SYNC_CONFIG);
+  const [webdavPassword, setWebdavPassword] = useState('');
+  const [savingSwitch, setSavingSwitch] = useState(false);
+  const wasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      const base = syncConfig ?? DEFAULT_SYNC_CONFIG;
+      const mode: DriveTransportMode =
+        initialMode ?? (base.mode === 'gdirectMount' ? 'directAPIWithGDirect' : base.mode);
+      setDraft({ ...base, mode });
+      setAction('migrate');
+      setWebdavPassword('');
+    }
+    wasOpenRef.current = open;
+  }, [open, syncConfig, initialMode]);
+
+  const targetMode: DriveTransportMode =
+    draft.mode === 'gdirectMount' ? 'directAPIWithGDirect' : draft.mode;
+
+  const hasReadyGoogleAccount =
+    (syncStatus?.account != null &&
+      syncStatus.account.source !== 'WebDAV' &&
+      syncStatus.account.source !== '本地文件夹') ||
+    Boolean(diagnostics?.gdirect.defaultAccount) ||
+    (diagnostics?.gdirect.accounts.length ?? 0) > 0;
+
+  const trimmedWebdavUrl = draft.webDAVServerURL.trim();
+  const isWebdavUrlValid = isValidHttpUrl(trimmedWebdavUrl);
+  const showWebdavUrlError =
+    targetMode === 'webDAV' && trimmedWebdavUrl.length > 0 && !isWebdavUrlValid;
+
+  const canConfirm =
+    targetMode === 'localOnly'
+      ? draft.localLibraryPath.trim().length > 0
+      : targetMode === 'webDAV'
+        ? isWebdavUrlValid
+        : draft.rootFolderName.trim().length > 0;
+
+  const busy = migrating || savingSwitch;
+
+  const handleConfirm = async () => {
+    if (!canConfirm || busy) return;
+    const target: DriveSyncConfig = {
+      ...draft,
+      mode: targetMode,
+      webDAVServerURL: trimmedWebdavUrl,
+      webDAVUsername: draft.webDAVUsername.trim(),
+      webDAVRemotePath: draft.webDAVRemotePath.trim() || '/Charkle',
+      localLibraryPath: draft.localLibraryPath.trim(),
+      rootFolderName: draft.rootFolderName.trim() || 'Charkle',
+    };
+    const pwd = webdavPassword.trim() || undefined;
+    if (action === 'migrate') {
+      const report = await runStorageMigration(target, pwd);
+      if (report) {
+        onMigrated?.(report);
+        onClose();
+      }
+    } else {
+      setSavingSwitch(true);
+      try {
+        const ok = await saveSyncConfig(target, pwd);
+        if (ok) onClose();
+      } finally {
+        setSavingSwitch(false);
+      }
+    }
+  };
+
+  return (
+    <SettingsSubModal
+      open={open}
+      onClose={onClose}
+      title={
+        <span className="inline-flex items-center gap-2">
+          <ArrowRightLeft size={16} />
+          <span>更改或转移素材库位置</span>
+        </span>
+      }
+      subtitle={`当前位置：${activeStorageLocationSummary(syncConfig, diagnostics?.dataDir)}`}
+      width="md"
+      footer={
+        <>
+          <SettingsButton variant="secondary" disabled={busy} onClick={onClose}>
+            取消
+          </SettingsButton>
+          <SettingsButton
+            variant="primary"
+            loading={busy}
+            disabled={!canConfirm}
+            onClick={() => void handleConfirm()}
+          >
+            {action === 'migrate'
+              ? migrating
+                ? '正在迁移素材库…'
+                : '开始无损迁移'
+              : savingSwitch
+                ? '正在保存…'
+                : '切换至该位置'}
+          </SettingsButton>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">操作方式</span>
+        <SegmentedControl<LocationWizardAction>
+          value={action}
+          onChange={setAction}
+          ariaLabel="素材库迁移方式"
+          options={[
+            { value: 'migrate', label: '完整无损迁移（推荐）' },
+            { value: 'switchOnly', label: '仅切换指向位置' },
+          ]}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">目标存储方式</span>
+        <SegmentedControl<DriveTransportMode>
+          value={targetMode}
+          onChange={(mode) => setDraft({ ...draft, mode })}
+          ariaLabel="目标存储方式"
+          options={[
+            { value: 'directAPIWithGDirect', label: 'Google Drive' },
+            { value: 'webDAV', label: 'WebDAV 云盘' },
+            { value: 'localOnly', label: '纯本地文件夹' },
+          ]}
+        />
+      </div>
+
+      {targetMode === 'directAPIWithGDirect' && (
+        <div className="flex flex-col gap-2.5">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+              目标 Google Drive 路径
+            </span>
+            <SettingsInput
+              type="text"
+              value={draft.rootFolderName}
+              onChange={(e) => setDraft({ ...draft, rootFolderName: e.target.value })}
+              placeholder="Charkle 或 Design/Charkle"
+            />
+          </label>
+          {!hasReadyGoogleAccount && (
+            <div className="rounded-[9px] bg-[var(--settings-warning)]/10 border border-[var(--settings-warning)]/25 px-3 py-2 flex items-center justify-between gap-2 text-[11.5px]">
+              <span className="inline-flex items-center gap-1.5 text-[var(--text-secondary)]">
+                <Info size={13} className="text-[var(--settings-warning)] shrink-0" />
+                迁移到 Google Drive 前请先在「云同步」完成账号登录。
+              </span>
+              <SettingsButton
+                variant="secondary"
+                onClick={() => {
+                  onClose();
+                  setSettingsTab('sync');
+                }}
+              >
+                前往云同步
+              </SettingsButton>
+            </div>
+          )}
+        </div>
+      )}
+
+      {targetMode === 'webDAV' && (
+        <div className="flex flex-col gap-2">
+          <SettingsInput
+            type="text"
+            value={draft.webDAVServerURL}
+            onChange={(e) => setDraft({ ...draft, webDAVServerURL: e.target.value })}
+            placeholder="服务器地址（如 https://dav.jianguoyun.com/dav/）"
+          />
+          {showWebdavUrlError && (
+            <span className="text-[11px] text-[var(--settings-warning)]">
+              请输入以 https:// 或 http:// 开头的有效服务器地址
+            </span>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <SettingsInput
+              type="text"
+              value={draft.webDAVUsername}
+              onChange={(e) => setDraft({ ...draft, webDAVUsername: e.target.value })}
+              placeholder="用户名"
+            />
+            <SettingsInput
+              type="password"
+              value={webdavPassword}
+              onChange={(e) => setWebdavPassword(e.target.value)}
+              placeholder={hasWebdavPassword ? '应用密码（留空沿用已存）' : '应用密码'}
+            />
+          </div>
+          <SettingsInput
+            type="text"
+            value={draft.webDAVRemotePath}
+            onChange={(e) => setDraft({ ...draft, webDAVRemotePath: e.target.value })}
+            placeholder="远端保存路径（如 /Charkle）"
+          />
+        </div>
+      )}
+
+      {targetMode === 'localOnly' && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+            目标本机文件夹路径
+          </span>
+          <div className="flex gap-2">
+            <SettingsInput
+              type="text"
+              value={draft.localLibraryPath}
+              onChange={(e) => setDraft({ ...draft, localLibraryPath: e.target.value })}
+              placeholder="例如：D:\Pictures\Charkle"
+              className="flex-1"
+            />
+            <SettingsButton
+              variant="secondary"
+              onClick={async () => {
+                const picked = await getTransport().pickDirectoryDialog('选择素材库保存文件夹');
+                if (picked) setDraft({ ...draft, localLibraryPath: picked });
+              }}
+            >
+              选择文件夹…
+            </SettingsButton>
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-[9px] bg-[var(--settings-subtle)] p-2.5 flex flex-col gap-1">
+        <span className="text-[11.5px] font-semibold text-[var(--text-primary)]">
+          {action === 'migrate' ? '无损迁移流程' : '仅切换说明'}
+        </span>
+        <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed whitespace-pre-line">
+          {action === 'migrate'
+            ? '1. 验证目标位置连通与可写性，避免中断损坏原库；\n2. 自动补全拉取尚未缓存在本机的云端原件；\n3. 将全部文件夹、素材原件与情绪板完整写入新位置并切换为默认存储。'
+            : '仅将 Charkle 指向新位置并保存配置，不搬运原位置的现有文件；适合接入已有云端或本地素材库。'}
+        </p>
+      </div>
+    </SettingsSubModal>
+  );
+};
+
+// =========================================================================
+// Pane 1: 通用 (GeneralSettingsPane)
+// =========================================================================
+
+const THEME_CARDS: Array<{
+  mode: ThemeMode;
+  title: string;
+  subtitle: string;
+  icon: React.ReactNode;
+}> = [
+  { mode: 'system', title: '跟随系统', subtitle: '自动同步浅色与深色', icon: <Monitor size={15} /> },
+  { mode: 'light', title: '浅色画廊', subtitle: '柔和暖白画布底色', icon: <Sun size={15} /> },
+  { mode: 'dark', title: '深色画廊', subtitle: '低眩光专注看图', icon: <Moon size={15} /> },
+];
 
 export const GeneralSettingsPane: React.FC = () => {
   const themeMode = useCoordinatorStore((s) => s.themeMode);
   const setThemeMode = useCoordinatorStore((s) => s.setThemeMode);
+  const surfaceState = useCoordinatorStore((s) => s.surfaceState);
   const layoutMode = useCoordinatorStore((s) => s.layoutMode);
   const setLayoutMode = useCoordinatorStore((s) => s.setLayoutMode);
-  const surfaceState = useCoordinatorStore((s) => s.surfaceState);
+  const sidebarCollapsed = useCoordinatorStore((s) => s.sidebarCollapsed);
+  const setSidebarCollapsed = useCoordinatorStore((s) => s.setSidebarCollapsed);
+  const openOnboarding = useCoordinatorStore((s) => s.openOnboarding);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+  const setStatusFeedback = useSyncAIStore((s) => s.setStatusFeedback);
 
   const [autostart, setAutostart] = useState(false);
+  const [lightGlassTint, setLightGlassTint] = useState<number>(() => getGlassTintScale('light'));
+  const [darkGlassTint, setDarkGlassTint] = useState<number>(() => getGlassTintScale('dark'));
+  const isGlassTintCustomized =
+    Math.abs(lightGlassTint - 1) > 0.001 || Math.abs(darkGlassTint - 1) > 0.001;
 
   useEffect(() => {
     void getTransport()
@@ -48,454 +737,1102 @@ export const GeneralSettingsPane: React.FC = () => {
   }, []);
 
   return (
-    <div data-testid="settings-pane-general" className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">通用</h2>
-        <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-          调整外观主题、默认画廊排版及 Windows 登录自启动偏好。
-        </p>
-      </div>
-
-      <section className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] p-4 flex flex-col gap-3.5">
-        <div className="flex items-center justify-between gap-3">
-          <div>
+    <div data-testid="settings-pane-general" className="flex flex-col gap-[22px]">
+      <SettingsSection title="外观与画廊">
+        <div className="p-4 flex flex-col gap-3">
+          <div className="flex flex-col gap-0.5">
             <div className="text-[13px] font-medium text-[var(--text-primary)]">界面主题</div>
-            <div className="text-[11.5px] text-[var(--text-tertiary)]">
-              跟随 Windows 系统外观或固定浅色 / 深色画廊氛围
+            <div className="text-[11.5px] text-[var(--text-secondary)]">
+              切换 Charkle 的画廊外观主题，点击立即生效。
             </div>
           </div>
-          <SegmentedControl<ThemeMode>
-            value={themeMode}
-            onChange={(m) => void setThemeMode(m)}
-            ariaLabel="界面主题选择"
-            options={[
-              { value: 'system', label: '跟随系统' },
-              { value: 'light', label: '浅色' },
-              { value: 'dark', label: '深色' },
-            ]}
-          />
+
+          <div className="grid grid-cols-3 gap-2.5" role="radiogroup" aria-label="界面主题选择">
+            {THEME_CARDS.map((card) => {
+              const selected = themeMode === card.mode;
+              return (
+                <button
+                  key={card.mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => {
+                    void setThemeMode(card.mode);
+                    setStatusFeedback(`已切换界面主题为「${card.title}」`, null);
+                  }}
+                  className={[
+                    'charkle-pressable relative p-3 rounded-[10px] text-left cursor-pointer transition-colors duration-150 motion-reduce:transition-none flex flex-col gap-1.5',
+                    selected
+                      ? 'bg-black/[0.06] dark:bg-white/[0.09] border border-black/35 dark:border-white/45'
+                      : 'bg-[var(--settings-subtle)] border border-[var(--settings-border)] hover:border-black/20 dark:hover:border-white/22',
+                  ].join(' ')}
+                >
+                  <div className="flex items-center justify-between">
+                    <span
+                      className={
+                        selected ? 'text-[var(--text-primary)]' : 'text-[var(--text-secondary)]'
+                      }
+                    >
+                      {card.icon}
+                    </span>
+                    {selected && (
+                      <CheckCircle2 size={14} className="text-[var(--text-primary)]" />
+                    )}
+                  </div>
+                  <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                    {card.title}
+                  </div>
+                  <div className="text-[11px] text-[var(--text-secondary)] leading-snug">
+                    {card.subtitle}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        <div className="h-px bg-[var(--border-hairline)]" />
+        <SettingsCardDivider />
 
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-[13px] font-medium text-[var(--text-primary)]">默认画廊布局</div>
-            <div className="text-[11.5px] text-[var(--text-tertiary)]">
-              也可随时通过 Ctrl+1 / 2 / 3 在画廊内即时切换
+        <div data-testid="settings-glass-tint-controls" className="px-4 py-3.5 flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <div className="text-[13px] font-medium text-[var(--text-primary)]">
+                悬浮液态玻璃质感
+              </div>
+              <div className="text-[11.5px] text-[var(--text-secondary)]">
+                调节浅色与深色模式下悬浮胶囊的透光度，拖动实时生效。
+              </div>
+            </div>
+            {isGlassTintCustomized && (
+              <button
+                type="button"
+                onClick={() => {
+                  setLightGlassTint(1);
+                  setDarkGlassTint(1);
+                  setGlassTintScale('light', 1);
+                  setGlassTintScale('dark', 1);
+                }}
+                className="charkle-pressable shrink-0 text-[12px] font-medium text-[var(--accent)] hover:opacity-80 transition-opacity duration-150 motion-reduce:transition-none cursor-pointer px-1.5 py-0.5 rounded-[6px]"
+              >
+                重置
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between text-[12px]">
+                <span className="font-medium text-[var(--text-primary)]">浅色玻璃浓度</span>
+                <span className="text-[11.5px] font-medium text-[var(--text-secondary)] charkle-tabular">
+                  {Math.round(lightGlassTint * 100)}%
+                </span>
+              </div>
+              <CharkleSlider
+                variant="standard"
+                min={0}
+                max={1.5}
+                step={0.05}
+                value={lightGlassTint}
+                valueText={`${Math.round(lightGlassTint * 100)}%`}
+                ariaLabel="浅色玻璃浓度"
+                data-testid="slider-light-glass-tint"
+                onChange={(next) => {
+                  setLightGlassTint(next);
+                  setGlassTintScale('light', next);
+                }}
+                className="w-full"
+              />
+              <div className="flex items-center justify-between text-[10.5px] text-[var(--text-tertiary)] charkle-tabular">
+                <span>0%</span>
+                <span>150%</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between text-[12px]">
+                <span className="font-medium text-[var(--text-primary)]">深色玻璃浓度</span>
+                <span className="text-[11.5px] font-medium text-[var(--text-secondary)] charkle-tabular">
+                  {Math.round(darkGlassTint * 100)}%
+                </span>
+              </div>
+              <CharkleSlider
+                variant="standard"
+                min={0}
+                max={1.5}
+                step={0.05}
+                value={darkGlassTint}
+                valueText={`${Math.round(darkGlassTint * 100)}%`}
+                ariaLabel="深色玻璃浓度"
+                data-testid="slider-dark-glass-tint"
+                onChange={(next) => {
+                  setDarkGlassTint(next);
+                  setGlassTintScale('dark', next);
+                }}
+                className="w-full"
+              />
+              <div className="flex items-center justify-between text-[10.5px] text-[var(--text-tertiary)] charkle-tabular">
+                <span>0%</span>
+                <span>150%</span>
+              </div>
             </div>
           </div>
+        </div>
+
+        {surfaceState?.backdrop === 'mica' && surfaceState.transparencyEnabled === false && (
+          <>
+            <SettingsCardDivider />
+            <div data-testid="settings-transparency-prompt">
+              <SettingsRow
+                title="系统透明效果未开启"
+                subtitle="开启 Windows 透明效果后，窗口标题栏与侧边栏将呈现柔和的桌面透色"
+              >
+                <SettingsButton
+                  variant="secondary"
+                  onClick={() => {
+                    void getTransport()
+                      .openExternalUrl('ms-settings:colors')
+                      .catch((err) => {
+                        pushToast({
+                          message:
+                            err instanceof Error ? err.message : '无法打开 Windows 个性化设置',
+                          tone: 'error',
+                        });
+                      });
+                  }}
+                >
+                  打开系统设置
+                  <ArrowUpRight size={12.5} />
+                </SettingsButton>
+              </SettingsRow>
+            </div>
+          </>
+        )}
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="画廊默认排布"
+          subtitle="打开全部素材或文件夹时默认采用的浏览视图（Ctrl+1 / 2 / 3 / 4）"
+        >
           <SegmentedControl<GalleryLayoutMode>
             value={layoutMode}
             onChange={setLayoutMode}
             ariaLabel="默认画廊布局"
             options={[
-              { value: 'verticalMasonry', label: '瀑布流' },
-              { value: 'horizontalJustified', label: '等高行' },
-              { value: 'galleryFilmstrip', label: '胶片带' },
+              { value: 'verticalMasonry', label: '纵向瀑布流' },
+              { value: 'horizontalJustified', label: '横向等高行' },
+              { value: 'galleryFilmstrip', label: '画廊视图' },
+              { value: 'ringGallery', label: '环形画廊' },
             ]}
           />
-        </div>
+        </SettingsRow>
 
-        <div className="h-px bg-[var(--border-hairline)]" />
+        <SettingsCardDivider />
 
-        <label className="flex items-center justify-between gap-3 cursor-pointer">
-          <div>
-            <div className="text-[13px] font-medium text-[var(--text-primary)]">
-              开机自动启动 Charkle
-            </div>
-            <div className="text-[11.5px] text-[var(--text-tertiary)]">
-              登录后驻留系统托盘，保持全局快捷键与顶部悬浮窗随时待命
-            </div>
-          </div>
-          <input
-            type="checkbox"
-            checked={autostart}
-            onChange={async (e) => {
-              const next = e.target.checked;
-              const applied = await getTransport().setAutostartEnabled(next);
-              setAutostart(applied);
-              pushToast({
-                message: applied ? '已开启开机自启动' : '已关闭开机自启动',
-                tone: 'info',
-              });
-            }}
-            className="h-4 w-4 accent-[var(--accent)]"
+        <SettingsRow
+          title="启动时收起侧边栏为精简图标栏"
+          subtitle="随时按 Ctrl+\ 一键展开或收起，左下角齿轮按钮可随时打开设置"
+        >
+          <SettingsSwitch
+            checked={sidebarCollapsed}
+            onChange={setSidebarCollapsed}
+            ariaLabel="收起侧边栏为精简图标栏"
           />
-        </label>
+        </SettingsRow>
+      </SettingsSection>
 
-        <div className="h-px bg-[var(--border-hairline)]" />
+      <SettingsSection title="系统集成">
+        <SettingsRow
+          title="开机自动启动 Charkle"
+          subtitle="登录 Windows 后驻留系统托盘，保持全局快捷键与顶部浮窗随时待命"
+        >
+          <SettingsSwitch
+            checked={autostart}
+            ariaLabel="开机自动启动 Charkle"
+            onChange={async (next) => {
+              try {
+                const applied = await getTransport().setAutostartEnabled(next);
+                setAutostart(applied);
+                pushToast({
+                  message: applied ? '已开启开机自启动' : '已关闭开机自启动',
+                  tone: 'info',
+                });
+              } catch (err) {
+                pushToast({
+                  message: err instanceof Error ? err.message : '切换开机自启动失败',
+                  tone: 'error',
+                });
+              }
+            }}
+          />
+        </SettingsRow>
+      </SettingsSection>
 
-        <div className="flex items-center justify-between text-[12px]">
-          <span className="text-[var(--text-secondary)]">界面语言</span>
-          <span className="text-[var(--text-primary)] font-medium">简体中文（Windows）</span>
-        </div>
-
-        <div className="flex items-center justify-between text-[12px]">
-          <span className="text-[var(--text-secondary)]">窗口材质渲染</span>
-          <span className="text-[var(--text-tertiary)]">
-            {surfaceState?.backdrop === 'mica'
-              ? 'Windows 11 Mica 材质已启用'
-              : '中性纯色画廊底色（兼容模式 / 透明效果关闭）'}
-          </span>
-        </div>
-      </section>
+      <SettingsSection title="入门与帮助">
+        <SettingsRow
+          title="快速上手引导"
+          subtitle="重新配置素材库存储、顶部浮窗、AI 智能与外观偏好（每步均可跳过）"
+        >
+          <SettingsButton variant="primary" onClick={openOnboarding}>
+            重新查看
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSection>
     </div>
   );
 };
 
+// =========================================================================
+// Pane 2: 素材库 (LibrarySettingsPane) — mirrors LibrarySettingsPane.swift 1:1
+// =========================================================================
+
 export const LibrarySettingsPane: React.FC = () => {
+  const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
+  const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const cacheStats = useSyncAIStore((s) => s.cacheStats);
   const diagnostics = useSyncAIStore((s) => s.diagnostics);
+  const syncing = useSyncAIStore((s) => s.syncing);
+  const migrating = useSyncAIStore((s) => s.migrating);
+  const lastMigrationReport = useSyncAIStore((s) => s.lastMigrationReport);
   const setCacheBudgetBytes = useSyncAIStore((s) => s.setCacheBudgetBytes);
   const evictCacheNow = useSyncAIStore((s) => s.evictCacheNow);
+  const syncNow = useSyncAIStore((s) => s.syncNow);
+  const openDirectoryInExplorer = useSyncAIStore((s) => s.openDirectoryInExplorer);
 
+  const cfg = syncConfig ?? DEFAULT_SYNC_CONFIG;
   const budgetGb = Math.max(
     2,
     Math.min(100, Math.round((cacheStats?.budgetBytes ?? 10 * 1024 ** 3) / 1024 ** 3)),
   );
   const [sliderGb, setSliderGb] = useState(budgetGb);
+  const [showWizard, setShowWizard] = useState(false);
+  const [evicting, setEvicting] = useState(false);
 
   useEffect(() => {
     setSliderGb(budgetGb);
   }, [budgetGb]);
 
-  const totalUsed =
-    (cacheStats?.thumbnailBytes ?? 0) + (cacheStats?.originalCacheBytes ?? 0);
+  const thumbBytes = cacheStats?.thumbnailBytes ?? 0;
+  const origBytes = cacheStats?.originalCacheBytes ?? 0;
+  const pinnedBytes = cacheStats?.pinnedOfflineBytes ?? 0;
+  const totalUsed = thumbBytes + origBytes + pinnedBytes;
+  const barScale = Math.max(1, totalUsed, cacheStats?.budgetBytes ?? 1);
+
+  const thumbPct = thumbBytes > 0 ? Math.min(45, Math.max(2, (thumbBytes / barScale) * 100)) : 0;
+  const origPct = origBytes > 0 ? Math.min(45, Math.max(2, (origBytes / barScale) * 100)) : 0;
+  const pinPct = pinnedBytes > 0 ? Math.min(45, Math.max(2, (pinnedBytes / barScale) * 100)) : 0;
 
   return (
-    <div data-testid="settings-pane-library" className="flex flex-col gap-4">
-      <div>
-        <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">素材库</h2>
-        <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-          管理本地索引目录与按需原图 LRU 缓存预算，已标记「离线常驻」的素材与情绪板永不被自动清理。
-        </p>
-      </div>
+    <div data-testid="settings-pane-library" className="flex flex-col gap-[22px]">
+      <SettingsSection title="当前存储位置">
+        <SettingsRow
+          title={storageModeHeadline(cfg.mode)}
+          subtitle={activeStorageLocationSummary(cfg, diagnostics?.dataDir)}
+          subtitleTone={cfg.mode === 'localOnly' ? 'default' : 'positive'}
+        >
+          {cfg.mode === 'localOnly' ? (
+            <SettingsButton
+              variant="secondary"
+              onClick={() =>
+                void openDirectoryInExplorer(cfg.localLibraryPath || diagnostics?.dataDir || '')
+              }
+            >
+              <FolderOpen size={13} />
+              打开文件夹
+            </SettingsButton>
+          ) : (
+            <SettingsButton variant="secondary" onClick={() => setSettingsTab('sync')}>
+              同步设置
+            </SettingsButton>
+          )}
 
-      <section className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] p-4 flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-[12px] font-medium text-[var(--text-secondary)]">本地数据库与缓存目录</div>
-            <div className="text-[12.5px] font-mono text-[var(--text-primary)] truncate mt-0.5">
-              {diagnostics?.dataDir ?? '%LOCALAPPDATA%\\Charkle'}
-            </div>
-          </div>
-          <Button
-            variant="secondary"
-            size="xs"
-            onClick={() => void getTransport().revealInExplorer(diagnostics?.dataDir ?? '')}
+          <SettingsButton
+            variant="primary"
+            disabled={syncing || migrating}
+            onClick={() => setShowWizard(true)}
           >
-            <FolderOpen size={13} />
-            打开目录
-          </Button>
-        </div>
+            更改或转移…
+          </SettingsButton>
+        </SettingsRow>
 
-        <div className="grid grid-cols-3 gap-2.5 pt-1">
-          <div className="rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)]/70 p-3">
-            <div className="text-[11px] text-[var(--text-tertiary)]">缩略图缓存</div>
-            <div className="text-[15px] font-semibold text-[var(--text-primary)] charkle-tabular mt-1">
-              {formatBytes(cacheStats?.thumbnailBytes ?? 0)}
-            </div>
-          </div>
-          <div className="rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)]/70 p-3">
-            <div className="text-[11px] text-[var(--text-tertiary)]">本地原图缓存</div>
-            <div className="text-[15px] font-semibold text-[var(--text-primary)] charkle-tabular mt-1">
-              {formatBytes(cacheStats?.originalCacheBytes ?? 0)}
-            </div>
-            <div className="text-[10.5px] text-[var(--text-tertiary)] mt-0.5">
-              {cacheStats?.cachedOriginalCount ?? 0} 个文件
-            </div>
-          </div>
-          <div className="rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)]/70 p-3">
-            <div className="text-[11px] text-[var(--text-tertiary)]">离线常驻保护</div>
-            <div className="text-[15px] font-semibold text-[var(--accent)] charkle-tabular mt-1">
-              {formatBytes(cacheStats?.pinnedOfflineBytes ?? 0)}
-            </div>
-            <div className="text-[10.5px] text-[var(--text-tertiary)] mt-0.5">
-              {cacheStats?.pinnedAssetCount ?? 0} 项受保护
-            </div>
-          </div>
-        </div>
+        {cfg.mode === 'localOnly' && (
+          <>
+            <SettingsCardDivider />
+            <SettingsRow
+              title="本机目录同步检查"
+              subtitle="手动扫描当前本机文件夹内新增的文件并补齐索引"
+            >
+              <SettingsButton
+                variant="secondary"
+                loading={syncing}
+                onClick={() => void syncNow()}
+              >
+                <RefreshCw size={12.5} className={syncing ? 'animate-spin motion-reduce:animate-none' : ''} />
+                立即扫描
+              </SettingsButton>
+            </SettingsRow>
+          </>
+        )}
 
-        <div className="flex flex-col gap-1.5 pt-1">
-          <div className="flex items-center justify-between text-[12.5px]">
-            <span className="font-medium text-[var(--text-primary)]">本地原图 LRU 缓存上限</span>
-            <span className="font-semibold text-[var(--accent)] charkle-tabular">
-              {sliderGb} GB（已用 {formatBytes(totalUsed)}）
+        {lastMigrationReport && (
+          <div
+            data-testid="storage-migration-report"
+            className="mx-4 mb-3 rounded-[9px] bg-[var(--settings-positive)]/10 border border-[var(--settings-positive)]/25 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
+          >
+            <CheckCircle2 size={15} className="text-[var(--settings-positive)] shrink-0" />
+            <span>
+              素材库已迁移至「{lastMigrationReport.targetLocation}」：
+              {lastMigrationReport.migratedAssets} 项素材、{lastMigrationReport.migratedFolders}{' '}
+              个文件夹、{lastMigrationReport.migratedBoards} 块情绪板。
             </span>
           </div>
-          <input
-            type="range"
-            aria-label="本地缓存预算 GB"
+        )}
+
+        <InlineGuideDisclosure title="切换存储方式会丢失素材吗？怎么安全搬家">
+          <SettingsGuideStep
+            number="1"
+            title="选择「完整无损迁移（推荐）」不会丢失任何内容"
+            detail="Charkle 会先验证新位置可写、自动拉取尚未缓存在本机的云端原件，再把全部文件夹、原图与情绪板写入新位置。"
+          />
+          <SettingsGuideStep
+            number="2"
+            title="「仅切换指向位置」适合接入已有素材库"
+            detail="如果你在另一台电脑或云盘已有现成的 Charkle 目录，仅切换指向即可直接连接，不搬运本机现有文件。"
+          />
+          <SettingsGuideStep
+            number="3"
+            title="随时可在 Google Drive、WebDAV 与纯本地之间互迁"
+            detail="原始文件均按可读文件夹保存，不锁定专有格式，在文件资源管理器或网盘网页端都能直接查看。"
+          />
+        </InlineGuideDisclosure>
+      </SettingsSection>
+
+      <SettingsSection title="本机缓存空间">
+        <div className="px-4 py-3.5 flex flex-col gap-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-[13px] font-medium text-[var(--text-primary)]">
+              已使用本机缓存
+            </span>
+            <span className="text-[12px] font-medium text-[var(--text-secondary)] charkle-tabular">
+              {formatBytes(totalUsed)} / {sliderGb} GB 上限
+            </span>
+          </div>
+
+          {/* 3-segment proportional stacked bar matching macOS LibrarySettingsPane */}
+          <div className="h-[18px] w-full rounded-[7px] bg-[var(--settings-subtle)] p-[3px] flex items-center gap-[2px] overflow-hidden">
+            {thumbPct > 0 && (
+              <div
+                style={{ width: `${thumbPct}%`, backgroundColor: '#4E7D96' }}
+                className="h-full rounded-[4px]"
+              />
+            )}
+            {origPct > 0 && (
+              <div
+                style={{ width: `${origPct}%`, backgroundColor: '#D4A373' }}
+                className="h-full rounded-[4px]"
+              />
+            )}
+            {pinPct > 0 && (
+              <div
+                style={{ width: `${pinPct}%`, backgroundColor: '#6B8E76' }}
+                className="h-full rounded-[4px]"
+              />
+            )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: '#4E7D96' }} />
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--text-secondary)] truncate">画廊预览图</div>
+                <div className="text-[12px] font-semibold text-[var(--text-primary)] charkle-tabular">
+                  {formatBytes(thumbBytes)}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: '#D4A373' }} />
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                  临时原件（{cacheStats?.cachedOriginalCount ?? 0} 项）
+                </div>
+                <div className="text-[12px] font-semibold text-[var(--text-primary)] charkle-tabular">
+                  {formatBytes(origBytes)}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: '#6B8E76' }} />
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                  常驻离线（{cacheStats?.pinnedAssetCount ?? 0} 项）
+                </div>
+                <div className="text-[12px] font-semibold text-[var(--text-primary)] charkle-tabular">
+                  {formatBytes(pinnedBytes)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <SettingsCardDivider />
+
+        <div className="px-4 py-[13px] flex flex-col gap-2">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium text-[var(--text-primary)]">
+                临时原件缓存上限
+              </div>
+              <div className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+                超出上限时按最久未用自动回收，常驻离线素材与预览图不受影响
+              </div>
+            </div>
+            <span className="text-[12.5px] font-semibold text-[var(--text-primary)] charkle-tabular shrink-0">
+              {sliderGb} GB
+            </span>
+          </div>
+          <CharkleSlider
+            variant="standard"
             min={2}
             max={100}
             step={1}
             value={sliderGb}
-            onChange={(e) => setSliderGb(Number(e.target.value))}
-            onMouseUp={() => void setCacheBudgetBytes(sliderGb * 1024 ** 3)}
-            onKeyUp={() => void setCacheBudgetBytes(sliderGb * 1024 ** 3)}
-            className="w-full accent-[var(--accent)]"
+            valueText={`${sliderGb} GB`}
+            ariaLabel="本地缓存预算 GB"
+            onChange={setSliderGb}
+            onChangeEnd={(nextGb) => void setCacheBudgetBytes(nextGb * 1024 ** 3)}
+            className="w-full"
           />
-          <div className="flex items-center justify-between text-[11px] text-[var(--text-tertiary)]">
+          <div className="flex items-center justify-between text-[11px] text-[var(--text-tertiary)] charkle-tabular">
             <span>2 GB</span>
             <span>100 GB</span>
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 pt-1 border-t border-[var(--border-hairline)]">
-          <Button variant="secondary" size="sm" onClick={() => void evictCacheNow()}>
-            <Trash2 size={13.5} />
-            立即按 LRU 清理未固定缓存
-          </Button>
-        </div>
-      </section>
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="清理临时原件缓存"
+          subtitle="立即释放未设为「始终保留在本地」的临时原件，云端与本地原件安全保留"
+        >
+          <SettingsButton
+            variant="secondary"
+            loading={evicting}
+            disabled={syncing || migrating}
+            onClick={async () => {
+              setEvicting(true);
+              try {
+                await evictCacheNow();
+              } finally {
+                setEvicting(false);
+              }
+            }}
+          >
+            {evicting ? '清理中…' : '立即清理'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSection>
+
+      <StorageLocationWizardModal open={showWizard} onClose={() => setShowWizard(false)} />
     </div>
   );
 };
 
+// =========================================================================
+// Pane 3: 云同步 (SyncSettingsPane) — mirrors SyncSettingsPane.swift 1:1
+// =========================================================================
+
 export const SyncSettingsPane: React.FC = () => {
+  const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
-  const syncing = useSyncAIStore((s) => s.syncing);
-  const migrating = useSyncAIStore((s) => s.migrating);
+  const lastSyncReport = useSyncAIStore((s) => s.lastSyncReport);
+  const lastMigrationReport = useSyncAIStore((s) => s.lastMigrationReport);
   const diagnostics = useSyncAIStore((s) => s.diagnostics);
+  const syncing = useSyncAIStore((s) => s.syncing);
+  const signingInGoogle = useSyncAIStore((s) => s.signingInGoogle);
+  const testingWebdav = useSyncAIStore((s) => s.testingWebdav);
+  const hasGoogleOAuthClient = useSyncAIStore((s) => s.hasGoogleOAuthClient);
   const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
-  const runStorageMigration = useSyncAIStore((s) => s.runStorageMigration);
+  const testWebdavConnection = useSyncAIStore((s) => s.testWebdavConnection);
+  const signInGoogleDrive = useSyncAIStore((s) => s.signInGoogleDrive);
+  const signOutGoogleDrive = useSyncAIStore((s) => s.signOutGoogleDrive);
   const syncNow = useSyncAIStore((s) => s.syncNow);
 
-  const [draft, setDraft] = useState<DriveSyncConfig>(
-    syncConfig ?? {
-      mode: 'localOnly',
-      rootFolderName: 'Charkle',
-      sharedFolderURLOrID: '',
-      mountPath: 'G:\\',
-      useGDirectIPAcceleration: true,
-      webDAVServerURL: '',
-      webDAVUsername: '',
-      webDAVRemotePath: '/Charkle',
-      localLibraryPath: '',
-      autoSyncIntervalSeconds: 120,
-      syncThumbnails: true,
-      syncEmbeddings: true,
-    },
-  );
-  const [webdavPassword, setWebdavPassword] = useState('');
-  const [migrationReport, setMigrationReport] = useState<StorageMigrationReport | null>(null);
+  const [draft, setDraft] = useState<DriveSyncConfig>(syncConfig ?? DEFAULT_SYNC_CONFIG);
+  const [showOAuthModal, setShowOAuthModal] = useState(false);
+  const [showWebDAVModal, setShowWebDAVModal] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
 
   useEffect(() => {
-    if (syncConfig) setDraft(syncConfig);
-  }, [syncConfig]);
+    if (syncConfig && !showWebDAVModal && !showWizard) setDraft(syncConfig);
+  }, [syncConfig, showWebDAVModal, showWizard]);
 
-  const modeChanged = syncConfig != null && draft.mode !== syncConfig.mode;
+  const persistQuiet = (next: DriveSyncConfig) => {
+    setDraft(next);
+    void saveSyncConfig(next, undefined, { quiet: true });
+  };
+
+  const isBusy = syncing || signingInGoogle || testingWebdav || isSyncPhaseBusy(syncStatus);
+  const isSyncingNow = syncing || isSyncPhaseBusy(syncStatus);
+  const hasGDirect = Boolean(diagnostics?.gdirect.cliPath);
+
+  const directAccount =
+    syncStatus?.account &&
+    syncStatus.account.source !== 'WebDAV' &&
+    syncStatus.account.source !== '本地文件夹' &&
+    syncStatus.account.source !== 'gdirect' &&
+    syncStatus.account.source !== 'gdirect mount'
+      ? syncStatus.account
+      : null;
+
+  const gdirectEmail =
+    draft.selectedGDirectAccount ??
+    diagnostics?.gdirect.defaultAccount ??
+    diagnostics?.gdirect.accounts[0] ??
+    null;
+
+  const activeGoogleAccount =
+    draft.mode === 'gdirectMount'
+      ? gdirectEmail
+        ? { email: gdirectEmail, displayName: null, source: 'gdirect mount', storageUsedBytes: null, storageLimitBytes: null }
+        : null
+      : directAccount ??
+        (gdirectEmail
+          ? { email: gdirectEmail, displayName: null, source: 'gdirect', storageUsedBytes: null, storageLimitBytes: null }
+          : null);
+
+  const isUsingGDirectFallback =
+    draft.mode === 'directAPIWithGDirect' && !directAccount && activeGoogleAccount != null;
+
+  const triggerGoogleSignIn = () => {
+    if (hasGoogleOAuthClient) {
+      void signInGoogleDrive();
+    } else {
+      setShowOAuthModal(true);
+    }
+  };
+
+  // State A: Local-only guidance (matches macOS SyncSettingsPane.localOnboardingSection)
+  if (draft.mode === 'localOnly') {
+    return (
+      <div data-testid="settings-pane-sync" className="flex flex-col gap-[22px]">
+        <SettingsSection title="云端同步服务">
+          <SettingsRow
+            title="当前素材库仅保存在本机"
+            subtitle={`路径：${activeStorageLocationSummary(draft, diagnostics?.dataDir)} · 启用云同步可在多台设备间自动同步并支持团队共享`}
+          >
+            <SettingsButton variant="secondary" onClick={() => setSettingsTab('library')}>
+              管理素材库位置
+            </SettingsButton>
+          </SettingsRow>
+
+          <SettingsCardDivider />
+
+          <SettingsRow
+            title="Google Drive 云端直连"
+            subtitle="推荐 · 原始文件按可读目录保存在你的 Google Drive，支持共享协作与网页端直接拖入新素材"
+          >
+            <SettingsButton
+              variant="primary"
+              onClick={() => persistQuiet({ ...draft, mode: 'directAPIWithGDirect' })}
+            >
+              启用 Google 同步
+            </SettingsButton>
+          </SettingsRow>
+
+          <InlineGuideDisclosure title="开始前需要准备什么？（仅首次需 3 分钟配置凭据）">
+            <SettingsGuideStep
+              number="1"
+              title="直连你自己的 Google Drive，不经任何第三方中转服务器"
+              detail="因此首次登录前需要准备一份个人桌面端 OAuth 凭据（client_secret.json）。"
+            />
+            <SettingsGuideStep
+              number="2"
+              title="随时可在「设置 → 云同步」导入凭据或手动粘贴 Client ID"
+              detail="启用 Google 同步后，可一键导入从 Google Cloud 下载的凭据文件并完成登录。"
+            />
+            <SettingsGuideStep
+              number="3"
+              title="想把已有本地素材一并迁上云盘？"
+              detail="点击下方「更改或转移…」选择完整无损迁移，自动搬运全部文件夹、原图与情绪板。"
+            />
+          </InlineGuideDisclosure>
+
+          <SettingsCardDivider />
+
+          <SettingsRow
+            title="WebDAV 云盘"
+            subtitle="兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务"
+          >
+            <SettingsButton variant="secondary" onClick={() => setShowWebDAVModal(true)}>
+              配置 WebDAV…
+            </SettingsButton>
+          </SettingsRow>
+
+          <SettingsCardDivider />
+
+          <SettingsRow
+            title="无损迁移现有素材至云盘"
+            subtitle="将当前本机素材、文件夹与情绪板完整搬迁至 Google Drive 或 WebDAV"
+          >
+            <SettingsButton variant="secondary" onClick={() => setShowWizard(true)}>
+              <ArrowRightLeft size={13} />
+              更改或转移…
+            </SettingsButton>
+          </SettingsRow>
+        </SettingsSection>
+
+        <WebDAVEditorModal
+          open={showWebDAVModal}
+          onClose={() => setShowWebDAVModal(false)}
+          initialConfig={draft}
+        />
+        <StorageLocationWizardModal open={showWizard} onClose={() => setShowWizard(false)} />
+      </div>
+    );
+  }
+
+  // State B: Active Cloud Sync (Google Drive / gdirectMount / WebDAV)
+  const sharedID = resolveSharedFolderID(draft.sharedFolderURLOrID);
+  const trimmedShared = draft.sharedFolderURLOrID.trim();
+  const isWebDAVConnected = syncStatus?.account?.source === 'WebDAV';
+  let webdavHost = draft.webDAVServerURL.trim();
+  try {
+    webdavHost = new URL(draft.webDAVServerURL).host || webdavHost;
+  } catch {
+    // keep raw url
+  }
 
   return (
-    <div data-testid="settings-pane-sync" className="flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">云同步与存储迁移</h2>
-          <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">
-            完全兼容 macOS `/.charkle/` 同步协议，支持 Google Drive、WebDAV、Windows 挂载盘与纯本地目录无损双向切换。
-          </p>
-        </div>
-        <Button variant="secondary" size="xs" loading={syncing} onClick={() => void syncNow()}>
-          <RefreshCw size={12.5} />
-          立即同步
-        </Button>
-      </div>
+    <div data-testid="settings-pane-sync" className="flex flex-col gap-[22px]">
+      {/* 1. Live Sync Status Section */}
+      <SettingsSection title="同步状态">
+        <div className="px-4 py-3.5 flex flex-col gap-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              {isSyncingNow ? (
+                <RefreshCw
+                  size={14}
+                  className="text-[var(--accent)] animate-spin motion-reduce:animate-none shrink-0"
+                />
+              ) : (
+                <span
+                  style={{ backgroundColor: syncIndicatorColor(syncStatus) }}
+                  className="h-2 w-2 rounded-full shrink-0"
+                />
+              )}
 
-      <section className="rounded-[var(--radius-settings-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] p-4 flex flex-col gap-3.5">
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[12px] font-medium text-[var(--text-secondary)]">存储与同步后端</span>
-          <SegmentedControl<DriveTransportMode>
-            value={draft.mode}
-            onChange={(mode) => setDraft({ ...draft, mode })}
-            ariaLabel="同步后端选择"
-            options={[
-              { value: 'directAPIWithGDirect', label: 'Google Drive' },
-              { value: 'webDAV', label: 'WebDAV' },
-              { value: 'gdirectMount', label: 'Windows 挂载盘' },
-              { value: 'localOnly', label: '纯本地文件夹' },
-            ]}
-          />
-        </div>
+              <div className="min-w-0 flex flex-col gap-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
+                    {isSyncingNow
+                      ? localizedSyncPhaseTitle(syncStatus)
+                      : syncIdleHeadline(syncStatus)}
+                  </span>
+                  {isSyncingNow && syncStatus?.progressFraction != null && (
+                    <span className="text-[11px] font-mono font-semibold text-[var(--text-secondary)] charkle-tabular">
+                      {Math.round(syncStatus.progressFraction * 100)}%
+                    </span>
+                  )}
+                </div>
+                <span
+                  className={[
+                    'text-[11.5px] leading-snug line-clamp-2',
+                    syncStatus?.lastError && !isSyncingNow
+                      ? 'text-[var(--settings-destructive)]'
+                      : 'text-[var(--text-secondary)]',
+                  ].join(' ')}
+                >
+                  {isSyncingNow
+                    ? syncStatus?.currentDetail ||
+                      `正在与 ${activeStorageLocationSummary(draft, diagnostics?.dataDir)} 同步…`
+                    : syncStatus?.lastError ||
+                      `目标：${activeStorageLocationSummary(draft, diagnostics?.dataDir)}`}
+                </span>
+              </div>
+            </div>
 
-        {draft.mode === 'directAPIWithGDirect' && (
-          <div className="grid grid-cols-1 gap-2.5">
-            <label className="flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">云端根目录名称</span>
-              <input
+            <SettingsButton
+              variant="primary"
+              loading={isSyncingNow}
+              onClick={() => void syncNow()}
+            >
+              {isSyncingNow ? '同步中…' : '立即同步'}
+            </SettingsButton>
+          </div>
+
+          {isSyncingNow && (
+            <div className="h-1.5 w-full rounded-full bg-[var(--settings-subtle)] overflow-hidden">
+              <div
+                style={{
+                  transform: `scaleX(${Math.max(0.12, Math.min(1, syncStatus?.progressFraction ?? 0.35))})`,
+                }}
+                className="h-full w-full origin-left rounded-full bg-[var(--accent)] transition-transform duration-200 motion-reduce:transition-none"
+              />
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-secondary)]">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex items-center gap-1">
+                <Clock size={11} />
+                {syncStatus?.lastSyncedAt
+                  ? `上次同步：${relativeTimeText(syncStatus.lastSyncedAt)}`
+                  : '尚未完成首次同步'}
+              </span>
+              {(syncStatus?.pendingOpCount ?? 0) > 0 && (
+                <span className="inline-flex items-center gap-1 font-medium text-[var(--settings-warning)] charkle-tabular">
+                  <ArrowUpCircle size={11} />
+                  待上传 {syncStatus?.pendingOpCount} 项
+                </span>
+              )}
+            </div>
+
+            {lastSyncReport && (
+              <span className="text-[10.5px] font-mono text-[var(--text-tertiary)] charkle-tabular">
+                ↑ {lastSyncReport.uploadedOps}  ↓ {lastSyncReport.downloadedOps}  +
+                {lastSyncReport.discoveredRemoteAssets} 新发现
+              </span>
+            )}
+          </div>
+        </div>
+      </SettingsSection>
+
+      {/* 2A. Google Drive Account & Shared Collaboration */}
+      {(draft.mode === 'directAPIWithGDirect' || draft.mode === 'gdirectMount') && (
+        <>
+          <SettingsSection title="Google Drive 账号">
+            {draft.mode === 'gdirectMount' ? (
+              <SettingsRow
+                title={gdirectEmail ?? '当前处于本地挂载盘模式'}
+                subtitle={
+                  diagnostics?.gdirect.isMountActive
+                    ? `已挂载至 ${draft.mountPath}（如需切回免挂载高速直连，可随时切换）`
+                    : '当前挂载路径未就绪，可在「高级与关于」检查挂载目录或切回标准直连'
+                }
+                subtitleTone={diagnostics?.gdirect.isMountActive ? 'positive' : 'warning'}
+              >
+                <SettingsButton
+                  variant="secondary"
+                  onClick={() => persistQuiet({ ...draft, mode: 'directAPIWithGDirect' })}
+                >
+                  切回标准直连
+                </SettingsButton>
+                <SettingsButton
+                  variant="secondary"
+                  onClick={() => setSettingsTab('advancedAbout')}
+                >
+                  挂载管理
+                </SettingsButton>
+              </SettingsRow>
+            ) : (
+              <div>
+                <div className="px-4 py-[13px] flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="h-[38px] w-[38px] rounded-full bg-[var(--settings-subtle)] inline-flex items-center justify-center shrink-0">
+                      {activeGoogleAccount ? (
+                        <UserCheck size={18} className="text-[var(--settings-positive)]" />
+                      ) : (
+                        <UserCircle2 size={18} className="text-[var(--text-secondary)]" />
+                      )}
+                    </span>
+
+                    <div className="min-w-0 flex flex-col gap-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[13px] font-semibold text-[var(--text-primary)] truncate">
+                          {activeGoogleAccount?.displayName ||
+                            activeGoogleAccount?.email ||
+                            '未登录 Google 账号'}
+                        </span>
+                        {directAccount && <SettingsStatusBadge text="已直连" tone="positive" />}
+                        {isUsingGDirectFallback && (
+                          <SettingsStatusBadge text="gdirect 兜底" tone="warning" />
+                        )}
+                      </div>
+
+                      <span className="text-[11.5px] text-[var(--text-secondary)] leading-snug">
+                        {activeGoogleAccount?.displayName
+                          ? activeGoogleAccount.email
+                          : isUsingGDirectFallback
+                            ? '当前暂用本机 gdirect 兜底，独立登录 Google 账号后可启用免挂载高速直连'
+                            : !hasGoogleOAuthClient
+                              ? hasGDirect
+                                ? '检测到本机 gdirect，配置桌面端凭据后即可开启免挂载高速直连'
+                                : '首次登录需配置一次 Google 桌面端凭据，完成后自动开启直连同步'
+                              : '登录 Google 账号后，素材与情绪板将自动直连同步'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {directAccount ? (
+                      <>
+                        <SettingsButton
+                          variant="secondary"
+                          disabled={isBusy}
+                          onClick={triggerGoogleSignIn}
+                        >
+                          切换账号
+                        </SettingsButton>
+                        <SettingsButton
+                          variant="destructive"
+                          disabled={isBusy}
+                          onClick={() => void signOutGoogleDrive()}
+                        >
+                          退出
+                        </SettingsButton>
+                      </>
+                    ) : (
+                      <>
+                        {hasGoogleOAuthClient && (
+                          <SettingsButton
+                            variant="secondary"
+                            disabled={isBusy}
+                            onClick={() => setShowOAuthModal(true)}
+                          >
+                            管理凭据…
+                          </SettingsButton>
+                        )}
+                        <SettingsButton
+                          variant="secondary"
+                          loading={signingInGoogle}
+                          onClick={triggerGoogleSignIn}
+                        >
+                          {hasGoogleOAuthClient ? '使用 Google 登录' : '配置凭据并登录'}
+                        </SettingsButton>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {activeGoogleAccount?.storageUsedBytes != null &&
+                  activeGoogleAccount?.storageLimitBytes != null &&
+                  activeGoogleAccount.storageLimitBytes > 0 && (
+                    <div className="px-4 pb-3 flex flex-col gap-1">
+                      <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)] charkle-tabular">
+                        <span>Google Drive 云端空间</span>
+                        <span>
+                          {formatBytes(activeGoogleAccount.storageUsedBytes)} /{' '}
+                          {formatBytes(activeGoogleAccount.storageLimitBytes)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-[var(--settings-subtle)] overflow-hidden">
+                        <div
+                          style={{
+                            transform: `scaleX(${Math.max(0, Math.min(1, activeGoogleAccount.storageUsedBytes / activeGoogleAccount.storageLimitBytes))})`,
+                          }}
+                          className="h-full w-full origin-left rounded-full bg-[var(--accent)] transition-transform duration-200 motion-reduce:transition-none"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                {!hasGoogleOAuthClient && !directAccount && (
+                  <InlineGuideDisclosure title="为什么首次登录需要配置一次凭据？">
+                    <SettingsGuideStep
+                      number="1"
+                      title="你的素材直连个人 Google Drive，零中转"
+                      detail="Charkle 不经过云端代理服务器，所有原图和情绪板直接读写你自己的网盘。"
+                    />
+                    <SettingsGuideStep
+                      number="2"
+                      title="按教程 3 分钟创建一次桌面端 Client ID 即可长期使用"
+                      detail="点击「配置凭据并登录」即可打开教程链接，支持直接导入下载的 client_secret.json。"
+                    />
+                  </InlineGuideDisclosure>
+                )}
+              </div>
+            )}
+
+            <SettingsCardDivider />
+
+            <SettingsRow
+              title="云端保存路径"
+              subtitle={
+                sharedID
+                  ? '当前已绑定下方共享协作目录；清除后将恢复使用此路径'
+                  : '支持单级目录（Charkle）或多级路径（Design/Charkle）'
+              }
+            >
+              <SettingsInput
                 type="text"
                 value={draft.rootFolderName}
+                disabled={Boolean(sharedID)}
                 onChange={(e) => setDraft({ ...draft, rootFolderName: e.target.value })}
-                className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                onBlur={() => persistQuiet(draft)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') persistQuiet(draft);
+                }}
+                placeholder="Charkle"
+                className="w-[210px]"
               />
-            </label>
-            <label className="flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">
-                团队共享文件夹链接或 ID（可选，自动识别 `folders/&lt;id&gt;`）
-              </span>
-              <input
-                type="text"
-                value={draft.sharedFolderURLOrID}
-                onChange={(e) => setDraft({ ...draft, sharedFolderURLOrID: e.target.value })}
-                placeholder="https://drive.google.com/drive/folders/..."
-                className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-          </div>
-        )}
+            </SettingsRow>
+          </SettingsSection>
 
-        {draft.mode === 'webDAV' && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <label className="sm:col-span-2 flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">WebDAV 服务器地址（远程须 HTTPS）</span>
-              <input
-                type="text"
-                value={draft.webDAVServerURL}
-                onChange={(e) => setDraft({ ...draft, webDAVServerURL: e.target.value })}
-                placeholder="https://dav.example.com/dav/"
-                className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">用户名</span>
-              <input
-                type="text"
-                value={draft.webDAVUsername}
-                onChange={(e) => setDraft({ ...draft, webDAVUsername: e.target.value })}
-                className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">密码（加密存于 Windows 凭据管理器）</span>
-              <input
-                type="password"
-                value={webdavPassword}
-                onChange={(e) => setWebdavPassword(e.target.value)}
-                placeholder="留空则保持已有密码不变"
-                className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-            <label className="sm:col-span-2 flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">远程子目录路径</span>
-              <input
-                type="text"
-                value={draft.webDAVRemotePath}
-                onChange={(e) => setDraft({ ...draft, webDAVRemotePath: e.target.value })}
-                className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-          </div>
-        )}
-
-        {draft.mode === 'gdirectMount' && (
-          <div className="flex flex-col gap-2.5">
-            <label className="flex flex-col gap-1 text-[12px]">
-              <span className="text-[var(--text-secondary)]">
-                Windows 挂载盘符或映射目录（如 `G:\` 或 OneDrive / SMB / gdirect 路径）
-              </span>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={draft.mountPath}
-                  onChange={(e) => setDraft({ ...draft, mountPath: e.target.value })}
-                  className="flex-1 h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                />
-                <Button
-                  variant="secondary"
-                  size="xs"
-                  onClick={async () => {
-                    const picked = await getTransport().pickDirectoryDialog('选择挂载根目录');
-                    if (picked) setDraft({ ...draft, mountPath: picked });
-                  }}
-                >
-                  浏览…
-                </Button>
+          <SettingsSection title="团队共享协作（可选）">
+            <div className="px-4 py-[13px] flex flex-col gap-2.5">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[13px] font-medium text-[var(--text-primary)]">
+                  共享协作目录
+                </span>
+                {sharedID ? (
+                  <span className="text-[11.5px] text-[var(--settings-positive)]">
+                    已启用协作模式（目录 ID：{sharedID.slice(0, 12)}…）
+                  </span>
+                ) : trimmedShared ? (
+                  <span className="text-[11.5px] text-[var(--settings-warning)]">
+                    链接或 ID 格式无效，请检查是否包含 /folders/…
+                  </span>
+                ) : (
+                  <span className="text-[11.5px] text-[var(--text-secondary)]">
+                    粘贴 Google Drive「与我共享」目录链接或 ID，多人可共同整理与浏览
+                  </span>
+                )}
               </div>
-            </label>
-            <div className="rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)]/70 p-2.5 text-[11.5px] text-[var(--text-secondary)] flex items-center justify-between">
-              <span className="inline-flex items-center gap-1.5">
-                <HardDrive size={13} />
-                挂载探针：{diagnostics?.gdirect.isMountActive ? '卷已就绪' : '未检测到活跃挂载路径'}
-              </span>
-              <span className="text-[var(--text-tertiary)]">
-                gdirect.exe：{diagnostics?.gdirect.cliPath ? '已检测到' : '可选未安装'}
-              </span>
-            </div>
-          </div>
-        )}
 
-        {draft.mode === 'localOnly' && (
-          <label className="flex flex-col gap-1 text-[12px]">
-            <span className="text-[var(--text-secondary)]">纯本地素材库目录</span>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={draft.localLibraryPath}
-                onChange={(e) => setDraft({ ...draft, localLibraryPath: e.target.value })}
-                placeholder="例如：D:\DesignAssets\Charkle"
-                className="flex-1 h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              <div className="flex items-center gap-2">
+                <SettingsInput
+                  type="text"
+                  value={draft.sharedFolderURLOrID}
+                  onChange={(e) => setDraft({ ...draft, sharedFolderURLOrID: e.target.value })}
+                  onBlur={() => persistQuiet(draft)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') persistQuiet(draft);
+                  }}
+                  placeholder="https://drive.google.com/drive/folders/… 或目录 ID"
+                  className="flex-1"
+                />
+                {trimmedShared && (
+                  <SettingsButton
+                    variant="secondary"
+                    onClick={() => persistQuiet({ ...draft, sharedFolderURLOrID: '' })}
+                  >
+                    清除
+                  </SettingsButton>
+                )}
+              </div>
+            </div>
+
+            <InlineGuideDisclosure title="如何与团队成员共享同一个素材库">
+              <SettingsGuideStep
+                number="1"
+                title="在 Google Drive 网页端将 Charkle 文件夹共享给协作者（编辑者权限）"
               />
-              <Button
-                variant="secondary"
-                size="xs"
-                onClick={async () => {
-                  const picked = await getTransport().pickDirectoryDialog('选择本地素材库目录');
-                  if (picked) setDraft({ ...draft, localLibraryPath: picked });
-                }}
-              >
-                选择目录…
-              </Button>
-            </div>
-          </label>
-        )}
+              <SettingsGuideStep
+                number="2"
+                title="协作者登录 Charkle 后，直接粘贴共享目录链接或 ID"
+                detail="所有成员对标签、文件夹与情绪板的编辑都会通过增量日志安全合并，互不覆盖。"
+              />
+            </InlineGuideDisclosure>
+          </SettingsSection>
+        </>
+      )}
 
-        <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--border-hairline)]">
-          <div className="text-[11.5px] text-[var(--text-tertiary)] flex items-center gap-1.5">
-            <Cloud size={13} />
-            <span>
-              待同步操作：{syncStatus?.pendingOpCount ?? 0} 条
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            {modeChanged && (
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={migrating}
-                onClick={async () => {
-                  const report = await runStorageMigration(draft, webdavPassword);
-                  if (report) setMigrationReport(report);
-                }}
-              >
-                <ArrowRightLeft size={13.5} />
-                无损迁移现有素材至新后端
-              </Button>
-            )}
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => void saveSyncConfig(draft, webdavPassword)}
-            >
-              保存同步配置
-            </Button>
-          </div>
-        </div>
-
-        {migrationReport && (
-          <div
-            data-testid="storage-migration-report"
-            className="rounded-[var(--radius-settings-inner)] bg-[var(--accent-soft)]/60 border border-[var(--accent)]/30 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
+      {/* 2B. WebDAV Account Section */}
+      {draft.mode === 'webDAV' && (
+        <SettingsSection title="WebDAV 服务">
+          <SettingsRow
+            title={webdavHost || '尚未配置 WebDAV 服务器'}
+            subtitle={
+              webdavHost
+                ? `账号：${draft.webDAVUsername || '未填写'} · 路径：${draft.webDAVRemotePath || '/Charkle'}`
+                : '支持坚果云、Nextcloud、群晖 NAS、Alist 等标准 WebDAV 服务'
+            }
+            subtitleTone={isWebDAVConnected ? 'positive' : 'default'}
           >
-            <CheckCircle2 size={15} className="text-[var(--accent)] shrink-0" />
-            <span>
-              已完成无损存储迁移：{migrationReport.migratedAssets} 项素材、
-              {migrationReport.migratedFolders} 个文件夹、{migrationReport.migratedBoards} 块情绪板已迁移至{' '}
-              {migrationReport.targetLocation}。
-            </span>
-          </div>
-        )}
-      </section>
+            <SettingsButton
+              variant="secondary"
+              loading={testingWebdav}
+              disabled={!draft.webDAVServerURL.trim() || isBusy}
+              onClick={() => void testWebdavConnection(draft, null)}
+            >
+              测试连接
+            </SettingsButton>
+            <SettingsButton variant="secondary" onClick={() => setShowWebDAVModal(true)}>
+              编辑配置…
+            </SettingsButton>
+          </SettingsRow>
+
+          <InlineGuideDisclosure title="坚果云 / 群晖 NAS 如何获取应用密码">
+            <SettingsGuideStep
+              number="1"
+              title="坚果云用户请使用「第三方应用管理」生成的专用密码"
+              detail="服务器地址一般为 https://dav.jianguoyun.com/dav/，不要直接使用网页登录密码。"
+            />
+            <SettingsGuideStep
+              number="2"
+              title="密码仅加密保存于 Windows 凭据管理器"
+              detail="不会明文写入任何配置文件。"
+            />
+          </InlineGuideDisclosure>
+        </SettingsSection>
+      )}
+
+      {/* 3. Sync Preferences */}
+      <SettingsSection title="同步偏好">
+        <SettingsRow
+          title="同步轻量化预览图"
+          subtitle="切换其他电脑时秒看完整画廊，无需等待下载原始大文件"
+        >
+          <SettingsSwitch
+            checked={draft.syncThumbnails}
+            ariaLabel="同步轻量化预览图"
+            onChange={(syncThumbnails) => persistQuiet({ ...draft, syncThumbnails })}
+          />
+        </SettingsRow>
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="同步智能搜索索引"
+          subtitle="在多台设备间共享搜索索引，保持一致的搜图与情绪板推荐体验"
+        >
+          <SettingsSwitch
+            checked={draft.syncEmbeddings}
+            ariaLabel="同步智能搜索索引"
+            onChange={(syncEmbeddings) => persistQuiet({ ...draft, syncEmbeddings })}
+          />
+        </SettingsRow>
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="切换或无损迁移存储位置"
+          subtitle="随时在 Google Drive、WebDAV 与纯本地文件夹之间安全搬家"
+        >
+          <SettingsButton variant="secondary" onClick={() => setShowWizard(true)}>
+            <ArrowRightLeft size={13} />
+            更改或转移…
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSection>
+
+      {lastMigrationReport && (
+        <div
+          data-testid="storage-migration-report"
+          className="rounded-[9px] bg-[var(--settings-positive)]/10 border border-[var(--settings-positive)]/25 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
+        >
+          <CheckCircle2 size={15} className="text-[var(--settings-positive)] shrink-0" />
+          <span>
+            已完成无损存储迁移：{lastMigrationReport.migratedAssets} 项素材、
+            {lastMigrationReport.migratedFolders} 个文件夹、{lastMigrationReport.migratedBoards}{' '}
+            块情绪板已迁移至 {lastMigrationReport.targetLocation}。
+          </span>
+        </div>
+      )}
+
+      <GoogleOAuthSetupModal
+        open={showOAuthModal}
+        onClose={() => setShowOAuthModal(false)}
+        autoSignInAfterSave
+      />
+      <WebDAVEditorModal
+        open={showWebDAVModal}
+        onClose={() => setShowWebDAVModal(false)}
+        initialConfig={draft}
+      />
+      <StorageLocationWizardModal open={showWizard} onClose={() => setShowWizard(false)} />
     </div>
   );
 };

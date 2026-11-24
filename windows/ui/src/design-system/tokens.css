@@ -1,8 +1,26 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *, [data-kind="dark"], [data-kind="dark"] *));
+
+/* Optical Liquid Glass animatable material tokens */
+@property --m-tint { syntax: '<color>'; inherits: true; initial-value: #ffffff; }
+@property --m-k { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --m-thin { syntax: '<number>'; inherits: true; initial-value: 0.06; }
+@property --m-dense { syntax: '<number>'; inherits: true; initial-value: 0.22; }
+@property --m-blur { syntax: '<number>'; inherits: true; initial-value: 2; }
+@property --m-sat { syntax: '<number>'; inherits: true; initial-value: 1.8; }
+@property --m-bri { syntax: '<number>'; inherits: true; initial-value: 1.06; }
+@property --m-con { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --m-catch { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --m-bevel { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --m-shadow { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --density { syntax: '<number>'; inherits: true; initial-value: 0.35; }
+@property --keep { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --floor { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --m-floor-min { syntax: '<number>'; inherits: true; initial-value: 0; }
 
 :root {
+  --u: 1px;
   /* Gallery-First Neutral Surfaces — Light (DESIGN.md §2.1) */
   --bg-gallery: #F6F6F5;
   --bg-elevated: #FFFFFF;
@@ -44,6 +62,7 @@
   --danger-soft: rgba(217, 59, 48, 0.11);
 
   /* Concentric Continuous Radii (4px grid, DESIGN.md §3.2) */
+  --radius-modal: 20px;
   --radius-dock-outer: 20px;
   --radius-dock-inner: 12px;
   --radius-popover-outer: 16px;
@@ -53,6 +72,11 @@
   --radius-card-outer: 12px;
   --radius-card-inner: 6px;
   --radius-chip: 8px;
+
+  --shadow-modal:
+    0 0 0 1px rgba(0, 0, 0, 0.08),
+    0 24px 64px rgba(0, 0, 0, 0.20),
+    0 6px 18px rgba(0, 0, 0, 0.08);
 
   /* Restrained Floating Glass / Acrylic (strictly over media/canvas) */
   --glass-bg: rgba(255, 255, 255, 0.76);
@@ -87,6 +111,7 @@
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-notch-spring: cubic-bezier(0.22, 1.09, 0.36, 1);
 
   --duration-press: 120ms;
   --duration-sm: 180ms;
@@ -95,6 +120,8 @@
   --duration-md: 240ms;
   --duration-lg: 280ms;
   --duration-drawer: 300ms;
+  --duration-notch: 420ms;
+  --duration-notch-exit: 240ms;
   --duration-exit-sm: 130ms;
   --duration-exit-md: 170ms;
   --duration-overshoot: 260ms;
@@ -178,6 +205,10 @@
     rgba(6, 7, 10, 0.34) 0%,
     rgba(6, 7, 10, 0.50) 100%
   );
+  --shadow-modal:
+    0 0 0 1px rgba(255, 255, 255, 0.09),
+    0 28px 72px rgba(0, 0, 0, 0.62),
+    0 8px 22px rgba(0, 0, 0, 0.36);
 
   --skeleton-base: rgba(255, 255, 255, 0.06);
   --skeleton-shine: rgba(255, 255, 255, 0.11);
@@ -219,9 +250,16 @@ body,
   overflow: hidden;
 }
 
-:root[data-backdrop="solidFallback"] body,
-:root:not([data-backdrop="mica"]) body {
+:root[data-backdrop="solidFallback"]:not([data-transparent-window="true"]) body,
+:root:not([data-backdrop="mica"]):not([data-transparent-window="true"]) body {
   background-color: var(--bg-gallery);
+}
+
+:root[data-transparent-window="true"],
+:root[data-transparent-window="true"] body,
+:root[data-transparent-window="true"] #root {
+  background: transparent !important;
+  background-color: transparent !important;
 }
 
 code,
@@ -270,71 +308,529 @@ textarea {
   color: var(--text-primary);
 }
 
-/* Windows 11 Mica Rail behind Sidebar & Titlebar with Win10 solid fallback */
+/* Windows 11 Mica Chrome Rail (Titlebar & Sidebar) with clean solid fallback on Win10 / non-Mica */
+.charkle-mica-chrome,
 .charkle-sidebar-surface {
   background-color: var(--bg-sidebar);
 }
 
+:root[data-backdrop="mica"] .charkle-mica-chrome,
 :root[data-backdrop="mica"] .charkle-sidebar-surface {
-  background-color: var(--sidebar-mica-bg);
+  background-color: rgba(255, 255, 255, 0.14);
 }
 
-@media (prefers-reduced-transparency: reduce) {
-  :root[data-backdrop="mica"] .charkle-sidebar-surface {
-    background-color: var(--bg-sidebar);
+:root[data-theme="dark"][data-backdrop="mica"] .charkle-mica-chrome,
+:root[data-theme="dark"][data-backdrop="mica"] .charkle-sidebar-surface,
+.dark[data-backdrop="mica"] .charkle-mica-chrome,
+.dark[data-backdrop="mica"] .charkle-sidebar-surface {
+  background-color: rgba(20, 22, 26, 0.22);
+}
+
+/* Seamless Mica L-frame: titlebar merges into sidebar rail while elevated gallery carries the hairline */
+:root[data-backdrop="mica"] .charkle-mica-titlebar {
+  border-bottom-color: transparent;
+}
+
+/* Elevated center gallery canvas framing Windows 11 Mica Titlebar + Sidebar */
+:root[data-backdrop="mica"] .charkle-gallery-surface {
+  border-top-left-radius: 10px;
+  border-top: 1px solid var(--border-hairline);
+  border-left: 1px solid var(--border-hairline);
+  box-shadow: -1px -1px 0 rgba(255, 255, 255, 0.35);
+}
+
+:root[data-theme="dark"][data-backdrop="mica"] .charkle-gallery-surface,
+.dark[data-backdrop="mica"] .charkle-gallery-surface {
+  box-shadow: -1px -1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Crystal-clear Optical Liquid Glass Surfaces (strictly floating over media/canvas).
+   Material declarations: user tint scale (--l-k / --d-k), adaptive tint veil, backdrop-filter
+   + SVG rim lens, top-left inner radial light (::before), catch-light & specular bevel shadows.
+   Default `position: relative` lives strictly inside `@layer components` so Tailwind v4
+   `@layer utilities` (`absolute`, `fixed`, `sticky`) ALWAYS wins on floating overlays. */
+@layer components {
+  :where(
+    .charkle-glass,
+    .charkle-glass-dark,
+    .charkle-slider,
+    .charkle-slider-track,
+    .charkle-skeleton
+  ) {
+    position: relative;
   }
 }
 
-/* Floating Acrylic / Liquid Glass Surfaces (strictly floating over media/canvas) */
+.charkle-glass::before,
+.charkle-glass-dark::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: -1;
+  background: radial-gradient(
+    ellipse 85% 75% at 15% 8%,
+    rgba(255, 255, 255, 0.30) 0%,
+    rgba(255, 255, 255, 0) 55%
+  );
+}
+
+.charkle-glass[data-kind="dark"]::before,
+:root[data-theme="dark"] .charkle-glass::before,
+.dark .charkle-glass::before,
+.charkle-glass-dark::before {
+  background: radial-gradient(
+    ellipse 85% 75% at 15% 8%,
+    rgba(255, 255, 255, 0.10) 0%,
+    rgba(255, 255, 255, 0) 55%
+  );
+}
+
 .charkle-glass {
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-backdrop);
-  -webkit-backdrop-filter: var(--glass-backdrop);
-  box-shadow: var(--glass-shadow);
+  --m-tint: #ffffff;
+  --m-k: var(--l-k, 1);
+  --m-thin: 0.06;
+  --m-dense: 0.22;
+  --m-blur: 2;
+  --m-sat: 1.8;
+  --m-bri: 1.06;
+  --m-con: 1;
+  --m-catch: 1;
+  --m-bevel: 1;
+  --m-shadow: 1;
+  --density: 0.35;
+  --keep: 1;
+  --floor: 0;
+  --m-floor-min: 0;
+
+  --veil-k: min(1, var(--m-k));
+  --tint-a: min(
+    0.95,
+    max(
+      var(--floor),
+      var(--m-floor-min, 0),
+      calc((var(--m-thin) + (var(--m-dense) - var(--m-thin)) * var(--density)) * var(--m-k))
+    )
+  );
+  --glass-filter:
+    blur(calc(var(--m-blur) * var(--u, 1px)))
+    saturate(var(--m-sat))
+    contrast(calc(1 + (var(--m-con) - 1) * var(--veil-k)))
+    brightness(calc(1 + (var(--m-bri) - 1) * var(--veil-k)))
+    saturate(var(--keep));
+
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--m-tint) calc(var(--tint-a) * 100%), transparent);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter) var(--glass-lens,);
+  isolation: isolate;
+  box-shadow:
+    inset calc(1.5 * var(--u)) calc(1.5 * var(--u)) var(--u) calc(-1 * var(--u)) rgb(255 255 255 / calc(0.95 * var(--m-catch))),
+    inset calc(-1.25 * var(--u)) calc(-1.25 * var(--u)) var(--u) calc(-1 * var(--u)) rgb(255 255 255 / calc(0.62 * var(--m-catch))),
+    inset 0 0 0 calc(0.75 * var(--u)) rgb(255 255 255 / calc(0.45 * var(--m-catch))),
+    0 0 0 calc(0.5 * var(--u)) rgb(0 0 0 / calc(0.12 * var(--m-shadow))),
+    0 calc(4 * var(--u)) calc(16 * var(--u)) rgb(0 0 0 / calc(0.09 * var(--m-shadow))),
+    inset 0 calc(6 * var(--u)) calc(8 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.58 * var(--veil-k) * var(--m-bevel))),
+    inset calc(4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.28 * var(--veil-k) * var(--m-bevel))),
+    inset calc(-4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.16 * var(--veil-k) * var(--m-bevel))),
+    inset 0 calc(-6 * var(--u)) calc(6 * var(--u)) calc(-6 * var(--u)) rgb(0 0 0 / calc(0.05 * var(--veil-k) * var(--m-bevel)));
 }
 
+.charkle-glass[data-pill="true"],
+.charkle-glass-dark[data-pill="true"] {
+  corner-shape: round;
+}
+
+.charkle-glass[data-kind="dark"],
+:root[data-theme="dark"] .charkle-glass,
+.dark .charkle-glass,
 .charkle-glass-dark {
-  background: var(--glass-dark-bg);
-  backdrop-filter: var(--glass-dark-backdrop);
-  -webkit-backdrop-filter: var(--glass-dark-backdrop);
-  box-shadow: var(--glass-dark-shadow);
+  --m-tint: #1e1e22;
+  --m-k: var(--d-k, 1);
+  --m-thin: 0.16;
+  --m-dense: 0.38;
+  --m-blur: 2;
+  --m-sat: 1.6;
+  --m-bri: 0.8;
+  --m-con: 1;
+  --m-catch: 1;
+  --m-bevel: 1;
+  --m-shadow: 1;
+  --density: 0.38;
+  --keep: 1;
+  --floor: 0;
+  --m-floor-min: 0;
+
+  /* Scope adaptive light ink variables so nested controls inside [data-kind="dark"] stay WCAG crisp */
+  --text-primary: #F4F5F7;
+  --text-secondary: rgba(244, 245, 247, 0.78);
+  --text-tertiary: rgba(244, 245, 247, 0.56);
+  --border-hairline: rgba(255, 255, 255, 0.16);
+  --accent: #74A9FF;
+  --accent-soft: rgba(116, 169, 255, 0.24);
+
+  --veil-k: min(1, var(--m-k));
+  --tint-a: min(
+    0.95,
+    max(
+      var(--floor),
+      var(--m-floor-min, 0),
+      calc((var(--m-thin) + (var(--m-dense) - var(--m-thin)) * var(--density)) * var(--m-k))
+    )
+  );
+  --glass-filter:
+    blur(calc(var(--m-blur) * var(--u, 1px)))
+    saturate(var(--m-sat))
+    contrast(calc(1 + (var(--m-con) - 1) * var(--veil-k)))
+    brightness(calc(1 + (var(--m-bri) - 1) * var(--veil-k)))
+    saturate(var(--keep));
+
   color: #F4F5F7;
+  text-shadow: none;
+  background: color-mix(in srgb, var(--m-tint) calc(var(--tint-a) * 100%), transparent);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter) var(--glass-lens,);
+  isolation: isolate;
+  box-shadow:
+    inset calc(1.25 * var(--u)) calc(1.25 * var(--u)) calc(0.75 * var(--u)) calc(-0.75 * var(--u)) rgb(255 255 255 / calc(0.52 * var(--m-catch))),
+    inset calc(-1 * var(--u)) calc(-1 * var(--u)) calc(0.5 * var(--u)) calc(-0.5 * var(--u)) rgb(255 255 255 / calc(0.20 * var(--m-catch))),
+    inset 0 0 0 calc(0.65 * var(--u)) rgb(255 255 255 / calc(0.13 * var(--m-catch))),
+    0 0 0 calc(0.5 * var(--u)) rgb(0 0 0 / calc(0.32 * var(--m-shadow))),
+    0 calc(6 * var(--u)) calc(22 * var(--u)) rgb(0 0 0 / calc(0.32 * var(--m-shadow))),
+    inset 0 calc(6 * var(--u)) calc(8 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.22 * var(--veil-k) * var(--m-bevel))),
+    inset calc(4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.09 * var(--veil-k) * var(--m-bevel))),
+    inset calc(-4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.04 * var(--veil-k) * var(--m-bevel))),
+    inset 0 calc(-6 * var(--u)) calc(6 * var(--u)) calc(-6 * var(--u)) rgb(0 0 0 / calc(0.10 * var(--veil-k) * var(--m-bevel)));
 }
 
+/* Smooth material glide on theme switch and adaptive dark/light luminance flips */
+.charkle-glass:not(.charkle-pressable):not(.charkle-toast-item):not(.charkle-popover-panel):not(.charkle-reveal-top):not(.charkle-reveal-bottom),
+.charkle-glass-dark:not(.charkle-pressable):not(.charkle-toast-item):not(.charkle-popover-panel):not(.charkle-reveal-top):not(.charkle-reveal-bottom) {
+  transition:
+    --m-tint 420ms var(--ease-out),
+    --m-k 420ms var(--ease-out),
+    --m-thin 420ms var(--ease-out),
+    --m-dense 420ms var(--ease-out),
+    --m-blur 420ms var(--ease-out),
+    --m-sat 420ms var(--ease-out),
+    --m-bri 420ms var(--ease-out),
+    --density 420ms var(--ease-out),
+    --floor 420ms var(--ease-out),
+    --keep 420ms var(--ease-out),
+    color 260ms var(--ease-out),
+    box-shadow 420ms var(--ease-out);
+}
+
+.charkle-glass.charkle-pressable,
+.charkle-glass-dark.charkle-pressable {
+  transition:
+    transform var(--duration-press) var(--ease-out),
+    opacity var(--duration-press) var(--ease-out),
+    --m-tint 380ms var(--ease-out),
+    --m-k 240ms var(--ease-out),
+    --m-thin 380ms var(--ease-out),
+    --m-dense 380ms var(--ease-out),
+    --m-bri 380ms var(--ease-out),
+    --density 380ms var(--ease-out),
+    --floor 380ms var(--ease-out),
+    color 240ms var(--ease-out),
+    box-shadow 380ms var(--ease-out);
+}
+
+/* Highlighted rows on light glass menus/popovers: luminous white highlight + crisp white inner stroke */
+.charkle-popover-panel.charkle-glass button:not(:disabled):not([class*="bg-[var(--accent"]):not([class*="bg-[var(--danger"]):hover,
+.charkle-popover-panel.charkle-glass [role="option"]:hover {
+  background-color: rgba(255, 255, 255, 0.42);
+}
+
+.charkle-popover-panel.charkle-glass [role="option"][aria-selected="true"],
+.charkle-popover-panel.charkle-glass [data-selected="true"] {
+  background-color: rgba(255, 255, 255, 0.76);
+  box-shadow: inset 0 0 0 0.75px rgba(255, 255, 255, 0.85);
+}
+
+:root[data-theme="dark"] .charkle-popover-panel.charkle-glass button:not(:disabled):not([class*="bg-[var(--accent"]):not([class*="bg-[var(--danger"]):hover,
+.dark .charkle-popover-panel.charkle-glass button:not(:disabled):not([class*="bg-[var(--accent"]):not([class*="bg-[var(--danger"]):hover,
+:root[data-theme="dark"] .charkle-popover-panel.charkle-glass [role="option"]:hover,
+.dark .charkle-popover-panel.charkle-glass [role="option"]:hover {
+  background-color: rgba(255, 255, 255, 0.10);
+}
+
+:root[data-theme="dark"] .charkle-popover-panel.charkle-glass [role="option"][aria-selected="true"],
+.dark .charkle-popover-panel.charkle-glass [role="option"][aria-selected="true"],
+:root[data-theme="dark"] .charkle-popover-panel.charkle-glass [data-selected="true"],
+.dark .charkle-popover-panel.charkle-glass [data-selected="true"] {
+  background-color: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0 0 0.75px rgba(255, 255, 255, 0.20);
+}
+
+/* Hover tint brightening on interactive liquid-glass buttons (never lifting shadows) */
+@media (hover: hover) and (pointer: fine) {
+  .charkle-glass.charkle-pressable:hover {
+    --m-k: calc(var(--l-k, 1) * 1.14);
+  }
+
+  .charkle-glass[data-kind="dark"].charkle-pressable:hover,
+  :root[data-theme="dark"] .charkle-glass.charkle-pressable:hover,
+  .dark .charkle-glass.charkle-pressable:hover,
+  .charkle-glass-dark.charkle-pressable:hover {
+    --m-k: calc(var(--d-k, 1) * 1.14);
+  }
+}
+
+/* Safari / WebKit safety: keep round corners on backdrop-filter surfaces */
+@supports (-webkit-touch-callout: none) {
+  .charkle-glass,
+  .charkle-glass-dark {
+    corner-shape: round;
+  }
+}
+
+/* Windows desktop "Transparency effects = Off" maps to prefers-reduced-transparency: reduce in WebView2.
+   Keep full optical clear glass active across Light and Dark themes; solid accessibility is governed
+   strictly by forced-colors: active and prefers-contrast: more below. */
 @media (prefers-reduced-transparency: reduce) {
   .charkle-glass {
-    background: var(--bg-elevated);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-    box-shadow:
-      0 0 0 1px var(--border-strong),
-      0 8px 24px rgba(0, 0, 0, 0.12);
+    --m-thin: 0.06;
+    --m-dense: 0.22;
+    --m-blur: 2;
+    --m-sat: 1.8;
+    --m-bri: 1.06;
+    --floor: 0;
   }
 
+  .charkle-glass[data-kind="dark"],
+  :root[data-theme="dark"] .charkle-glass,
+  .dark .charkle-glass,
   .charkle-glass-dark {
-    background: #0B0C0F;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-    box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.16),
-      0 12px 32px rgba(0, 0, 0, 0.5);
+    --m-thin: 0.16;
+    --m-dense: 0.38;
+    --m-blur: 2;
+    --m-sat: 1.6;
+    --m-bri: 0.8;
+    --floor: 0;
   }
 }
 
-/* Windows 10 / Transparency Effects Off solid fallback parity (M5-R5) */
-:root[data-backdrop="solidFallback"] .charkle-glass {
-  background: var(--bg-elevated);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  box-shadow:
-    0 0 0 1px var(--border-strong),
-    0 8px 24px rgba(0, 0, 0, 0.12);
+/* Dense-text & Search Studio-Frost Elevation (strictly AFTER prefers-reduced-transparency
+   so Windows "Transparency effects = Off" never resets legibility floors back to 0 / 2px). */
+.charkle-command-palette.charkle-glass {
+  --m-tint: #fcfcfb;
+  --m-thin: 0.86;
+  --m-dense: 0.92;
+  --density: 0.85;
+  --floor: 0.88;
+  --m-floor-min: 0.88;
+  --m-blur: 24;
+  --m-sat: 1.4;
+  --m-bri: 1.02;
 }
 
-:root[data-backdrop="solidFallback"] .charkle-glass-dark {
-  background: #0B0C0F;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+.charkle-command-palette.charkle-glass[data-kind="dark"],
+:root[data-theme="dark"] .charkle-command-palette.charkle-glass,
+.dark .charkle-command-palette.charkle-glass {
+  --m-tint: #1b1c20;
+  --m-thin: 0.86;
+  --m-dense: 0.93;
+  --density: 0.85;
+  --floor: 0.88;
+  --m-floor-min: 0.88;
+  --m-blur: 24;
+  --m-sat: 1.35;
+  --m-bri: 0.96;
+}
+
+.charkle-popover-panel.charkle-glass {
+  --m-thin: 0.72;
+  --m-dense: 0.84;
+  --density: 0.85;
+  --floor: 0.78;
+  --m-floor-min: 0.78;
+  --m-blur: 18;
+}
+
+.charkle-popover-panel.charkle-glass[data-kind="dark"],
+:root[data-theme="dark"] .charkle-popover-panel.charkle-glass,
+.dark .charkle-popover-panel.charkle-glass {
+  --m-thin: 0.78;
+  --m-dense: 0.88;
+  --density: 0.85;
+  --floor: 0.82;
+  --m-floor-min: 0.82;
+  --m-blur: 18;
+}
+
+.charkle-glass-panel.charkle-glass {
+  --m-thin: 0.76;
+  --m-dense: 0.86;
+  --density: 0.85;
+  --floor: 0.80;
+  --m-floor-min: 0.80;
+  --m-blur: 18;
+}
+
+.charkle-glass-panel.charkle-glass[data-kind="dark"],
+:root[data-theme="dark"] .charkle-glass-panel.charkle-glass,
+.dark .charkle-glass-panel.charkle-glass {
+  --m-thin: 0.80;
+  --m-dense: 0.88;
+  --density: 0.85;
+  --floor: 0.82;
+  --m-floor-min: 0.82;
+  --m-blur: 18;
+}
+
+.charkle-toast-glass.charkle-glass {
+  --m-thin: 0.74;
+  --m-dense: 0.86;
+  --density: 0.85;
+  --floor: 0.80;
+  --m-floor-min: 0.80;
+  --m-blur: 18;
+}
+
+.charkle-toast-glass.charkle-glass[data-kind="dark"],
+:root[data-theme="dark"] .charkle-toast-glass.charkle-glass,
+.dark .charkle-toast-glass.charkle-glass {
+  --m-thin: 0.80;
+  --m-dense: 0.88;
+  --density: 0.85;
+  --floor: 0.84;
+  --m-floor-min: 0.84;
+  --m-blur: 18;
+}
+
+.charkle-search-capsule.charkle-glass {
+  --m-thin: 0.44;
+  --m-dense: 0.58;
+  --floor: 0.44;
+  --m-floor-min: 0.44;
+  --m-blur: 10;
+}
+
+.charkle-search-capsule.charkle-glass[data-kind="dark"],
+:root[data-theme="dark"] .charkle-search-capsule.charkle-glass,
+.dark .charkle-search-capsule.charkle-glass {
+  --m-thin: 0.54;
+  --m-dense: 0.68;
+  --floor: 0.54;
+  --m-floor-min: 0.54;
+  --m-blur: 10;
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --border-hairline: rgba(0, 0, 0, 0.22);
+    --border-strong: rgba(0, 0, 0, 0.36);
+  }
+
+  :root[data-theme="dark"],
+  .dark {
+    --border-hairline: rgba(255, 255, 255, 0.22);
+    --border-strong: rgba(255, 255, 255, 0.36);
+  }
+
+  .charkle-glass,
+  .charkle-search-capsule.charkle-glass {
+    --floor: 0.72;
+    --m-floor-min: 0.72;
+    --m-blur: 12;
+  }
+
+  :root[data-theme="dark"] .charkle-glass,
+  .dark .charkle-glass,
+  :root[data-theme="dark"] .charkle-search-capsule.charkle-glass,
+  .dark .charkle-search-capsule.charkle-glass,
+  .charkle-glass-dark {
+    --floor: 0.78;
+    --m-floor-min: 0.78;
+    --m-blur: 12;
+  }
+}
+
+@media (forced-colors: active) {
+  .charkle-glass,
+  .charkle-glass-dark {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* Tactile 5-layer keycap button styles matching macOS CharkleSkeuoButtonStyle (DESIGN.md §7.1) */
+.charkle-skeuo-primary {
+  background: linear-gradient(180deg, #404859 0%, #273042 100%);
+  color: #ffffff;
+  border: 1px solid #12161f;
+  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24),
+    0 3px 8px rgba(18, 22, 31, 0.26),
+    0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .charkle-skeuo-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #4a5366 0%, #2f394d 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.24),
+      0 5px 12px rgba(18, 22, 31, 0.30),
+      0 1px 2px rgba(0, 0, 0, 0.18);
+  }
+}
+
+.charkle-skeuo-primary:active:not(:disabled) {
+  background: linear-gradient(180deg, #273042 0%, #404859 100%);
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.34),
+    0 1px 1px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-theme="dark"] .charkle-skeuo-primary,
+.dark .charkle-skeuo-primary {
+  background: linear-gradient(180deg, #414b60 0%, #283144 100%);
+  border-color: #151923;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.32),
+    0 3px 10px rgba(0, 0, 0, 0.45),
+    0 1px 2px rgba(0, 0, 0, 0.36);
+}
+
+.charkle-skeuo-secondary {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f3f6 100%);
+  color: #1f2633;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.06),
+    0 3px 7px rgba(15, 23, 42, 0.09),
+    0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.charkle-skeuo-secondary:active:not(:disabled) {
+  background: linear-gradient(180deg, #f1f3f6 0%, #ffffff 100%);
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.14),
+    0 1px 1px rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="dark"] .charkle-skeuo-secondary,
+.dark .charkle-skeuo-secondary {
+  background: linear-gradient(180deg, #272a31 0%, #1f2127 100%);
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 3px 8px rgba(0, 0, 0, 0.30),
+    0 1px 2px rgba(0, 0, 0, 0.26);
 }
 
 /* Tactile press feedback — never uses transition: all */
@@ -352,7 +848,169 @@ textarea {
   opacity: 0.88;
 }
 
-/* Interruptible Modal / Sheet Transitions with @starting-style (DESIGN.md P0-2 & modern-web-guidance) */
+/* Bespoke Precision Slider (Apple/macOS tactile glass pill & studio cobalt standard variants) */
+.charkle-slider {
+  display: inline-flex;
+  align-items: center;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+  --slider-track-h: 4px;
+  --slider-thumb-w: 14px;
+  --slider-thumb-h: 14px;
+  --slider-thumb-half: 7px;
+}
+
+.charkle-slider[data-size="sm"] {
+  height: 22px;
+  min-width: 56px;
+  --slider-track-h: 4px;
+}
+
+.charkle-slider[data-size="md"] {
+  height: 26px;
+  min-width: 72px;
+  --slider-track-h: 5px;
+}
+
+.charkle-slider[data-variant="glass"][data-size="sm"] {
+  --slider-thumb-w: 18px;
+  --slider-thumb-h: 12px;
+  --slider-thumb-half: 9px;
+}
+
+.charkle-slider[data-variant="glass"][data-size="md"] {
+  --slider-thumb-w: 20px;
+  --slider-thumb-h: 13px;
+  --slider-thumb-half: 10px;
+}
+
+.charkle-slider[data-variant="standard"][data-size="sm"] {
+  --slider-thumb-w: 14px;
+  --slider-thumb-h: 14px;
+  --slider-thumb-half: 7px;
+}
+
+.charkle-slider[data-variant="standard"][data-size="md"] {
+  --slider-thumb-w: 16px;
+  --slider-thumb-h: 16px;
+  --slider-thumb-half: 8px;
+}
+
+.charkle-slider-track {
+  width: 100%;
+  height: var(--slider-track-h);
+  border-radius: 9999px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.11);
+  box-shadow: inset 0 0.5px 1px rgba(0, 0, 0, 0.14);
+  transform: translateX(calc(var(--slider-edge-x, 0px) * 0.35));
+  transition: transform 220ms var(--ease-out);
+}
+
+.charkle-slider[data-dragging="true"] .charkle-slider-track {
+  transition: none;
+}
+
+:root[data-theme="dark"] .charkle-slider-track,
+.dark .charkle-slider-track,
+.charkle-glass[data-kind="dark"] .charkle-slider-track,
+.charkle-glass-dark .charkle-slider-track {
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0.5px 1px rgba(0, 0, 0, 0.28);
+}
+
+.charkle-slider-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  transform-origin: left center;
+  transform: scaleX(var(--slider-ratio, 0));
+  background: var(--accent);
+}
+
+.charkle-slider[data-variant="glass"] .charkle-slider-fill {
+  background: rgba(24, 25, 28, 0.42);
+}
+
+:root[data-theme="dark"] .charkle-slider[data-variant="glass"] .charkle-slider-fill,
+.dark .charkle-slider[data-variant="glass"] .charkle-slider-fill,
+.charkle-glass[data-kind="dark"] .charkle-slider[data-variant="glass"] .charkle-slider-fill,
+.charkle-glass-dark .charkle-slider[data-variant="glass"] .charkle-slider-fill {
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.charkle-slider-thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--slider-thumb-half) + (100% - var(--slider-thumb-w)) * var(--slider-ratio, 0));
+  width: var(--slider-thumb-w);
+  height: var(--slider-thumb-h);
+  border-radius: 9999px;
+  background: #ffffff;
+  transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1);
+  transition:
+    transform 180ms var(--ease-out),
+    background-color 140ms var(--ease-out),
+    box-shadow 180ms var(--ease-out);
+  pointer-events: none;
+}
+
+.charkle-slider[data-variant="glass"] .charkle-slider-thumb {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.12),
+    0 1.5px 4px rgba(0, 0, 0, 0.18),
+    0 0.5px 1px rgba(0, 0, 0, 0.10),
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.96);
+}
+
+.charkle-slider[data-variant="standard"] .charkle-slider-thumb {
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.14),
+    0 1.5px 4px rgba(0, 0, 0, 0.16),
+    0 0.5px 1px rgba(0, 0, 0, 0.10);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .charkle-slider[data-variant="glass"]:hover:not([data-dragging="true"]) .charkle-slider-thumb {
+    transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.06);
+  }
+
+  .charkle-slider[data-variant="standard"]:hover:not([data-dragging="true"]) .charkle-slider-thumb {
+    transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.07);
+  }
+}
+
+.charkle-slider[data-variant="glass"][data-dragging="true"] .charkle-slider-thumb {
+  transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.18, 1.12);
+  background: rgba(255, 255, 255, 0.46);
+  -webkit-backdrop-filter: blur(4px) saturate(1.85);
+  backdrop-filter: blur(4px) saturate(1.85);
+  box-shadow:
+    inset 0 1px 1.25px rgba(255, 255, 255, 0.96),
+    inset 0 -0.75px 1px rgba(0, 0, 0, 0.12),
+    0 0 0 0.75px rgba(255, 255, 255, 0.78),
+    0 3px 10px rgba(0, 0, 0, 0.22);
+  transition:
+    transform 150ms var(--ease-spring),
+    background-color 110ms var(--ease-out),
+    box-shadow 140ms var(--ease-out);
+}
+
+.charkle-slider[data-variant="standard"][data-dragging="true"] .charkle-slider-thumb {
+  transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.14);
+  box-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.14),
+    0 0 0 3px var(--accent-soft),
+    0 2px 6px rgba(0, 0, 0, 0.20);
+}
+
+.charkle-slider:focus-visible .charkle-slider-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Interruptible Modal / Sheet Transitions with @starting-style (DESIGN.md P0-2) */
 .charkle-modal-scrim {
   background: var(--modal-scrim);
   opacity: 1;
@@ -413,10 +1071,11 @@ textarea {
   transition-duration: var(--duration-popover-out);
 }
 
-/* Interruptible Toast Entry/Exit (DESIGN.md P0-1) */
+/* Interruptible Top-Trailing Toast Entry/Exit matching macOS CharkleToastOverlay (DESIGN.md P0-1) */
 .charkle-toast-item {
   opacity: 1;
   transform: translateY(0) scale(1);
+  transform-origin: top right;
   transition:
     opacity var(--duration-sm) var(--ease-out),
     transform var(--duration-sm) var(--ease-out);
@@ -425,17 +1084,17 @@ textarea {
 @starting-style {
   .charkle-toast-item {
     opacity: 0;
-    transform: translateY(10px) scale(0.96);
+    transform: translateY(-8px) scale(0.96);
   }
 }
 
 .charkle-toast-item[data-closing="true"] {
   opacity: 0;
-  transform: translateY(6px) scale(0.96);
+  transform: scale(0.96);
   transition-duration: var(--duration-exit-sm);
 }
 
-/* Safe-Triangle Submenu Bridge (DESIGN.md §7.4 & modern-web-guidance menu) */
+/* Safe-Triangle Submenu Bridge (DESIGN.md §7.4) */
 .charkle-submenu-portal {
   overflow: visible;
 }
@@ -444,6 +1103,8 @@ textarea {
   content: "";
   position: absolute;
   inset: -100vh -100vw;
+  background: none;
+  z-index: auto;
   pointer-events: auto;
   --bridge-slack: 6px;
   --bridge-edge: clamp(100vw, 50% + var(--pointer-x, -1px) * 100000, 100% - 100vw);
@@ -494,7 +1155,6 @@ textarea {
 }
 
 .charkle-skeleton {
-  position: relative;
   overflow: hidden;
   background-color: var(--skeleton-base);
 }
@@ -519,6 +1179,195 @@ textarea {
   transform: scale(1.04);
 }
 
+/* Smooth 300ms drawer slot matching macOS MainWindowView Sidebar & Inspector */
+.charkle-drawer-slot {
+  overflow: hidden;
+  flex-shrink: 0;
+  transition:
+    width var(--duration-drawer) var(--ease-drawer),
+    opacity var(--duration-md) var(--ease-out);
+}
+
+/* Quick Look overlay smooth enter/exit continuity */
+.charkle-quicklook-root {
+  opacity: 1;
+  transition: opacity var(--duration-md) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-quicklook-root {
+    opacity: 0;
+  }
+}
+
+.charkle-quicklook-root[data-closing="true"] {
+  opacity: 0;
+  transition-duration: var(--duration-exit-md);
+}
+
+.charkle-quicklook-stage {
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity var(--duration-md) var(--ease-out),
+    transform var(--duration-md) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-quicklook-stage {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.charkle-quicklook-stage[data-closing="true"] {
+  opacity: 0;
+  transform: scale(0.96);
+  transition-duration: var(--duration-exit-md);
+}
+
+/* Expandable Filter Bar / Batch Action Pill entrance & exit */
+.charkle-reveal-top {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: top center;
+  transition:
+    opacity var(--duration-popover-in) var(--ease-out),
+    transform var(--duration-popover-in) var(--ease-out);
+}
+
+@starting-style {
+  .charkle-reveal-top {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+}
+
+.charkle-reveal-top[data-closing="true"] {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.96);
+  transition-duration: var(--duration-popover-out);
+}
+
+.charkle-reveal-bottom {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: bottom center;
+  transition:
+    opacity var(--duration-settle) var(--ease-out-strong),
+    transform var(--duration-settle) var(--ease-out-strong);
+}
+
+@starting-style {
+  .charkle-reveal-bottom {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+}
+
+.charkle-reveal-bottom[data-closing="true"] {
+  opacity: 0;
+  transform: translateY(8px) scale(0.96);
+  transition-duration: var(--duration-exit-sm);
+}
+
+/* Settings pane & Onboarding step directional transitions */
+@keyframes charkle-pane-fade {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes charkle-step-fwd {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes charkle-step-back {
+  from {
+    opacity: 0;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.charkle-pane-fade {
+  animation: charkle-pane-fade var(--duration-sm) var(--ease-out) both;
+}
+
+.charkle-step-fwd {
+  animation: charkle-step-fwd var(--duration-lg) var(--ease-out) both;
+}
+
+.charkle-step-back {
+  animation: charkle-step-back var(--duration-lg) var(--ease-out) both;
+}
+
+/* Moodboard Reveal-in-Library Spotlight Pulse matching macOS MasonryTileLayer.animateRevealSpotlight */
+@keyframes charkle-spotlight-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(42, 96, 224, 0.72), 0 0 0 2.5px var(--accent);
+  }
+  38% {
+    box-shadow: 0 0 0 9px rgba(42, 96, 224, 0.24), 0 0 0 4px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 16px rgba(42, 96, 224, 0), 0 0 0 2.5px var(--accent);
+  }
+}
+
+.charkle-spotlight-pulse {
+  animation: charkle-spotlight-pulse 620ms var(--ease-out-strong) 2;
+}
+
+/* Onboarding completion shockwave ring (rare/first-time delight budget) */
+@keyframes charkle-shockwave {
+  0% {
+    transform: scale(0.72);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+.charkle-shockwave {
+  animation: charkle-shockwave 680ms var(--ease-out-strong) both;
+}
+
+/* Hardware Notch Shelf fluid spring morph (pure-black bezel drop-down) */
+.charkle-shelf-shell {
+  transform-origin: top center;
+  transition:
+    width var(--duration-notch) var(--ease-notch-spring),
+    height var(--duration-notch) var(--ease-notch-spring),
+    transform var(--duration-notch) var(--ease-notch-spring),
+    opacity var(--duration-md) var(--ease-out);
+}
+
+.charkle-shelf-shell[data-expanded="false"] {
+  transition:
+    width var(--duration-notch-exit) var(--ease-out),
+    height var(--duration-notch-exit) var(--ease-out),
+    transform var(--duration-notch-exit) var(--ease-out),
+    opacity 190ms var(--ease-out);
+}
+
 /* Reduced Motion: 150ms cross-fade, remove all displacement/springs/shimmer */
 @media (prefers-reduced-motion: reduce) {
   :root {
@@ -540,6 +1389,8 @@ textarea {
   }
 
   .charkle-pressable:active:not(:disabled),
+  .charkle-skeuo-primary:active:not(:disabled),
+  .charkle-skeuo-secondary:active:not(:disabled),
   .group:hover .charkle-media-zoom,
   .charkle-filmstrip-thumb[data-active="true"],
   .charkle-modal-panel,
@@ -564,12 +1415,46 @@ textarea {
     display: none;
   }
 
-  .charkle-micro-pop {
+  .charkle-micro-pop,
+  .charkle-pane-fade,
+  .charkle-step-fwd,
+  .charkle-step-back,
+  .charkle-spotlight-pulse,
+  .charkle-shockwave {
     animation: none;
+  }
+
+  .charkle-quicklook-stage,
+  .charkle-quicklook-stage[data-closing="true"],
+  .charkle-reveal-top,
+  .charkle-reveal-bottom,
+  .charkle-shelf-shell {
+    transform: none !important;
+  }
+
+  .charkle-slider-track,
+  .charkle-slider-thumb {
+    transition: none !important;
+  }
+
+  .charkle-slider[data-variant="glass"]:hover .charkle-slider-thumb,
+  .charkle-slider[data-variant="standard"]:hover .charkle-slider-thumb,
+  .charkle-slider[data-variant="glass"][data-dragging="true"] .charkle-slider-thumb,
+  .charkle-slider[data-variant="standard"][data-dragging="true"] .charkle-slider-thumb {
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 
 /* Calm Minimal Scrollbars */
+.charkle-scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.charkle-scroll-hidden::-webkit-scrollbar {
+  display: none;
+}
+
 .charkle-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(128, 132, 142, 0.28) transparent;

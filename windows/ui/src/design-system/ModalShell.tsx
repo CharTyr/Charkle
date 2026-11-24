@@ -34,6 +34,8 @@ export interface ModalShellProps {
  * - Soft GPU radial dimming scrim (Light 0.075->0.165, Dark 0.34->0.50, zero backdrop-blur jank)
  * - Interruptible enter/exit transition (240ms in / 170ms strong ease-out out), or 0ms for instant mode
  */
+const modalEscapeStack: symbol[] = [];
+
 export const ModalShell: React.FC<ModalShellProps> = ({
   open,
   onClose,
@@ -77,15 +79,22 @@ export const ModalShell: React.FC<ModalShellProps> = ({
 
   useEffect(() => {
     if (!open) return;
+    const token = Symbol('modal-shell');
+    modalEscapeStack.push(token);
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        onCloseRef.current();
-      }
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (modalEscapeStack[modalEscapeStack.length - 1] !== token) return;
+      if (document.querySelector('[data-charkle-popover-open="true"]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onCloseRef.current();
     };
     window.addEventListener('keydown', handleKey, true);
-    return () => window.removeEventListener('keydown', handleKey, true);
+    return () => {
+      window.removeEventListener('keydown', handleKey, true);
+      const idx = modalEscapeStack.lastIndexOf(token);
+      if (idx >= 0) modalEscapeStack.splice(idx, 1);
+    };
   }, [open]);
 
   if (!rendered || typeof document === 'undefined') return null;
@@ -95,6 +104,11 @@ export const ModalShell: React.FC<ModalShellProps> = ({
       className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
       role="dialog"
       aria-modal="true"
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
     >
       <div
         data-closing={closing ? 'true' : undefined}

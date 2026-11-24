@@ -1,237 +1,292 @@
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  Maximize2,
-  Minimize2,
-  Pause,
-  Play,
-  RotateCcw,
-  ScrollText,
-  ZoomIn,
-  ZoomOut,
-} from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { FolderOpen, ImageOff } from 'lucide-react';
 import { getTransport } from '../../api/transport';
-import { isLongStripImage } from '../../design-system';
+import { Button } from '../../design-system';
 import type { AssetRecord } from '../../types/domain';
 
 export interface ImageStageViewerProps {
   asset: AssetRecord;
+  zoom: number;
+  onZoomChange: (nextZoom: number) => void;
+  maxZoomLimit: number;
+  rotationDegrees: number;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  longStripMode: boolean;
+  pausedAnim: boolean;
+  onToggleAnimPauseReady?: (freezeFn: () => void) => void;
 }
 
 /**
- * Full-resolution Image / GIF Quick Look viewer (DESIGN.md §7.7 & M2-R7):
- * - Automatic Long-Strip vertical scroll mode (`height >= 1600 && h/w >= 2.2`) with Fit toggle
- * - Dynamic 1x–16x zoom with drag-to-pan
- * - Play / Pause canvas freeze toggle for Animated Images (GIF / APNG / WebP)
+ * Full-resolution Image / GIF Quick Look stage (1:1 macOS `QuickLookOverlayView.swift`):
+ * - Automatic Long-Strip vertical scroll mode (`height >= 1600 && h/w >= 2.2`)
+ * - Smooth dynamic 0.5x–16x zoom, non-passive wheel zoom, double-click 1x/2x toggle, pointer-capture pan
+ * - Screen-space rotation & H/V flip with exact macOS `quarterTurnFitScale`
+ * - Animated GIF freeze-frame canvas support & dual-tier error fallback
  */
-export const ImageStageViewer: React.FC<ImageStageViewerProps> = ({ asset }) => {
-  const autoLongStrip = isLongStripImage(asset);
-  const [longStripMode, setLongStripMode] = useState(autoLongStrip);
-  const [zoom, setZoom] = useState(1);
+export const ImageStageViewer: React.FC<ImageStageViewerProps> = ({
+  asset,
+  zoom,
+  onZoomChange,
+  maxZoomLimit,
+  rotationDegrees,
+  flipHorizontal,
+  flipVertical,
+  longStripMode,
+  pausedAnim,
+  onToggleAnimPauseReady,
+}) => {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
-  const [pausedAnim, setPausedAnim] = useState(false);
   const [fallbackThumb, setFallbackThumb] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [stageSize, setStageSize] = useState({ width: 960, height: 640 });
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number }>({
+    w: asset.pixelWidth || 0,
+    h: asset.pixelHeight || 0,
+  });
 
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const freezeCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const dragStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const dragStartRef = useRef({ pointerId: -1, x: 0, y: 0, panX: 0, panY: 0 });
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const maxZoomRef = useRef(maxZoomLimit);
+  maxZoomRef.current = maxZoomLimit;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
 
   useEffect(() => {
-    setLongStripMode(isLongStripImage(asset));
-    setZoom(1);
     setPan({ x: 0, y: 0 });
-    setPausedAnim(false);
+    setDragging(false);
     setFallbackThumb(false);
-  }, [asset.id, asset.pixelWidth, asset.pixelHeight, asset.mediaKind]);
+    setLoadFailed(false);
+    setNaturalSize({ w: asset.pixelWidth || 0, h: asset.pixelHeight || 0 });
+  }, [asset.id, asset.pixelWidth, asset.pixelHeight]);
+
+  useEffect(() => {
+    if (zoom <= 1.01) {
+      setPan({ x: 0, y: 0 });
+    }
+  }, [zoom]);
+
+  const normalizedRot = ((Math.round(rotationDegrees) % 360) + 360) % 360;
+  const hasTransform = normalizedRot !== 0 || flipHorizontal || flipVertical;
+  const showLongStrip = longStripMode && !hasTransform && zoom <= 1.01;
+
+  // Measure stage bounds for exact macOS quarterTurnFitScale
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const sync = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 80 && rect.height > 80) {
+        setStageSize({ width: Math.floor(rect.width), height: Math.floor(rect.height) });
+      }
+    };
+    sync();
+    if (typeof ResizeObserver === 'undefined') return;
+    const obs = new ResizeObserver(sync);
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [asset.id, showLongStrip]);
+
+  // Native non-passive wheel listener so preventDefault never triggers passive listener warnings
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const handleWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaY) === 0) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.18 : 0.85;
+      const next = Math.max(
+        0.5,
+        Math.min(maxZoomRef.current, Number((zoomRef.current * factor).toFixed(2))),
+      );
+      onZoomChangeRef.current(next);
+    };
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [asset.id, showLongStrip]);
+
+  useEffect(() => {
+    onToggleAnimPauseReady?.(() => {
+      if (imgRef.current && freezeCanvasRef.current) {
+        const img = imgRef.current;
+        const canvas = freezeCanvasRef.current;
+        canvas.width = img.naturalWidth || img.width || 600;
+        canvas.height = img.naturalHeight || img.height || 400;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          try {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          } catch {
+            // Cross-origin guard
+          }
+        }
+      }
+    });
+  }, [onToggleAnimPauseReady]);
+
+  const quarterTurnFitScale = useMemo(() => {
+    if (normalizedRot !== 90 && normalizedRot !== 270) return 1;
+    const availW = Math.max(120, stageSize.width - 32);
+    const availH = Math.max(120, stageSize.height - 32);
+    const ratio =
+      naturalSize.w > 0 && naturalSize.h > 0
+        ? naturalSize.w / naturalSize.h
+        : Math.max(0.2, asset.pixelHeight > 0 ? asset.pixelWidth / asset.pixelHeight : 1);
+    let fittedW: number;
+    let fittedH: number;
+    if (availW / availH > ratio) {
+      fittedH = availH;
+      fittedW = fittedH * ratio;
+    } else {
+      fittedW = availW;
+      fittedH = fittedW / ratio;
+    }
+    const scale = Math.min(availW / Math.max(1, fittedH), availH / Math.max(1, fittedW));
+    return Math.max(0.25, Math.min(1, scale));
+  }, [normalizedRot, stageSize.width, stageSize.height, naturalSize.w, naturalSize.h, asset.pixelWidth, asset.pixelHeight]);
 
   const transport = getTransport();
   const src = fallbackThumb
     ? transport.thumbnailUrl(asset.id, 'preview1400')
     : transport.originalUrl(asset.id);
 
-  const adjustZoom = (nextZoom: number) => {
-    const clamped = Math.max(1, Math.min(16, Number(nextZoom.toFixed(2))));
-    setZoom(clamped);
-    if (clamped === 1) setPan({ x: 0, y: 0 });
+  const handleImgError = () => {
+    if (!fallbackThumb) {
+      setFallbackThumb(true);
+    } else {
+      setLoadFailed(true);
+    }
   };
 
-  const toggleAnimPause = () => {
-    if (!pausedAnim && imgRef.current && freezeCanvasRef.current) {
-      const img = imgRef.current;
-      const canvas = freezeCanvasRef.current;
-      canvas.width = img.naturalWidth || img.width || 600;
-      canvas.height = img.naturalHeight || img.height || 400;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        try {
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        } catch {
-          // Cross-origin canvas draw guard
-        }
-      }
-    }
-    setPausedAnim((v) => !v);
-  };
+  if (loadFailed) {
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="max-w-[420px] mx-auto p-6 rounded-[16px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-center flex flex-col items-center gap-3 shadow-2xl"
+      >
+        <ImageOff size={28} className="text-[var(--text-tertiary)]" />
+        <div className="text-[14px] font-semibold text-[var(--text-primary)]">{asset.title}</div>
+        <p className="text-[12px] text-[var(--text-secondary)]">
+          暂时无法加载该图像的原文件或预览图，可在资源管理器中检查文件。
+        </p>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={() => void transport.revealInExplorer(asset.id)}
+        >
+          <FolderOpen size={13} />
+          在资源管理器中显示
+        </Button>
+      </div>
+    );
+  }
+
+  if (showLongStrip) {
+    return (
+      <div
+        data-testid="quicklook-long-strip-scroll"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full h-full overflow-y-auto charkle-scroll flex justify-center py-4 px-6"
+      >
+        <img
+          ref={imgRef}
+          src={src}
+          alt={asset.title}
+          onError={handleImgError}
+          draggable={false}
+          style={{ width: 'min(1040px, 84%)' }}
+          className="h-auto self-start rounded-[14px] shadow-[0_18px_48px_rgba(0,0,0,0.45)] ring-1 ring-white/10"
+        />
+      </div>
+    );
+  }
 
   return (
-    <div className="relative w-full h-full flex flex-col items-center justify-center overflow-hidden">
-      {longStripMode ? (
-        <div
-          data-testid="quicklook-long-strip-scroll"
-          className="w-full h-full overflow-y-auto charkle-scroll flex justify-center py-6 px-4"
-        >
-          <img
-            ref={imgRef}
-            src={src}
-            alt={asset.title}
-            onError={() => setFallbackThumb(true)}
-            draggable={false}
-            style={{
-              width: `${Math.round(Math.min(100, 68 * zoom))}%`,
-              maxWidth: `${Math.round(920 * zoom)}px`,
-            }}
-            className="h-auto self-start rounded-[var(--radius-card-outer)] shadow-2xl"
-          />
-        </div>
-      ) : (
-        <div
-          onWheel={(e) => {
-            if (e.ctrlKey || Math.abs(e.deltaY) > 0) {
-              e.preventDefault();
-              const factor = e.deltaY < 0 ? 1.25 : 0.8;
-              adjustZoom(zoom * factor);
+    <div
+      ref={stageRef}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        if (zoom > 1.1) {
+          onZoomChange(1);
+          setPan({ x: 0, y: 0 });
+        } else {
+          onZoomChange(2);
+        }
+      }}
+      onPointerDown={(e) => {
+        if (e.button !== 0 || zoom <= 1.01) return;
+        e.preventDefault();
+        try {
+          e.currentTarget.setPointerCapture?.(e.pointerId);
+        } catch {
+          // Ignore synthetic events
+        }
+        setDragging(true);
+        dragStartRef.current = {
+          pointerId: e.pointerId,
+          x: e.clientX,
+          y: e.clientY,
+          panX: pan.x,
+          panY: pan.y,
+        };
+      }}
+      onPointerMove={(e) => {
+        if (!dragging || e.pointerId !== dragStartRef.current.pointerId) return;
+        setPan({
+          x: dragStartRef.current.panX + (e.clientX - dragStartRef.current.x),
+          y: dragStartRef.current.panY + (e.clientY - dragStartRef.current.y),
+        });
+      }}
+      onPointerUp={(e) => {
+        if (e.pointerId !== dragStartRef.current.pointerId) return;
+        setDragging(false);
+      }}
+      onPointerCancel={() => setDragging(false)}
+      className={[
+        'w-full h-full flex items-center justify-center p-4 overflow-hidden select-none',
+        zoom > 1.01 ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default',
+      ].join(' ')}
+    >
+      <div
+        style={{
+          transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${(
+            zoom * quarterTurnFitScale
+          ).toFixed(4)}) scaleX(${flipHorizontal ? -1 : 1}) scaleY(${
+            flipVertical ? -1 : 1
+          }) rotate(${rotationDegrees}deg)`,
+          transition: dragging ? 'none' : 'transform 220ms var(--ease-out-strong)',
+        }}
+        className="relative max-w-full max-h-full flex items-center justify-center"
+      >
+        <img
+          ref={imgRef}
+          src={src}
+          alt={asset.title}
+          onLoad={(e) => {
+            const img = e.currentTarget;
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
             }
           }}
-          onMouseDown={(e) => {
-            if (zoom <= 1) return;
-            e.preventDefault();
-            setDragging(true);
-            dragStartRef.current = {
-              x: e.clientX,
-              y: e.clientY,
-              panX: pan.x,
-              panY: pan.y,
-            };
-          }}
-          onMouseMove={(e) => {
-            if (!dragging) return;
-            setPan({
-              x: dragStartRef.current.panX + (e.clientX - dragStartRef.current.x),
-              y: dragStartRef.current.panY + (e.clientY - dragStartRef.current.y),
-            });
-          }}
-          onMouseUp={() => setDragging(false)}
-          onMouseLeave={() => setDragging(false)}
-          className={[
-            'w-full h-full flex items-center justify-center p-6 overflow-hidden select-none',
-            zoom > 1 ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default',
-          ].join(' ')}
-        >
-          <div
-            style={{
-              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
-              transition: dragging ? 'none' : 'transform 140ms var(--ease-out)',
-            }}
-            className="relative max-w-full max-h-full flex items-center justify-center"
-          >
-            <img
-              ref={imgRef}
-              src={src}
-              alt={asset.title}
-              onError={() => setFallbackThumb(true)}
-              draggable={false}
-              className={`max-w-[86vw] max-h-[72vh] object-contain rounded-[var(--radius-card-outer)] shadow-2xl ${
-                pausedAnim ? 'opacity-0' : 'opacity-100'
-              }`}
-            />
-            <canvas
-              ref={freezeCanvasRef}
-              aria-hidden={!pausedAnim}
-              className={`absolute inset-0 w-full h-full object-contain rounded-[var(--radius-card-outer)] pointer-events-none ${
-                pausedAnim ? 'opacity-100' : 'opacity-0'
-              }`}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Floating bottom-right zoom & mode controls */}
-      <div className="charkle-glass-dark absolute bottom-4 right-5 z-20 rounded-full px-2.5 py-1 flex items-center gap-1 text-[12px]">
-        <button
-          type="button"
-          aria-label="缩小"
-          onClick={() => adjustZoom(zoom / 1.4)}
-          className="h-7 w-7 inline-flex items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
-        >
-          <ZoomOut size={14} />
-        </button>
-        <span className="min-w-[44px] text-center charkle-tabular text-[11.5px]">
-          {Math.round(zoom * 100)}%
-        </span>
-        <button
-          type="button"
-          aria-label="放大"
-          onClick={() => adjustZoom(zoom * 1.4)}
-          className="h-7 w-7 inline-flex items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
-        >
-          <ZoomIn size={14} />
-        </button>
-        {zoom > 1 && (
-          <button
-            type="button"
-            aria-label="还原缩放"
-            onClick={() => adjustZoom(1)}
-            className="h-7 w-7 inline-flex items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
-          >
-            <RotateCcw size={13} />
-          </button>
-        )}
-
-        {(autoLongStrip || asset.pixelHeight > asset.pixelWidth * 1.6) && (
-          <button
-            type="button"
-            onClick={() => {
-              setLongStripMode((v) => !v);
-              setZoom(1);
-              setPan({ x: 0, y: 0 });
-            }}
-            className="ml-1 h-7 px-2.5 inline-flex items-center gap-1 rounded-full bg-white/10 hover:bg-white/20 text-[11.5px] cursor-pointer"
-          >
-            {longStripMode ? (
-              <>
-                <Minimize2 size={12} />
-                适应屏幕
-              </>
-            ) : (
-              <>
-                <ScrollText size={12} />
-                长图阅读
-              </>
-            )}
-          </button>
-        )}
-
-        {asset.mediaKind === 'animatedImage' && (
-          <button
-            type="button"
-            onClick={toggleAnimPause}
-            className="ml-1 h-7 px-2.5 inline-flex items-center gap-1 rounded-full bg-white/10 hover:bg-white/20 text-[11.5px] cursor-pointer"
-          >
-            {pausedAnim ? <Play size={12} /> : <Pause size={12} />}
-            {pausedAnim ? '播放动图' : '暂停动图'}
-          </button>
-        )}
-
-        {!longStripMode && zoom === 1 && (
-          <button
-            type="button"
-            title="切换至 200% 查看细节"
-            onClick={() => adjustZoom(2)}
-            className="h-7 w-7 inline-flex items-center justify-center rounded-full hover:bg-white/10 cursor-pointer"
-          >
-            <Maximize2 size={12.5} />
-          </button>
-        )}
+          onError={handleImgError}
+          draggable={false}
+          className={`max-w-full max-h-[76vh] object-contain rounded-[14px] shadow-[0_20px_54px_rgba(0,0,0,0.44)] ${
+            pausedAnim ? 'opacity-0' : 'opacity-100'
+          }`}
+        />
+        <canvas
+          ref={freezeCanvasRef}
+          aria-hidden={!pausedAnim}
+          className={`absolute inset-0 w-full h-full object-contain rounded-[14px] pointer-events-none ${
+            pausedAnim ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
       </div>
     </div>
   );

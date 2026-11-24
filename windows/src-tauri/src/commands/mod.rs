@@ -11,9 +11,10 @@ pub mod sync;
 pub mod window;
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64};
 use std::sync::{Arc, Mutex};
 
+use charkle_core::bridge::LocalExtensionBridgeServer;
 use charkle_core::engine::LiveCharkleEngine;
 use charkle_core::error::CoreError;
 use charkle_core::intelligence::CloudAIUsageStore;
@@ -23,15 +24,27 @@ use charkle_platform_win::wake::LibraryWakeHandle;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::desktop::{CaptureFrameStore, HotkeyConfig};
+use crate::desktop::{CaptureFrameStore, HotkeyConfig, ShelfSettings};
 
 pub struct AppState {
     pub engine: Arc<LiveCharkleEngine>,
+    pub extension_bridge: Arc<LocalExtensionBridgeServer>,
     pub data_dir: PathBuf,
     pub usage_store: Arc<CloudAIUsageStore>,
     pub capture_frames: Arc<CaptureFrameStore>,
     pub hotkeys: Arc<Mutex<HotkeyConfig>>,
+    pub shelf_settings: Arc<Mutex<ShelfSettings>>,
+    pub shelf_enabled: Arc<AtomicBool>,
+    pub shelf_hover_trigger: Arc<AtomicBool>,
+    pub shelf_expanded: Arc<AtomicBool>,
     pub shelf_pinned: Arc<AtomicBool>,
+    pub shelf_drag_hovering: Arc<AtomicBool>,
+    pub shelf_busy: Arc<AtomicBool>,
+    pub shelf_hold_until_ms: Arc<AtomicU64>,
+    pub shelf_hwnd: Arc<AtomicIsize>,
+    pub shelf_anim_gen: Arc<AtomicU64>,
+    pub shelf_minimal_mode: Arc<AtomicBool>,
+    pub explicit_quit: Arc<AtomicBool>,
     pub latest_clipboard: Arc<Mutex<Option<ClipboardPreview>>>,
     pub _clipboard_listener: Option<ClipboardListenerHandle>,
     pub _top_edge_monitor: Option<TopEdgeDragMonitorHandle>,

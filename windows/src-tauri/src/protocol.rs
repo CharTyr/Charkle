@@ -7,6 +7,8 @@
 //!   strictly read local cache and never trigger cloud downloads)
 //! - `charkle-media://localhost/capture-frame/{token}` (frozen 1:1 physical-pixel screenshot
 //!   frame served directly from RAM without IPC base64 overhead)
+//! - `charkle-media://localhost/proxy-xhs?url=<encoded>` (async Referer-injecting proxy with
+//!   strict `https://` `*.xhscdn.com` / `*.xiaohongshu.com` allowlist & on-disk cache)
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -15,9 +17,11 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use charkle_core::engine::LiveCharkleEngine;
+use charkle_core::media::xiaohongshu::{fetch_or_cache_xhs_media, XhsProxyError};
 use charkle_core::media::MediaPipeline;
 use charkle_core::models::media::ThumbnailTier;
 use tauri::http::{header, Request, Response, StatusCode};
+use url::Url;
 use uuid::Uuid;
 
 use crate::desktop::CaptureFrameStore;
@@ -86,6 +90,67 @@ pub fn parse_byte_range(header_value: &str, total_len: u64) -> ByteRangeResult {
     };
 
     ByteRangeResult::Partial { start, end }
+}
+
+/// Returns `true` when the incoming `charkle-media://` request targets the async `/proxy-xhs` route.
+pub fn is_xhs_proxy_route(request: &Request<Vec<u8>>) -> bool {
+    request.uri().path().trim_end_matches('/') == "/proxy-xhs"
+}
+
+/// Asynchronously fetches (or serves from on-disk cache under `data_dir/cache/xhs-proxy/`) a
+/// strict-allowlisted Xiaohongshu CDN media URL with `Referer: https://www.xiaohongshu.com/`.
+pub async fn handle_xhs_proxy_request(
+    data_dir: &Path,
+    request: &Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
+    if request.method() == "OPTIONS" {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS")
+            .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Range, If-None-Match")
+            .body(Vec::new())
+            .unwrap_or_else(|_| Response::new(Vec::new()));
+    }
+
+    let query = request.uri().query().unwrap_or("");
+    let target_url = Url::parse(&format!("http://charkle-media.localhost/proxy-xhs?{query}"))
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "url")
+                .map(|(_, v)| v.into_owned())
+        });
+
+    let Some(raw_target) = target_url.filter(|s| !s.trim().is_empty()) else {
+        return error_response(StatusCode::BAD_REQUEST, "Missing url parameter");
+    };
+
+    let cache_dir = data_dir.join("cache").join("xhs-proxy");
+    match fetch_or_cache_xhs_media(&raw_target, &cache_dir).await {
+        Ok(res) => {
+            let total_len = res.bytes.len();
+            let body = if request.method() == "HEAD" {
+                Vec::new()
+            } else {
+                res.bytes
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, res.content_type)
+                .header(header::CONTENT_LENGTH, total_len.to_string())
+                .header(header::CACHE_CONTROL, "public, max-age=86400")
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(body)
+                .unwrap_or_else(|_| Response::new(Vec::new()))
+        }
+        Err(XhsProxyError::BadRequest(msg)) => error_response(StatusCode::BAD_REQUEST, msg),
+        Err(XhsProxyError::Forbidden(msg)) => error_response(StatusCode::FORBIDDEN, msg),
+        Err(XhsProxyError::TooLarge) => {
+            error_response(StatusCode::PAYLOAD_TOO_LARGE, "Media exceeds 20 MiB limit")
+        }
+        Err(XhsProxyError::Upstream(msg)) => error_response(StatusCode::BAD_GATEWAY, &msg),
+    }
 }
 
 /// Handles a `charkle-media://` request synchronously from disk or ephemeral capture frame
@@ -415,5 +480,98 @@ mod tests {
             "image/png"
         );
         assert!(cap_res.body().starts_with(b"\x89PNG"));
+    }
+
+    #[tokio::test]
+    async fn proxy_xhs_enforces_https_host_allowlist_and_serves_disk_cache() {
+        let tmp = tempdir().unwrap();
+
+        // Missing url parameter -> 400
+        let missing_req = Request::builder()
+            .uri("http://charkle-media.localhost/proxy-xhs")
+            .body(Vec::new())
+            .unwrap();
+        assert!(is_xhs_proxy_route(&missing_req));
+        let missing_res = handle_xhs_proxy_request(tmp.path(), &missing_req).await;
+        assert_eq!(missing_res.status(), StatusCode::BAD_REQUEST);
+
+        // Non-HTTPS and non-allowlisted hosts -> 403 Forbidden (SSRF protection)
+        for bad_url in [
+            "http://sns-webpic-qc.xhscdn.com/photo.webp",
+            "https://evil.com/photo.png",
+            "https://xhscdn.com.evil.com/photo.png",
+            "https://127.0.0.1:41937/api/v1/health",
+        ] {
+            let encoded =
+                url::form_urlencoded::byte_serialize(bad_url.as_bytes()).collect::<String>();
+            let req = Request::builder()
+                .uri(format!(
+                    "http://charkle-media.localhost/proxy-xhs?url={encoded}"
+                ))
+                .body(Vec::new())
+                .unwrap();
+            let res = handle_xhs_proxy_request(tmp.path(), &req).await;
+            assert_eq!(
+                res.status(),
+                StatusCode::FORBIDDEN,
+                "expected 403 for {bad_url}"
+            );
+        }
+
+        // Valid allowlisted URL hit in disk cache under data_dir/cache/xhs-proxy/<sha256>.bin -> 200
+        let target = "https://sns-webpic-qc.xhscdn.com/cached.png";
+        let key = charkle_core::media::xiaohongshu::xhs_proxy_cache_key(target);
+        let cache_dir = tmp.path().join("cache").join("xhs-proxy");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let png_payload = b"\x89PNG\r\n\x1a\nXHS_CACHED_BYTES";
+        std::fs::write(cache_dir.join(format!("{key}.bin")), png_payload).unwrap();
+
+        let encoded = url::form_urlencoded::byte_serialize(target.as_bytes()).collect::<String>();
+        let ok_req = Request::builder()
+            .uri(format!(
+                "http://charkle-media.localhost/proxy-xhs?url={encoded}"
+            ))
+            .body(Vec::new())
+            .unwrap();
+        let ok_res = handle_xhs_proxy_request(tmp.path(), &ok_req).await;
+        assert_eq!(ok_res.status(), StatusCode::OK);
+        assert_eq!(
+            ok_res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            ok_res
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        assert_eq!(
+            ok_res.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=86400"
+        );
+        assert_eq!(ok_res.body(), png_payload);
+
+        // Complex query parameters (`&`, `=`, `%2B` -> `+`) round-trip through query_pairs cleanly
+        let complex_target =
+            "https://sns-webpic-qc.xhscdn.com/photo.webp?x=1&sig=abc+def==&fmt=webp";
+        let complex_key = charkle_core::media::xiaohongshu::xhs_proxy_cache_key(complex_target);
+        let webp_payload = b"RIFF\x10\x00\x00\x00WEBPVP8X_SAMPLE";
+        std::fs::write(cache_dir.join(format!("{complex_key}.bin")), webp_payload).unwrap();
+        let complex_encoded =
+            url::form_urlencoded::byte_serialize(complex_target.as_bytes()).collect::<String>();
+        let complex_req = Request::builder()
+            .uri(format!(
+                "http://charkle-media.localhost/proxy-xhs?url={complex_encoded}"
+            ))
+            .body(Vec::new())
+            .unwrap();
+        let complex_res = handle_xhs_proxy_request(tmp.path(), &complex_req).await;
+        assert_eq!(complex_res.status(), StatusCode::OK);
+        assert_eq!(
+            complex_res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/webp"
+        );
+        assert_eq!(complex_res.body(), webp_payload);
     }
 }

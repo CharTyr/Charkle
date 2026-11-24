@@ -30,7 +30,7 @@ interface ComputedPosition {
 }
 
 /**
- * Origin-aware interruptible Popover (DESIGN.md §6.2/§6.3 & modern-web-guidance):
+ * Origin-aware interruptible Popover (DESIGN.md §6.2 & §6.3):
  * - Binds `transform-origin` to trigger edge and auto-flips when near viewport edge
  * - Uses CSS transition (`@starting-style` + `[data-closing="true"]`) with `160ms` in / `110ms` out
  */
@@ -81,14 +81,16 @@ export const Popover: React.FC<PopoverProps> = ({
       let originX = 'left';
       let originY = 'top';
       if (left + pw > vw - margin) {
-        left = Math.max(margin, anchorPoint.x - pw);
+        left = anchorPoint.x - pw;
         originX = 'right';
       }
       if (top + ph > vh - margin) {
-        top = Math.max(margin, anchorPoint.y - ph);
+        top = anchorPoint.y - ph;
         originY = 'bottom';
       }
-      setPos({ top, left, transformOrigin: `${originY} ${originX}` });
+      const clampedLeft = Math.max(margin, Math.min(Math.max(margin, vw - pw - margin), left));
+      const clampedTop = Math.max(margin, Math.min(Math.max(margin, vh - ph - margin), top));
+      setPos({ top: clampedTop, left: clampedLeft, transformOrigin: `${originY} ${originX}` });
       return;
     }
 
@@ -135,8 +137,8 @@ export const Popover: React.FC<PopoverProps> = ({
     }
 
     setPos({
-      top: Math.max(margin, Math.min(vh - ph - margin, top)),
-      left: Math.max(margin, Math.min(vw - pw - margin, left)),
+      top: Math.max(margin, Math.min(Math.max(margin, vh - ph - margin), top)),
+      left: Math.max(margin, Math.min(Math.max(margin, vw - pw - margin), left)),
       transformOrigin: `${originY} ${originX}`,
     });
   }, [anchorEl, anchorPoint, placement, offset]);
@@ -148,10 +150,16 @@ export const Popover: React.FC<PopoverProps> = ({
     }
     computePosition();
     const raf = requestAnimationFrame(computePosition);
+    let ro: ResizeObserver | null = null;
+    if (panelRef.current && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(computePosition);
+      ro.observe(panelRef.current);
+    }
     window.addEventListener('resize', computePosition);
     window.addEventListener('scroll', computePosition, true);
     return () => {
       cancelAnimationFrame(raf);
+      ro?.disconnect();
       window.removeEventListener('resize', computePosition);
       window.removeEventListener('scroll', computePosition, true);
     };
@@ -167,16 +175,18 @@ export const Popover: React.FC<PopoverProps> = ({
       onOpenChange(false);
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
         onOpenChange(false);
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [open, anchorEl, onOpenChange]);
 
@@ -186,9 +196,16 @@ export const Popover: React.FC<PopoverProps> = ({
     <div
       ref={panelRef}
       role="dialog"
+      data-charkle-popover-open={open ? 'true' : undefined}
       data-closing={closing ? 'true' : undefined}
+      data-no-lens="true"
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
       className={[
-        'fixed z-[120] rounded-[var(--radius-popover-outer)] charkle-popover-panel',
+        'fixed z-[120] rounded-[var(--radius-popover-outer)] charkle-popover-panel charkle-scroll overflow-y-auto',
         glass
           ? 'charkle-glass'
           : 'bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-xl',
@@ -197,6 +214,7 @@ export const Popover: React.FC<PopoverProps> = ({
       style={{
         top: pos ? pos.top : -9999,
         left: pos ? pos.left : -9999,
+        maxHeight: 'calc(100vh - 20px)',
         visibility: pos ? 'visible' : 'hidden',
         transformOrigin: pos?.transformOrigin ?? 'top left',
       }}

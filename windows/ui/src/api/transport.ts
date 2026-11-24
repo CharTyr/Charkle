@@ -25,7 +25,9 @@ import {
   type DragOutOutcome,
   type DriveSyncConfig,
   type EditorialLayoutResult,
+  type ExtensionBridgeStateDto,
   type ExternalAgentConfig,
+  type ExternalAgentSelfCheckDto,
   type ExternalAgentStateDto,
   type FigmaBridgeExportReport,
   type FilterCriteria,
@@ -41,9 +43,13 @@ import {
   type MoodboardSummary,
   type OcrDiagnostics,
   type QuickJumpMatch,
+  type RebuildIndexResultDto,
   type ScoredAsset,
+  type ShelfSettings,
+  type ShelfTargetMode,
   type SmartFolderRecord,
   type StorageMigrationReport,
+  type SyncAuthStateDto,
   type SyncReport,
   type SyncStatus,
   type SystemDiagnosticsDto,
@@ -52,6 +58,7 @@ import {
   type TypeSafeExperimentalConfig,
   type TypeSafeStateDto,
   type TypeSafeTestResultDto,
+  type WebdavTestResultDto,
   type WindowSurfaceState,
 } from '../types/domain';
 
@@ -62,7 +69,21 @@ export interface CharkleEventHandlers {
   onBoardUpdated?: (boardId: string) => void;
   onClipboardChanged?: (preview: ClipboardPreview) => void;
   onClipboardCollected?: (count: number) => void;
-  onShelfState?: (state: { expanded: boolean; pinned: boolean }) => void;
+  onExtensionImported?: (payload: {
+    count: number;
+    targetFolderId?: string | null;
+    targetBoardId?: string | null;
+  }) => void;
+  onShelfState?: (state: {
+    expanded: boolean;
+    pinned: boolean;
+    defaultTargetMode?: ShelfTargetMode;
+    minimalMode?: boolean;
+  }) => void;
+  onShelfSettings?: (settings: ShelfSettings) => void;
+  onShelfDragHover?: (payload: { active: boolean; count: number }) => void;
+  onShelfDropStatus?: (payload: { phase: 'processing' | 'done' | 'error'; message: string }) => void;
+  onMainOpenAsset?: (payload: { assetId: string; openQuickLook: boolean }) => void;
   onDeepLinkNavigate?: (payload: DeepLinkPayload) => void;
   onMoodboardAgentStep?: (step: MoodboardAgentStep) => void;
 }
@@ -119,14 +140,25 @@ export interface CharkleTransport {
   evictCacheNow(): Promise<CacheStats>;
   readAssetTextContent(id: string): Promise<string | null>;
   revealInExplorer(id: string): Promise<void>;
+  openDirectoryInExplorer(path: string): Promise<void>;
   openExternalUrl(url: string): Promise<void>;
   pickFilesDialog(): Promise<string[]>;
+  pickJsonFileDialog(title?: string): Promise<string | null>;
 
   // Sync
   syncConfig(): Promise<DriveSyncConfig>;
   saveSyncConfig(config: DriveSyncConfig): Promise<void>;
   syncStatus(): Promise<SyncStatus>;
   syncNow(): Promise<SyncReport>;
+  getSyncAuthState(): Promise<SyncAuthStateDto>;
+  saveGoogleOAuthClient(clientId: string, clientSecret: string): Promise<boolean>;
+  importGoogleOAuthSecretFile(filePath: string): Promise<boolean>;
+  signInGoogleDrive(): Promise<SyncStatus>;
+  signOutGoogleDrive(): Promise<SyncStatus>;
+  testWebdavConnection(
+    config: DriveSyncConfig,
+    password?: string | null,
+  ): Promise<WebdavTestResultDto>;
 
   // Window Chrome & Snap Layouts
   setWindowTheme(isDark: boolean): Promise<WindowSurfaceState>;
@@ -163,6 +195,13 @@ export interface CharkleTransport {
   getOcrDiagnostics(): Promise<OcrDiagnostics>;
   runAssetOcr(id: string): Promise<AssetRecord | null>;
   focusMainWindow(): Promise<void>;
+  openMainWindow(): Promise<void>;
+  openAssetInMainWindow(assetId: string, openQuickLook?: boolean): Promise<void>;
+  copyAssetsToClipboard(assetIds: string[]): Promise<number>;
+  getShelfSettings(): Promise<ShelfSettings>;
+  saveShelfSettings(settings: ShelfSettings): Promise<ShelfSettings>;
+  setMinimalMode(enabled: boolean): Promise<ShelfSettings>;
+  setShelfAllowActivate(allow: boolean): Promise<void>;
 
   // M4 Moodboard Studio, Curator Harness & Exporters
   curateMoodboard(request: MoodboardCurationRequest): Promise<MoodboardProposal>;
@@ -195,6 +234,7 @@ export interface CharkleTransport {
   ): Promise<AIProviderStateDto>;
   testAiProviderConnection(): Promise<AIConnectionTestResult>;
   resetAiUsage(category?: CloudAIUsageCategory | null): Promise<CloudAIUsageSummary>;
+  signInWithChatgpt(reconsent?: boolean, switchAccount?: boolean): Promise<AIProviderStateDto>;
   disconnectChatgptAccount(): Promise<ChatGPTAccountSession>;
   getTypesafeState(): Promise<TypeSafeStateDto>;
   saveTypesafeConfig(
@@ -205,6 +245,8 @@ export interface CharkleTransport {
   runInboxSmartTriage(): Promise<InboxTriageRecommendation[]>;
   getExternalAgentState(): Promise<ExternalAgentStateDto>;
   saveExternalAgentConfig(config: ExternalAgentConfig): Promise<ExternalAgentStateDto>;
+  runExternalAgentSelfCheck(): Promise<ExternalAgentSelfCheckDto>;
+  rebuildLocalVisualIndex(): Promise<RebuildIndexResultDto>;
   saveWebdavPassword(password: string): Promise<void>;
   runStorageMigration(
     targetConfig: DriveSyncConfig,
@@ -212,6 +254,13 @@ export interface CharkleTransport {
   ): Promise<StorageMigrationReport>;
   getSystemDiagnostics(): Promise<SystemDiagnosticsDto>;
   exportFigmaPluginBundle(destinationDir: string): Promise<string>;
+
+  // Browser Extension Bridge
+  getExtensionBridgeState(): Promise<ExtensionBridgeStateDto>;
+  setExtensionBridgeEnabled(enabled: boolean): Promise<ExtensionBridgeStateDto>;
+  setExtensionAutoPair(allowLocalAutoPair: boolean): Promise<ExtensionBridgeStateDto>;
+  regenerateExtensionBridgeToken(): Promise<ExtensionBridgeStateDto>;
+  revealBundledBrowserExtension(): Promise<string>;
 
   // Live Events
   subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void>;
@@ -385,6 +434,10 @@ export class TauriTransport implements CharkleTransport {
     return invoke('reveal_in_explorer', { id });
   }
 
+  openDirectoryInExplorer(path: string): Promise<void> {
+    return invoke('open_directory_in_explorer', { path });
+  }
+
   openExternalUrl(url: string): Promise<void> {
     return invoke('open_external_url', { url });
   }
@@ -393,6 +446,16 @@ export class TauriTransport implements CharkleTransport {
     const selected = await openDialog({ multiple: true, directory: false });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
+  }
+
+  async pickJsonFileDialog(title = '选择 JSON 凭证文件'): Promise<string | null> {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      title,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    return typeof selected === 'string' && selected.length > 0 ? selected : null;
   }
 
   syncConfig(): Promise<DriveSyncConfig> {
@@ -409,6 +472,33 @@ export class TauriTransport implements CharkleTransport {
 
   syncNow(): Promise<SyncReport> {
     return invoke('sync_now');
+  }
+
+  getSyncAuthState(): Promise<SyncAuthStateDto> {
+    return invoke('get_sync_auth_state');
+  }
+
+  saveGoogleOAuthClient(clientId: string, clientSecret: string): Promise<boolean> {
+    return invoke('save_google_oauth_client', { clientId, clientSecret });
+  }
+
+  importGoogleOAuthSecretFile(filePath: string): Promise<boolean> {
+    return invoke('import_google_oauth_secret_file', { filePath });
+  }
+
+  signInGoogleDrive(): Promise<SyncStatus> {
+    return invoke('sign_in_google_drive');
+  }
+
+  signOutGoogleDrive(): Promise<SyncStatus> {
+    return invoke('sign_out_google_drive');
+  }
+
+  testWebdavConnection(
+    config: DriveSyncConfig,
+    password?: string | null,
+  ): Promise<WebdavTestResultDto> {
+    return invoke('test_webdav_connection', { config, password: password ?? null });
   }
 
   setWindowTheme(isDark: boolean): Promise<WindowSurfaceState> {
@@ -529,6 +619,34 @@ export class TauriTransport implements CharkleTransport {
     return invoke('focus_main_window');
   }
 
+  openMainWindow(): Promise<void> {
+    return invoke('open_main_window');
+  }
+
+  openAssetInMainWindow(assetId: string, openQuickLook = true): Promise<void> {
+    return invoke('open_asset_in_main_window', { assetId, openQuickLook });
+  }
+
+  copyAssetsToClipboard(assetIds: string[]): Promise<number> {
+    return invoke('copy_assets_to_clipboard', { assetIds });
+  }
+
+  getShelfSettings(): Promise<ShelfSettings> {
+    return invoke('get_shelf_settings');
+  }
+
+  saveShelfSettings(settings: ShelfSettings): Promise<ShelfSettings> {
+    return invoke('save_shelf_settings', { settings });
+  }
+
+  setMinimalMode(enabled: boolean): Promise<ShelfSettings> {
+    return invoke('set_minimal_mode', { enabled });
+  }
+
+  setShelfAllowActivate(allow: boolean): Promise<void> {
+    return invoke('set_shelf_allow_activate', { allow });
+  }
+
   curateMoodboard(request: MoodboardCurationRequest): Promise<MoodboardProposal> {
     return invoke('curate_moodboard', { request });
   }
@@ -601,6 +719,10 @@ export class TauriTransport implements CharkleTransport {
     return invoke('reset_ai_usage', { category: category ?? null });
   }
 
+  signInWithChatgpt(reconsent = false, switchAccount = false): Promise<AIProviderStateDto> {
+    return invoke('sign_in_with_chatgpt', { reconsent, switchAccount });
+  }
+
   disconnectChatgptAccount(): Promise<ChatGPTAccountSession> {
     return invoke('disconnect_chatgpt_account');
   }
@@ -638,6 +760,14 @@ export class TauriTransport implements CharkleTransport {
     return invoke('save_external_agent_config', { config });
   }
 
+  runExternalAgentSelfCheck(): Promise<ExternalAgentSelfCheckDto> {
+    return invoke('run_external_agent_self_check');
+  }
+
+  rebuildLocalVisualIndex(): Promise<RebuildIndexResultDto> {
+    return invoke('rebuild_local_visual_index');
+  }
+
   saveWebdavPassword(password: string): Promise<void> {
     return invoke('save_webdav_password', { password });
   }
@@ -660,58 +790,174 @@ export class TauriTransport implements CharkleTransport {
     return invoke('export_figma_plugin_bundle', { destinationDir });
   }
 
+  getExtensionBridgeState(): Promise<ExtensionBridgeStateDto> {
+    return invoke('get_extension_bridge_state');
+  }
+
+  setExtensionBridgeEnabled(enabled: boolean): Promise<ExtensionBridgeStateDto> {
+    return invoke('set_extension_bridge_enabled', { enabled });
+  }
+
+  setExtensionAutoPair(allowLocalAutoPair: boolean): Promise<ExtensionBridgeStateDto> {
+    return invoke('set_extension_auto_pair', { allowLocalAutoPair });
+  }
+
+  regenerateExtensionBridgeToken(): Promise<ExtensionBridgeStateDto> {
+    return invoke('regenerate_extension_bridge_token');
+  }
+
+  revealBundledBrowserExtension(): Promise<string> {
+    return invoke('reveal_bundled_browser_extension');
+  }
+
   async subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void> {
+    let disposed = false;
     const unsubs: UnlistenFn[] = [];
+    const cleanup = () => {
+      if (disposed) return;
+      disposed = true;
+      for (const unsub of unsubs.splice(0)) {
+        try {
+          unsub();
+        } catch {
+          // Ignore already-unregistered Tauri listener errors during teardown.
+        }
+      }
+    };
+
+    const registrations: Array<() => Promise<UnlistenFn>> = [];
     if (handlers.onLibraryChanged) {
-      unsubs.push(await listen('library:changed', () => handlers.onLibraryChanged?.()));
+      registrations.push(() =>
+        listen('library:changed', () => {
+          if (!disposed) handlers.onLibraryChanged?.();
+        }),
+      );
     }
     if (handlers.onSyncStatus) {
-      unsubs.push(await listen<SyncStatus>('sync:status', (e) => handlers.onSyncStatus?.(e.payload)));
+      registrations.push(() =>
+        listen<SyncStatus>('sync:status', (e) => {
+          if (!disposed) handlers.onSyncStatus?.(e.payload);
+        }),
+      );
     }
     if (handlers.onAssetEnriched) {
-      unsubs.push(await listen<string>('asset:enriched', (e) => handlers.onAssetEnriched?.(e.payload)));
+      registrations.push(() =>
+        listen<string>('asset:enriched', (e) => {
+          if (!disposed) handlers.onAssetEnriched?.(e.payload);
+        }),
+      );
     }
     if (handlers.onBoardUpdated) {
-      unsubs.push(await listen<string>('board:updated', (e) => handlers.onBoardUpdated?.(e.payload)));
+      registrations.push(() =>
+        listen<string>('board:updated', (e) => {
+          if (!disposed) handlers.onBoardUpdated?.(e.payload);
+        }),
+      );
     }
     if (handlers.onClipboardChanged) {
-      unsubs.push(
-        await listen<ClipboardPreview>('clipboard:changed', (e) =>
-          handlers.onClipboardChanged?.(e.payload),
-        ),
+      registrations.push(() =>
+        listen<ClipboardPreview>('clipboard:changed', (e) => {
+          if (!disposed) handlers.onClipboardChanged?.(e.payload);
+        }),
       );
     }
     if (handlers.onClipboardCollected) {
-      unsubs.push(
-        await listen<number>('clipboard:collected', (e) =>
-          handlers.onClipboardCollected?.(e.payload),
-        ),
+      registrations.push(() =>
+        listen<number>('clipboard:collected', (e) => {
+          if (!disposed) handlers.onClipboardCollected?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onExtensionImported) {
+      registrations.push(() =>
+        listen<{
+          count: number;
+          targetFolderId?: string | null;
+          targetBoardId?: string | null;
+        }>('extension:imported', (e) => {
+          if (!disposed) handlers.onExtensionImported?.(e.payload);
+        }),
       );
     }
     if (handlers.onShelfState) {
-      unsubs.push(
-        await listen<{ expanded: boolean; pinned: boolean }>('shelf:state', (e) =>
-          handlers.onShelfState?.(e.payload),
+      registrations.push(() =>
+        listen<{
+          expanded: boolean;
+          pinned: boolean;
+          defaultTargetMode?: ShelfTargetMode;
+          minimalMode?: boolean;
+        }>('shelf:state', (e) => {
+          if (!disposed) handlers.onShelfState?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onShelfSettings) {
+      registrations.push(() =>
+        listen<ShelfSettings>('shelf:settings', (e) => {
+          if (!disposed) handlers.onShelfSettings?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onShelfDragHover) {
+      registrations.push(() =>
+        listen<{ active: boolean; count: number }>('shelf:drag-hover', (e) => {
+          if (!disposed) handlers.onShelfDragHover?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onShelfDropStatus) {
+      registrations.push(() =>
+        listen<{ phase: 'processing' | 'done' | 'error'; message: string }>(
+          'shelf:drop-status',
+          (e) => {
+            if (!disposed) handlers.onShelfDropStatus?.(e.payload);
+          },
         ),
+      );
+    }
+    if (handlers.onMainOpenAsset) {
+      registrations.push(() =>
+        listen<{ assetId: string; openQuickLook: boolean }>('main:open-asset', (e) => {
+          if (!disposed) handlers.onMainOpenAsset?.(e.payload);
+        }),
       );
     }
     if (handlers.onDeepLinkNavigate) {
-      unsubs.push(
-        await listen<DeepLinkPayload>('deep-link:navigate', (e) =>
-          handlers.onDeepLinkNavigate?.(e.payload),
-        ),
+      registrations.push(() =>
+        listen<DeepLinkPayload>('deep-link:navigate', (e) => {
+          if (!disposed) handlers.onDeepLinkNavigate?.(e.payload);
+        }),
       );
     }
     if (handlers.onMoodboardAgentStep) {
-      unsubs.push(
-        await listen<MoodboardAgentStep>('moodboard:agent-step', (e) =>
-          handlers.onMoodboardAgentStep?.(e.payload),
-        ),
+      registrations.push(() =>
+        listen<MoodboardAgentStep>('moodboard:agent-step', (e) => {
+          if (!disposed) handlers.onMoodboardAgentStep?.(e.payload);
+        }),
       );
     }
-    return () => {
-      for (const u of unsubs) u();
-    };
+
+    try {
+      await Promise.all(
+        registrations.map(async (register) => {
+          const unsub = await register();
+          if (disposed) {
+            try {
+              unsub();
+            } catch {
+              // Ignore teardown error if already cleaned up.
+            }
+          } else {
+            unsubs.push(unsub);
+          }
+        }),
+      );
+    } catch (err) {
+      cleanup();
+      throw err;
+    }
+
+    return cleanup;
   }
 }
 
@@ -1116,6 +1362,55 @@ export class InMemoryMockTransport implements CharkleTransport {
   async ingestUrl(url: string, title?: string | null, notes?: string | null, targetFolderId?: string | null): Promise<AssetRecord[]> {
     const now = msToCocoaSeconds(Date.now());
     const id = makeUuid();
+    const isXiaohongshu = /(?:^|\/\/)(?:[^/]*\.)?(?:xiaohongshu\.com|xhslink\.com)\b/i.test(url);
+    if (isXiaohongshu) {
+      const noteTitle = title?.trim() || '小红书视觉灵感笔记';
+      const coverUrl = makeSvgDataUrl('#F8F5F1', '#FF2442', noteTitle, 900, 1200);
+      const asset: AssetRecord = {
+        id,
+        contentHash: id,
+        folderID: targetFolderId ?? null,
+        mediaKind: 'webBookmark',
+        mimeType: 'text/uri-list',
+        title: noteTitle,
+        fileName: 'xiaohongshu-note.url',
+        notes: notes ?? '',
+        tags: ['小红书'],
+        suggestedTags: [],
+        rating: 0,
+        pixelWidth: 900,
+        pixelHeight: 1440,
+        fileSizeBytes: 512,
+        dominantColors: [{ hex: '#FF2442', l: 54, a: 74, b: 40, proportion: 0.4 }],
+        waveformPeaks: [],
+        sourceURL: url,
+        sourceDomain: 'www.xiaohongshu.com',
+        richMetadata: {
+          socialPost: {
+            platform: 'xiaohongshu',
+            authorName: '小红书创作者',
+            authorHandle: '',
+            articleTitle: noteTitle,
+            bodyText: notes?.trim() || '已通过链接采集的小红书视觉笔记。',
+            mediaURLs: [coverUrl],
+            mediaThumbnailURLs: [coverUrl],
+            attachments: [{ id: `${id}-img-0`, kind: 'photo', url: coverUrl, thumbnailURL: coverUrl }],
+            hasVideo: false,
+            likeCount: 1280,
+            originalURL: url,
+          },
+        },
+        pinnedOffline: false,
+        isLocalOriginalCached: true,
+        isTrashed: false,
+        createdAt: now,
+        updatedAt: now,
+        updatedHLC: 11,
+      };
+      this.thumbs.set(id, makeSvgDataUrl('#FFFFFF', '#FF2442', noteTitle, 900, 1440));
+      this.assets = [asset, ...this.assets];
+      return [asset];
+    }
     const asset: AssetRecord = {
       id,
       contentHash: id,
@@ -1461,10 +1756,18 @@ export class InMemoryMockTransport implements CharkleTransport {
     return this.textContent.get(id) ?? null;
   }
 
+  private mockHasGoogleOAuthClient = false;
+  private mockHasWebdavPassword = false;
+  private mockGoogleAccountEmail: string | null = null;
+
   async revealInExplorer(): Promise<void> {}
+  async openDirectoryInExplorer(): Promise<void> {}
   async openExternalUrl(): Promise<void> {}
   async pickFilesDialog(): Promise<string[]> {
     return [];
+  }
+  async pickJsonFileDialog(): Promise<string | null> {
+    return 'mock-exports/client_secret.json';
   }
 
   async syncConfig(): Promise<DriveSyncConfig> {
@@ -1476,7 +1779,18 @@ export class InMemoryMockTransport implements CharkleTransport {
   }
 
   async syncStatus(): Promise<SyncStatus> {
-    return { phase: 'idle', pendingOpCount: 0, activeMode: this.syncCfg.mode };
+    return {
+      phase: 'idle',
+      pendingOpCount: 0,
+      activeMode: this.syncCfg.mode,
+      account: this.mockGoogleAccountEmail
+        ? {
+            email: this.mockGoogleAccountEmail,
+            displayName: 'Charkle Designer',
+            source: 'Google Drive API',
+          }
+        : null,
+    };
   }
 
   async syncNow(): Promise<SyncReport> {
@@ -1489,6 +1803,49 @@ export class InMemoryMockTransport implements CharkleTransport {
       reconciledRenames: 0,
       durationSeconds: 0.01,
     };
+  }
+
+  async getSyncAuthState(): Promise<SyncAuthStateDto> {
+    return {
+      hasGoogleOAuthClient: this.mockHasGoogleOAuthClient,
+      hasWebdavPassword: this.mockHasWebdavPassword,
+    };
+  }
+
+  async saveGoogleOAuthClient(clientId: string): Promise<boolean> {
+    if (!clientId.trim()) throw new Error('请输入有效的 Google OAuth Client ID。');
+    this.mockHasGoogleOAuthClient = true;
+    return true;
+  }
+
+  async importGoogleOAuthSecretFile(filePath: string): Promise<boolean> {
+    if (!filePath.trim()) throw new Error('请选择有效的 JSON 凭证文件。');
+    this.mockHasGoogleOAuthClient = true;
+    return true;
+  }
+
+  async signInGoogleDrive(): Promise<SyncStatus> {
+    this.mockHasGoogleOAuthClient = true;
+    this.mockGoogleAccountEmail = 'designer@example.com';
+    return this.syncStatus();
+  }
+
+  async signOutGoogleDrive(): Promise<SyncStatus> {
+    this.mockGoogleAccountEmail = null;
+    return this.syncStatus();
+  }
+
+  async testWebdavConnection(
+    config: DriveSyncConfig,
+    password?: string | null,
+  ): Promise<WebdavTestResultDto> {
+    if (password && password.trim()) {
+      this.mockHasWebdavPassword = true;
+    }
+    if (!config.webDAVServerURL.trim()) {
+      return { ok: false, message: '请输入有效的 WebDAV 服务器地址。' };
+    }
+    return { ok: true, message: '连接成功，远程目录可正常访问。' };
   }
 
   async setWindowTheme(isDark: boolean): Promise<WindowSurfaceState> {
@@ -1664,6 +2021,10 @@ export class InMemoryMockTransport implements CharkleTransport {
   }
 
   async focusMainWindow(): Promise<void> {}
+
+  async openMainWindow(): Promise<void> {
+    this.mockShelfSettings = { ...this.mockShelfSettings, minimalMode: false };
+  }
 
   async curateMoodboard(request: MoodboardCurationRequest): Promise<MoodboardProposal> {
     const now = msToCocoaSeconds(Date.now());
@@ -1935,6 +2296,25 @@ export class InMemoryMockTransport implements CharkleTransport {
     return structuredClone(this.mockAiState.usage);
   }
 
+  async signInWithChatgpt(_reconsent = false, switchAccount = false): Promise<AIProviderStateDto> {
+    const email = switchAccount ? 'studio@example.com' : 'designer@example.com';
+    this.mockAiState.chatgptSession = {
+      status: 'connected',
+      sharingEnabled: true,
+      email,
+      name: switchAccount ? 'Studio Account' : 'Charkle Designer',
+      subject: switchAccount ? 'sub-studio' : 'sub-designer',
+      lastUpdatedAt: msToCocoaSeconds(Date.now()),
+    };
+    this.mockAiState.config = {
+      ...this.mockAiState.config,
+      provider: 'chatGPTSubscription',
+      baseURL: 'https://api.openai.com/v1',
+      chatModel: this.mockAiState.config.chatModel || 'gpt-5.4-mini',
+    };
+    return structuredClone(this.mockAiState);
+  }
+
   async disconnectChatgptAccount(): Promise<ChatGPTAccountSession> {
     this.mockAiState.chatgptSession = { status: 'disconnected', sharingEnabled: false };
     return { ...this.mockAiState.chatgptSession };
@@ -2003,9 +2383,9 @@ export class InMemoryMockTransport implements CharkleTransport {
         null,
         2,
       ),
-      readToolCount: 8,
-      writeToolCount: 6,
-      resourceCount: 2,
+      readToolCount: 12,
+      writeToolCount: 8,
+      resourceCount: 6,
     };
   }
 
@@ -2014,15 +2394,48 @@ export class InMemoryMockTransport implements CharkleTransport {
     return this.getExternalAgentState();
   }
 
-  async saveWebdavPassword(): Promise<void> {}
+  async runExternalAgentSelfCheck(): Promise<ExternalAgentSelfCheckDto> {
+    const activeAssets = this.assets.filter((a) => !a.isTrashed).length;
+    return {
+      ok: true,
+      summary: `自检通过：素材库含 ${activeAssets} 项素材、${this.folders.length} 个目录、${this.boards.length} 个灵感板。`,
+    };
+  }
 
-  async runStorageMigration(targetConfig: DriveSyncConfig): Promise<StorageMigrationReport> {
+  async rebuildLocalVisualIndex(): Promise<RebuildIndexResultDto> {
+    const eligible = this.assets.filter(
+      (a) =>
+        !a.isTrashed &&
+        (a.mediaKind === 'image' || a.mediaKind === 'animatedImage' || a.mediaKind === 'designFile'),
+    ).length;
+    return { processed: eligible, total: eligible };
+  }
+
+  async saveWebdavPassword(password: string): Promise<void> {
+    this.mockHasWebdavPassword = password.trim().length > 0;
+  }
+
+  async runStorageMigration(
+    targetConfig: DriveSyncConfig,
+    webdavPassword?: string | null,
+  ): Promise<StorageMigrationReport> {
     const sourceMode = this.syncCfg.mode;
     this.syncCfg = { ...targetConfig };
+    if (webdavPassword && webdavPassword.trim()) {
+      this.mockHasWebdavPassword = true;
+    }
+    const targetLocation =
+      targetConfig.mode === 'webDAV'
+        ? targetConfig.webDAVServerURL.trim() || targetConfig.webDAVRemotePath || '/Charkle'
+        : targetConfig.mode === 'localOnly'
+          ? targetConfig.localLibraryPath.trim() || '%LOCALAPPDATA%\\Charkle'
+          : targetConfig.mode === 'gdirectMount'
+            ? targetConfig.mountPath.trim() || 'G:\\'
+            : targetConfig.rootFolderName.trim() || 'Charkle';
     return {
       sourceMode,
       targetMode: targetConfig.mode,
-      targetLocation: targetConfig.localLibraryPath || targetConfig.rootFolderName,
+      targetLocation,
       downloadedOriginals: this.assets.length,
       migratedAssets: this.assets.length,
       migratedFolders: this.folders.length,
@@ -2063,6 +2476,90 @@ export class InMemoryMockTransport implements CharkleTransport {
   async exportFigmaPluginBundle(destinationDir: string): Promise<string> {
     return `${destinationDir}/Charkle-Figma-Plugin`;
   }
+
+  private extensionBridge: ExtensionBridgeStateDto = {
+    enabled: true,
+    running: true,
+    port: 41937,
+    baseUrl: 'http://127.0.0.1:41937',
+    allowLocalAutoPair: true,
+    accessToken: 'charkle_mock_bridge_token_41937',
+    lastError: null,
+    bundledExtensionDir: 'C:\\Program Files\\Charkle\\Resources\\BrowserExtension',
+    bundledExtensionManifestPath:
+      'C:\\Program Files\\Charkle\\Resources\\BrowserExtension\\manifest.json',
+  };
+
+  private mockBridgeTokenCounter = 0;
+
+  async getExtensionBridgeState(): Promise<ExtensionBridgeStateDto> {
+    return { ...this.extensionBridge };
+  }
+
+  async setExtensionBridgeEnabled(enabled: boolean): Promise<ExtensionBridgeStateDto> {
+    this.extensionBridge = {
+      ...this.extensionBridge,
+      enabled,
+      running: enabled,
+      lastError: null,
+    };
+    return { ...this.extensionBridge };
+  }
+
+  async setExtensionAutoPair(allowLocalAutoPair: boolean): Promise<ExtensionBridgeStateDto> {
+    this.extensionBridge = {
+      ...this.extensionBridge,
+      allowLocalAutoPair,
+    };
+    return { ...this.extensionBridge };
+  }
+
+  async regenerateExtensionBridgeToken(): Promise<ExtensionBridgeStateDto> {
+    this.mockBridgeTokenCounter += 1;
+    const hex = `${Date.now().toString(16)}${this.mockBridgeTokenCounter.toString(16).padStart(4, '0')}${Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0')}`.slice(-24);
+    this.extensionBridge = {
+      ...this.extensionBridge,
+      accessToken: `charkle_${hex}`,
+    };
+    return { ...this.extensionBridge };
+  }
+
+  async revealBundledBrowserExtension(): Promise<string> {
+    return (
+      this.extensionBridge.bundledExtensionManifestPath ??
+      this.extensionBridge.bundledExtensionDir ??
+      ''
+    );
+  }
+
+  private mockShelfSettings: ShelfSettings = {
+    enabled: true,
+    hoverTriggerEnabled: true,
+    defaultTargetMode: 'inbox',
+    minimalMode: false,
+  };
+
+  async openAssetInMainWindow(): Promise<void> {}
+
+  async copyAssetsToClipboard(assetIds: string[]): Promise<number> {
+    return assetIds.length;
+  }
+
+  async getShelfSettings(): Promise<ShelfSettings> {
+    return { ...this.mockShelfSettings };
+  }
+
+  async saveShelfSettings(settings: ShelfSettings): Promise<ShelfSettings> {
+    this.mockShelfSettings = { ...settings };
+    return { ...this.mockShelfSettings };
+  }
+
+  async setMinimalMode(enabled: boolean): Promise<ShelfSettings> {
+    this.mockShelfSettings = { ...this.mockShelfSettings, minimalMode: enabled };
+    return { ...this.mockShelfSettings };
+  }
+
+  async setShelfAllowActivate(): Promise<void> {}
 
   async subscribeEvents(): Promise<() => void> {
     return () => {};

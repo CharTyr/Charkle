@@ -132,13 +132,15 @@ fn fill_rect(img: &mut RgbaImage, x: u32, y: u32, w: u32, h: u32, color: Rgba<u8
 
 fn parse_hex_rgb(hex: &str) -> Option<[u8; 3]> {
     let clean = hex.trim().trim_start_matches('#');
-    if clean.len() != 6 {
+    if clean.len() != 6 || !clean.is_ascii() {
         return None;
     }
-    let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
-    Some([r, g, b])
+    let val = u32::from_str_radix(clean, 16).ok()?;
+    Some([
+        ((val >> 16) & 0xFF) as u8,
+        ((val >> 8) & 0xFF) as u8,
+        (val & 0xFF) as u8,
+    ])
 }
 
 /// Tiny 3x5 bitmap digit renderer (scaled 2x) for numbered contact-sheet slot badges (1..16).

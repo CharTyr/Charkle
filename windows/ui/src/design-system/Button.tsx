@@ -1,7 +1,14 @@
 import React from 'react';
 import { useDelayedFlag } from './useDelayedFlag';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'glass';
+export type ButtonVariant =
+  | 'primary'
+  | 'skeuoPrimary'
+  | 'skeuoSecondary'
+  | 'secondary'
+  | 'ghost'
+  | 'danger'
+  | 'glass';
 export type ButtonSize = 'xs' | 'sm' | 'md' | 'icon';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -15,6 +22,8 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   primary:
     'bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)] border border-transparent shadow-xs',
+  skeuoPrimary: 'charkle-skeuo-primary',
+  skeuoSecondary: 'charkle-skeuo-secondary',
   secondary:
     'bg-[var(--bg-subtle)] text-[var(--text-primary)] hover:bg-[var(--border-hairline)] border border-[var(--border-hairline)]',
   ghost:
@@ -22,7 +31,7 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   danger:
     'bg-[var(--danger-soft)] text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white border border-transparent',
   glass:
-    'charkle-glass text-[var(--text-primary)] hover:bg-[var(--glass-bg-hover)] border border-transparent',
+    'charkle-glass text-[var(--text-primary)] border border-transparent',
 };
 
 const SIZE_CLASSES: Record<ButtonSize, string> = {

@@ -79,9 +79,44 @@ pub fn reveal_in_explorer(state: State<'_, AppState>, id: String) -> IpcResult<(
     Ok(())
 }
 
-/// Opens a validated HTTP/HTTPS external URL in the user's default browser.
+/// Opens an existing (or auto-created) directory directly in Windows File Explorer.
 #[tauri::command]
-pub fn open_external_url(url: String) -> IpcResult<()> {
+pub fn open_directory_in_explorer(path: String) -> IpcResult<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(IpcError {
+            code: "INVALID_PATH",
+            message: "目录路径不能为空。".to_string(),
+        });
+    }
+    let dir = std::path::PathBuf::from(trimmed);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| IpcError {
+            code: "IO_ERROR",
+            message: format!("无法创建目录：{e}"),
+        })?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| IpcError {
+                code: "IO_ERROR",
+                message: format!("无法打开文件资源管理器：{e}"),
+            })?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = dir;
+    }
+    Ok(())
+}
+
+/// Validates and opens an HTTP/HTTPS URL in the system default browser without `cmd.exe`
+/// metacharacter truncation (safe for OAuth URLs containing `&` query parameters).
+pub(crate) fn open_validated_http_url(url: &str) -> IpcResult<()> {
     let parsed = Url::parse(url.trim()).map_err(|_| IpcError {
         code: "INVALID_URL",
         message: "无效的链接地址。".to_string(),
@@ -97,8 +132,8 @@ pub fn open_external_url(url: String) -> IpcResult<()> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", parsed.as_str()])
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", parsed.as_str()])
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| IpcError {
@@ -106,5 +141,74 @@ pub fn open_external_url(url: String) -> IpcResult<()> {
                 message: format!("无法打开浏览器：{e}"),
             })?;
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = parsed;
+    }
     Ok(())
+}
+
+const ALLOWED_MS_SETTINGS_URIS: &[&str] = &[
+    "ms-settings:colors",
+    "ms-settings:personalization-colors",
+    "ms-settings:easeofaccess-visualeffects",
+    "ms-settings:display",
+];
+
+fn match_allowed_ms_settings_uri(url: &str) -> Option<&'static str> {
+    let trimmed = url.trim();
+    ALLOWED_MS_SETTINGS_URIS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(trimmed))
+}
+
+/// Opens a validated HTTP/HTTPS external URL in the user's default browser, or opens an
+/// allowlisted Windows Settings URI (`ms-settings:colors`, etc.) via File Explorer shell launch.
+#[tauri::command]
+pub fn open_external_url(url: String) -> IpcResult<()> {
+    let trimmed = url.trim();
+    if let Some(allowed_uri) = match_allowed_ms_settings_uri(trimmed) {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("explorer.exe")
+                .arg(allowed_uri)
+                .spawn()
+                .map_err(|e| IpcError {
+                    code: "IO_ERROR",
+                    message: format!("无法打开系统设置：{e}"),
+                })?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = allowed_uri;
+        }
+        return Ok(());
+    }
+    open_validated_http_url(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ms_settings_allowlist_accepts_colors_and_rejects_arbitrary_uris() {
+        assert_eq!(
+            match_allowed_ms_settings_uri("ms-settings:colors"),
+            Some("ms-settings:colors")
+        );
+        assert_eq!(
+            match_allowed_ms_settings_uri("  MS-SETTINGS:COLORS "),
+            Some("ms-settings:colors")
+        );
+        assert_eq!(
+            match_allowed_ms_settings_uri("ms-settings:powersleep"),
+            None
+        );
+        assert_eq!(
+            match_allowed_ms_settings_uri("file:///C:/Windows/cmd.exe"),
+            None
+        );
+    }
 }

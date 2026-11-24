@@ -77,6 +77,14 @@ impl Default for NormalizedCropRect {
     }
 }
 
+fn finite_or(v: f64, fallback: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
+}
+
 impl NormalizedCropRect {
     pub const FULL: Self = Self {
         x: 0.0,
@@ -86,10 +94,10 @@ impl NormalizedCropRect {
     };
 
     pub fn from_box(top: f64, bottom: f64, left: f64, right: f64) -> Self {
-        let clamped_left = left.clamp(0.0, 1.0);
-        let clamped_right = right.clamp(clamped_left, 1.0);
-        let clamped_top = top.clamp(0.0, 1.0);
-        let clamped_bottom = bottom.clamp(clamped_top, 1.0);
+        let clamped_left = finite_or(left, 0.0).clamp(0.0, 1.0);
+        let clamped_right = finite_or(right, 1.0).clamp(clamped_left, 1.0);
+        let clamped_top = finite_or(top, 0.0).clamp(0.0, 1.0);
+        let clamped_bottom = finite_or(bottom, 1.0).clamp(clamped_top, 1.0);
         Self {
             x: clamped_left,
             y: clamped_top,
@@ -99,39 +107,54 @@ impl NormalizedCropRect {
     }
 
     pub fn area(self) -> f64 {
-        self.width.max(0.0) * self.height.max(0.0)
+        let w = finite_or(self.width, 0.0).max(0.0);
+        let h = finite_or(self.height, 0.0).max(0.0);
+        w * h
     }
 
     pub fn center_point(self) -> BoardPoint {
+        let x = finite_or(self.x, 0.0);
+        let y = finite_or(self.y, 0.0);
+        let w = finite_or(self.width, 1.0);
+        let h = finite_or(self.height, 1.0);
         BoardPoint {
-            x: (self.x + self.width * 0.5).clamp(0.0, 1.0),
-            y: (self.y + self.height * 0.5).clamp(0.0, 1.0),
+            x: (x + w * 0.5).clamp(0.0, 1.0),
+            y: (y + h * 0.5).clamp(0.0, 1.0),
         }
     }
 
     pub fn is_meaningful_subregion(self) -> bool {
-        self.width >= 0.04 && self.height >= 0.04 && self.area() < 0.96
+        let w = finite_or(self.width, 1.0);
+        let h = finite_or(self.height, 1.0);
+        w >= 0.04 && h >= 0.04 && self.area() < 0.96
     }
 
     pub fn clamped(self) -> Self {
-        let left = self.x.clamp(0.0, 0.98);
-        let top = self.y.clamp(0.0, 0.98);
-        let right = (self.x + self.width).clamp(left + 0.02, 1.0);
-        let bottom = (self.y + self.height).clamp(top + 0.02, 1.0);
+        let raw_x = finite_or(self.x, 0.0);
+        let raw_y = finite_or(self.y, 0.0);
+        let raw_w = finite_or(self.width, 1.0);
+        let raw_h = finite_or(self.height, 1.0);
+        let left = raw_x.clamp(0.0, 0.98);
+        let top = raw_y.clamp(0.0, 0.98);
+        let min_right = (left + 0.02).min(1.0);
+        let min_bottom = (top + 0.02).min(1.0);
+        let right = (raw_x + raw_w).clamp(min_right, 1.0);
+        let bottom = (raw_y + raw_h).clamp(min_bottom, 1.0);
         Self {
             x: left,
             y: top,
-            width: right - left,
-            height: bottom - top,
+            width: (right - left).max(0.02),
+            height: (bottom - top).max(0.02),
         }
     }
 
     pub fn padded(self, fraction: f64) -> Self {
-        let pad = fraction.clamp(0.0, 0.35);
-        let left = (self.x - pad).max(0.0);
-        let top = (self.y - pad).max(0.0);
-        let right = (self.x + self.width + pad).min(1.0);
-        let bottom = (self.y + self.height + pad).min(1.0);
+        let base = self.clamped();
+        let pad = finite_or(fraction, 0.0).clamp(0.0, 0.35);
+        let left = (base.x - pad).max(0.0);
+        let top = (base.y - pad).max(0.0);
+        let right = (base.x + base.width + pad).min(1.0);
+        let bottom = (base.y + base.height + pad).min(1.0);
         Self {
             x: left,
             y: top,
@@ -141,14 +164,19 @@ impl NormalizedCropRect {
     }
 
     pub fn mapping_image_point_to_visible(self, point: BoardPoint) -> BoardPoint {
-        if self.width <= 0.01 || self.height <= 0.01 {
-            return point;
+        let w = finite_or(self.width, 1.0);
+        let h = finite_or(self.height, 1.0);
+        if w <= 0.01 || h <= 0.01 {
+            return BoardPoint {
+                x: finite_or(point.x, 0.5).clamp(0.0, 1.0),
+                y: finite_or(point.y, 0.5).clamp(0.0, 1.0),
+            };
         }
-        let vx = (point.x - self.x) / self.width;
-        let vy = (point.y - self.y) / self.height;
+        let vx = (finite_or(point.x, 0.5) - finite_or(self.x, 0.0)) / w;
+        let vy = (finite_or(point.y, 0.5) - finite_or(self.y, 0.0)) / h;
         BoardPoint {
-            x: vx.clamp(0.02, 0.98),
-            y: vy.clamp(0.02, 0.98),
+            x: finite_or(vx, 0.5).clamp(0.02, 0.98),
+            y: finite_or(vy, 0.5).clamp(0.02, 0.98),
         }
     }
 }
@@ -336,6 +364,7 @@ pub struct BoardNode {
     #[serde(with = "upper_uuid")]
     pub id: Uuid,
     pub kind: BoardNodeKind,
+    #[serde(default)]
     pub frame: BoardRect,
     #[serde(default)]
     pub z_index: i32,

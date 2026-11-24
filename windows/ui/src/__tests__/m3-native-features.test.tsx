@@ -17,7 +17,10 @@ function resetStores() {
     themeMode: 'light',
     surfaceState: null,
     sidebarOpen: true,
+    sidebarCollapsed: false,
     inspectorOpen: true,
+    inspectorTab: 'info',
+    visualFilterBarOpen: false,
     layoutMode: 'verticalMasonry',
     cardScale: 236,
     destination: { type: 'allItems' },
@@ -25,8 +28,12 @@ function resetStores() {
     lastSelectedAssetId: null,
     quickLookAssetId: null,
     quickLookOriginRect: null,
+    pendingGalleryReveal: null,
     jumpOpen: false,
     captureOpen: false,
+    settingsOpen: false,
+    onboardingOpen: false,
+    moodboardGeneratorOpen: false,
     activeMoodboardId: null,
     toasts: [],
   });
@@ -65,7 +72,7 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
     resetStores();
   });
 
-  it('operates TopEdgeDropShelf in Compact and Expanded Full-Waterfall modes with clipboard collect & OLE drag-out', async () => {
+  it('operates TopEdgeDropShelf in Compact and Expanded Full-Waterfall modes with clipboard collect & 6px OLE drag-out', async () => {
     render(<TopEdgeDropShelf />);
 
     await waitFor(() => {
@@ -73,28 +80,35 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
       expect(screen.getByText(/charkle_design/)).toBeInTheDocument();
     });
 
+    // Strictly faithful to macOS NotchShelfView: no invented "顶部灵感抽屉" header
+    expect(screen.queryByText('顶部灵感抽屉')).not.toBeInTheDocument();
+
     // Hit rect is synchronized to Win32 WM_NCHITTEST
     expect(mock.lastShelfHitRect).not.toBeNull();
 
     // Switch target routing pill
-    fireEvent.click(screen.getByRole('radio', { name: '当前活跃情绪板' }));
-    expect(screen.getByRole('radio', { name: '当前活跃情绪板' })).toHaveAttribute(
+    fireEvent.click(screen.getByRole('radio', { name: '活跃情绪板' }));
+    expect(screen.getByRole('radio', { name: '活跃情绪板' })).toHaveAttribute(
       'aria-checked',
       'true',
     );
 
-    // Quick-collect clipboard URL chip
-    fireEvent.click(screen.getByRole('button', { name: '立即采集' }));
+    // Quick-collect clipboard URL chip inside Drop Well
+    fireEvent.click(screen.getByRole('button', { name: /检测到剪贴板链接/ }));
     await waitFor(() => {
       expect(screen.getByText(/已采集 1 项剪贴板内容/)).toBeInTheDocument();
     });
 
-    // Expand to Full-Waterfall Shelf mode & trigger OLE outbound drag
+    // Expand to Full-Waterfall mode & drag card past 6px threshold to trigger OLE outbound drag
     fireEvent.click(screen.getByRole('button', { name: '展开为全瀑布流抽屉' }));
     expect(screen.getByTestId('top-edge-drop-shelf')).toHaveAttribute('data-mode', 'waterfall');
 
-    const dragOutBtn = screen.getByRole('button', { name: '原生拖出 暖调建筑海报参考' });
-    fireEvent.mouseDown(dragOutBtn, { button: 0 });
+    const cardEl = document.querySelector('[data-shelf-card-id="20000000-0000-4000-8000-000000000001"]')!;
+    expect(cardEl).not.toBeNull();
+    fireEvent.pointerDown(cardEl, { button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(window, { clientX: 120, clientY: 120, buttons: 1 });
+    fireEvent.pointerUp(window, { clientX: 120, clientY: 120 });
+
     await waitFor(() => {
       expect(mock.lastOutboundDragIds).toEqual(['20000000-0000-4000-8000-000000000001']);
     });
@@ -123,7 +137,7 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
     });
   });
 
-  it('exposes Desktop Integration popover (hotkeys/autostart/OCR) and Inspector OLE drag-out + OCR extraction', async () => {
+  it('exposes Desktop Integration popover (hotkeys/autostart/OCR) and Inspector pointer OLE drag-out + OCR extraction', async () => {
     render(<App />);
 
     await waitFor(() => {
@@ -142,7 +156,7 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
       expect(screen.getByText('charkle://')).toBeInTheDocument();
     });
 
-    // Select asset 1 -> click Inspector OCR & OLE Drag-Out buttons
+    // Select asset 1 -> click Inspector OCR & Pointer-drag OLE Drag-Out chip
     const card = document.querySelector('[data-asset-id="20000000-0000-4000-8000-000000000001"]')!;
     fireEvent.click(card);
 
@@ -155,7 +169,11 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
       expect(screen.getByText(/识别文字：Charkle 视觉灵感参考/)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: /拖出原文件/ }));
+    const dragOutChip = screen.getByRole('button', { name: /按住拖出/ });
+    fireEvent.pointerDown(dragOutChip, { button: 0, clientX: 50, clientY: 50 });
+    fireEvent.pointerMove(window, { clientX: 70, clientY: 70, buttons: 1 });
+    fireEvent.pointerUp(window, { clientX: 70, clientY: 70 });
+
     await waitFor(() => {
       expect(mock.lastOutboundDragIds).toEqual(['20000000-0000-4000-8000-000000000001']);
     });

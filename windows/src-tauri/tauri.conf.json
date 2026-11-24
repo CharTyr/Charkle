@@ -21,7 +21,8 @@
         "minHeight": 620,
         "center": true,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
+        "backgroundColor": "#00000000",
         "shadow": true,
         "resizable": true
       }
@@ -50,7 +51,28 @@
     "resources": {
       "../../Resources/FigmaPlugin/manifest.json": "Resources/FigmaPlugin/manifest.json",
       "../../Resources/FigmaPlugin/code.js": "Resources/FigmaPlugin/code.js",
-      "../../Resources/FigmaPlugin/ui.html": "Resources/FigmaPlugin/ui.html"
+      "../../Resources/FigmaPlugin/ui.html": "Resources/FigmaPlugin/ui.html",
+      "resources/BrowserExtension/manifest.json": "Resources/BrowserExtension/manifest.json",
+      "resources/BrowserExtension/background.js": "Resources/BrowserExtension/background.js",
+      "resources/BrowserExtension/content.js": "Resources/BrowserExtension/content.js",
+      "resources/BrowserExtension/popup.html": "Resources/BrowserExtension/popup.html",
+      "resources/BrowserExtension/popup.css": "Resources/BrowserExtension/popup.css",
+      "resources/BrowserExtension/popup.js": "Resources/BrowserExtension/popup.js",
+      "resources/BrowserExtension/options.html": "Resources/BrowserExtension/options.html",
+      "resources/BrowserExtension/options.css": "Resources/BrowserExtension/options.css",
+      "resources/BrowserExtension/options.js": "Resources/BrowserExtension/options.js",
+      "resources/BrowserExtension/README.md": "Resources/BrowserExtension/README.md",
+      "resources/BrowserExtension/icons/charkle-dark.svg": "Resources/BrowserExtension/icons/charkle-dark.svg",
+      "resources/BrowserExtension/icons/charkle-light.svg": "Resources/BrowserExtension/icons/charkle-light.svg",
+      "resources/BrowserExtension/icons/icon-16.png": "Resources/BrowserExtension/icons/icon-16.png",
+      "resources/BrowserExtension/icons/icon-32.png": "Resources/BrowserExtension/icons/icon-32.png",
+      "resources/BrowserExtension/icons/icon-48.png": "Resources/BrowserExtension/icons/icon-48.png",
+      "resources/BrowserExtension/icons/icon-128.png": "Resources/BrowserExtension/icons/icon-128.png",
+      "resources/BrowserExtension/lib/api.js": "Resources/BrowserExtension/lib/api.js",
+      "resources/BrowserExtension/lib/image-filter.js": "Resources/BrowserExtension/lib/image-filter.js",
+      "resources/BrowserExtension/lib/storage.js": "Resources/BrowserExtension/lib/storage.js",
+      "resources/BrowserExtension/lib/url-detect.js": "Resources/BrowserExtension/lib/url-detect.js",
+      "resources/BrowserExtension/lib/xhs-parser.js": "Resources/BrowserExtension/lib/xhs-parser.js"
     },
     "windows": {
       "webviewInstallMode": {

@@ -48,15 +48,31 @@ impl EditorialLayoutSolver {
         assets_by_id: &HashMap<Uuid, AssetRecord>,
         padding: f64,
     ) -> EditorialLayoutResult {
-        let effective_padding = match config.style {
-            EditorialStyle::Magazine => (padding + 10.0).max(36.0),
-            EditorialStyle::Balanced => padding.max(22.0),
-            EditorialStyle::Compact => padding.clamp(12.0, 14.0),
+        let safe_container_w = if container_width.is_finite() && container_width > 0.0 {
+            container_width
+        } else {
+            1120.0
         };
-        let usable_width = (container_width - effective_padding * 2.0).max(320.0);
+        let safe_padding = if padding.is_finite() {
+            padding.clamp(0.0, 240.0)
+        } else {
+            28.0
+        };
+        let safe_spacing = if config.spacing.is_finite() {
+            config.spacing.clamp(0.0, 120.0)
+        } else {
+            16.0
+        };
+
+        let effective_padding = match config.style {
+            EditorialStyle::Magazine => (safe_padding + 10.0).max(36.0),
+            EditorialStyle::Balanced => safe_padding.max(22.0),
+            EditorialStyle::Compact => safe_padding.clamp(12.0, 14.0),
+        };
+        let usable_width = (safe_container_w - effective_padding * 2.0).max(320.0);
         let style_spacing = match config.style {
-            EditorialStyle::Magazine => (config.spacing + 10.0).max(26.0),
-            EditorialStyle::Balanced => config.spacing.max(15.0),
+            EditorialStyle::Magazine => (safe_spacing + 10.0).max(26.0),
+            EditorialStyle::Balanced => safe_spacing.max(15.0),
             EditorialStyle::Compact => 6.0,
         };
 
@@ -99,7 +115,7 @@ impl EditorialLayoutSolver {
                         .iter()
                         .copied()
                         .fold(effective_padding, f64::max);
-                    let raw_h = if node.frame.height > 0.0 {
+                    let raw_h = if node.frame.height.is_finite() && node.frame.height > 0.0 {
                         node.frame.height
                     } else {
                         60.0
@@ -137,8 +153,13 @@ impl EditorialLayoutSolver {
                     let y = column_heights[col];
                     let char_count = text.chars().count();
                     let estimated_lines = (((char_count as f64) / 18.0) as i32 + 2).clamp(3, 10);
+                    let safe_font = if font_size.is_finite() {
+                        font_size.clamp(10.0, 48.0)
+                    } else {
+                        14.0
+                    };
                     let height =
-                        ((estimated_lines as f64) * (font_size * 1.45).max(18.0) + 42.0).max(124.0);
+                        ((estimated_lines as f64) * (safe_font * 1.45).max(18.0) + 42.0).max(124.0);
                     frames.insert(key, BoardRect::new(x, y, col_width, height));
                     column_heights[col] = y + height + style_spacing;
                 }
@@ -203,7 +224,7 @@ impl EditorialLayoutSolver {
                 .map(|n| format_swift_uuid(&n.id))
                 .collect(),
             content_size: EditorialSize {
-                width: container_width,
+                width: safe_container_w,
                 height: max_height.max(480.0),
             },
             column_width: col_width,
@@ -253,7 +274,18 @@ impl EditorialLayoutSolver {
                 BoardNodeKind::AssetRef { asset_id, crop, .. } => {
                     resolved_aspect_ratio(asset_id, crop, assets_by_id, EditorialStyle::Balanced)
                 }
-                _ => (node.frame.width / node.frame.height.max(1.0)).clamp(0.65, 2.2),
+                _ => {
+                    let raw = if node.frame.width.is_finite() && node.frame.height.is_finite() {
+                        node.frame.width / node.frame.height.max(1.0)
+                    } else {
+                        1.25
+                    };
+                    if raw.is_finite() {
+                        raw.clamp(0.65, 2.2)
+                    } else {
+                        1.25
+                    }
+                }
             })
             .collect();
 
@@ -273,8 +305,8 @@ impl EditorialLayoutSolver {
             for (idx, &ratio) in ratios.iter().enumerate().take(n) {
                 current_row.push(idx);
                 current_sum += ratio;
-                let remaining_rows = row_count - rows.len() - 1;
-                let remaining_items = n - idx - 1;
+                let remaining_rows = row_count.saturating_sub(rows.len()).saturating_sub(1);
+                let remaining_items = n.saturating_sub(idx).saturating_sub(1);
                 if remaining_rows > 0
                     && (remaining_items == remaining_rows || current_sum >= target_row_ratio * 0.88)
                 {
@@ -398,7 +430,12 @@ impl EditorialLayoutSolver {
             .fold(f64::NEG_INFINITY, f64::max);
         let origin_x = if min_x.is_finite() { min_x } else { 40.0 };
         let origin_y = if min_y.is_finite() { min_y } else { 40.0 };
-        let width = (max_x - origin_x + 56.0).clamp(760.0, 1440.0);
+        let span = if max_x.is_finite() {
+            max_x - origin_x + 56.0
+        } else {
+            1080.0
+        };
+        let width = span.clamp(760.0, 1440.0);
 
         let solved = Self::solve(
             &target_nodes,
@@ -436,11 +473,15 @@ fn resolved_aspect_ratio(
     let mut ratio = assets_by_id
         .get(&asset_id)
         .map(AssetRecord::aspect_ratio)
+        .filter(|v| v.is_finite() && *v > 0.05)
         .unwrap_or(1.25);
     if let Some(c) = crop {
-        if c.width > 0.05 && c.height > 0.05 {
+        if c.width.is_finite() && c.height.is_finite() && c.width > 0.05 && c.height > 0.05 {
             ratio *= c.width / c.height;
         }
+    }
+    if !ratio.is_finite() {
+        ratio = 1.25;
     }
     match style {
         EditorialStyle::Compact => ratio.clamp(0.80, 1.32),
@@ -450,6 +491,9 @@ fn resolved_aspect_ratio(
 }
 
 fn shortest_column_index(heights: &[f64]) -> usize {
+    if heights.is_empty() {
+        return 0;
+    }
     let mut best_idx = 0;
     let mut best_val = heights[0];
     for (i, &val) in heights.iter().enumerate().skip(1) {

@@ -1,7 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { LayoutGrid, Sparkles, Trash2 } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { CheckCircle2, Circle, Folder, Image as ImageIcon, MinusCircle, Sparkles, Wand2 } from 'lucide-react';
 import { getTransport } from '../../api/transport';
-import { CharkleFolderIcon } from '../../design-system';
+import {
+  Button,
+  CharkleFolderIcon,
+  CharkleIcon,
+  ModalShell,
+  Popover,
+  useDelayedFlag,
+} from '../../design-system';
 import {
   useCoordinatorStore,
   useLibraryStore,
@@ -12,34 +19,108 @@ import {
   flattenFolderTree,
   type AssetRecord,
   type FolderSuggestion,
+  type InboxTriageRecommendation,
 } from '../../types/domain';
+import { FolderMoveMenu } from '../sidebar/FolderMoveMenu';
 
 export interface InboxTriageBarProps {
   assets: AssetRecord[];
 }
 
+const TriageRowThumb: React.FC<{ asset?: AssetRecord; rawUrl: string }> = ({ asset, rawUrl }) => {
+  const thumbSrc =
+    rawUrl.startsWith('data:') || rawUrl.startsWith('blob:')
+      ? rawUrl
+      : asset?.updatedAt != null
+        ? `${rawUrl}?v=${encodeURIComponent(String(asset.updatedAt))}`
+        : rawUrl;
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [thumbSrc]);
+
+  if (asset?.fileName.toLowerCase().endsWith('.swatch')) {
+    const hex = (asset.dominantColors[0]?.hex || '#2A60E0').toUpperCase();
+    return (
+      <div
+        className="h-10 w-10 rounded-[var(--radius-card-inner)] border border-black/10 dark:border-white/15 shrink-0"
+        style={{ backgroundColor: hex }}
+      />
+    );
+  }
+
+  if (failed) {
+    return (
+      <div className="h-10 w-10 rounded-[var(--radius-card-inner)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] flex items-center justify-center text-[var(--text-tertiary)] shrink-0">
+        <ImageIcon size={15} />
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={thumbSrc}
+      alt=""
+      onError={() => setFailed(true)}
+      className="h-10 w-10 rounded-[var(--radius-card-inner)] object-cover bg-[var(--bg-elevated)] shrink-0"
+    />
+  );
+};
+
 /**
- * Rapid Inbox triage strip (DESIGN.md M2-R6):
- * - Keys 1–9 move selected/top Inbox asset into the first 9 folders immediately with Undo toast
- * - Live smart folder suggestion chip with one-click Accept
- * - Quick send to active Moodboard & soft-trash
+ * Floating Liquid Glass Inbox Triage Bar matching macOS `MainWindowView.swift:1421-1583`:
+ * - Pending count + AI recommended folder 1-click pill + Batch Smart Triage sheet
+ * - Quick 1–9 folder archive chips + hierarchical "全部目录" dropdown
+ * - 1-click "一键收入情绪板" menu (all boards + create new moodboard from inbox)
  */
 export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
   const destination = useCoordinatorStore((s) => s.destination);
   const selectedAssetIds = useCoordinatorStore((s) => s.selectedAssetIds);
-  const activeMoodboardId = useCoordinatorStore((s) => s.activeMoodboardId);
   const clearSelection = useCoordinatorStore((s) => s.clearSelection);
+  const setSelection = useCoordinatorStore((s) => s.setSelection);
+  const setMoodboardGeneratorOpen = useCoordinatorStore((s) => s.setMoodboardGeneratorOpen);
+  const pushToast = useCoordinatorStore((s) => s.pushToast);
 
   const folders = useLibraryStore((s) => s.folders);
+  const inboxCount = useLibraryStore((s) => s.inboxCount);
   const updateAssets = useLibraryStore((s) => s.updateAssets);
 
   const boards = useMoodboardStore((s) => s.boards);
   const addAssetsToBoard = useMoodboardStore((s) => s.addAssetsToBoard);
 
-  const topNineFolders = useMemo(
-    () => flattenFolderTree(buildFolderTree(folders)).slice(0, 9),
+  const allFoldersBtnRef = useRef<HTMLButtonElement | null>(null);
+  const moodboardBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  const [allFoldersOpen, setAllFoldersOpen] = useState(false);
+  const [moodboardMenuOpen, setMoodboardMenuOpen] = useState(false);
+  const [triageRunning, setTriageRunning] = useState(false);
+  const [triageModalOpen, setTriageModalOpen] = useState(false);
+  const [triageRecs, setTriageRecs] = useState<InboxTriageRecommendation[]>([]);
+  const [selectedTriageIds, setSelectedTriageIds] = useState<Set<string>>(new Set());
+
+  const showTriageSpinner = useDelayedFlag(triageRunning, 300, 500);
+
+  const flatFolders = useMemo(
+    () => flattenFolderTree(buildFolderTree(folders)),
     [folders],
   );
+  const topNineFolders = useMemo(() => flatFolders.slice(0, 9), [flatFolders]);
+
+  const folderDisplayPath = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f]));
+    return (folderId: string): string => {
+      const names: string[] = [];
+      const visited = new Set<string>();
+      let cur = byId.get(folderId);
+      while (cur && !visited.has(cur.id)) {
+        visited.add(cur.id);
+        names.unshift(cur.name);
+        cur = cur.parentID ? byId.get(cur.parentID) : undefined;
+      }
+      return names.join(' / ');
+    };
+  }, [folders]);
 
   const targetAssets = useMemo(() => {
     if (selectedAssetIds.length > 0) {
@@ -75,6 +156,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
   if (!primaryAsset) return null;
 
   const targetIds = targetAssets.map((a) => a.id);
+  const transport = getTransport();
 
   const moveToFolder = async (folderId: string, folderName: string) => {
     clearSelection();
@@ -88,91 +170,349 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
     );
   };
 
-  const targetBoardId = activeMoodboardId ?? boards[0]?.id ?? null;
+  const handleRunSmartTriage = async () => {
+    if (triageRunning) return;
+    setTriageRunning(true);
+    try {
+      const recs = await transport.runInboxSmartTriage();
+      setTriageRecs(recs);
+      setSelectedTriageIds(
+        new Set(
+          recs
+            .filter((r) => r.recommendedFolderID && r.confidence >= 0.65)
+            .map((r) => r.assetID),
+        ),
+      );
+      setTriageModalOpen(true);
+    } catch (err) {
+      pushToast({
+        message: err instanceof Error ? err.message : '智能分拣失败，请检查相关配置',
+        tone: 'error',
+      });
+    } finally {
+      setTriageRunning(false);
+    }
+  };
+
+  const actionableRecs = triageRecs.filter((r) => Boolean(r.recommendedFolderID));
+  const selectedRecs = actionableRecs.filter((r) => selectedTriageIds.has(r.assetID));
+
+  const handleApplyTriage = async () => {
+    const batch = selectedRecs;
+    setTriageModalOpen(false);
+    if (batch.length === 0) return;
+
+    const grouped = new Map<string, string[]>();
+    for (const rec of batch) {
+      if (!rec.recommendedFolderID) continue;
+      const list = grouped.get(rec.recommendedFolderID) ?? [];
+      list.push(rec.assetID);
+      grouped.set(rec.recommendedFolderID, list);
+    }
+
+    let movedCount = 0;
+    for (const [folderId, ids] of grouped.entries()) {
+      await updateAssets(
+        { assetIDs: ids, folderAssignment: { folder: folderId } },
+        destination,
+      );
+      movedCount += ids.length;
+    }
+    pushToast({
+      message: `智能分拣完成：已归档 ${movedCount} 项素材`,
+      tone: 'success',
+    });
+  };
 
   return (
-    <div
-      data-testid="inbox-triage-bar"
-      className="shrink-0 mx-4 mb-2 px-3 py-2 rounded-[var(--radius-settings-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] flex flex-col gap-2"
-    >
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-[11.5px] font-semibold text-[var(--accent)] bg-[var(--accent-soft)] px-2 py-0.5 rounded-full shrink-0">
-            收件箱分拣
-          </span>
-          <span className="text-[12.5px] font-medium text-[var(--text-primary)] truncate">
-            {targetIds.length > 1
-              ? `已选 ${targetIds.length} 项素材`
-              : primaryAsset.title}
-          </span>
-          <span className="hidden md:inline text-[11.5px] text-[var(--text-tertiary)]">
-            按数字键 1–9 一键归档
+    <>
+      <div
+        data-testid="inbox-triage-bar"
+        data-adapt-glass="true"
+        className="pointer-events-auto charkle-glass charkle-reveal-top rounded-[var(--radius-card-outer)] px-2.5 py-1.5 flex items-center gap-2"
+      >
+        {/* Left: Inbox count */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <CharkleIcon name="inbox" style="duotone" size={14.5} isActive />
+          <span className="text-[12px] font-semibold text-[var(--text-primary)] charkle-tabular whitespace-nowrap">
+            待整理 {inboxCount || assets.length} 项
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {suggestion && (
-            <button
-              type="button"
-              onClick={() => void moveToFolder(suggestion.folderID, suggestion.folderName)}
-              title={suggestion.reason}
-              className="charkle-pressable h-7 px-2.5 inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-[var(--accent-soft)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
-            >
-              <Sparkles size={12.5} />
-              <span>建议归入：{suggestion.folderName}</span>
-            </button>
-          )}
+        <div className="h-4 w-px bg-[var(--border-hairline)] shrink-0" />
 
-          {targetBoardId && (
-            <button
-              type="button"
-              onClick={() => void addAssetsToBoard(targetBoardId, targetIds)}
-              className="charkle-pressable h-7 px-2.5 inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] text-[var(--text-primary)] hover:bg-[var(--border-hairline)] text-[12px] cursor-pointer"
-            >
-              <LayoutGrid size={12.5} />
-              <span>发送至情绪板</span>
-            </button>
-          )}
-
+        {/* AI Suggested Folder 1-Click Pill */}
+        {suggestion && (
           <button
             type="button"
-            onClick={() => {
-              clearSelection();
-              void updateAssets({ assetIDs: targetIds, isTrashed: true }, destination, {
-                undoMessage: `已将 ${targetIds.length} 项移入回收站`,
-                undoPatch: { assetIDs: targetIds, isTrashed: false },
-              });
-            }}
-            className="charkle-pressable h-7 px-2 inline-flex items-center gap-1 rounded-[var(--radius-chip)] text-[var(--danger)] hover:bg-[var(--danger-soft)] text-[12px] cursor-pointer"
+            onClick={() => void moveToFolder(suggestion.folderID, suggestion.folderName)}
+            title={suggestion.reason}
+            data-pill="true"
+            className="charkle-pressable h-6 px-2 inline-flex items-center gap-1 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/18 text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap"
           >
-            <Trash2 size={12.5} />
-            <span>舍弃</span>
+            <Sparkles size={10.5} className="shrink-0" />
+            <span className="max-w-[96px] truncate">推荐：{suggestion.folderName}</span>
           </button>
-        </div>
-      </div>
+        )}
 
-      {topNineFolders.length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap">
+        {/* Batch Inbox Smart Triage */}
+        {folders.length > 0 && (
+          <button
+            type="button"
+            disabled={triageRunning}
+            onClick={() => void handleRunSmartTriage()}
+            title="批量识别收件箱素材并推荐归档目录"
+            data-pill="true"
+            className="charkle-pressable h-6 px-2 inline-flex items-center gap-1 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/18 text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap disabled:opacity-50"
+          >
+            {showTriageSpinner ? (
+              <span
+                aria-hidden="true"
+                className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"
+              />
+            ) : (
+              <Wand2 size={11} className="shrink-0" />
+            )}
+            <span>{triageRunning ? '分拣中…' : '智能分拣'}</span>
+          </button>
+        )}
+
+        {/* Quick 1–9 Folder Archive Chips (horizontal wheel-scrollable, never crushing chip labels to 0px) */}
+        <div
+          onWheel={(e) => {
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+              e.currentTarget.scrollLeft += e.deltaY;
+            }
+          }}
+          className="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto charkle-scroll-hidden"
+        >
           {topNineFolders.map((node, index) => (
             <button
               key={node.folder.id}
               type="button"
               onClick={() => void moveToFolder(node.folder.id, node.folder.name)}
-              className="charkle-pressable h-7 px-2 inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] text-[12px] text-[var(--text-primary)] cursor-pointer"
+              title={`${folderDisplayPath(node.folder.id)}（按数字键 ${index + 1}）`}
+              className="charkle-pressable h-6 px-2 inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-black/[0.05] dark:bg-white/[0.08] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] text-[11px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
             >
-              <kbd className="text-[10.5px] font-semibold px-1 py-0.5 rounded bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-[var(--text-tertiary)] charkle-tabular">
+              <kbd className="text-[9.5px] font-bold charkle-mono w-[14px] h-[14px] inline-flex items-center justify-center rounded-[4px] bg-black/[0.08] dark:bg-white/[0.12] text-[var(--text-secondary)] shrink-0">
                 {index + 1}
               </kbd>
               <CharkleFolderIcon
                 colorHex={node.folder.colorHex}
                 customSymbol={node.folder.customSymbol}
-                size={13.5}
+                size={13}
               />
-              <span className="max-w-[120px] truncate">{node.folder.name}</span>
+              <span className="max-w-[116px] shrink-0 truncate">
+                {node.depth > 0 ? `↳ ${node.folder.name}` : node.folder.name}
+              </span>
             </button>
           ))}
         </div>
-      )}
-    </div>
+
+        {/* Always-accessible Full Folder Menu */}
+        {folders.length > 0 && (
+          <button
+            ref={allFoldersBtnRef}
+            type="button"
+            title="展开全部文件夹归档目录"
+            onClick={() => setAllFoldersOpen((v) => !v)}
+            className="charkle-pressable h-6 px-2 inline-flex items-center gap-1 rounded-[var(--radius-chip)] bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.09] dark:hover:bg-white/[0.14] text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
+          >
+            <Folder size={11} className="shrink-0" />
+            <span>目录</span>
+          </button>
+        )}
+
+        {/* 1-Click Send to Moodboard Menu */}
+        <button
+          ref={moodboardBtnRef}
+          type="button"
+          title="一键收入情绪板"
+          onClick={() => setMoodboardMenuOpen((v) => !v)}
+          data-pill="true"
+          className="charkle-pressable h-[26px] px-2.5 inline-flex items-center gap-1.5 rounded-full bg-black/[0.07] dark:bg-white/[0.10] hover:bg-black/[0.11] dark:hover:bg-white/[0.16] text-[11.5px] font-semibold text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
+        >
+          <CharkleIcon name="sparkle-board" style="duotone" size={13} isActive />
+          <span>收入情绪板</span>
+        </button>
+      </div>
+
+      {/* All Folders Hierarchical Popover */}
+      <Popover
+        open={allFoldersOpen}
+        onOpenChange={setAllFoldersOpen}
+        anchorEl={allFoldersBtnRef.current}
+        placement="bottom-start"
+        className="p-1.5"
+      >
+        <FolderMoveMenu
+          folders={folders}
+          onSelectFolder={(folderId) => {
+            setAllFoldersOpen(false);
+            if (!folderId) return;
+            const folderName = folders.find((f) => f.id === folderId)?.name ?? '文件夹';
+            void moveToFolder(folderId, folderName);
+          }}
+        />
+      </Popover>
+
+      {/* Send to Moodboard Popover */}
+      <Popover
+        open={moodboardMenuOpen}
+        onOpenChange={setMoodboardMenuOpen}
+        anchorEl={moodboardBtnRef.current}
+        placement="bottom-end"
+        className="w-[228px] p-1.5"
+      >
+        <div className="flex flex-col gap-0.5 text-[12.5px]">
+          {boards.map((board) => (
+            <button
+              key={board.id}
+              type="button"
+              onClick={() => {
+                setMoodboardMenuOpen(false);
+                void addAssetsToBoard(board.id, targetIds);
+              }}
+              className="w-full text-left px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] truncate cursor-pointer"
+            >
+              {board.title}
+            </button>
+          ))}
+          {boards.length > 0 && <div className="my-1 h-px bg-[var(--border-hairline)]" />}
+          <button
+            type="button"
+            onClick={() => {
+              setMoodboardMenuOpen(false);
+              setSelection(assets.slice(0, 16).map((a) => a.id));
+              setMoodboardGeneratorOpen(true);
+            }}
+            className="w-full flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--accent)] hover:bg-[var(--accent-soft)] font-medium cursor-pointer"
+          >
+            <Sparkles size={13} />
+            用当前收件箱创建新情绪板…
+          </button>
+        </div>
+      </Popover>
+
+      {/* Batch Inbox Smart Triage Preview Modal (matching macOS inboxBatchTriageSheet) */}
+      <ModalShell
+        open={triageModalOpen}
+        onClose={() => setTriageModalOpen(false)}
+        title="收件箱智能分拣预览"
+        subtitle={`共分析 ${triageRecs.length} 项待整理素材，其中 ${actionableRecs.length} 项匹配到已有目录；高置信度项已默认勾选。`}
+        width="md"
+        footer={
+          <div className="w-full flex items-center justify-between gap-2">
+            <div>
+              {actionableRecs.length > 0 && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    if (selectedRecs.length === actionableRecs.length) {
+                      setSelectedTriageIds(new Set());
+                    } else {
+                      setSelectedTriageIds(new Set(actionableRecs.map((r) => r.assetID)));
+                    }
+                  }}
+                >
+                  {selectedRecs.length === actionableRecs.length ? '取消全选' : '全选推荐项'}
+                </Button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setTriageModalOpen(false)}>
+                取消
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={selectedRecs.length === 0}
+                onClick={() => void handleApplyTriage()}
+              >
+                归档已勾选 ({selectedRecs.length} 项)
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        {triageRecs.length === 0 ? (
+          <div className="py-10 text-center text-[12.5px] text-[var(--text-secondary)]">
+            收件箱暂无可分拣素材。
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2 max-h-[360px] overflow-y-auto charkle-scroll">
+            {triageRecs.map((rec) => {
+              const hasTarget = Boolean(rec.recommendedFolderID);
+              const checked = selectedTriageIds.has(rec.assetID);
+              return (
+                <div
+                  key={rec.assetID}
+                  className="p-2 rounded-[var(--radius-popover-inner)] bg-[var(--bg-subtle)]/70 flex items-center gap-2.5"
+                >
+                  <button
+                    type="button"
+                    disabled={!hasTarget}
+                    onClick={() => {
+                      if (!hasTarget) return;
+                      setSelectedTriageIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(rec.assetID)) next.delete(rec.assetID);
+                        else next.add(rec.assetID);
+                        return next;
+                      });
+                    }}
+                    className="cursor-pointer disabled:opacity-45 shrink-0 text-[var(--accent)]"
+                  >
+                    {!hasTarget ? (
+                      <MinusCircle size={16} className="text-[var(--text-tertiary)]" />
+                    ) : checked ? (
+                      <CheckCircle2 size={16} />
+                    ) : (
+                      <Circle size={16} className="text-[var(--text-tertiary)]" />
+                    )}
+                  </button>
+
+                  <TriageRowThumb
+                    asset={assets.find((a) => a.id === rec.assetID)}
+                    rawUrl={transport.thumbnailUrl(rec.assetID, 'grid520')}
+                  />
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12.5px] font-medium text-[var(--text-primary)] truncate">
+                      {rec.assetTitle}
+                    </div>
+                    <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                      {rec.reason}
+                    </div>
+                  </div>
+
+                  {rec.recommendedFolderName ? (
+                    <span
+                      className={[
+                        'inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold shrink-0 charkle-tabular',
+                        rec.confidence >= 0.65
+                          ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : 'bg-[var(--bg-elevated)] text-[var(--text-primary)]',
+                      ].join(' ')}
+                    >
+                      <Folder size={10.5} />
+                      <span>{rec.recommendedFolderName}</span>
+                      <span className="text-[10px] opacity-75">
+                        {Math.round(rec.confidence * 100)}%
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="px-2 py-1 rounded-full bg-[var(--bg-elevated)] text-[11px] text-[var(--text-secondary)] shrink-0">
+                      留在收件箱
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </ModalShell>
+    </>
   );
 };

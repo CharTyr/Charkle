@@ -1,6 +1,6 @@
 //! Deterministic TypeScript mirror of `crates/charkle-core/src/layout/editorial.rs`
-//! and macOS `EditorialLayoutSolver.swift` enabling 60/120 FPS Auto Editorial drag-reorder
-//! and Smart Auto-Layout GroupFrame reflow with zero IPC round-trips.
+//! and macOS `EditorialLayoutSolver.swift` enabling 60/120 FPS Auto Editorial drag-reorder,
+//! Smart Auto-Layout GroupFrame reflow, connector geometry, and harmonious palette extraction.
 
 import {
   isAutoEditorialMode,
@@ -14,33 +14,159 @@ import {
   type EditorialLayoutResult,
   type EditorialStyle,
   type GroupTint,
+  type InkStrokePoint,
+  type LabColor,
   type MoodboardDocument,
   type NormalizedCropRect,
   type NoteStyle,
 } from '../../types/domain';
 
-export const NOTE_STYLE_PALETTE: Record<
-  NoteStyle,
-  { label: string; bg: string; fg: string; border: string }
-> = {
-  paper: { label: '素纸', bg: '#FFFFFF', fg: '#1D1F23', border: '#D9DBDE' },
-  ink: { label: '墨黑', bg: '#1D1F24', fg: '#F1F2F4', border: '#3A3D45' },
-  warm: { label: '暖羊皮', bg: '#F7F0E4', fg: '#392F22', border: '#C9B79C' },
-  sage: { label: '鼠尾草', bg: '#E8F0EA', fg: '#203227', border: '#9AB5A3' },
-  slate: { label: '石板蓝', bg: '#E9EEF3', fg: '#1F2B36', border: '#9EB0C2' },
+export interface NoteStyleTheme {
+  label: string;
+  bg: string;
+  fg: string;
+  border: string;
+}
+
+export interface GroupTintTheme {
+  label: string;
+  accent: string;
+  bgLight: string;
+  bgDark: string;
+  headerLight: string;
+  headerDark: string;
+}
+
+export const NOTE_STYLE_PALETTE: Record<NoteStyle, NoteStyleTheme> = {
+  paper: { label: '纸白', bg: '#FFFFFF', fg: '#1D1F23', border: 'rgba(0,0,0,0.09)' },
+  ink: { label: '墨黑', bg: '#1D1F24', fg: '#F1F2F4', border: 'rgba(255,255,255,0.14)' },
+  warm: { label: '暖沙', bg: '#F7F0E4', fg: '#392F22', border: 'rgba(201,183,156,0.45)' },
+  sage: { label: '鼠尾草', bg: '#E8F0EA', fg: '#203227', border: 'rgba(154,181,163,0.45)' },
+  slate: { label: '岩灰', bg: '#E9EEF3', fg: '#1F2B36', border: 'rgba(158,176,194,0.45)' },
 };
 
-export const GROUP_TINT_PALETTE: Record<
-  GroupTint,
-  { label: string; accent: string; bgLight: string; bgDark: string }
-> = {
-  neutral: { label: '中性灰', accent: '#7D838B', bgLight: 'rgba(125,131,139,0.08)', bgDark: 'rgba(125,131,139,0.14)' },
-  sand: { label: '暖沙', accent: '#B5956B', bgLight: 'rgba(181,149,107,0.10)', bgDark: 'rgba(181,149,107,0.15)' },
-  sage: { label: '鼠尾草', accent: '#6B8E76', bgLight: 'rgba(107,142,118,0.10)', bgDark: 'rgba(107,142,118,0.15)' },
-  slate: { label: '石板灰', accent: '#627A94', bgLight: 'rgba(98,122,148,0.10)', bgDark: 'rgba(98,122,148,0.15)' },
-  terracotta: { label: '陶土', accent: '#BA6B55', bgLight: 'rgba(186,107,85,0.10)', bgDark: 'rgba(186,107,85,0.15)' },
-  ocean: { label: '深海蓝', accent: '#4D7E97', bgLight: 'rgba(77,126,151,0.10)', bgDark: 'rgba(77,126,151,0.15)' },
+export const GROUP_TINT_PALETTE: Record<GroupTint, GroupTintTheme> = {
+  neutral: {
+    label: '中性灰',
+    accent: '#7D838B',
+    bgLight: 'rgba(125,131,139,0.03)',
+    bgDark: 'rgba(125,131,139,0.06)',
+    headerLight: 'rgba(125,131,139,0.08)',
+    headerDark: 'rgba(125,131,139,0.14)',
+  },
+  sand: {
+    label: '暖沙',
+    accent: '#B5956B',
+    bgLight: 'rgba(181,149,107,0.035)',
+    bgDark: 'rgba(181,149,107,0.065)',
+    headerLight: 'rgba(181,149,107,0.08)',
+    headerDark: 'rgba(181,149,107,0.14)',
+  },
+  sage: {
+    label: '青苔',
+    accent: '#6B8E76',
+    bgLight: 'rgba(107,142,118,0.035)',
+    bgDark: 'rgba(107,142,118,0.065)',
+    headerLight: 'rgba(107,142,118,0.08)',
+    headerDark: 'rgba(107,142,118,0.14)',
+  },
+  slate: {
+    label: '板岩',
+    accent: '#627A94',
+    bgLight: 'rgba(98,122,148,0.035)',
+    bgDark: 'rgba(98,122,148,0.065)',
+    headerLight: 'rgba(98,122,148,0.08)',
+    headerDark: 'rgba(98,122,148,0.14)',
+  },
+  terracotta: {
+    label: '陶土',
+    accent: '#BA6B55',
+    bgLight: 'rgba(186,107,85,0.035)',
+    bgDark: 'rgba(186,107,85,0.065)',
+    headerLight: 'rgba(186,107,85,0.08)',
+    headerDark: 'rgba(186,107,85,0.14)',
+  },
+  ocean: {
+    label: '深海',
+    accent: '#4D7E97',
+    bgLight: 'rgba(77,126,151,0.035)',
+    bgDark: 'rgba(77,126,151,0.065)',
+    headerLight: 'rgba(77,126,151,0.08)',
+    headerDark: 'rgba(77,126,151,0.14)',
+  },
 };
+
+export function getNoteStylePalette(style?: string | null): NoteStyleTheme {
+  if (style && style in NOTE_STYLE_PALETTE) {
+    return NOTE_STYLE_PALETTE[style as NoteStyle];
+  }
+  return NOTE_STYLE_PALETTE.paper;
+}
+
+export function getGroupTintPalette(tint?: string | null): GroupTintTheme {
+  if (tint && tint in GROUP_TINT_PALETTE) {
+    return GROUP_TINT_PALETTE[tint as GroupTint];
+  }
+  return GROUP_TINT_PALETTE.neutral;
+}
+
+export function isLightHex(hex: string): boolean {
+  const cleaned = hex.trim().replace(/^#/, '');
+  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) return false;
+  const r = parseInt(cleaned.slice(0, 2), 16) / 255;
+  const g = parseInt(cleaned.slice(2, 4), 16) / 255;
+  const b = parseInt(cleaned.slice(4, 6), 16) / 255;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 0.62;
+}
+
+export function normalizeDegrees(degrees: number): number {
+  if (!Number.isFinite(degrees)) return 0;
+  let d = degrees % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  if (Math.abs(d) < 0.05) d = 0;
+  return d;
+}
+
+export function extractBoardPaletteFromAssets(
+  assets: AssetRecord[],
+  count = 6,
+): LabColor[] {
+  const bucket = new Map<string, { color: LabColor; weight: number }>();
+  for (const asset of assets) {
+    const dom = Array.isArray(asset.dominantColors) ? asset.dominantColors : [];
+    for (const color of dom.slice(0, 2)) {
+      if (!color?.hex) continue;
+      const key = color.hex.toUpperCase();
+      const prev = bucket.get(key);
+      const add = Number.isFinite(color.proportion) ? Math.max(0.15, color.proportion) : 0.2;
+      if (prev) {
+        prev.weight += add;
+      } else {
+        bucket.set(key, {
+          color: { ...color, hex: key },
+          weight: add,
+        });
+      }
+    }
+  }
+  const ranked = Array.from(bucket.values()).sort((a, b) => b.weight - a.weight);
+  const distinct: LabColor[] = [];
+  for (const entry of ranked) {
+    const c = entry.color;
+    const tooClose = distinct.some((d) => {
+      const dl = (d.l ?? 50) - (c.l ?? 50);
+      const da = (d.a ?? 0) - (c.a ?? 0);
+      const db = (d.b ?? 0) - (c.b ?? 0);
+      return Math.sqrt(dl * dl + da * da + db * db) < 14;
+    });
+    if (!tooClose) {
+      distinct.push(c);
+      if (distinct.length >= count) break;
+    }
+  }
+  return distinct;
+}
 
 function resolvedAspectRatio(
   assetId: string,
@@ -53,15 +179,23 @@ function resolvedAspectRatio(
     asset && asset.pixelWidth > 0 && asset.pixelHeight > 0
       ? asset.pixelWidth / asset.pixelHeight
       : 1.25;
-  if (crop && crop.width > 0.05 && crop.height > 0.05) {
+  if (
+    crop &&
+    Number.isFinite(crop.width) &&
+    Number.isFinite(crop.height) &&
+    crop.width > 0.05 &&
+    crop.height > 0.05
+  ) {
     ratio *= crop.width / crop.height;
   }
+  if (!Number.isFinite(ratio)) ratio = 1.25;
   if (style === 'compact') return Math.max(0.8, Math.min(1.32, ratio));
   if (style === 'magazine') return Math.max(0.56, Math.min(2.15, ratio));
   return Math.max(0.64, Math.min(1.85, ratio));
 }
 
 function shortestColumnIndex(heights: number[]): number {
+  if (heights.length === 0) return 0;
   let bestIdx = 0;
   let bestVal = heights[0];
   for (let i = 1; i < heights.length; i++) {
@@ -94,30 +228,39 @@ export function solveEditorialLayout(
   assetsById: Map<string, AssetRecord>,
   padding = 28,
 ): EditorialLayoutResult {
-  const effectivePadding =
-    config.style === 'magazine'
-      ? Math.max(36, padding + 10)
-      : config.style === 'balanced'
-        ? Math.max(22, padding)
-        : Math.max(12, Math.min(padding, 14));
+  const safeNodes = Array.isArray(nodes) ? nodes : [];
+  const safeContainerWidth =
+    Number.isFinite(containerWidth) && containerWidth > 0 ? containerWidth : 1080;
+  const safePadding = Number.isFinite(padding) ? Math.max(0, Math.min(240, padding)) : 28;
+  const safeSpacing = Number.isFinite(config?.spacing)
+    ? Math.max(0, Math.min(120, config.spacing))
+    : 16;
+  const style: EditorialStyle = config?.style ?? 'balanced';
 
-  const usableWidth = Math.max(320, containerWidth - effectivePadding * 2);
+  const effectivePadding =
+    style === 'magazine'
+      ? Math.max(36, safePadding + 10)
+      : style === 'balanced'
+        ? Math.max(22, safePadding)
+        : Math.max(12, Math.min(safePadding, 14));
+
+  const usableWidth = Math.max(320, safeContainerWidth - effectivePadding * 2);
   const styleSpacing =
-    config.style === 'magazine'
-      ? Math.max(26, config.spacing + 10)
-      : config.style === 'balanced'
-        ? Math.max(15, config.spacing)
+    style === 'magazine'
+      ? Math.max(26, safeSpacing + 10)
+      : style === 'balanced'
+        ? Math.max(15, safeSpacing)
         : 6;
 
   const cols =
-    config.style === 'magazine'
+    style === 'magazine'
       ? Math.max(2, Math.min(3, Math.trunc((usableWidth + styleSpacing) / 280)))
-      : config.style === 'balanced'
+      : style === 'balanced'
         ? Math.max(3, Math.min(4, Math.trunc((usableWidth + styleSpacing) / 220)))
         : Math.max(5, Math.min(7, Math.trunc((usableWidth + styleSpacing) / 142)));
 
   const colWidth = (usableWidth - styleSpacing * (cols - 1)) / cols;
-  const sortedNodes = [...nodes].sort((a, b) => {
+  const sortedNodes = [...safeNodes].sort((a, b) => {
     if (a.editorialOrder !== b.editorialOrder) return a.editorialOrder - b.editorialOrder;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
@@ -125,13 +268,14 @@ export function solveEditorialLayout(
   const columnHeights = new Array<number>(cols).fill(effectivePadding);
   const frames: Record<string, BoardRect> = {};
 
-  let heroQuota = config.style === 'magazine' ? 3 : 0;
+  let heroQuota = style === 'magazine' ? 3 : 0;
   let magazineHeroAssigned = false;
 
   sortedNodes.forEach((node, index) => {
     if ('groupFrame' in node.kind) {
       const maxY = Math.max(...columnHeights, effectivePadding);
-      const rawH = node.frame.height > 0 ? node.frame.height : 60;
+      const rawH =
+        Number.isFinite(node.frame?.height) && node.frame.height > 0 ? node.frame.height : 60;
       const headerHeight = Math.max(54, Math.min(86, rawH));
       frames[node.id] = { x: effectivePadding, y: maxY, width: usableWidth, height: headerHeight };
       const nextY = maxY + headerHeight + styleSpacing;
@@ -141,7 +285,7 @@ export function solveEditorialLayout(
 
     if ('paletteStrip' in node.kind) {
       const maxY = Math.max(...columnHeights, effectivePadding);
-      const stripHeight = config.style === 'compact' ? 56 : 76;
+      const stripHeight = style === 'compact' ? 56 : 76;
       frames[node.id] = { x: effectivePadding, y: maxY, width: usableWidth, height: stripHeight };
       const nextY = maxY + stripHeight + styleSpacing;
       columnHeights.fill(nextY);
@@ -152,12 +296,11 @@ export function solveEditorialLayout(
       const col = shortestColumnIndex(columnHeights);
       const x = effectivePadding + col * (colWidth + styleSpacing);
       const y = columnHeights[col];
-      const charCount = [...node.kind.note.text].length;
+      const textStr = typeof node.kind.note.text === 'string' ? node.kind.note.text : '';
+      const fontSize = Number.isFinite(node.kind.note.fontSize) ? node.kind.note.fontSize : 14;
+      const charCount = [...textStr].length;
       const estimatedLines = Math.max(3, Math.min(10, Math.trunc(charCount / 18) + 2));
-      const height = Math.max(
-        124,
-        estimatedLines * Math.max(18, node.kind.note.fontSize * 1.45) + 42,
-      );
+      const height = Math.max(124, estimatedLines * Math.max(18, fontSize * 1.45) + 42);
       frames[node.id] = { x, y, width: colWidth, height };
       columnHeights[col] = y + height + styleSpacing;
       return;
@@ -165,9 +308,9 @@ export function solveEditorialLayout(
 
     if ('assetRef' in node.kind) {
       const { assetID, crop, weight } = node.kind.assetRef;
-      const aspect = resolvedAspectRatio(assetID, crop, assetsById, config.style);
+      const aspect = resolvedAspectRatio(assetID, crop, assetsById, style);
       const wantsHero =
-        config.style === 'magazine' &&
+        style === 'magazine' &&
         cols >= 3 &&
         heroQuota > 0 &&
         ((!magazineHeroAssigned && index === 0) ||
@@ -205,7 +348,7 @@ export function solveEditorialLayout(
   return {
     frames,
     orderedNodeIds: sortedNodes.map((n) => n.id),
-    contentSize: { width: containerWidth, height: Math.max(480, maxHeight) },
+    contentSize: { width: safeContainerWidth, height: Math.max(480, maxHeight) },
     columnWidth: colWidth,
     columnCount: cols,
   };
@@ -219,7 +362,7 @@ export function reflowNodesInsideGroupFrame(
   padding = 12,
   spacing = 10,
 ): Record<string, BoardRect> {
-  if (childNodes.length === 0) return {};
+  if (!Array.isArray(childNodes) || childNodes.length === 0) return {};
   const innerX = groupRect.x + padding;
   const innerY = groupRect.y + headerHeight + padding * 0.6;
   const innerW = Math.max(80, groupRect.width - padding * 2);
@@ -240,7 +383,8 @@ export function reflowNodesInsideGroupFrame(
         'balanced',
       );
     }
-    return Math.max(0.65, Math.min(2.2, node.frame.width / Math.max(1, node.frame.height)));
+    const raw = node.frame.width / Math.max(1, node.frame.height);
+    return Number.isFinite(raw) ? Math.max(0.65, Math.min(2.2, raw)) : 1.25;
   });
 
   const n = ordered.length;
@@ -259,7 +403,7 @@ export function reflowNodesInsideGroupFrame(
     for (let idx = 0; idx < n; idx++) {
       currentRow.push(idx);
       currentSum += ratios[idx];
-      const remainingRows = rowCount - rows.length - 1;
+      const remainingRows = Math.max(0, rowCount - rows.length - 1);
       const remainingItems = n - idx - 1;
       if (
         remainingRows > 0 &&
@@ -316,14 +460,15 @@ export function freezeIntoFreeform(
   containerWidth: number,
   assetsById: Map<string, AssetRecord>,
 ): MoodboardDocument {
+  const nodes = Array.isArray(document.nodes) ? document.nodes : [];
   const cfg: AutoLayoutConfig = isAutoEditorialMode(document.mode)
     ? document.mode.autoEditorial._0
     : { columns: 4, spacing: 16, style: 'balanced', showPaletteStrip: true };
-  const solved = solveEditorialLayout(document.nodes, cfg, containerWidth, assetsById, 28);
+  const solved = solveEditorialLayout(nodes, cfg, containerWidth, assetsById, 28);
   return {
     ...document,
     mode: { freeform: {} },
-    nodes: document.nodes.map((n) => ({
+    nodes: nodes.map((n) => ({
       ...n,
       frame: solved.frames[n.id] ?? n.frame,
     })),
@@ -340,10 +485,9 @@ export function tidyNodesInFreeform(
   selectedNodeIds: Set<string>,
   assetsById: Map<string, AssetRecord>,
 ): MoodboardDocument {
+  const nodes = Array.isArray(document.nodes) ? document.nodes : [];
   const targets =
-    selectedNodeIds.size >= 2
-      ? document.nodes.filter((n) => selectedNodeIds.has(n.id))
-      : document.nodes;
+    selectedNodeIds.size >= 2 ? nodes.filter((n) => selectedNodeIds.has(n.id)) : nodes;
   if (targets.length === 0) return document;
 
   const minX = Math.min(...targets.map((n) => n.frame.x));
@@ -360,7 +504,7 @@ export function tidyNodesInFreeform(
   );
   return {
     ...document,
-    nodes: document.nodes.map((n) => {
+    nodes: nodes.map((n) => {
       const r = solved.frames[n.id];
       if (!r) return n;
       return {
@@ -377,7 +521,7 @@ function resolveAnchor(
   norm: BoardPoint | null | undefined,
   other: BoardRect,
 ): BoardPoint {
-  if (norm) {
+  if (norm && Number.isFinite(norm.x) && Number.isFinite(norm.y)) {
     return {
       x: rect.x + Math.max(0, Math.min(1, norm.x)) * rect.width,
       y: rect.y + Math.max(0, Math.min(1, norm.y)) * rect.height,
@@ -407,34 +551,169 @@ function resolveAnchor(
   }
 }
 
+function connectorNormalOffset(
+  rect: BoardRect,
+  pt: BoardPoint,
+  isPinpoint: boolean,
+  otherPt: BoardPoint,
+  dist: number,
+): BoardPoint {
+  if (isPinpoint) {
+    const dx = otherPt.x - pt.x;
+    const dy = otherPt.y - pt.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const pull = Math.min(dist * 0.65, length * 0.35);
+    return { x: (dx / length) * pull, y: (dy / length) * pull };
+  }
+  if (Math.abs(pt.y - rect.y) < 1.5) return { x: 0, y: -dist };
+  if (Math.abs(pt.y - (rect.y + rect.height)) < 1.5) return { x: 0, y: dist };
+  if (Math.abs(pt.x - rect.x) < 1.5) return { x: -dist, y: 0 };
+  if (Math.abs(pt.x - (rect.x + rect.width)) < 1.5) return { x: dist, y: 0 };
+  return { x: (otherPt.x - pt.x) * 0.25, y: 0 };
+}
+
+export interface ConnectorSvgGeometry {
+  path: string;
+  start: BoardPoint;
+  end: BoardPoint;
+  c1: BoardPoint;
+  c2: BoardPoint;
+  mid: BoardPoint;
+  arrowHeadPath: string;
+}
+
 export function buildConnectorSvgPath(
   conn: BoardConnector,
   fromRect: BoardRect,
   toRect: BoardRect,
-): { path: string; start: BoardPoint; end: BoardPoint; mid: BoardPoint } {
+): ConnectorSvgGeometry {
   const start = resolveAnchor(fromRect, conn.fromAnchor, conn.fromNormalizedPoint, toRect);
   const end = resolveAnchor(toRect, conn.toAnchor, conn.toNormalizedPoint, fromRect);
-  const mid = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  const dist = Math.max(48, Math.hypot(end.x - start.x, end.y - start.y) * 0.36);
+
+  const n1 = connectorNormalOffset(
+    fromRect,
+    start,
+    Boolean(conn.fromNormalizedPoint),
+    end,
+    dist,
+  );
+  const n2 = connectorNormalOffset(
+    toRect,
+    end,
+    Boolean(conn.toNormalizedPoint),
+    start,
+    dist,
+  );
+  const c1: BoardPoint = { x: start.x + n1.x, y: start.y + n1.y };
+  const c2: BoardPoint = { x: end.x + n2.x, y: end.y + n2.y };
+
+  let path: string;
+  let mid: BoardPoint;
+  let tangentSrc: BoardPoint;
 
   if (conn.style === 'straight') {
-    return { path: `M ${start.x} ${start.y} L ${end.x} ${end.y}`, start, end, mid };
-  }
-  if (conn.style === 'elbow') {
-    const mx = (start.x + end.x) / 2;
-    return {
-      path: `M ${start.x} ${start.y} L ${mx} ${start.y} L ${mx} ${end.y} L ${end.x} ${end.y}`,
-      start,
-      end,
-      mid,
+    path = `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
+    mid = { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+    tangentSrc = start;
+  } else if (conn.style === 'elbow') {
+    const mx = (start.x + end.x) * 0.5;
+    path = `M ${start.x} ${start.y} L ${mx} ${start.y} L ${mx} ${end.y} L ${end.x} ${end.y}`;
+    mid = { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+    // Vertical elbow (start.x === end.x) has mx === end.x; use the vertical segment to avoid 0-radian arrow
+    tangentSrc = Math.abs(end.x - mx) >= 0.5 ? { x: mx, y: end.y } : { x: mx, y: start.y };
+  } else {
+    path = `M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
+    mid = {
+      x: 0.125 * start.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * end.x,
+      y: 0.125 * start.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * end.y,
     };
+    if (Math.hypot(end.x - c2.x, end.y - c2.y) >= 0.5) {
+      tangentSrc = c2;
+    } else if (Math.hypot(end.x - c1.x, end.y - c1.y) >= 0.5) {
+      tangentSrc = c1;
+    } else {
+      tangentSrc = start;
+    }
   }
-  const dx = Math.max(48, Math.abs(end.x - start.x) * 0.45);
-  const c1x = start.x + (end.x >= start.x ? dx : -dx);
-  const c2x = end.x - (end.x >= start.x ? dx : -dx);
-  return {
-    path: `M ${start.x} ${start.y} C ${c1x} ${start.y}, ${c2x} ${end.y}, ${end.x} ${end.y}`,
-    start,
-    end,
-    mid,
-  };
+
+  let arrowHeadPath = '';
+  const segLen = Math.hypot(end.x - tangentSrc.x, end.y - tangentSrc.y);
+  if (segLen >= 0.5 && Number.isFinite(segLen)) {
+    const angle = Math.atan2(end.y - tangentSrc.y, end.x - tangentSrc.x);
+    const arrowLen = 10;
+    const spread = Math.PI / 6.5;
+    const ax1 = end.x - arrowLen * Math.cos(angle - spread);
+    const ay1 = end.y - arrowLen * Math.sin(angle - spread);
+    const ax2 = end.x - arrowLen * Math.cos(angle + spread);
+    const ay2 = end.y - arrowLen * Math.sin(angle + spread);
+    arrowHeadPath = `M ${ax1} ${ay1} L ${end.x} ${end.y} L ${ax2} ${ay2}`;
+  }
+
+  return { path, start, end, c1, c2, mid, arrowHeadPath };
+}
+
+/** Smooth quadratic Bezier SVG path matching macOS `MoodboardCanvasView` ink rendering. */
+export function buildInkStrokeSvgPath(points: InkStrokePoint[]): string {
+  if (!Array.isArray(points) || points.length < 2) return '';
+  const safePoints = points.filter(
+    (pt) => pt && Number.isFinite(pt.x) && Number.isFinite(pt.y),
+  );
+  if (safePoints.length < 2) return '';
+  if (safePoints.length === 2) {
+    return `M ${safePoints[0].x} ${safePoints[0].y} L ${safePoints[1].x} ${safePoints[1].y}`;
+  }
+  const cmds: string[] = [`M ${safePoints[0].x} ${safePoints[0].y}`];
+  for (let i = 1; i < safePoints.length - 1; i++) {
+    const midX = (safePoints[i].x + safePoints[i + 1].x) * 0.5;
+    const midY = (safePoints[i].y + safePoints[i + 1].y) * 0.5;
+    cmds.push(`Q ${safePoints[i].x} ${safePoints[i].y} ${midX} ${midY}`);
+  }
+  const last = safePoints[safePoints.length - 1];
+  cmds.push(`L ${last.x} ${last.y}`);
+  return cmds.join(' ');
+}
+
+const WINDOWS_RESERVED_BASENAMES = new Set([
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  'COM1',
+  'COM2',
+  'COM3',
+  'COM4',
+  'COM5',
+  'COM6',
+  'COM7',
+  'COM8',
+  'COM9',
+  'LPT1',
+  'LPT2',
+  'LPT3',
+  'LPT4',
+  'LPT5',
+  'LPT6',
+  'LPT7',
+  'LPT8',
+  'LPT9',
+]);
+
+/** Sanitize a moodboard title into a safe Windows filename stem (without extension). */
+export function sanitizeExportFileName(
+  rawTitle: string | null | undefined,
+  fallback = '未命名情绪板',
+): string {
+  const cleaned = (rawTitle ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '')
+    .slice(0, 120);
+  if (!cleaned) return fallback;
+  if (WINDOWS_RESERVED_BASENAMES.has(cleaned.toUpperCase())) {
+    return `${cleaned}_board`;
+  }
+  return cleaned;
 }

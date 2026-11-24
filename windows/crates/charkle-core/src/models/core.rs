@@ -115,6 +115,7 @@ pub enum SocialPlatform {
     X,
     Threads,
     Bluesky,
+    Xiaohongshu,
 }
 
 impl SocialPlatform {
@@ -123,7 +124,20 @@ impl SocialPlatform {
             Self::X => "X",
             Self::Threads => "Threads",
             Self::Bluesky => "Bluesky",
+            Self::Xiaohongshu => "小红书",
         }
+    }
+
+    pub fn post_noun(self) -> &'static str {
+        match self {
+            Self::X => "推文",
+            Self::Xiaohongshu => "笔记",
+            Self::Threads | Self::Bluesky => "贴文",
+        }
+    }
+
+    pub fn post_type_label(self) -> String {
+        format!("{} {}", self.display_name(), self.post_noun())
     }
 
     pub fn open_action_label(self) -> &'static str {
@@ -131,6 +145,7 @@ impl SocialPlatform {
             Self::X => "在 X 打开",
             Self::Threads => "在 Threads 打开",
             Self::Bluesky => "在 Bluesky 打开",
+            Self::Xiaohongshu => "在小红书打开",
         }
     }
 }
@@ -141,7 +156,12 @@ pub struct GitHubRepoMetadata {
     pub owner: String,
     pub repo: String,
     pub full_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "ownerAvatarURL",
+        alias = "ownerAvatarUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub owner_avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -310,6 +330,45 @@ pub struct SocialPostMetadata {
 }
 
 impl SocialPostMetadata {
+    /// Displayable handle subtitle (omits internal 24-hex Xiaohongshu user IDs for cleaner typography).
+    pub fn display_handle_line(&self) -> Option<String> {
+        let trimmed = self.author_handle.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if self.platform == SocialPlatform::Xiaohongshu {
+            let is_internal_hex =
+                trimmed.len() == 24 && trimmed.bytes().all(|b| b.is_ascii_hexdigit());
+            if is_internal_hex
+                || trimmed.eq_ignore_ascii_case("xiaohongshu")
+                || trimmed == self.author_name.trim()
+            {
+                return None;
+            }
+            return Some(format!("小红书号 {trimmed}"));
+        }
+        Some(format!("@{trimmed}"))
+    }
+
+    /// Clean display author name that never leaks an internal 24-hex Xiaohongshu user ID.
+    pub fn display_author_name(&self) -> String {
+        let name = self.author_name.trim();
+        let is_internal_hex = name.len() == 24 && name.bytes().all(|b| b.is_ascii_hexdigit());
+        if !name.is_empty() && !is_internal_hex {
+            return name.to_string();
+        }
+        if self.platform == SocialPlatform::Xiaohongshu {
+            "小红书用户".to_string()
+        } else {
+            let handle = self.author_handle.trim();
+            if handle.is_empty() {
+                self.platform.display_name().to_string()
+            } else {
+                handle.to_string()
+            }
+        }
+    }
+
     /// Unified typed attachment list across both newly saved posts and legacy saved social posts.
     pub fn effective_attachments(&self) -> Vec<SocialMediaAttachment> {
         if !self.attachments.is_empty() {
@@ -955,7 +1014,7 @@ impl AssetRecord {
             .as_ref()
             .and_then(|m| m.social_post.as_ref())
         {
-            return format!("{} 推文", post.platform.display_name());
+            return post.platform.post_type_label();
         }
         if self.is_github_repo() {
             return "GitHub 仓库".to_string();
@@ -1487,6 +1546,8 @@ pub struct AssetBatchPatch {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<i32>,
     #[serde(default)]

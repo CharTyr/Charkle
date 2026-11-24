@@ -155,6 +155,7 @@ const LUCIDE_FALLBACK_MAP: Record<string, LucideIcon> = {
   'sidebar-toggle': PanelLeft,
   'masonry-vertical': Columns3,
   'masonry-horizontal': Rows2,
+  'gallery-ring': Shapes,
   github: Code2,
   model3d: Box,
   audio: AudioWaveform,

@@ -21,3 +21,17 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
     disconnect() {}
   };
 }
+
+if (typeof globalThis.PointerEvent === 'undefined' && typeof MouseEvent !== 'undefined') {
+  class PolyfillPointerEvent extends MouseEvent {
+    pointerId: number;
+    pointerType: string;
+    constructor(type: string, params: PointerEventInit = {}) {
+      super(type, params);
+      this.pointerId = params.pointerId ?? 1;
+      this.pointerType = params.pointerType ?? 'mouse';
+    }
+  }
+  (globalThis as unknown as { PointerEvent: typeof MouseEvent }).PointerEvent =
+    PolyfillPointerEvent;
+}
