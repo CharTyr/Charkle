@@ -115,6 +115,29 @@ describe('Charkle Design System & Layout Algorithms', () => {
     expect(onChange).toHaveBeenCalledWith('b');
   });
 
+  it('distributes SegmentedControl segments evenly without inline-flex overriding grid/w-full', () => {
+    const onChange = vi.fn();
+    render(
+      <SegmentedControl
+        value="info"
+        onChange={onChange}
+        ariaLabel="检查器标签页"
+        className="w-full grid grid-cols-2"
+        options={[
+          { value: 'info', label: '信息' },
+          { value: 'similar', label: '类似项目 (5)' },
+        ]}
+      />,
+    );
+    const group = screen.getByRole('radiogroup', { name: '检查器标签页' });
+    expect(group.className).toContain('grid-cols-2');
+    expect(group.className).not.toContain('inline-flex');
+    for (const radio of screen.getAllByRole('radio')) {
+      expect(radio.className).toContain('w-full');
+      expect(radio.className).toContain('justify-center');
+    }
+  });
+
   it('opens CustomSelect listbox and enables search at >= 15 options', () => {
     const onChange = vi.fn();
     const options = Array.from({ length: 16 }, (_, i) => ({

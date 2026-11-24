@@ -13,6 +13,8 @@ export interface SegmentedControlProps<T extends string> {
   options: ReadonlyArray<SegmentedOption<T>>;
   onChange: (value: T) => void;
   size?: 'xs' | 'sm';
+  /** Stretch control to 100% width with equal-width centered segments. */
+  fullWidth?: boolean;
   ariaLabel?: string;
   /** Optional explicit Motion `layoutId` for shared-pill transitions. */
   layoutId?: string;
@@ -29,19 +31,28 @@ export function SegmentedControl<T extends string>({
   options,
   onChange,
   size = 'xs',
+  fullWidth = false,
   ariaLabel,
   layoutId,
   className = '',
 }: SegmentedControlProps<T>) {
   const autoId = useId();
   const pillLayoutId = layoutId ?? `win-segmented-pill-${autoId}`;
+  const hasGridClass = /\b(?:inline-)?grid\b/.test(className);
+  const isFullWidth = fullWidth || /\bw-full\b/.test(className);
+  const containerDisplay = hasGridClass
+    ? 'items-center'
+    : isFullWidth
+      ? 'flex w-full items-center'
+      : 'inline-flex items-center';
 
   return (
     <div
       role="radiogroup"
       aria-label={ariaLabel}
       className={[
-        'inline-flex items-center p-[2px] gap-0.5 bg-[var(--bg-subtle)] border border-[var(--win-stroke-control)]',
+        containerDisplay,
+        'p-[2px] gap-0.5 bg-[var(--bg-subtle)] border border-[var(--win-stroke-control)]',
         'rounded-[var(--win-radius-control)] select-none',
         className,
       ]
@@ -60,13 +71,16 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(opt.value)}
             className={[
               'relative inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer font-medium',
+              hasGridClass ? 'w-full min-w-0' : isFullWidth ? 'flex-1 min-w-0' : '',
               'rounded-[3px] transition-colors duration-[83ms] ease-[var(--win-ease-out)]',
               'focus-visible:outline-2 focus-visible:outline-[var(--accent)]',
               size === 'xs' ? 'h-6 px-2 text-[12px] leading-[16px]' : 'h-7 px-2.5 text-[13px] leading-[18px]',
               selected
                 ? 'text-[var(--text-primary)]'
                 : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-            ].join(' ')}
+            ]
+              .filter(Boolean)
+              .join(' ')}
           >
             {selected && (
               <m.span
