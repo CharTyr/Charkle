@@ -687,6 +687,8 @@ export interface CacheStats {
 
 export type BackdropKind = 'mica' | 'solidFallback';
 
+export type AccentSource = 'studio' | 'windows';
+
 export interface WindowSurfaceState {
   buildNumber: number;
   backdrop: BackdropKind;
@@ -694,6 +696,7 @@ export interface WindowSurfaceState {
   transparencyEnabled: boolean;
   animationsEnabled: boolean;
   snapLayoutsSupported: boolean;
+  systemAccentHex?: string | null;
 }
 
 export interface ClientRect {

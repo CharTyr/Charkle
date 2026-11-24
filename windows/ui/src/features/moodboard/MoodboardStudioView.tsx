@@ -1,56 +1,56 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertCircle,
-  ArrowLeft,
-  ArrowLeftRight,
-  ArrowUpRight,
-  Box,
-  Clipboard,
-  Compass,
-  Copy,
-  Crop,
-  Download,
-  Eraser,
-  ExternalLink,
-  Eye,
-  FileText,
-  Film,
-  FlipHorizontal2,
-  FlipVertical2,
-  FolderOpen,
-  Globe,
-  Grid2x2,
-  Hand,
-  Image as ImageIcon,
-  Layers,
-  LayoutGrid,
-  Lock,
-  Maximize2,
-  Minus,
-  MousePointer2,
-  Music,
-  Palette,
-  PanelRight,
-  Pencil,
-  PenTool,
-  Plus,
-  Redo2,
-  RefreshCw,
-  RotateCcw,
-  RotateCw,
-  Scissors,
-  Search,
-  Sparkles,
-  SquareDashed,
-  Star,
-  StickyNote,
-  Tag,
-  Trash2,
-  Undo2,
-  Unlock,
-  Upload,
-  Wand2,
-} from 'lucide-react';
+  Add16Regular,
+  ArrowDownload16Regular,
+  ArrowLeft16Regular,
+  ArrowRedo16Regular,
+  ArrowRotateClockwise16Regular,
+  ArrowRotateCounterclockwise16Regular,
+  ArrowSwap16Regular,
+  ArrowSync16Regular,
+  ArrowUndo16Regular,
+  ArrowUpload16Regular,
+  ArrowUpRight16Regular,
+  Clipboard16Regular,
+  Color16Regular,
+  CompassNorthwest16Regular,
+  Copy16Regular,
+  Crop16Regular,
+  Cube16Regular,
+  Cursor16Regular,
+  Cut16Regular,
+  Delete16Regular,
+  DocumentText16Regular,
+  Edit16Regular,
+  Eraser20Regular,
+  ErrorCircle16Regular,
+  Eye16Regular,
+  Filmstrip16Regular,
+  FlipHorizontal16Regular,
+  FlipVertical16Regular,
+  FolderOpen16Regular,
+  FullScreenMaximize16Regular,
+  Globe16Regular,
+  Grid16Regular,
+  HandLeft16Regular,
+  Image16Regular,
+  LayerDiagonal16Regular,
+  LockClosed16Regular,
+  LockOpen16Regular,
+  MusicNote216Regular,
+  Note16Regular,
+  Open16Regular,
+  PanelRight16Regular,
+  Pen16Regular,
+  Search16Regular,
+  Sparkle16Regular,
+  SquareHint16Regular,
+  Star16Filled,
+  Star16Regular,
+  Subtract16Regular,
+  Tag16Regular,
+  Wand16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -309,17 +309,17 @@ function renderAssetFallbackIcon(kind: AssetRecord['mediaKind'] | undefined) {
   switch (kind) {
     case 'video':
     case 'animatedImage':
-      return <Film size={22} strokeWidth={1.5} />;
+      return <Filmstrip16Regular className="w-5 h-5" />;
     case 'audio':
-      return <Music size={22} strokeWidth={1.5} />;
+      return <MusicNote216Regular className="w-5 h-5" />;
     case 'document':
-      return <FileText size={22} strokeWidth={1.5} />;
+      return <DocumentText16Regular className="w-5 h-5" />;
     case 'webBookmark':
-      return <Globe size={22} strokeWidth={1.5} />;
+      return <Globe16Regular className="w-5 h-5" />;
     case 'model3D':
-      return <Box size={22} strokeWidth={1.5} />;
+      return <Cube16Regular className="w-5 h-5" />;
     default:
-      return <ImageIcon size={22} strokeWidth={1.5} />;
+      return <Image16Regular className="w-5 h-5" />;
   }
 }
 
@@ -368,7 +368,7 @@ const BoardAssetMedia: React.FC<BoardAssetMediaProps> = ({
         data-testid="missing-asset-placeholder"
         className="w-full h-full flex flex-col items-center justify-center gap-2 p-3 text-center bg-[var(--bg-subtle)] text-[var(--text-secondary)]"
       >
-        <AlertCircle size={20} strokeWidth={1.6} className="text-[var(--text-tertiary)] shrink-0" />
+        <ErrorCircle16Regular className="w-5 h-5 text-[var(--text-tertiary)] shrink-0" />
         <div className="text-[11px] font-medium leading-snug text-[var(--text-secondary)]">
           原素材已从素材库移除
         </div>
@@ -2391,20 +2391,20 @@ export const MoodboardStudioView: React.FC = () => {
   return (
     <div
       data-testid="moodboard-studio-view"
-      className="charkle-gallery-surface flex-1 min-w-0 min-h-0 h-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
+      className="flex-1 min-w-0 min-h-0 h-full flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
     >
       {/* Top Studio Header Bar */}
-      <header className="shrink-0 h-[48px] px-3.5 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)]/85 flex items-center justify-between gap-2 select-none overflow-hidden">
+      <header className="shrink-0 h-[48px] px-3.5 border-b border-[var(--win-stroke-divider)] bg-[var(--bg-elevated)]/85 flex items-center justify-between gap-2 select-none overflow-hidden">
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
           <Button
-            variant="ghost"
+            variant="subtle"
             size="xs"
             aria-label="返回情绪板列表"
             title="返回情绪板列表"
             className="shrink-0 whitespace-nowrap"
             onClick={() => setDestination({ type: 'moodboardsHome' })}
           >
-            <ArrowLeft size={14} />
+            <ArrowLeft16Regular className="w-3.5 h-3.5" />
             {!dockLayout.compactHeader && <span>情绪板</span>}
           </Button>
           <input
@@ -2421,7 +2421,7 @@ export const MoodboardStudioView: React.FC = () => {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.nativeEvent.isComposing) e.currentTarget.blur();
             }}
-            className="h-7 px-2 rounded-[var(--radius-card-inner)] bg-transparent hover:bg-[var(--bg-subtle)] focus:bg-[var(--bg-inspector-field)] border border-transparent focus:border-[var(--accent)] text-[14px] font-semibold text-[var(--text-primary)] outline-none min-w-[72px] flex-1 max-w-[220px] truncate"
+            className="h-7 px-2 rounded-[var(--win-radius-control)] bg-transparent hover:bg-[var(--win-subtle-hover)] focus:bg-[var(--bg-inspector-field)] border border-transparent focus:border-[var(--accent)] text-[14px] font-semibold text-[var(--text-primary)] outline-none min-w-[72px] flex-1 max-w-[220px] truncate"
           />
 
           <SegmentedControl<'autoEditorial' | 'freeform'>
@@ -2431,8 +2431,8 @@ export const MoodboardStudioView: React.FC = () => {
             size="xs"
             className="shrink-0"
             options={[
-              { value: 'autoEditorial', label: '自动编排', icon: <LayoutGrid size={12.5} /> },
-              { value: 'freeform', label: '自由画布', icon: <Layers size={12.5} /> },
+              { value: 'autoEditorial', label: '自动编排', icon: <Grid16Regular className="w-3.5 h-3.5" /> },
+              { value: 'freeform', label: '自由画布', icon: <LayerDiagonal16Regular className="w-3.5 h-3.5" /> },
             ]}
           />
 
@@ -2456,7 +2456,7 @@ export const MoodboardStudioView: React.FC = () => {
 
         <div className="flex items-center gap-1 shrink-0">
           <Button
-            variant="ghost"
+            variant="subtle"
             size="icon"
             disabled={historyPast.length === 0}
             onClick={undo}
@@ -2464,10 +2464,10 @@ export const MoodboardStudioView: React.FC = () => {
             title="撤销 (Ctrl+Z)"
             className="shrink-0"
           >
-            <Undo2 size={14.5} />
+            <ArrowUndo16Regular className="w-3.5 h-3.5" />
           </Button>
           <Button
-            variant="ghost"
+            variant="subtle"
             size="icon"
             disabled={historyFuture.length === 0}
             onClick={redo}
@@ -2475,36 +2475,36 @@ export const MoodboardStudioView: React.FC = () => {
             title="重做 (Ctrl+Shift+Z)"
             className="shrink-0"
           >
-            <Redo2 size={14.5} />
+            <ArrowRedo16Regular className="w-3.5 h-3.5" />
           </Button>
 
           <Button
-            variant="secondary"
+            variant="standard"
             size="xs"
             aria-label="智能策展"
             onClick={() => setGenOpen(true)}
             title="打开 AI 情绪板策展工作台"
             className="shrink-0 whitespace-nowrap"
           >
-            <Sparkles size={12.5} />
+            <Sparkle16Regular className="w-3.5 h-3.5" />
             {!dockLayout.compactHeader && <span>智能策展</span>}
           </Button>
 
           <Button
             ref={exportBtnRef}
-            variant="primary"
+            variant="accent"
             size="xs"
             aria-label="导出"
             title="导出情绪板"
             onClick={() => setExportOpen((v) => !v)}
             className="shrink-0 whitespace-nowrap"
           >
-            <Download size={13} />
+            <ArrowDownload16Regular className="w-3.5 h-3.5" />
             {dockLayout.showExportLabel && <span>导出</span>}
           </Button>
 
           <Button
-            variant="ghost"
+            variant="subtle"
             size="icon"
             active={inspectorOpen}
             onClick={toggleInspector}
@@ -2512,7 +2512,7 @@ export const MoodboardStudioView: React.FC = () => {
             title="显示 / 隐藏右侧检查器 (Ctrl+I)"
             className="shrink-0"
           >
-            <PanelRight size={15} />
+            <PanelRight16Regular className="w-4 h-4" />
           </Button>
         </div>
       </header>
@@ -2633,7 +2633,7 @@ export const MoodboardStudioView: React.FC = () => {
           {/* 2. Empty Board Placeholder */}
           {safeNodes.length === 0 && visibleInkStrokes.length === 0 && (
             <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2.5 text-center px-8">
-              <Layers size={34} strokeWidth={1.4} className="text-[var(--text-tertiary)]/70" />
+              <LayerDiagonal16Regular className="w-8 h-8 text-[var(--text-tertiary)]/70" />
               <div className="text-[14px] font-medium text-[var(--text-secondary)]">
                 把素材拖进来，或从右侧候选池点击加入
               </div>
@@ -2897,7 +2897,7 @@ export const MoodboardStudioView: React.FC = () => {
                           }}
                           className="px-3 py-2 flex items-center gap-1.5"
                         >
-                          <Grid2x2 size={11} style={{ color: theme.accent }} className="shrink-0" />
+                          <Grid16Regular style={{ color: theme.accent }} className="w-3 h-3 shrink-0" />
                           {enclosedCount > 0 && (
                             <span
                               style={{ color: theme.accent }}
@@ -3106,12 +3106,18 @@ export const MoodboardStudioView: React.FC = () => {
                                   }));
                                 }}
                                 className={[
-                                  'pointer-events-auto charkle-pressable px-1.5 py-0.5 rounded-[var(--radius-card-inner)] text-white text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer',
-                                  refKind.weight >= 2 ? 'bg-[var(--accent)]' : 'bg-black/60',
+                                  'pointer-events-auto charkle-pressable px-1.5 py-0.5 rounded-[var(--win-radius-control)] text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer',
+                                  refKind.weight >= 2
+                                    ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                                    : 'bg-black/60 text-white',
                                 ].join(' ')}
                                 title="切换 2× 跨列主图权重"
                               >
-                                <Star size={9.5} className={refKind.weight >= 2 ? 'fill-current' : ''} />
+                                {refKind.weight >= 2 ? (
+                                  <Star16Filled className="w-2.5 h-2.5" />
+                                ) : (
+                                  <Star16Regular className="w-2.5 h-2.5" />
+                                )}
                                 <span>{refKind.weight >= 2 ? '主图 2×' : '设为主图'}</span>
                               </button>
                             )}
@@ -3126,12 +3132,14 @@ export const MoodboardStudioView: React.FC = () => {
                                 if (next) setInspectorOpen(true);
                               }}
                               className={[
-                                'pointer-events-auto charkle-pressable px-1.5 py-0.5 rounded-[var(--radius-card-inner)] text-white text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer',
-                                isSwapTarget ? 'bg-[var(--accent)]' : 'bg-black/60',
+                                'pointer-events-auto charkle-pressable px-1.5 py-0.5 rounded-[var(--win-radius-control)] text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer',
+                                isSwapTarget
+                                  ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                                  : 'bg-black/60 text-white',
                               ].join(' ')}
                               title="打开右侧候选池原地替换这张图"
                             >
-                              <ArrowLeftRight size={9.5} />
+                              <ArrowSwap16Regular className="w-2.5 h-2.5" />
                               <span>换一张</span>
                             </button>
                           </div>
@@ -3139,8 +3147,8 @@ export const MoodboardStudioView: React.FC = () => {
                           <div className="flex items-center justify-between gap-1">
                             <div className="flex items-center gap-1">
                               {node.isLocked && (
-                                <span className="h-5 w-5 rounded-full bg-black/55 text-white inline-flex items-center justify-center">
-                                  <Lock size={9.5} />
+                                <span className="h-5 w-5 rounded-[var(--win-radius-control)] bg-black/55 text-white inline-flex items-center justify-center">
+                                  <LockClosed16Regular className="w-2.5 h-2.5" />
                                 </span>
                               )}
                               {hasCrop && (
@@ -3158,14 +3166,14 @@ export const MoodboardStudioView: React.FC = () => {
                                       ),
                                     }));
                                   }}
-                                  className="pointer-events-auto charkle-pressable px-1.5 py-0.5 rounded-[var(--radius-card-inner)] bg-black/60 text-white text-[9.5px] font-semibold cursor-pointer"
+                                  className="pointer-events-auto charkle-pressable px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-black/60 text-white text-[9.5px] font-semibold cursor-pointer"
                                   title="点击还原完整画面"
                                 >
                                   局部取景 · 还原
                                 </button>
                               )}
                               {isPlainWebBookmarkAsset(asset) && asset.sourceDomain && !hasCrop && (
-                                <span className="px-1.5 py-0.5 rounded-[var(--radius-card-inner)] bg-black/55 text-white text-[9.5px] font-medium truncate max-w-[140px]">
+                                <span className="px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-black/55 text-white text-[9.5px] font-medium truncate max-w-[140px]">
                                   {asset.sourceDomain}
                                 </span>
                               )}
@@ -3179,7 +3187,7 @@ export const MoodboardStudioView: React.FC = () => {
                                   e.stopPropagation();
                                   openBoardAsset(refKind.assetID, null);
                                 }}
-                                className="pointer-events-auto charkle-pressable h-5.5 w-5.5 rounded-[var(--radius-card-inner)] bg-black/55 text-white inline-flex items-center justify-center cursor-pointer"
+                                className="pointer-events-auto charkle-pressable h-5.5 w-5.5 rounded-[var(--win-radius-control)] bg-black/55 text-white inline-flex items-center justify-center cursor-pointer"
                                 title={
                                   isPlainWebBookmarkAsset(asset)
                                     ? '在默认浏览器中打开 (Space)'
@@ -3187,9 +3195,9 @@ export const MoodboardStudioView: React.FC = () => {
                                 }
                               >
                                 {isPlainWebBookmarkAsset(asset) ? (
-                                  <ExternalLink size={10.5} />
+                                  <Open16Regular className="w-3 h-3" />
                                 ) : (
-                                  <Eye size={10.5} />
+                                  <Eye16Regular className="w-3 h-3" />
                                 )}
                               </button>
                             )}
@@ -3705,11 +3713,11 @@ export const MoodboardStudioView: React.FC = () => {
                             className={[
                               'pointer-events-auto charkle-pressable relative h-[22px] w-[22px] rounded-full border-[1.5px] border-[var(--accent)] shadow-sm flex items-center justify-center cursor-grab active:cursor-grabbing',
                               isRotatingThis
-                                ? 'bg-[var(--accent)] text-white'
-                                : 'bg-white text-[var(--accent)]',
+                                ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                                : 'bg-[var(--bg-elevated)] text-[var(--accent)]',
                             ].join(' ')}
                           >
-                            <RotateCw size={10} strokeWidth={2.3} />
+                            <ArrowRotateClockwise16Regular className="w-3 h-3" />
                             {isRotatingThis && (
                               <span
                                 style={{ transform: `rotate(${-rot}deg)` }}
@@ -3774,7 +3782,7 @@ export const MoodboardStudioView: React.FC = () => {
                     }
                     title="点击编辑连线标签"
                   >
-                    {hasLabel ? conn.label : <Tag size={8} />}
+                    {hasLabel ? conn.label : <Tag16Regular className="w-2.5 h-2.5" />}
                   </button>
                 );
               })}
@@ -3785,7 +3793,7 @@ export const MoodboardStudioView: React.FC = () => {
           {liveMarquee && liveMarquee.started && (
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute rounded-[4px] border border-[var(--accent)]/70 bg-[var(--accent-soft)] z-25"
+              className="pointer-events-none absolute rounded-[var(--win-radius-control)] border border-[var(--accent)]/70 bg-[var(--accent-soft)] z-25"
               style={{
                 left: Math.min(liveMarquee.startScreen.x, liveMarquee.curScreen.x),
                 top: Math.min(liveMarquee.startScreen.y, liveMarquee.curScreen.y),
@@ -3795,7 +3803,7 @@ export const MoodboardStudioView: React.FC = () => {
             />
           )}
 
-          {/* 7. Top Floating Liquid Glass Board Palette Header Strip (macOS BoardPaletteHeaderStrip 1:1) */}
+          {/* 7. Top Floating Fluent Acrylic Board Palette Header Strip */}
           {showTopPaletteStrip && safePalette.length > 0 && (
             <div
               style={{
@@ -3807,7 +3815,7 @@ export const MoodboardStudioView: React.FC = () => {
               <div
                 data-testid="board-palette-header-strip"
                 data-stage-floating-ui="true"
-                className="pointer-events-auto charkle-glass charkle-reveal-top rounded-full px-3 py-1.5 flex items-center gap-1.5 w-fit max-w-full overflow-x-auto charkle-scroll-hidden"
+                className="pointer-events-auto win-acrylic charkle-reveal-top rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-1.5 w-fit max-w-full overflow-x-auto charkle-scroll-hidden"
               >
                 <span className="text-[11px] font-medium text-[var(--text-secondary)] pr-0.5 shrink-0 whitespace-nowrap">
                   板内色卡
@@ -3826,14 +3834,14 @@ export const MoodboardStudioView: React.FC = () => {
                         handleSearchColorHex(hex);
                       }}
                       title={`点击复制 ${hex}，右键以此色检索素材库`}
-                      className="charkle-pressable inline-flex items-center gap-1.5 px-2 py-1 rounded-[var(--radius-chip)] bg-[var(--bg-elevated)]/88 border border-[var(--border-hairline)] shrink-0 cursor-pointer"
+                      className="charkle-pressable win-control-elevation inline-flex items-center gap-1.5 px-2 py-1 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] shrink-0 cursor-pointer"
                     >
                       <span
                         style={{
                           backgroundColor: hex,
                           borderColor: light ? 'rgba(0,0,0,0.14)' : 'rgba(255,255,255,0.22)',
                         }}
-                        className="h-3.5 w-3.5 rounded-[4px] border shrink-0"
+                        className="h-3.5 w-3.5 rounded-[3px] border shrink-0"
                       />
                       <span className="text-[10.5px] font-medium charkle-mono text-[var(--text-primary)]/85">
                         {isCopied ? '已复制' : hex}
@@ -3862,7 +3870,7 @@ export const MoodboardStudioView: React.FC = () => {
                     ].join(' ')}
                   />
                 ))}
-                <div className="ml-1 flex items-center gap-0.5 bg-[var(--bg-subtle)] rounded-[6px] p-0.5 shrink-0">
+                <div className="ml-1 flex items-center gap-0.5 bg-[var(--bg-subtle)] rounded-[var(--win-radius-control)] p-0.5 shrink-0">
                   {[
                     { label: '细', val: 2.0 },
                     { label: '中', val: 3.5 },
@@ -3873,7 +3881,7 @@ export const MoodboardStudioView: React.FC = () => {
                       type="button"
                       onClick={() => setInkWidth(w.val)}
                       className={[
-                        'px-1.5 h-5 rounded-[4px] text-[10.5px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
+                        'px-1.5 h-5 rounded-[var(--win-radius-control)] text-[10.5px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
                         inkWidth === w.val
                           ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-2xs'
                           : 'text-[var(--text-secondary)]',
@@ -3894,10 +3902,10 @@ export const MoodboardStudioView: React.FC = () => {
                     type="button"
                     onClick={() => setConnectorStyle(st)}
                     className={[
-                      'px-1.5 h-6 rounded-[6px] text-[11px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
+                      'px-1.5 h-6 rounded-[var(--win-radius-control)] text-[11px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
                       connectorStyle === st
                         ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]',
+                        : 'text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)]',
                     ].join(' ')}
                   >
                     {st === 'curved' ? '曲线' : st === 'elbow' ? '折线' : '直线'}
@@ -3907,10 +3915,10 @@ export const MoodboardStudioView: React.FC = () => {
                   type="button"
                   onClick={() => setConnectorDashed((v) => !v)}
                   className={[
-                    'px-1.5 h-6 rounded-[6px] text-[11px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
+                    'px-1.5 h-6 rounded-[var(--win-radius-control)] text-[11px] font-medium cursor-pointer shrink-0 whitespace-nowrap',
                     connectorDashed
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]',
+                      : 'text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
                   虚线
@@ -3919,18 +3927,18 @@ export const MoodboardStudioView: React.FC = () => {
             );
 
             const toolBtnSize = dockLayout.compactButtons ? 'h-7 w-7' : 'h-8 w-8';
-            const toolIconSize = dockLayout.compactButtons ? 13.5 : 15;
+            const toolIconSize = dockLayout.compactButtons ? 14 : 16;
             const insertBtnSize = dockLayout.compactButtons ? 'h-7 px-1.5' : 'h-8 px-2';
-            const insertIconSize = dockLayout.compactButtons ? 13 : 14;
+            const insertIconSize = dockLayout.compactButtons ? 14 : 15;
+            const toolIconStyle = { width: toolIconSize, height: toolIconSize };
+            const insertIconStyle = { width: insertIconSize, height: insertIconSize };
 
             const toolDockElement = (
               <div
                 data-testid="moodboard-tool-dock"
                 className={[
-                  'pointer-events-auto charkle-glass flex items-center text-[12px] shrink-0',
-                  dockLayout.compactButtons
-                    ? 'rounded-[16px] px-1.5 py-1 gap-0.5'
-                    : 'rounded-[var(--radius-dock-outer)] px-2 py-1.5 gap-1',
+                  'pointer-events-auto win-acrylic flex items-center text-[12px] shrink-0 rounded-[var(--win-radius-overlay)]',
+                  dockLayout.compactButtons ? 'px-1.5 py-1 gap-0.5' : 'px-2 py-1.5 gap-1',
                 ].join(' ')}
               >
                 <button
@@ -3939,14 +3947,14 @@ export const MoodboardStudioView: React.FC = () => {
                   title="选择 (V)"
                   aria-label="选择工具"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                     toolBtnSize,
                     tool === 'select'
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--bg-subtle)]',
+                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <MousePointer2 size={toolIconSize} />
+                  <Cursor16Regular style={toolIconStyle} />
                 </button>
 
                 <button
@@ -3958,14 +3966,14 @@ export const MoodboardStudioView: React.FC = () => {
                   title="抓手 (H · 空格+拖拽)"
                   aria-label="平移工具"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                     toolBtnSize,
                     tool === 'hand'
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--bg-subtle)]',
+                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <Hand size={toolIconSize} />
+                  <HandLeft16Regular style={toolIconStyle} />
                 </button>
 
                 <button
@@ -3974,14 +3982,14 @@ export const MoodboardStudioView: React.FC = () => {
                   title="连线 (C)"
                   aria-label="连线工具"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                     toolBtnSize,
                     tool === 'connector'
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--bg-subtle)]',
+                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <ArrowUpRight size={toolIconSize} />
+                  <ArrowUpRight16Regular style={toolIconStyle} />
                 </button>
 
                 <button
@@ -3993,14 +4001,14 @@ export const MoodboardStudioView: React.FC = () => {
                   title="手绘 (P)"
                   aria-label="画笔工具"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                     toolBtnSize,
                     tool === 'ink'
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--bg-subtle)]',
+                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <PenTool size={toolIconSize} />
+                  <Pen16Regular style={toolIconStyle} />
                 </button>
 
                 <button
@@ -4012,31 +4020,31 @@ export const MoodboardStudioView: React.FC = () => {
                   title="橡皮 (E · 擦除连线与手绘)"
                   aria-label="橡皮工具"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                     toolBtnSize,
                     tool === 'eraser'
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--bg-subtle)]',
+                      : 'text-[var(--text-primary)]/85 hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <Eraser size={toolIconSize} />
+                  <Eraser20Regular style={toolIconStyle} />
                 </button>
 
                 {/* Inline contextual options strictly on >= 960px wide canvas */}
                 {dockLayout.inlineToolOptions && tool === 'ink' && (
                   <>
-                    <div className="h-4.5 w-px bg-[var(--border-hairline)] mx-0.5 shrink-0" />
+                    <div className="h-4.5 w-px bg-[var(--win-stroke-divider)] mx-0.5 shrink-0" />
                     {penOptionsContent}
                   </>
                 )}
                 {dockLayout.inlineToolOptions && tool === 'connector' && (
                   <>
-                    <div className="h-4.5 w-px bg-[var(--border-hairline)] mx-0.5 shrink-0" />
+                    <div className="h-4.5 w-px bg-[var(--win-stroke-divider)] mx-0.5 shrink-0" />
                     {connectorOptionsContent}
                   </>
                 )}
 
-                <div className="h-4.5 w-px bg-[var(--border-hairline)] mx-0.5 shrink-0" />
+                <div className="h-4.5 w-px bg-[var(--win-stroke-divider)] mx-0.5 shrink-0" />
 
                 {/* Insert Nodes + Tidy */}
                 <button
@@ -4045,11 +4053,11 @@ export const MoodboardStudioView: React.FC = () => {
                   title="添加便签卡片"
                   aria-label="添加便签"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center gap-1 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0 whitespace-nowrap',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center gap-1 text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer shrink-0 whitespace-nowrap',
                     insertBtnSize,
                   ].join(' ')}
                 >
-                  <StickyNote size={insertIconSize} />
+                  <Note16Regular style={insertIconStyle} />
                   {dockLayout.showInsertLabels && <span>便签</span>}
                 </button>
 
@@ -4059,11 +4067,11 @@ export const MoodboardStudioView: React.FC = () => {
                   title="添加区域分组框"
                   aria-label="添加分组框"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center gap-1 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0 whitespace-nowrap',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center gap-1 text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer shrink-0 whitespace-nowrap',
                     insertBtnSize,
                   ].join(' ')}
                 >
-                  <SquareDashed size={insertIconSize} />
+                  <SquareHint16Regular style={insertIconStyle} />
                   {dockLayout.showInsertLabels && <span>分组</span>}
                 </button>
 
@@ -4073,11 +4081,11 @@ export const MoodboardStudioView: React.FC = () => {
                   title="添加全板色卡条"
                   aria-label="添加色卡条"
                   className={[
-                    'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center gap-1 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0 whitespace-nowrap',
+                    'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center gap-1 text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer shrink-0 whitespace-nowrap',
                     insertBtnSize,
                   ].join(' ')}
                 >
-                  <Palette size={insertIconSize} />
+                  <Color16Regular style={insertIconStyle} />
                   {dockLayout.showInsertLabels && <span>色卡</span>}
                 </button>
 
@@ -4088,11 +4096,11 @@ export const MoodboardStudioView: React.FC = () => {
                     title="重新整齐排版"
                     aria-label="整理对齐"
                     className={[
-                      'charkle-pressable rounded-[var(--radius-dock-inner)] inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0',
+                      'charkle-pressable rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-[var(--win-subtle-hover)] cursor-pointer shrink-0',
                       toolBtnSize,
                     ].join(' ')}
                   >
-                    <Wand2 size={insertIconSize} />
+                    <Wand16Regular style={insertIconStyle} />
                   </button>
                 )}
               </div>
@@ -4100,12 +4108,13 @@ export const MoodboardStudioView: React.FC = () => {
 
             const zoomCompact = dockLayout.tier !== 'wide';
             const zoomBtnSize = zoomCompact ? 'h-5.5 w-5.5' : 'h-6 w-6';
+            const zoomIconClass = zoomCompact ? 'w-3 h-3' : 'w-3.5 h-3.5';
             const zoomPillElement = !isEditorial ? (
               <div
                 data-testid="freeform-zoom-controls"
                 data-stage-floating-ui="true"
                 className={[
-                  'pointer-events-auto charkle-glass rounded-full flex items-center select-none shrink-0',
+                  'pointer-events-auto win-acrylic rounded-[var(--win-radius-overlay)] flex items-center select-none shrink-0',
                   zoomCompact ? 'px-1.5 py-0.5 gap-0' : 'px-2 py-1 gap-0.5',
                 ].join(' ')}
               >
@@ -4117,18 +4126,18 @@ export const MoodboardStudioView: React.FC = () => {
                     applyZoomAtScreenPoint(0.82, stageSize.width * 0.5, stageSize.height * 0.5, true)
                   }
                   className={[
-                    'charkle-pressable rounded-full hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer',
+                    'charkle-pressable rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer',
                     zoomBtnSize,
                   ].join(' ')}
                 >
-                  <Minus size={zoomCompact ? 10.5 : 11.5} />
+                  <Subtract16Regular className={zoomIconClass} />
                 </button>
                 <button
                   type="button"
                   title="重置为 100%"
                   onClick={() => triggerSmoothCameraUpdate((prev) => ({ ...prev, zoom: 1 }))}
                   className={[
-                    'charkle-pressable px-1 rounded-full hover:bg-[var(--bg-subtle)] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)] cursor-pointer',
+                    'charkle-pressable px-1 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)] cursor-pointer',
                     zoomCompact ? 'min-w-[36px] h-5.5 text-[10.5px]' : 'min-w-[42px] h-6 text-[11px]',
                   ].join(' ')}
                 >
@@ -4142,24 +4151,24 @@ export const MoodboardStudioView: React.FC = () => {
                     applyZoomAtScreenPoint(1.22, stageSize.width * 0.5, stageSize.height * 0.5, true)
                   }
                   className={[
-                    'charkle-pressable rounded-full hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer',
+                    'charkle-pressable rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer',
                     zoomBtnSize,
                   ].join(' ')}
                 >
-                  <Plus size={zoomCompact ? 10.5 : 11.5} />
+                  <Add16Regular className={zoomIconClass} />
                 </button>
-                <div className="h-3.5 w-px bg-[var(--border-hairline)] mx-1" />
+                <div className="h-3.5 w-px bg-[var(--win-stroke-divider)] mx-1" />
                 <button
                   type="button"
                   aria-label="适应画布"
                   title="适应画布 (Fit Board)"
                   onClick={fitBoardToScreen}
                   className={[
-                    'charkle-pressable rounded-full hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer',
+                    'charkle-pressable rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer',
                     zoomBtnSize,
                   ].join(' ')}
                 >
-                  <Maximize2 size={zoomCompact ? 10.5 : 11.5} />
+                  <FullScreenMaximize16Regular className={zoomIconClass} />
                 </button>
               </div>
             ) : null;
@@ -4193,14 +4202,14 @@ export const MoodboardStudioView: React.FC = () => {
                   return (
                     <div
                       data-testid="selected-transform-pill"
-                      className="pointer-events-auto charkle-glass charkle-reveal-bottom rounded-full px-2 py-1 flex items-center gap-1 text-[11.5px] max-w-full overflow-x-auto charkle-scroll-hidden"
+                      className="pointer-events-auto win-acrylic charkle-reveal-bottom rounded-[var(--win-radius-overlay)] px-2 py-1 flex items-center gap-1 text-[11.5px] max-w-full overflow-x-auto charkle-scroll-hidden"
                     >
                       {allSelectedIds.length > 1 && (
                         <>
                           <span className="px-1.5 text-[11px] font-semibold charkle-tabular text-[var(--text-secondary)] shrink-0 whitespace-nowrap">
                             已选 {allSelectedIds.length} 项
                           </span>
-                          <div className="h-4 w-px bg-[var(--border-hairline)] shrink-0" />
+                          <div className="h-4 w-px bg-[var(--win-stroke-divider)] shrink-0" />
                         </>
                       )}
 
@@ -4211,36 +4220,36 @@ export const MoodboardStudioView: React.FC = () => {
                             title="逆时针 90° (Shift+R)"
                             aria-label="逆时针旋转 90°"
                             onClick={() => rotateNodes(targetIds, -90)}
-                            className="charkle-pressable h-6.5 w-7 rounded-[var(--radius-chip)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer shrink-0"
+                            className="charkle-pressable h-6.5 w-7 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer shrink-0"
                           >
-                            <RotateCcw size={12.5} />
+                            <ArrowRotateCounterclockwise16Regular className="w-3.5 h-3.5" />
                           </button>
                           <button
                             type="button"
                             title="顺时针 90° (R)"
                             aria-label="顺时针旋转 90°"
                             onClick={() => rotateNodes(targetIds, 90)}
-                            className="charkle-pressable h-6.5 w-7 rounded-[var(--radius-chip)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer shrink-0"
+                            className="charkle-pressable h-6.5 w-7 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer shrink-0"
                           >
-                            <RotateCw size={12.5} />
+                            <ArrowRotateClockwise16Regular className="w-3.5 h-3.5" />
                           </button>
                           {anyRotated && (
                             <button
                               type="button"
                               title="点击重置旋转角度至 0°"
                               onClick={() => resetNodesRotation(targetIds)}
-                              className="charkle-pressable h-6.5 px-2 rounded-[var(--radius-chip)] bg-[var(--accent-soft)] text-[var(--accent)] inline-flex items-center gap-1 text-[11px] font-semibold charkle-mono charkle-tabular cursor-pointer shrink-0"
+                              className="charkle-pressable h-6.5 px-2 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] text-[var(--accent)] inline-flex items-center gap-1 text-[11px] font-semibold charkle-mono charkle-tabular cursor-pointer shrink-0"
                             >
                               <span>
                                 {selectedUnlockedNodes.length === 1
                                   ? `${Math.round(singleAngle)}°`
                                   : '重置角度'}
                               </span>
-                              <Undo2 size={9.5} />
+                              <ArrowUndo16Regular className="w-3 h-3" />
                             </button>
                           )}
 
-                          <div className="h-4 w-px bg-[var(--border-hairline)] mx-0.5 shrink-0" />
+                          <div className="h-4 w-px bg-[var(--win-stroke-divider)] mx-0.5 shrink-0" />
 
                           <button
                             type="button"
@@ -4248,13 +4257,13 @@ export const MoodboardStudioView: React.FC = () => {
                             aria-label="水平翻转"
                             onClick={() => flipNodes(targetIds, true)}
                             className={[
-                              'charkle-pressable h-6.5 w-7 rounded-[var(--radius-chip)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                              'charkle-pressable h-6.5 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                               anyFlippedH
                                 ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                                : 'hover:bg-[var(--bg-subtle)] text-[var(--text-primary)]',
+                                : 'hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)]',
                             ].join(' ')}
                           >
-                            <FlipHorizontal2 size={12.5} />
+                            <FlipHorizontal16Regular className="w-3.5 h-3.5" />
                           </button>
                           <button
                             type="button"
@@ -4262,13 +4271,13 @@ export const MoodboardStudioView: React.FC = () => {
                             aria-label="上下翻转"
                             onClick={() => flipNodes(targetIds, false)}
                             className={[
-                              'charkle-pressable h-6.5 w-7 rounded-[var(--radius-chip)] inline-flex items-center justify-center cursor-pointer shrink-0',
+                              'charkle-pressable h-6.5 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer shrink-0',
                               anyFlippedV
                                 ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                                : 'hover:bg-[var(--bg-subtle)] text-[var(--text-primary)]',
+                                : 'hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)]',
                             ].join(' ')}
                           >
-                            <FlipVertical2 size={12.5} />
+                            <FlipVertical16Regular className="w-3.5 h-3.5" />
                           </button>
                         </>
                       )}
@@ -4276,16 +4285,16 @@ export const MoodboardStudioView: React.FC = () => {
                       {selectedSingleNode && 'assetRef' in selectedSingleNode.kind && (
                         <>
                           {targetIds.length > 0 && (
-                            <div className="h-4 w-px bg-[var(--border-hairline)] mx-0.5 shrink-0" />
+                            <div className="h-4 w-px bg-[var(--win-stroke-divider)] mx-0.5 shrink-0" />
                           )}
                           <button
                             ref={cropBtnRef}
                             type="button"
                             onClick={() => setCropOpen((v) => !v)}
                             title="非破坏性局部裁切"
-                            className="charkle-pressable h-6.5 px-2 rounded-[var(--radius-chip)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                            className="charkle-pressable h-6.5 px-2 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
                           >
-                            <Crop size={12} />
+                            <Crop16Regular className="w-3.5 h-3.5" />
                             <span>裁切</span>
                           </button>
                           <button
@@ -4298,9 +4307,9 @@ export const MoodboardStudioView: React.FC = () => {
                               )
                             }
                             title="在素材库中定位此素材"
-                            className="charkle-pressable h-6.5 px-2 rounded-[var(--radius-chip)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                            className="charkle-pressable h-6.5 px-2 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
                           >
-                            <Compass size={12} />
+                            <CompassNorthwest16Regular className="w-3.5 h-3.5" />
                             <span>定位</span>
                           </button>
                         </>
@@ -4308,7 +4317,7 @@ export const MoodboardStudioView: React.FC = () => {
 
                       {(targetIds.length > 0 ||
                         (selectedSingleNode && 'assetRef' in selectedSingleNode.kind)) && (
-                        <div className="h-4 w-px bg-[var(--border-hairline)] mx-0.5 shrink-0" />
+                        <div className="h-4 w-px bg-[var(--win-stroke-divider)] mx-0.5 shrink-0" />
                       )}
                       <button
                         type="button"
@@ -4334,9 +4343,13 @@ export const MoodboardStudioView: React.FC = () => {
                             { recordUndo: true, immediateSave: true },
                           );
                         }}
-                        className="charkle-pressable h-6.5 w-6.5 rounded-[var(--radius-chip)] hover:bg-[var(--bg-subtle)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer shrink-0"
+                        className="charkle-pressable h-6.5 w-6.5 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer shrink-0"
                       >
-                        {allSelectedLocked ? <Unlock size={12} /> : <Lock size={12} />}
+                        {allSelectedLocked ? (
+                          <LockOpen16Regular className="w-3.5 h-3.5" />
+                        ) : (
+                          <LockClosed16Regular className="w-3.5 h-3.5" />
+                        )}
                       </button>
                       <button
                         type="button"
@@ -4348,11 +4361,11 @@ export const MoodboardStudioView: React.FC = () => {
                         aria-label="删除选中节点"
                         onClick={() => removeBoardNodesWithFeedback(allSelectedIds)}
                         className={[
-                          'charkle-pressable h-6.5 rounded-[var(--radius-chip)] hover:bg-[var(--danger-soft)] text-[var(--danger)] inline-flex items-center justify-center gap-1 cursor-pointer shrink-0 whitespace-nowrap',
+                          'charkle-pressable h-6.5 rounded-[var(--win-radius-control)] hover:bg-[var(--danger-soft)] text-[var(--danger)] inline-flex items-center justify-center gap-1 cursor-pointer shrink-0 whitespace-nowrap',
                           allSelectedIds.length > 1 ? 'px-2 text-[11px] font-medium' : 'w-6.5',
                         ].join(' ')}
                       >
-                        <Trash2 size={12} />
+                        <Delete16Regular className="w-3.5 h-3.5" />
                         {allSelectedIds.length > 1 && <span>移除 ({allSelectedIds.length})</span>}
                       </button>
                     </div>
@@ -4363,7 +4376,7 @@ export const MoodboardStudioView: React.FC = () => {
                 {!dockLayout.inlineToolOptions && (tool === 'ink' || tool === 'connector') && (
                   <div
                     data-testid="floating-tool-options-pill"
-                    className="pointer-events-auto charkle-glass charkle-reveal-bottom rounded-full px-2.5 py-1.5 flex items-center gap-1.5 max-w-full overflow-x-auto charkle-scroll-hidden"
+                    className="pointer-events-auto win-acrylic charkle-reveal-bottom rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-1.5 max-w-full overflow-x-auto charkle-scroll-hidden"
                   >
                     {tool === 'ink' ? penOptionsContent : connectorOptionsContent}
                   </div>
@@ -4409,9 +4422,9 @@ export const MoodboardStudioView: React.FC = () => {
 
           {/* 10. Drop-Ring Overlay */}
           {showCanvasDropOverlay && (
-            <div className="pointer-events-none absolute inset-4 z-40 rounded-[var(--radius-dock-outer)] border-2 border-dashed border-[var(--accent)] bg-[var(--accent-soft)]/50 flex flex-col items-center justify-center gap-2 text-[var(--accent)]">
-              <div className="h-11 w-11 rounded-full bg-[var(--bg-elevated)] shadow-sm flex items-center justify-center">
-                <Upload size={20} />
+            <div className="pointer-events-none absolute inset-4 z-40 rounded-[var(--win-radius-overlay)] border-2 border-dashed border-[var(--accent)] bg-[var(--accent-soft)]/50 flex flex-col items-center justify-center gap-2 text-[var(--accent)]">
+              <div className="h-11 w-11 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-sm flex items-center justify-center">
+                <ArrowUpload16Regular className="w-5 h-5" />
               </div>
               <div className="text-[13px] font-semibold">
                 {pointerDrag?.kind === 'candidate'
@@ -4422,29 +4435,36 @@ export const MoodboardStudioView: React.FC = () => {
           )}
         </div>
 
-        {/* Collapsible 300px Moodboard Right Rail (respects coordinatorStore.inspectorOpen!) */}
+        {/* Collapsible 300px Moodboard Right Rail (zero-reflow slot + GPU inner slide) */}
         <div
           aria-hidden={!inspectorOpen}
           style={{
             width: inspectorOpen ? 300 : 0,
-            opacity: inspectorOpen ? 1 : 0,
           }}
           className={[
             'charkle-drawer-slot shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
             inspectorOpen ? '' : 'pointer-events-none',
           ].join(' ')}
         >
-          <CandidatePoolPanel
-            onAddAsset={(asset) =>
-              addAssetNodeAt(asset.id, getSpawnWorldCenter(), asset, assetsById)
-            }
-            onExportFigmaBundle={() => void handleExportFigmaBridge()}
-            onCopyBoardImage={() => void handleCopyClipboard()}
-            onSaveBoardImage={(fmt) => void handleExportImage(fmt)}
-            onCopyHex={handleCopyColorHex}
-            onSearchByColorHex={handleSearchColorHex}
-            exporting={exporting}
-          />
+          <div
+            style={{
+              opacity: inspectorOpen ? 1 : 0,
+              transform: inspectorOpen ? 'translate3d(0,0,0)' : 'translate3d(12px,0,0)',
+            }}
+            className="win-drawer-content h-full shrink-0"
+          >
+            <CandidatePoolPanel
+              onAddAsset={(asset) =>
+                addAssetNodeAt(asset.id, getSpawnWorldCenter(), asset, assetsById)
+              }
+              onExportFigmaBundle={() => void handleExportFigmaBridge()}
+              onCopyBoardImage={() => void handleCopyClipboard()}
+              onSaveBoardImage={(fmt) => void handleExportImage(fmt)}
+              onCopyHex={handleCopyColorHex}
+              onSearchByColorHex={handleSearchColorHex}
+              exporting={exporting}
+            />
+          </div>
         </div>
       </div>
 
@@ -4548,12 +4568,12 @@ export const MoodboardStudioView: React.FC = () => {
                           closeMenu();
                           handleSearchColorHex(ctxSwatchHex);
                         }}
-                        className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                        className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                       >
-                        <Search size={13} />
+                        <Search16Regular className="w-3.5 h-3.5" />
                         <span>以此色筛选素材库</span>
                       </button>
-                      <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                      <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                     </>
                   )}
                   <button
@@ -4585,16 +4605,16 @@ export const MoodboardStudioView: React.FC = () => {
                         { recordUndo: true, immediateSave: true },
                       );
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <RefreshCw size={13} />
+                    <ArrowSync16Regular className="w-3.5 h-3.5" />
                     <span>
                       {paletteStripNode.autoSyncWithBoard
                         ? '关闭自动同步板内色板'
                         : '开启自动同步板内色板'}
                     </span>
                   </button>
-                  <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                  <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                 </>
               )}
 
@@ -4608,12 +4628,12 @@ export const MoodboardStudioView: React.FC = () => {
                       setEditingGroupId(null);
                       setEditingNoteId(targetNode.id);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <Pencil size={13} />
+                    <Edit16Regular className="w-3.5 h-3.5" />
                     <span>编辑便签</span>
                   </button>
-                  <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                  <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                 </>
               )}
 
@@ -4627,9 +4647,13 @@ export const MoodboardStudioView: React.FC = () => {
                           closeMenu();
                           openBoardAsset(assetRef.assetID, null);
                         }}
-                        className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                        className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                       >
-                        {ctxPlainBookmark ? <ExternalLink size={13} /> : <Eye size={13} />}
+                        {ctxPlainBookmark ? (
+                          <Open16Regular className="w-3.5 h-3.5" />
+                        ) : (
+                          <Eye16Regular className="w-3.5 h-3.5" />
+                        )}
                         <span>{ctxPlainBookmark ? '在默认浏览器中打开' : '快速预览 (Space)'}</span>
                       </button>
                       <button
@@ -4640,7 +4664,7 @@ export const MoodboardStudioView: React.FC = () => {
                         }}
                         className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] cursor-pointer text-left font-medium"
                       >
-                        <Compass size={13} />
+                        <CompassNorthwest16Regular className="w-3.5 h-3.5" />
                         <span>在素材库中定位</span>
                       </button>
                       <button
@@ -4654,9 +4678,9 @@ export const MoodboardStudioView: React.FC = () => {
                             });
                           });
                         }}
-                        className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                        className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                       >
-                        <FolderOpen size={13} />
+                        <FolderOpen16Regular className="w-3.5 h-3.5" />
                         <span>在资源管理器中显示</span>
                       </button>
                     </>
@@ -4668,9 +4692,9 @@ export const MoodboardStudioView: React.FC = () => {
                       setSwappingNodeId(targetNode.id);
                       setInspectorOpen(true);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <ArrowLeftRight size={13} />
+                    <ArrowSwap16Regular className="w-3.5 h-3.5" />
                     <span>从候选池换一张…</span>
                   </button>
                   {hasCrop && (
@@ -4690,13 +4714,13 @@ export const MoodboardStudioView: React.FC = () => {
                           { recordUndo: true, immediateSave: true },
                         );
                       }}
-                      className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                      className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                     >
-                      <Crop size={13} />
+                      <Crop16Regular className="w-3.5 h-3.5" />
                       <span>还原完整画面</span>
                     </button>
                   )}
-                  <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                  <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                 </>
               )}
 
@@ -4707,9 +4731,9 @@ export const MoodboardStudioView: React.FC = () => {
                     closeMenu();
                     void handleCopyAssets(ctxAssetIds);
                   }}
-                  className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                  className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                 >
-                  <Copy size={13} />
+                  <Copy16Regular className="w-3.5 h-3.5" />
                   <span>拷贝{countSuffix}</span>
                 </button>
               )}
@@ -4721,12 +4745,12 @@ export const MoodboardStudioView: React.FC = () => {
                       closeMenu();
                       void handleCutNodes(ctxTargetIds);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <Scissors size={13} />
+                    <Cut16Regular className="w-3.5 h-3.5" />
                     <span>剪切{countSuffix}</span>
                   </button>
-                  <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                  <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                 </>
               )}
 
@@ -4741,9 +4765,9 @@ export const MoodboardStudioView: React.FC = () => {
                         setEditingNoteId(null);
                         setEditingGroupId(targetNode.id);
                       }}
-                      className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                      className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                     >
-                      <Pencil size={13} />
+                      <Edit16Regular className="w-3.5 h-3.5" />
                       <span>重命名分组</span>
                     </button>
                   )}
@@ -4753,12 +4777,12 @@ export const MoodboardStudioView: React.FC = () => {
                       closeMenu();
                       reflowGroupFrameNow(targetNode.id);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <Grid2x2 size={13} />
+                    <Grid16Regular className="w-3.5 h-3.5" />
                     <span>自适应缩放排布框内素材</span>
                   </button>
-                  <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                  <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                 </>
               )}
 
@@ -4770,9 +4794,9 @@ export const MoodboardStudioView: React.FC = () => {
                       closeMenu();
                       rotateNodes(ctxUnlockedIds, 90);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <RotateCw size={13} />
+                    <ArrowRotateClockwise16Regular className="w-3.5 h-3.5" />
                     <span>顺时针旋转 90° (R){countSuffix}</span>
                   </button>
                   <button
@@ -4781,9 +4805,9 @@ export const MoodboardStudioView: React.FC = () => {
                       closeMenu();
                       rotateNodes(ctxUnlockedIds, -90);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <RotateCcw size={13} />
+                    <ArrowRotateCounterclockwise16Regular className="w-3.5 h-3.5" />
                     <span>逆时针旋转 90° (Shift+R){countSuffix}</span>
                   </button>
                   {anyRotated && (
@@ -4793,9 +4817,9 @@ export const MoodboardStudioView: React.FC = () => {
                         closeMenu();
                         resetNodesRotation(ctxUnlockedIds);
                       }}
-                      className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                      className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                     >
-                      <Undo2 size={13} />
+                      <ArrowUndo16Regular className="w-3.5 h-3.5" />
                       <span>重置旋转角度 (0°){countSuffix}</span>
                     </button>
                   )}
@@ -4805,9 +4829,9 @@ export const MoodboardStudioView: React.FC = () => {
                       closeMenu();
                       flipNodes(ctxUnlockedIds, true);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <FlipHorizontal2 size={13} />
+                    <FlipHorizontal16Regular className="w-3.5 h-3.5" />
                     <span>
                       {!isMulti && targetNode.flipHorizontal
                         ? '取消水平翻转'
@@ -4820,16 +4844,16 @@ export const MoodboardStudioView: React.FC = () => {
                       closeMenu();
                       flipNodes(ctxUnlockedIds, false);
                     }}
-                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                    className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                   >
-                    <FlipVertical2 size={13} />
+                    <FlipVertical16Regular className="w-3.5 h-3.5" />
                     <span>
                       {!isMulti && targetNode.flipVertical
                         ? '取消上下翻转'
                         : `上下翻转 (Shift+V)${countSuffix}`}
                     </span>
                   </button>
-                  <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+                  <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
                 </>
               )}
 
@@ -4858,9 +4882,13 @@ export const MoodboardStudioView: React.FC = () => {
                       { recordUndo: true, immediateSave: true },
                     );
                   }}
-                  className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                  className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
                 >
-                  <Star size={13} />
+                  {assetRef.weight >= 2 ? (
+                    <Star16Filled className="w-3.5 h-3.5 text-[#E5B243]" />
+                  ) : (
+                    <Star16Regular className="w-3.5 h-3.5" />
+                  )}
                   <span>{assetRef.weight >= 2 ? '取消主图 2× 权重' : '设为主图 2× 权重'}</span>
                 </button>
               )}
@@ -4880,12 +4908,16 @@ export const MoodboardStudioView: React.FC = () => {
                     { recordUndo: true, immediateSave: true },
                   );
                 }}
-                className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+                className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
               >
-                {allLocked ? <Unlock size={13} /> : <Lock size={13} />}
+                {allLocked ? (
+                  <LockOpen16Regular className="w-3.5 h-3.5" />
+                ) : (
+                  <LockClosed16Regular className="w-3.5 h-3.5" />
+                )}
                 <span>{allLocked ? `解锁位置${countSuffix}` : `锁定位置${countSuffix}`}</span>
               </button>
-              <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+              <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
               <button
                 type="button"
                 onClick={() => {
@@ -4894,7 +4926,7 @@ export const MoodboardStudioView: React.FC = () => {
                 }}
                 className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--danger-soft)] text-[var(--danger)] cursor-pointer text-left"
               >
-                <Trash2 size={13} />
+                <Delete16Regular className="w-3.5 h-3.5" />
                 <span>从情绪板移除{countSuffix}</span>
               </button>
             </div>
@@ -4928,12 +4960,12 @@ export const MoodboardStudioView: React.FC = () => {
                 setContextMenu(null);
                 handlePasteIntoBoard(pt);
               }}
-              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
             >
-              <Clipboard size={13} />
+              <Clipboard16Regular className="w-3.5 h-3.5" />
               <span>粘贴到情绪板</span>
             </button>
-            <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+            <div className="my-0.5 h-px bg-[var(--win-stroke-divider)]" />
             <button
               type="button"
               onClick={() => {
@@ -4941,9 +4973,9 @@ export const MoodboardStudioView: React.FC = () => {
                 setContextMenu(null);
                 addNoteNode('warm', pt);
               }}
-              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
             >
-              <StickyNote size={13} />
+              <Note16Regular className="w-3.5 h-3.5" />
               <span>添加灵感便签</span>
             </button>
             <button
@@ -4953,9 +4985,9 @@ export const MoodboardStudioView: React.FC = () => {
                 setContextMenu(null);
                 addGroupFrameNode('sand', pt);
               }}
-              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
             >
-              <SquareDashed size={13} />
+              <SquareHint16Regular className="w-3.5 h-3.5" />
               <span>添加区域分组框</span>
             </button>
             <button
@@ -4965,9 +4997,9 @@ export const MoodboardStudioView: React.FC = () => {
                 setContextMenu(null);
                 addPaletteStripNode(pt);
               }}
-              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--bg-subtle)] cursor-pointer text-left"
+              className="w-full h-7.5 px-2.5 rounded-[var(--radius-popover-inner)] flex items-center gap-2 hover:bg-[var(--win-subtle-hover)] cursor-pointer text-left"
             >
-              <Palette size={13} />
+              <Color16Regular className="w-3.5 h-3.5" />
               <span>添加全板色卡条</span>
             </button>
           </div>
@@ -5000,7 +5032,7 @@ export const MoodboardStudioView: React.FC = () => {
                   setEditingConnector(null);
                 }
               }}
-              className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[12px] text-[var(--text-primary)] outline-none"
             />
             <div className="flex items-center justify-between">
               <Button
@@ -5015,7 +5047,7 @@ export const MoodboardStudioView: React.FC = () => {
                 删除连线
               </Button>
               <Button
-                variant="primary"
+                variant="accent"
                 size="xs"
                 onClick={() => {
                   updateConnectorLabel(editingConnector.id, editingConnector.draft);
@@ -5084,7 +5116,7 @@ export const MoodboardStudioView: React.FC = () => {
                     }}
                     ariaLabel="缩放倍率"
                     valueText={`${Math.round(crop.width * 100)}%`}
-                    variant="glass"
+                    variant="standard"
                     size="sm"
                     className="w-28"
                   />
@@ -5100,7 +5132,7 @@ export const MoodboardStudioView: React.FC = () => {
                     onChange={(x) => updateCrop({ ...crop, x })}
                     ariaLabel="水平偏移"
                     valueText={`${Math.round(crop.x * 100)}%`}
-                    variant="glass"
+                    variant="standard"
                     size="sm"
                     className="w-28"
                   />
@@ -5116,7 +5148,7 @@ export const MoodboardStudioView: React.FC = () => {
                     onChange={(y) => updateCrop({ ...crop, y })}
                     ariaLabel="垂直偏移"
                     valueText={`${Math.round(crop.y * 100)}%`}
-                    variant="glass"
+                    variant="standard"
                     size="sm"
                     className="w-28"
                   />
@@ -5194,35 +5226,35 @@ export const MoodboardStudioView: React.FC = () => {
             </label>
           </div>
 
-          <div className="pt-2 border-t border-[var(--border-hairline)] flex flex-col gap-1.5">
+          <div className="pt-2 border-t border-[var(--win-stroke-divider)] flex flex-col gap-1.5">
             <Button
-              variant="secondary"
+              variant="standard"
               size="sm"
               loading={exporting}
               onClick={() => void handleExportImage()}
               className="w-full justify-center"
             >
-              <ImageIcon size={14} />
+              <Image16Regular className="w-3.5 h-3.5" />
               导出 {exportScale}× {exportFormat.toUpperCase()} 图片
             </Button>
             <Button
-              variant="secondary"
+              variant="standard"
               size="sm"
               loading={exporting}
               onClick={() => void handleCopyClipboard()}
               className="w-full justify-center"
             >
-              <Clipboard size={14} />
+              <Clipboard16Regular className="w-3.5 h-3.5" />
               复制高清图到剪贴板
             </Button>
             <Button
-              variant="primary"
+              variant="accent"
               size="sm"
               loading={exporting}
               onClick={() => void handleExportFigmaBridge()}
               className="w-full justify-center"
             >
-              <Download size={14} />
+              <ArrowDownload16Regular className="w-3.5 h-3.5" />
               导出 .charkleboard（Figma / FigJam）
             </Button>
           </div>

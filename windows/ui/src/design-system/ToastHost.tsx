@@ -1,7 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
+import {
+  CheckmarkCircle20Filled,
+  Dismiss16Regular,
+  ErrorCircle20Filled,
+  Info20Filled,
+} from '@fluentui/react-icons';
 import { useCoordinatorStore, type ToastItem } from '../stores/coordinatorStore';
+import { AnimatePresence, m, WIN_TRANSITION_EXIT, WIN_TRANSITION_FAST } from './MotionPrimitives';
 
 const RING_RADIUS = 6.5;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
@@ -13,20 +19,18 @@ const ToastCard: React.FC<{
   const duration = toast.durationMs ?? (toast.actionLabel ? 4800 : 2800);
   const [paused, setPaused] = useState(false);
   const [hovered, setHovered] = useState(false);
-  const [closing, setClosing] = useState(false);
   const [remainingMs, setRemainingMs] = useState(duration);
   const lastTickRef = useRef<number>(Date.now());
-  const closingRef = useRef(false);
+  const dismissedRef = useRef(false);
 
   const triggerClose = () => {
-    if (closingRef.current) return;
-    closingRef.current = true;
-    setClosing(true);
-    window.setTimeout(() => onDismiss(toast.id), 135);
+    if (dismissedRef.current) return;
+    dismissedRef.current = true;
+    onDismiss(toast.id);
   };
 
   useEffect(() => {
-    if (paused || closing) return;
+    if (paused || dismissedRef.current) return;
     lastTickRef.current = Date.now();
     const interval = window.setInterval(() => {
       const now = Date.now();
@@ -35,16 +39,13 @@ const ToastCard: React.FC<{
       setRemainingMs((prev) => Math.max(0, prev - dt));
     }, 50);
     return () => window.clearInterval(interval);
-  }, [paused, closing]);
+  }, [paused]);
 
   useEffect(() => {
-    if (remainingMs === 0 && !closingRef.current) {
-      closingRef.current = true;
-      setClosing(true);
-      const timer = window.setTimeout(() => onDismiss(toast.id), 135);
-      return () => window.clearTimeout(timer);
+    if (remainingMs === 0 && !dismissedRef.current) {
+      dismissedRef.current = true;
+      onDismiss(toast.id);
     }
-    return undefined;
   }, [remainingMs, onDismiss, toast.id]);
 
   const progress = Math.max(0, Math.min(1, remainingMs / Math.max(1, duration)));
@@ -52,9 +53,11 @@ const ToastCard: React.FC<{
   const showClose = Boolean(toast.actionLabel) || hovered;
 
   return (
-    <div
-      data-closing={closing ? 'true' : undefined}
-      data-no-lens="true"
+    <m.div
+      layout="position"
+      initial={{ opacity: 0, y: -8, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1, transition: WIN_TRANSITION_FAST }}
+      exit={{ opacity: 0, scale: 0.96, transition: WIN_TRANSITION_EXIT }}
       onMouseEnter={() => {
         setHovered(true);
         setPaused(true);
@@ -72,7 +75,8 @@ const ToastCard: React.FC<{
         }
       }}
       className={[
-        'charkle-toast-item charkle-glass charkle-toast-glass pointer-events-auto relative overflow-hidden flex items-center gap-2 py-2 rounded-[var(--radius-popover-outer)] text-[12.5px] text-[var(--text-primary)]',
+        'win-acrylic pointer-events-auto relative overflow-hidden flex items-center gap-2.5 py-2',
+        'rounded-[var(--win-radius-overlay)] text-[13px] leading-[18px] text-[var(--text-primary)]',
         showClose ? 'pl-3.5 pr-2' : 'px-3.5',
       ].join(' ')}
     >
@@ -90,7 +94,7 @@ const ToastCard: React.FC<{
             r={RING_RADIUS}
             fill="none"
             stroke="currentColor"
-            strokeOpacity="0.14"
+            strokeOpacity="0.16"
             strokeWidth="2"
           />
           <circle
@@ -106,11 +110,11 @@ const ToastCard: React.FC<{
           />
         </svg>
       ) : toast.tone === 'success' ? (
-        <CheckCircle2 size={15} className="text-[var(--success)] shrink-0" />
+        <CheckmarkCircle20Filled className="w-[18px] h-[18px] text-[var(--success)] shrink-0" />
       ) : toast.tone === 'error' ? (
-        <AlertCircle size={15} className="text-[var(--danger)] shrink-0" />
+        <ErrorCircle20Filled className="w-[18px] h-[18px] text-[var(--danger)] shrink-0" />
       ) : (
-        <Info size={15} className="text-[var(--accent)] shrink-0" />
+        <Info20Filled className="w-[18px] h-[18px] text-[var(--accent)] shrink-0" />
       )}
 
       <span className="leading-snug flex-1 min-w-0 font-medium charkle-wrap-safe">
@@ -124,7 +128,7 @@ const ToastCard: React.FC<{
             toast.onAction?.();
             triggerClose();
           }}
-          className="charkle-pressable px-2.5 py-1 text-[12px] font-semibold text-[var(--accent)] bg-[var(--accent-soft)] hover:brightness-95 rounded-[var(--radius-popover-inner)] cursor-pointer shrink-0"
+          className="charkle-pressable px-2.5 py-1 text-[12px] font-semibold text-[var(--accent)] bg-[var(--accent-soft)] hover:brightness-95 rounded-[var(--win-radius-control)] cursor-pointer shrink-0"
         >
           {toast.actionLabel}
         </button>
@@ -135,25 +139,25 @@ const ToastCard: React.FC<{
           type="button"
           onClick={triggerClose}
           aria-label="关闭提示"
-          className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--radius-popover-inner)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer shrink-0"
+          className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer shrink-0"
         >
-          <X size={12.5} />
+          <Dismiss16Regular className="w-3.5 h-3.5" />
         </button>
       )}
-    </div>
+    </m.div>
   );
 };
 
 /**
- * Interactive top-trailing Liquid Glass ToastHost matching macOS `CharkleToastOverlay.swift`:
- * - Click-through outside pills; smooth `@starting-style` enter (`180ms`) & `[data-closing]` exit (`130ms`)
- * - Hover & focus pause countdown; action/Undo toasts display a live circular SVG countdown ring
+ * Windows 11 InfoBar-inspired top-trailing Acrylic ToastHost powered by `AnimatePresence`:
+ * - Click-through container; smooth 167ms entry & 135ms fast-out exit
+ * - Hover & focus pause countdown; action/Undo toasts display a circular SVG countdown ring
  */
 export const ToastHost: React.FC = () => {
   const toasts = useCoordinatorStore((s) => s.toasts);
   const dismissToast = useCoordinatorStore((s) => s.dismissToast);
 
-  if (typeof document === 'undefined' || toasts.length === 0) return null;
+  if (typeof document === 'undefined') return null;
 
   return createPortal(
     <div
@@ -163,9 +167,11 @@ export const ToastHost: React.FC = () => {
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
-      {toasts.map((toast) => (
-        <ToastCard key={toast.id} toast={toast} onDismiss={dismissToast} />
-      ))}
+      <AnimatePresence initial={false}>
+        {toasts.map((toast) => (
+          <ToastCard key={toast.id} toast={toast} onDismiss={dismissToast} />
+        ))}
+      </AnimatePresence>
     </div>,
     document.body,
   );

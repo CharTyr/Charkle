@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { X } from 'lucide-react';
+import React from 'react';
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
+import { Dismiss16Regular } from '@fluentui/react-icons';
 
 export type ModalWidth = 'sm' | 'md' | 'lg' | 'xl' | 'studio';
 
@@ -23,19 +23,28 @@ export interface ModalShellProps {
   noPadding?: boolean;
   hideCloseButton?: boolean;
   closeOnBackdrop?: boolean;
-  /** True for 0ms instant modals like Ctrl+J Jump Anywhere (DESIGN.md §6.1). */
+  /** True for 0ms instant modals like Ctrl+J Jump Anywhere (fluent2-design-system.md §6.1). */
   instant?: boolean;
+  ariaLabel?: string;
   className?: string;
   children: React.ReactNode;
 }
 
-/**
- * Unified ModalShell implementing DESIGN.md P0-2:
- * - Soft GPU radial dimming scrim (Light 0.075->0.165, Dark 0.34->0.50, zero backdrop-blur jank)
- * - Interruptible enter/exit transition (240ms in / 170ms strong ease-out out), or 0ms for instant mode
- */
-const modalEscapeStack: symbol[] = [];
+const stopModalPropagation = {
+  onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
+  onPointerDown: (e: React.PointerEvent) => e.stopPropagation(),
+  onClick: (e: React.MouseEvent) => e.stopPropagation(),
+  onDoubleClick: (e: React.MouseEvent) => e.stopPropagation(),
+  onContextMenu: (e: React.MouseEvent) => e.stopPropagation(),
+};
 
+/**
+ * Fluent 2 Desktop `ContentDialog` shell built on `@base-ui/react/dialog`:
+ * - Built-in focus trap, Esc stacking, and focus restoration on close
+ * - Smoke backdrop scrim (no expensive full-screen blur)
+ * - 10px dialog radius, 1px flyout stroke, subtle ContentDialog footer bar
+ * - `instant` prop disables entry/exit motion for 0ms high-frequency modals (Ctrl+J)
+ */
 export const ModalShell: React.FC<ModalShellProps> = ({
   open,
   onClose,
@@ -48,127 +57,95 @@ export const ModalShell: React.FC<ModalShellProps> = ({
   hideCloseButton = false,
   closeOnBackdrop = true,
   instant = false,
+  ariaLabel,
   className = '',
   children,
-}) => {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  const [rendered, setRendered] = useState(open);
-  const [closing, setClosing] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setClosing(false);
-      setRendered(true);
-      return;
-    }
-    if (!rendered) return;
-    if (instant) {
-      setRendered(false);
-      setClosing(false);
-      return;
-    }
-    setClosing(true);
-    const timer = window.setTimeout(() => {
-      setRendered(false);
-      setClosing(false);
-    }, 175);
-    return () => window.clearTimeout(timer);
-  }, [open, rendered, instant]);
-
-  useEffect(() => {
-    if (!open) return;
-    const token = Symbol('modal-shell');
-    modalEscapeStack.push(token);
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.defaultPrevented) return;
-      if (modalEscapeStack[modalEscapeStack.length - 1] !== token) return;
-      if (document.querySelector('[data-charkle-popover-open="true"]')) return;
-      e.preventDefault();
-      e.stopPropagation();
-      onCloseRef.current();
-    };
-    window.addEventListener('keydown', handleKey, true);
-    return () => {
-      window.removeEventListener('keydown', handleKey, true);
-      const idx = modalEscapeStack.lastIndexOf(token);
-      if (idx >= 0) modalEscapeStack.splice(idx, 1);
-    };
-  }, [open]);
-
-  if (!rendered || typeof document === 'undefined') return null;
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
-      role="dialog"
-      aria-modal="true"
-      onMouseDown={(e) => e.stopPropagation()}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.stopPropagation()}
-    >
-      <div
-        data-closing={closing ? 'true' : undefined}
-        className={instant ? 'fixed inset-0' : 'charkle-modal-scrim fixed inset-0'}
-        style={instant ? { background: 'var(--modal-scrim)' } : undefined}
-        onClick={closeOnBackdrop ? onClose : undefined}
+}) => (
+  <BaseDialog.Root
+    open={open}
+    modal={true}
+    disablePointerDismissal={!closeOnBackdrop}
+    onOpenChange={(nextOpen, details) => {
+      if (nextOpen) return;
+      if (
+        details.reason === 'escape-key' &&
+        typeof document !== 'undefined' &&
+        document.querySelector('[data-charkle-popover-open="true"]')
+      ) {
+        details.cancel();
+        return;
+      }
+      onClose();
+    }}
+  >
+    <BaseDialog.Portal>
+      <BaseDialog.Backdrop
+        className={[
+          'win-smoke-scrim fixed inset-0 z-[100]',
+          instant ? '' : 'win-dialog-backdrop',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        {...stopModalPropagation}
       />
 
-      <div
-        data-closing={closing ? 'true' : undefined}
-        className={[
-          instant ? '' : 'charkle-modal-panel',
-          'relative z-10 w-full flex flex-col max-h-[90vh] overflow-hidden',
-          'rounded-[var(--radius-dock-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)]',
-          'shadow-[0_24px_64px_rgba(0,0,0,0.22)]',
-          WIDTH_CLASS[width],
-          className,
-        ].join(' ')}
+      <BaseDialog.Viewport
+        className="fixed inset-0 z-[101] flex items-center justify-center p-4 sm:p-6 pointer-events-none"
+        {...stopModalPropagation}
       >
-        {(title || !hideCloseButton || headerRight) && (
-          <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-[var(--border-hairline)] shrink-0">
-            <div className="min-w-0">
-              {title && (
-                <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] truncate">
-                  {title}
-                </h2>
-              )}
-              {subtitle && (
-                <p className="text-[12px] text-[var(--text-secondary)] mt-0.5 truncate">
-                  {subtitle}
-                </p>
-              )}
+        <BaseDialog.Popup
+          aria-label={!title ? ariaLabel : undefined}
+          className={[
+            instant ? '' : 'win-dialog-popup',
+            'pointer-events-auto relative w-full flex flex-col max-h-[90vh] overflow-hidden outline-none',
+            'rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)]',
+            'border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)]',
+            WIDTH_CLASS[width],
+            className,
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          {...stopModalPropagation}
+        >
+          {(title || !hideCloseButton || headerRight) && (
+            <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-[var(--win-stroke-divider)] shrink-0">
+              <div className="min-w-0">
+                {title && (
+                  <BaseDialog.Title className="text-[18px] leading-[24px] font-semibold tracking-[-0.01em] text-[var(--text-primary)] truncate charkle-heading">
+                    {title}
+                  </BaseDialog.Title>
+                )}
+                {subtitle && (
+                  <BaseDialog.Description className="text-[12px] leading-[16px] text-[var(--text-secondary)] mt-0.5 truncate">
+                    {subtitle}
+                  </BaseDialog.Description>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {headerRight}
+                {!hideCloseButton && (
+                  <BaseDialog.Close
+                    aria-label="关闭"
+                    className="charkle-pressable h-8 w-8 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+                  >
+                    <Dismiss16Regular className="w-4 h-4" />
+                  </BaseDialog.Close>
+                )}
+              </div>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {headerRight}
-              {!hideCloseButton && (
-                <button
-                  type="button"
-                  onClick={onClose}
-                  aria-label="关闭"
-                  className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-[var(--radius-chip)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
-                >
-                  <X size={16} />
-                </button>
-              )}
+          )}
+
+          <div className={`flex-1 min-h-0 overflow-y-auto charkle-scroll ${noPadding ? '' : 'p-5'}`}>
+            {children}
+          </div>
+
+          {footer && (
+            <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-[var(--win-stroke-divider)] bg-[var(--bg-subtle)]/55 shrink-0">
+              {footer}
             </div>
-          </div>
-        )}
-
-        <div className={`flex-1 min-h-0 overflow-y-auto charkle-scroll ${noPadding ? '' : 'p-5'}`}>
-          {children}
-        </div>
-
-        {footer && (
-          <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[var(--border-hairline)] bg-[var(--bg-gallery)]/50 shrink-0">
-            {footer}
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-};
+          )}
+        </BaseDialog.Popup>
+      </BaseDialog.Viewport>
+    </BaseDialog.Portal>
+  </BaseDialog.Root>
+);

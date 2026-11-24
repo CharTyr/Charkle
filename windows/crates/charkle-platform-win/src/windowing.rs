@@ -5,7 +5,7 @@
 //! - Custom frameless titlebar Windows 11 Snap Layouts via `SetWindowSubclass` + `WM_NCHITTEST` (`HTMAXBUTTON`)
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,12 +15,18 @@ pub const WIN11_22H2_BUILD: u32 = 22621;
 pub const WIN10_DARK_MODE_BUILD: u32 = 19041;
 /// Win32 `WS_SYSMENU` style bit (`0x0008_0000`).
 const WS_SYSMENU_BIT: u32 = 0x0008_0000;
+/// Win32 `WM_SETTINGCHANGE` message constant (`0x001A`).
+pub const WM_SETTINGCHANGE_MSG: u32 = 0x001A;
 /// Win32 `WM_NCPAINT` message constant (`0x0085`).
 pub const WM_NCPAINT_MSG: u32 = 0x0085;
 /// Undocumented `uxtheme.dll` message sent to paint the classic themed window caption bar.
 pub const WM_NCUAHDRAWCAPTION: u32 = 0x00AE;
 /// Undocumented `uxtheme.dll` message sent to paint the classic themed window frame.
 pub const WM_NCUAHDRAWFRAME: u32 = 0x00AF;
+/// Win32 `WM_THEMECHANGED` message constant (`0x031A`).
+pub const WM_THEMECHANGED_MSG: u32 = 0x031A;
+/// Win32 `WM_DWMCOLORIZATIONCOLORCHANGED` message constant (`0x0320`).
+pub const WM_DWMCOLORIZATIONCOLORCHANGED_MSG: u32 = 0x0320;
 /// `WM_NCACTIVATE` `lParam` value (`-1`) telling `DefWindowProcW` to update active state
 /// without repainting any non-client caption bar or title text.
 pub const WM_NCACTIVATE_NO_REPAINT_LPARAM: isize = -1;
@@ -99,6 +105,34 @@ pub const fn nc_activate_no_repaint_lparam() -> isize {
     WM_NCACTIVATE_NO_REPAINT_LPARAM
 }
 
+/// Returns `true` for Win32 system appearance messages (`WM_SETTINGCHANGE`, `WM_THEMECHANGED`,
+/// `WM_DWMCOLORIZATIONCOLORCHANGED`) that should re-apply DWM chrome and notify registered
+/// surface-change callbacks.
+pub const fn should_refresh_surface_on_message(msg: u32) -> bool {
+    matches!(
+        msg,
+        WM_SETTINGCHANGE_MSG | WM_THEMECHANGED_MSG | WM_DWMCOLORIZATIONCOLORCHANGED_MSG
+    )
+}
+
+/// Converts a Windows DWM `AccentColor` registry DWORD (`0xAABBGGRR`, little-endian ABGR)
+/// into an uppercase `#RRGGBB` hex string.
+pub fn parse_dwm_abgr_to_hex(raw: u32) -> String {
+    let r = raw & 0xFF;
+    let g = (raw >> 8) & 0xFF;
+    let b = (raw >> 16) & 0xFF;
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// Converts a Windows DWM `ColorizationColor` registry DWORD or `WM_DWMCOLORIZATIONCOLORCHANGED`
+/// `wParam` (`0xAARRGGBB`) into an uppercase `#RRGGBB` hex string.
+pub fn parse_dwm_argb_to_hex(raw: u32) -> String {
+    let r = (raw >> 16) & 0xFF;
+    let g = (raw >> 8) & 0xFF;
+    let b = raw & 0xFF;
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowsVersion {
@@ -114,7 +148,7 @@ pub enum BackdropKind {
     SolidFallback,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowSurfaceState {
     pub build_number: u32,
@@ -123,6 +157,8 @@ pub struct WindowSurfaceState {
     pub transparency_enabled: bool,
     pub animations_enabled: bool,
     pub snap_layouts_supported: bool,
+    #[serde(default)]
+    pub system_accent_hex: Option<String>,
 }
 
 /// Client-area pixel rectangle (physical pixels relative to HWND client top-left).
@@ -162,8 +198,17 @@ pub fn resolve_backdrop_kind(build_number: u32, _transparency_enabled: bool) -> 
     }
 }
 
+/// Thread-safe callback invoked when live OS theme, transparency, animation, or DWM accent
+/// settings change for a subclassed window.
+pub type SurfaceChangeCallback = Arc<dyn Fn(WindowSurfaceState) + Send + Sync + 'static>;
+
 fn max_button_rects() -> &'static Mutex<HashMap<isize, ClientRect>> {
     static MAP: OnceLock<Mutex<HashMap<isize, ClientRect>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn surface_change_callbacks() -> &'static Mutex<HashMap<isize, SurfaceChangeCallback>> {
+    static MAP: OnceLock<Mutex<HashMap<isize, SurfaceChangeCallback>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -188,6 +233,50 @@ pub fn update_maximize_button_rect(hwnd: isize, rect: Option<ClientRect>) {
     }
 }
 
+/// Registers (or replaces) a thread-safe callback invoked whenever the subclassed window
+/// receives live OS surface updates (`WM_SETTINGCHANGE`, `WM_THEMECHANGED`,
+/// `WM_DWMCOLORIZATIONCOLORCHANGED`).
+///
+/// Any callback registered for `hwnd` is removed automatically on `WM_NCDESTROY` so there
+/// are zero leaks. Passing `hwnd == 0` is a safe no-op.
+pub fn register_surface_change_callback<F>(hwnd: isize, callback: F)
+where
+    F: Fn(WindowSurfaceState) + Send + Sync + 'static,
+{
+    if hwnd == 0 {
+        return;
+    }
+    if let Ok(mut guard) = surface_change_callbacks().lock() {
+        guard.insert(hwnd, Arc::new(callback));
+    }
+}
+
+/// Unregisters any surface-change callback associated with `hwnd`.
+/// Called automatically on `WM_NCDESTROY` and exposed for deterministic cleanup/tests.
+pub fn unregister_surface_change_callback(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    if let Ok(mut guard) = surface_change_callbacks().lock() {
+        guard.remove(&hwnd);
+    }
+}
+
+/// Dispatches `surface` to any callback registered for `hwnd`, dropping the registry mutex
+/// before invocation so re-entrant calls cannot deadlock.
+fn notify_surface_change_callback(hwnd: isize, surface: WindowSurfaceState) {
+    if hwnd == 0 {
+        return;
+    }
+    let callback = surface_change_callbacks()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&hwnd).cloned());
+    if let Some(cb) = callback {
+        cb(surface);
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod win32_impl {
@@ -195,7 +284,7 @@ mod win32_impl {
     use std::ffi::c_void;
     use std::mem::size_of;
 
-    use windows::core::w;
+    use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Dwm::{
         DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW,
@@ -215,8 +304,8 @@ mod win32_impl {
         SPI_GETCLIENTAREAANIMATION, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
         SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
         WM_CLOSE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN,
-        WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT, WM_SETTINGCHANGE, WM_STYLECHANGING, WM_SYSCOMMAND,
-        WM_SYSKEYDOWN, WM_THEMECHANGED, WS_VISIBLE,
+        WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+        WS_VISIBLE,
     };
 
     const SNAP_SUBCLASS_ID: usize = 0x4348_4B31; // "CHK1"
@@ -311,10 +400,41 @@ mod win32_impl {
         }
     }
 
+    fn read_dwm_dword(value_name: PCWSTR) -> Option<u32> {
+        unsafe {
+            let mut value: u32 = 0;
+            let mut size = size_of::<u32>() as u32;
+            let status = RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\Microsoft\\Windows\\DWM"),
+                value_name,
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&mut value as *mut u32).cast::<c_void>()),
+                Some(&mut size),
+            );
+            if status.is_ok() {
+                Some(value)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Reads the live Windows system accent color from `HKCU\Software\Microsoft\Windows\DWM\AccentColor`
+    /// (`0xAABBGGRR`), falling back to `ColorizationColor` (`0xAARRGGBB`).
+    pub fn read_system_accent_hex() -> Option<String> {
+        if let Some(abgr) = read_dwm_dword(w!("AccentColor")) {
+            return Some(parse_dwm_abgr_to_hex(abgr));
+        }
+        read_dwm_dword(w!("ColorizationColor")).map(parse_dwm_argb_to_hex)
+    }
+
     pub fn apply_window_chrome(hwnd_raw: isize, is_dark: bool) -> WindowSurfaceState {
         let ver = query_windows_version();
         let transparency_enabled = is_transparency_enabled();
         let animations_enabled = are_animations_enabled();
+        let system_accent_hex = read_system_accent_hex();
         let mut backdrop = resolve_backdrop_kind(ver.build, transparency_enabled);
 
         if hwnd_raw != 0 {
@@ -416,6 +536,7 @@ mod win32_impl {
             transparency_enabled,
             animations_enabled,
             snap_layouts_supported: ver.build >= 22000,
+            system_accent_hex,
         }
     }
 
@@ -553,18 +674,29 @@ mod win32_impl {
                 let _ = ShowWindow(hwnd, cmd);
                 return LRESULT(0);
             }
-            WM_SETTINGCHANGE | WM_THEMECHANGED => {
-                // Re-sync DWM Mica Alt + immersive dark mode whenever the user toggles Windows
-                // Transparency Effects or updates desktop wallpaper/theme live.
+            m if should_refresh_surface_on_message(m) => {
+                // Let the windowing layer process the OS notification first, then re-sync DWM
+                // Mica Alt + immersive dark mode and broadcast the fresh surface state (theme,
+                // transparency, animation, and system accent color) to registered listeners.
+                let res = DefSubclassProc(hwnd, msg, wparam, lparam);
                 let is_dark = window_dark_modes()
                     .lock()
                     .ok()
                     .and_then(|map| map.get(&hwnd_key).copied())
                     .unwrap_or(false);
-                let _ = apply_window_chrome(hwnd_key, is_dark);
+                let mut surface = apply_window_chrome(hwnd_key, is_dark);
+                if m == WM_DWMCOLORIZATIONCOLORCHANGED_MSG
+                    && surface.system_accent_hex.is_none()
+                    && wparam.0 != 0
+                {
+                    surface.system_accent_hex = Some(parse_dwm_argb_to_hex(wparam.0 as u32));
+                }
+                notify_surface_change_callback(hwnd_key, surface);
+                return res;
             }
             WM_NCDESTROY => {
                 update_maximize_button_rect(hwnd_key, None);
+                unregister_surface_change_callback(hwnd_key);
                 if let Ok(mut modes) = window_dark_modes().lock() {
                     modes.remove(&hwnd_key);
                 }
@@ -596,6 +728,10 @@ mod win32_impl {
         true
     }
 
+    pub fn read_system_accent_hex() -> Option<String> {
+        None
+    }
+
     pub fn apply_window_chrome(_hwnd_raw: isize, is_dark: bool) -> WindowSurfaceState {
         WindowSurfaceState {
             build_number: 0,
@@ -604,6 +740,7 @@ mod win32_impl {
             transparency_enabled: true,
             animations_enabled: true,
             snap_layouts_supported: false,
+            system_accent_hex: read_system_accent_hex(),
         }
     }
 
@@ -614,7 +751,7 @@ mod win32_impl {
 
 pub use win32_impl::{
     apply_window_chrome, are_animations_enabled, install_snap_layout_subclass,
-    is_transparency_enabled, query_windows_version,
+    is_transparency_enabled, query_windows_version, read_system_accent_hex,
 };
 
 #[cfg(test)]
@@ -808,5 +945,134 @@ mod tests {
         );
         #[cfg(not(target_os = "windows"))]
         assert_eq!(ver.build, 0);
+    }
+
+    #[test]
+    fn parse_dwm_abgr_to_hex_extracts_rgb_from_aabbggrr() {
+        // Windows default accent blue #0078D4 stored as 0xAABBGGRR
+        assert_eq!(parse_dwm_abgr_to_hex(0xFFD4_7800), "#0078D4");
+        // Alpha byte is ignored
+        assert_eq!(parse_dwm_abgr_to_hex(0x00D4_7800), "#0078D4");
+        // Distinct R/G/B bytes verify byte order (R=0x12, G=0x34, B=0x56)
+        assert_eq!(parse_dwm_abgr_to_hex(0xFF56_3412), "#123456");
+        // Leading zeros and bounds
+        assert_eq!(parse_dwm_abgr_to_hex(0xFF0A_0501), "#01050A");
+        assert_eq!(parse_dwm_abgr_to_hex(0x0000_0000), "#000000");
+        assert_eq!(parse_dwm_abgr_to_hex(0xFFFF_FFFF), "#FFFFFF");
+    }
+
+    #[test]
+    fn parse_dwm_argb_to_hex_extracts_rgb_from_aarrggbb() {
+        // Windows default ColorizationColor #0078D4 stored as 0xAARRGGBB
+        assert_eq!(parse_dwm_argb_to_hex(0xC400_78D4), "#0078D4");
+        // Alpha byte is ignored
+        assert_eq!(parse_dwm_argb_to_hex(0x0000_78D4), "#0078D4");
+        // Distinct R/G/B bytes verify byte order (R=0x12, G=0x34, B=0x56)
+        assert_eq!(parse_dwm_argb_to_hex(0xC412_3456), "#123456");
+        // Leading zeros and bounds
+        assert_eq!(parse_dwm_argb_to_hex(0xFF01_050A), "#01050A");
+        assert_eq!(parse_dwm_argb_to_hex(0x0000_0000), "#000000");
+        assert_eq!(parse_dwm_argb_to_hex(0xFFFF_FFFF), "#FFFFFF");
+    }
+
+    #[test]
+    fn surface_refresh_messages_include_dwm_colorization_changed() {
+        assert_eq!(WM_SETTINGCHANGE_MSG, 0x001A);
+        assert_eq!(WM_THEMECHANGED_MSG, 0x031A);
+        assert_eq!(WM_DWMCOLORIZATIONCOLORCHANGED_MSG, 0x0320);
+
+        assert!(should_refresh_surface_on_message(WM_SETTINGCHANGE_MSG));
+        assert!(should_refresh_surface_on_message(WM_THEMECHANGED_MSG));
+        assert!(should_refresh_surface_on_message(
+            WM_DWMCOLORIZATIONCOLORCHANGED_MSG
+        ));
+        assert!(!should_refresh_surface_on_message(0x000F)); // WM_PAINT
+        assert!(!should_refresh_surface_on_message(0x0084)); // WM_NCHITTEST
+
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                WM_DWMCOLORIZATIONCOLORCHANGED, WM_SETTINGCHANGE, WM_THEMECHANGED,
+            };
+            assert_eq!(WM_SETTINGCHANGE_MSG, WM_SETTINGCHANGE);
+            assert_eq!(WM_THEMECHANGED_MSG, WM_THEMECHANGED);
+            assert_eq!(
+                WM_DWMCOLORIZATIONCOLORCHANGED_MSG,
+                WM_DWMCOLORIZATIONCOLORCHANGED
+            );
+        }
+    }
+
+    #[test]
+    fn read_system_accent_hex_returns_valid_hex_or_none() {
+        let accent = read_system_accent_hex();
+        #[cfg(target_os = "windows")]
+        if let Some(hex) = accent {
+            assert_eq!(hex.len(), 7, "expected #RRGGBB hex string, got {hex:?}");
+            assert!(hex.starts_with('#'));
+            assert!(hex[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(accent, None);
+
+        let surface = apply_window_chrome(0, false);
+        assert_eq!(surface.system_accent_hex, read_system_accent_hex());
+    }
+
+    #[test]
+    fn surface_change_callback_register_replace_notify_and_unregister() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Synthetic non-zero HWND key isolated to this unit test
+        let test_hwnd: isize = 0x5445_5354;
+        let sample = WindowSurfaceState {
+            build_number: 26100,
+            backdrop: BackdropKind::Mica,
+            is_dark: true,
+            transparency_enabled: true,
+            animations_enabled: true,
+            snap_layouts_supported: true,
+            system_accent_hex: Some("#0078D4".to_string()),
+        };
+
+        // Zero HWND is always a safe no-op
+        let zero_hits = Arc::new(AtomicUsize::new(0));
+        let zero_hits_cb = Arc::clone(&zero_hits);
+        register_surface_change_callback(0, move |_| {
+            zero_hits_cb.fetch_add(1, Ordering::SeqCst);
+        });
+        notify_surface_change_callback(0, sample.clone());
+        assert_eq!(zero_hits.load(Ordering::SeqCst), 0);
+
+        let received = Arc::new(Mutex::new(Vec::<WindowSurfaceState>::new()));
+        let received_cb = Arc::clone(&received);
+        register_surface_change_callback(test_hwnd, move |state| {
+            // Re-entering the registry from inside the callback must not deadlock
+            update_maximize_button_rect(test_hwnd, None);
+            if let Ok(mut guard) = received_cb.lock() {
+                guard.push(state);
+            }
+        });
+
+        notify_surface_change_callback(test_hwnd, sample.clone());
+        assert_eq!(
+            received.lock().unwrap().as_slice(),
+            std::slice::from_ref(&sample)
+        );
+
+        // Replacing callback for the same HWND drops old closure and invokes only the new one
+        let replacement_hits = Arc::new(AtomicUsize::new(0));
+        let replacement_hits_cb = Arc::clone(&replacement_hits);
+        register_surface_change_callback(test_hwnd, move |_| {
+            replacement_hits_cb.fetch_add(1, Ordering::SeqCst);
+        });
+        notify_surface_change_callback(test_hwnd, sample.clone());
+        assert_eq!(received.lock().unwrap().len(), 1);
+        assert_eq!(replacement_hits.load(Ordering::SeqCst), 1);
+
+        // Cleanup on WM_NCDESTROY removes callback completely
+        unregister_surface_change_callback(test_hwnd);
+        notify_surface_change_callback(test_hwnd, sample);
+        assert_eq!(replacement_hits.load(Ordering::SeqCst), 1);
     }
 }

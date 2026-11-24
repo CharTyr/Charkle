@@ -1,9 +1,92 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React from 'react';
+import {
+  Add20Filled,
+  Add20Regular,
+  ArrowDownload20Filled,
+  ArrowDownload20Regular,
+  ArrowSwap20Filled,
+  ArrowSwap20Regular,
+  ArrowUpRight20Filled,
+  ArrowUpRight20Regular,
+  Board20Filled,
+  Board20Regular,
+  BoardSplit20Filled,
+  BoardSplit20Regular,
+  Chat20Filled,
+  Chat20Regular,
+  CheckmarkCircle20Filled,
+  CheckmarkCircle20Regular,
+  Clock20Filled,
+  Clock20Regular,
+  Cloud20Filled,
+  Cloud20Regular,
+  CloudSync20Filled,
+  CloudSync20Regular,
+  Code20Filled,
+  Code20Regular,
+  Color20Filled,
+  Color20Regular,
+  Cube20Filled,
+  Cube20Regular,
+  Delete20Filled,
+  Delete20Regular,
+  Desktop20Filled,
+  Desktop20Regular,
+  DocumentText20Filled,
+  DocumentText20Regular,
+  Eye20Filled,
+  Eye20Regular,
+  Filmstrip20Filled,
+  Filmstrip20Regular,
+  Filter20Filled,
+  Filter20Regular,
+  Folder20Filled,
+  Folder20Regular,
+  FolderSearch20Filled,
+  FolderSearch20Regular,
+  Grid20Filled,
+  Grid20Regular,
+  LayoutColumnThree20Filled,
+  LayoutColumnThree20Regular,
+  LayoutRowTwo20Filled,
+  LayoutRowTwo20Regular,
+  MailInbox20Filled,
+  MailInbox20Regular,
+  Note20Filled,
+  Note20Regular,
+  PanelLeft20Filled,
+  PanelLeft20Regular,
+  PanelRight20Filled,
+  PanelRight20Regular,
+  Pen20Filled,
+  Pen20Regular,
+  Screenshot20Filled,
+  Screenshot20Regular,
+  Search20Filled,
+  Search20Regular,
+  Settings20Filled,
+  Settings20Regular,
+  Shapes20Filled,
+  Shapes20Regular,
+  Share20Filled,
+  Share20Regular,
+  SoundWaveCircle20Filled,
+  SoundWaveCircle20Regular,
+  Sparkle20Filled,
+  Sparkle20Regular,
+  SquareHint20Filled,
+  SquareHint20Regular,
+  Tag20Filled,
+  Tag20Regular,
+  WeatherMoon20Filled,
+  WeatherMoon20Regular,
+  WeatherSunny20Filled,
+  WeatherSunny20Regular,
+  bundleIcon,
+  type FluentIcon,
+} from '@fluentui/react-icons';
 import {
   Archive,
-  ArrowDownCircle,
-  ArrowLeftRight,
-  ArrowUpRight,
   AudioWaveform,
   Bolt,
   Book,
@@ -11,20 +94,14 @@ import {
   Box,
   Briefcase,
   Camera,
-  CheckCircle2,
-  Clock,
-  CloudUpload,
   Code2,
-  Columns3,
   Cpu,
   Eye,
   FileText,
   Film,
-  Filter,
   Flame,
   Flag,
   Folder,
-  FolderCog,
   Gamepad2,
   Globe,
   Hand,
@@ -32,7 +109,6 @@ import {
   Heart,
   Image as ImageIcon,
   Inbox,
-  LayoutGrid,
   Leaf,
   Link2,
   MessageSquare,
@@ -41,27 +117,18 @@ import {
   Music,
   Paintbrush,
   Palette,
-  PanelLeft,
   PawPrint,
   PenTool,
   PlaySquare,
-  Rows2,
   Ruler,
   Scissors,
-  Search,
-  Settings,
   Shapes,
-  Share,
   Smartphone,
   Smile,
   Sparkles,
-  SquareDashed,
   Star,
-  StickyNote,
   Sun,
-  Tag,
   Terminal,
-  Trash2,
   User,
   Users,
   Wand2,
@@ -71,121 +138,98 @@ import { deriveDuotonePair, useResolvedIsDark } from './theme';
 
 export type CharkleIconStyle = 'duotone' | 'layered';
 
-const SOURCE_PRIMARY = '#445C94';
-const SOURCE_SECONDARY = '#B4BED4';
+const LibraryIcon = bundleIcon(Grid20Filled, Grid20Regular);
+const InboxIcon = bundleIcon(MailInbox20Filled, MailInbox20Regular);
+const MoodboardIcon = bundleIcon(Board20Filled, Board20Regular);
+const FolderFluentIcon = bundleIcon(Folder20Filled, Folder20Regular);
+const SmartFolderIcon = bundleIcon(FolderSearch20Filled, FolderSearch20Regular);
+const TagIcon = bundleIcon(Tag20Filled, Tag20Regular);
+const RecentIcon = bundleIcon(Clock20Filled, Clock20Regular);
+const TrashIcon = bundleIcon(Delete20Filled, Delete20Regular);
+const SidebarToggleIcon = bundleIcon(PanelLeft20Filled, PanelLeft20Regular);
+const InspectorToggleIcon = bundleIcon(PanelRight20Filled, PanelRight20Regular);
+const MasonryVerticalIcon = bundleIcon(LayoutColumnThree20Filled, LayoutColumnThree20Regular);
+const MasonryHorizontalIcon = bundleIcon(LayoutRowTwo20Filled, LayoutRowTwo20Regular);
+const FilmstripIcon = bundleIcon(Filmstrip20Filled, Filmstrip20Regular);
+const GalleryRingIcon = bundleIcon(Shapes20Filled, Shapes20Regular);
+const CodeIcon = bundleIcon(Code20Filled, Code20Regular);
+const Model3DIcon = bundleIcon(Cube20Filled, Cube20Regular);
+const AudioIcon = bundleIcon(SoundWaveCircle20Filled, SoundWaveCircle20Regular);
+const SocialPostIcon = bundleIcon(Chat20Filled, Chat20Regular);
+const MarkdownIcon = bundleIcon(DocumentText20Filled, DocumentText20Regular);
+const SparkleIcon = bundleIcon(Sparkle20Filled, Sparkle20Regular);
+const AutoLayoutIcon = bundleIcon(BoardSplit20Filled, BoardSplit20Regular);
+const PenIcon = bundleIcon(Pen20Filled, Pen20Regular);
+const NoteIcon = bundleIcon(Note20Filled, Note20Regular);
+const GroupFrameIcon = bundleIcon(SquareHint20Filled, SquareHint20Regular);
+const ConnectorIcon = bundleIcon(ArrowUpRight20Filled, ArrowUpRight20Regular);
+const PaletteIcon = bundleIcon(Color20Filled, Color20Regular);
+const ExportIcon = bundleIcon(Share20Filled, Share20Regular);
+const SwapIcon = bundleIcon(ArrowSwap20Filled, ArrowSwap20Regular);
+const PinOfflineIcon = bundleIcon(ArrowDownload20Filled, ArrowDownload20Regular);
+const ShelfIcon = bundleIcon(Desktop20Filled, Desktop20Regular);
+const ScreenshotIcon = bundleIcon(Screenshot20Filled, Screenshot20Regular);
+const DriveSyncIcon = bundleIcon(CloudSync20Filled, CloudSync20Regular);
+const DriveCloudIcon = bundleIcon(Cloud20Filled, Cloud20Regular);
+const FilterIcon = bundleIcon(Filter20Filled, Filter20Regular);
+const SearchIcon = bundleIcon(Search20Filled, Search20Regular);
+const SettingsIcon = bundleIcon(Settings20Filled, Settings20Regular);
+const QuickLookIcon = bundleIcon(Eye20Filled, Eye20Regular);
+const ReadyIcon = bundleIcon(CheckmarkCircle20Filled, CheckmarkCircle20Regular);
+const SunIcon = bundleIcon(WeatherSunny20Filled, WeatherSunny20Regular);
+const MoonIcon = bundleIcon(WeatherMoon20Filled, WeatherMoon20Regular);
+const AddIcon = bundleIcon(Add20Filled, Add20Regular);
 
-const svgTextCache = new Map<string, string | null>();
-const svgPromiseCache = new Map<string, Promise<string | null>>();
-
-function fetchSvgSource(baseName: string): Promise<string | null> {
-  if (svgTextCache.has(baseName)) {
-    return Promise.resolve(svgTextCache.get(baseName) ?? null);
-  }
-  const existing = svgPromiseCache.get(baseName);
-  if (existing) return existing;
-
-  if (typeof fetch === 'undefined') {
-    return Promise.resolve(null);
-  }
-
-  const promise = fetch(`/icons/${baseName}.svg`)
-    .then(async (res) => {
-      if (!res.ok) return null;
-      const text = await res.text();
-      if (!text.includes('<svg')) return null;
-      svgTextCache.set(baseName, text);
-      return text;
-    })
-    .catch(() => null)
-    .then((result) => {
-      if (result === null) svgTextCache.set(baseName, null);
-      return result;
-    });
-
-  svgPromiseCache.set(baseName, promise);
-  return promise;
-}
-
-function adaptDuotoneSvg(
-  rawSvg: string,
-  isDark: boolean,
-  isActive: boolean,
-  tintHex?: string | null,
-): string {
-  let primary: string | null = null;
-  let secondary: string | null = null;
-
-  if (tintHex) {
-    const pair = deriveDuotonePair(tintHex, isDark);
-    if (pair) {
-      primary = pair.primary;
-      secondary = pair.secondary;
-    }
-  }
-
-  if (!primary || !secondary) {
-    if (!isDark && !isActive) return rawSvg;
-    if (!isDark && isActive) {
-      primary = '#2A60E0';
-      secondary = '#AFC6F7';
-    } else if (isDark && !isActive) {
-      primary = '#8EA8E8';
-      secondary = '#3D4E75';
-    } else {
-      primary = '#9BB7FF';
-      secondary = '#3E5998';
-    }
-  }
-
-  return rawSvg
-    .replace(new RegExp(SOURCE_PRIMARY, 'gi'), primary)
-    .replace(new RegExp(SOURCE_SECONDARY, 'gi'), secondary);
-}
-
-const LUCIDE_FALLBACK_MAP: Record<string, LucideIcon> = {
-  library: LayoutGrid,
-  inbox: Inbox,
-  moodboard: Columns3,
-  folder: Folder,
-  'smart-folder': FolderCog,
-  untagged: Tag,
-  recent: Clock,
-  trash: Trash2,
-  tag: Tag,
-  'sidebar-toggle': PanelLeft,
-  'masonry-vertical': Columns3,
-  'masonry-horizontal': Rows2,
-  'gallery-ring': Shapes,
-  github: Code2,
-  model3d: Box,
-  audio: AudioWaveform,
-  'social-post': MessageSquare,
-  markdown: FileText,
-  similar: Sparkles,
-  'sparkle-board': Sparkles,
-  'auto-layout': LayoutGrid,
-  freeform: PenTool,
-  note: StickyNote,
-  'group-frame': SquareDashed,
-  connector: ArrowUpRight,
-  'ink-pen': PenTool,
-  palette: Palette,
-  export: Share,
-  swap: ArrowLeftRight,
-  'pin-offline': ArrowDownCircle,
-  notch: Monitor,
-  screenshot: Camera,
-  'drive-sync': CloudUpload,
-  filter: Filter,
-  search: Search,
-  settings: Settings,
-  quicklook: Eye,
-  drive: CloudUpload,
-  'ai-spark': Sparkles,
-  gallery: LayoutGrid,
-  ready: CheckCircle2,
+const FLUENT_ICON_MAP: Record<string, FluentIcon> = {
+  library: LibraryIcon,
+  gallery: LibraryIcon,
+  inbox: InboxIcon,
+  moodboard: MoodboardIcon,
+  folder: FolderFluentIcon,
+  'smart-folder': SmartFolderIcon,
+  untagged: TagIcon,
+  recent: RecentIcon,
+  trash: TrashIcon,
+  tag: TagIcon,
+  'sidebar-toggle': SidebarToggleIcon,
+  'inspector-toggle': InspectorToggleIcon,
+  'masonry-vertical': MasonryVerticalIcon,
+  'masonry-horizontal': MasonryHorizontalIcon,
+  'gallery-filmstrip': FilmstripIcon,
+  'gallery-ring': GalleryRingIcon,
+  github: CodeIcon,
+  model3d: Model3DIcon,
+  audio: AudioIcon,
+  'social-post': SocialPostIcon,
+  markdown: MarkdownIcon,
+  similar: SparkleIcon,
+  'sparkle-board': SparkleIcon,
+  'ai-spark': SparkleIcon,
+  'auto-layout': AutoLayoutIcon,
+  freeform: PenIcon,
+  note: NoteIcon,
+  'group-frame': GroupFrameIcon,
+  connector: ConnectorIcon,
+  'ink-pen': PenIcon,
+  palette: PaletteIcon,
+  export: ExportIcon,
+  swap: SwapIcon,
+  'pin-offline': PinOfflineIcon,
+  notch: ShelfIcon,
+  screenshot: ScreenshotIcon,
+  'drive-sync': DriveSyncIcon,
+  drive: DriveCloudIcon,
+  filter: FilterIcon,
+  search: SearchIcon,
+  settings: SettingsIcon,
+  quicklook: QuickLookIcon,
+  ready: ReadyIcon,
+  sun: SunIcon,
+  moon: MoonIcon,
+  add: AddIcon,
 };
 
+/** Custom SF-symbol badge lookup preserved for `CharkleFolderIcon` and folder customization. */
 export const SF_SYMBOL_TO_LUCIDE: Record<string, LucideIcon> = {
   'paintbrush.fill': Paintbrush,
   'paintpalette.fill': Palette,
@@ -247,6 +291,10 @@ export interface CharkleIconProps {
   alt?: string;
 }
 
+/**
+ * Fluent 2 chrome, navigation & action icon backed by `@fluentui/react-icons` `bundleIcon`.
+ * Automatically transitions between `Regular` (inactive) and `Filled` (active) geometry.
+ */
 export const CharkleIcon: React.FC<CharkleIconProps> = ({
   name,
   style = 'duotone',
@@ -256,55 +304,59 @@ export const CharkleIcon: React.FC<CharkleIconProps> = ({
   className = '',
   alt = '',
 }) => {
-  const isDark = useResolvedIsDark();
-  const baseName = `${style}-${name}`;
-  const [svgRaw, setSvgRaw] = useState<string | null | undefined>(() =>
-    svgTextCache.has(baseName) ? svgTextCache.get(baseName) : undefined,
-  );
+  const BundledIcon = FLUENT_ICON_MAP[name] ?? GroupFrameIcon;
+  const resolvedSize = style === 'layered' ? Math.round(size * 0.62) : size;
 
-  useEffect(() => {
-    let mounted = true;
-    if (svgTextCache.has(baseName)) {
-      setSvgRaw(svgTextCache.get(baseName));
-      return;
-    }
-    fetchSvgSource(baseName).then((loaded) => {
-      if (mounted) setSvgRaw(loaded);
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [baseName]);
-
-  const dataUri = useMemo(() => {
-    if (!svgRaw) return null;
-    const finalSvg =
-      style === 'duotone' ? adaptDuotoneSvg(svgRaw, isDark, isActive, tintHex) : svgRaw;
-    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(finalSvg)}`;
-  }, [svgRaw, style, isDark, isActive, tintHex]);
-
-  if (dataUri) {
+  if (style === 'layered') {
     return (
-      <img
-        src={dataUri}
-        alt={alt}
-        width={size}
-        height={size}
-        draggable={false}
-        className={`inline-block shrink-0 select-none ${className}`}
-        style={{ width: size, height: size }}
-      />
+      <span
+        role={alt ? 'img' : undefined}
+        aria-label={alt || undefined}
+        aria-hidden={alt ? undefined : true}
+        className={[
+          'inline-flex items-center justify-center shrink-0 select-none',
+          'rounded-[var(--win-radius-card)] bg-[var(--accent-soft)] text-[var(--accent)]',
+          className,
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style={{
+          width: size,
+          height: size,
+          ...(tintHex ? { color: tintHex } : undefined),
+        }}
+      >
+        <BundledIcon
+          filled={true}
+          style={{ width: resolvedSize, height: resolvedSize }}
+        />
+      </span>
     );
   }
 
-  const FallbackIcon = LUCIDE_FALLBACK_MAP[name] ?? SquareDashed;
   return (
-    <FallbackIcon
-      size={style === 'layered' ? Math.round(size * 0.68) : size}
-      strokeWidth={1.75}
-      className={`inline-block shrink-0 ${className}`}
-      style={tintHex ? { color: tintHex } : undefined}
-    />
+    <span
+      role={alt ? 'img' : undefined}
+      aria-label={alt || undefined}
+      aria-hidden={alt ? undefined : true}
+      className={[
+        'inline-flex items-center justify-center shrink-0 select-none',
+        isActive && !tintHex ? 'text-[var(--accent)]' : '',
+        className,
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      style={{
+        width: size,
+        height: size,
+        ...(tintHex ? { color: tintHex } : undefined),
+      }}
+    >
+      <BundledIcon
+        filled={isActive}
+        style={{ width: size, height: size }}
+      />
+    </span>
   );
 };
 
@@ -316,6 +368,9 @@ export interface CharkleFolderIconProps {
   className?: string;
 }
 
+/**
+ * Custom Charkle brand folder icon supporting custom folder colors & embossed emoji/symbol badges.
+ */
 export const CharkleFolderIcon: React.FC<CharkleFolderIconProps> = ({
   colorHex = null,
   customSymbol = null,
@@ -324,6 +379,25 @@ export const CharkleFolderIcon: React.FC<CharkleFolderIconProps> = ({
   className = '',
 }) => {
   const isDark = useResolvedIsDark();
+  const pair = colorHex ? deriveDuotonePair(colorHex, isDark) : null;
+
+  const backFill = pair
+    ? pair.primary
+    : isActive
+      ? 'var(--accent)'
+      : isDark
+        ? '#8EA8E8'
+        : '#4A6FA5';
+  const frontFill = pair
+    ? pair.secondary
+    : isActive
+      ? isDark
+        ? '#3E5998'
+        : '#AFC6F7'
+      : isDark
+        ? '#3D4E75'
+        : '#B8C6E0';
+
   const embossColor = colorHex
     ? isDark
       ? 'rgba(255, 255, 255, 0.92)'
@@ -365,16 +439,30 @@ export const CharkleFolderIcon: React.FC<CharkleFolderIconProps> = ({
 
   return (
     <span
-      className={`relative inline-flex items-center justify-center shrink-0 ${className}`}
+      className={`relative inline-flex items-center justify-center shrink-0 select-none ${className}`}
       style={{ width: size, height: size }}
     >
-      <CharkleIcon
-        name="folder"
-        style="duotone"
-        size={size}
-        isActive={isActive}
-        tintHex={colorHex}
-      />
+      <svg
+        viewBox="0 0 20 20"
+        width={size}
+        height={size}
+        aria-hidden="true"
+        className="block shrink-0"
+      >
+        <path
+          d="M2.5 5.25C2.5 4.28 3.28 3.5 4.25 3.5H7.6c.48 0 .94.2 1.26.55l.9.95h5.99c.97 0 1.75.78 1.75 1.75V14.75c0 .97-.78 1.75-1.75 1.75H4.25c-.97 0-1.75-.78-1.75-1.75V5.25Z"
+          fill={backFill}
+        />
+        <rect
+          x="2.5"
+          y="7"
+          width="15"
+          height="9.5"
+          rx="1.75"
+          fill={frontFill}
+          fillOpacity={isActive ? 0.92 : 0.85}
+        />
+      </svg>
       {customSymbol && (
         <span className="absolute inset-0 flex items-center justify-center">{renderBadge()}</span>
       )}

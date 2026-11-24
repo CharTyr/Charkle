@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Clipboard } from 'lucide-react';
+import { ClipboardPaste16Regular } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
-import { Popover } from '../../design-system';
+import { ContextMenu, MenuItem } from '../../design-system';
 import { useCoordinatorStore, useLibraryStore } from '../../stores';
 import type { AssetRecord } from '../../types/domain';
 import { AssetCard } from './AssetCard';
@@ -49,6 +49,8 @@ export interface VerticalMasonryViewProps {
   cardScale: number;
   topInset?: number;
   bottomInset?: number;
+  /** Exposes the live vertical scroll container for scroll-linked sticky header collapse. */
+  onScrollElementChange?: (el: HTMLDivElement | null) => void;
 }
 
 interface MarqueeRect {
@@ -72,8 +74,16 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
   cardScale,
   topInset = 0,
   bottomInset = 44,
+  onScrollElementChange,
 }) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const setScrollContainerRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      scrollRef.current = el;
+      onScrollElementChange?.(el);
+    },
+    [onScrollElementChange],
+  );
   const contentRef = useRef<HTMLDivElement | null>(null);
   const cardElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const hoveredAssetIdRef = useRef<string | null>(null);
@@ -572,7 +582,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
   return (
     <>
       <div
-        ref={scrollRef}
+        ref={setScrollContainerRef}
         data-testid="gallery-masonry-scroll"
         onScroll={(e) => {
           const nextTop = e.currentTarget.scrollTop;
@@ -589,7 +599,7 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
           e.preventDefault();
           setEmptyMenuPoint({ x: e.clientX, y: e.clientY });
         }}
-        className="flex-1 min-h-0 overflow-y-auto charkle-scroll px-4 relative"
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden charkle-scroll px-4 relative"
       >
         <div
           ref={contentRef}
@@ -630,41 +640,38 @@ export const VerticalMasonryView: React.FC<VerticalMasonryViewProps> = ({
         </div>
       </div>
 
-      {/* Empty-space Paste context menu matching macOS MasonryDocumentView.menu */}
-      <Popover
+      {/* Empty-space Fluent 2 Acrylic Paste context menu */}
+      <ContextMenu
         open={emptyMenuPoint !== null}
         onOpenChange={(open) => {
           if (!open) setEmptyMenuPoint(null);
         }}
         anchorPoint={emptyMenuPoint}
-        className="w-[184px] p-1.5"
       >
-        <button
-          type="button"
-          onClick={async () => {
+        <MenuItem
+          icon={<ClipboardPaste16Regular className="w-4 h-4" />}
+          shortcut="Ctrl+V"
+          onSelect={() => {
             setEmptyMenuPoint(null);
             const targetFolderId = destination.type === 'folder' ? destination.id : null;
-            try {
-              const count = await getTransport().collectClipboardNow(targetFolderId, null);
-              if (count > 0) {
-                await refreshAll(destination);
-                pushToast({ message: `已粘贴导入 ${count} 项素材`, tone: 'success' });
-              } else {
-                pushToast({ message: '剪贴板中没有可粘贴的素材', tone: 'info' });
+            void (async () => {
+              try {
+                const count = await getTransport().collectClipboardNow(targetFolderId, null);
+                if (count > 0) {
+                  await refreshAll(destination);
+                  pushToast({ message: `已粘贴导入 ${count} 项素材`, tone: 'success' });
+                } else {
+                  pushToast({ message: '剪贴板中没有可粘贴的素材', tone: 'info' });
+                }
+              } catch {
+                pushToast({ message: '无法读取系统剪贴板', tone: 'error' });
               }
-            } catch {
-              pushToast({ message: '无法读取系统剪贴板', tone: 'error' });
-            }
+            })();
           }}
-          className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-[12.5px] rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
         >
-          <span className="inline-flex items-center gap-2">
-            <Clipboard size={14} className="text-[var(--text-secondary)]" />
-            粘贴素材
-          </span>
-          <kbd className="text-[10.5px] text-[var(--text-tertiary)]">Ctrl+V</kbd>
-        </button>
-      </Popover>
+          粘贴素材
+        </MenuItem>
+      </ContextMenu>
     </>
   );
 };

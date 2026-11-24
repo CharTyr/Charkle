@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, ImageOff } from 'lucide-react';
+import { FolderOpen16Regular, ImageOff24Regular } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { Button } from '../../design-system';
 import type { AssetRecord } from '../../types/domain';
@@ -167,19 +167,19 @@ export const ImageStageViewer: React.FC<ImageStageViewerProps> = ({
     return (
       <div
         onClick={(e) => e.stopPropagation()}
-        className="max-w-[420px] mx-auto p-6 rounded-[16px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-center flex flex-col items-center gap-3 shadow-2xl"
+        className="max-w-[420px] mx-auto p-6 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] text-center flex flex-col items-center gap-3 shadow-2xl"
       >
-        <ImageOff size={28} className="text-[var(--text-tertiary)]" />
+        <ImageOff24Regular className="w-7 h-7 text-[var(--text-tertiary)]" />
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">{asset.title}</div>
-        <p className="text-[12px] text-[var(--text-secondary)]">
+        <p className="text-[12.5px] text-[var(--text-secondary)]">
           暂时无法加载该图像的原文件或预览图，可在资源管理器中检查文件。
         </p>
         <Button
-          variant="primary"
+          variant="accent"
           size="sm"
           onClick={() => void transport.revealInExplorer(asset.id)}
         >
-          <FolderOpen size={13} />
+          <FolderOpen16Regular className="w-4 h-4" />
           在资源管理器中显示
         </Button>
       </div>
@@ -200,7 +200,7 @@ export const ImageStageViewer: React.FC<ImageStageViewerProps> = ({
           onError={handleImgError}
           draggable={false}
           style={{ width: 'min(1040px, 84%)' }}
-          className="h-auto self-start rounded-[14px] shadow-[0_18px_48px_rgba(0,0,0,0.45)] ring-1 ring-white/10"
+          className="h-auto self-start rounded-[var(--win-radius-card)] shadow-[0_18px_48px_rgba(0,0,0,0.45)] ring-1 ring-white/10"
         />
       </div>
     );
@@ -276,14 +276,14 @@ export const ImageStageViewer: React.FC<ImageStageViewerProps> = ({
           }}
           onError={handleImgError}
           draggable={false}
-          className={`max-w-full max-h-[76vh] object-contain rounded-[14px] shadow-[0_20px_54px_rgba(0,0,0,0.44)] ${
+          className={`max-w-full max-h-[76vh] object-contain rounded-[var(--win-radius-card)] shadow-[0_20px_54px_rgba(0,0,0,0.44)] ${
             pausedAnim ? 'opacity-0' : 'opacity-100'
           }`}
         />
         <canvas
           ref={freezeCanvasRef}
           aria-hidden={!pausedAnim}
-          className={`absolute inset-0 w-full h-full object-contain rounded-[14px] pointer-events-none ${
+          className={`absolute inset-0 w-full h-full object-contain rounded-[var(--win-radius-card)] pointer-events-none ${
             pausedAnim ? 'opacity-100' : 'opacity-0'
           }`}
         />

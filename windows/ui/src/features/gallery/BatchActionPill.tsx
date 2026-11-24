@@ -1,17 +1,17 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownCircle,
-  Cloud,
-  FolderInput,
-  LayoutGrid,
-  RotateCcw,
-  Sparkles,
-  Star,
-  Tag,
-  Trash2,
-  X,
-} from 'lucide-react';
-import { Button, ModalShell, Popover } from '../../design-system';
+  ArrowDownload16Regular,
+  ArrowUndo16Regular,
+  Board16Regular,
+  Cloud16Regular,
+  Delete16Regular,
+  Dismiss16Regular,
+  FolderArrowRight16Regular,
+  Sparkle16Regular,
+  Star16Regular,
+  Tag16Regular,
+} from '@fluentui/react-icons';
+import { Button, ModalShell, Popover, Tooltip } from '../../design-system';
 import {
   useCoordinatorStore,
   useLibraryStore,
@@ -20,8 +20,8 @@ import {
 import { FolderMoveMenu } from '../sidebar/FolderMoveMenu';
 
 /**
- * Floating bottom-center Liquid Glass multi-select batch action capsule (shown when >= 2 items selected,
- * matching macOS `MainWindowView.swift:751, 1861-2070`).
+ * Floating bottom-center Fluent 2 Acrylic multi-select batch action bar
+ * (shown on demand when >= 2 items are selected).
  */
 export const BatchActionPill: React.FC = () => {
   const selectedAssetIds = useCoordinatorStore((s) => s.selectedAssetIds);
@@ -91,162 +91,165 @@ export const BatchActionPill: React.FC = () => {
   return (
     <>
       {showPill && (
-      <div className="pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 z-30 max-w-[calc(100%-32px)]">
-        <div
-          data-pill="true"
-          data-adapt-glass="true"
-          className="charkle-reveal-bottom pointer-events-auto charkle-glass rounded-full px-3 py-1.5 flex items-center gap-1.5 text-[12px]"
-        >
-          <span className="pl-1 pr-1.5 font-semibold text-[var(--text-primary)] charkle-tabular whitespace-nowrap">
-            已选 {selectedAssetIds.length} 项
-          </span>
+        <div className="pointer-events-none absolute bottom-5 left-1/2 -translate-x-1/2 z-30 max-w-[calc(100%-32px)]">
+          <div className="charkle-reveal-bottom pointer-events-auto win-acrylic rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-1.5 text-[12.5px]">
+            <span className="pl-1 pr-1.5 font-semibold text-[var(--text-primary)] charkle-tabular whitespace-nowrap">
+              已选 {selectedAssetIds.length} 项
+            </span>
 
-          <div className="h-4 w-px bg-[var(--border-hairline)]" />
+            <div className="h-4 w-px bg-[var(--win-stroke-divider)]" />
 
-          {isTrashSelection ? (
-            <>
-              <button
-                type="button"
-                data-pill="true"
-                onClick={() => {
-                  const ids = [...selectedAssetIds];
-                  clearSelection();
-                  void updateAssets({ assetIDs: ids, isTrashed: false }, destination).then(() =>
-                    pushToast({
-                      message: `已将 ${ids.length} 项放回原处`,
-                      tone: 'success',
-                    }),
-                  );
-                }}
-                className="charkle-pressable h-7 px-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold cursor-pointer whitespace-nowrap"
-              >
-                <RotateCcw size={13} />
-                <span>放回原处</span>
-              </button>
-
-              <button
-                type="button"
-                data-pill="true"
-                onClick={() => setPermDeleteIds([...selectedAssetIds])}
-                className="charkle-pressable h-7 px-2.5 inline-flex items-center gap-1.5 rounded-full bg-[var(--danger-soft)] text-[var(--danger)] hover:bg-[var(--danger)] hover:text-white font-semibold cursor-pointer whitespace-nowrap"
-              >
-                <Trash2 size={13} />
-                <span>彻底删除</span>
-              </button>
-            </>
-          ) : (
-            <>
-              {/* Primary Cobalt CTA: Generate Moodboard from selection */}
-              <button
-                type="button"
-                data-pill="true"
-                onClick={() => setMoodboardGeneratorOpen(true)}
-                className="charkle-pressable h-7 px-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white font-semibold cursor-pointer whitespace-nowrap"
-              >
-                <Sparkles size={13} />
-                <span>生成情绪板</span>
-              </button>
-
-              {boards.length > 0 && (
-                <button
-                  ref={boardBtnRef}
-                  type="button"
-                  onClick={() => setBoardOpen((v) => !v)}
-                  className="charkle-pressable h-7 px-2 inline-flex items-center gap-1 rounded-full text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] font-medium cursor-pointer whitespace-nowrap"
+            {isTrashSelection ? (
+              <>
+                <Button
+                  variant="accent"
+                  size="xs"
+                  onClick={() => {
+                    const ids = [...selectedAssetIds];
+                    clearSelection();
+                    void updateAssets({ assetIDs: ids, isTrashed: false }, destination).then(() =>
+                      pushToast({
+                        message: `已将 ${ids.length} 项放回原处`,
+                        tone: 'success',
+                      }),
+                    );
+                  }}
                 >
-                  <LayoutGrid size={13} />
-                  <span>加入板</span>
-                </button>
-              )}
+                  <ArrowUndo16Regular className="w-3.5 h-3.5" />
+                  <span>放回原处</span>
+                </Button>
 
+                <Button
+                  variant="danger"
+                  size="xs"
+                  onClick={() => setPermDeleteIds([...selectedAssetIds])}
+                >
+                  <Delete16Regular className="w-3.5 h-3.5" />
+                  <span>彻底删除</span>
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="accent"
+                  size="xs"
+                  onClick={() => setMoodboardGeneratorOpen(true)}
+                >
+                  <Sparkle16Regular className="w-3.5 h-3.5" />
+                  <span>生成情绪板</span>
+                </Button>
+
+                {boards.length > 0 && (
+                  <Button
+                    ref={boardBtnRef}
+                    variant="subtle"
+                    size="xs"
+                    onClick={() => setBoardOpen((v) => !v)}
+                    className="text-[var(--text-primary)]"
+                  >
+                    <Board16Regular className="w-3.5 h-3.5" />
+                    <span>加入板</span>
+                  </Button>
+                )}
+
+                <Button
+                  ref={moveBtnRef}
+                  variant="subtle"
+                  size="xs"
+                  onClick={() => setMoveOpen((v) => !v)}
+                  className="text-[var(--text-primary)]"
+                >
+                  <FolderArrowRight16Regular className="w-3.5 h-3.5" />
+                  <span>移动</span>
+                </Button>
+
+                <Button
+                  ref={tagBtnRef}
+                  variant="subtle"
+                  size="xs"
+                  onClick={() => setTagOpen((v) => !v)}
+                  className="text-[var(--text-primary)]"
+                >
+                  <Tag16Regular className="w-3.5 h-3.5" />
+                  <span>加标签</span>
+                </Button>
+
+                <Button
+                  ref={rateBtnRef}
+                  variant="subtle"
+                  size="xs"
+                  onClick={() => setRateOpen((v) => !v)}
+                  className="text-[var(--text-primary)]"
+                >
+                  <Star16Regular className="w-3.5 h-3.5" />
+                  <span>评分</span>
+                </Button>
+
+                {/* Smart Kept-Locally Toggle */}
+                <Tooltip content={allKeptLocally ? '取消全部保留在本地' : '全部始终保留在本地'}>
+                  <button
+                    type="button"
+                    aria-label={allKeptLocally ? '取消全部保留在本地' : '全部始终保留在本地'}
+                    onClick={() => {
+                      const nextPinned = !allKeptLocally;
+                      const count = selectedAssetIds.length;
+                      void updateAssets(
+                        { assetIDs: selectedAssetIds, pinnedOffline: nextPinned },
+                        destination,
+                      ).then(() =>
+                        pushToast({
+                          message: nextPinned
+                            ? `已将 ${count} 项设为始终保留在本地`
+                            : `已取消 ${count} 项的始终保留`,
+                          tone: 'info',
+                        }),
+                      );
+                    }}
+                    className={[
+                      'charkle-pressable h-[26px] w-[26px] inline-flex items-center justify-center rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)] cursor-pointer',
+                      allKeptLocally ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]',
+                    ].join(' ')}
+                  >
+                    {allKeptLocally ? (
+                      <ArrowDownload16Regular className="w-4 h-4" />
+                    ) : (
+                      <Cloud16Regular className="w-4 h-4" />
+                    )}
+                  </button>
+                </Tooltip>
+
+                <Tooltip content="移至回收站">
+                  <button
+                    type="button"
+                    aria-label="移至回收站"
+                    onClick={() => {
+                      const ids = [...selectedAssetIds];
+                      clearSelection();
+                      void updateAssets({ assetIDs: ids, isTrashed: true }, destination, {
+                        undoMessage: `已移至回收站 (${ids.length} 项)`,
+                        undoPatch: { assetIDs: ids, isTrashed: false },
+                      });
+                    }}
+                    className="charkle-pressable h-[26px] w-[26px] inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
+                  >
+                    <Delete16Regular className="w-4 h-4" />
+                  </button>
+                </Tooltip>
+              </>
+            )}
+
+            <Tooltip content="取消选择" shortcut="Esc">
               <button
-                ref={moveBtnRef}
                 type="button"
-                onClick={() => setMoveOpen((v) => !v)}
-                className="charkle-pressable h-7 px-2 inline-flex items-center gap-1 rounded-full text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] font-medium cursor-pointer whitespace-nowrap"
+                aria-label="取消选择"
+                onClick={clearSelection}
+                className="charkle-pressable h-[26px] w-[26px] inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)] cursor-pointer"
               >
-                <FolderInput size={13} />
-                <span>移动</span>
+                <Dismiss16Regular className="w-3.5 h-3.5" />
               </button>
-
-              <button
-                ref={tagBtnRef}
-                type="button"
-                onClick={() => setTagOpen((v) => !v)}
-                className="charkle-pressable h-7 px-2 inline-flex items-center gap-1 rounded-full text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] font-medium cursor-pointer whitespace-nowrap"
-              >
-                <Tag size={13} />
-                <span>加标签</span>
-              </button>
-
-              <button
-                ref={rateBtnRef}
-                type="button"
-                onClick={() => setRateOpen((v) => !v)}
-                className="charkle-pressable h-7 px-2 inline-flex items-center gap-1 rounded-full text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] font-medium cursor-pointer whitespace-nowrap"
-              >
-                <Star size={13} />
-                <span>评分</span>
-              </button>
-
-              {/* Smart Kept-Locally Toggle */}
-              <button
-                type="button"
-                aria-label={allKeptLocally ? '取消全部保留在本地' : '全部始终保留在本地'}
-                title={allKeptLocally ? '取消全部保留在本地' : '全部始终保留在本地'}
-                onClick={() => {
-                  const nextPinned = !allKeptLocally;
-                  const count = selectedAssetIds.length;
-                  void updateAssets(
-                    { assetIDs: selectedAssetIds, pinnedOffline: nextPinned },
-                    destination,
-                  ).then(() =>
-                    pushToast({
-                      message: nextPinned
-                        ? `已将 ${count} 项设为始终保留在本地`
-                        : `已取消 ${count} 项的始终保留`,
-                      tone: 'info',
-                    }),
-                  );
-                }}
-                className={[
-                  'charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-full hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer',
-                  allKeptLocally ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]',
-                ].join(' ')}
-              >
-                {allKeptLocally ? <ArrowDownCircle size={14} /> : <Cloud size={14} />}
-              </button>
-
-              <button
-                type="button"
-                aria-label="移至回收站"
-                title="移至回收站"
-                onClick={() => {
-                  const ids = [...selectedAssetIds];
-                  clearSelection();
-                  void updateAssets({ assetIDs: ids, isTrashed: true }, destination, {
-                    undoMessage: `已移至回收站 (${ids.length} 项)`,
-                    undoPatch: { assetIDs: ids, isTrashed: false },
-                  });
-                }}
-                className="charkle-pressable h-7 w-7 inline-flex items-center justify-center rounded-full text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
-              >
-                <Trash2 size={13.5} />
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            aria-label="取消选择"
-            title="取消选择 (Esc)"
-            onClick={clearSelection}
-            className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-full text-[var(--text-secondary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] hover:text-[var(--text-primary)] cursor-pointer"
-          >
-            <X size={12.5} />
-          </button>
+            </Tooltip>
+          </div>
         </div>
-      </div>
       )}
 
       {/* Move Popover */}
@@ -255,7 +258,7 @@ export const BatchActionPill: React.FC = () => {
         onOpenChange={setMoveOpen}
         anchorEl={moveBtnRef.current}
         placement="top-center"
-        className="p-1.5"
+        className="p-1"
       >
         <FolderMoveMenu
           folders={folders}
@@ -286,7 +289,7 @@ export const BatchActionPill: React.FC = () => {
         onOpenChange={setTagOpen}
         anchorEl={tagBtnRef.current}
         placement="top-center"
-        className="w-[244px] p-3"
+        className="w-[248px] p-3"
       >
         <form
           onSubmit={(e) => {
@@ -295,7 +298,7 @@ export const BatchActionPill: React.FC = () => {
           }}
           className="flex flex-col gap-2"
         >
-          <div className="text-[12px] font-semibold text-[var(--text-primary)]">
+          <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
             为 {selectedAssetIds.length} 项素材添加标签
           </div>
           <input
@@ -304,7 +307,7 @@ export const BatchActionPill: React.FC = () => {
             autoFocus
             onChange={(e) => setTagDraft(e.target.value)}
             placeholder="输入标签回车…"
-            className="h-7 px-2.5 rounded-[var(--radius-popover-inner)] bg-[var(--bg-subtle)] text-[12px] text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
           />
           {tagCounts.length > 0 && (
             <div className="flex flex-wrap gap-1">
@@ -313,7 +316,7 @@ export const BatchActionPill: React.FC = () => {
                   key={t.name}
                   type="button"
                   onClick={() => void applyBatchTag(t.name)}
-                  className="charkle-pressable px-2 py-0.5 text-[11px] rounded-full bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                  className="charkle-pressable px-2 py-0.5 text-[11.5px] rounded-[var(--win-radius-control)] bg-[var(--win-subtle-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-active)] cursor-pointer"
                 >
                   #{t.name}
                 </button>
@@ -329,9 +332,9 @@ export const BatchActionPill: React.FC = () => {
         onOpenChange={setRateOpen}
         anchorEl={rateBtnRef.current}
         placement="top-center"
-        className="p-1.5"
+        className="p-1"
       >
-        <div className="flex flex-col gap-0.5 min-w-[128px]">
+        <div className="flex flex-col gap-0.5 min-w-[132px]">
           {[1, 2, 3, 4, 5].map((r) => (
             <button
               key={r}
@@ -340,19 +343,19 @@ export const BatchActionPill: React.FC = () => {
                 setRateOpen(false);
                 void updateAssets({ assetIDs: selectedAssetIds, rating: r }, destination);
               }}
-              className="charkle-pressable w-full flex items-center gap-0.5 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[12px] text-[#E5B243] hover:bg-[var(--bg-subtle)] cursor-pointer"
+              className="charkle-pressable w-full min-h-[30px] flex items-center gap-0.5 px-2.5 py-1 rounded-[var(--win-radius-control)] text-[12.5px] text-[#E5B243] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
             >
               {'★'.repeat(r)}
             </button>
           ))}
-          <div className="my-0.5 h-px bg-[var(--border-hairline)]" />
+          <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
           <button
             type="button"
             onClick={() => {
               setRateOpen(false);
               void updateAssets({ assetIDs: selectedAssetIds, rating: 0 }, destination);
             }}
-            className="charkle-pressable w-full text-left px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+            className="charkle-pressable w-full min-h-[30px] text-left px-2.5 py-1 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
           >
             清除评分
           </button>
@@ -365,7 +368,7 @@ export const BatchActionPill: React.FC = () => {
         onOpenChange={setBoardOpen}
         anchorEl={boardBtnRef.current}
         placement="top-center"
-        className="w-[220px] p-1.5"
+        className="w-[224px] p-1"
       >
         <div className="flex flex-col gap-0.5">
           {boards.map((b) => (
@@ -376,7 +379,7 @@ export const BatchActionPill: React.FC = () => {
                 setBoardOpen(false);
                 void addAssetsToBoard(b.id, selectedAssetIds);
               }}
-              className="w-full text-left px-2.5 py-1.5 text-[12.5px] rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] truncate cursor-pointer"
+              className="w-full min-h-[32px] text-left px-2.5 py-1.5 text-[13px] rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] truncate cursor-pointer"
             >
               {b.title}
             </button>
@@ -392,7 +395,7 @@ export const BatchActionPill: React.FC = () => {
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setPermDeleteIds(null)}>
+            <Button variant="standard" onClick={() => setPermDeleteIds(null)}>
               取消
             </Button>
             <Button

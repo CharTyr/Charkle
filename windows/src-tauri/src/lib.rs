@@ -332,6 +332,7 @@ pub fn run() {
 
             if let Some(main_win) = app.get_webview_window("main") {
                 configure_main_window(app.handle(), &main_win);
+                commands::window::attach_surface_change_emitter(&main_win);
             }
 
             // Pre-warm hidden transparent Top-Edge Drop Shelf window

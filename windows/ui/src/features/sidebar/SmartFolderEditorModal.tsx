@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Check, X } from 'lucide-react';
+import { Checkmark12Regular, Dismiss12Regular } from '@fluentui/react-icons';
 import {
   Button,
   CharkleIcon,
@@ -41,7 +41,7 @@ const QUICK_PALETTE: readonly string[] = [
   '#10B981',
   '#06B6D4',
   '#3B82F6',
-  '#6366F1',
+  '#1D4ED8',
   '#EC4899',
   '#18181B',
   '#71717A',
@@ -74,7 +74,7 @@ export interface SmartFolderEditorModalProps {
 }
 
 /**
- * 1:1 macOS `SmartFolderEditorSheet.swift` rule builder with live match count,
+ * Fluent 2 Smart Folder rule builder with live match count,
  * removable tag chips, multi-color tolerance picker, media kinds, and rating filter.
  */
 export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
@@ -256,18 +256,18 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
         <div className="w-full flex items-center justify-between gap-3">
           <span
             className={[
-              'text-[11.5px]',
+              'text-[12px]',
               hasAnyCondition ? 'text-[var(--text-secondary)]' : 'text-[var(--warning)]',
             ].join(' ')}
           >
             {hasAnyCondition ? '规则就绪' : '请至少设置一个筛选条件'}
           </span>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" onClick={onClose}>
+            <Button variant="standard" onClick={onClose}>
               取消
             </Button>
             <Button
-              variant="primary"
+              variant="accent"
               loading={saving}
               disabled={!hasAnyCondition}
               onClick={() => void handleSubmit()}
@@ -278,25 +278,29 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
         </div>
       }
     >
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
         {/* Name + Match Mode */}
         <div className="flex items-end gap-3 flex-wrap sm:flex-nowrap">
           <div className="flex-1 min-w-[200px] flex flex-col gap-1.5">
-            <label className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
+            <label
+              htmlFor="smart-folder-name-input"
+              className="text-[12px] font-medium text-[var(--text-secondary)]"
+            >
               文件夹名称
             </label>
             <input
+              id="smart-folder-name-input"
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="例如：蓝色系夏日插画 / GitHub 灵感"
               autoFocus
-              className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
             />
           </div>
 
           <div className="flex flex-col gap-1.5 shrink-0">
-            <span className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
+            <span className="text-[12px] font-medium text-[var(--text-secondary)]">
               规则匹配方式
             </span>
             <SegmentedControl<SmartFolderMatchMode>
@@ -312,10 +316,10 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
         </div>
 
         {/* Condition 1: Tags */}
-        <div className="p-3 rounded-[10px] bg-[var(--bg-subtle)]/45 border border-[var(--border-hairline)] flex flex-col gap-2">
+        <div className="p-3 rounded-[var(--win-radius-card)] bg-[var(--win-layer-default)] border border-[var(--win-stroke-card)] flex flex-col gap-2">
           <div className="flex items-baseline gap-1.5">
-            <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">符合标签</span>
-            <span className="text-[11px] text-[var(--text-secondary)]">选择已有标签或手动输入</span>
+            <span className="text-[13px] font-semibold text-[var(--text-primary)]">符合标签</span>
+            <span className="text-[12px] text-[var(--text-secondary)]">选择已有标签或手动输入</span>
           </div>
 
           {selectedTags.length > 0 && (
@@ -323,16 +327,16 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
               {selectedTags.map((tag) => (
                 <span
                   key={tag}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--accent)] text-white text-[11.5px] font-medium"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] text-[var(--accent-text)] text-[12px] font-medium"
                 >
                   <span>#{tag}</span>
                   <button
                     type="button"
                     aria-label={`移除标签 ${tag}`}
                     onClick={() => setSelectedTags((prev) => prev.filter((t) => t !== tag))}
-                    className="opacity-85 hover:opacity-100 cursor-pointer"
+                    className="opacity-85 hover:opacity-100 cursor-pointer inline-flex items-center"
                   >
-                    <X size={10} />
+                    <Dismiss12Regular className="w-3 h-3" />
                   </button>
                 </span>
               ))}
@@ -352,16 +356,17 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                 }
               }}
               placeholder="输入标签后回车添加…"
-              className="flex-1 min-w-0 h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              aria-label="输入标签"
+              className="win-input-elevation flex-1 min-w-0 h-8 px-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
             />
             <Button
               type="button"
-              variant="secondary"
-              size="xs"
+              variant="standard"
+              size="sm"
               disabled={!customTagInput.trim()}
               onClick={addCustomTag}
             >
-              添加
+              添加标签
             </Button>
           </div>
 
@@ -372,7 +377,7 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                   key={tc.name}
                   type="button"
                   onClick={() => setSelectedTags((prev) => [...prev, tc.name])}
-                  className="charkle-pressable px-2 py-0.5 rounded-full bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                  className="charkle-pressable win-control-elevation px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
                   + #{tc.name}
                 </button>
@@ -382,12 +387,12 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
         </div>
 
         {/* Condition 2: Description / Keywords */}
-        <div className="p-3 rounded-[10px] bg-[var(--bg-subtle)]/45 border border-[var(--border-hairline)] flex flex-col gap-2">
+        <div className="p-3 rounded-[var(--win-radius-card)] bg-[var(--win-layer-default)] border border-[var(--win-stroke-card)] flex flex-col gap-2">
           <div className="flex items-baseline gap-1.5 flex-wrap">
-            <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+            <span className="text-[13px] font-semibold text-[var(--text-primary)]">
               符合描述 / 关键词
             </span>
-            <span className="text-[11px] text-[var(--text-secondary)]">
+            <span className="text-[12px] text-[var(--text-secondary)]">
               匹配标题、AI 描述、备注、OCR 文本、推文正文与 README
             </span>
           </div>
@@ -396,15 +401,16 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
             value={descriptionQuery}
             onChange={(e) => setDescriptionQuery(e.target.value)}
             placeholder="输入多个关键词用空格分隔，例如：极简 建筑 海报"
-            className="h-8 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            aria-label="描述或关键词"
+            className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
           />
         </div>
 
         {/* Condition 3: Specific Colors */}
-        <div className="p-3 rounded-[10px] bg-[var(--bg-subtle)]/45 border border-[var(--border-hairline)] flex flex-col gap-2.5">
+        <div className="p-3 rounded-[var(--win-radius-card)] bg-[var(--win-layer-default)] border border-[var(--win-stroke-card)] flex flex-col gap-2.5">
           <div className="flex items-baseline gap-1.5 flex-wrap">
-            <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">特定颜色</span>
-            <span className="text-[11px] text-[var(--text-secondary)]">
+            <span className="text-[13px] font-semibold text-[var(--text-primary)]">特定颜色</span>
+            <span className="text-[12px] text-[var(--text-secondary)]">
               匹配任意已选色值的相近主色素材
             </span>
           </div>
@@ -422,16 +428,15 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                   style={{ backgroundColor: hex }}
                   className={[
                     'charkle-pressable w-[22px] h-[22px] rounded-full inline-flex items-center justify-center cursor-pointer',
+                    'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
                     active
                       ? 'ring-2 ring-offset-1 ring-[var(--accent)]'
                       : 'border border-black/15',
                   ].join(' ')}
                 >
                   {active && (
-                    <Check
-                      size={11}
-                      strokeWidth={3}
-                      className={isLightHex(hex) ? 'text-black' : 'text-white'}
+                    <Checkmark12Regular
+                      className={`w-3 h-3 ${isLightHex(hex) ? 'text-black' : 'text-white'}`}
                     />
                   )}
                 </button>
@@ -445,11 +450,11 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
               aria-label="自定义筛选色"
               value={customColorHex}
               onChange={(e) => setCustomColorHex(e.target.value.toUpperCase())}
-              className="w-7 h-6 rounded border border-[var(--border-hairline)] bg-transparent cursor-pointer"
+              className="w-7 h-7 rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-transparent cursor-pointer"
             />
             <Button
               type="button"
-              variant="secondary"
+              variant="standard"
               size="xs"
               onClick={() => {
                 const upper = customColorHex.toUpperCase();
@@ -468,7 +473,7 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                 {colorHexes.map((hex) => (
                   <span
                     key={hex}
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[var(--bg-subtle)] text-[10.5px] font-medium charkle-mono text-[var(--text-primary)]"
+                    className="win-control-elevation inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] text-[11px] font-medium charkle-mono text-[var(--text-primary)]"
                   >
                     <span
                       className="w-2.5 h-2.5 rounded-full border border-black/15"
@@ -479,16 +484,16 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                       type="button"
                       aria-label={`移除颜色 ${hex}`}
                       onClick={() => toggleColor(hex)}
-                      className="text-[var(--text-tertiary)] hover:text-[var(--danger)] cursor-pointer"
+                      className="text-[var(--text-tertiary)] hover:text-[var(--danger)] cursor-pointer inline-flex items-center"
                     >
-                      <X size={10} />
+                      <Dismiss12Regular className="w-2.5 h-2.5" />
                     </button>
                   </span>
                 ))}
               </div>
 
               <div className="flex items-center gap-2.5">
-                <span className="text-[11.5px] text-[var(--text-secondary)]">色彩容差</span>
+                <span className="text-[12px] text-[var(--text-secondary)]">色彩容差</span>
                 <CharkleSlider
                   min={10}
                   max={48}
@@ -502,7 +507,7 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                   valueText={`ΔE ≤ ${colorTolerance}`}
                   data-testid="smart-folder-color-tolerance-slider"
                 />
-                <span className="text-[11px] charkle-mono charkle-tabular text-[var(--text-secondary)]">
+                <span className="text-[11.5px] charkle-mono charkle-tabular text-[var(--text-secondary)]">
                   ΔE ≤ {colorTolerance}
                 </span>
               </div>
@@ -511,10 +516,10 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
         </div>
 
         {/* Condition 4: Media Kinds */}
-        <div className="p-3 rounded-[10px] bg-[var(--bg-subtle)]/45 border border-[var(--border-hairline)] flex flex-col gap-2">
+        <div className="p-3 rounded-[var(--win-radius-card)] bg-[var(--win-layer-default)] border border-[var(--win-stroke-card)] flex flex-col gap-2">
           <div className="flex items-baseline gap-1.5">
-            <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">素材类型</span>
-            <span className="text-[11px] text-[var(--text-secondary)]">不选则不限制类型</span>
+            <span className="text-[13px] font-semibold text-[var(--text-primary)]">素材类型</span>
+            <span className="text-[12px] text-[var(--text-secondary)]">不选则不限制类型</span>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {ALL_MEDIA_KINDS.map((kind) => {
@@ -523,12 +528,14 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                 <button
                   key={kind}
                   type="button"
+                  aria-pressed={active}
                   onClick={() => toggleKind(kind)}
                   className={[
-                    'charkle-pressable px-2.5 py-1 text-[12px] rounded-full cursor-pointer',
+                    'charkle-pressable px-2.5 h-7 text-[12px] rounded-[var(--win-radius-control)] cursor-pointer',
+                    'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
                     active
-                      ? 'bg-[var(--accent)] text-white font-semibold'
-                      : 'bg-[var(--bg-subtle)] text-[var(--text-primary)] hover:bg-[var(--border-hairline)]',
+                      ? 'bg-[var(--accent)] text-[var(--accent-text)] font-medium win-accent-elevation'
+                      : 'bg-[var(--win-control-fill)] text-[var(--text-primary)] hover:bg-[var(--win-control-fill-hover)] win-control-elevation',
                   ].join(' ')}
                 >
                   {mediaKindLabel(kind)}
@@ -540,7 +547,7 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
 
         {/* Condition 5: Minimum Rating */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          <span className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
+          <span className="text-[12px] font-medium text-[var(--text-secondary)]">
             最低星级（可选）
           </span>
           <div className="flex items-center gap-1">
@@ -550,12 +557,14 @@ export const SmartFolderEditorModal: React.FC<SmartFolderEditorModalProps> = ({
                 <button
                   key={star}
                   type="button"
+                  aria-pressed={active}
                   onClick={() => setMinRating(star)}
                   className={[
-                    'charkle-pressable px-2.5 py-1 rounded-full text-[11.5px] cursor-pointer charkle-tabular',
+                    'charkle-pressable px-2.5 h-7 rounded-[var(--win-radius-control)] text-[12px] cursor-pointer charkle-tabular',
+                    'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
                     active
-                      ? 'bg-[var(--accent)] text-white font-semibold'
-                      : 'bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+                      ? 'bg-[var(--accent)] text-[var(--accent-text)] font-medium win-accent-elevation'
+                      : 'bg-[var(--win-control-fill)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-control-fill-hover)] win-control-elevation',
                   ].join(' ')}
                 >
                   {star === 0 ? '不限' : `${star}★+`}

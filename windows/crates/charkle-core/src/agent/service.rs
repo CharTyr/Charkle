@@ -250,7 +250,7 @@ impl CharkleExternalAgentService {
                         },
                         "serverInfo": {
                             "name": "charkle",
-                            "version": "1.0.1"
+                            "version": "1.2.0"
                         },
                         "instructions": "Charkle is a cross-platform visual reference library and moodboard studio. Use `library_overview` to inspect folders and tags, `search_assets` / `semantic_search` / `find_similar_assets` / `quick_jump` / `list_inbox` to locate candidates, `render_contact_sheet` to visually inspect up to 16 numbered thumbnails in one image, `get_board_context` / `export_board_image` to inspect moodboards, and safe write tools (`organize_assets`, `create_folder`, `update_folder`, `ingest_asset`, `compose_moodboard`, `patch_moodboard`, `trash_assets`, `analyze_assets`) when write access is enabled in Charkle Settings."
                     }),

@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ChevronRight,
-  FolderPlus,
-  RotateCcw,
-  Trash2,
-  Upload,
-} from 'lucide-react';
+  ArrowUndo16Regular,
+  ArrowUpload24Regular,
+  ChevronRight16Regular,
+  Delete16Regular,
+  FolderAdd16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -14,6 +14,8 @@ import {
   GallerySkeleton,
   ModalShell,
   Popover,
+  WIN_EASE_OUT,
+  m,
   useDelayedFlag,
   type EmptyVignetteKind,
 } from '../../design-system';
@@ -46,12 +48,12 @@ function findSubtreeCount(nodes: FolderTreeNode[], targetId: string): number {
 }
 
 /**
- * Full-height Gallery-First stage matching macOS `MainWindowView.swift`:
- * - Floating `.charkle-glass` top control stack (`TopFilterCapsule` + `InboxTriageBar` / `trashActionBar` / `folderSubfoldersBar`)
- *   overlaid directly above scrolling gallery artwork (zero opaque header bar, zero top gradient veil)
- * - Dynamic `ResizeObserver` `topInset` so Row 1 sits cleanly below pills at scrollTop = 0 and cards glide visibly under glass
- * - Native macOS folder breadcrumb + subfolder chips + create-subfolder popover
- * - Native macOS Trash recovery/empty bar & Inbox Zero celebration view
+ * Full-height Fluent 2 Gallery-First stage:
+ * - Collapsible sticky gallery header (`TopFilterCapsule`) with scroll-linked Acrylic reveal (`0px -> 48px`)
+ * - Dynamic `ResizeObserver` `topInset` so Row 1 sits cleanly below expanded header/strips at `scrollTop = 0`
+ *   and cards glide smoothly behind the sticky Acrylic header when scrolled
+ * - Lightweight Fluent `Entrance` / `Drill-in` destination transitions respecting `MotionConfig`
+ * - Clean single-row Fluent contextual strips for Inbox Triage, Trash Recovery, and Folder Subfolders
  */
 export const GalleryView: React.FC = () => {
   const destination = useCoordinatorStore((s) => s.destination);
@@ -82,13 +84,38 @@ export const GalleryView: React.FC = () => {
   const stageRef = useRef<HTMLElement | null>(null);
   const topStackRef = useRef<HTMLDivElement | null>(null);
   const createSubfolderBtnRef = useRef<HTMLButtonElement | null>(null);
+  const hasNavigatedRef = useRef(false);
 
   const [galleryWidth, setGalleryWidth] = useState(960);
-  const [topInset, setTopInset] = useState(68);
+  const [topInset, setTopInset] = useState(64);
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
   const [htmlDragHovering, setHtmlDragHovering] = useState(false);
   const [emptyTrashIds, setEmptyTrashIds] = useState<string[] | null>(null);
   const [createSubfolderOpen, setCreateSubfolderOpen] = useState(false);
   const [subfolderDraft, setSubfolderDraft] = useState('');
+
+  const handleScrollElementChange = useCallback((el: HTMLDivElement | null) => {
+    setScrollElement(el);
+  }, []);
+
+  const destinationTransitionKey = useMemo(() => {
+    if (destination.type === 'folder' || destination.type === 'smartFolder' || destination.type === 'moodboard') {
+      return `${destination.type}:${destination.id}`;
+    }
+    if (destination.type === 'tag') {
+      return `tag:${destination.name}`;
+    }
+    return destination.type;
+  }, [destination]);
+
+  const prevTransitionKeyRef = useRef(destinationTransitionKey);
+  if (prevTransitionKeyRef.current !== destinationTransitionKey) {
+    prevTransitionKeyRef.current = destinationTransitionKey;
+    hasNavigatedRef.current = true;
+  }
+
+  const isDrillInDestination =
+    destination.type === 'folder' || destination.type === 'smartFolder';
 
   // Measure gallery stage width for exact 1-column / 1-stop zoom stepping in TopFilterCapsule
   useEffect(() => {
@@ -107,15 +134,14 @@ export const GalleryView: React.FC = () => {
     return () => obs.disconnect();
   }, []);
 
-  // Dynamically measure floating top control stack height so Row 1 never clips underneath pills
+  // Dynamically measure top header + contextual strip stack height so Row 1 clears expanded header
   useEffect(() => {
     const el = topStackRef.current;
     if (!el) return;
     const measure = () => {
       const h = el.offsetHeight;
       if (h > 0) {
-        // top: 12px + measured stack height + 14px breathing clearance
-        const next = Math.max(58, Math.ceil(h) + 26);
+        const next = Math.max(56, Math.ceil(h) + 8);
         setTopInset((prev) => (Math.abs(prev - next) >= 1 ? next : prev));
       }
     };
@@ -250,6 +276,10 @@ export const GalleryView: React.FC = () => {
   };
 
   const isInboxZero = isInbox && assets.length === 0 && !loading && !hasFilters;
+  const hasSecondaryStrip =
+    (isInbox && assets.length > 0) ||
+    (isTrash && assets.length > 0) ||
+    Boolean(activeFolderId && folderBreadcrumbs.length > 0);
 
   const emptyMeta = useMemo<{
     kind: EmptyVignetteKind;
@@ -286,6 +316,18 @@ export const GalleryView: React.FC = () => {
     };
   }, [isTrash, hasFilters, activeFolderId]);
 
+  const stageInitial = !hasNavigatedRef.current
+    ? false
+    : isDrillInDestination
+      ? { opacity: 0, scale: 0.985 }
+      : { opacity: 0, y: 12 };
+
+  const stageAnimate = { opacity: 1, y: 0, scale: 1 };
+  const stageTransition = {
+    duration: isDrillInDestination ? 0.22 : 0.2,
+    ease: WIN_EASE_OUT,
+  };
+
   return (
     <main
       ref={stageRef}
@@ -303,10 +345,16 @@ export const GalleryView: React.FC = () => {
         if (e.currentTarget === e.target) setHtmlDragHovering(false);
       }}
       onDrop={(e) => void handleExternalDrop(e)}
-      className="charkle-gallery-surface relative flex-1 min-w-0 min-h-0 flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
+      className="relative flex-1 min-w-0 min-h-0 flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
     >
-      {/* Full-Height Gallery Content Stage (cards scroll visibly beneath floating Liquid Glass pills) */}
-      <div className="relative flex-1 min-h-0 flex flex-col overflow-hidden">
+      {/* Full-Height Gallery Content Stage with Fluent Entrance / Drill-in transitions */}
+      <m.div
+        key={destinationTransitionKey}
+        initial={stageInitial}
+        animate={stageAnimate}
+        transition={stageTransition}
+        className="relative flex-1 min-h-0 flex flex-col overflow-hidden"
+      >
         {showSkeleton ? (
           <GallerySkeleton columns={4} topInset={topInset} />
         ) : isInboxZero ? (
@@ -323,14 +371,14 @@ export const GalleryView: React.FC = () => {
             </p>
             <div className="flex items-center gap-2.5 pt-1">
               <Button
-                variant="secondary"
+                variant="standard"
                 size="sm"
                 onClick={() => setDestination({ type: 'allItems' })}
               >
                 浏览全部素材
               </Button>
               <Button
-                variant="primary"
+                variant="accent"
                 size="sm"
                 onClick={() => setMoodboardGeneratorOpen(true)}
               >
@@ -354,7 +402,7 @@ export const GalleryView: React.FC = () => {
               <div className="flex items-center gap-2.5 pt-0.5">
                 {hasFilters ? (
                   <Button
-                    variant="secondary"
+                    variant="standard"
                     size="sm"
                     onClick={() => void clearVisualFilters(destination)}
                   >
@@ -362,7 +410,7 @@ export const GalleryView: React.FC = () => {
                   </Button>
                 ) : (
                   <Button
-                    variant="secondary"
+                    variant="standard"
                     size="sm"
                     onClick={() => setCaptureOpen(true)}
                   >
@@ -370,7 +418,7 @@ export const GalleryView: React.FC = () => {
                   </Button>
                 )}
                 <Button
-                  variant="primary"
+                  variant="accent"
                   size="sm"
                   onClick={() => void handleCollectClipboard()}
                 >
@@ -385,6 +433,7 @@ export const GalleryView: React.FC = () => {
             cardScale={cardScale}
             topInset={topInset}
             bottomInset={bottomInset}
+            onScrollElementChange={handleScrollElementChange}
           />
         ) : layoutMode === 'horizontalJustified' ? (
           <HorizontalJustifiedView
@@ -392,173 +441,168 @@ export const GalleryView: React.FC = () => {
             cardScale={cardScale}
             topInset={topInset}
             bottomInset={bottomInset}
+            onScrollElementChange={handleScrollElementChange}
           />
         ) : layoutMode === 'ringGallery' ? (
           <GalleryRingView assets={assets} topInset={topInset} />
         ) : (
           <GalleryFilmstripView assets={assets} topInset={topInset} />
         )}
-      </div>
+      </m.div>
 
-      {/* Floating Liquid Glass Top Control Stack overlaid directly over full-height gallery */}
+      {/* Collapsible Sticky Fluent 2 Gallery Header + Contextual Secondary Strips */}
       <div
         ref={topStackRef}
-        className="pointer-events-none absolute top-[10px] left-4 right-4 z-30 flex flex-col gap-2"
+        className="pointer-events-none absolute top-0 left-0 right-0 z-30 flex flex-col"
       >
-        <TopFilterCapsule galleryViewportWidth={galleryWidth} />
+        <TopFilterCapsule
+          galleryViewportWidth={galleryWidth}
+          sectionTitle={dropTargetTitle}
+          itemCount={assets.length}
+          scrollContainer={scrollElement}
+        />
 
-        {/* Floating Inbox Triage Bar */}
-        {isInbox && assets.length > 0 && <InboxTriageBar assets={assets} />}
+        {hasSecondaryStrip && (
+          <div className="pointer-events-none px-4 pb-2 flex flex-col gap-2">
+            {/* Single-row Fluent Inbox Triage Strip */}
+            {isInbox && assets.length > 0 && <InboxTriageBar assets={assets} />}
 
-        {/* Floating Trash Action Capsules (content-hugging Liquid Glass pills, zero full-width bar) */}
-        {isTrash && assets.length > 0 && (
-          <div
-            data-testid="trash-action-bar"
-            className="pointer-events-none charkle-reveal-top flex items-center justify-between gap-2"
-          >
-            <div
-              data-pill="true"
-              data-adapt-glass="true"
-              className="pointer-events-auto charkle-glass rounded-full h-[32px] px-3 inline-flex items-center gap-1.5 text-[12px] font-semibold text-[var(--text-primary)] charkle-tabular w-fit shrink-0"
-            >
-              <Trash2 size={13} className="text-[var(--text-secondary)] shrink-0" />
-              <span>回收站 · 共 {assets.length} 项素材</span>
-            </div>
-
-            <div
-              data-pill="true"
-              data-adapt-glass="true"
-              className="pointer-events-auto charkle-glass rounded-full h-[32px] px-1.5 inline-flex items-center gap-1 w-fit shrink-0"
-            >
-              <button
-                type="button"
-                data-pill="true"
-                onClick={() => {
-                  const allIds = assets.map((a) => a.id);
-                  clearSelection();
-                  void updateAssets({ assetIDs: allIds, isTrashed: false }, destination).then(() =>
-                    pushToast({
-                      message: `已将 ${allIds.length} 项全部放回原处`,
-                      tone: 'success',
-                    }),
-                  );
-                }}
-                className="charkle-pressable h-[24px] px-2.5 inline-flex items-center gap-1.5 rounded-full bg-black/[0.06] dark:bg-white/[0.10] hover:bg-black/[0.11] dark:hover:bg-white/[0.16] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer whitespace-nowrap"
+            {/* Single-row Fluent Trash Action Strip */}
+            {isTrash && assets.length > 0 && (
+              <div
+                data-testid="trash-action-bar"
+                className="pointer-events-auto charkle-reveal-top min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex items-center justify-between gap-2"
               >
-                <RotateCcw size={11.5} />
-                <span>全部放回原处</span>
-              </button>
+                <div className="inline-flex items-center gap-2 text-[12.5px] font-medium text-[var(--text-primary)] charkle-tabular min-w-0">
+                  <Delete16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="truncate">回收站 · 共 {assets.length} 项素材</span>
+                </div>
 
-              <button
-                type="button"
-                data-pill="true"
-                onClick={() => setEmptyTrashIds(assets.map((a) => a.id))}
-                className="charkle-pressable h-[24px] px-2.5 inline-flex items-center gap-1.5 rounded-full bg-[var(--danger-soft)] hover:bg-[var(--danger)] text-[var(--danger)] hover:text-white text-[11.5px] font-semibold cursor-pointer whitespace-nowrap"
+                <div className="inline-flex items-center gap-1.5 shrink-0">
+                  <Button
+                    variant="standard"
+                    size="xs"
+                    onClick={() => {
+                      const allIds = assets.map((a) => a.id);
+                      clearSelection();
+                      void updateAssets({ assetIDs: allIds, isTrashed: false }, destination).then(
+                        () =>
+                          pushToast({
+                            message: `已将 ${allIds.length} 项全部放回原处`,
+                            tone: 'success',
+                          }),
+                      );
+                    }}
+                  >
+                    <ArrowUndo16Regular className="w-3.5 h-3.5" />
+                    <span>全部放回原处</span>
+                  </Button>
+
+                  <Button
+                    variant="danger"
+                    size="xs"
+                    onClick={() => setEmptyTrashIds(assets.map((a) => a.id))}
+                  >
+                    <Delete16Regular className="w-3.5 h-3.5" />
+                    <span>清空回收站…</span>
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Single-row Fluent Folder Breadcrumb + Subfolders + Create-Subfolder Strip */}
+            {activeFolderId && folderBreadcrumbs.length > 0 && (
+              <div
+                data-testid="folder-subfolders-bar"
+                className="pointer-events-auto charkle-reveal-top min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex items-center justify-between gap-2"
               >
-                <Trash2 size={11.5} />
-                <span>清空回收站…</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Floating Folder Breadcrumb + Subfolders + Create-Subfolder Capsules (zero edge-to-edge bar) */}
-        {activeFolderId && folderBreadcrumbs.length > 0 && (
-          <div
-            data-testid="folder-subfolders-bar"
-            className="pointer-events-none charkle-reveal-top flex items-center justify-between gap-2"
-          >
-            <div
-              data-pill="true"
-              data-adapt-glass="true"
-              className="pointer-events-auto charkle-glass rounded-full h-[32px] px-3 inline-flex items-center gap-2 w-fit max-w-[calc(100%-132px)] min-w-0"
-            >
-              {/* Breadcrumb path */}
-              <nav aria-label="文件夹路径" className="flex items-center gap-1 shrink-0 min-w-0">
-                {folderBreadcrumbs.map((crumb, index) => {
-                  const isCurrent = crumb.id === activeFolderId;
-                  return (
-                    <React.Fragment key={crumb.id}>
-                      {index > 0 && (
-                        <ChevronRight
-                          size={11}
-                          className="text-[var(--text-tertiary)] shrink-0"
-                        />
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setDestination({ type: 'folder', id: crumb.id })}
-                        className={[
-                          'inline-flex items-center gap-1.5 text-[12px] cursor-pointer max-w-[160px]',
-                          isCurrent
-                            ? 'font-semibold text-[var(--text-primary)]'
-                            : 'font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                        ].join(' ')}
-                      >
-                        {index === 0 && (
-                          <CharkleFolderIcon
-                            colorHex={crumb.colorHex}
-                            customSymbol={crumb.customSymbol}
-                            size={15}
-                            isActive
-                          />
-                        )}
-                        <span className="truncate">{crumb.name}</span>
-                      </button>
-                    </React.Fragment>
-                  );
-                })}
-              </nav>
-
-              {/* Subfolder navigation chips */}
-              {childFolders.length > 0 && (
-                <>
-                  <div className="h-3.5 w-px bg-[var(--border-hairline)] shrink-0" />
-                  <div className="min-w-0 flex items-center gap-1.5 overflow-x-auto charkle-scroll-hidden">
-                    {childFolders.map((child) => {
-                      const count = Math.max(child.assetCount, findSubtreeCount(folderTree, child.id));
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  {/* Breadcrumb path */}
+                  <nav aria-label="文件夹路径" className="flex items-center gap-1 shrink-0 min-w-0">
+                    {folderBreadcrumbs.map((crumb, index) => {
+                      const isCurrent = crumb.id === activeFolderId;
                       return (
-                        <button
-                          key={child.id}
-                          type="button"
-                          data-pill="true"
-                          onClick={() => setDestination({ type: 'folder', id: child.id })}
-                          className="charkle-pressable h-[22px] px-2 inline-flex items-center gap-1.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] hover:bg-black/[0.10] dark:hover:bg-white/[0.14] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
-                        >
-                          <CharkleFolderIcon
-                            colorHex={child.colorHex}
-                            customSymbol={child.customSymbol}
-                            size={13}
-                          />
-                          <span className="max-w-[120px] truncate">{child.name}</span>
-                          {count > 0 && (
-                            <span className="text-[10px] text-[var(--text-secondary)] charkle-tabular">
-                              {count}
-                            </span>
+                        <React.Fragment key={crumb.id}>
+                          {index > 0 && (
+                            <ChevronRight16Regular className="w-3 h-3 text-[var(--text-tertiary)] shrink-0" />
                           )}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => setDestination({ type: 'folder', id: crumb.id })}
+                            className={[
+                              'inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded-[var(--win-radius-control)] text-[12.5px] hover:bg-[var(--win-subtle-hover)] cursor-pointer max-w-[160px]',
+                              isCurrent
+                                ? 'font-semibold text-[var(--text-primary)]'
+                                : 'font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+                            ].join(' ')}
+                          >
+                            {index === 0 && (
+                              <CharkleFolderIcon
+                                colorHex={crumb.colorHex}
+                                customSymbol={crumb.customSymbol}
+                                size={15}
+                                isActive
+                              />
+                            )}
+                            <span className="truncate">{crumb.name}</span>
+                          </button>
+                        </React.Fragment>
                       );
                     })}
-                  </div>
-                </>
-              )}
-            </div>
+                  </nav>
 
-            {/* Right: Create Subfolder Floating Glass Pill */}
-            <button
-              ref={createSubfolderBtnRef}
-              type="button"
-              data-pill="true"
-              data-adapt-glass="true"
-              onClick={() => {
-                setSubfolderDraft('');
-                setCreateSubfolderOpen(true);
-              }}
-              className="pointer-events-auto charkle-pressable charkle-glass rounded-full h-[32px] px-3 inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--accent)] cursor-pointer shrink-0 whitespace-nowrap"
-            >
-              <FolderPlus size={12.5} />
-              <span>新建子文件夹</span>
-            </button>
+                  {/* Subfolder navigation chips */}
+                  {childFolders.length > 0 && (
+                    <>
+                      <div className="h-4 w-px bg-[var(--win-stroke-divider)] shrink-0" />
+                      <div className="min-w-0 flex items-center gap-1.5 overflow-x-auto charkle-scroll-hidden">
+                        {childFolders.map((child) => {
+                          const count = Math.max(
+                            child.assetCount,
+                            findSubtreeCount(folderTree, child.id),
+                          );
+                          return (
+                            <button
+                              key={child.id}
+                              type="button"
+                              onClick={() => setDestination({ type: 'folder', id: child.id })}
+                              className="charkle-pressable h-[26px] px-2 inline-flex items-center gap-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-subtle-hover)] hover:bg-[var(--win-subtle-active)] text-[12px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
+                            >
+                              <CharkleFolderIcon
+                                colorHex={child.colorHex}
+                                customSymbol={child.customSymbol}
+                                size={13}
+                              />
+                              <span className="max-w-[120px] truncate">{child.name}</span>
+                              {count > 0 && (
+                                <span className="text-[10.5px] text-[var(--text-tertiary)] charkle-tabular">
+                                  {count}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Right: Create Subfolder Fluent Action */}
+                <Button
+                  ref={createSubfolderBtnRef}
+                  variant="subtle"
+                  size="xs"
+                  onClick={() => {
+                    setSubfolderDraft('');
+                    setCreateSubfolderOpen(true);
+                  }}
+                  className="text-[var(--accent)] hover:text-[var(--accent)] shrink-0"
+                >
+                  <FolderAdd16Regular className="w-3.5 h-3.5" />
+                  <span>新建子文件夹</span>
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -569,7 +613,7 @@ export const GalleryView: React.FC = () => {
         onOpenChange={setCreateSubfolderOpen}
         anchorEl={createSubfolderBtnRef.current}
         placement="bottom-end"
-        className="w-[264px] p-3.5"
+        className="w-[268px] p-3.5"
       >
         <form
           onSubmit={(e) => {
@@ -578,9 +622,7 @@ export const GalleryView: React.FC = () => {
           }}
           className="flex flex-col gap-2.5"
         >
-          <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
-            新建子文件夹
-          </div>
+          <div className="text-[13px] font-semibold text-[var(--text-primary)]">新建子文件夹</div>
           <div className="flex items-center gap-1.5">
             <input
               type="text"
@@ -588,12 +630,12 @@ export const GalleryView: React.FC = () => {
               autoFocus
               onChange={(e) => setSubfolderDraft(e.target.value)}
               placeholder="子文件夹名称"
-              className="flex-1 min-w-0 h-7 px-2.5 rounded-[var(--radius-popover-inner)] bg-[var(--bg-subtle)] text-[12px] text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+              className="win-input-elevation flex-1 min-w-0 h-8 px-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
             />
             <Button
               type="submit"
-              variant="primary"
-              size="xs"
+              variant="accent"
+              size="sm"
               disabled={!subfolderDraft.trim()}
             >
               创建
@@ -602,14 +644,14 @@ export const GalleryView: React.FC = () => {
         </form>
       </Popover>
 
-      {/* Floating Multi-Selection Action Pill (>= 2 items selected) */}
+      {/* Floating Multi-Selection Acrylic Action Bar (>= 2 items selected) */}
       <BatchActionPill />
 
-      {/* GPU Dashed Drop-Ring Overlay (matching macOS CanvasDropRingOverlay) */}
+      {/* GPU Dashed Drop-Ring Overlay */}
       {showDropOverlay && (
-        <div className="charkle-reveal-top pointer-events-none absolute inset-3 z-50 rounded-[var(--radius-dock-outer)] border-2 border-dashed border-[var(--accent)] bg-[var(--accent-soft)] backdrop-blur-[4px] flex flex-col items-center justify-center gap-2">
+        <div className="charkle-reveal-top pointer-events-none absolute inset-4 z-50 rounded-[var(--win-radius-overlay)] border-2 border-dashed border-[var(--accent)] bg-[var(--accent-soft)] flex flex-col items-center justify-center gap-2">
           <div className="w-12 h-12 rounded-full bg-[var(--accent)]/15 flex items-center justify-center">
-            <Upload size={24} className="text-[var(--accent)]" />
+            <ArrowUpload24Regular className="w-6 h-6 text-[var(--accent)]" />
           </div>
           <div className="text-[14px] font-semibold text-[var(--accent)]">
             松开即可导入{osFileDrop.paths.length > 0 ? ` ${osFileDrop.paths.length} 项` : ''}到「
@@ -629,7 +671,7 @@ export const GalleryView: React.FC = () => {
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setEmptyTrashIds(null)}>
+            <Button variant="standard" onClick={() => setEmptyTrashIds(null)}>
               取消
             </Button>
             <Button

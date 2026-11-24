@@ -1,6 +1,10 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Folder, GripVertical, Image as ImageIcon } from 'lucide-react';
+import {
+  Folder16Regular,
+  Image16Regular,
+  ReOrderDotsVertical16Regular,
+} from '@fluentui/react-icons';
 import { getTransport, isTauriRuntime } from '../../api/transport';
 import { useDndStore, type ActivePointerDrag, type DragDropTarget } from './dndStore';
 
@@ -121,7 +125,7 @@ function isNearWindowBoundary(clientX: number, clientY: number): boolean {
 /**
  * Initiates a Pointer-Event managed drag gesture with a 6px movement hysteresis threshold.
  * Works 100% reliably inside Tauri v2 WebView2 (unlike HTML5 `draggable`), tracks 1:1 with
- * a Liquid Glass floating ghost, and seamlessly hands off to native Win32 OLE `DoDragDrop`
+ * a Fluent 2 Acrylic floating ghost, and seamlessly hands off to native Win32 OLE `DoDragDrop`
  * if an asset drag crosses outside the Charkle window bounds.
  */
 export function beginPointerDrag(
@@ -256,7 +260,7 @@ export function beginPointerDrag(
 }
 
 /**
- * Floating GPU-composited Liquid Glass drag preview overlay rendered at the root of the window.
+ * Floating GPU-composited Fluent 2 Acrylic drag preview overlay rendered at the root of the window.
  */
 export const PointerDragGhostLayer: React.FC = () => {
   const drag = useDndStore((s) => s.pointerDrag);
@@ -306,18 +310,15 @@ export const PointerDragGhostLayer: React.FC = () => {
       className="pointer-events-none fixed top-0 left-0 z-[260] flex flex-col items-start gap-1.5"
     >
       {drag.kind === 'assets' && (
-        <div
-          data-no-lens="true"
-          className="charkle-glass rounded-[12px] p-1.5 flex items-center gap-2 max-w-[240px]"
-        >
-          <div className="relative h-10 w-10 rounded-[8px] overflow-hidden bg-[var(--bg-subtle)] shrink-0">
+        <div className="win-acrylic rounded-[var(--win-radius-overlay)] p-1.5 flex items-center gap-2 max-w-[240px]">
+          <div className="relative h-10 w-10 rounded-[var(--win-radius-control)] overflow-hidden bg-[var(--bg-subtle)] shrink-0">
             <img
               src={transport.thumbnailUrl(drag.previewAssetId, 'grid520')}
               alt=""
               className="w-full h-full object-cover"
             />
             {drag.assetIds.length > 1 && (
-              <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--accent)] text-white text-[10px] font-bold inline-flex items-center justify-center charkle-tabular">
+              <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[var(--accent)] text-[var(--accent-text)] text-[10px] font-bold inline-flex items-center justify-center charkle-tabular">
                 {drag.assetIds.length}
               </span>
             )}
@@ -334,11 +335,8 @@ export const PointerDragGhostLayer: React.FC = () => {
       )}
 
       {drag.kind === 'folder' && (
-        <div
-          data-no-lens="true"
-          className="charkle-glass rounded-[10px] px-2.5 py-1.5 flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]"
-        >
-          <Folder size={14} className="text-[var(--accent)] shrink-0" />
+        <div className="win-acrylic rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]">
+          <Folder16Regular className="w-4 h-4 text-[var(--accent)] shrink-0" />
           <span className="truncate max-w-[160px]">{drag.name}</span>
           {targetHint && (
             <span className="text-[10.5px] text-[var(--accent)] shrink-0">· {targetHint}</span>
@@ -347,21 +345,15 @@ export const PointerDragGhostLayer: React.FC = () => {
       )}
 
       {drag.kind === 'inspectorCard' && (
-        <div
-          data-no-lens="true"
-          className="charkle-glass rounded-[10px] px-2.5 py-1.5 flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]"
-        >
-          <GripVertical size={13} className="text-[var(--text-tertiary)]" />
+        <div className="win-acrylic rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]">
+          <ReOrderDotsVertical16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)]" />
           <span>{drag.title}</span>
         </div>
       )}
 
       {(drag.kind === 'candidate' || drag.kind === 'editorialNode') && (
-        <div
-          data-no-lens="true"
-          className="charkle-glass rounded-[10px] px-2.5 py-1.5 flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]"
-        >
-          <ImageIcon size={14} className="text-[var(--accent)]" />
+        <div className="win-acrylic rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]">
+          <Image16Regular className="w-4 h-4 text-[var(--accent)]" />
           <span className="truncate max-w-[180px]">{drag.title}</span>
           {targetHint && <span className="text-[10.5px] text-[var(--accent)]">· {targetHint}</span>}
         </div>

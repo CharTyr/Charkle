@@ -1,20 +1,27 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './design-system/tokens.css';
-import {
-  applySavedGlassTintScales,
-  ErrorBoundary,
-  startLiquidGlassController,
-} from './design-system';
+import { ErrorBoundary, FluentMotionProvider, TooltipProvider } from './design-system';
 import { App } from './App';
+import { useCoordinatorStore } from './stores/coordinatorStore';
 
-applySavedGlassTintScales();
-startLiquidGlassController({ rim: 40, edge: 1.35, power: 2.1, dispersion: 0.20 });
+const MainRoot: React.FC = () => {
+  const animationsDisabled = useCoordinatorStore(
+    (s) => s.surfaceState?.animationsEnabled === false,
+  );
+  return (
+    <FluentMotionProvider animationsDisabled={animationsDisabled}>
+      <TooltipProvider>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </TooltipProvider>
+    </FluentMotionProvider>
+  );
+};
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
+    <MainRoot />
   </React.StrictMode>,
 );

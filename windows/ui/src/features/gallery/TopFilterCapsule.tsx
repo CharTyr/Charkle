@@ -1,25 +1,29 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownCircle,
-  ArrowUpDown,
-  Grid2x2,
-  Grid3x3,
-  PanelRight,
-  Sparkles,
-  Star,
-  X,
-} from 'lucide-react';
+  Add16Regular,
+  ArrowDownload16Regular,
+  ArrowSort16Regular,
+  Dismiss16Regular,
+  Star16Filled,
+  Star16Regular,
+  Subtract16Regular,
+} from '@fluentui/react-icons';
+import { useMotionValue, type MotionValue } from 'motion/react';
 import {
+  Button,
   CharkleIcon,
   CharkleSlider,
   CustomSelect,
   FILTER_PRESET_COLORS,
+  SegmentedControl,
+  Tooltip,
+  m,
+  useMotionValueEvent,
+  useScroll,
+  useTransform,
   type SelectOption,
 } from '../../design-system';
-import {
-  useCoordinatorStore,
-  useLibraryStore,
-} from '../../stores';
+import { useCoordinatorStore, useLibraryStore } from '../../stores';
 import {
   mediaKindLabel,
   type AspectShape,
@@ -57,6 +61,8 @@ const SORT_OPTIONS: ReadonlyArray<SelectOption<SortOrder>> = [
   { value: 'relevance', label: '相关度优先' },
 ];
 
+const COLLAPSE_DISTANCE_PX = 48;
+
 function toleranceLabel(val: number): string {
   if (val <= 18) return '精确';
   if (val <= 34) return '适中';
@@ -74,21 +80,60 @@ function countVisualFiltersOnly(criteria: FilterCriteria): number {
   return count;
 }
 
+const ScrollProgressBinder: React.FC<{
+  container: HTMLDivElement;
+  scrollProgress: MotionValue<number>;
+}> = ({ container, scrollProgress }) => {
+  const containerRef = useRef<HTMLDivElement>(container);
+  containerRef.current = container;
+  const { scrollY } = useScroll({ container: containerRef });
+
+  useMotionValueEvent(scrollY, 'change', (latest) => {
+    const next = Math.max(0, Math.min(1, latest / COLLAPSE_DISTANCE_PX));
+    scrollProgress.set(next);
+  });
+
+  useEffect(() => {
+    const sync = () => {
+      const next = Math.max(0, Math.min(1, container.scrollTop / COLLAPSE_DISTANCE_PX));
+      scrollProgress.set(next);
+    };
+    sync();
+    container.addEventListener('scroll', sync, { passive: true });
+    return () => {
+      container.removeEventListener('scroll', sync);
+      scrollProgress.set(0);
+    };
+  }, [container, scrollProgress]);
+
+  return null;
+};
+
 export interface TopFilterCapsuleProps {
   /** Measured gallery viewport width for exact 1-column / 1-stop +/- zoom stepping. */
   galleryViewportWidth?: number;
+  /** Section heading displayed on the left side of the collapsible Fluent 2 gallery header. */
+  sectionTitle?: string;
+  /** Total item count displayed beside the heading in tabular numerals. */
+  itemCount?: number;
+  /** Live vertical scroll container driving zero-rerender scroll-linked sticky collapse (0px -> 48px). */
+  scrollContainer?: HTMLDivElement | null;
 }
 
 /**
- * Floating Liquid Glass Top Control Bar matching macOS `MainWindowView.swift`:
- * - Individual `.charkle-glass rounded-full` capsules floating directly over scrolling gallery artwork
- * - Transparent search input with inline semantic toggle pill inside the search capsule
- * - Filter toggle pill, Sort picker glass pill, 3-mode duotone layout switcher pill,
- *   density slider pill (exact 1-column/1-stop +/- stepping), quick moodboard CTA pill, and Inspector circle
- * - Expandable `.charkle-glass` visual & color filter bar
+ * Windows 11 Fluent 2 Collapsible Sticky Gallery Header (`fluent2-design-system.md` §3.2 & §6.2):
+ * - Expanded (`scrollTop = 0`): 24px SemiBold `.win-display-title` heading + tabular item count on left;
+ *   crisp 32px-tall aligned Fluent toolbar on right (Filter, Sort, 4-mode layout SegmentedControl,
+ *   Density slider with +/- steps, Quick Moodboard CTA). Search lives in Sidebar; Inspector toggle in Titlebar.
+ * - Scrolled (`0px -> 48px`): zero-rerender `useScroll` + `useTransform` glides out display heading,
+ *   fades in compact sticky title, and reveals `.win-acrylic-header` + 1px bottom divider.
+ * - Expandable Visual Filter card (`data-testid="visual-filter-bar"`) with 4px/8px Fluent geometry.
  */
 export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   galleryViewportWidth = 960,
+  sectionTitle,
+  itemCount,
+  scrollContainer = null,
 }) => {
   const destination = useCoordinatorStore((s) => s.destination);
   const layoutMode = useCoordinatorStore((s) => s.layoutMode);
@@ -97,86 +142,58 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   const setCardScale = useCoordinatorStore((s) => s.setCardScale);
   const filterOpen = useCoordinatorStore((s) => s.visualFilterBarOpen);
   const toggleFilterOpen = useCoordinatorStore((s) => s.toggleVisualFilterBar);
-  const inspectorOpen = useCoordinatorStore((s) => s.inspectorOpen);
-  const toggleInspector = useCoordinatorStore((s) => s.toggleInspector);
   const setMoodboardGeneratorOpen = useCoordinatorStore((s) => s.setMoodboardGeneratorOpen);
-  const pushToast = useCoordinatorStore((s) => s.pushToast);
 
+  const assetsLength = useLibraryStore((s) => s.assets.length);
+  const folders = useLibraryStore((s) => s.folders);
+  const smartFolders = useLibraryStore((s) => s.smartFolders);
   const criteria = useLibraryStore((s) => s.criteria);
   const tagCounts = useLibraryStore((s) => s.tagCounts);
-  const semanticSearch = useLibraryStore((s) => s.semanticSearch);
-  const setSemanticSearch = useLibraryStore((s) => s.setSemanticSearch);
   const setCriteria = useLibraryStore((s) => s.setCriteria);
   const clearVisualFilters = useLibraryStore((s) => s.clearVisualFilters);
 
-  const [searchDraft, setSearchDraft] = useState(criteria.searchQuery);
+  const resolvedTitle = useMemo(() => {
+    if (sectionTitle) return sectionTitle;
+    switch (destination.type) {
+      case 'allItems':
+        return '全部素材';
+      case 'inbox':
+        return '收件箱';
+      case 'untagged':
+        return '未打标签';
+      case 'recent':
+        return '最近浏览';
+      case 'trash':
+        return '回收站';
+      case 'folder':
+        return folders.find((f) => f.id === destination.id)?.name ?? '文件夹';
+      case 'smartFolder':
+        return smartFolders.find((sf) => sf.id === destination.id)?.name ?? '智能文件夹';
+      case 'tag':
+        return `#${destination.name}`;
+      default:
+        return '全部素材';
+    }
+  }, [sectionTitle, destination, folders, smartFolders]);
 
-  useEffect(() => {
-    setSearchDraft(criteria.searchQuery);
-  }, [criteria.searchQuery]);
-
-  useEffect(() => {
-    if (searchDraft === criteria.searchQuery) return;
-    if (semanticSearch && searchDraft.trim().length > 0) return;
-    const timer = window.setTimeout(() => {
-      void setCriteria({ searchQuery: searchDraft }, destination);
-    }, 120);
-    return () => window.clearTimeout(timer);
-  }, [searchDraft, criteria.searchQuery, semanticSearch, destination, setCriteria]);
-
+  const resolvedCount = itemCount ?? assetsLength;
   const visualFilterCount = countVisualFiltersOnly(criteria);
   const usableWidth = Math.max(240, galleryViewportWidth - 32);
 
-  const toggleKind = (kind: MediaKind) => {
-    const next = criteria.kinds.includes(kind)
-      ? criteria.kinds.filter((k) => k !== kind)
-      : [...criteria.kinds, kind];
-    void setCriteria({ kinds: next }, destination);
-  };
+  // Zero-rerender scroll progress (0 at top -> 1 at >= 48px scrolled)
+  const scrollProgress = useMotionValue(0);
+  const acrylicOpacity = useTransform(scrollProgress, [0, 0.25, 1], [0, 0.35, 1]);
+  const rowY = useTransform(scrollProgress, [0, 1], [4, 0]);
+  const displayOpacity = useTransform(scrollProgress, [0, 0.62], [1, 0]);
+  const displayY = useTransform(scrollProgress, [0, 0.62], [0, -12]);
+  const compactOpacity = useTransform(scrollProgress, [0.38, 1], [0, 1]);
+  const compactY = useTransform(scrollProgress, [0.38, 1], [10, 0]);
 
-  const toggleTag = (tag: string) => {
-    const next = criteria.tags.includes(tag)
-      ? criteria.tags.filter((t) => t !== tag)
-      : [...criteria.tags, tag];
-    void setCriteria({ tags: next }, destination);
-  };
-
-  const commitSemanticQuery = () => {
-    const trimmed = searchDraft.trim();
-    if (!trimmed) return;
-    void setCriteria({ searchQuery: trimmed, sortBy: 'relevance' }, destination);
-  };
-
-  const handleToggleSemantic = () => {
-    const trimmed = searchDraft.trim();
-    if (semanticSearch && !trimmed) {
-      setSemanticSearch(false);
-      if (criteria.sortBy === 'relevance') {
-        void setCriteria({ sortBy: 'newest' }, destination);
-      }
-      return;
+  useEffect(() => {
+    if (!scrollContainer) {
+      scrollProgress.set(0);
     }
-    const next = !semanticSearch;
-    setSemanticSearch(next);
-    if (next) {
-      if (trimmed) {
-        void setCriteria({ searchQuery: trimmed, sortBy: 'relevance' }, destination);
-      } else {
-        pushToast({
-          message: '已开启语义搜图模式：输入描述后按回车检索',
-          tone: 'info',
-        });
-      }
-    } else {
-      void setCriteria(
-        {
-          searchQuery: searchDraft,
-          sortBy: criteria.sortBy === 'relevance' ? 'newest' : criteria.sortBy,
-        },
-        destination,
-      );
-    }
-  };
+  }, [scrollContainer, scrollProgress]);
 
   const barRef = useRef<HTMLDivElement | null>(null);
   const [measuredWidth, setMeasuredWidth] = useState(0);
@@ -195,6 +212,20 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
   }, []);
 
   const effectiveWidth = measuredWidth > 0 ? measuredWidth : galleryViewportWidth;
+
+  const toggleKind = (kind: MediaKind) => {
+    const next = criteria.kinds.includes(kind)
+      ? criteria.kinds.filter((k) => k !== kind)
+      : [...criteria.kinds, kind];
+    void setCriteria({ kinds: next }, destination);
+  };
+
+  const toggleTag = (tag: string) => {
+    const next = criteria.tags.includes(tag)
+      ? criteria.tags.filter((t) => t !== tag)
+      : [...criteria.tags, tag];
+    void setCriteria({ tags: next }, destination);
+  };
 
   const layoutModes: ReadonlyArray<{
     mode: GalleryLayoutMode;
@@ -216,7 +247,7 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
     },
     {
       mode: 'galleryFilmstrip',
-      icon: 'quicklook',
+      icon: 'gallery-filmstrip',
       title: '画廊视图（底部胶片挑图）(Ctrl+3)',
       ariaLabel: '画廊视图',
     },
@@ -228,545 +259,542 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
     },
   ];
 
-  // Progressive narrow top-bar collapse (Pitfall 3): full -> hide button labels -> compact search & hide secondary density slider
+  // Progressive responsive widths so 251px ultra-narrow -> 800px -> 2560px wide never overflows or clips
   const supportsDensity = layoutMode !== 'galleryFilmstrip' && layoutMode !== 'ringGallery';
-  const showDensitySlider = supportsDensity && (effectiveWidth <= 0 || effectiveWidth >= 580);
-  const showFilterLabel = effectiveWidth <= 0 || effectiveWidth >= 660;
-  const showFullMoodboardLabel = effectiveWidth <= 0 || effectiveWidth >= 860;
-  const showCompactMoodboardLabel = !showFullMoodboardLabel && effectiveWidth >= 700;
-  const showSemanticLabel = effectiveWidth <= 0 || effectiveWidth >= 520;
-  const compactSearch = effectiveWidth > 0 && effectiveWidth < 940;
+  const showHeading = effectiveWidth <= 0 || effectiveWidth >= 480;
+  const isTightHeader = !showHeading;
+  const showSortInRow = effectiveWidth <= 0 || effectiveWidth >= 340;
+  const compactSort = effectiveWidth > 0 && effectiveWidth < 430;
+  const showDensitySlider = supportsDensity && (effectiveWidth <= 0 || effectiveWidth >= 660);
+  const showFilterLabel = effectiveWidth <= 0 || effectiveWidth >= 740;
+  const showFullMoodboardLabel = effectiveWidth <= 0 || effectiveWidth >= 960;
+  const showCompactMoodboardLabel = !showFullMoodboardLabel && effectiveWidth >= 780;
+
+  const scrollBinderKey = useMemo(() => {
+    const destId =
+      'id' in destination ? destination.id : 'name' in destination ? destination.name : '';
+    return `${layoutMode}:${destination.type}:${destId}`;
+  }, [layoutMode, destination]);
 
   return (
-    <div ref={barRef} className="pointer-events-none flex flex-col gap-2">
-      {/* Row 1: Individual Floating Liquid Glass Capsules */}
-      <div className="pointer-events-none flex items-center gap-2 flex-nowrap">
-        {/* 1. Search Capsule (transparent input + inline semantic toggle pill) */}
-        <div
-          data-pill="true"
-          data-adapt-glass="true"
-          className="pointer-events-auto charkle-glass charkle-search-capsule rounded-full h-[34px] px-3 flex items-center gap-1.5 flex-[2_1_172px] min-w-[132px] max-w-[300px] focus-within:ring-1 focus-within:ring-[var(--accent)]"
+    <div ref={barRef} className="pointer-events-none flex flex-col">
+      {scrollContainer && (
+        <ScrollProgressBinder
+          key={scrollBinderKey}
+          container={scrollContainer}
+          scrollProgress={scrollProgress}
+        />
+      )}
+
+      {/* Primary Collapsible Sticky Gallery Header (Expanded 56px -> Sticky Acrylic 48px) */}
+      <header
+        data-testid="gallery-sticky-header"
+        className="pointer-events-auto relative h-[56px] w-full shrink-0 select-none overflow-hidden"
+      >
+        {/* Scroll-revealed Acrylic backdrop + 1px bottom divider (opacity 0 -> 1 over 0..48px) */}
+        <m.div
+          aria-hidden="true"
+          data-testid="gallery-header-acrylic"
+          style={{ opacity: acrylicOpacity }}
+          className="win-acrylic-header pointer-events-none absolute inset-x-0 top-0 h-[48px]"
+        />
+
+        {/* Symmetrically aligned header row (px-4 aligns flush with gallery card edges) */}
+        <m.div
+          style={{ y: rowY }}
+          className={[
+            'relative z-[1] h-[48px] flex items-center min-w-0',
+            isTightHeader ? 'px-2.5 justify-between gap-1.5' : 'px-4 justify-between gap-3',
+          ].join(' ')}
         >
-          <CharkleIcon
-            name="search"
-            style="duotone"
-            size={16}
-            isActive={semanticSearch}
-            className="shrink-0"
-          />
-          <input
-            type="text"
-            value={searchDraft}
-            onChange={(e) => setSearchDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && semanticSearch) {
-                e.preventDefault();
-                commitSemanticQuery();
-              }
-            }}
-            placeholder={
-              semanticSearch
-                ? compactSearch
-                  ? '语义搜图，回车…'
-                  : '自然语言语义搜图，回车检索…'
-                : compactSearch
-                  ? '搜索素材…'
-                  : '搜索素材、标签或文字…'
-            }
-            aria-label="搜索素材"
-            className="w-full min-w-0 pr-1 bg-transparent text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
-          />
-          {searchDraft && (
-            <button
-              type="button"
-              aria-label="清空搜索"
-              onClick={() => {
-                setSearchDraft('');
-                void setCriteria({ searchQuery: '' }, destination);
-              }}
-              className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] cursor-pointer shrink-0 inline-flex items-center justify-center"
-            >
-              <X size={12.5} />
-            </button>
+          {/* Left: Morphing Section Heading (24px Display -> 14px Compact Sticky Title) */}
+          {showHeading ? (
+            <div className="relative flex-1 min-w-0 h-full flex items-center overflow-hidden">
+              <m.div
+                style={{ opacity: displayOpacity, y: displayY }}
+                className="flex items-baseline gap-2 min-w-0 max-w-full"
+              >
+                <h1 className="win-display-title whitespace-nowrap text-[var(--text-primary)] truncate">
+                  {resolvedTitle}
+                </h1>
+                <span className="text-[12px] font-medium text-[var(--text-tertiary)] charkle-tabular shrink-0">
+                  {resolvedCount.toLocaleString()}
+                </span>
+              </m.div>
+
+              <m.div
+                aria-hidden="true"
+                style={{ opacity: compactOpacity, y: compactY }}
+                className="pointer-events-none absolute inset-y-0 left-0 right-0 flex items-center gap-2 min-w-0"
+              >
+                <span className="text-[14px] font-semibold leading-[20px] whitespace-nowrap text-[var(--text-primary)] truncate">
+                  {resolvedTitle}
+                </span>
+                <span className="text-[11.5px] font-medium text-[var(--text-tertiary)] charkle-tabular shrink-0">
+                  {resolvedCount.toLocaleString()}
+                </span>
+              </m.div>
+            </div>
+          ) : (
+            <h1 className="sr-only">{resolvedTitle}</h1>
           )}
-          <button
-            type="button"
-            aria-pressed={semanticSearch}
-            aria-label="语义搜图"
-            title="开启或关闭语义搜图（结合画面内容与文字语义）"
-            onClick={handleToggleSemantic}
-            data-pill="true"
+
+          {/* Right: Crisp 32px-tall Aligned Fluent 2 Control Strip */}
+          <div
             className={[
-              'charkle-pressable h-[22px] inline-flex items-center justify-center gap-1 rounded-full text-[10.5px] font-semibold cursor-pointer shrink-0 whitespace-nowrap',
-              showSemanticLabel ? 'px-2' : 'w-[22px]',
-              semanticSearch
-                ? 'bg-[var(--accent)] text-white'
-                : 'bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/18',
+              'flex items-center shrink-0 flex-nowrap min-w-0',
+              isTightHeader ? 'gap-1 w-full justify-between' : 'gap-1.5',
             ].join(' ')}
           >
-            <Sparkles size={10.5} />
-            {showSemanticLabel && <span>语义</span>}
-          </button>
-        </div>
-
-        {/* 2. Visual Filter Toggle Pill */}
-        <button
-          type="button"
-          aria-expanded={filterOpen}
-          aria-label="筛选"
-          title="展开视觉与色彩筛选条 (Ctrl+Shift+S)"
-          onClick={toggleFilterOpen}
-          data-pill="true"
-          data-adapt-glass="true"
-          className={[
-            'pointer-events-auto charkle-pressable charkle-glass rounded-full h-[34px] inline-flex items-center justify-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap',
-            showFilterLabel ? 'px-3' : 'w-[34px]',
-          ].join(' ')}
-        >
-          <CharkleIcon
-            name="filter"
-            style="duotone"
-            size={16}
-            isActive={filterOpen || visualFilterCount > 0}
-          />
-          {showFilterLabel && <span>筛选</span>}
-          {visualFilterCount > 0 && (
-            <span
-              aria-label={`已启用 ${visualFilterCount} 项筛选`}
-              className="h-[6px] w-[6px] rounded-full bg-[var(--accent)] shrink-0"
-            />
-          )}
-        </button>
-
-        {/* 3. Sort Picker Pill */}
-        <div className="pointer-events-auto shrink-0">
-          <CustomSelect<SortOrder>
-            value={criteria.sortBy}
-            options={SORT_OPTIONS}
-            onChange={(sortBy) => void setCriteria({ sortBy }, destination)}
-            ariaLabel="排序方式"
-            variant="glassPill"
-            adaptGlass
-            hideChevron
-            leadingIcon={
-              <ArrowUpDown size={11.5} className="text-[var(--text-secondary)] shrink-0" />
-            }
-          />
-        </div>
-
-        {/* 4. 3-Mode Gallery View Switcher Pill */}
-        <div
-          role="radiogroup"
-          aria-label="画廊布局模式"
-          data-pill="true"
-          data-adapt-glass="true"
-          className="pointer-events-auto charkle-glass rounded-full h-[34px] px-1 inline-flex items-center gap-0.5 shrink-0 select-none"
-        >
-          {layoutModes.map((item) => {
-            const active = layoutMode === item.mode;
-            return (
-              <button
-                key={item.mode}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                aria-label={item.ariaLabel}
-                title={item.title}
-                onClick={() => setLayoutMode(item.mode)}
-                data-pill="true"
-                className={[
-                  'charkle-pressable h-[26px] w-[28px] rounded-full inline-flex items-center justify-center cursor-pointer',
-                  'focus-visible:outline-2 focus-visible:outline-[var(--accent)]',
-                  active
-                    ? 'bg-black/[0.09] dark:bg-white/[0.16]'
-                    : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.07]',
-                ].join(' ')}
+            {/* 1. Visual Filter Toggle Button */}
+            <Tooltip content="视觉与色彩筛选" shortcut="Ctrl+Shift+S">
+              <Button
+                variant="standard"
+                size={showFilterLabel ? 'sm' : 'icon'}
+                active={filterOpen || visualFilterCount > 0}
+                aria-expanded={filterOpen}
+                aria-label="筛选"
+                onClick={toggleFilterOpen}
+                className="relative shrink-0"
               >
-                <CharkleIcon name={item.icon} style="duotone" size={16} isActive={active} />
-              </button>
-            );
-          })}
-        </div>
-
-        {/* 5. Column / Row Density Slider Pill */}
-        {showDensitySlider && (
-          <div
-            data-pill="true"
-            data-adapt-glass="true"
-            title="支持按住 Ctrl + 滚轮缩放"
-            className="pointer-events-auto charkle-glass rounded-full h-[34px] px-2 inline-flex items-center gap-1.5 shrink-0"
-          >
-            <button
-              type="button"
-              aria-label="缩小卡片"
-              title="缩小卡片、显示更多列 (Ctrl+滚轮)"
-              onClick={() =>
-                setCardScale(steppedColumnWidth(cardScale, -1, layoutMode, usableWidth, 12))
-              }
-              className="charkle-pressable h-[22px] w-[22px] rounded-full inline-flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
-            >
-              <Grid3x3 size={11.5} />
-            </button>
-            <CharkleSlider
-              min={130}
-              max={420}
-              step={1}
-              value={cardScale}
-              onChange={(val) => setCardScale(val)}
-              ariaLabel="卡片缩放尺寸"
-              variant="glass"
-              size="sm"
-              className="w-[74px]"
-            />
-            <button
-              type="button"
-              aria-label="放大卡片"
-              title="放大卡片、清晰浏览细节 (Ctrl+滚轮)"
-              onClick={() =>
-                setCardScale(steppedColumnWidth(cardScale, 1, layoutMode, usableWidth, 12))
-              }
-              className="charkle-pressable h-[22px] w-[22px] rounded-full inline-flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
-            >
-              <Grid2x2 size={11.5} />
-            </button>
-          </div>
-        )}
-
-        <div className="flex-1 min-w-[4px]" />
-
-        {/* 6. Rapid Moodboard Generator CTA Pill */}
-        <button
-          type="button"
-          onClick={() => setMoodboardGeneratorOpen(true)}
-          title="快速生成情绪板"
-          aria-label="快速生成情绪板"
-          data-pill="true"
-          data-adapt-glass="true"
-          className={[
-            'pointer-events-auto charkle-pressable charkle-glass rounded-full h-[34px] inline-flex items-center justify-center gap-1.5 text-[12px] font-semibold text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap',
-            showFullMoodboardLabel || showCompactMoodboardLabel ? 'px-3' : 'w-[34px]',
-          ].join(' ')}
-        >
-          <CharkleIcon name="sparkle-board" style="duotone" size={16} isActive />
-          {showFullMoodboardLabel && <span>快速生成情绪板</span>}
-          {showCompactMoodboardLabel && <span>情绪板</span>}
-        </button>
-
-        {/* 7. Inspector Toggle Circle Pill (1:1 macOS MainWindowView.swift) */}
-        <button
-          type="button"
-          onClick={toggleInspector}
-          aria-label={inspectorOpen ? '收起右侧检查器' : '展开右侧检查器'}
-          title="显示 / 隐藏右侧检查器 (Ctrl+I)"
-          data-pill="true"
-          data-adapt-glass="true"
-          className="pointer-events-auto charkle-pressable charkle-glass rounded-full h-[34px] w-[34px] inline-flex items-center justify-center cursor-pointer shrink-0"
-        >
-          <PanelRight
-            size={14}
-            className={inspectorOpen ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}
-          />
-        </button>
-      </div>
-
-      {/* Expandable Floating Liquid Glass Visual Filter Bar */}
-      {filterOpen && (
-        <div
-          data-testid="visual-filter-bar"
-          data-no-lens="true"
-          className="pointer-events-auto charkle-glass charkle-glass-panel charkle-reveal-top rounded-[var(--radius-popover-outer)] px-3.5 py-2.5 flex flex-col gap-2.5"
-        >
-          {/* Row 1: MediaKind Chips + Aspect Shape Pills + Clear */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
-              媒体
-            </span>
-            <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
-              {ALL_MEDIA_KINDS.map((kind) => {
-                const active = criteria.kinds.includes(kind);
-                return (
-                  <button
-                    key={kind}
-                    type="button"
-                    onClick={() => toggleKind(kind)}
-                    data-pill="true"
-                    className={[
-                      'charkle-pressable h-6 px-2.5 text-[11px] rounded-full cursor-pointer',
-                      active
-                        ? 'bg-[var(--accent)] text-white font-semibold'
-                        : 'bg-black/[0.06] dark:bg-white/[0.08] text-[var(--text-primary)]/85 hover:bg-black/[0.10] dark:hover:bg-white/[0.14]',
-                    ].join(' ')}
-                  >
-                    {mediaKindLabel(kind)}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex items-center gap-1 shrink-0">
-              {ASPECT_SHAPES.map((item) => {
-                const active = criteria.shape === item.value;
-                return (
-                  <button
-                    key={item.value}
-                    type="button"
-                    onClick={() =>
-                      void setCriteria(
-                        { shape: active ? null : item.value },
-                        destination,
-                      )
+                <CharkleIcon
+                  name="filter"
+                  style="duotone"
+                  size={16}
+                  isActive={filterOpen || visualFilterCount > 0}
+                />
+                {showFilterLabel && <span>筛选</span>}
+                {visualFilterCount > 0 && (
+                  <span
+                    aria-label={`已启用 ${visualFilterCount} 项筛选`}
+                    className={
+                      showFilterLabel
+                        ? 'inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-[var(--accent)] text-[var(--accent-text)] text-[10px] font-semibold charkle-tabular shrink-0'
+                        : 'absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[var(--accent)]'
                     }
-                    className={[
-                      'charkle-pressable h-6 px-2 text-[11px] rounded-[var(--radius-card-inner)] cursor-pointer',
-                      active
-                        ? 'bg-[var(--accent)] text-white font-semibold'
-                        : 'bg-black/[0.05] dark:bg-white/[0.07] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                    ].join(' ')}
                   >
-                    {item.label}
-                  </button>
-                );
-              })}
-            </div>
+                    {showFilterLabel ? visualFilterCount : null}
+                  </span>
+                )}
+              </Button>
+            </Tooltip>
 
-            {visualFilterCount > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchDraft('');
-                  void clearVisualFilters(destination);
-                }}
-                className="text-[11px] font-semibold text-[var(--accent)] hover:underline cursor-pointer shrink-0"
-              >
-                清除
-              </button>
-            )}
-          </div>
-
-          {/* Row 2: Color Swatches + Custom Color Picker + Tolerance + Rating + Kept Locally */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[11px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
-                色彩
-              </span>
-              {FILTER_PRESET_COLORS.map((hex) => {
-                const selected = criteria.selectedColorHex?.toUpperCase() === hex.toUpperCase();
-                return (
-                  <button
-                    key={hex}
-                    type="button"
-                    aria-label={`按颜色 ${hex} 筛选`}
-                    title={`按主色调筛选 ${hex}`}
-                    onClick={() =>
-                      void setCriteria(
-                        { selectedColorHex: selected ? null : hex },
-                        destination,
-                      )
-                    }
-                    className={[
-                      'charkle-pressable h-[17px] w-[17px] rounded-full border border-black/18 dark:border-white/20 cursor-pointer',
-                      selected ? 'ring-2 ring-offset-1 ring-[var(--accent)]' : '',
-                    ].join(' ')}
-                    style={{ backgroundColor: hex }}
-                  />
-                );
-              })}
-
-              <label
-                title="自定义颜色筛选"
-                className="relative h-[19px] w-[19px] rounded-full overflow-hidden border border-[var(--border-strong)] cursor-pointer ml-0.5 inline-flex items-center justify-center"
-                style={{
-                  background:
-                    'conic-gradient(#EF4444, #F59E0B, #10B981, #3B82F6, #EC4899, #EF4444)',
-                }}
-              >
-                <input
-                  type="color"
-                  aria-label="自定义筛选颜色"
-                  value={criteria.selectedColorHex ?? '#3D5A80'}
-                  onChange={(e) =>
-                    void setCriteria(
-                      { selectedColorHex: e.target.value.toUpperCase() },
-                      destination,
+            {/* 2. Sort ComboBox (folds into filter panel below 340px to prevent clipping) */}
+            {showSortInRow && (
+              <div className="shrink-0">
+                <CustomSelect<SortOrder>
+                  value={criteria.sortBy}
+                  options={SORT_OPTIONS}
+                  onChange={(sortBy) => void setCriteria({ sortBy }, destination)}
+                  ariaLabel="排序方式"
+                  size="sm"
+                  hideChevron={compactSort}
+                  leadingIcon={
+                    compactSort ? undefined : (
+                      <ArrowSort16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
                     )
                   }
-                  className="opacity-0 absolute inset-0 cursor-pointer"
+                  className={compactSort ? 'px-2 max-w-[82px] text-[12px]' : undefined}
                 />
-              </label>
+              </div>
+            )}
 
-              {criteria.selectedColorHex && (
-                <div className="flex items-center gap-1.5 ml-1">
-                  <span className="text-[10px] text-[var(--text-secondary)]">精确</span>
-                  <CharkleSlider
-                    min={10}
-                    max={55}
-                    step={1}
-                    value={criteria.colorTolerance}
-                    onChange={(val) => void setCriteria({ colorTolerance: val }, destination)}
-                    ariaLabel="色彩匹配范围"
-                    title="调节颜色匹配范围：越靠左越接近所选颜色，越靠右包含更多相近色调"
-                    variant="glass"
-                    size="sm"
-                    className="w-[82px]"
-                  />
-                  <span className="text-[10px] text-[var(--text-secondary)]">宽松</span>
-                  <span className="px-1.5 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-medium">
-                    {toleranceLabel(criteria.colorTolerance)}
-                  </span>
+            {/* 3. 4-Mode View Switcher SegmentedControl */}
+            <SegmentedControl<GalleryLayoutMode>
+              value={layoutMode}
+              onChange={setLayoutMode}
+              size="xs"
+              ariaLabel="画廊布局模式"
+              layoutId="win-gallery-layout-mode"
+              className="h-8 shrink-0"
+              options={layoutModes.map((item) => ({
+                value: item.mode,
+                label: '',
+                title: item.title,
+                icon: (
+                  <>
+                    <CharkleIcon
+                      name={item.icon}
+                      style="duotone"
+                      size={16}
+                      isActive={layoutMode === item.mode}
+                    />
+                    <span className="sr-only">{item.ariaLabel}</span>
+                  </>
+                ),
+              }))}
+            />
+
+            {/* 4. Density Slider + -/+ Step Buttons */}
+            {showDensitySlider && (
+              <div
+                title="支持按住 Ctrl + 滚轮缩放"
+                className="win-control-elevation h-8 px-1.5 inline-flex items-center gap-1 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] shrink-0"
+              >
+                <Tooltip content="缩小卡片、显示更多列" shortcut="Ctrl+滚轮">
                   <button
                     type="button"
-                    aria-label="清除颜色筛选"
-                    onClick={() => void setCriteria({ selectedColorHex: null }, destination)}
-                    className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                    aria-label="缩小卡片"
+                    onClick={() =>
+                      setCardScale(steppedColumnWidth(cardScale, -1, layoutMode, usableWidth, 12))
+                    }
+                    className="charkle-pressable h-6 w-6 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] cursor-pointer"
                   >
-                    <X size={12} />
+                    <Subtract16Regular className="w-3.5 h-3.5" />
                   </button>
-                </div>
+                </Tooltip>
+                <CharkleSlider
+                  min={130}
+                  max={420}
+                  step={1}
+                  value={cardScale}
+                  onChange={(val) => setCardScale(val)}
+                  ariaLabel="卡片缩放尺寸"
+                  variant="standard"
+                  size="sm"
+                  className="w-[68px]"
+                />
+                <Tooltip content="放大卡片、清晰浏览细节" shortcut="Ctrl+滚轮">
+                  <button
+                    type="button"
+                    aria-label="放大卡片"
+                    onClick={() =>
+                      setCardScale(steppedColumnWidth(cardScale, 1, layoutMode, usableWidth, 12))
+                    }
+                    className="charkle-pressable h-6 w-6 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] cursor-pointer"
+                  >
+                    <Add16Regular className="w-3.5 h-3.5" />
+                  </button>
+                </Tooltip>
+              </div>
+            )}
+
+            {/* 5. Quick Moodboard Generator CTA */}
+            <Tooltip content="快速生成情绪板">
+              <Button
+                variant="standard"
+                size={showFullMoodboardLabel || showCompactMoodboardLabel ? 'sm' : 'icon'}
+                aria-label="快速生成情绪板"
+                onClick={() => setMoodboardGeneratorOpen(true)}
+                className="shrink-0"
+              >
+                <CharkleIcon name="sparkle-board" style="duotone" size={16} isActive />
+                {showFullMoodboardLabel && <span>快速生成情绪板</span>}
+                {showCompactMoodboardLabel && <span>情绪板</span>}
+              </Button>
+            </Tooltip>
+          </div>
+        </m.div>
+      </header>
+
+      {/* Expandable Fluent 2 Visual Filter Card */}
+      {filterOpen && (
+        <div className="pointer-events-none px-4 pb-2">
+          <div
+            data-testid="visual-filter-bar"
+            className="pointer-events-auto charkle-reveal-top rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_6px_20px_rgba(0,0,0,0.08)] px-3.5 py-2.5 flex flex-col gap-2.5"
+          >
+            {!showSortInRow && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11.5px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
+                  排序
+                </span>
+                <CustomSelect<SortOrder>
+                  value={criteria.sortBy}
+                  options={SORT_OPTIONS}
+                  onChange={(sortBy) => void setCriteria({ sortBy }, destination)}
+                  ariaLabel="排序方式"
+                  size="xs"
+                  leadingIcon={
+                    <ArrowSort16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
+                  }
+                />
+              </div>
+            )}
+            {/* Row 1: MediaKind Chips + Aspect Shape + Clear */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11.5px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
+                媒体
+              </span>
+              <div className="flex items-center gap-1 flex-wrap flex-1 min-w-0">
+                {ALL_MEDIA_KINDS.map((kind) => {
+                  const active = criteria.kinds.includes(kind);
+                  return (
+                    <button
+                      key={kind}
+                      type="button"
+                      onClick={() => toggleKind(kind)}
+                      className={[
+                        'charkle-pressable h-[26px] px-2.5 text-[12px] leading-[16px] rounded-[var(--win-radius-control)] cursor-pointer',
+                        'focus-visible:outline-2 focus-visible:outline-[var(--accent)]',
+                        active
+                          ? 'bg-[var(--accent)] text-[var(--accent-text)] font-medium'
+                          : 'bg-[var(--win-subtle-hover)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-active)]',
+                      ].join(' ')}
+                    >
+                      {mediaKindLabel(kind)}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                {ASPECT_SHAPES.map((item) => {
+                  const active = criteria.shape === item.value;
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      onClick={() =>
+                        void setCriteria({ shape: active ? null : item.value }, destination)
+                      }
+                      className={[
+                        'charkle-pressable h-[26px] px-2 text-[12px] leading-[16px] rounded-[var(--win-radius-control)] cursor-pointer',
+                        'focus-visible:outline-2 focus-visible:outline-[var(--accent)]',
+                        active
+                          ? 'bg-[var(--accent)] text-[var(--accent-text)] font-medium'
+                          : 'bg-[var(--win-subtle-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-active)]',
+                      ].join(' ')}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {visualFilterCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void clearVisualFilters(destination)}
+                  className="text-[12px] font-medium text-[var(--accent)] hover:underline cursor-pointer shrink-0"
+                >
+                  清除筛选
+                </button>
               )}
             </div>
 
-            <div className="h-4 w-px bg-[var(--border-hairline)] hidden sm:block" />
+            {/* Row 2: Color Swatches + Custom Color Picker + Tolerance + Rating + Kept Locally */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11.5px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
+                  色彩
+                </span>
+                {FILTER_PRESET_COLORS.map((hex) => {
+                  const selected = criteria.selectedColorHex?.toUpperCase() === hex.toUpperCase();
+                  return (
+                    <button
+                      key={hex}
+                      type="button"
+                      aria-label={`按颜色 ${hex} 筛选`}
+                      title={`按主色调筛选 ${hex}`}
+                      onClick={() =>
+                        void setCriteria(
+                          { selectedColorHex: selected ? null : hex },
+                          destination,
+                        )
+                      }
+                      className={[
+                        'charkle-pressable h-[18px] w-[18px] rounded-full border border-black/18 dark:border-white/20 cursor-pointer',
+                        selected ? 'ring-2 ring-offset-1 ring-[var(--accent)]' : '',
+                      ].join(' ')}
+                      style={{ backgroundColor: hex }}
+                    />
+                  );
+                })}
 
-            {/* Minimum Rating Stars (#E5B243 gold matching macOS) */}
-            <div className="flex items-center gap-1">
-              <span className="text-[11px] font-semibold text-[var(--text-secondary)] mr-0.5">
-                评分
-              </span>
-              {[1, 2, 3, 4, 5].map((star) => {
-                const filled = star <= criteria.minRating;
-                return (
-                  <button
-                    key={star}
-                    type="button"
-                    aria-label={`最低 ${star} 星`}
-                    onClick={() =>
+                <label
+                  title="自定义颜色筛选"
+                  className="relative h-[19px] w-[19px] rounded-full overflow-hidden border border-[var(--border-strong)] cursor-pointer ml-0.5 inline-flex items-center justify-center"
+                  style={{
+                    background:
+                      'conic-gradient(#EF4444, #F59E0B, #10B981, #3B82F6, #EC4899, #EF4444)',
+                  }}
+                >
+                  <input
+                    type="color"
+                    aria-label="自定义筛选颜色"
+                    value={criteria.selectedColorHex ?? '#3D5A80'}
+                    onChange={(e) =>
                       void setCriteria(
-                        { minRating: criteria.minRating === star ? 0 : star },
+                        { selectedColorHex: e.target.value.toUpperCase() },
                         destination,
                       )
                     }
-                    className={[
-                      'charkle-pressable cursor-pointer',
-                      filled ? 'text-[#E5B243] charkle-micro-pop' : 'text-[var(--text-tertiary)]/55',
-                    ].join(' ')}
-                  >
-                    <Star size={12} className={filled ? 'fill-current' : ''} />
-                  </button>
-                );
-              })}
+                    className="opacity-0 absolute inset-0 cursor-pointer"
+                  />
+                </label>
+
+                {criteria.selectedColorHex && (
+                  <div className="flex items-center gap-1.5 ml-1">
+                    <span className="text-[11px] text-[var(--text-secondary)]">精确</span>
+                    <CharkleSlider
+                      min={10}
+                      max={55}
+                      step={1}
+                      value={criteria.colorTolerance}
+                      onChange={(val) => void setCriteria({ colorTolerance: val }, destination)}
+                      ariaLabel="色彩匹配范围"
+                      title="调节颜色匹配范围：越靠左越接近所选颜色，越靠右包含更多相近色调"
+                      variant="standard"
+                      size="sm"
+                      className="w-[82px]"
+                    />
+                    <span className="text-[11px] text-[var(--text-secondary)]">宽松</span>
+                    <span className="px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] text-[var(--accent)] text-[10.5px] font-medium">
+                      {toleranceLabel(criteria.colorTolerance)}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="清除颜色筛选"
+                      onClick={() => void setCriteria({ selectedColorHex: null }, destination)}
+                      className="h-5 w-5 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
+                    >
+                      <Dismiss16Regular className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="h-4 w-px bg-[var(--win-stroke-divider)] hidden sm:block" />
+
+              {/* Minimum Rating Stars (#E5B243 gold) */}
+              <div className="flex items-center gap-0.5">
+                <span className="text-[11.5px] font-semibold text-[var(--text-secondary)] mr-1">
+                  评分
+                </span>
+                {[1, 2, 3, 4, 5].map((star) => {
+                  const filled = star <= criteria.minRating;
+                  return (
+                    <button
+                      key={star}
+                      type="button"
+                      aria-label={`最低 ${star} 星`}
+                      onClick={() =>
+                        void setCriteria(
+                          { minRating: criteria.minRating === star ? 0 : star },
+                          destination,
+                        )
+                      }
+                      className={[
+                        'charkle-pressable h-6 w-6 rounded-[var(--win-radius-control)] inline-flex items-center justify-center hover:bg-[var(--win-subtle-hover)] cursor-pointer',
+                        filled
+                          ? 'text-[#E5B243] charkle-micro-pop'
+                          : 'text-[var(--text-tertiary)]/65',
+                      ].join(' ')}
+                    >
+                      {filled ? (
+                        <Star16Filled className="w-3.5 h-3.5" />
+                      ) : (
+                        <Star16Regular className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="h-4 w-px bg-[var(--win-stroke-divider)] hidden sm:block" />
+
+              {/* Kept Locally Filter Toggle */}
+              <button
+                type="button"
+                aria-pressed={criteria.onlyPinnedOffline}
+                onClick={() =>
+                  void setCriteria({ onlyPinnedOffline: !criteria.onlyPinnedOffline }, destination)
+                }
+                className={[
+                  'charkle-pressable h-[26px] px-2.5 rounded-[var(--win-radius-control)] inline-flex items-center gap-1.5 text-[12px] font-medium cursor-pointer',
+                  criteria.onlyPinnedOffline
+                    ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'bg-[var(--win-subtle-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-active)]',
+                ].join(' ')}
+              >
+                <ArrowDownload16Regular className="w-3.5 h-3.5" />
+                <span>已保留在本地</span>
+              </button>
             </div>
 
-            <div className="h-4 w-px bg-[var(--border-hairline)] hidden sm:block" />
-
-            {/* Kept Locally Filter Toggle Pill */}
-            <button
-              type="button"
-              onClick={() =>
-                void setCriteria({ onlyPinnedOffline: !criteria.onlyPinnedOffline }, destination)
-              }
-              data-pill="true"
-              className={[
-                'charkle-pressable h-6 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer',
-                criteria.onlyPinnedOffline
-                  ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                  : 'bg-black/[0.05] dark:bg-white/[0.07] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-              ].join(' ')}
-            >
-              <ArrowDownCircle size={11.5} />
-              <span>已保留在本地</span>
-            </button>
+            {/* Optional Top Tags Row */}
+            {tagCounts.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11.5px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
+                  标签
+                </span>
+                {tagCounts.slice(0, 12).map((t) => {
+                  const active = criteria.tags.includes(t.name);
+                  return (
+                    <button
+                      key={t.name}
+                      type="button"
+                      onClick={() => toggleTag(t.name)}
+                      className={[
+                        'charkle-pressable h-6 px-2 rounded-[var(--win-radius-control)] text-[11.5px] cursor-pointer',
+                        active
+                          ? 'bg-[var(--accent)] text-[var(--accent-text)] font-medium'
+                          : 'bg-[var(--win-subtle-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-active)]',
+                      ].join(' ')}
+                    >
+                      #{t.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
-
-          {/* Optional Top Tags Row */}
-          {tagCounts.length > 0 && (
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[11px] font-semibold text-[var(--text-secondary)] w-7 shrink-0">
-                标签
-              </span>
-              {tagCounts.slice(0, 12).map((t) => {
-                const active = criteria.tags.includes(t.name);
-                return (
-                  <button
-                    key={t.name}
-                    type="button"
-                    onClick={() => toggleTag(t.name)}
-                    data-pill="true"
-                    className={[
-                      'charkle-pressable h-5 px-2 rounded-full text-[11px] cursor-pointer',
-                      active
-                        ? 'bg-[var(--accent)] text-white font-medium'
-                        : 'bg-black/[0.05] dark:bg-white/[0.07] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
-                    ].join(' ')}
-                  >
-                    #{t.name}
-                  </button>
-                );
-              })}
-            </div>
-          )}
         </div>
       )}
 
-      {/* Compact Active Visual Filter Chips when filter bar is collapsed */}
+      {/* Compact Active Visual Filter Chips when filter card is collapsed */}
       {!filterOpen && visualFilterCount > 0 && (
-        <div className="pointer-events-none flex items-center gap-1.5 flex-wrap">
+        <div className="pointer-events-none px-4 pb-2 flex items-center gap-1.5 flex-wrap">
           {criteria.kinds.map((kind) => (
             <button
               key={kind}
               type="button"
-              data-pill="true"
-              data-adapt-glass="true"
               onClick={() => toggleKind(kind)}
-              className="pointer-events-auto charkle-pressable charkle-glass inline-flex items-center gap-1 h-[26px] px-2.5 rounded-full text-[var(--accent)] text-[11.5px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>{mediaKindLabel(kind)}</span>
-              <X size={11} />
+              <Dismiss16Regular className="w-3 h-3" />
             </button>
           ))}
 
           {criteria.selectedColorHex && (
             <button
               type="button"
-              data-pill="true"
-              data-adapt-glass="true"
               onClick={() => void setCriteria({ selectedColorHex: null }, destination)}
-              className="pointer-events-auto charkle-pressable charkle-glass inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-full text-[var(--accent)] text-[11.5px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1.5 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span
                 className="h-3 w-3 rounded-full border border-black/15"
                 style={{ backgroundColor: criteria.selectedColorHex }}
               />
               <span className="charkle-mono text-[11px]">{criteria.selectedColorHex}</span>
-              <X size={11} />
+              <Dismiss16Regular className="w-3 h-3" />
             </button>
           )}
 
           {criteria.shape && (
             <button
               type="button"
-              data-pill="true"
-              data-adapt-glass="true"
               onClick={() => void setCriteria({ shape: null }, destination)}
-              className="pointer-events-auto charkle-pressable charkle-glass inline-flex items-center gap-1 h-[26px] px-2.5 rounded-full text-[var(--accent)] text-[11.5px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>
                 画幅：
                 {ASPECT_SHAPES.find((s) => s.value === criteria.shape)?.label ?? criteria.shape}
               </span>
-              <X size={11} />
+              <Dismiss16Regular className="w-3 h-3" />
             </button>
           )}
 
           {criteria.minRating > 0 && (
             <button
               type="button"
-              data-pill="true"
-              data-adapt-glass="true"
               onClick={() => void setCriteria({ minRating: 0 }, destination)}
-              className="pointer-events-auto charkle-pressable charkle-glass inline-flex items-center gap-1 h-[26px] px-2.5 rounded-full text-[var(--accent)] text-[11.5px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>评分 {criteria.minRating}+</span>
-              <X size={11} />
+              <Dismiss16Regular className="w-3 h-3" />
             </button>
           )}
 
@@ -774,38 +802,29 @@ export const TopFilterCapsule: React.FC<TopFilterCapsuleProps> = ({
             <button
               key={tag}
               type="button"
-              data-pill="true"
-              data-adapt-glass="true"
               onClick={() => toggleTag(tag)}
-              className="pointer-events-auto charkle-pressable charkle-glass inline-flex items-center gap-1 h-[26px] px-2.5 rounded-full text-[var(--accent)] text-[11.5px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>#{tag}</span>
-              <X size={11} />
+              <Dismiss16Regular className="w-3 h-3" />
             </button>
           ))}
 
           {criteria.onlyPinnedOffline && (
             <button
               type="button"
-              data-pill="true"
-              data-adapt-glass="true"
               onClick={() => void setCriteria({ onlyPinnedOffline: false }, destination)}
-              className="pointer-events-auto charkle-pressable charkle-glass inline-flex items-center gap-1 h-[26px] px-2.5 rounded-full text-[var(--accent)] text-[11.5px] font-medium cursor-pointer"
+              className="pointer-events-auto charkle-pressable win-control-elevation inline-flex items-center gap-1 h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[var(--accent)] text-[12px] font-medium cursor-pointer"
             >
               <span>已保留在本地</span>
-              <X size={11} />
+              <Dismiss16Regular className="w-3 h-3" />
             </button>
           )}
 
           <button
             type="button"
-            data-pill="true"
-            data-adapt-glass="true"
-            onClick={() => {
-              setSearchDraft('');
-              void clearVisualFilters(destination);
-            }}
-            className="pointer-events-auto charkle-pressable charkle-glass h-[26px] px-2.5 rounded-full text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+            onClick={() => void clearVisualFilters(destination)}
+            className="pointer-events-auto charkle-pressable h-[26px] px-2 rounded-[var(--win-radius-control)] text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
           >
             清除筛选
           </button>

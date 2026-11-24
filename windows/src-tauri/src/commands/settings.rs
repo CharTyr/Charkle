@@ -586,7 +586,7 @@ pub fn get_system_diagnostics(state: State<'_, AppState>) -> SystemDiagnosticsDt
     };
     let ocr = probe_ocr_diagnostics();
     SystemDiagnosticsDto {
-        app_version: "1.0.1".to_string(),
+        app_version: "1.2.0".to_string(),
         schema_version: 2,
         data_dir: state.data_dir.display().to_string(),
         database_path: state.data_dir.join("Library.sqlite3").display().to_string(),

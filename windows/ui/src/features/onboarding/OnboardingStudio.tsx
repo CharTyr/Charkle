@@ -1,19 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle,
-  ArrowRight,
-  Check,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  Image as ImageIcon,
-  Monitor,
-  Moon,
-  Sun,
-  X,
-} from 'lucide-react';
+  ArrowRight16Regular,
+  Checkmark16Regular,
+  CheckmarkCircle16Filled,
+  ChevronLeft16Regular,
+  ChevronRight16Regular,
+  Desktop16Regular,
+  Dismiss16Regular,
+  Image16Regular,
+  Warning16Regular,
+  WeatherMoon16Regular,
+  WeatherSunny16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
+  Button,
   CharkleBrandMark,
   CharkleIcon,
   CustomSelect,
@@ -32,7 +33,6 @@ import type {
   ShelfSettings,
 } from '../../types/domain';
 import {
-  CharkleSkeuoButton,
   ChatGPTBrandMark,
   isValidHttpUrl,
   SettingsButton,
@@ -184,10 +184,10 @@ const RadioChoiceCard: React.FC<RadioChoiceCardProps> = ({
 }) => (
   <div
     className={[
-      'rounded-[12px] p-[13px] transition-colors duration-150 motion-reduce:transition-none',
+      'rounded-[var(--win-radius-card)] p-[13px] transition-colors duration-150 motion-reduce:transition-none',
       selected
-        ? 'bg-[var(--text-primary)]/[0.045] dark:bg-white/[0.075] border-[1.35px] border-[var(--text-primary)]/45 dark:border-white/50'
-        : 'bg-[var(--settings-card)] border border-[var(--settings-border)]',
+        ? 'bg-[var(--accent-soft)]/55 border border-[var(--accent)]/60'
+        : 'bg-[var(--settings-card)] border border-[var(--win-stroke-card)]',
     ].join(' ')}
   >
     <button
@@ -195,7 +195,7 @@ const RadioChoiceCard: React.FC<RadioChoiceCardProps> = ({
       onClick={onSelect}
       className="w-full flex items-center gap-3 text-left cursor-pointer"
     >
-      <span className="h-[34px] w-[34px] rounded-[9px] bg-[var(--settings-subtle)] inline-flex items-center justify-center shrink-0 text-[var(--text-primary)]">
+      <span className="h-[34px] w-[34px] rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] inline-flex items-center justify-center shrink-0 text-[var(--text-primary)]">
         {icon}
       </span>
       <div className="min-w-0 flex-1 flex flex-col gap-0.5">
@@ -222,7 +222,7 @@ const StepHeading: React.FC<{
         {title}
       </h2>
       {optionalTag && (
-        <span className="px-2 py-[2px] rounded-full bg-[var(--settings-subtle)] text-[10.5px] font-medium text-[var(--settings-label)]">
+        <span className="px-2 py-[2px] rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] text-[10.5px] font-medium text-[var(--settings-label)]">
           {optionalTag}
         </span>
       )}
@@ -255,14 +255,14 @@ const StepHeroPedestal: React.FC<{
   badgeText: string;
   caption: string;
 }> = ({ iconName, accentHex, badgeText, caption }) => (
-  <div className="h-full rounded-[14px] bg-[var(--settings-rail)] border border-[var(--settings-border)] p-[18px] flex flex-col items-center justify-center text-center gap-4">
+  <div className="h-full rounded-[var(--win-radius-card)] bg-[var(--settings-rail)] border border-[var(--win-stroke-card)] p-[18px] flex flex-col items-center justify-center text-center gap-4">
     <StepHeroIconDisc iconName={iconName} accentHex={accentHex} />
     <span
       style={{
         color: accentHex,
         backgroundColor: `${accentHex}1C`,
       }}
-      className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
+      className="px-2.5 py-1 rounded-[var(--win-radius-control)] text-[11px] font-semibold"
     >
       {badgeText}
     </span>
@@ -271,7 +271,7 @@ const StepHeroPedestal: React.FC<{
 );
 
 const GalleryLayoutMiniPreview: React.FC<{ mode: GalleryLayoutMode }> = ({ mode }) => (
-  <div className="w-full rounded-[11px] bg-[var(--settings-card)] border border-[var(--settings-border)] p-3 flex flex-col gap-2">
+  <div className="w-full rounded-[var(--win-radius-card)] bg-[var(--settings-card)] border border-[var(--win-stroke-card)] p-3 flex flex-col gap-2">
     <span className="text-[10.5px] font-semibold text-[var(--text-secondary)]">
       视图预览 · {layoutModeLabel(mode)}
     </span>
@@ -279,42 +279,42 @@ const GalleryLayoutMiniPreview: React.FC<{ mode: GalleryLayoutMode }> = ({ mode 
       {mode === 'verticalMasonry' && (
         <div className="grid grid-cols-3 gap-1.5 h-full">
           <div className="flex flex-col gap-1.5">
-            <div className="h-[46px] rounded-[5px] bg-[#D96B43]/45" />
-            <div className="flex-1 rounded-[5px] bg-[var(--text-primary)]/10" />
+            <div className="h-[46px] rounded-[var(--win-radius-control)] bg-[#D96B43]/45" />
+            <div className="flex-1 rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
           </div>
           <div className="flex flex-col gap-1.5">
-            <div className="h-[28px] rounded-[5px] bg-[var(--text-primary)]/10" />
-            <div className="flex-1 rounded-[5px] bg-[var(--text-primary)]/10" />
+            <div className="h-[28px] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
+            <div className="flex-1 rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
           </div>
           <div className="flex flex-col gap-1.5">
-            <div className="h-[38px] rounded-[5px] bg-[var(--text-primary)]/10" />
-            <div className="flex-1 rounded-[5px] bg-[#D96B43]/30" />
+            <div className="h-[38px] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
+            <div className="flex-1 rounded-[var(--win-radius-control)] bg-[#D96B43]/30" />
           </div>
         </div>
       )}
       {mode === 'horizontalJustified' && (
         <div className="flex flex-col gap-1.5 h-full">
           <div className="flex gap-1.5 h-[37px]">
-            <div className="w-[42%] rounded-[5px] bg-[#D96B43]/45" />
-            <div className="flex-1 rounded-[5px] bg-[var(--text-primary)]/10" />
-            <div className="w-[22%] rounded-[5px] bg-[var(--text-primary)]/10" />
+            <div className="w-[42%] rounded-[var(--win-radius-control)] bg-[#D96B43]/45" />
+            <div className="flex-1 rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
+            <div className="w-[22%] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
           </div>
           <div className="flex gap-1.5 h-[37px]">
-            <div className="w-[26%] rounded-[5px] bg-[var(--text-primary)]/10" />
-            <div className="flex-1 rounded-[5px] bg-[#D96B43]/30" />
-            <div className="w-[34%] rounded-[5px] bg-[var(--text-primary)]/10" />
+            <div className="w-[26%] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
+            <div className="flex-1 rounded-[var(--win-radius-control)] bg-[#D96B43]/30" />
+            <div className="w-[34%] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/10" />
           </div>
         </div>
       )}
       {mode === 'galleryFilmstrip' && (
         <div className="flex flex-col gap-1.5 h-full">
-          <div className="h-[58px] rounded-[6px] bg-[#D96B43]/40" />
+          <div className="h-[58px] rounded-[var(--win-radius-control)] bg-[#D96B43]/40" />
           <div className="grid grid-cols-5 gap-1 h-[16px]">
             {[0, 1, 2, 3, 4].map((i) => (
               <div
                 key={i}
                 className={[
-                  'rounded-[3.5px]',
+                  'rounded-[3px]',
                   i === 2 ? 'bg-[#D96B43]' : 'bg-[var(--text-primary)]/10',
                 ].join(' ')}
               />
@@ -324,11 +324,11 @@ const GalleryLayoutMiniPreview: React.FC<{ mode: GalleryLayoutMode }> = ({ mode 
       )}
       {mode === 'ringGallery' && (
         <div className="h-full flex items-center justify-center gap-1.5 px-1">
-          <div className="w-[14%] h-[46px] rounded-[6px] bg-[var(--text-primary)]/8 opacity-55" />
-          <div className="w-[20%] h-[62px] rounded-[7px] bg-[var(--text-primary)]/12 opacity-80" />
-          <div className="w-[30%] h-[76px] rounded-[8px] bg-[#D96B43]/45 border border-[#D96B43]/30 shadow-xs" />
-          <div className="w-[20%] h-[62px] rounded-[7px] bg-[var(--text-primary)]/12 opacity-80" />
-          <div className="w-[14%] h-[46px] rounded-[6px] bg-[var(--text-primary)]/8 opacity-55" />
+          <div className="w-[14%] h-[46px] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/8 opacity-55" />
+          <div className="w-[20%] h-[62px] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/12 opacity-80" />
+          <div className="w-[30%] h-[76px] rounded-[var(--win-radius-control)] bg-[#D96B43]/45 border border-[#D96B43]/30 shadow-xs" />
+          <div className="w-[20%] h-[62px] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/12 opacity-80" />
+          <div className="w-[14%] h-[46px] rounded-[var(--win-radius-control)] bg-[var(--text-primary)]/8 opacity-55" />
         </div>
       )}
     </div>
@@ -336,11 +336,11 @@ const GalleryLayoutMiniPreview: React.FC<{ mode: GalleryLayoutMode }> = ({ mode 
 );
 
 /**
- * 1:1 Windows parity port of macOS `Sources/CharkleApp/Views/OnboardingView.swift`:
+ * 1:1 Windows Fluent 2 onboarding studio:
  * - Bound to `coordinatorStore.onboardingStep` so opening Settings mid-flow returns to the EXACT step
  * - Non-destructive `openSettingsFromOnboarding('sync' | 'ai')` (never marks onboarding complete mid-flow)
  * - Inline `GoogleOAuthSetupModal` + live WebDAV connection test + live global hotkeys toggle
- * - Bespoke macOS layered & duotone `CharkleIcon`s + 5-layer tactile `CharkleSkeuoButton` primary CTA
+ * - Fluent 2 `CharkleIcon`s + accent `Button` primary CTA
  * - Every individual step and the entire onboarding flow are explicitly skippable at any time
  */
 export const OnboardingStudio: React.FC = () => {
@@ -751,12 +751,12 @@ export const OnboardingStudio: React.FC = () => {
           backgroundColor: `color-mix(in srgb, ${toneVar} 12%, transparent)`,
           borderColor: `color-mix(in srgb, ${toneVar} 24%, transparent)`,
         }}
-        className="charkle-reveal-top rounded-[9px] border px-3 py-2 text-[11.5px] font-medium text-[var(--text-primary)] flex items-center gap-2"
+        className="charkle-reveal-top rounded-[var(--win-radius-card)] border px-3 py-2 text-[11.5px] font-medium text-[var(--text-primary)] flex items-center gap-2"
       >
         {actionHint.isError ? (
-          <AlertTriangle size={13} style={{ color: toneVar }} className="shrink-0" />
+          <Warning16Regular style={{ color: toneVar }} className="w-3.5 h-3.5 shrink-0" />
         ) : (
-          <CheckCircle2 size={13} style={{ color: toneVar }} className="shrink-0" />
+          <CheckmarkCircle16Filled style={{ color: toneVar }} className="w-3.5 h-3.5 shrink-0" />
         )}
         <span className="truncate">{actionHint.text}</span>
       </div>
@@ -773,15 +773,15 @@ export const OnboardingStudio: React.FC = () => {
     >
       <div
         data-closing={closing ? 'true' : undefined}
-        className="charkle-modal-scrim fixed inset-0"
+        className="win-smoke-scrim fixed inset-0"
       />
 
       <div
         data-closing={closing ? 'true' : undefined}
-        className="charkle-modal-panel relative z-10 w-[min(840px,calc(100vw-48px))] h-[min(636px,calc(100vh-48px))] rounded-[20px] bg-[var(--settings-content)] border border-[var(--settings-border)] shadow-[var(--shadow-modal)] flex flex-col overflow-hidden"
+        className="relative z-10 w-[min(840px,calc(100vw-48px))] h-[min(636px,calc(100vh-48px))] rounded-[var(--win-radius-dialog)] bg-[var(--settings-content)] border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)] flex flex-col overflow-hidden"
       >
         {/* Header Bar with Interactive Travelling Step Rail */}
-        <header className="px-[22px] pt-[15px] pb-[13px] border-b border-[var(--settings-border)] flex items-center justify-between gap-3 shrink-0 select-none">
+        <header className="px-[22px] pt-[15px] pb-[13px] border-b border-[var(--win-stroke-divider)] flex items-center justify-between gap-3 shrink-0 select-none">
           <div className="flex items-center gap-2.5 w-[112px] shrink-0">
             <CharkleBrandMark size={22} />
             <span className="text-[14px] font-semibold text-[var(--text-primary)]">Charkle</span>
@@ -790,7 +790,7 @@ export const OnboardingStudio: React.FC = () => {
           <div
             role="tablist"
             aria-label="引导步骤"
-            className="flex items-center gap-0.5 p-[3px] rounded-full bg-[var(--settings-subtle)]"
+            className="flex items-center gap-0.5 p-[3px] rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)]"
           >
             {STEPS.map((s) => {
               const isActive = step === s.id;
@@ -804,21 +804,21 @@ export const OnboardingStudio: React.FC = () => {
                   aria-selected={isActive}
                   onClick={() => navigate(s.id)}
                   className={[
-                    'px-2.5 py-[5px] rounded-full text-[11.5px] flex items-center gap-1.5 cursor-pointer transition-colors duration-150 motion-reduce:transition-none',
+                    'px-2.5 py-[5px] rounded-[var(--win-radius-control)] text-[11.5px] flex items-center gap-1.5 cursor-pointer transition-colors duration-150 motion-reduce:transition-none',
                     isActive
-                      ? 'bg-[var(--settings-card)] border border-[var(--settings-border)] shadow-[0_1px_3px_rgba(0,0,0,0.08)] text-[var(--text-primary)] font-semibold'
+                      ? 'bg-[var(--settings-card)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.06)] text-[var(--text-primary)] font-semibold'
                       : 'border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium',
                   ].join(' ')}
                 >
                   {isPast && !wasSkipped ? (
-                    <Check size={10} strokeWidth={2.75} className="text-[var(--settings-positive)]" />
+                    <Checkmark16Regular className="w-3 h-3 text-[var(--settings-positive)]" />
                   ) : isPast && wasSkipped ? (
                     <span className="h-[6px] w-[6px] rounded-full border border-[var(--text-primary)]/30" />
                   ) : (
                     <span
                       className={[
                         'h-[5.5px] w-[5.5px] rounded-full',
-                        isActive ? 'bg-[var(--text-primary)]' : 'bg-[var(--text-primary)]/22',
+                        isActive ? 'bg-[var(--accent)]' : 'bg-[var(--text-primary)]/22',
                       ].join(' ')}
                     />
                   )}
@@ -834,10 +834,10 @@ export const OnboardingStudio: React.FC = () => {
                 type="button"
                 onClick={skipEntireOnboarding}
                 title="直接跳过全部引导 (Esc)，随时可在「设置 → 通用」重新查看"
-                className="px-2.5 py-[5px] rounded-full text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--settings-subtle)] inline-flex items-center gap-1 cursor-pointer transition-colors duration-150 motion-reduce:transition-none"
+                className="px-2.5 py-[5px] rounded-[var(--win-radius-control)] text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] inline-flex items-center gap-1 cursor-pointer transition-colors duration-150 motion-reduce:transition-none"
               >
                 <span>跳过引导</span>
-                <X size={11} strokeWidth={2.2} />
+                <Dismiss16Regular className="w-3 h-3" />
               </button>
             )}
           </div>
@@ -1158,7 +1158,7 @@ export const OnboardingStudio: React.FC = () => {
                   </div>
 
                   {/* Live non-blocking status bar so user always sees clear forward path */}
-                  <div className="rounded-[9px] bg-[var(--settings-subtle)] border border-[var(--settings-border)] px-3 py-2 flex items-center justify-between gap-2 text-[11.5px]">
+                  <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)] px-3 py-2 flex items-center justify-between gap-2 text-[11.5px]">
                     <span className="text-[var(--text-secondary)] truncate">
                       当前所选：<strong className="text-[var(--text-primary)]">{storageSummary}</strong>
                     </span>
@@ -1168,7 +1168,7 @@ export const OnboardingStudio: React.FC = () => {
                       className="text-[11.5px] font-semibold text-[var(--accent)] hover:underline inline-flex items-center gap-1 cursor-pointer shrink-0"
                     >
                       <span>继续下一步</span>
-                      <ArrowRight size={11.5} />
+                      <ArrowRight16Regular className="w-3 h-3" />
                     </button>
                   </div>
 
@@ -1181,9 +1181,9 @@ export const OnboardingStudio: React.FC = () => {
             {step === 2 && (
               <div className="h-full p-[22px] flex gap-[22px]">
                 {/* Left Pedestal with Live Auto-Looping Mini-Notch Demo */}
-                <div className="w-[234px] shrink-0 rounded-[14px] bg-[var(--settings-rail)] border border-[var(--settings-border)] p-4 flex flex-col justify-between gap-3.5">
+                <div className="w-[234px] shrink-0 rounded-[var(--win-radius-card)] bg-[var(--settings-rail)] border border-[var(--win-stroke-card)] p-4 flex flex-col justify-between gap-3.5">
                   <div className="flex flex-col gap-2.5">
-                    <div className="relative h-[146px] rounded-[11px] bg-gradient-to-br from-[#E7EAEF] to-[#F3F4F6] dark:from-[#242730] dark:to-[#181A20] border border-[var(--settings-border)] overflow-hidden flex justify-center">
+                    <div className="relative h-[146px] rounded-[var(--win-radius-card)] bg-gradient-to-br from-[#E7EAEF] to-[#F3F4F6] dark:from-[#242730] dark:to-[#181A20] border border-[var(--win-stroke-card)] overflow-hidden flex justify-center">
                       {/* Animated Pure-Black Mini Notch */}
                       <div
                         style={{
@@ -1200,13 +1200,15 @@ export const OnboardingStudio: React.FC = () => {
                         {demoNotchExpanded && (
                           <div
                             className={[
-                              'mt-2 px-2.5 py-1 rounded-[7px] flex items-center gap-1.5 text-[10px] font-semibold text-white/92 transition-colors duration-150 motion-reduce:transition-none',
-                              demoConfirmed ? 'bg-[#3D9970]/25' : 'bg-[#3B82F6]/25',
+                              'mt-2 px-2.5 py-1 rounded-[var(--win-radius-control)] flex items-center gap-1.5 text-[10px] font-semibold text-white/92 transition-colors duration-150 motion-reduce:transition-none',
+                              demoConfirmed ? 'bg-[#3D9970]/25' : 'bg-[#5B8DEF]/25',
                             ].join(' ')}
                           >
-                            <CheckCircle2
-                              size={11}
-                              className={demoConfirmed ? 'text-[#4ADE80]' : 'text-[#60A5FA]'}
+                            <CheckmarkCircle16Filled
+                              className={[
+                                'w-3 h-3',
+                                demoConfirmed ? 'text-[#4ADE80]' : 'text-[#60A5FA]',
+                              ].join(' ')}
                             />
                             <span className="whitespace-nowrap">
                               {demoConfirmed
@@ -1225,9 +1227,9 @@ export const OnboardingStudio: React.FC = () => {
                           transition:
                             'transform 340ms var(--ease-out-strong), opacity 220ms var(--ease-out)',
                         }}
-                        className="absolute top-0 h-[24px] w-[34px] rounded-[6px] bg-gradient-to-br from-[#3B74E8] to-[#2A8F9D] shadow-[0_4px_10px_rgba(0,0,0,0.2)] flex items-center justify-center motion-reduce:transition-none"
+                        className="absolute top-0 h-[24px] w-[34px] rounded-[var(--win-radius-control)] bg-gradient-to-br from-[#3B74E8] to-[#2A8F9D] shadow-[0_4px_10px_rgba(0,0,0,0.2)] flex items-center justify-center motion-reduce:transition-none"
                       >
-                        <ImageIcon size={11} className="text-white/95" />
+                        <Image16Regular className="w-3 h-3 text-white/95" />
                       </div>
                     </div>
 
@@ -1446,10 +1448,7 @@ export const OnboardingStudio: React.FC = () => {
                         key={item}
                         className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]"
                       >
-                        <CheckCircle2
-                          size={11}
-                          className="text-[var(--settings-positive)] shrink-0"
-                        />
+                        <CheckmarkCircle16Filled className="w-3 h-3 text-[var(--settings-positive)] shrink-0" />
                         <span>{item}</span>
                       </div>
                     ))}
@@ -1488,7 +1487,7 @@ export const OnboardingStudio: React.FC = () => {
                                 tone="positive"
                               />
                               <SettingsButton
-                                variant="secondary"
+                                variant="standard"
                                 onClick={() => openSettingsFromOnboarding('ai')}
                               >
                                 前往 AI 设置
@@ -1499,7 +1498,7 @@ export const OnboardingStudio: React.FC = () => {
                               <span>通过官方登录授权，凭据仅安全保存在本机</span>
                               <div className="flex items-center gap-1.5">
                                 <SettingsButton
-                                  variant="primary"
+                                  variant="accent"
                                   loading={signingInChatgpt}
                                   onClick={async () => {
                                     const ok = await signInChatgpt(false, false);
@@ -1514,7 +1513,7 @@ export const OnboardingStudio: React.FC = () => {
                                   {signingInChatgpt ? '等待授权…' : '登录 ChatGPT'}
                                 </SettingsButton>
                                 <SettingsButton
-                                  variant="secondary"
+                                  variant="standard"
                                   onClick={() => openSettingsFromOnboarding('ai')}
                                 >
                                   前往 AI 设置
@@ -1546,9 +1545,9 @@ export const OnboardingStudio: React.FC = () => {
                                   type="button"
                                   onClick={() => applyAIPreset(preset)}
                                   className={[
-                                    'charkle-pressable px-2.5 py-[3px] rounded-full text-[11px] cursor-pointer transition-colors duration-150 motion-reduce:transition-none',
+                                    'charkle-pressable px-2.5 py-[3px] rounded-[var(--win-radius-control)] text-[11px] cursor-pointer transition-colors duration-150 motion-reduce:transition-none',
                                     active
-                                      ? 'bg-[#18191D] text-white dark:bg-white dark:text-[#111215] font-semibold'
+                                      ? 'bg-[var(--accent)] text-[var(--accent-text)] font-semibold'
                                       : 'bg-[var(--settings-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-medium',
                                   ].join(' ')}
                                 >
@@ -1604,7 +1603,7 @@ export const OnboardingStudio: React.FC = () => {
                               className="flex-1"
                             />
                             <SettingsButton
-                              variant="primary"
+                              variant="accent"
                               loading={savingAiDraft}
                               disabled={
                                 draftAI.provider === 'openAICompatible' &&
@@ -1664,7 +1663,7 @@ export const OnboardingStudio: React.FC = () => {
             {/* Step 4: Appearance & Default Gallery Layout */}
             {step === 4 && (
               <div className="h-full p-[22px] flex gap-[22px]">
-                <div className="w-[234px] shrink-0 rounded-[14px] bg-[var(--settings-rail)] border border-[var(--settings-border)] p-4 flex flex-col items-center justify-center gap-4">
+                <div className="w-[234px] shrink-0 rounded-[var(--win-radius-card)] bg-[var(--settings-rail)] border border-[var(--win-stroke-card)] p-4 flex flex-col items-center justify-center gap-4">
                   <StepHeroIconDisc iconName="gallery" accentHex="#D96B43" />
                   <GalleryLayoutMiniPreview mode={layoutMode} />
                 </div>
@@ -1683,9 +1682,9 @@ export const OnboardingStudio: React.FC = () => {
                     <div className="grid grid-cols-3 gap-2.5">
                       {(
                         [
-                          { id: 'system', title: '跟随系统', sub: '自动同步浅/深色', icon: Monitor },
-                          { id: 'light', title: '浅色画廊', sub: '柔和暖白画布', icon: Sun },
-                          { id: 'dark', title: '深色画廊', sub: '静谧聚焦影像', icon: Moon },
+                          { id: 'system', title: '跟随系统', sub: '自动同步浅/深色', icon: Desktop16Regular },
+                          { id: 'light', title: '浅色画廊', sub: '柔和暖白画布', icon: WeatherSunny16Regular },
+                          { id: 'dark', title: '深色画廊', sub: '静谧聚焦影像', icon: WeatherMoon16Regular },
                         ] as const
                       ).map((opt) => {
                         const selected = themeMode === opt.id;
@@ -1696,14 +1695,14 @@ export const OnboardingStudio: React.FC = () => {
                             type="button"
                             onClick={() => void setThemeMode(opt.id)}
                             className={[
-                              'charkle-pressable rounded-[12px] p-3 text-left flex flex-col gap-1.5 cursor-pointer transition-colors duration-150 motion-reduce:transition-none',
+                              'charkle-pressable rounded-[var(--win-radius-card)] p-3 text-left flex flex-col gap-1.5 cursor-pointer transition-colors duration-150 motion-reduce:transition-none',
                               selected
-                                ? 'bg-[var(--text-primary)]/[0.045] dark:bg-white/[0.075] border-[1.35px] border-[var(--text-primary)]/45 dark:border-white/50'
-                                : 'bg-[var(--settings-card)] border border-[var(--settings-border)]',
+                                ? 'bg-[var(--accent-soft)]/55 border border-[var(--accent)]/60'
+                                : 'bg-[var(--settings-card)] border border-[var(--win-stroke-card)]',
                             ].join(' ')}
                           >
                             <div className="flex items-center justify-between">
-                              <Icon size={15} className="text-[var(--text-primary)]" />
+                              <Icon className="w-4 h-4 text-[var(--text-primary)]" />
                               <RadioIndicator selected={selected} />
                             </div>
                             <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
@@ -1896,7 +1895,7 @@ export const OnboardingStudio: React.FC = () => {
                           {item.value}
                         </div>
                       </div>
-                      <ChevronRight size={13} className="text-[var(--text-tertiary)] shrink-0" />
+                      <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
                     </button>
                   ))}
                   </div>
@@ -1907,14 +1906,14 @@ export const OnboardingStudio: React.FC = () => {
         </div>
 
         {/* Footer Navigation Bar */}
-        <footer className="px-[22px] py-[14px] border-t border-[var(--settings-border)] flex items-center justify-between gap-3 shrink-0 select-none">
+        <footer className="px-[22px] py-[14px] border-t border-[var(--win-stroke-divider)] flex items-center justify-between gap-3 shrink-0 select-none">
           <div className="min-w-0">
             {step > 0 ? (
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 onClick={() => navigate((step - 1) as OnboardingStep)}
               >
-                <ChevronLeft size={13} />
+                <ChevronLeft16Regular className="w-3.5 h-3.5" />
                 上一步
               </SettingsButton>
             ) : (
@@ -1931,36 +1930,36 @@ export const OnboardingStudio: React.FC = () => {
 
             {step === 0 && (
               <>
-                <SettingsButton variant="secondary" onClick={skipEntireOnboarding}>
+                <SettingsButton variant="standard" onClick={skipEntireOnboarding}>
                   跳过，直接使用
                 </SettingsButton>
-                <CharkleSkeuoButton onClick={() => goNext(false)}>
+                <Button variant="accent" size="md" onClick={() => goNext(false)}>
                   <span>开始快速配置</span>
-                  <ArrowRight size={13} />
-                </CharkleSkeuoButton>
+                  <ArrowRight16Regular className="w-3.5 h-3.5" />
+                </Button>
               </>
             )}
 
             {step >= 1 && step <= 4 && (
               <>
                 <SettingsButton
-                  variant="secondary"
+                  variant="standard"
                   title="保持当前默认设置，稍后再在「设置」中按需配置"
                   onClick={() => goNext(true)}
                 >
                   跳过此步
                 </SettingsButton>
-                <CharkleSkeuoButton onClick={() => goNext(false)}>
+                <Button variant="accent" size="md" onClick={() => goNext(false)}>
                   <span>{step === 4 ? '查看配置摘要' : '下一步'}</span>
-                  <ArrowRight size={13} />
-                </CharkleSkeuoButton>
+                  <ArrowRight16Regular className="w-3.5 h-3.5" />
+                </Button>
               </>
             )}
 
             {step === 5 && (
               <>
                 <SettingsButton
-                  variant="secondary"
+                  variant="standard"
                   onClick={() => {
                     completeOnboarding();
                     openSettings('general');
@@ -1968,10 +1967,10 @@ export const OnboardingStudio: React.FC = () => {
                 >
                   打开完整设置 (Ctrl+,)
                 </SettingsButton>
-                <CharkleSkeuoButton onClick={completeOnboarding}>
+                <Button variant="accent" size="md" onClick={completeOnboarding}>
                   <span>进入 Charkle 工作台</span>
-                  <ArrowRight size={13} />
-                </CharkleSkeuoButton>
+                  <ArrowRight16Regular className="w-3.5 h-3.5" />
+                </Button>
               </>
             )}
           </div>

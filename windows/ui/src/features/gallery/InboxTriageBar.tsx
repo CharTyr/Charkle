@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Circle, Folder, Image as ImageIcon, MinusCircle, Sparkles, Wand2 } from 'lucide-react';
+import {
+  CheckmarkCircle16Filled,
+  Circle16Regular,
+  Folder16Regular,
+  Image16Regular,
+  Sparkle16Regular,
+  SubtractCircle16Regular,
+  Wand16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -44,7 +52,7 @@ const TriageRowThumb: React.FC<{ asset?: AssetRecord; rawUrl: string }> = ({ ass
     const hex = (asset.dominantColors[0]?.hex || '#2A60E0').toUpperCase();
     return (
       <div
-        className="h-10 w-10 rounded-[var(--radius-card-inner)] border border-black/10 dark:border-white/15 shrink-0"
+        className="h-10 w-10 rounded-[var(--win-radius-control)] border border-[var(--win-stroke-card)] shrink-0"
         style={{ backgroundColor: hex }}
       />
     );
@@ -52,8 +60,8 @@ const TriageRowThumb: React.FC<{ asset?: AssetRecord; rawUrl: string }> = ({ ass
 
   if (failed) {
     return (
-      <div className="h-10 w-10 rounded-[var(--radius-card-inner)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] flex items-center justify-center text-[var(--text-tertiary)] shrink-0">
-        <ImageIcon size={15} />
+      <div className="h-10 w-10 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] flex items-center justify-center text-[var(--text-tertiary)] shrink-0">
+        <Image16Regular className="w-4 h-4" />
       </div>
     );
   }
@@ -63,16 +71,16 @@ const TriageRowThumb: React.FC<{ asset?: AssetRecord; rawUrl: string }> = ({ ass
       src={thumbSrc}
       alt=""
       onError={() => setFailed(true)}
-      className="h-10 w-10 rounded-[var(--radius-card-inner)] object-cover bg-[var(--bg-elevated)] shrink-0"
+      className="h-10 w-10 rounded-[var(--win-radius-control)] object-cover bg-[var(--bg-elevated)] shrink-0"
     />
   );
 };
 
 /**
- * Floating Liquid Glass Inbox Triage Bar matching macOS `MainWindowView.swift:1421-1583`:
- * - Pending count + AI recommended folder 1-click pill + Batch Smart Triage sheet
- * - Quick 1–9 folder archive chips + hierarchical "全部目录" dropdown
- * - 1-click "一键收入情绪板" menu (all boards + create new moodboard from inbox)
+ * Single-row Fluent 2 Inbox Triage Strip:
+ * - Pending count + AI recommended folder 1-click action + Batch Smart Triage modal
+ * - Quick 1-9 folder archive chips + hierarchical "目录" dropdown
+ * - 1-click "收入情绪板" menu (all boards + create new moodboard from inbox)
  */
 export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
   const destination = useCoordinatorStore((s) => s.destination);
@@ -228,29 +236,27 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
     <>
       <div
         data-testid="inbox-triage-bar"
-        data-adapt-glass="true"
-        className="pointer-events-auto charkle-glass charkle-reveal-top rounded-[var(--radius-card-outer)] px-2.5 py-1.5 flex items-center gap-2"
+        className="pointer-events-auto charkle-reveal-top min-h-[38px] px-3 py-1 rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_1px_2px_rgba(0,0,0,0.04)] flex items-center gap-2"
       >
         {/* Left: Inbox count */}
         <div className="flex items-center gap-1.5 shrink-0">
-          <CharkleIcon name="inbox" style="duotone" size={14.5} isActive />
-          <span className="text-[12px] font-semibold text-[var(--text-primary)] charkle-tabular whitespace-nowrap">
+          <CharkleIcon name="inbox" style="duotone" size={15} isActive />
+          <span className="text-[12.5px] font-semibold text-[var(--text-primary)] charkle-tabular whitespace-nowrap">
             待整理 {inboxCount || assets.length} 项
           </span>
         </div>
 
-        <div className="h-4 w-px bg-[var(--border-hairline)] shrink-0" />
+        <div className="h-4 w-px bg-[var(--win-stroke-divider)] shrink-0" />
 
-        {/* AI Suggested Folder 1-Click Pill */}
+        {/* AI Suggested Folder 1-Click Action */}
         {suggestion && (
           <button
             type="button"
             onClick={() => void moveToFolder(suggestion.folderID, suggestion.folderName)}
             title={suggestion.reason}
-            data-pill="true"
-            className="charkle-pressable h-6 px-2 inline-flex items-center gap-1 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/18 text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap"
+            className="charkle-pressable h-[26px] px-2 inline-flex items-center gap-1 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] text-[var(--accent)] hover:brightness-95 text-[11.5px] font-semibold cursor-pointer shrink-0 whitespace-nowrap"
           >
-            <Sparkles size={10.5} className="shrink-0" />
+            <Sparkle16Regular className="w-3 h-3 shrink-0" />
             <span className="max-w-[96px] truncate">推荐：{suggestion.folderName}</span>
           </button>
         )}
@@ -262,8 +268,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
             disabled={triageRunning}
             onClick={() => void handleRunSmartTriage()}
             title="批量识别收件箱素材并推荐归档目录"
-            data-pill="true"
-            className="charkle-pressable h-6 px-2 inline-flex items-center gap-1 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)]/18 text-[11px] font-semibold cursor-pointer shrink-0 whitespace-nowrap disabled:opacity-50"
+            className="charkle-pressable h-[26px] px-2 inline-flex items-center gap-1 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] text-[var(--accent)] hover:brightness-95 text-[11.5px] font-semibold cursor-pointer shrink-0 whitespace-nowrap disabled:opacity-50"
           >
             {showTriageSpinner ? (
               <span
@@ -271,13 +276,13 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                 className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"
               />
             ) : (
-              <Wand2 size={11} className="shrink-0" />
+              <Wand16Regular className="w-3.5 h-3.5 shrink-0" />
             )}
             <span>{triageRunning ? '分拣中…' : '智能分拣'}</span>
           </button>
         )}
 
-        {/* Quick 1–9 Folder Archive Chips (horizontal wheel-scrollable, never crushing chip labels to 0px) */}
+        {/* Quick 1-9 Folder Archive Chips */}
         <div
           onWheel={(e) => {
             if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -292,9 +297,9 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
               type="button"
               onClick={() => void moveToFolder(node.folder.id, node.folder.name)}
               title={`${folderDisplayPath(node.folder.id)}（按数字键 ${index + 1}）`}
-              className="charkle-pressable h-6 px-2 inline-flex items-center gap-1.5 rounded-[var(--radius-chip)] bg-black/[0.05] dark:bg-white/[0.08] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] text-[11px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
+              className="charkle-pressable h-[26px] px-2 inline-flex items-center gap-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-subtle-hover)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
             >
-              <kbd className="text-[9.5px] font-bold charkle-mono w-[14px] h-[14px] inline-flex items-center justify-center rounded-[4px] bg-black/[0.08] dark:bg-white/[0.12] text-[var(--text-secondary)] shrink-0">
+              <kbd className="text-[10px] font-semibold charkle-mono w-[15px] h-[15px] inline-flex items-center justify-center rounded-[3px] bg-[var(--bg-subtle)] text-[var(--text-secondary)] shrink-0">
                 {index + 1}
               </kbd>
               <CharkleFolderIcon
@@ -311,30 +316,31 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
 
         {/* Always-accessible Full Folder Menu */}
         {folders.length > 0 && (
-          <button
+          <Button
             ref={allFoldersBtnRef}
-            type="button"
+            variant="subtle"
+            size="xs"
             title="展开全部文件夹归档目录"
             onClick={() => setAllFoldersOpen((v) => !v)}
-            className="charkle-pressable h-6 px-2 inline-flex items-center gap-1 rounded-[var(--radius-chip)] bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.09] dark:hover:bg-white/[0.14] text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
+            className="shrink-0"
           >
-            <Folder size={11} className="shrink-0" />
+            <Folder16Regular className="w-3.5 h-3.5 shrink-0" />
             <span>目录</span>
-          </button>
+          </Button>
         )}
 
         {/* 1-Click Send to Moodboard Menu */}
-        <button
+        <Button
           ref={moodboardBtnRef}
-          type="button"
+          variant="standard"
+          size="xs"
           title="一键收入情绪板"
           onClick={() => setMoodboardMenuOpen((v) => !v)}
-          data-pill="true"
-          className="charkle-pressable h-[26px] px-2.5 inline-flex items-center gap-1.5 rounded-full bg-black/[0.07] dark:bg-white/[0.10] hover:bg-black/[0.11] dark:hover:bg-white/[0.16] text-[11.5px] font-semibold text-[var(--text-primary)] cursor-pointer shrink-0 whitespace-nowrap"
+          className="shrink-0"
         >
-          <CharkleIcon name="sparkle-board" style="duotone" size={13} isActive />
+          <CharkleIcon name="sparkle-board" style="duotone" size={14} isActive />
           <span>收入情绪板</span>
-        </button>
+        </Button>
       </div>
 
       {/* All Folders Hierarchical Popover */}
@@ -343,7 +349,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
         onOpenChange={setAllFoldersOpen}
         anchorEl={allFoldersBtnRef.current}
         placement="bottom-start"
-        className="p-1.5"
+        className="p-1"
       >
         <FolderMoveMenu
           folders={folders}
@@ -362,9 +368,9 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
         onOpenChange={setMoodboardMenuOpen}
         anchorEl={moodboardBtnRef.current}
         placement="bottom-end"
-        className="w-[228px] p-1.5"
+        className="w-[232px] p-1"
       >
-        <div className="flex flex-col gap-0.5 text-[12.5px]">
+        <div className="flex flex-col gap-0.5 text-[13px] leading-[18px]">
           {boards.map((board) => (
             <button
               key={board.id}
@@ -373,12 +379,12 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                 setMoodboardMenuOpen(false);
                 void addAssetsToBoard(board.id, targetIds);
               }}
-              className="w-full text-left px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] truncate cursor-pointer"
+              className="w-full min-h-[32px] text-left px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] truncate cursor-pointer"
             >
               {board.title}
             </button>
           ))}
-          {boards.length > 0 && <div className="my-1 h-px bg-[var(--border-hairline)]" />}
+          {boards.length > 0 && <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />}
           <button
             type="button"
             onClick={() => {
@@ -386,15 +392,15 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
               setSelection(assets.slice(0, 16).map((a) => a.id));
               setMoodboardGeneratorOpen(true);
             }}
-            className="w-full flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--accent)] hover:bg-[var(--accent-soft)] font-medium cursor-pointer"
+            className="w-full min-h-[32px] flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--accent)] hover:bg-[var(--accent-soft)] font-medium cursor-pointer"
           >
-            <Sparkles size={13} />
-            用当前收件箱创建新情绪板…
+            <Sparkle16Regular className="w-4 h-4 shrink-0" />
+            <span>用当前收件箱创建新情绪板…</span>
           </button>
         </div>
       </Popover>
 
-      {/* Batch Inbox Smart Triage Preview Modal (matching macOS inboxBatchTriageSheet) */}
+      {/* Batch Inbox Smart Triage Preview Modal */}
       <ModalShell
         open={triageModalOpen}
         onClose={() => setTriageModalOpen(false)}
@@ -406,7 +412,7 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
             <div>
               {actionableRecs.length > 0 && (
                 <Button
-                  variant="secondary"
+                  variant="standard"
                   size="sm"
                   onClick={() => {
                     if (selectedRecs.length === actionableRecs.length) {
@@ -421,11 +427,11 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="secondary" size="sm" onClick={() => setTriageModalOpen(false)}>
+              <Button variant="standard" size="sm" onClick={() => setTriageModalOpen(false)}>
                 取消
               </Button>
               <Button
-                variant="primary"
+                variant="accent"
                 size="sm"
                 disabled={selectedRecs.length === 0}
                 onClick={() => void handleApplyTriage()}
@@ -437,22 +443,23 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
         }
       >
         {triageRecs.length === 0 ? (
-          <div className="py-10 text-center text-[12.5px] text-[var(--text-secondary)]">
+          <div className="py-10 text-center text-[13px] text-[var(--text-secondary)]">
             收件箱暂无可分拣素材。
           </div>
         ) : (
-          <div className="flex flex-col gap-2 max-h-[360px] overflow-y-auto charkle-scroll">
+          <div className="flex flex-col gap-1.5 max-h-[360px] overflow-y-auto charkle-scroll">
             {triageRecs.map((rec) => {
               const hasTarget = Boolean(rec.recommendedFolderID);
               const checked = selectedTriageIds.has(rec.assetID);
               return (
                 <div
                   key={rec.assetID}
-                  className="p-2 rounded-[var(--radius-popover-inner)] bg-[var(--bg-subtle)]/70 flex items-center gap-2.5"
+                  className="p-2 rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)]/65 flex items-center gap-2.5"
                 >
                   <button
                     type="button"
                     disabled={!hasTarget}
+                    aria-label={checked ? '取消勾选' : '勾选归档'}
                     onClick={() => {
                       if (!hasTarget) return;
                       setSelectedTriageIds((prev) => {
@@ -465,11 +472,11 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                     className="cursor-pointer disabled:opacity-45 shrink-0 text-[var(--accent)]"
                   >
                     {!hasTarget ? (
-                      <MinusCircle size={16} className="text-[var(--text-tertiary)]" />
+                      <SubtractCircle16Regular className="w-4 h-4 text-[var(--text-tertiary)]" />
                     ) : checked ? (
-                      <CheckCircle2 size={16} />
+                      <CheckmarkCircle16Filled className="w-4 h-4" />
                     ) : (
-                      <Circle size={16} className="text-[var(--text-tertiary)]" />
+                      <Circle16Regular className="w-4 h-4 text-[var(--text-tertiary)]" />
                     )}
                   </button>
 
@@ -479,10 +486,10 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                   />
 
                   <div className="min-w-0 flex-1">
-                    <div className="text-[12.5px] font-medium text-[var(--text-primary)] truncate">
+                    <div className="text-[13px] font-medium text-[var(--text-primary)] truncate">
                       {rec.assetTitle}
                     </div>
-                    <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                    <div className="text-[11.5px] text-[var(--text-secondary)] truncate">
                       {rec.reason}
                     </div>
                   </div>
@@ -490,20 +497,20 @@ export const InboxTriageBar: React.FC<InboxTriageBarProps> = ({ assets }) => {
                   {rec.recommendedFolderName ? (
                     <span
                       className={[
-                        'inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold shrink-0 charkle-tabular',
+                        'inline-flex items-center gap-1 px-2 py-1 rounded-[var(--win-radius-control)] text-[11.5px] font-medium shrink-0 charkle-tabular',
                         rec.confidence >= 0.65
                           ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
                           : 'bg-[var(--bg-elevated)] text-[var(--text-primary)]',
                       ].join(' ')}
                     >
-                      <Folder size={10.5} />
+                      <Folder16Regular className="w-3 h-3" />
                       <span>{rec.recommendedFolderName}</span>
-                      <span className="text-[10px] opacity-75">
+                      <span className="text-[10.5px] opacity-75">
                         {Math.round(rec.confidence * 100)}%
                       </span>
                     </span>
                   ) : (
-                    <span className="px-2 py-1 rounded-full bg-[var(--bg-elevated)] text-[11px] text-[var(--text-secondary)] shrink-0">
+                    <span className="px-2 py-1 rounded-[var(--win-radius-control)] bg-[var(--bg-elevated)] text-[11.5px] text-[var(--text-secondary)] shrink-0">
                       留在收件箱
                     </span>
                   )}

@@ -1,22 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle,
-  Box,
-  Check,
-  CheckCircle2,
-  CircleDashed,
-  FileText,
-  Film,
-  Globe,
-  Image as ImageIcon,
-  Music,
-  Palette,
-  Search,
-  Sliders,
-  Sparkles,
-  Wand2,
-  X,
-} from 'lucide-react';
+  ArrowSync16Regular,
+  Checkmark16Regular,
+  CheckmarkCircle16Filled,
+  Color16Regular,
+  Cube16Regular,
+  Dismiss16Regular,
+  DocumentText16Regular,
+  Filmstrip16Regular,
+  Globe16Regular,
+  Image16Regular,
+  MusicNote216Regular,
+  Options16Regular,
+  Search16Regular,
+  Sparkle16Regular,
+  Wand16Regular,
+  Warning16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -73,17 +73,17 @@ function renderMediaFallbackIcon(kind: AssetRecord['mediaKind']) {
   switch (kind) {
     case 'video':
     case 'animatedImage':
-      return <Film size={20} strokeWidth={1.6} />;
+      return <Filmstrip16Regular className="w-5 h-5" />;
     case 'audio':
-      return <Music size={20} strokeWidth={1.6} />;
+      return <MusicNote216Regular className="w-5 h-5" />;
     case 'document':
-      return <FileText size={20} strokeWidth={1.6} />;
+      return <DocumentText16Regular className="w-5 h-5" />;
     case 'webBookmark':
-      return <Globe size={20} strokeWidth={1.6} />;
+      return <Globe16Regular className="w-5 h-5" />;
     case 'model3D':
-      return <Box size={20} strokeWidth={1.6} />;
+      return <Cube16Regular className="w-5 h-5" />;
     default:
-      return <ImageIcon size={20} strokeWidth={1.6} />;
+      return <Image16Regular className="w-5 h-5" />;
   }
 }
 
@@ -170,11 +170,11 @@ const PickerAssetTile: React.FC<PickerAssetTileProps> = ({ asset, selected, onTo
         className={[
           'pointer-events-none absolute top-1.5 right-1.5 h-5 w-5 rounded-full inline-flex items-center justify-center transition-opacity duration-150',
           selected
-            ? 'bg-[var(--accent)] text-white ring-1.5 ring-white/90 shadow-sm opacity-100'
+            ? 'bg-[var(--accent)] text-[var(--accent-text)] ring-1.5 ring-white/90 shadow-sm opacity-100'
             : 'bg-black/32 border border-white/80 text-transparent opacity-0 group-hover:opacity-100',
         ].join(' ')}
       >
-        <Check size={12} strokeWidth={2.6} />
+        <Checkmark16Regular className="w-3 h-3" />
       </span>
     </button>
   );
@@ -393,16 +393,16 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
       }
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="standard" onClick={onClose}>
             取消
           </Button>
           <Button
-            variant="primary"
+            variant="accent"
             loading={curating}
             disabled={isLibraryEmpty}
             onClick={() => void handleGenerate()}
           >
-            <Sparkles size={14} />
+            <Sparkle16Regular className="w-3.5 h-3.5" />
             立即生成情绪板
           </Button>
         </>
@@ -417,17 +417,17 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
           }}
           ariaLabel="策展入口"
           options={[
-            { value: 'prompt', label: '灵感主题词', icon: <Wand2 size={12.5} /> },
-            { value: 'seeds', label: '定调种子图', icon: <ImageIcon size={12.5} /> },
-            { value: 'palette', label: '色彩倾向', icon: <Palette size={12.5} /> },
+            { value: 'prompt', label: '灵感主题词', icon: <Wand16Regular className="w-3.5 h-3.5" /> },
+            { value: 'seeds', label: '定调种子图', icon: <Image16Regular className="w-3.5 h-3.5" /> },
+            { value: 'palette', label: '色彩倾向', icon: <Color16Regular className="w-3.5 h-3.5" /> },
             { value: 'manual', label: '手动挑选' },
-            { value: 'combined', label: '综合组合', icon: <Sliders size={12.5} /> },
+            { value: 'combined', label: '综合组合', icon: <Options16Regular className="w-3.5 h-3.5" /> },
           ]}
         />
 
         {isLibraryEmpty && (
-          <div className="p-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] text-[var(--text-secondary)] flex items-center gap-2">
-            <AlertTriangle size={14} className="text-[var(--warning)] shrink-0" />
+          <div className="p-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)] border border-[var(--win-stroke-card)] text-[11.5px] text-[var(--text-secondary)] flex items-center gap-2">
+            <Warning16Regular className="w-3.5 h-3.5 text-[var(--warning)] shrink-0" />
             <span>当前素材库暂无可用素材，请先导入图片后再生成情绪板。</span>
           </div>
         )}
@@ -452,7 +452,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
                 }
               }}
               placeholder="例如：暖石膏建筑、低角度晨光阴影、瑞士极简杂志排版…"
-              className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[13px] text-[var(--text-primary)] outline-none"
             />
             <div className="flex items-center gap-1.5 flex-wrap">
               {PRESET_PROMPTS.map((sample) => (
@@ -460,7 +460,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
                   key={sample}
                   type="button"
                   onClick={() => setPrompt(sample)}
-                  className="charkle-pressable px-2.5 py-1 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] text-[11px] text-[var(--text-secondary)] cursor-pointer"
+                  className="charkle-pressable win-control-elevation px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
                   {sample}
                 </button>
@@ -493,26 +493,23 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
             </div>
 
             <div className="relative flex items-center">
-              <Search
-                size={13}
-                className="absolute left-2.5 text-[var(--text-tertiary)] pointer-events-none"
-              />
+              <Search16Regular className="w-3.5 h-3.5 absolute left-2.5 text-[var(--text-tertiary)] pointer-events-none" />
               <input
                 type="text"
                 value={pickerQuery}
                 onChange={(e) => setPickerQuery(e.target.value)}
                 placeholder="筛选素材标题或标签…"
                 aria-label="筛选可选素材"
-                className="w-full h-8 pl-8 pr-7 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none focus:border-[var(--accent)]"
+                className="win-input-elevation w-full h-8 pl-8 pr-7 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
               {pickerQuery && (
                 <button
                   type="button"
                   aria-label="清空素材筛选词"
                   onClick={() => setPickerQuery('')}
-                  className="absolute right-2 h-4.5 w-4.5 rounded-full hover:bg-[var(--bg-subtle)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer"
+                  className="absolute right-2 h-4.5 w-4.5 rounded-full hover:bg-[var(--win-subtle-hover)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer"
                 >
-                  <X size={11} />
+                  <Dismiss16Regular className="w-3 h-3" />
                 </button>
               )}
             </div>
@@ -520,9 +517,9 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
             {pickableAssets.length === 0 ? (
               <div
                 data-testid="moodboard-picker-empty"
-                className="min-h-[132px] rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)]/70 border border-[var(--border-hairline)] p-4 flex flex-col items-center justify-center gap-2 text-center"
+                className="min-h-[132px] rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)]/70 border border-[var(--win-stroke-card)] p-4 flex flex-col items-center justify-center gap-2 text-center"
               >
-                <ImageIcon size={22} strokeWidth={1.5} className="text-[var(--text-tertiary)]" />
+                <Image16Regular className="w-5 h-5 text-[var(--text-tertiary)]" />
                 <div className="text-[12px] text-[var(--text-secondary)]">
                   {hasPickerScopeFilter ? '当前筛选条件下没有可选素材' : '素材库中还没有可用素材'}
                 </div>
@@ -534,7 +531,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
                       setRequiredTags([]);
                       setPickerQuery('');
                     }}
-                    className="charkle-pressable px-2.5 py-1 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] text-[11px] font-medium text-[var(--accent)] cursor-pointer"
+                    className="charkle-pressable win-control-elevation px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--accent)] cursor-pointer"
                   >
                     清除筛选条件
                   </button>
@@ -543,7 +540,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
             ) : (
               <div
                 data-testid="moodboard-asset-picker-grid"
-                className="grid grid-cols-4 sm:grid-cols-5 gap-2 max-h-[240px] overflow-y-auto charkle-scroll p-2 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)]/70 border border-[var(--border-hairline)]"
+                className="grid grid-cols-4 sm:grid-cols-5 gap-2 max-h-[240px] overflow-y-auto charkle-scroll p-2 rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)]/70 border border-[var(--win-stroke-card)]"
               >
                 {pickableAssets.map((a) => (
                   <PickerAssetTile
@@ -608,7 +605,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
 
         {/* Folder & Tag Scope */}
         {(folders.length > 0 || tagCounts.length > 0) && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-[var(--border-hairline)]">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-[var(--win-stroke-divider)]">
             {folders.length > 0 && (
               <div className="flex flex-col gap-1.5">
                 <span className="text-[11.5px] font-medium text-[var(--text-tertiary)]">
@@ -623,7 +620,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
                         type="button"
                         onClick={() => toggleItem(scopeFolderIds, f.id, setScopeFolderIds)}
                         className={[
-                          'charkle-pressable h-6 px-2 rounded-full text-[11.5px] cursor-pointer',
+                          'charkle-pressable h-6 px-2 rounded-[var(--win-radius-control)] text-[11.5px] cursor-pointer',
                           active
                             ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
                             : 'bg-[var(--bg-subtle)] text-[var(--text-secondary)]',
@@ -651,7 +648,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
                         type="button"
                         onClick={() => toggleItem(requiredTags, t.name, setRequiredTags)}
                         className={[
-                          'charkle-pressable h-6 px-2 rounded-full text-[11.5px] cursor-pointer',
+                          'charkle-pressable h-6 px-2 rounded-[var(--win-radius-control)] text-[11.5px] cursor-pointer',
                           active
                             ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
                             : 'bg-[var(--bg-subtle)] text-[var(--text-secondary)]',
@@ -668,7 +665,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
         )}
 
         {/* Layout Style & Count */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--border-hairline)]">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-[var(--win-stroke-divider)]">
           <div className="flex flex-col gap-1.5">
             <span className="text-[11.5px] font-medium text-[var(--text-tertiary)]">初始构图节奏</span>
             <SegmentedControl<EditorialStyle>
@@ -740,8 +737,8 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
         </div>
 
         {localError && (
-          <div className="p-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--warning-soft)] text-[11.5px] text-[var(--text-primary)] flex items-center gap-2">
-            <AlertTriangle size={14} className="text-[var(--warning)] shrink-0" />
+          <div className="p-2.5 rounded-[var(--win-radius-control)] bg-[var(--warning-soft)] text-[11.5px] text-[var(--text-primary)] flex items-center gap-2">
+            <Warning16Regular className="w-3.5 h-3.5 text-[var(--warning)] shrink-0" />
             <span>{localError}</span>
           </div>
         )}
@@ -750,7 +747,7 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
         {agentTrace.length > 0 && (
           <div
             data-testid="agent-harness-trace"
-            className="p-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] flex flex-col gap-1.5"
+            className="p-3 rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)] border border-[var(--win-stroke-card)] flex flex-col gap-1.5"
           >
             <div className="text-[11.5px] font-semibold text-[var(--text-secondary)]">
               策展步骤（{agentTrace.length} 步）
@@ -758,11 +755,11 @@ export const MoodboardGeneratorModal: React.FC<MoodboardGeneratorModalProps> = (
             {agentTrace.map((step) => (
               <div key={step.id} className="flex items-start gap-2 text-[11.5px]">
                 {step.status === 'done' ? (
-                  <CheckCircle2 size={13.5} className="text-[var(--success)] shrink-0 mt-0.5" />
+                  <CheckmarkCircle16Filled className="w-3.5 h-3.5 text-[var(--success)] shrink-0 mt-0.5" />
                 ) : step.status === 'warning' ? (
-                  <AlertTriangle size={13.5} className="text-[var(--warning)] shrink-0 mt-0.5" />
+                  <Warning16Regular className="w-3.5 h-3.5 text-[var(--warning)] shrink-0 mt-0.5" />
                 ) : (
-                  <CircleDashed size={13.5} className="text-[var(--accent)] shrink-0 mt-0.5 animate-spin" />
+                  <ArrowSync16Regular className="w-3.5 h-3.5 text-[var(--accent)] shrink-0 mt-0.5 animate-spin" />
                 )}
                 <div className="min-w-0">
                   <span className="font-medium text-[var(--text-primary)]">{step.title}</span>

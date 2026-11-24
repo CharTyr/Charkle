@@ -1,31 +1,30 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle,
-  ArrowDownCircle,
-  ArrowLeftRight,
-  ArrowUp,
-  Box,
-  CheckCircle2,
-  ChevronRight,
-  CircleDashed,
-  Clipboard,
-  FileText,
-  Film,
-  Globe,
-  Image as ImageIcon,
-  Images,
-  Layers,
-  Music,
-  Palette,
-  Plus,
-  PlusSquare,
-  Puzzle,
-  RefreshCw,
-  Search,
-  Share,
-  Sparkles,
-  X,
-} from 'lucide-react';
+  Add16Regular,
+  AddSquare16Regular,
+  ArrowCircleDown16Regular,
+  ArrowSwap16Regular,
+  ArrowSync16Regular,
+  ArrowUp16Regular,
+  CheckmarkCircle16Filled,
+  ChevronRight16Regular,
+  Clipboard16Regular,
+  Color16Regular,
+  Cube16Regular,
+  Dismiss16Regular,
+  DocumentText16Regular,
+  Filmstrip16Regular,
+  Globe16Regular,
+  Image16Regular,
+  ImageMultiple16Regular,
+  LayerDiagonal16Regular,
+  MusicNote216Regular,
+  PuzzlePiece16Regular,
+  Search16Regular,
+  Share16Regular,
+  Sparkle16Regular,
+  Warning16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { isLightHex, useResolvedIsDark } from '../../design-system';
 import {
@@ -53,20 +52,21 @@ function withCacheBust(url: string, updatedAt: number | string | undefined): str
 }
 
 function renderTileFallbackIcon(kind: AssetRecord['mediaKind'], size = 16) {
+  const style = { width: size, height: size };
   switch (kind) {
     case 'video':
     case 'animatedImage':
-      return <Film size={size} strokeWidth={1.6} />;
+      return <Filmstrip16Regular style={style} />;
     case 'audio':
-      return <Music size={size} strokeWidth={1.6} />;
+      return <MusicNote216Regular style={style} />;
     case 'document':
-      return <FileText size={size} strokeWidth={1.6} />;
+      return <DocumentText16Regular style={style} />;
     case 'webBookmark':
-      return <Globe size={size} strokeWidth={1.6} />;
+      return <Globe16Regular style={style} />;
     case 'model3D':
-      return <Box size={size} strokeWidth={1.6} />;
+      return <Cube16Regular style={style} />;
     default:
-      return <ImageIcon size={size} strokeWidth={1.6} />;
+      return <Image16Regular style={style} />;
   }
 }
 
@@ -149,7 +149,7 @@ const SectionCard: React.FC<{
   trailing?: React.ReactNode;
   children: React.ReactNode;
 }> = ({ title, icon, trailing, children }) => (
-  <section className="rounded-[var(--radius-card-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] p-3 flex flex-col gap-2.5">
+  <section className="rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] p-3 flex flex-col gap-2.5">
     <div className="flex items-center justify-between gap-2">
       <div className="flex items-center gap-1.5 min-w-0">
         <span className="shrink-0 text-[var(--text-secondary)]">{icon}</span>
@@ -496,11 +496,11 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
     <aside
       data-testid="candidate-pool-panel"
       aria-label="情绪板检查器"
-      className="w-[300px] shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--border-hairline)] flex flex-col overflow-hidden select-none"
+      className="w-[300px] shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--win-stroke-divider)] flex flex-col overflow-hidden select-none"
     >
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-3 flex flex-col gap-2.5">
         {/* Card 1: Board Identity & Status Controls */}
-        <section className="rounded-[var(--radius-card-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] p-3 flex flex-col gap-2">
+        <section className="rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] p-3 flex flex-col gap-2">
           <input
             type="text"
             value={titleDraft}
@@ -530,7 +530,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
             className="w-full bg-transparent text-[11.5px] text-[var(--text-secondary)] placeholder:text-[var(--text-tertiary)] outline-none"
           />
 
-          <div className="h-px bg-[var(--border-hairline)] my-0.5" />
+          <div className="h-px bg-[var(--win-stroke-divider)] my-0.5" />
 
           <div className="flex items-center gap-1.5 flex-wrap">
             <button
@@ -539,7 +539,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                 setActiveMoodboardId(activeBoard.id);
                 pushToast({ message: '已设为当前活跃情绪板', tone: 'success', durationMs: 2200 });
               }}
-              className="charkle-pressable h-6.5 px-2.5 rounded-full bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] inline-flex items-center gap-1.5 text-[10.5px] font-medium text-[var(--text-primary)] cursor-pointer"
+              className="charkle-pressable win-control-elevation h-6.5 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] inline-flex items-center gap-1.5 text-[10.5px] font-medium text-[var(--text-primary)] cursor-pointer"
             >
               <span
                 className={[
@@ -559,13 +559,13 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                   : '始终将此情绪板引用的素材保留在本机'
               }
               className={[
-                'charkle-pressable h-6.5 px-2.5 rounded-full border inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer',
+                'charkle-pressable h-6.5 px-2.5 rounded-[var(--win-radius-control)] border inline-flex items-center gap-1 text-[10.5px] font-medium cursor-pointer',
                 activeBoard.pinnedOffline
                   ? 'bg-[var(--accent-soft)] border-[var(--accent-ring)] text-[var(--accent)]'
-                  : 'bg-[var(--bg-inspector-field)] border-[var(--border-hairline)] hover:border-[var(--border-strong)] text-[var(--text-primary)]',
+                  : 'win-control-elevation bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] border-[var(--win-stroke-control)] text-[var(--text-primary)]',
               ].join(' ')}
             >
-              <ArrowDownCircle size={11.5} />
+              <ArrowCircleDown16Regular className="w-3 h-3" />
               <span>{activeBoard.pinnedOffline ? '已保留本地' : '始终保留本地'}</span>
             </button>
           </div>
@@ -574,7 +574,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
         {/* Card 2: In-Canvas AI Curator Assistant */}
         <SectionCard
           title="AI 策展助手"
-          icon={<Sparkles size={13} className="text-[var(--accent)]" />}
+          icon={<Sparkle16Regular className="w-3.5 h-3.5 text-[var(--accent)]" />}
           trailing={
             historyPast.length > 0 && !isRefiningActiveBoard ? (
               <button
@@ -604,19 +604,19 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
               disabled={isRefiningActiveBoard}
               onChange={(e) => setRefineText(e.target.value)}
               placeholder="输入指令微调当前情绪板…"
-              className="flex-1 min-w-0 h-7 px-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[11.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none focus:border-[var(--accent)] disabled:opacity-60"
+              className="win-input-elevation flex-1 min-w-0 h-7 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[11.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none disabled:opacity-60"
             />
             <button
               type="submit"
               disabled={!refineText.trim() || isRefiningActiveBoard}
               aria-label="执行 AI 策展微调"
               title="执行 AI 策展微调"
-              className="charkle-pressable h-7 w-7 shrink-0 rounded-[7px] bg-[var(--accent)] text-white inline-flex items-center justify-center cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+              className="charkle-pressable h-7 w-7 shrink-0 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] inline-flex items-center justify-center cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
             >
               {isRefiningActiveBoard ? (
-                <CircleDashed size={12.5} className="animate-spin" />
+                <ArrowSync16Regular className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <ArrowUp size={12.5} />
+                <ArrowUp16Regular className="w-3.5 h-3.5" />
               )}
             </button>
           </form>
@@ -641,7 +641,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                 type="button"
                 disabled={isRefiningActiveBoard}
                 onClick={() => void runRefinement(chip.prompt)}
-                className="charkle-pressable h-6.5 px-1.5 rounded-[6px] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] text-[10px] font-medium text-[var(--text-primary)] truncate cursor-pointer disabled:opacity-45"
+                className="charkle-pressable win-control-elevation h-6.5 px-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[10px] font-medium text-[var(--text-primary)] truncate cursor-pointer disabled:opacity-45"
               >
                 {chip.label}
               </button>
@@ -650,7 +650,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
 
           {isRefiningActiveBoard && latestStep && (
             <div className="flex items-start gap-2 pt-0.5 text-[10.5px]">
-              <CircleDashed size={12} className="text-[var(--accent)] animate-spin shrink-0 mt-0.5" />
+              <ArrowSync16Regular className="w-3 h-3 text-[var(--accent)] animate-spin shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <div className="font-semibold text-[var(--text-primary)]">{latestStep.title}</div>
                 {latestStep.detail && (
@@ -670,15 +670,15 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowTrace((v) => !v)}
-                    className="w-full min-h-[26px] px-2 py-1 rounded-[var(--radius-chip)] bg-[var(--bg-subtle)]/70 hover:bg-[var(--bg-subtle)] flex items-center justify-between text-[10.5px] font-medium text-[var(--text-secondary)] cursor-pointer"
+                    className="w-full min-h-[26px] px-2 py-1 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/70 hover:bg-[var(--bg-subtle)] flex items-center justify-between text-[10.5px] font-medium text-[var(--text-secondary)] cursor-pointer"
                   >
                     <span>
                       {showTrace
                         ? '收起策展步骤'
                         : `查看策展步骤（${activeBoardAgentTrace.length} 步）`}
                     </span>
-                    <ChevronRight
-                      size={11}
+                    <ChevronRight16Regular
+                      className="w-3 h-3"
                       style={{
                         transform: showTrace ? 'rotate(90deg)' : 'rotate(0deg)',
                         transition: 'transform 160ms var(--ease-out)',
@@ -690,11 +690,11 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                       {activeBoardAgentTrace.map((step) => (
                         <div key={step.id} className="flex items-start gap-1.5 text-[10px]">
                           {step.status === 'done' ? (
-                            <CheckCircle2 size={11} className="text-[var(--success)] shrink-0 mt-0.5" />
+                            <CheckmarkCircle16Filled className="w-3 h-3 text-[var(--success)] shrink-0 mt-0.5" />
                           ) : step.status === 'warning' ? (
-                            <AlertTriangle size={11} className="text-[var(--warning)] shrink-0 mt-0.5" />
+                            <Warning16Regular className="w-3 h-3 text-[var(--warning)] shrink-0 mt-0.5" />
                           ) : (
-                            <CircleDashed size={11} className="text-[var(--accent)] shrink-0 mt-0.5" />
+                            <ArrowSync16Regular className="w-3 h-3 text-[var(--accent)] shrink-0 mt-0.5 animate-spin" />
                           )}
                           <div className="min-w-0">
                             <div className="font-medium text-[var(--text-primary)]">{step.title}</div>
@@ -722,9 +722,9 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
           title={swappingNodeId ? '候选替换池' : '同方向候选池'}
           icon={
             swappingNodeId ? (
-              <ArrowLeftRight size={13} className="text-[var(--accent)]" />
+              <ArrowSwap16Regular className="w-3.5 h-3.5 text-[var(--accent)]" />
             ) : (
-              <Images size={13} />
+              <ImageMultiple16Regular className="w-3.5 h-3.5" />
             )
           }
           trailing={
@@ -744,8 +744,8 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
           }
         >
           {swappingNodeId && (
-            <div className="px-2 py-1.5 rounded-[var(--radius-settings-inner)] bg-[var(--accent-soft)] border border-[var(--accent-ring)] flex items-center gap-1.5 text-[10.5px] font-medium text-[var(--text-primary)]">
-              <ArrowLeftRight size={11} className="text-[var(--accent)] shrink-0" />
+            <div className="px-2 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] border border-[var(--accent-ring)] flex items-center gap-1.5 text-[10.5px] font-medium text-[var(--text-primary)]">
+              <ArrowSwap16Regular className="w-3 h-3 text-[var(--accent)] shrink-0" />
               <span>点击下方任意候选图即可原地替换选中卡片</span>
             </div>
           )}
@@ -781,7 +781,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                       ? `${item.asset.title} · ${item.matchReasons.join(' / ')}`
                       : item.asset.title
                   }
-                  className="group relative w-full h-[84px] rounded-[var(--radius-settings-inner)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--border-hairline)] hover:border-[var(--accent)] cursor-grab active:cursor-grabbing transition-colors duration-150"
+                  className="group relative w-full h-[84px] rounded-[var(--win-radius-control)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] hover:border-[var(--accent)] cursor-grab active:cursor-grabbing transition-colors duration-150"
                 >
                   <CandidateTileMedia asset={item.asset} />
                   <div className="pointer-events-none absolute inset-x-0 bottom-0 px-1.5 py-0.5 bg-gradient-to-t from-black/68 via-black/32 to-transparent group-hover:opacity-0 transition-opacity duration-150">
@@ -798,9 +798,9 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                           if (wasRecentPointerDrag()) return;
                           swapNodeAsset(effectiveSwapNodeId, item.asset.id, assetsById);
                         }}
-                        className="charkle-pressable flex-1 h-5.5 px-1.5 rounded-[5px] bg-[var(--accent)] text-white text-[10px] font-medium inline-flex items-center justify-center gap-0.5 cursor-pointer"
+                        className="charkle-pressable flex-1 h-5.5 px-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] text-[var(--accent-text)] text-[10px] font-medium inline-flex items-center justify-center gap-0.5 cursor-pointer"
                       >
-                        <ArrowLeftRight size={9.5} />
+                        <ArrowSwap16Regular className="w-2.5 h-2.5" />
                         替换
                       </button>
                     )}
@@ -813,9 +813,9 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                         handleAddAssetToCanvas(item.asset);
                         pushToast({ message: `已追加「${item.asset.title}」到情绪板`, tone: 'success', durationMs: 2000 });
                       }}
-                      className="charkle-pressable h-5.5 px-1.5 rounded-[5px] bg-black/72 text-white text-[10px] inline-flex items-center justify-center gap-0.5 cursor-pointer"
+                      className="charkle-pressable h-5.5 px-1.5 rounded-[var(--win-radius-control)] bg-black/72 text-white text-[10px] inline-flex items-center justify-center gap-0.5 cursor-pointer"
                     >
-                      <Plus size={10} />
+                      <Add16Regular className="w-2.5 h-2.5" />
                       添加
                     </button>
                   </div>
@@ -828,7 +828,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
         {/* Card 4: Board Harmonious Palette Strip */}
         <SectionCard
           title="全板和谐色板"
-          icon={<Palette size={13} />}
+          icon={<Color16Regular className="w-3.5 h-3.5" />}
           trailing={
             <button
               type="button"
@@ -839,7 +839,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
               title="重新分析板内素材并更新和谐色板"
               className="inline-flex items-center gap-1 text-[10.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
             >
-              <RefreshCw size={10} />
+              <ArrowSync16Regular className="w-2.5 h-2.5" />
               <span>重新提取</span>
             </button>
           }
@@ -864,7 +864,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                     title={`点击复制 ${hex}，右键以此色筛选素材库`}
                     aria-label={`色卡 ${hex}`}
                     style={{ backgroundColor: hex }}
-                    className="charkle-pressable flex-1 h-[30px] rounded-[var(--radius-card-inner)] border border-black/12 dark:border-white/15 cursor-pointer"
+                    className="charkle-pressable flex-1 h-[30px] rounded-[var(--win-radius-control)] border border-black/12 dark:border-white/15 cursor-pointer"
                   />
                 );
               })}
@@ -873,27 +873,24 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
         </SectionCard>
 
         {/* Card 5: Quick Add from Library Search */}
-        <SectionCard title="从素材库快速拉图" icon={<PlusSquare size={13} />}>
+        <SectionCard title="从素材库快速拉图" icon={<AddSquare16Regular className="w-3.5 h-3.5" />}>
           <div className="relative flex items-center">
-            <Search
-              size={12}
-              className="absolute left-2.5 text-[var(--text-tertiary)] pointer-events-none"
-            />
+            <Search16Regular className="w-3 h-3 absolute left-2.5 text-[var(--text-tertiary)] pointer-events-none" />
             <input
               type="text"
               value={quickAddQuery}
               onChange={(e) => setQuickAddQuery(e.target.value)}
               placeholder="搜索标题、标签或域名…"
-              className="w-full h-7 pl-7 pr-6 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[11.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation w-full h-7 pl-7 pr-6 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[11.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
             />
             {quickAddQuery && (
               <button
                 type="button"
                 aria-label="清空搜索"
                 onClick={() => setQuickAddQuery('')}
-                className="absolute right-1.5 h-4 w-4 rounded-full hover:bg-[var(--bg-subtle)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer"
+                className="absolute right-1.5 h-4 w-4 rounded-full hover:bg-[var(--win-subtle-hover)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer"
               >
-                <X size={10.5} />
+                <Dismiss16Regular className="w-2.5 h-2.5" />
               </button>
             )}
           </div>
@@ -921,7 +918,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                       durationMs: 2000,
                     });
                   }}
-                  className="group relative w-full h-[60px] rounded-[var(--radius-card-inner)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--border-hairline)] hover:border-[var(--accent)] cursor-grab active:cursor-grabbing text-left"
+                  className="group relative w-full h-[60px] rounded-[var(--win-radius-control)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] hover:border-[var(--accent)] cursor-grab active:cursor-grabbing text-left"
                 >
                   <CandidateTileMedia asset={asset} compact />
                   <div className="pointer-events-none absolute inset-x-0 bottom-0 px-1 py-0.5 bg-gradient-to-t from-black/68 via-black/32 to-transparent">
@@ -940,7 +937,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
         {/* Card 6: Export & Delivery */}
         <SectionCard
           title="导出与交付"
-          icon={<Share size={13} />}
+          icon={<Share16Regular className="w-3.5 h-3.5" />}
           trailing={
             <button
               type="button"
@@ -948,7 +945,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
               title="查看 Figma / FigJam 本地插件安装说明"
               className="inline-flex items-center gap-1 text-[10.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
             >
-              <Puzzle size={10.5} />
+              <PuzzlePiece16Regular className="w-3 h-3" />
               <span>插件指南</span>
             </button>
           }
@@ -959,9 +956,9 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
               disabled={isExporting}
               onClick={() => void triggerExportFigma()}
               title="导出 .charkleboard 文件，在 Figma / FigJam 中导入为独立可编辑图层"
-              className="charkle-pressable w-full px-2.5 py-2 rounded-[var(--radius-settings-inner)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11.5px] font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="charkle-pressable w-full px-2.5 py-2 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[11.5px] font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
-              <Layers size={13} className="shrink-0" />
+              <LayerDiagonal16Regular className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">导出到 Figma / FigJam（可编辑图层）</span>
             </button>
 
@@ -969,9 +966,9 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
               type="button"
               disabled={isExporting}
               onClick={() => void triggerCopyImage()}
-              className="charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--radius-settings-inner)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/18 text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/18 text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
-              <Clipboard size={12.5} className="shrink-0" />
+              <Clipboard16Regular className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">复制 2× 高清图（直接 Ctrl+V 粘贴）</span>
             </button>
 
@@ -980,7 +977,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                 type="button"
                 disabled={isExporting}
                 onClick={() => void triggerSaveImage('png')}
-                className="charkle-pressable h-7.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer disabled:opacity-50"
+                className="charkle-pressable win-control-elevation h-7.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer disabled:opacity-50"
               >
                 保存 PNG
               </button>
@@ -988,7 +985,7 @@ export const CandidatePoolPanel: React.FC<CandidatePoolPanelProps> = ({
                 type="button"
                 disabled={isExporting}
                 onClick={() => void triggerSaveImage('jpeg')}
-                className="charkle-pressable h-7.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer disabled:opacity-50"
+                className="charkle-pressable win-control-elevation h-7.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer disabled:opacity-50"
               >
                 保存 JPG
               </button>

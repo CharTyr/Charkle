@@ -10,6 +10,7 @@ import { TopFilterCapsule } from '../features/gallery/TopFilterCapsule';
 import { VerticalMasonryView } from '../features/gallery/VerticalMasonryView';
 import { JumpAnywhereModal } from '../features/jump/JumpAnywhereModal';
 import { MoodboardStudioView } from '../features/moodboard/MoodboardStudioView';
+import { SidebarView } from '../features/sidebar/SidebarView';
 import {
   DEFAULT_INSPECTOR_CARD_ORDER,
   useCoordinatorStore,
@@ -315,7 +316,7 @@ describe('Round 7 — Moodboard Removal, Multi-Select Portal Isolation & Liquid 
 
       // Undo toast appears and clicking "撤销" restores the locked node
       const toastMsg = await screen.findByText('已从情绪板移除 1 项');
-      const toastCard = toastMsg.closest<HTMLElement>('.charkle-toast-item');
+      const toastCard = toastMsg.closest<HTMLElement>('.win-acrylic');
       expect(toastCard).not.toBeNull();
       const undoBtn = within(toastCard!).getByRole('button', { name: '撤销' });
       realPointerClick(undoBtn);
@@ -737,25 +738,25 @@ describe('Round 7 — Moodboard Removal, Multi-Select Portal Isolation & Liquid 
   });
 
   // =========================================================================
-  // 3. Search & Dense-Text Liquid Glass Legibility
+  // 3. Fluent 2 Acrylic Surfaces, Single Sidebar Search & Strict Transparency Fallback
   // =========================================================================
-  describe('Search & Dense-Text Liquid Glass Legibility', () => {
-    it('JumpAnywhereModal uses studio-frost charkle-command-palette with data-no-lens="true" and no overridden bg-[var(--bg-elevated)]/95', async () => {
+  describe('Fluent 2 Acrylic Surfaces, Sidebar Search & Transparency Fallbacks', () => {
+    it('JumpAnywhereModal uses Fluent 2 .win-acrylic with .win-smoke-scrim and zero legacy glass classes', async () => {
       useCoordinatorStore.setState({ jumpOpen: true });
       render(<JumpAnywhereModal />);
 
       const panel = await screen.findByTestId('jump-anywhere-modal');
-      await waitFor(() => {
-        expect(panel.getAttribute('data-no-lens')).toBe('true');
-      });
-      expect(panel.className).toContain('charkle-glass');
-      expect(panel.className).toContain('charkle-command-palette');
+      expect(panel.className).toContain('win-acrylic');
+      expect(panel.className).not.toContain('charkle-glass');
       expect(panel.className).not.toContain('bg-[var(--bg-elevated)]/95');
+      expect(panel.getAttribute('data-no-lens')).toBeNull();
+      expect(document.querySelector('.win-smoke-scrim')).not.toBeNull();
     });
 
-    it('ToastHost, visual-filter-bar, ring-tuning-panel carry data-no-lens="true" + studio-frost classes, and TopFilterCapsule search pill carries charkle-search-capsule', () => {
-      const sampleAsset = makeAsset('GLASS-A', 'Glass Legibility Sample');
+    it('ToastHost & ring-tuning-panel use .win-acrylic, visual-filter-bar uses elevated Fluent card, and single search lives in SidebarView (not TopFilterCapsule)', () => {
+      const sampleAsset = makeAsset('GLASS-A', 'Fluent Legibility Sample');
       useCoordinatorStore.setState({
+        sidebarCollapsed: false,
         visualFilterBarOpen: true,
         toasts: [
           {
@@ -772,66 +773,83 @@ describe('Round 7 — Moodboard Removal, Multi-Select Portal Isolation & Liquid 
         allAssets: [sampleAsset],
       });
 
-      render(
+      const { container } = render(
         <>
+          <SidebarView />
           <ToastHost />
-          <TopFilterCapsule />
+          <div data-testid="top-filter-host">
+            <TopFilterCapsule />
+          </div>
           <GalleryRingView assets={[sampleAsset]} />
         </>,
       );
 
-      // ToastHost card
-      const toastCard = document.querySelector<HTMLElement>('.charkle-toast-item');
+      // ToastHost card uses Fluent 2 .win-acrylic
+      const toastMsg = screen.getByText('已移至回收站 (3 项)');
+      const toastCard = toastMsg.closest<HTMLElement>('.win-acrylic');
       expect(toastCard).not.toBeNull();
-      expect(toastCard!.getAttribute('data-no-lens')).toBe('true');
-      expect(toastCard!.className).toContain('charkle-toast-glass');
+      expect(toastCard!.getAttribute('data-no-lens')).toBeNull();
 
-      // TopFilterCapsule search capsule + visual-filter-bar
-      const searchInput = screen.getByRole('textbox', { name: '搜索素材' });
-      const searchCapsule = searchInput.closest<HTMLElement>('.charkle-search-capsule');
-      expect(searchCapsule).not.toBeNull();
-      expect(searchCapsule!.className).toContain('charkle-glass');
+      // Single global search input lives inside SidebarView with .win-input-elevation (zero search input in TopFilterCapsule)
+      const searchInputs = screen.getAllByRole('textbox', { name: '搜索素材' });
+      expect(searchInputs).toHaveLength(1);
+      const sidebar = container.querySelector('aside[aria-label="主导航侧边栏"]')!;
+      expect(sidebar.contains(searchInputs[0])).toBe(true);
+      expect(searchInputs[0].closest('.win-input-elevation')).not.toBeNull();
+      const topFilterHost = screen.getByTestId('top-filter-host');
+      expect(within(topFilterHost).queryByRole('textbox', { name: '搜索素材' })).toBeNull();
 
+      // Visual filter bar uses crisp elevated Fluent card
       const filterBar = screen.getByTestId('visual-filter-bar');
-      expect(filterBar.getAttribute('data-no-lens')).toBe('true');
-      expect(filterBar.className).toContain('charkle-glass-panel');
+      expect(filterBar.className).toContain('bg-[var(--bg-elevated)]');
       expect(filterBar.getAttribute('data-adapt-glass')).toBeNull();
 
-      // Ring tuning panel
+      // Ring tuning panel uses Fluent 2 .win-acrylic
       const tuningToggle = screen.getByTestId('ring-tuning-toggle');
       realPointerClick(tuningToggle);
       const tuningPanel = screen.getByTestId('ring-tuning-panel');
-      expect(tuningPanel.getAttribute('data-no-lens')).toBe('true');
-      expect(tuningPanel.className).toContain('charkle-glass-panel');
+      expect(tuningPanel.className).toContain('win-acrylic');
       expect(tuningPanel.getAttribute('data-adapt-glass')).toBeNull();
     });
 
-    it('tokens.css defines all 5 dense-text & search studio-frost classes strictly AFTER @media (prefers-reduced-transparency: reduce)', async () => {
+    it('tokens.css enforces backdrop-filter: none under prefers-reduced-transparency and solidFallback with zero liquidGlassLens', async () => {
       const css = await loadTokensCss();
       const rtmMarker = '@media (prefers-reduced-transparency: reduce)';
       const rtmIdx = css.indexOf(rtmMarker);
       expect(rtmIdx).toBeGreaterThan(-1);
 
-      const requiredSelectors = [
-        '.charkle-command-palette.charkle-glass',
-        '.charkle-popover-panel.charkle-glass',
-        '.charkle-glass-panel.charkle-glass',
-        '.charkle-toast-glass.charkle-glass',
-        '.charkle-search-capsule.charkle-glass',
-      ];
+      // Extract the reduced-transparency block and verify explicit backdrop-filter: none
+      const solidFallbackIdx = css.indexOf(':root[data-backdrop="solidFallback"] .win-acrylic');
+      expect(solidFallbackIdx).toBeGreaterThan(rtmIdx);
 
-      for (const selector of requiredSelectors) {
-        const blockToken = `${selector} {`;
-        const idx = css.indexOf(blockToken);
-        expect(idx, `${blockToken} should exist in tokens.css`).toBeGreaterThan(-1);
-        expect(
-          idx,
-          `${blockToken} must be declared AFTER ${rtmMarker} so Windows Transparency Off never resets its legibility floor`,
-        ).toBeGreaterThan(rtmIdx);
-      }
+      const reducedTransparencySlice = css.slice(rtmIdx, solidFallbackIdx);
+      expect(reducedTransparencySlice).toContain('.win-acrylic');
+      expect(reducedTransparencySlice).toContain('.win-acrylic-header');
+      expect(reducedTransparencySlice).toContain('.win-acrylic-dark');
+      expect(reducedTransparencySlice).toContain('backdrop-filter: none');
 
-      // Ensure adaptive floor clamp --m-floor-min is honored in --tint-a
-      expect(css).toContain('var(--m-floor-min, 0)');
+      const solidFallbackSlice = css.slice(solidFallbackIdx, solidFallbackIdx + 1400);
+      expect(solidFallbackSlice).toContain('.win-acrylic');
+      expect(solidFallbackSlice).toContain('.win-acrylic-header');
+      expect(solidFallbackSlice).toContain('.win-acrylic-dark');
+      expect(solidFallbackSlice).toContain('backdrop-filter: none');
+
+      // Retired liquidGlassLens / .charkle-glass legacy selectors are gone
+      expect(css).not.toContain('.charkle-glass');
+      expect(css).not.toContain('charkle-command-palette');
+      expect(css).not.toContain('--m-floor-min');
+
+      const fsSpec = 'node:fs';
+      const pathSpec = 'node:path';
+      const fs = (await import(/* @vite-ignore */ fsSpec)) as {
+        existsSync: (filePath: string) => boolean;
+      };
+      const path = (await import(/* @vite-ignore */ pathSpec)) as {
+        resolve: (...segments: string[]) => string;
+      };
+      const cwd = (globalThis as { process?: { cwd: () => string } }).process?.cwd() ?? '.';
+      const retiredLensPath = path.resolve(cwd, 'src/design-system', `${'liquid'}${'GlassLens'}.ts`);
+      expect(fs.existsSync(retiredLensPath)).toBe(false);
     });
   });
 });

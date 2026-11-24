@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, FolderUp, Link2, Palette } from 'lucide-react';
+import {
+  Color16Regular,
+  DocumentText16Regular,
+  FolderArrowUp16Regular,
+  FolderArrowUp24Regular,
+  Link16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -209,11 +215,11 @@ export const QuickCaptureModal: React.FC = () => {
       footer={
         tab !== 'files' ? (
           <>
-            <Button variant="secondary" onClick={() => setOpen(false)}>
+            <Button variant="standard" onClick={() => setOpen(false)}>
               取消
             </Button>
             <Button
-              variant="primary"
+              variant="accent"
               loading={submitting}
               disabled={!canSubmitForm}
               onClick={() => void submitCurrentTab()}
@@ -230,10 +236,18 @@ export const QuickCaptureModal: React.FC = () => {
             value={tab}
             onChange={setTab}
             options={[
-              { value: 'files', label: '本地文件', icon: <FolderUp size={13} /> },
-              { value: 'url', label: '网页链接', icon: <Link2 size={13} /> },
-              { value: 'text', label: '文本笔记', icon: <FileText size={13} /> },
-              { value: 'swatch', label: '色卡', icon: <Palette size={13} /> },
+              {
+                value: 'files',
+                label: '本地文件',
+                icon: <FolderArrowUp16Regular className="w-3.5 h-3.5" />,
+              },
+              { value: 'url', label: '网页链接', icon: <Link16Regular className="w-3.5 h-3.5" /> },
+              {
+                value: 'text',
+                label: '文本笔记',
+                icon: <DocumentText16Regular className="w-3.5 h-3.5" />,
+              },
+              { value: 'swatch', label: '色卡', icon: <Color16Regular className="w-3.5 h-3.5" /> },
             ]}
           />
 
@@ -248,15 +262,15 @@ export const QuickCaptureModal: React.FC = () => {
         </div>
 
         {tab === 'files' && (
-          <div className="py-8 px-6 rounded-[var(--radius-settings-outer)] border border-dashed border-[var(--border-strong)] bg-[var(--bg-gallery)] flex flex-col items-center justify-center gap-3 text-center">
-            <FolderUp size={28} className="text-[var(--accent)]" />
+          <div className="py-8 px-6 rounded-[var(--win-radius-card)] border border-dashed border-[var(--border-strong)] bg-[var(--bg-gallery)] flex flex-col items-center justify-center gap-3 text-center">
+            <FolderArrowUp24Regular className="w-7 h-7 text-[var(--accent)]" />
             <div className="text-[13.5px] font-medium text-[var(--text-primary)]">
               选择图片、视频、音频、PDF、文档或 3D 模型
             </div>
             <p className="text-[12px] text-[var(--text-secondary)]">
               也可直接将文件拖入画廊，或按 Ctrl+V 粘贴剪贴板图片与链接。
             </p>
-            <Button variant="primary" loading={submitting} onClick={() => void handlePickFiles()}>
+            <Button variant="accent" loading={submitting} onClick={() => void handlePickFiles()}>
               选择文件…
             </Button>
           </div>
@@ -280,7 +294,7 @@ export const QuickCaptureModal: React.FC = () => {
                   setSubmitError(null);
                 }}
                 placeholder="https://... 或直接粘贴小红书 / 推文 / GitHub 分享内容"
-                className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
               {urlHasInput && extractedUrl && extractedUrl !== url.trim() && (
                 <p className="text-[11px] text-[var(--accent)] truncate">
@@ -302,7 +316,7 @@ export const QuickCaptureModal: React.FC = () => {
                 value={urlTitle}
                 onChange={(e) => setUrlTitle(e.target.value)}
                 placeholder="自定义标题…"
-                className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
             </div>
             <div className="flex flex-col gap-1">
@@ -314,7 +328,7 @@ export const QuickCaptureModal: React.FC = () => {
                 value={urlNotes}
                 onChange={(e) => setUrlNotes(e.target.value)}
                 placeholder="记录参考说明…"
-                className="p-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] resize-none"
+                className="win-input-elevation p-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none resize-none"
               />
             </div>
           </form>
@@ -332,7 +346,7 @@ export const QuickCaptureModal: React.FC = () => {
                 value={textTitle}
                 onChange={(e) => setTextTitle(e.target.value)}
                 placeholder="例如：排版原则笔记…"
-                className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
             </div>
             <div className="flex flex-col gap-1">
@@ -348,7 +362,7 @@ export const QuickCaptureModal: React.FC = () => {
                   setSubmitError(null);
                 }}
                 placeholder="支持 Markdown 标题、列表与代码块…"
-                className="p-2.5 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[12.5px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] charkle-mono"
+                className="win-input-elevation p-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none charkle-mono"
               />
             </div>
           </form>
@@ -366,7 +380,7 @@ export const QuickCaptureModal: React.FC = () => {
                   setSubmitError(null);
                 }}
                 aria-label="选择颜色"
-                className="h-12 w-16 rounded-[var(--radius-settings-inner)] border border-[var(--border-hairline)] cursor-pointer bg-transparent"
+                className="h-12 w-16 rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] cursor-pointer bg-transparent"
               />
               <div className="flex-1 flex flex-col gap-1">
                 <label className="text-[12px] font-medium text-[var(--text-secondary)]">
@@ -386,7 +400,7 @@ export const QuickCaptureModal: React.FC = () => {
                     }
                   }}
                   placeholder="#2A60E0"
-                  className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] charkle-mono text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] charkle-mono text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
                 />
               </div>
             </div>
@@ -404,7 +418,7 @@ export const QuickCaptureModal: React.FC = () => {
                 value={swatchTitle}
                 onChange={(e) => setSwatchTitle(e.target.value)}
                 placeholder="例如：暖石膏、深海蓝…"
-                className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                className="win-input-elevation h-9 px-3 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
               />
             </div>
           </form>
@@ -413,7 +427,7 @@ export const QuickCaptureModal: React.FC = () => {
         {submitError && (
           <div
             role="alert"
-            className="px-3 py-2 rounded-[var(--radius-settings-inner)] bg-[var(--danger)]/10 border border-[var(--danger)]/25 text-[12px] text-[var(--danger)]"
+            className="px-3 py-2 rounded-[var(--win-radius-control)] bg-[var(--danger)]/10 border border-[var(--danger)]/25 text-[12px] text-[var(--danger)]"
           >
             {submitError}
           </div>

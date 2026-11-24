@@ -1,17 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownCircle,
-  Box,
-  FileText,
-  Film,
-  Globe,
-  Image as ImageIcon,
-  Music,
-  Pencil,
-  Plus,
-  Star,
-  Trash2,
-} from 'lucide-react';
+  Add16Regular,
+  ArrowCircleDown16Regular,
+  Cube16Regular,
+  Delete16Regular,
+  DocumentText16Regular,
+  Edit16Regular,
+  Filmstrip16Regular,
+  Globe16Regular,
+  Image16Regular,
+  MusicNote216Regular,
+  Star16Filled,
+  Star16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   BoardLoadingSkeleton,
@@ -40,17 +41,17 @@ function renderMosaicFallbackIcon(kind: AssetRecord['mediaKind'] | undefined) {
   switch (kind) {
     case 'video':
     case 'animatedImage':
-      return <Film size={16} strokeWidth={1.6} />;
+      return <Filmstrip16Regular className="w-4 h-4" />;
     case 'audio':
-      return <Music size={16} strokeWidth={1.6} />;
+      return <MusicNote216Regular className="w-4 h-4" />;
     case 'document':
-      return <FileText size={16} strokeWidth={1.6} />;
+      return <DocumentText16Regular className="w-4 h-4" />;
     case 'webBookmark':
-      return <Globe size={16} strokeWidth={1.6} />;
+      return <Globe16Regular className="w-4 h-4" />;
     case 'model3D':
-      return <Box size={16} strokeWidth={1.6} />;
+      return <Cube16Regular className="w-4 h-4" />;
     default:
-      return <ImageIcon size={16} strokeWidth={1.6} />;
+      return <Image16Regular className="w-4 h-4" />;
   }
 }
 
@@ -178,7 +179,7 @@ export const MoodboardsHome: React.FC = () => {
     }
     if (openBoardFailedId === destination.id) {
       return (
-        <div className="charkle-gallery-surface flex-1 min-w-0 min-h-0 flex flex-col items-center justify-center gap-3 bg-[var(--bg-gallery)] p-6 text-center">
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col items-center justify-center gap-3 bg-[var(--bg-gallery)] p-6 text-center">
           <EmptyStateVignette kind="emptyMoodboards" compact />
           <div className="text-[14px] font-semibold text-[var(--text-primary)]">
             未找到该情绪板
@@ -187,7 +188,7 @@ export const MoodboardsHome: React.FC = () => {
             该情绪板可能已被删除或尚未同步完成。
           </p>
           <Button
-            variant="secondary"
+            variant="standard"
             size="sm"
             onClick={() => setDestination({ type: 'moodboardsHome' })}
           >
@@ -199,7 +200,7 @@ export const MoodboardsHome: React.FC = () => {
     return (
       <div
         data-testid="moodboard-loading-stage"
-        className="charkle-gallery-surface flex-1 min-w-0 min-h-0 flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
+        className="flex-1 min-w-0 min-h-0 flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
       >
         {showBoardSkeleton && <BoardLoadingSkeleton />}
       </div>
@@ -254,14 +255,14 @@ export const MoodboardsHome: React.FC = () => {
   return (
     <div
       data-testid="moodboards-home"
-      className="charkle-gallery-surface flex-1 min-w-0 min-h-0 flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
+      className="flex-1 min-w-0 min-h-0 flex flex-col bg-[var(--bg-gallery)] overflow-hidden"
     >
       <div className="flex-1 overflow-y-auto charkle-scroll p-6">
         <div className="flex flex-col gap-5">
           {/* Header (matching macOS MainWindowView.moodboardsHomeStage) */}
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="min-w-0">
-              <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-[var(--text-primary)]">
+              <h1 className="win-display-title text-[var(--text-primary)]">
                 情绪板创作台
               </h1>
               <p className="text-[12.5px] text-[var(--text-secondary)] mt-0.5">
@@ -270,17 +271,17 @@ export const MoodboardsHome: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
-              <Button variant="secondary" size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus size={14} />
+              <Button variant="standard" size="sm" onClick={() => setCreateOpen(true)}>
+                <Add16Regular className="w-3.5 h-3.5" />
                 新建空白板
               </Button>
               <Button
-                variant="primary"
+                variant="accent"
                 size="sm"
                 aria-label="4+1 智能生成"
                 onClick={() => setGeneratorOpen(true)}
               >
-                <CharkleIcon name="sparkle-board" style="duotone" size={14} tintHex="#FFFFFF" />
+                <CharkleIcon name="sparkle-board" style="duotone" size={14} />
                 智能生成
               </Button>
             </div>
@@ -296,12 +297,12 @@ export const MoodboardsHome: React.FC = () => {
                 通过灵感词、种子图或主色板生成首张可编辑情绪板，或新建一块空白自由画布。
               </p>
               <div className="flex items-center gap-2.5 pt-0.5">
-                <Button variant="secondary" size="sm" onClick={() => setCreateOpen(true)}>
-                  <Plus size={14} />
+                <Button variant="standard" size="sm" onClick={() => setCreateOpen(true)}>
+                  <Add16Regular className="w-3.5 h-3.5" />
                   新建空白板
                 </Button>
-                <Button variant="primary" size="sm" onClick={() => setGeneratorOpen(true)}>
-                  <CharkleIcon name="sparkle-board" style="duotone" size={14} tintHex="#FFFFFF" />
+                <Button variant="accent" size="sm" onClick={() => setGeneratorOpen(true)}>
+                  <CharkleIcon name="sparkle-board" style="duotone" size={14} />
                   智能生成情绪板
                 </Button>
               </div>
@@ -315,7 +316,7 @@ export const MoodboardsHome: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setGeneratorOpen(true)}
-                className="charkle-pressable rounded-[16px] bg-[var(--bg-elevated)] border-[1.25px] border-dashed border-[var(--accent)]/35 hover:border-[var(--accent)] p-[18px] min-h-[220px] flex flex-col items-center justify-center gap-2.5 text-center cursor-pointer transition-colors duration-150"
+                className="charkle-pressable rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-dashed border-[var(--accent)]/40 hover:border-[var(--accent)] p-[18px] min-h-[220px] flex flex-col items-center justify-center gap-2.5 text-center cursor-pointer transition-colors duration-150"
               >
                 <CharkleIcon name="sparkle-board" style="layered" size={42} />
                 <div className="text-[14px] font-semibold text-[var(--text-primary)]">
@@ -338,10 +339,10 @@ export const MoodboardsHome: React.FC = () => {
                   <div
                     key={board.id}
                     onClick={() => setDestination({ type: 'moodboard', id: board.id })}
-                    className="group rounded-[16px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] hover:border-[var(--border-strong)] p-3 cursor-pointer flex flex-col gap-2.5 shadow-[0_3px_10px_rgba(0,0,0,0.04)] transition-colors duration-150"
+                    className="group rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] hover:border-[var(--border-strong)] p-3 cursor-pointer flex flex-col gap-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] transition-colors duration-150"
                   >
                     {/* True 2×2 Preview Mosaic (h-[132px], resilient to deleted/swatch assets) */}
-                    <div className="relative h-[132px] rounded-[10px] bg-[var(--bg-subtle)] overflow-hidden">
+                    <div className="relative h-[132px] rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)] overflow-hidden">
                       {previewIds.length === 0 ? (
                         <div className="w-full h-full flex items-center justify-center">
                           <CharkleIcon
@@ -352,7 +353,7 @@ export const MoodboardsHome: React.FC = () => {
                           />
                         </div>
                       ) : previewIds.length === 1 ? (
-                        <div className="w-full h-full overflow-hidden rounded-[4px]">
+                        <div className="w-full h-full overflow-hidden rounded-[var(--win-radius-control)]">
                           <BoardMosaicTile
                             assetId={previewIds[0]}
                             asset={assetsById.get(previewIds[0])}
@@ -362,7 +363,7 @@ export const MoodboardsHome: React.FC = () => {
                       ) : previewIds.length === 2 ? (
                         <div className="grid grid-cols-2 gap-[3px] h-full">
                           {previewIds.map((aid) => (
-                            <div key={aid} className="min-h-0 overflow-hidden rounded-[4px]">
+                            <div key={aid} className="min-h-0 overflow-hidden rounded-[var(--win-radius-control)]">
                               <BoardMosaicTile
                                 assetId={aid}
                                 asset={assetsById.get(aid)}
@@ -374,7 +375,7 @@ export const MoodboardsHome: React.FC = () => {
                       ) : (
                         <div className="grid grid-cols-2 grid-rows-2 gap-[3px] h-full">
                           {previewIds.map((aid) => (
-                            <div key={aid} className="min-h-0 overflow-hidden rounded-[4px]">
+                            <div key={aid} className="min-h-0 overflow-hidden rounded-[var(--win-radius-control)]">
                               <BoardMosaicTile
                                 assetId={aid}
                                 asset={assetsById.get(aid)}
@@ -383,7 +384,7 @@ export const MoodboardsHome: React.FC = () => {
                             </div>
                           ))}
                           {previewIds.length === 3 && (
-                            <div className="min-h-0 rounded-[4px] bg-[var(--bg-subtle)]" />
+                            <div className="min-h-0 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]" />
                           )}
                         </div>
                       )}
@@ -394,7 +395,7 @@ export const MoodboardsHome: React.FC = () => {
                         {paletteHexes.slice(0, 6).map((hex) => (
                           <span
                             key={hex}
-                            className="h-2 flex-1 rounded-[3px]"
+                            className="h-2 flex-1 rounded-[2px]"
                             style={{ backgroundColor: hex }}
                           />
                         ))}
@@ -408,7 +409,7 @@ export const MoodboardsHome: React.FC = () => {
                             {board.title}
                           </span>
                           {isActiveTarget && (
-                            <span className="px-1.5 py-0.5 rounded-full bg-[var(--success-soft)] text-[var(--success)] text-[10px] font-semibold shrink-0">
+                            <span className="px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--success-soft)] text-[var(--success)] text-[10px] font-semibold shrink-0">
                               活跃板
                             </span>
                           )}
@@ -429,9 +430,9 @@ export const MoodboardsHome: React.FC = () => {
                             e.stopPropagation();
                             openRenameModal(board);
                           }}
-                          className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--radius-card-inner)] text-[var(--text-tertiary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)] cursor-pointer"
+                          className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-tertiary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)] cursor-pointer"
                         >
-                          <Pencil size={12} />
+                          <Edit16Regular className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
@@ -447,13 +448,17 @@ export const MoodboardsHome: React.FC = () => {
                             });
                           }}
                           className={[
-                            'charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--radius-card-inner)] cursor-pointer',
+                            'charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] cursor-pointer',
                             isActiveTarget
                               ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                              : 'text-[var(--text-tertiary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]',
+                              : 'text-[var(--text-tertiary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)]',
                           ].join(' ')}
                         >
-                          <Star size={12.5} className={isActiveTarget ? 'fill-current' : ''} />
+                          {isActiveTarget ? (
+                            <Star16Filled className="w-3.5 h-3.5" />
+                          ) : (
+                            <Star16Regular className="w-3.5 h-3.5" />
+                          )}
                         </button>
                         <button
                           type="button"
@@ -464,13 +469,13 @@ export const MoodboardsHome: React.FC = () => {
                             void setBoardPinnedOffline(board.id, !board.pinnedOffline);
                           }}
                           className={[
-                            'charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--radius-card-inner)] cursor-pointer',
+                            'charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] cursor-pointer',
                             board.pinnedOffline
                               ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                              : 'text-[var(--text-tertiary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]',
+                              : 'text-[var(--text-tertiary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)]',
                           ].join(' ')}
                         >
-                          <ArrowDownCircle size={12.5} />
+                          <ArrowCircleDown16Regular className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
@@ -480,9 +485,9 @@ export const MoodboardsHome: React.FC = () => {
                             deleteAnchorRef.current = e.currentTarget;
                             setDeletingId(board.id);
                           }}
-                          className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--radius-card-inner)] text-[var(--text-tertiary)] hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] cursor-pointer"
+                          className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-tertiary)] hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] cursor-pointer"
                         >
-                          <Trash2 size={12.5} />
+                          <Delete16Regular className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </div>
@@ -510,10 +515,10 @@ export const MoodboardsHome: React.FC = () => {
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={closeCreateModal}>
+            <Button variant="standard" onClick={closeCreateModal}>
               取消
             </Button>
-            <Button variant="primary" loading={creating} onClick={() => void handleCreateBlank()}>
+            <Button variant="accent" loading={creating} onClick={() => void handleCreateBlank()}>
               创建并进入画布
             </Button>
           </>
@@ -531,7 +536,7 @@ export const MoodboardsHome: React.FC = () => {
                 if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleCreateBlank();
               }}
               placeholder="例如：春季海报材质与配色…"
-              className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[13px] text-[var(--text-primary)] outline-none"
             />
           </div>
           <div className="flex flex-col gap-1">
@@ -544,7 +549,7 @@ export const MoodboardsHome: React.FC = () => {
                 if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleCreateBlank();
               }}
               placeholder="补充创作方向或氛围备注…"
-              className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[13px] text-[var(--text-primary)] outline-none"
             />
           </div>
         </div>
@@ -557,11 +562,11 @@ export const MoodboardsHome: React.FC = () => {
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={closeRenameModal}>
+            <Button variant="standard" onClick={closeRenameModal}>
               取消
             </Button>
             <Button
-              variant="primary"
+              variant="accent"
               loading={renaming}
               disabled={!renameTitleDraft.trim()}
               onClick={() => void handleCommitRename()}
@@ -585,7 +590,7 @@ export const MoodboardsHome: React.FC = () => {
                 }
               }}
               placeholder="输入情绪板名称…"
-              className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[13px] text-[var(--text-primary)] outline-none"
             />
           </div>
           <div className="flex flex-col gap-1">
@@ -600,7 +605,7 @@ export const MoodboardsHome: React.FC = () => {
                 }
               }}
               placeholder="补充创作方向或氛围备注…"
-              className="h-9 px-3 rounded-[var(--radius-settings-inner)] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[13px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+              className="win-input-elevation h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[13px] text-[var(--text-primary)] outline-none"
             />
           </div>
         </div>

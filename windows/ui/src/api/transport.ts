@@ -88,6 +88,7 @@ export interface CharkleEventHandlers {
   onMainOpenAsset?: (payload: { assetId: string; openQuickLook: boolean }) => void;
   onDeepLinkNavigate?: (payload: DeepLinkPayload) => void;
   onMoodboardAgentStep?: (step: MoodboardAgentStep) => void;
+  onSurfaceState?: (state: WindowSurfaceState) => void;
 }
 
 export interface CharkleTransport {
@@ -936,6 +937,13 @@ export class TauriTransport implements CharkleTransport {
       registrations.push(() =>
         listen<MoodboardAgentStep>('moodboard:agent-step', (e) => {
           if (!disposed) handlers.onMoodboardAgentStep?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onSurfaceState) {
+      registrations.push(() =>
+        listen<WindowSurfaceState>('charkle://surface-changed', (e) => {
+          if (!disposed) handlers.onSurfaceState?.(e.payload);
         }),
       );
     }
@@ -1851,6 +1859,9 @@ export class InMemoryMockTransport implements CharkleTransport {
     return { ok: true, message: '连接成功，远程目录可正常访问。' };
   }
 
+  public mockSystemAccentHex: string | null = '#0078D4';
+  private surfaceListeners = new Set<(state: WindowSurfaceState) => void>();
+
   async setWindowTheme(isDark: boolean): Promise<WindowSurfaceState> {
     return {
       buildNumber: 22631,
@@ -1859,6 +1870,7 @@ export class InMemoryMockTransport implements CharkleTransport {
       transparencyEnabled: true,
       animationsEnabled: true,
       snapLayoutsSupported: true,
+      systemAccentHex: this.mockSystemAccentHex,
     };
   }
 
@@ -2449,7 +2461,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.0.1',
+      appVersion: '1.2.0',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -2568,8 +2580,26 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async setShelfAllowActivate(): Promise<void> {}
 
-  async subscribeEvents(): Promise<() => void> {
-    return () => {};
+  async subscribeEvents(handlers?: CharkleEventHandlers): Promise<() => void> {
+    const surfaceHandler = handlers?.onSurfaceState;
+    if (surfaceHandler) {
+      this.surfaceListeners.add(surfaceHandler);
+    }
+    return () => {
+      if (surfaceHandler) {
+        this.surfaceListeners.delete(surfaceHandler);
+      }
+    };
+  }
+
+  /** Helper for tests simulating live Windows DWM surface/accent changes. */
+  emitSurfaceState(state: WindowSurfaceState): void {
+    if (state.systemAccentHex !== undefined) {
+      this.mockSystemAccentHex = state.systemAccentHex;
+    }
+    for (const listener of this.surfaceListeners) {
+      listener(state);
+    }
   }
 
   /** Helper for tests inspecting smart folder evaluation. */

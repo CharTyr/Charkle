@@ -1,24 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownCircle,
-  ChevronLeft,
-  ChevronRight,
-  Cloud,
-  Copy,
-  ExternalLink,
-  Eye,
-  FlipHorizontal2,
-  FlipVertical2,
-  FolderInput,
-  FolderOpen,
-  LayoutGrid,
-  RotateCcw,
-  RotateCw,
-  Star,
-  Trash2,
-  ZoomIn,
-  ZoomOut,
-} from 'lucide-react';
+  ArrowClockwise16Regular,
+  ArrowCounterclockwise16Regular,
+  ArrowDownload16Regular,
+  ArrowUndo16Regular,
+  Board16Regular,
+  ChevronLeft20Regular,
+  ChevronRight16Regular,
+  ChevronRight20Regular,
+  Cloud16Regular,
+  Copy16Regular,
+  Delete16Regular,
+  Eye16Regular,
+  FlipHorizontal16Regular,
+  FlipVertical16Regular,
+  FolderArrowRight16Regular,
+  FolderOpen16Regular,
+  Open16Regular,
+  Star16Filled,
+  Star16Regular,
+  ZoomIn16Regular,
+  ZoomOut16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -53,7 +56,7 @@ export interface GalleryFilmstripViewProps {
  * Gallery Filmstrip View with 1:1 macOS `GalleryFilmstripView.swift` parity:
  * - Full rich multi-format preview stage (Images, GIF, Video, Audio, PDF, 3D, Markdown, GitHub, Social Posts, Swatches, Bookmarks)
  * - Direct wheel zoom, drag-to-pan when zoomed, double-click 100% <-> 200%, ±90° rotate (quarter-turn fit), H/V flip
- * - Floating `.charkle-glass rounded-full` preview controls pill + metadata & interactive 1–5 star strip
+ * - Floating `.win-acrylic` preview controls bar + metadata & interactive 1–5 star strip
  * - Proportional bottom filmstrip thumbnails with vertical-wheel-to-horizontal scroll & full right-click context menu
  */
 const FilmstripThumbVisual: React.FC<{ item: AssetRecord; src: string }> = ({ item, src }) => {
@@ -319,26 +322,6 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
   useEffect(() => {
     setFallbackThumb(false);
   }, [activeAsset?.id, activeAsset?.updatedAt]);
-
-  // Re-sample floating Liquid Glass pills whenever stage artwork zooms, pans, rotates, or switches
-  useEffect(() => {
-    window.dispatchEvent(new Event('charkle:glass-resample'));
-    if (!isPanning) {
-      const timer = window.setTimeout(() => {
-        window.dispatchEvent(new Event('charkle:glass-resample'));
-      }, 260);
-      return () => window.clearTimeout(timer);
-    }
-    return undefined;
-  }, [
-    activeAsset?.id,
-    activeAsset?.updatedAt,
-    zoomScale,
-    panOffset.x,
-    panOffset.y,
-    rotationDegrees,
-    isPanning,
-  ]);
 
   // Measure preview stage size for quarter-turn fit
   useEffect(() => {
@@ -625,19 +608,17 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
               {activeAsset.sourceURL && (
                 <button
                   type="button"
-                  data-pill="true"
-                  data-adapt-glass="true"
                   onClick={() => openExternalBookmark(activeAsset)}
-                  className="charkle-pressable charkle-glass shrink-0 max-w-[min(560px,90%)] rounded-full px-3.5 py-1.5 inline-flex items-center gap-2 text-[12px] text-[var(--text-primary)] cursor-pointer"
+                  className="charkle-pressable win-acrylic shrink-0 max-w-[min(560px,90%)] rounded-[var(--win-radius-overlay)] px-3.5 py-1.5 inline-flex items-center gap-2 text-[12px] text-[var(--text-primary)] cursor-pointer"
                 >
                   <span
                     className="h-2 w-2 rounded-full shrink-0"
                     style={{ backgroundColor: accentHex }}
                   />
                   <span className="font-semibold charkle-mono truncate">{domain}</span>
-                  <span className="h-3 w-px bg-[var(--border-hairline)] shrink-0" />
+                  <span className="h-3 w-px bg-[var(--win-stroke-divider)] shrink-0" />
                   <span className="inline-flex items-center gap-1 font-medium text-[var(--accent)] shrink-0">
-                    <ExternalLink size={12} />
+                    <Open16Regular className="w-3.5 h-3.5" />
                     在默认浏览器中打开
                   </span>
                 </button>
@@ -648,7 +629,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
         return (
           <div
             onDoubleClick={() => openExternalBookmark(activeAsset)}
-            className="w-full max-w-[600px] p-6 rounded-[var(--radius-popover-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_14px_36px_rgba(0,0,0,0.14)] flex flex-col gap-3.5 select-text"
+            className="w-full max-w-[600px] p-6 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] shadow-[0_14px_36px_rgba(0,0,0,0.14)] flex flex-col gap-3.5 select-text"
           >
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 min-w-0">
@@ -662,11 +643,11 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
               </div>
               {activeAsset.sourceURL && (
                 <Button
-                  variant="primary"
+                  variant="accent"
                   size="xs"
                   onClick={() => openExternalBookmark(activeAsset)}
                 >
-                  <ExternalLink size={12} />
+                  <Open16Regular className="w-3.5 h-3.5" />
                   在默认浏览器中打开
                 </Button>
               )}
@@ -792,6 +773,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
       >
         <div
           ref={stageRef}
+          data-asset-card-id={activeAsset.id}
           style={{ paddingTop: topInset + 8 }}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -812,7 +794,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
           {renderStageMedia()}
         </div>
 
-        {/* Left / Right Liquid Glass Stepping Chevrons */}
+        {/* Left / Right Fluent Acrylic Stepping Chevrons */}
         {assets.length > 1 && (
           <>
             <button
@@ -820,11 +802,9 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
               aria-label="上一项"
               disabled={!prevAsset}
               onClick={() => prevAsset && selectAsset(prevAsset.id, orderedIds)}
-              data-pill="true"
-              data-adapt-glass="true"
-              className="charkle-pressable charkle-glass absolute left-3.5 top-1/2 -translate-y-1/2 z-10 h-[34px] w-[34px] rounded-full inline-flex items-center justify-center text-[var(--text-primary)] cursor-pointer disabled:opacity-25 disabled:cursor-default"
+              className="charkle-pressable win-acrylic absolute left-3.5 top-1/2 -translate-y-1/2 z-10 h-9 w-9 rounded-[var(--win-radius-overlay)] inline-flex items-center justify-center text-[var(--text-primary)] cursor-pointer disabled:opacity-25 disabled:cursor-default"
             >
-              <ChevronLeft size={16} />
+              <ChevronLeft20Regular className="w-5 h-5" />
             </button>
 
             <button
@@ -832,23 +812,17 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
               aria-label="下一项"
               disabled={!nextAsset}
               onClick={() => nextAsset && selectAsset(nextAsset.id, orderedIds)}
-              data-pill="true"
-              data-adapt-glass="true"
-              className="charkle-pressable charkle-glass absolute right-3.5 top-1/2 -translate-y-1/2 z-10 h-[34px] w-[34px] rounded-full inline-flex items-center justify-center text-[var(--text-primary)] cursor-pointer disabled:opacity-25 disabled:cursor-default"
+              className="charkle-pressable win-acrylic absolute right-3.5 top-1/2 -translate-y-1/2 z-10 h-9 w-9 rounded-[var(--win-radius-overlay)] inline-flex items-center justify-center text-[var(--text-primary)] cursor-pointer disabled:opacity-25 disabled:cursor-default"
             >
-              <ChevronRight size={16} />
+              <ChevronRight20Regular className="w-5 h-5" />
             </button>
           </>
         )}
 
-        {/* Preview Controls Pill + Compact Metadata & Star Rating Strip */}
+        {/* Preview Controls Bar + Compact Metadata & Star Rating Strip */}
         <div className="relative z-20 shrink-0 flex flex-col items-center gap-1.5 px-4 pb-2.5 pt-1">
           {supportsVisualTransform && (
-            <div
-              data-pill="true"
-              data-adapt-glass="true"
-              className="charkle-glass rounded-full px-2.5 py-1 flex items-center gap-1.5 text-[11.5px]"
-            >
+            <div className="win-acrylic rounded-[var(--win-radius-overlay)] px-2 py-1 flex items-center gap-1.5 text-[12px]">
               {/* Zoom controls */}
               <div className="flex items-center gap-0.5">
                 <button
@@ -856,15 +830,15 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   title="缩小 (-)"
                   aria-label="缩小"
                   onClick={() => stepZoom(0.8)}
-                  className="charkle-pressable h-[26px] w-[26px] rounded-[var(--radius-chip)] inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
+                  className="charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <ZoomOut size={13} />
+                  <ZoomOut16Regular className="w-4 h-4" />
                 </button>
                 <button
                   type="button"
                   title="点击复位到 100% (0)"
                   onClick={resetViewTransform}
-                  className="px-1.5 min-w-[42px] text-center text-[11px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)] cursor-pointer"
+                  className="px-1.5 min-w-[42px] text-center text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)] cursor-pointer"
                 >
                   {Math.round(zoomScale * 100)}%
                 </button>
@@ -873,13 +847,13 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   title="放大 (+)"
                   aria-label="放大"
                   onClick={() => stepZoom(1.25)}
-                  className="charkle-pressable h-[26px] w-[26px] rounded-[var(--radius-chip)] inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
+                  className="charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <ZoomIn size={13} />
+                  <ZoomIn16Regular className="w-4 h-4" />
                 </button>
               </div>
 
-              <div className="h-3.5 w-px bg-[var(--border-hairline)]" />
+              <div className="h-4 w-px bg-[var(--win-stroke-divider)]" />
 
               {/* Rotate & Flip controls */}
               <div className="flex items-center gap-0.5">
@@ -888,18 +862,18 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   title="逆时针旋转 90° (Shift+R)"
                   aria-label="逆时针旋转 90°"
                   onClick={() => rotatePreview(-90)}
-                  className="charkle-pressable h-[26px] w-[26px] rounded-[var(--radius-chip)] inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
+                  className="charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <RotateCcw size={13} />
+                  <ArrowCounterclockwise16Regular className="w-4 h-4" />
                 </button>
                 <button
                   type="button"
                   title="顺时针旋转 90° (R)"
                   aria-label="顺时针旋转 90°"
                   onClick={() => rotatePreview(90)}
-                  className="charkle-pressable h-[26px] w-[26px] rounded-[var(--radius-chip)] inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
+                  className="charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <RotateCw size={13} />
+                  <ArrowClockwise16Regular className="w-4 h-4" />
                 </button>
                 <button
                   type="button"
@@ -908,13 +882,13 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   aria-pressed={flipHorizontal}
                   onClick={() => setFlipHorizontal((v) => !v)}
                   className={[
-                    'charkle-pressable h-[26px] w-[26px] rounded-[var(--radius-chip)] inline-flex items-center justify-center cursor-pointer',
+                    'charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
                     flipHorizontal
-                      ? 'bg-[var(--accent)] text-white'
-                      : 'text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.10]',
+                      ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                      : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <FlipHorizontal2 size={13} />
+                  <FlipHorizontal16Regular className="w-4 h-4" />
                 </button>
                 <button
                   type="button"
@@ -923,13 +897,13 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   aria-pressed={flipVertical}
                   onClick={() => setFlipVertical((v) => !v)}
                   className={[
-                    'charkle-pressable h-[26px] w-[26px] rounded-[var(--radius-chip)] inline-flex items-center justify-center cursor-pointer',
+                    'charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
                     flipVertical
-                      ? 'bg-[var(--accent)] text-white'
-                      : 'text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.10]',
+                      ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                      : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
-                  <FlipVertical2 size={13} />
+                  <FlipVertical16Regular className="w-4 h-4" />
                 </button>
 
                 {hasAnyTransformOrZoom && (
@@ -937,33 +911,32 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                     type="button"
                     title="还原全部视图变换 (0)"
                     onClick={resetViewTransform}
-                    className="charkle-pressable ml-0.5 h-6 px-2 rounded-[var(--radius-card-inner)] bg-[var(--accent)] text-white inline-flex items-center gap-1 text-[10.5px] font-semibold charkle-mono cursor-pointer"
+                    className="charkle-pressable ml-0.5 h-6 px-2 rounded-[var(--win-radius-control)] bg-[var(--accent)] text-[var(--accent-text)] inline-flex items-center gap-1 text-[11px] font-semibold charkle-mono cursor-pointer"
                   >
                     {displayRotationDegrees !== 0 && <span>{displayRotationDegrees}°</span>}
-                    <RotateCcw size={10} />
+                    <ArrowCounterclockwise16Regular className="w-3 h-3" />
                   </button>
                 )}
               </div>
 
-              <div className="h-3.5 w-px bg-[var(--border-hairline)]" />
+              <div className="h-4 w-px bg-[var(--win-stroke-divider)]" />
 
               <button
                 type="button"
                 title="全屏沉浸预览 (Space)"
                 onClick={() => launchQuickLook()}
-                data-pill="true"
-                className="charkle-pressable h-[26px] px-2.5 rounded-full inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.10] cursor-pointer"
+                className="charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
               >
-                <CharkleIcon name="quicklook" style="duotone" size={13.5} />
+                <CharkleIcon name="quicklook" style="duotone" size={14} />
                 <span>沉浸预览</span>
               </button>
             </div>
           )}
 
-          {/* Compact Metadata & Quick 1–5 Star Rating Strip */}
+          {/* Compact Metadata & Quick 1-5 Star Rating Strip */}
           <div className="flex items-center justify-center gap-3 flex-wrap text-[12px]">
             {activeAsset.richMetadata?.socialPost?.platform === 'xiaohongshu' && (
-              <span className="px-2 py-0.5 rounded-full bg-[#FF2442] text-white text-[10.5px] font-semibold shrink-0">
+              <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[#FF2442] text-white text-[10.5px] font-semibold shrink-0">
                 小红书
               </span>
             )}
@@ -977,7 +950,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
               </span>
             )}
 
-            <span className="px-2 py-0.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08] text-[11px] font-medium charkle-tabular text-[var(--text-secondary)]">
+            <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-subtle-hover)] text-[11px] font-medium charkle-tabular text-[var(--text-secondary)]">
               {activeIndex + 1} / {assets.length}
             </span>
 
@@ -994,26 +967,25 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                       void updateAssets({ assetIDs: [activeAsset.id], rating: next }, destination);
                     }}
                     className={[
-                      'charkle-pressable cursor-pointer p-0.5',
+                      'charkle-pressable cursor-pointer p-0.5 rounded-[var(--win-radius-control)] hover:bg-[var(--win-subtle-hover)]',
                       filled ? 'text-[#E5B243] charkle-micro-pop' : 'text-[var(--text-tertiary)]/55',
                     ].join(' ')}
                   >
-                    <Star size={11.5} className={filled ? 'fill-current' : ''} />
+                    {filled ? (
+                      <Star16Filled className="w-3.5 h-3.5" />
+                    ) : (
+                      <Star16Regular className="w-3.5 h-3.5" />
+                    )}
                   </button>
                 );
               })}
             </div>
 
             {!supportsVisualTransform && !isPlainWebBookmarkAsset(activeAsset) && (
-              <button
-                type="button"
-                onClick={() => launchQuickLook()}
-                data-pill="true"
-                className="charkle-pressable h-6 px-2.5 rounded-full bg-black/[0.06] dark:bg-white/[0.09] hover:bg-black/[0.10] dark:hover:bg-white/[0.14] inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-primary)] cursor-pointer"
-              >
-                <CharkleIcon name="quicklook" style="duotone" size={13.5} />
+              <Button variant="standard" size="xs" onClick={() => launchQuickLook()}>
+                <CharkleIcon name="quicklook" style="duotone" size={14} />
                 <span>沉浸预览</span>
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -1022,7 +994,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
       {/* Synchronized Bottom Filmstrip Scrubber (proportional widths + wheel-to-horizontal scroll) */}
       <div
         ref={stripRef}
-        className="relative z-20 shrink-0 h-[96px] border-t border-[var(--border-hairline)] bg-[var(--bg-elevated)]/85 px-4 flex items-center gap-2 overflow-x-auto charkle-scroll-hidden"
+        className="relative z-20 shrink-0 h-[96px] border-t border-[var(--win-stroke-divider)] bg-[var(--bg-elevated)]/85 px-4 flex items-center gap-2 overflow-x-auto charkle-scroll-hidden"
       >
         {assets.map((item) => {
           const isFocused = item.id === activeAsset.id;
@@ -1083,12 +1055,12 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
               }}
               title={item.title}
               className={[
-                'charkle-filmstrip-thumb shrink-0 rounded-[var(--radius-chip)] overflow-hidden cursor-pointer bg-[var(--bg-subtle)]',
+                'charkle-filmstrip-thumb shrink-0 rounded-[var(--win-radius-control)] overflow-hidden cursor-pointer bg-[var(--bg-subtle)]',
                 isFocused
-                  ? 'ring-[2.5px] ring-[var(--accent)] opacity-100'
+                  ? 'ring-2 ring-[var(--accent)] opacity-100'
                   : isSelected
                     ? 'ring-[1.5px] ring-[var(--accent)]/65 opacity-95'
-                    : 'opacity-70 hover:opacity-100 ring-1 ring-[var(--border-hairline)]',
+                    : 'opacity-70 hover:opacity-100 ring-1 ring-[var(--win-stroke-card)]',
               ].join(' ')}
             >
               <FilmstripThumbVisual
@@ -1100,7 +1072,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
         })}
       </div>
 
-      {/* Stage & Filmstrip Shared Right-Click Context Menu */}
+      {/* Stage & Filmstrip Shared Fluent Acrylic Right-Click Context Menu */}
       <Popover
         open={contextTarget !== null}
         onOpenChange={(open) => {
@@ -1110,10 +1082,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
           }
         }}
         anchorPoint={contextTarget?.point ?? null}
-        className="w-[228px] p-1.5"
+        className="w-[236px] p-1"
       >
         {contextTarget && (
-          <div className="flex flex-col gap-0.5 text-[12.5px]">
+          <div className="flex flex-col gap-0.5 text-[13px] leading-[18px]">
             <button
               type="button"
               onClick={() => {
@@ -1125,19 +1097,20 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   openQuickLook(target.id, null);
                 }
               }}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+              className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
             >
-              {isPlainWebBookmarkAsset(contextTarget.asset) && contextTarget.asset.sourceURL ? (
-                <>
-                  <ExternalLink size={14} className="text-[var(--text-secondary)]" />
-                  在默认浏览器中打开
-                </>
-              ) : (
-                <>
-                  <Eye size={14} className="text-[var(--text-secondary)]" />
-                  沉浸预览
-                </>
-              )}
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                {isPlainWebBookmarkAsset(contextTarget.asset) && contextTarget.asset.sourceURL ? (
+                  <Open16Regular className="w-4 h-4" />
+                ) : (
+                  <Eye16Regular className="w-4 h-4" />
+                )}
+              </span>
+              <span className="flex-1 text-left truncate">
+                {isPlainWebBookmarkAsset(contextTarget.asset) && contextTarget.asset.sourceURL
+                  ? '在默认浏览器中打开'
+                  : '沉浸预览'}
+              </span>
             </button>
 
             {contextTarget.asset.sourceURL && !isPlainWebBookmarkAsset(contextTarget.asset) && (
@@ -1148,14 +1121,14 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   setContextTarget(null);
                   if (url) void transport.openExternalUrl(url);
                 }}
-                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
               >
-                <ExternalLink size={14} className="text-[var(--text-secondary)]" />
-                打开来源网页
+                <Open16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                <span className="flex-1 text-left truncate">打开来源网页</span>
               </button>
             )}
 
-            <div className="my-1 h-px bg-[var(--border-hairline)]" />
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
 
             <button
               type="button"
@@ -1166,10 +1139,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                   pushToast({ message: `已拷贝 ${n} 项素材到剪贴板`, tone: 'success' }),
                 );
               }}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+              className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
             >
-              <Copy size={14} className="text-[var(--text-secondary)]" />
-              拷贝{contextCountSuffix}
+              <Copy16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+              <span className="flex-1 text-left truncate">拷贝{contextCountSuffix}</span>
             </button>
 
             <button
@@ -1179,13 +1152,13 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                 setContextTarget(null);
                 void transport.revealInExplorer(id);
               }}
-              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+              className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
             >
-              <FolderOpen size={14} className="text-[var(--text-secondary)]" />
-              在资源管理器中显示
+              <FolderOpen16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+              <span className="flex-1 text-left truncate">在资源管理器中显示</span>
             </button>
 
-            <div className="my-1 h-px bg-[var(--border-hairline)]" />
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
 
             {!(contextTarget.asset.isTrashed || destination.type === 'trash') ? (
               <>
@@ -1201,26 +1174,28 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                       setMoodboardGeneratorOpen(true);
                     }
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <LayoutGrid size={14} className="text-[var(--text-secondary)]" />
-                  加入活跃情绪板{contextCountSuffix}
+                  <Board16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">
+                    加入活跃情绪板{contextCountSuffix}
+                  </span>
                 </button>
 
                 <div className="relative">
                   <button
                     type="button"
                     onClick={() => setMoveSubOpen((v) => !v)}
-                    className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                    className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                   >
-                    <span className="inline-flex items-center gap-2">
-                      <FolderInput size={14} className="text-[var(--text-secondary)]" />
+                    <FolderArrowRight16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                    <span className="flex-1 text-left truncate">
                       移动到文件夹{contextCountSuffix}
                     </span>
-                    <span className="text-[11px] text-[var(--text-tertiary)]">▸</span>
+                    <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
                   </button>
                   {moveSubOpen && (
-                    <div className="mt-1 pl-1 border-t border-[var(--border-hairline)] pt-1">
+                    <div className="mt-1 pl-1 border-t border-[var(--win-stroke-divider)] pt-1">
                       <FolderMoveMenu
                         folders={folders}
                         currentFolderId={
@@ -1274,19 +1249,23 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                       }),
                     );
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  {contextTarget.asset.pinnedOffline ? (
-                    <Cloud size={14} className="text-[var(--text-secondary)]" />
-                  ) : (
-                    <ArrowDownCircle size={14} className="text-[var(--text-secondary)]" />
-                  )}
-                  {contextTarget.asset.pinnedOffline
-                    ? `取消始终保留在本地${contextCountSuffix}`
-                    : `始终保留在本地${contextCountSuffix}`}
+                  <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                    {contextTarget.asset.pinnedOffline ? (
+                      <Cloud16Regular className="w-4 h-4" />
+                    ) : (
+                      <ArrowDownload16Regular className="w-4 h-4" />
+                    )}
+                  </span>
+                  <span className="flex-1 text-left truncate">
+                    {contextTarget.asset.pinnedOffline
+                      ? `取消始终保留在本地${contextCountSuffix}`
+                      : `始终保留在本地${contextCountSuffix}`}
+                  </span>
                 </button>
 
-                <div className="my-1 h-px bg-[var(--border-hairline)]" />
+                <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
 
                 <button
                   type="button"
@@ -1299,10 +1278,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                       undoPatch: { assetIDs: ids, isTrashed: false },
                     });
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
                 >
-                  <Trash2 size={14} />
-                  移至回收站{contextCountSuffix}
+                  <Delete16Regular className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 text-left truncate">移至回收站{contextCountSuffix}</span>
                 </button>
               </>
             ) : (
@@ -1317,10 +1296,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                       pushToast({ message: `已将 ${ids.length} 项放回原处`, tone: 'success' }),
                     );
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <RotateCcw size={14} className="text-[var(--text-secondary)]" />
-                  放回原处{contextCountSuffix}
+                  <ArrowUndo16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">放回原处{contextCountSuffix}</span>
                 </button>
                 <button
                   type="button"
@@ -1329,10 +1308,10 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
                     setContextTarget(null);
                     setPermDeleteIds(ids);
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
                 >
-                  <Trash2 size={14} />
-                  彻底删除{contextCountSuffix}
+                  <Delete16Regular className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 text-left truncate">彻底删除{contextCountSuffix}</span>
                 </button>
               </>
             )}
@@ -1347,7 +1326,7 @@ export const GalleryFilmstripView: React.FC<GalleryFilmstripViewProps> = ({
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setPermDeleteIds(null)}>
+            <Button variant="standard" onClick={() => setPermDeleteIds(null)}>
               取消
             </Button>
             <Button

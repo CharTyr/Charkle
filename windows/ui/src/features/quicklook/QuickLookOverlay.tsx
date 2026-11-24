@@ -1,38 +1,54 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowDownCircle,
-  ChevronLeft,
-  ChevronRight,
-  Copy,
-  ExternalLink,
-  Film,
-  FlipHorizontal2,
-  FlipVertical2,
-  FolderOpen,
-  LayoutGrid,
-  Minimize2,
-  PanelRight,
-  Pause,
-  Play,
-  RotateCcw,
-  RotateCw,
-  ScrollText,
-  Star,
-  Trash2,
-  X,
-  ZoomIn,
-  ZoomOut,
-} from 'lucide-react';
+  ArrowClockwise16Regular,
+  ArrowCounterclockwise16Regular,
+  ArrowDownload16Regular,
+  ArrowUndo16Regular,
+  Board16Regular,
+  ChevronLeft20Regular,
+  ChevronRight20Regular,
+  Copy16Regular,
+  Delete16Regular,
+  Dismiss16Regular,
+  DocumentBulletList16Regular,
+  FlipHorizontal16Regular,
+  FlipVertical16Regular,
+  FolderOpen16Regular,
+  Open16Regular,
+  PanelRight16Filled,
+  PanelRight16Regular,
+  Pause16Regular,
+  Play16Filled,
+  ScaleFit16Regular,
+  Star16Filled,
+  Star16Regular,
+  VideoClip24Regular,
+  ZoomIn16Regular,
+  ZoomOut16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
+  AnimatePresence,
   Button,
   Popover,
+  Tooltip,
+  WIN_EASE_OUT,
+  WIN_SPRING_SNAPPY,
+  WIN_TRANSITION_EXIT,
+  WIN_TRANSITION_FAST,
+  WIN_TRANSITION_NORMAL,
   computeAmbientTintStyle,
   isLongStripImage,
+  m,
   useResolvedIsDark,
 } from '../../design-system';
-import { useCoordinatorStore, useLibraryStore, useMoodboardStore } from '../../stores';
+import {
+  useCoordinatorStore,
+  useLibraryStore,
+  useMoodboardStore,
+  type QuickLookOriginRect,
+} from '../../stores';
 import { mediaKindLabel, type AssetRecord } from '../../types/domain';
 import { InspectorView } from '../inspector/InspectorView';
 import { AudioStudioViewer } from './AudioStudioViewer';
@@ -74,6 +90,108 @@ function formatQuickLookBookmarkDomain(
   return '网页';
 }
 
+function isMotionReducedNow(): boolean {
+  if (typeof document !== 'undefined' && document.documentElement.dataset.animations === 'disabled') {
+    return true;
+  }
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  return false;
+}
+
+function isValidRect(rect: QuickLookOriginRect | null | undefined): rect is QuickLookOriginRect {
+  return Boolean(
+    rect &&
+      Number.isFinite(rect.left) &&
+      Number.isFinite(rect.top) &&
+      Number.isFinite(rect.width) &&
+      Number.isFinite(rect.height) &&
+      rect.width > 4 &&
+      rect.height > 4,
+  );
+}
+
+function queryVisibleCardRect(assetId: string): QuickLookOriginRect | null {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return null;
+  const escaped =
+    typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(assetId)
+      : assetId.replace(/["\\]/g, '\\$&');
+  const el = document.querySelector<HTMLElement>(`[data-asset-card-id="${escaped}"]`);
+  if (!el) return null;
+  const rect = el.getBoundingClientRect();
+  if (!isValidRect(rect)) return null;
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 800;
+  const isVisible = rect.right > 0 && rect.left < vw && rect.bottom > 0 && rect.top < vh;
+  if (!isVisible) return null;
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+interface FlipDelta {
+  x: number;
+  y: number;
+  scaleX: number;
+  scaleY: number;
+}
+
+function computeConnectedFlipDelta(
+  cardRect: QuickLookOriginRect | null | undefined,
+  asset: Pick<AssetRecord, 'pixelWidth' | 'pixelHeight'>,
+  inspectorOpen: boolean,
+): FlipDelta | null {
+  if (!isValidRect(cardRect) || typeof window === 'undefined') return null;
+  const vw = window.innerWidth || 1280;
+  const vh = window.innerHeight || 800;
+  const stageW = inspectorOpen ? Math.max(320, vw - 300) : vw;
+  const padX = inspectorOpen ? 56 : 96;
+  const headerH = 56;
+  const hudH = 72;
+  const availW = Math.max(160, stageW - padX);
+  const availH = Math.max(160, vh - headerH - hudH - 24);
+
+  const stageCenterX = stageW * 0.5;
+  const stageCenterY = headerH + (vh - headerH - hudH) * 0.5;
+
+  let targetW = Math.min(680, availW);
+  let targetH = Math.min(480, availH);
+  if (asset.pixelWidth > 0 && asset.pixelHeight > 0) {
+    const ratio = asset.pixelWidth / asset.pixelHeight;
+    if (availW / availH > ratio) {
+      targetH = Math.min(availH, vh * 0.76);
+      targetW = targetH * ratio;
+    } else {
+      targetW = availW;
+      targetH = targetW / ratio;
+    }
+  } else if (cardRect.width > 0 && cardRect.height > 0) {
+    const ratio = cardRect.width / cardRect.height;
+    if (availW / availH > ratio) {
+      targetH = availH * 0.72;
+      targetW = targetH * ratio;
+    } else {
+      targetW = availW * 0.72;
+      targetH = targetW / ratio;
+    }
+  }
+
+  const srcCenterX = cardRect.left + cardRect.width * 0.5;
+  const srcCenterY = cardRect.top + cardRect.height * 0.5;
+
+  return {
+    x: Math.round(srcCenterX - stageCenterX),
+    y: Math.round(srcCenterY - stageCenterY),
+    scaleX: Number(Math.max(0.12, Math.min(1.4, cardRect.width / Math.max(60, targetW))).toFixed(4)),
+    scaleY: Number(Math.max(0.12, Math.min(1.4, cardRect.height / Math.max(60, targetH))).toFixed(4)),
+  };
+}
+
 const QuickLookVideoStage: React.FC<{
   asset: AssetRecord;
   src: string;
@@ -105,19 +223,19 @@ const QuickLookVideoStage: React.FC<{
     return (
       <div
         onClick={(e) => e.stopPropagation()}
-        className="max-w-[440px] mx-auto p-6 rounded-[16px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-center flex flex-col items-center gap-3 shadow-2xl"
+        className="max-w-[440px] mx-auto p-6 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] text-center flex flex-col items-center gap-3 shadow-2xl"
       >
-        <Film size={28} className="text-[var(--text-tertiary)]" />
+        <VideoClip24Regular className="w-7 h-7 text-[var(--text-tertiary)]" />
         <div className="text-[14px] font-semibold text-[var(--text-primary)]">{asset.title}</div>
-        <p className="text-[12px] text-[var(--text-secondary)]">
+        <p className="text-[12.5px] text-[var(--text-secondary)]">
           当前视频编码或文件暂无法内嵌播放，可在资源管理器中使用系统播放器打开。
         </p>
         <Button
-          variant="primary"
+          variant="accent"
           size="sm"
           onClick={() => void getTransport().revealInExplorer(asset.id)}
         >
-          <FolderOpen size={13} />
+          <FolderOpen16Regular className="w-4 h-4" />
           在资源管理器中显示
         </Button>
       </div>
@@ -134,20 +252,22 @@ const QuickLookVideoStage: React.FC<{
       playsInline
       onError={() => setFailed(true)}
       onClick={(e) => e.stopPropagation()}
-      className="max-w-[82vw] max-h-[74vh] rounded-[16px] shadow-[0_24px_60px_rgba(0,0,0,0.48)] bg-black"
+      className="max-w-[82vw] max-h-[74vh] rounded-[var(--win-radius-card)] shadow-[0_24px_60px_rgba(0,0,0,0.48)] bg-black"
     />
   );
 };
 
 /**
- * Full-Media Spacebar Quick Look Overlay 1:1 faithful to macOS `QuickLookOverlayView.swift`:
- * - Instant, zero-sluggishness keyboard toggle (Space / Esc / Arrows / R / Shift+H/V / 0 / +/-)
- * - Soft dark neutral ambient backdrop + minimal top metadata bar
- * - Full-height 300px synchronized Right Inspector (`InspectorView`, identical cards & tabs)
- * - Floating Dark Liquid Glass bottom HUD + all 7 media viewers + webBookmark & swatch cards
+ * Full-Media Spacebar Quick Look Overlay with Fluent 2 Connected Animation (FLIP):
+ * - Opens smoothly from `quickLookOriginRect` via `WIN_SPRING_SNAPPY` (`m.div`) while fading in
+ *   `.win-smoke-scrim` + subtle radial ambient tint (`computeAmbientTintStyle`)
+ * - Closes back toward live `[data-asset-card-id]` when visible in viewport, or soft scale-down (0.96) + fade out
+ * - Instant 0ms keyboard stepping (Space / Esc / Arrows / R / Shift+H/V / 0 / +/-)
+ * - Full-height 300px synchronized Right Inspector (`InspectorView`) & `.win-acrylic-dark` HUD
  */
 export const QuickLookOverlay: React.FC = () => {
   const quickLookAssetId = useCoordinatorStore((s) => s.quickLookAssetId);
+  const quickLookOriginRect = useCoordinatorStore((s) => s.quickLookOriginRect);
   const openQuickLook = useCoordinatorStore((s) => s.openQuickLook);
   const closeQuickLook = useCoordinatorStore((s) => s.closeQuickLook);
   const setSelection = useCoordinatorStore((s) => s.setSelection);
@@ -180,6 +300,7 @@ export const QuickLookOverlay: React.FC = () => {
 
   const boardBtnRef = useRef<HTMLButtonElement | null>(null);
   const freezeAnimRef = useRef<(() => void) | null>(null);
+  const lastActiveAssetRef = useRef<AssetRecord | null>(null);
 
   const activeIndex = useMemo(() => {
     if (!quickLookAssetId) return -1;
@@ -191,6 +312,10 @@ export const QuickLookOverlay: React.FC = () => {
     if (activeIndex >= 0) return assets[activeIndex];
     return allAssets.find((a) => a.id === quickLookAssetId) ?? null;
   }, [quickLookAssetId, activeIndex, assets, allAssets]);
+
+  if (asset) {
+    lastActiveAssetRef.current = asset;
+  }
 
   const isSwatchAsset = Boolean(asset && asset.fileName.toLowerCase().endsWith('.swatch'));
   const isTallStrip = asset ? isLongStripImage(asset) : false;
@@ -217,7 +342,7 @@ export const QuickLookOverlay: React.FC = () => {
     }
   }, [quickLookAssetId, bootstrapped, asset, closeQuickLook]);
 
-  // Resign stale underlying text/button focus immediately upon entering Quick Look (Pitfall 4)
+  // Resign stale underlying text/button focus immediately upon entering Quick Look
   useEffect(() => {
     if (!quickLookAssetId) return;
     (document.activeElement as HTMLElement | null)?.blur?.();
@@ -298,7 +423,7 @@ export const QuickLookOverlay: React.FC = () => {
       const mod = e.ctrlKey || e.metaKey;
       const hasPrimaryModifiers = mod || e.altKey || e.shiftKey;
 
-      // Respect active text editing inside docked Inspector; Escape blurs field first (1:1 macOS)
+      // Respect active text editing inside docked Inspector; Escape blurs field first
       if (isTypingInsideQuickLook(e.target)) {
         if (e.key === 'Escape' && !hasPrimaryModifiers && !e.isComposing && e.keyCode !== 229) {
           e.preventDefault();
@@ -418,23 +543,85 @@ export const QuickLookOverlay: React.FC = () => {
     updateAssets,
   ]);
 
-  if (!asset || typeof document === 'undefined') return null;
+  const openFlipDelta = useMemo(() => {
+    if (!asset || isMotionReducedNow()) return null;
+    return computeConnectedFlipDelta(quickLookOriginRect, asset, inspectorOpen);
+  }, [asset?.id, quickLookOriginRect, inspectorOpen]);
+
+  if (typeof document === 'undefined') return null;
 
   const transport = getTransport();
   const canStep = assets.length > 1 && activeIndex >= 0;
-  const ambientStyle = computeAmbientTintStyle(asset.dominantColors[0]?.hex, true, 'quicklook');
 
-  const renderWebBookmarkCard = () => {
-    const dotHex = asset.dominantColors[0]?.hex ?? '#5C6B73';
-    const domain = formatQuickLookBookmarkDomain(asset);
+  const stageVariants = {
+    enter: () => {
+      if (isMotionReducedNow()) {
+        return { opacity: 0, x: 0, y: 0, scaleX: 1, scaleY: 1 };
+      }
+      if (openFlipDelta) {
+        return {
+          x: openFlipDelta.x,
+          y: openFlipDelta.y,
+          scaleX: openFlipDelta.scaleX,
+          scaleY: openFlipDelta.scaleY,
+          opacity: 0.72,
+        };
+      }
+      return { x: 0, y: 0, scaleX: 0.96, scaleY: 0.96, opacity: 0 };
+    },
+    center: {
+      x: 0,
+      y: 0,
+      scaleX: 1,
+      scaleY: 1,
+      opacity: 1,
+      transition: isMotionReducedNow()
+        ? { duration: 0.14, ease: WIN_EASE_OUT }
+        : openFlipDelta
+          ? WIN_SPRING_SNAPPY
+          : WIN_TRANSITION_NORMAL,
+    },
+    exit: () => {
+      if (isMotionReducedNow()) {
+        return { opacity: 0, transition: WIN_TRANSITION_EXIT };
+      }
+      const closingAsset = lastActiveAssetRef.current;
+      if (closingAsset) {
+        const liveCardRect = queryVisibleCardRect(closingAsset.id);
+        const exitDelta = computeConnectedFlipDelta(liveCardRect, closingAsset, inspectorOpen);
+        if (exitDelta) {
+          return {
+            x: exitDelta.x,
+            y: exitDelta.y,
+            scaleX: exitDelta.scaleX,
+            scaleY: exitDelta.scaleY,
+            opacity: 0,
+            transition: { duration: 0.167, ease: WIN_EASE_OUT },
+          };
+        }
+      }
+      return {
+        x: 0,
+        y: 0,
+        scaleX: 0.96,
+        scaleY: 0.96,
+        opacity: 0,
+        transition: WIN_TRANSITION_EXIT,
+      };
+    },
+  };
+
+  const renderWebBookmarkCard = (active: AssetRecord) => {
+    const dotHex = active.dominantColors[0]?.hex ?? '#5C6B73';
+    const domain = formatQuickLookBookmarkDomain(active);
     const previewUrl = withQuickLookThumbCacheBust(
-      transport.thumbnailUrl(asset.id, 'preview1400'),
-      asset.updatedAt,
+      transport.thumbnailUrl(active.id, 'preview1400'),
+      active.updatedAt,
     );
     return (
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[680px] p-5 rounded-[18px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col gap-3.5"
+        className="w-full max-w-[680px] p-5 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col gap-3.5"
       >
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -443,16 +630,16 @@ export const QuickLookOverlay: React.FC = () => {
               style={{ backgroundColor: dotHex }}
             />
             <span className="text-[13px] font-semibold charkle-mono text-[var(--text-secondary)] truncate">
-              {asset.sourceDomain ?? domain}
+              {active.sourceDomain ?? domain}
             </span>
           </div>
-          {asset.sourceURL && (
+          {active.sourceURL && (
             <Button
-              variant="primary"
+              variant="accent"
               size="xs"
               onClick={() =>
                 void transport
-                  .openExternalUrl(asset.sourceURL!)
+                  .openExternalUrl(active.sourceURL!)
                   .then(() => {
                     pushToast({
                       message: `已在默认浏览器中打开 ${domain}`,
@@ -464,36 +651,36 @@ export const QuickLookOverlay: React.FC = () => {
                   })
               }
             >
-              <ExternalLink size={12} />
+              <Open16Regular className="w-3.5 h-3.5" />
               在默认浏览器中打开
             </Button>
           )}
         </div>
 
-        <div className="w-full max-h-[380px] rounded-[12px] overflow-hidden border border-[var(--border-hairline)] bg-[var(--bg-subtle)]/40 flex items-center justify-center">
+        <div className="w-full max-h-[380px] rounded-[var(--win-radius-card)] overflow-hidden border border-[var(--win-stroke-card)] bg-[var(--bg-subtle)]/40 flex items-center justify-center">
           <img
             src={previewUrl}
-            alt={asset.title}
+            alt={active.title}
             draggable={false}
             className="w-full max-h-[380px] object-contain"
           />
         </div>
 
-        <h3 className="text-[19px] font-semibold text-[var(--text-primary)] charkle-heading">
-          {asset.title}
+        <h3 className="text-[18px] font-semibold text-[var(--text-primary)] charkle-heading">
+          {active.title}
         </h3>
 
-        {asset.sourceURL && (
+        {active.sourceURL && (
           <p className="text-[12px] charkle-mono text-[var(--text-secondary)] select-text break-all">
-            {asset.sourceURL}
+            {active.sourceURL}
           </p>
         )}
 
-        {asset.notes && (
+        {active.notes && (
           <>
-            <div className="h-px bg-[var(--border-hairline)]" />
+            <div className="h-px bg-[var(--win-stroke-divider)]" />
             <p className="text-[13px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap select-text">
-              {asset.notes}
+              {active.notes}
             </p>
           </>
         )}
@@ -501,25 +688,25 @@ export const QuickLookOverlay: React.FC = () => {
     );
   };
 
-  const renderSwatchCard = () => {
-    const hex = (asset.dominantColors[0]?.hex ?? '#2A60E0').toUpperCase();
+  const renderSwatchCard = (active: AssetRecord) => {
+    const hex = (active.dominantColors[0]?.hex ?? '#2A60E0').toUpperCase();
     return (
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[380px] rounded-[20px] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_24px_60px_rgba(0,0,0,0.45)] flex flex-col"
+        className="w-[380px] rounded-[var(--win-radius-dialog)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.45)] flex flex-col"
       >
         <div className="h-[260px] w-full" style={{ backgroundColor: hex }} />
         <div className="p-5 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[16px] font-semibold text-[var(--text-primary)] truncate">
-              {asset.title}
+              {active.title}
             </div>
             <div className="text-[13px] charkle-mono text-[var(--text-secondary)] mt-0.5">
               {hex}
             </div>
           </div>
           <Button
-            variant="secondary"
+            variant="standard"
             size="xs"
             onClick={() => {
               if (!navigator.clipboard?.writeText) {
@@ -536,7 +723,7 @@ export const QuickLookOverlay: React.FC = () => {
                 });
             }}
           >
-            <Copy size={12} />
+            <Copy16Regular className="w-3.5 h-3.5" />
             复制 HEX
           </Button>
         </div>
@@ -544,74 +731,74 @@ export const QuickLookOverlay: React.FC = () => {
     );
   };
 
-  const renderMediaStage = () => {
-    if (asset.richMetadata?.githubRepo) {
+  const renderMediaStage = (active: AssetRecord) => {
+    if (active.richMetadata?.githubRepo) {
       return (
         <div
           onClick={(e) => e.stopPropagation()}
           className="w-full h-full flex items-center justify-center"
         >
-          <GitHubRepoViewer asset={asset} />
+          <GitHubRepoViewer asset={active} />
         </div>
       );
     }
-    if (asset.richMetadata?.socialPost) {
+    if (active.richMetadata?.socialPost) {
       return (
         <div
           onClick={(e) => e.stopPropagation()}
           className="w-full h-full flex items-center justify-center"
         >
-          <SocialPostViewer asset={asset} />
+          <SocialPostViewer asset={active} />
         </div>
       );
     }
     if (isSwatchAsset) {
-      return renderSwatchCard();
+      return renderSwatchCard(active);
     }
-    if (asset.mediaKind === 'webBookmark') {
-      return renderWebBookmarkCard();
+    if (active.mediaKind === 'webBookmark') {
+      return renderWebBookmarkCard(active);
     }
-    if (asset.mediaKind === 'video') {
+    if (active.mediaKind === 'video') {
       return (
         <QuickLookVideoStage
-          key={asset.id}
-          asset={asset}
-          src={transport.originalUrl(asset.id)}
-          poster={transport.thumbnailUrl(asset.id, 'preview1400')}
+          key={active.id}
+          asset={active}
+          src={transport.originalUrl(active.id)}
+          poster={transport.thumbnailUrl(active.id, 'preview1400')}
         />
       );
     }
-    if (asset.mediaKind === 'audio') {
+    if (active.mediaKind === 'audio') {
       return (
         <div onClick={(e) => e.stopPropagation()} className="w-full flex justify-center">
-          <AudioStudioViewer asset={asset} />
+          <AudioStudioViewer asset={active} />
         </div>
       );
     }
-    if (asset.mediaKind === 'model3D') {
+    if (active.mediaKind === 'model3D') {
       return (
         <div
           onClick={(e) => e.stopPropagation()}
           className="w-full h-full flex items-center justify-center"
         >
-          <Model3DViewer asset={asset} />
+          <Model3DViewer asset={active} />
         </div>
       );
     }
-    if (asset.mediaKind === 'document') {
-      const isPdf = asset.mimeType === 'application/pdf' || /\.pdf$/i.test(asset.fileName);
+    if (active.mediaKind === 'document') {
+      const isPdf = active.mimeType === 'application/pdf' || /\.pdf$/i.test(active.fileName);
       return (
         <div
           onClick={(e) => e.stopPropagation()}
           className="w-full h-full flex items-center justify-center"
         >
-          {isPdf ? <PdfDocumentViewer asset={asset} /> : <DocumentMarkdownViewer asset={asset} />}
+          {isPdf ? <PdfDocumentViewer asset={active} /> : <DocumentMarkdownViewer asset={active} />}
         </div>
       );
     }
     return (
       <ImageStageViewer
-        asset={asset}
+        asset={active}
         zoom={zoom}
         onZoomChange={(next) => {
           setLongStripMode(false);
@@ -631,533 +818,588 @@ export const QuickLookOverlay: React.FC = () => {
   };
 
   return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={`快速预览：${asset.title}`}
-      data-testid="quicklook-overlay"
-      className="fixed inset-0 z-[130] flex overflow-hidden"
-    >
-      {/* Left Hero Ambient Stage */}
-      <div
-        onClick={closeQuickLook}
-        style={{
-          backgroundColor: isDark ? 'rgba(0, 0, 0, 0.80)' : 'rgba(21, 22, 25, 0.74)',
-          ...ambientStyle,
-        }}
-        className="relative flex-1 min-w-0 h-full flex flex-col backdrop-blur-[16px]"
-      >
-        {/* Top Minimal Header Bar */}
-        <header
-          onClick={(e) => e.stopPropagation()}
-          className="shrink-0 px-6 pt-4 pb-2 flex items-center justify-between gap-3 z-20"
+    <AnimatePresence>
+      {asset && (
+        <m.div
+          key="quicklook-session"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`快速预览：${asset.title}`}
+          data-testid="quicklook-overlay"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1, transition: WIN_TRANSITION_FAST }}
+          exit={{ opacity: 0, transition: WIN_TRANSITION_EXIT }}
+          className="fixed inset-0 z-[130] flex overflow-hidden"
         >
-          <div className="flex items-center gap-2.5 min-w-0">
-            {asset.richMetadata?.socialPost?.platform === 'xiaohongshu' && (
-              <span className="px-2 py-0.5 rounded-full bg-[#FF2442] text-white text-[10.5px] font-semibold shrink-0">
-                小红书
-              </span>
-            )}
-            <h2 className="text-[13.5px] font-semibold text-white/95 truncate">{asset.title}</h2>
-            <span className="text-[11px] charkle-mono text-white/62 charkle-tabular shrink-0">
-              {asset.pixelWidth > 0 && asset.pixelHeight > 0
-                ? `${asset.pixelWidth} × ${asset.pixelHeight} · `
-                : ''}
-              {asset.richMetadata?.socialPost?.platform === 'xiaohongshu'
-                ? '小红书笔记'
-                : asset.richMetadata?.githubRepo
-                  ? 'GitHub 仓库'
-                  : mediaKindLabel(asset.mediaKind)}
-              {canStep ? ` · ${activeIndex + 1} / ${assets.length}` : ''}
-            </span>
-          </div>
+          {/* Left Hero Ambient Stage (Smoke scrim + subtle radial ambient tint, pure composited layer) */}
+          <div
+            onClick={closeQuickLook}
+            style={{
+              backgroundColor: isDark ? 'rgba(10, 11, 14, 0.86)' : 'rgba(18, 20, 24, 0.78)',
+              ...computeAmbientTintStyle(asset.dominantColors[0]?.hex, true, 'quicklook'),
+            }}
+            className="win-smoke-scrim relative flex-1 min-w-0 h-full flex flex-col"
+          >
+            {/* Top Minimal Header Bar */}
+            <header
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 px-6 pt-4 pb-2 flex items-center justify-between gap-3 z-20"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                {asset.richMetadata?.socialPost?.platform === 'xiaohongshu' && (
+                  <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[#FF2442] text-white text-[10.5px] font-semibold shrink-0">
+                    小红书
+                  </span>
+                )}
+                <h2 className="text-[14px] font-semibold text-white/95 truncate">{asset.title}</h2>
+                <span className="text-[11.5px] charkle-mono text-white/62 charkle-tabular shrink-0">
+                  {asset.pixelWidth > 0 && asset.pixelHeight > 0
+                    ? `${asset.pixelWidth} × ${asset.pixelHeight} · `
+                    : ''}
+                  {asset.richMetadata?.socialPost?.platform === 'xiaohongshu'
+                    ? '小红书笔记'
+                    : asset.richMetadata?.githubRepo
+                      ? 'GitHub 仓库'
+                      : mediaKindLabel(asset.mediaKind)}
+                  {canStep ? ` · ${activeIndex + 1} / ${assets.length}` : ''}
+                </span>
+              </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={toggleInspector}
-              aria-label={inspectorOpen ? '隐藏右侧详情栏' : '显示右侧详情栏'}
-              title="显示 / 隐藏右侧详情栏 (Ctrl+I)"
+              <div className="flex items-center gap-1.5 shrink-0">
+                <Tooltip content="显示 / 隐藏右侧详情栏" shortcut="Ctrl+I">
+                  <button
+                    type="button"
+                    onClick={toggleInspector}
+                    aria-label={inspectorOpen ? '隐藏右侧详情栏' : '显示右侧详情栏'}
+                    className={[
+                      'charkle-pressable win-acrylic-dark w-8 h-8 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
+                      inspectorOpen ? 'text-[var(--accent)]' : 'text-white/85 hover:text-white',
+                    ].join(' ')}
+                  >
+                    {inspectorOpen ? (
+                      <PanelRight16Filled className="w-4 h-4" />
+                    ) : (
+                      <PanelRight16Regular className="w-4 h-4" />
+                    )}
+                  </button>
+                </Tooltip>
+
+                <Tooltip content="关闭预览" shortcut="Space / Esc">
+                  <button
+                    type="button"
+                    aria-label="关闭快速预览"
+                    onClick={closeQuickLook}
+                    className="charkle-pressable win-acrylic-dark w-8 h-8 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/85 hover:text-white cursor-pointer"
+                  >
+                    <Dismiss16Regular className="w-4 h-4" />
+                  </button>
+                </Tooltip>
+              </div>
+            </header>
+
+            {/* Center Media Stage with Shared-Element FLIP Connected Animation */}
+            <div
               className={[
-                'charkle-pressable charkle-glass-dark w-7 h-7 rounded-full inline-flex items-center justify-center cursor-pointer',
-                inspectorOpen ? 'text-[#5B8DEF]' : 'text-white/85 hover:text-white',
+                'relative flex-1 min-h-0 flex items-center justify-center overflow-hidden',
+                inspectorOpen ? 'px-7' : 'px-12',
               ].join(' ')}
             >
-              <PanelRight size={13.5} />
-            </button>
-
-            <button
-              type="button"
-              aria-label="关闭快速预览"
-              title="关闭预览 (Space / Esc)"
-              onClick={closeQuickLook}
-              className="charkle-pressable charkle-glass-dark w-7 h-7 rounded-full inline-flex items-center justify-center text-white/85 hover:text-white cursor-pointer"
-            >
-              <X size={13.5} />
-            </button>
-          </div>
-        </header>
-
-        {/* Center Media Stage */}
-        <div
-          className={[
-            'relative flex-1 min-h-0 flex items-center justify-center overflow-hidden',
-            inspectorOpen ? 'px-7' : 'px-12',
-          ].join(' ')}
-        >
-          {renderMediaStage()}
-
-          {canStep && (
-            <>
-              <button
-                type="button"
-                aria-label="上一项素材"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  stepPlaylist(-1);
-                }}
-                className="charkle-pressable charkle-glass-dark absolute left-4 top-1/2 -translate-y-1/2 z-20 h-9 w-9 rounded-full inline-flex items-center justify-center text-white/88 hover:text-white cursor-pointer"
+              <m.div
+                data-testid="quicklook-flip-stage"
+                variants={stageVariants}
+                initial="enter"
+                animate="center"
+                exit="exit"
+                className="w-full h-full flex items-center justify-center will-change-transform"
               >
-                <ChevronLeft size={18} />
-              </button>
+                {renderMediaStage(asset)}
+              </m.div>
 
-              <button
-                type="button"
-                aria-label="下一项素材"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  stepPlaylist(1);
-                }}
-                className="charkle-pressable charkle-glass-dark absolute right-4 top-1/2 -translate-y-1/2 z-20 h-9 w-9 rounded-full inline-flex items-center justify-center text-white/88 hover:text-white cursor-pointer"
-              >
-                <ChevronRight size={18} />
-              </button>
-            </>
-          )}
-        </div>
-
-        {/* Floating Dark Liquid Glass Bottom HUD (1:1 macOS floatingBottomHUD) */}
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="shrink-0 pb-5 pt-2 flex justify-center z-20 px-4"
-        >
-          <div className="charkle-glass-dark rounded-full px-3.5 py-1.5 flex items-center gap-2 flex-wrap justify-center">
-            {supportsVisualTransform && (
-              <>
-                {isTallStrip && (
-                  <>
+              {canStep && (
+                <>
+                  <Tooltip content="上一项素材" shortcut="←">
                     <button
                       type="button"
-                      onClick={() => {
-                        setLongStripMode((v) => !v);
-                        setZoom(1);
+                      aria-label="上一项素材"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        stepPlaylist(-1);
                       }}
-                      title="切换长图按宽滚动阅读 / 适应窗口缩放查看"
-                      className={[
-                        'charkle-pressable h-7 px-2.5 rounded-full inline-flex items-center gap-1 text-[11px] font-semibold cursor-pointer',
-                        longStripMode
-                          ? 'bg-[#3B82F6]/80 text-white'
-                          : 'bg-white/14 text-white/90 hover:bg-white/20',
-                      ].join(' ')}
+                      className="charkle-pressable win-acrylic-dark absolute left-4 top-1/2 -translate-y-1/2 z-20 h-9 w-9 rounded-[var(--win-radius-overlay)] inline-flex items-center justify-center text-white/88 hover:text-white cursor-pointer"
                     >
-                      {longStripMode ? <ScrollText size={11.5} /> : <Minimize2 size={11.5} />}
-                      <span>{longStripMode ? '长图滚动' : '适应窗口'}</span>
+                      <ChevronLeft20Regular className="w-5 h-5" />
                     </button>
-                    <span className="w-px h-4 bg-white/15" />
-                  </>
-                )}
+                  </Tooltip>
 
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    aria-label="缩小"
-                    title="缩小 (-)"
-                    onClick={() => {
-                      setLongStripMode(false);
-                      setZoom((z) => Math.max(0.5, Number((z * 0.8).toFixed(2))));
-                    }}
-                    className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
-                  >
-                    <ZoomOut size={13.5} />
-                  </button>
-                  <span className="min-w-[40px] text-center text-[11px] charkle-mono font-semibold text-white/90 charkle-tabular">
-                    {Math.round(zoom * 100)}%
-                  </span>
-                  <button
-                    type="button"
-                    aria-label="放大"
-                    title="放大 (+)"
-                    onClick={() => {
-                      setLongStripMode(false);
-                      setZoom((z) => Math.min(maxZoomLimit, Number((z * 1.25).toFixed(2))));
-                    }}
-                    className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
-                  >
-                    <ZoomIn size={13.5} />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="重置缩放与变换"
-                    title="重置缩放与变换 (0)"
-                    onClick={() => resetTransforms(true)}
-                    className="charkle-pressable h-7 px-1.5 rounded-full inline-flex items-center justify-center text-[10.5px] charkle-mono text-white/78 hover:bg-white/12 cursor-pointer"
-                  >
-                    1:1
-                  </button>
-                </div>
-
-                <span className="w-px h-4 bg-white/15" />
-
-                <div className="flex items-center gap-0.5">
-                  <button
-                    type="button"
-                    title="逆时针旋转 90° (Shift+R)"
-                    aria-label="逆时针旋转"
-                    onClick={() => rotateBy(-90)}
-                    className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
-                  >
-                    <RotateCcw size={13.5} />
-                  </button>
-                  <button
-                    type="button"
-                    title="顺时针旋转 90° (R)"
-                    aria-label="顺时针旋转"
-                    onClick={() => rotateBy(90)}
-                    className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
-                  >
-                    <RotateCw size={13.5} />
-                  </button>
-                  <button
-                    type="button"
-                    title="水平翻转 (Shift+H)"
-                    aria-label="水平翻转"
-                    onClick={() => {
-                      setLongStripMode(false);
-                      setFlipHorizontal((v) => !v);
-                    }}
-                    className={[
-                      'charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center cursor-pointer',
-                      flipHorizontal
-                        ? 'bg-[#3B82F6]/75 text-white'
-                        : 'text-white/88 hover:bg-white/12',
-                    ].join(' ')}
-                  >
-                    <FlipHorizontal2 size={13.5} />
-                  </button>
-                  <button
-                    type="button"
-                    title="上下翻转 (Shift+V)"
-                    aria-label="上下翻转"
-                    onClick={() => {
-                      setLongStripMode(false);
-                      setFlipVertical((v) => !v);
-                    }}
-                    className={[
-                      'charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center cursor-pointer',
-                      flipVertical
-                        ? 'bg-[#3B82F6]/75 text-white'
-                        : 'text-white/88 hover:bg-white/12',
-                    ].join(' ')}
-                  >
-                    <FlipVertical2 size={13.5} />
-                  </button>
-                  {hasActiveTransform && (
+                  <Tooltip content="下一项素材" shortcut="→">
                     <button
                       type="button"
-                      title="还原旋转与翻转"
-                      onClick={() => resetTransforms(false)}
-                      className="charkle-pressable ml-0.5 h-6 px-2 rounded-[7px] bg-[#3B82F6]/75 text-white text-[10.5px] charkle-mono inline-flex items-center gap-1 cursor-pointer"
-                    >
-                      {normalizedRot !== 0 && <span>{normalizedRot}°</span>}
-                      <RotateCcw size={10} />
-                    </button>
-                  )}
-                </div>
-
-                {asset.mediaKind === 'animatedImage' && (
-                  <>
-                    <span className="w-px h-4 bg-white/15" />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!pausedAnim) freezeAnimRef.current?.();
-                        setPausedAnim((v) => !v);
+                      aria-label="下一项素材"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        stepPlaylist(1);
                       }}
-                      className="charkle-pressable h-7 px-2.5 rounded-full bg-white/12 hover:bg-white/20 text-white text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                      className="charkle-pressable win-acrylic-dark absolute right-4 top-1/2 -translate-y-1/2 z-20 h-9 w-9 rounded-[var(--win-radius-overlay)] inline-flex items-center justify-center text-white/88 hover:text-white cursor-pointer"
                     >
-                      {pausedAnim ? <Play size={11.5} /> : <Pause size={11.5} />}
-                      <span>{pausedAnim ? '播放' : '暂停'}</span>
+                      <ChevronRight20Regular className="w-5 h-5" />
                     </button>
-                  </>
-                )}
-
-                <span className="w-px h-4 bg-white/15" />
-              </>
-            )}
-
-            {/* Rating Stars */}
-            <div className="flex items-center gap-0.5">
-              {[1, 2, 3, 4, 5].map((star) => {
-                const filled = asset.rating >= star;
-                const isPeak = asset.rating === star;
-                return (
-                  <button
-                    key={star}
-                    type="button"
-                    aria-label={`评为 ${star} 星`}
-                    onClick={() =>
-                      void updateAssets(
-                        { assetIDs: [asset.id], rating: asset.rating === star ? 0 : star },
-                        destination,
-                      )
-                    }
-                    className={[
-                      'charkle-pressable w-6 h-6 rounded-full inline-flex items-center justify-center cursor-pointer',
-                      filled ? 'text-[#F2C14E]' : 'text-white/45 hover:text-white/85',
-                      isPeak ? 'charkle-micro-pop' : '',
-                    ].join(' ')}
-                  >
-                    <Star size={12.5} className={filled ? 'fill-current' : ''} />
-                  </button>
-                );
-              })}
+                  </Tooltip>
+                </>
+              )}
             </div>
 
-            <span className="w-px h-4 bg-white/15" />
+            {/* Floating Fluent 2 Dark Acrylic Bottom HUD */}
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 pb-5 pt-2 flex justify-center z-20 px-4"
+            >
+              <div className="win-acrylic-dark rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-1.5 flex-wrap justify-center">
+                {supportsVisualTransform && (
+                  <>
+                    {isTallStrip && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLongStripMode((v) => !v);
+                            setZoom(1);
+                          }}
+                          title="切换长图按宽滚动阅读 / 适应窗口缩放查看"
+                          className={[
+                            'charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] inline-flex items-center gap-1.5 text-[11.5px] font-medium cursor-pointer',
+                            longStripMode
+                              ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                              : 'bg-white/10 text-white/90 hover:bg-white/16',
+                          ].join(' ')}
+                        >
+                          {longStripMode ? (
+                            <DocumentBulletList16Regular className="w-3.5 h-3.5" />
+                          ) : (
+                            <ScaleFit16Regular className="w-3.5 h-3.5" />
+                          )}
+                          <span>{longStripMode ? '长图滚动' : '适应窗口'}</span>
+                        </button>
+                        <span className="w-px h-4 bg-white/15" />
+                      </>
+                    )}
 
-            {asset.isTrashed ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const id = asset.id;
-                    void updateAssets({ assetIDs: [id], isTrashed: false }, destination).then(() =>
-                      pushToast({ message: '已放回原处', tone: 'success' }),
-                    );
-                  }}
-                  className="charkle-pressable h-7 px-2.5 rounded-full hover:bg-white/12 text-white text-[11.5px] font-medium inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <RotateCcw size={12} />
-                  放回原处
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDeleteOpen(true)}
-                  className="charkle-pressable h-7 px-2.5 rounded-full hover:bg-red-500/20 text-[#FF6B6B] text-[11.5px] font-medium inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <Trash2 size={12} />
-                  彻底删除
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  title={asset.pinnedOffline ? '取消始终保留在本地' : '始终保留在本地'}
-                  onClick={() => {
-                    const nextPinned = !asset.pinnedOffline;
-                    void updateAssets(
-                      { assetIDs: [asset.id], pinnedOffline: nextPinned },
-                      destination,
-                    ).then(() =>
-                      pushToast({
-                        message: nextPinned ? '已设为始终保留在本地' : '已取消始终保留在本地',
-                        tone: 'info',
-                      }),
-                    );
-                  }}
-                  className={[
-                    'charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center cursor-pointer',
-                    asset.pinnedOffline
-                      ? 'bg-[#3B82F6]/35 text-[#93C5FD]'
-                      : 'text-white/85 hover:bg-white/12',
-                  ].join(' ')}
-                >
-                  <ArrowDownCircle size={13.5} />
-                </button>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        aria-label="缩小"
+                        title="缩小 (-)"
+                        onClick={() => {
+                          setLongStripMode(false);
+                          setZoom((z) => Math.max(0.5, Number((z * 0.8).toFixed(2))));
+                        }}
+                        className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
+                      >
+                        <ZoomOut16Regular className="w-4 h-4" />
+                      </button>
+                      <span className="min-w-[42px] text-center text-[11.5px] charkle-mono font-semibold text-white/90 charkle-tabular">
+                        {Math.round(zoom * 100)}%
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="放大"
+                        title="放大 (+)"
+                        onClick={() => {
+                          setLongStripMode(false);
+                          setZoom((z) => Math.min(maxZoomLimit, Number((z * 1.25).toFixed(2))));
+                        }}
+                        className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
+                      >
+                        <ZoomIn16Regular className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="重置缩放与变换"
+                        title="重置缩放与变换 (0)"
+                        onClick={() => resetTransforms(true)}
+                        className="charkle-pressable h-7 px-1.5 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[11px] charkle-mono text-white/80 hover:bg-white/12 cursor-pointer"
+                      >
+                        1:1
+                      </button>
+                    </div>
 
-                <button
-                  ref={boardBtnRef}
-                  type="button"
-                  title="加入情绪板"
-                  onClick={() => setBoardMenuOpen((v) => !v)}
-                  className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
-                >
-                  <LayoutGrid size={13.5} />
-                </button>
+                    <span className="w-px h-4 bg-white/15" />
 
-                <button
-                  type="button"
-                  title="在资源管理器中显示"
-                  onClick={() =>
-                    void transport.revealInExplorer(asset.id).catch(() => {
-                      pushToast({ message: '无法定位本地文件', tone: 'error' });
-                    })
-                  }
-                  className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
-                >
-                  <FolderOpen size={13.5} />
-                </button>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        title="逆时针旋转 90° (Shift+R)"
+                        aria-label="逆时针旋转"
+                        onClick={() => rotateBy(-90)}
+                        className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
+                      >
+                        <ArrowCounterclockwise16Regular className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        title="顺时针旋转 90° (R)"
+                        aria-label="顺时针旋转"
+                        onClick={() => rotateBy(90)}
+                        className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/88 hover:bg-white/12 cursor-pointer"
+                      >
+                        <ArrowClockwise16Regular className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        title="水平翻转 (Shift+H)"
+                        aria-label="水平翻转"
+                        onClick={() => {
+                          setLongStripMode(false);
+                          setFlipHorizontal((v) => !v);
+                        }}
+                        className={[
+                          'charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
+                          flipHorizontal
+                            ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                            : 'text-white/88 hover:bg-white/12',
+                        ].join(' ')}
+                      >
+                        <FlipHorizontal16Regular className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        title="上下翻转 (Shift+V)"
+                        aria-label="上下翻转"
+                        onClick={() => {
+                          setLongStripMode(false);
+                          setFlipVertical((v) => !v);
+                        }}
+                        className={[
+                          'charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
+                          flipVertical
+                            ? 'bg-[var(--accent)] text-[var(--accent-text)]'
+                            : 'text-white/88 hover:bg-white/12',
+                        ].join(' ')}
+                      >
+                        <FlipVertical16Regular className="w-4 h-4" />
+                      </button>
+                      {hasActiveTransform && (
+                        <button
+                          type="button"
+                          title="还原旋转与翻转"
+                          onClick={() => resetTransforms(false)}
+                          className="charkle-pressable ml-0.5 h-6 px-2 rounded-[var(--win-radius-control)] bg-[var(--accent)] text-[var(--accent-text)] text-[11px] charkle-mono inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          {normalizedRot !== 0 && <span>{normalizedRot}°</span>}
+                          <ArrowCounterclockwise16Regular className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
 
-                <button
-                  type="button"
-                  title="拷贝文件"
-                  onClick={() =>
-                    void transport
-                      .copyAssetsToClipboard([asset.id])
-                      .then(() => pushToast({ message: '已拷贝到剪贴板', tone: 'success' }))
-                      .catch((err) =>
-                        pushToast({
-                          message: err instanceof Error ? err.message : '无法拷贝文件',
-                          tone: 'error',
-                        }),
-                      )
-                  }
-                  className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
-                >
-                  <Copy size={13.5} />
-                </button>
+                    {asset.mediaKind === 'animatedImage' && (
+                      <>
+                        <span className="w-px h-4 bg-white/15" />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!pausedAnim) freezeAnimRef.current?.();
+                            setPausedAnim((v) => !v);
+                          }}
+                          className="charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] bg-white/10 hover:bg-white/18 text-white text-[11.5px] inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          {pausedAnim ? (
+                            <Play16Filled className="w-3.5 h-3.5" />
+                          ) : (
+                            <Pause16Regular className="w-3.5 h-3.5" />
+                          )}
+                          <span>{pausedAnim ? '播放' : '暂停'}</span>
+                        </button>
+                      </>
+                    )}
 
-                {asset.sourceURL && (
-                  <button
-                    type="button"
-                    title="打开来源网页"
-                    onClick={() =>
-                      void transport.openExternalUrl(asset.sourceURL!).catch(() => {
-                        pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' });
-                      })
-                    }
-                    className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
-                  >
-                    <ExternalLink size={13.5} />
-                  </button>
+                    <span className="w-px h-4 bg-white/15" />
+                  </>
                 )}
 
-                <button
-                  type="button"
-                  title="移至回收站"
-                  aria-label="移至回收站"
-                  onClick={() => {
-                    const id = asset.id;
-                    void updateAssets({ assetIDs: [id], isTrashed: true }, destination, {
-                      undoMessage: '已移至回收站',
-                      undoPatch: { assetIDs: [id], isTrashed: false },
-                    });
-                  }}
-                  className="charkle-pressable w-7 h-7 rounded-full inline-flex items-center justify-center text-white/85 hover:bg-red-500/20 hover:text-[#FF6B6B] cursor-pointer"
-                >
-                  <Trash2 size={13.5} />
-                </button>
-              </>
-            )}
-          </div>
-        </div>
+                {/* Rating Stars */}
+                <div className="flex items-center gap-0.5">
+                  {[1, 2, 3, 4, 5].map((star) => {
+                    const filled = asset.rating >= star;
+                    const isPeak = asset.rating === star;
+                    return (
+                      <button
+                        key={star}
+                        type="button"
+                        aria-label={`评为 ${star} 星`}
+                        onClick={() =>
+                          void updateAssets(
+                            { assetIDs: [asset.id], rating: asset.rating === star ? 0 : star },
+                            destination,
+                          )
+                        }
+                        className={[
+                          'charkle-pressable w-6 h-6 rounded-[var(--win-radius-control)] inline-flex items-center justify-center hover:bg-white/10 cursor-pointer',
+                          filled ? 'text-[#F2C14E]' : 'text-white/45 hover:text-white/85',
+                          isPeak ? 'charkle-micro-pop' : '',
+                        ].join(' ')}
+                      >
+                        {filled ? (
+                          <Star16Filled className="w-3.5 h-3.5" />
+                        ) : (
+                          <Star16Regular className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
 
-        {/* Add to Moodboard Popover (z-[170] above Quick Look z-[130]) */}
-        <Popover
-          open={boardMenuOpen}
-          onOpenChange={setBoardMenuOpen}
-          anchorEl={boardBtnRef.current}
-          placement="top-center"
-          className="!z-[170] w-[212px] p-1"
-        >
-          <div className="flex flex-col gap-0.5 text-[12px]">
-            {boards.length === 0 ? (
-              <div className="px-2.5 py-1.5 text-[11.5px] text-[var(--text-tertiary)]">
-                暂无情绪板
+                <span className="w-px h-4 bg-white/15" />
+
+                {asset.isTrashed ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const id = asset.id;
+                        void updateAssets({ assetIDs: [id], isTrashed: false }, destination).then(
+                          () => pushToast({ message: '已放回原处', tone: 'success' }),
+                        );
+                      }}
+                      className="charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] hover:bg-white/12 text-white text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowUndo16Regular className="w-3.5 h-3.5" />
+                      放回原处
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteOpen(true)}
+                      className="charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] hover:bg-red-500/20 text-[#FF6B6B] text-[12px] font-medium inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Delete16Regular className="w-3.5 h-3.5" />
+                      彻底删除
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      aria-label={asset.pinnedOffline ? '取消始终保留在本地' : '始终保留在本地'}
+                      title={asset.pinnedOffline ? '取消始终保留在本地' : '始终保留在本地'}
+                      onClick={() => {
+                        const nextPinned = !asset.pinnedOffline;
+                        void updateAssets(
+                          { assetIDs: [asset.id], pinnedOffline: nextPinned },
+                          destination,
+                        ).then(() =>
+                          pushToast({
+                            message: nextPinned ? '已设为始终保留在本地' : '已取消始终保留在本地',
+                            tone: 'info',
+                          }),
+                        );
+                      }}
+                      className={[
+                        'charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
+                        asset.pinnedOffline
+                          ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : 'text-white/85 hover:bg-white/12',
+                      ].join(' ')}
+                    >
+                      <ArrowDownload16Regular className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      ref={boardBtnRef}
+                      type="button"
+                      aria-label="加入情绪板"
+                      title="加入情绪板"
+                      onClick={() => setBoardMenuOpen((v) => !v)}
+                      className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
+                    >
+                      <Board16Regular className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-label="在资源管理器中显示"
+                      title="在资源管理器中显示"
+                      onClick={() =>
+                        void transport.revealInExplorer(asset.id).catch(() => {
+                          pushToast({ message: '无法定位本地文件', tone: 'error' });
+                        })
+                      }
+                      className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
+                    >
+                      <FolderOpen16Regular className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-label="拷贝文件"
+                      title="拷贝文件"
+                      onClick={() =>
+                        void transport
+                          .copyAssetsToClipboard([asset.id])
+                          .then(() => pushToast({ message: '已拷贝到剪贴板', tone: 'success' }))
+                          .catch((err) =>
+                            pushToast({
+                              message: err instanceof Error ? err.message : '无法拷贝文件',
+                              tone: 'error',
+                            }),
+                          )
+                      }
+                      className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
+                    >
+                      <Copy16Regular className="w-4 h-4" />
+                    </button>
+
+                    {asset.sourceURL && (
+                      <button
+                        type="button"
+                        aria-label="打开来源网页"
+                        title="打开来源网页"
+                        onClick={() =>
+                          void transport.openExternalUrl(asset.sourceURL!).catch(() => {
+                            pushToast({ message: '无法在默认浏览器中打开链接', tone: 'error' });
+                          })
+                        }
+                        className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/85 hover:bg-white/12 cursor-pointer"
+                      >
+                        <Open16Regular className="w-4 h-4" />
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      title="移至回收站"
+                      aria-label="移至回收站"
+                      onClick={() => {
+                        const id = asset.id;
+                        void updateAssets({ assetIDs: [id], isTrashed: true }, destination, {
+                          undoMessage: '已移至回收站',
+                          undoPatch: { assetIDs: [id], isTrashed: false },
+                        });
+                      }}
+                      className="charkle-pressable w-7 h-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-white/85 hover:bg-red-500/20 hover:text-[#FF6B6B] cursor-pointer"
+                    >
+                      <Delete16Regular className="w-4 h-4" />
+                    </button>
+                  </>
+                )}
               </div>
-            ) : (
-              boards.map((b) => (
+            </div>
+
+            {/* Add to Moodboard Popover (z-[170] above Quick Look z-[130]) */}
+            <Popover
+              open={boardMenuOpen}
+              onOpenChange={setBoardMenuOpen}
+              anchorEl={boardBtnRef.current}
+              placement="top-center"
+              className="!z-[170] w-[220px] p-1"
+            >
+              <div className="flex flex-col gap-0.5 text-[13px] leading-[18px]">
+                {boards.length === 0 ? (
+                  <div className="px-2.5 py-1.5 text-[12px] text-[var(--text-tertiary)]">
+                    暂无情绪板
+                  </div>
+                ) : (
+                  boards.map((b) => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      onClick={() => {
+                        setBoardMenuOpen(false);
+                        void addAssetsToBoard(b.id, [asset.id]);
+                      }}
+                      className="charkle-pressable w-full min-h-[32px] text-left px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] truncate cursor-pointer"
+                    >
+                      {b.title}
+                    </button>
+                  ))
+                )}
+                <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
                 <button
-                  key={b.id}
                   type="button"
                   onClick={() => {
                     setBoardMenuOpen(false);
-                    void addAssetsToBoard(b.id, [asset.id]);
+                    setSelection([asset.id], asset.id);
+                    closeQuickLook();
+                    openMoodboardGenerator('seedAssets');
                   }}
-                  className="charkle-pressable w-full text-left px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] truncate cursor-pointer"
+                  className="charkle-pressable w-full min-h-[32px] text-left px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--accent)] font-medium hover:bg-[var(--accent-soft)] cursor-pointer"
                 >
-                  {b.title}
+                  以此图快速生成新情绪板…
                 </button>
-              ))
-            )}
-            <div className="my-1 h-px bg-[var(--border-hairline)]" />
-            <button
-              type="button"
-              onClick={() => {
-                setBoardMenuOpen(false);
-                setSelection([asset.id], asset.id);
-                closeQuickLook();
-                openMoodboardGenerator('seedAssets');
-              }}
-              className="charkle-pressable w-full text-left px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--accent)] font-medium hover:bg-[var(--accent-soft)] cursor-pointer"
-            >
-              以此图快速生成新情绪板…
-            </button>
+              </div>
+            </Popover>
           </div>
-        </Popover>
-      </div>
 
-      {/* Synchronized Full-Height 300px Right Inspector (1:1 macOS QuickLookOverlayView.swift) */}
-      <div
-        aria-hidden={!inspectorOpen}
-        style={{
-          width: inspectorOpen ? 300 : 0,
-          opacity: inspectorOpen ? 1 : 0,
-        }}
-        className={[
-          'charkle-drawer-slot shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
-          inspectorOpen ? '' : 'pointer-events-none',
-        ].join(' ')}
-      >
-        <InspectorView
-          pinnedAsset={asset}
-          isQuickLookHosted
-          onRequestCloseQuickLook={closeQuickLook}
-        />
-      </div>
-
-      {/* Permanent Delete Confirm Dialog at z-[180] (above Quick Look z-[130]) */}
-      {confirmDeleteOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="彻底删除此素材"
-          data-quicklook-delete-open="true"
-          onMouseDown={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          className="fixed inset-0 z-[180] flex items-center justify-center p-4"
-        >
+          {/* Synchronized Full-Height 300px Right Inspector (zero per-frame width reflow) */}
           <div
-            className="charkle-modal-scrim fixed inset-0"
-            onClick={() => setConfirmDeleteOpen(false)}
-          />
-          <div className="charkle-modal-panel relative z-10 w-full max-w-[380px] rounded-[var(--radius-dock-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[var(--shadow-modal)] p-5 flex flex-col gap-3">
-            <div className="text-[15px] font-semibold text-[var(--text-primary)]">
-              彻底删除此素材？
-            </div>
-            <p className="text-[13px] text-[var(--text-secondary)]">彻底删除后将无法恢复。</p>
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <Button variant="secondary" size="sm" onClick={() => setConfirmDeleteOpen(false)}>
-                取消
-              </Button>
-              <Button
-                variant="danger"
-                size="sm"
-                onClick={async () => {
-                  const id = asset.id;
-                  setConfirmDeleteOpen(false);
-                  await permanentlyDeleteAssets([id], destination);
-                }}
-              >
-                彻底删除
-              </Button>
+            aria-hidden={!inspectorOpen}
+            style={{ width: inspectorOpen ? 300 : 0 }}
+            className={[
+              'charkle-drawer-slot shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
+              inspectorOpen ? '' : 'pointer-events-none',
+            ].join(' ')}
+          >
+            <div
+              className="win-drawer-content h-full w-[300px] shrink-0"
+              style={{
+                opacity: inspectorOpen ? 1 : 0,
+                transform: inspectorOpen ? 'translateX(0)' : 'translateX(16px)',
+              }}
+            >
+              <InspectorView
+                pinnedAsset={asset}
+                isQuickLookHosted
+                onRequestCloseQuickLook={closeQuickLook}
+              />
             </div>
           </div>
-        </div>
+
+          {/* Permanent Delete Confirm Dialog at z-[180] (above Quick Look z-[130]) */}
+          {confirmDeleteOpen && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="彻底删除此素材"
+              data-quicklook-delete-open="true"
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className="fixed inset-0 z-[180] flex items-center justify-center p-4"
+            >
+              <div
+                className="win-smoke-scrim fixed inset-0"
+                onClick={() => setConfirmDeleteOpen(false)}
+              />
+              <div className="win-dialog-popup relative z-10 w-full max-w-[380px] rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)] overflow-hidden flex flex-col">
+                <div className="p-5 flex flex-col gap-2">
+                  <div className="text-[16px] font-semibold text-[var(--text-primary)]">
+                    彻底删除此素材？
+                  </div>
+                  <p className="text-[13px] text-[var(--text-secondary)]">彻底删除后将无法恢复。</p>
+                </div>
+                <div className="px-5 py-3.5 bg-[var(--bg-subtle)]/55 border-t border-[var(--win-stroke-divider)] flex items-center justify-end gap-2">
+                  <Button
+                    variant="standard"
+                    size="sm"
+                    onClick={() => setConfirmDeleteOpen(false)}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={async () => {
+                      const id = asset.id;
+                      setConfirmDeleteOpen(false);
+                      await permanentlyDeleteAssets([id], destination);
+                    }}
+                  >
+                    彻底删除
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </m.div>
       )}
-    </div>,
+    </AnimatePresence>,
     document.body,
   );
 };

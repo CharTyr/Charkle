@@ -1,23 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowUpRight,
-  Camera,
-  CheckCircle2,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
-  Clipboard,
-  Copy,
-  ExternalLink,
-  Eye,
-  LayoutGrid,
-  Link2,
-  Pin,
-  Search,
-  Upload,
-  X,
-} from 'lucide-react';
+  ArrowUpRight16Regular,
+  ArrowUpload16Regular,
+  Camera16Regular,
+  CheckmarkCircle16Filled,
+  ChevronDown16Regular,
+  ChevronLeft16Regular,
+  ChevronRight16Regular,
+  ChevronUp16Regular,
+  Clipboard16Regular,
+  Copy16Regular,
+  Dismiss16Regular,
+  Eye16Regular,
+  Grid16Regular,
+  Link16Regular,
+  Open16Regular,
+  Pin16Filled,
+  Pin16Regular,
+  Search16Regular,
+} from '@fluentui/react-icons';
 import { getTransport, isTauriRuntime } from '../../api/transport';
 import { CharkleBrandMark, CustomSelect, type SelectOption } from '../../design-system';
 import {
@@ -1166,7 +1167,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     if (statusMessage) {
       return (
         <div className="flex items-center gap-2 text-[12px] font-semibold text-white min-w-0">
-          <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
+          <CheckmarkCircle16Filled className="w-4 h-4 text-emerald-400 shrink-0" />
           <span className="truncate">{statusMessage}</span>
         </div>
       );
@@ -1174,7 +1175,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
     if (isDropTargeted) {
       return (
         <div className="flex items-center gap-2.5 min-w-0">
-          <Upload size={17} className="text-[#3B82F6] shrink-0" />
+          <ArrowUpload16Regular className="w-4 h-4 text-[#5B8DEF] shrink-0" />
           <div className="flex flex-col leading-tight min-w-0">
             <span className="text-[12.5px] font-semibold text-white truncate">
               松开立即收藏 {dragItemCount} 项素材
@@ -1194,7 +1195,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
             className="flex-1 min-w-0 h-full flex items-center justify-between gap-2 cursor-pointer text-left"
           >
             <span className="flex items-center gap-2 min-w-0">
-              <Link2 size={15} className="text-[#3B82F6] shrink-0" />
+              <Link16Regular className="w-4 h-4 text-[#5B8DEF] shrink-0" />
               <span
                 className={
                   sideCompact
@@ -1205,7 +1206,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 {activeClipboardUrlPrompt.label}
               </span>
             </span>
-            <span className="px-2.5 py-1 rounded-full bg-[#3B82F6] text-[11px] font-semibold text-white shrink-0">
+            <span className="px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--accent)] text-[11px] font-semibold text-[var(--accent-text)] shrink-0">
               保存
             </span>
           </button>
@@ -1214,9 +1215,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
             title="忽略剪贴板链接"
             aria-label="忽略剪贴板链接"
             onClick={() => setDismissedClipboardLabel(activeClipboardUrlPrompt.clip.label)}
-            className="charkle-pressable w-6 h-6 rounded-full bg-white/8 hover:bg-white/16 text-white/62 hover:text-white inline-flex items-center justify-center shrink-0 cursor-pointer"
+            className="charkle-pressable w-6 h-6 rounded-[var(--win-radius-control)] bg-white/8 hover:bg-white/16 text-white/62 hover:text-white inline-flex items-center justify-center shrink-0 cursor-pointer"
           >
-            <X size={11.5} />
+            <Dismiss16Regular className="w-3 h-3" />
           </button>
         </div>
       );
@@ -1227,7 +1228,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
         onClick={() => void handleCollectClipboard()}
         className="w-full h-full flex items-center gap-2.5 cursor-pointer text-left"
       >
-        <Upload size={14.5} className="text-white/72 shrink-0" />
+        <ArrowUpload16Regular className="w-3.5 h-3.5 text-white/72 shrink-0" />
         <span
           className={
             sideCompact
@@ -1312,7 +1313,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 Charkle
               </span>
               {minimalMode && (
-                <span className="inline-flex items-center gap-1 px-[7px] py-[2px] rounded-full bg-white/11 text-[10px] font-semibold text-white/84 shrink-0 whitespace-nowrap">
+                <span className="inline-flex items-center gap-1 px-[7px] py-[2px] rounded-[var(--win-radius-control)] bg-white/11 text-[10px] font-semibold text-white/84 shrink-0 whitespace-nowrap">
                   <span className="w-[5px] h-[5px] rounded-full bg-[#34C769] shrink-0" />
                   <span>极简采集</span>
                 </span>
@@ -1331,13 +1332,17 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   void transport.setShelfPinned(next).catch(() => {});
                 }}
                 className={[
-                  'charkle-pressable w-[22px] h-[22px] rounded-full inline-flex items-center justify-center cursor-pointer',
+                  'charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] inline-flex items-center justify-center cursor-pointer',
                   pinned
-                    ? 'bg-white/16 text-[#3B82F6]'
+                    ? 'bg-white/16 text-[#5B8DEF]'
                     : 'bg-white/8 text-white/68 hover:text-white hover:bg-white/14',
                 ].join(' ')}
               >
-                <Pin size={10.5} className={pinned ? 'fill-current' : ''} />
+                {pinned ? (
+                  <Pin16Filled className="w-3 h-3" />
+                ) : (
+                  <Pin16Regular className="w-3 h-3" />
+                )}
               </button>
 
               <button
@@ -1345,9 +1350,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 title="打开 Charkle 主窗口"
                 aria-label="打开主窗口"
                 onClick={openMainWindowAndCollapse}
-                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-white/8 text-white/68 hover:text-white hover:bg-white/14 inline-flex items-center justify-center cursor-pointer"
+                className="charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] bg-white/8 text-white/68 hover:text-white hover:bg-white/14 inline-flex items-center justify-center cursor-pointer"
               >
-                <ArrowUpRight size={11.5} />
+                <ArrowUpRight16Regular className="w-3 h-3" />
               </button>
 
               <button
@@ -1358,9 +1363,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   cancelAutoCollapse();
                   void transport.hideShelf().catch(() => {});
                 }}
-                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-white/10 text-white/68 hover:text-white hover:bg-white/18 inline-flex items-center justify-center cursor-pointer"
+                className="charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] bg-white/10 text-white/68 hover:text-white hover:bg-white/18 inline-flex items-center justify-center cursor-pointer"
               >
-                <X size={11} />
+                <Dismiss16Regular className="w-3 h-3" />
               </button>
             </div>
           </div>
@@ -1377,9 +1382,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     title="区域截图 (Alt+Shift+A)"
                     aria-label="区域截图采集"
                     onClick={handleStartRegionCapture}
-                    className="charkle-pressable h-[29px] px-1.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                    className="charkle-pressable h-[29px] px-1.5 rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
                   >
-                    <Camera size={12} className="shrink-0" />
+                    <Camera16Regular className="w-3.5 h-3.5 shrink-0" />
                     <span>区域截图</span>
                   </button>
 
@@ -1388,9 +1393,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     title="采集剪贴板 (Alt+Shift+V)"
                     aria-label="采集剪贴板"
                     onClick={() => void handleCollectClipboard()}
-                    className="charkle-pressable h-[29px] px-1.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                    className="charkle-pressable h-[29px] px-1.5 rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
                   >
-                    <Clipboard size={12} className="shrink-0" />
+                    <Clipboard16Regular className="w-3.5 h-3.5 shrink-0" />
                     <span>剪贴板</span>
                   </button>
 
@@ -1398,9 +1403,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     type="button"
                     title={minimalMode ? '退出极简模式并打开主窗' : '打开 Charkle 主窗'}
                     onClick={openMainWindowAndCollapse}
-                    className="charkle-pressable h-[29px] px-1.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                    className="charkle-pressable h-[29px] px-1.5 rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center justify-center gap-1 text-[11px] font-medium cursor-pointer whitespace-nowrap"
                   >
-                    <LayoutGrid size={12} className="shrink-0" />
+                    <Grid16Regular className="w-3.5 h-3.5 shrink-0" />
                     <span>{minimalMode ? '恢复主窗' : '主窗'}</span>
                   </button>
                 </div>
@@ -1410,7 +1415,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   <div
                     role="radiogroup"
                     aria-label="采集投递目标"
-                    className="grid grid-cols-3 p-[2.5px] gap-0.5 rounded-[9px] bg-white/8"
+                    className="grid grid-cols-3 p-[2.5px] gap-0.5 rounded-[var(--win-radius-control)] bg-white/8"
                   >
                     {(
                       [
@@ -1438,7 +1443,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                             persistTargetSelection(opt.id, nextFolderId);
                           }}
                           className={[
-                            'charkle-pressable px-1.5 py-[4px] rounded-[7px] text-[10.5px] cursor-pointer whitespace-nowrap text-center',
+                            'charkle-pressable px-1.5 py-[4px] rounded-[var(--win-radius-control)] text-[10.5px] cursor-pointer whitespace-nowrap text-center',
                             active
                               ? 'bg-white/18 text-white font-semibold'
                               : 'text-white/62 hover:text-white/90 font-medium',
@@ -1451,7 +1456,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   </div>
 
                   {targetMode === 'inbox' && (
-                    <div className="flex items-center justify-between px-2.5 py-1 rounded-[8px] bg-white/[0.05] text-[10.5px] text-white/66">
+                    <div className="flex items-center justify-between px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/[0.05] text-[10.5px] text-white/66">
                       <span>默认收入收件箱待整理</span>
                       <span className="charkle-tabular font-semibold text-white/84">
                         {inboxCount} 项
@@ -1473,13 +1478,13 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                         className="w-full h-[26px] bg-white/11 border-white/12 text-white text-[11px]"
                       />
                     ) : (
-                      <div className="px-2.5 py-1 rounded-[8px] bg-white/[0.05] text-[10.5px] text-white/55">
+                      <div className="px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/[0.05] text-[10.5px] text-white/55">
                         暂无文件夹，将保存至收件箱
                       </div>
                     ))}
 
                   {targetMode === 'activeMoodboard' && (
-                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] bg-white/[0.05] text-[10.5px] text-white/86 min-w-0">
+                    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/[0.05] text-[10.5px] text-white/86 min-w-0">
                       <span className="w-[5px] h-[5px] rounded-full bg-emerald-400 shrink-0" />
                       <span className="truncate">{activeBoardTitle}</span>
                     </div>
@@ -1489,9 +1494,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 {/* Vertical-Friendly Drop Well */}
                 <div
                   className={[
-                    'min-h-[64px] shrink-0 rounded-[13px] flex items-center justify-center transition-colors duration-150 py-2.5 px-3',
+                    'min-h-[64px] shrink-0 rounded-[var(--win-radius-card)] flex items-center justify-center transition-colors duration-150 py-2.5 px-3',
                     isDropTargeted
-                      ? 'bg-[#3B82F6]/24 border-[1.5px] border-[#3B82F6]/92'
+                      ? 'bg-[var(--accent)]/24 border-[1.5px] border-[var(--accent)]'
                       : 'bg-white/[0.06] border border-dashed border-white/14 hover:bg-white/[0.08]',
                   ].join(' ')}
                 >
@@ -1501,7 +1506,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 {/* Recent Assets 2-Column Scrollable Grid */}
                 <div className="flex-1 min-h-0 flex flex-col gap-1.5">
                   <div className="flex items-center justify-between gap-2 shrink-0">
-                    <span className="px-2.5 py-[3px] rounded-full bg-white/14 text-[11px] font-semibold text-white shrink-0">
+                    <span className="px-2.5 py-[3px] rounded-[var(--win-radius-control)] bg-white/14 text-[11px] font-semibold text-white shrink-0">
                       最近素材
                     </span>
 
@@ -1511,10 +1516,10 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                         title="退出极简模式并打开主窗口浏览全部素材"
                         aria-label="恢复主窗看全部"
                         onClick={openMainWindowAndCollapse}
-                        className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/9 hover:bg-white/16 text-[10.5px] font-semibold text-white/78 inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                        className="charkle-pressable px-2.5 py-[3px] rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/16 text-[10.5px] font-semibold text-white/78 inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
                       >
                         <span>恢复主窗看全部</span>
-                        <ArrowUpRight size={10.5} />
+                        <ArrowUpRight16Regular className="w-3 h-3" />
                       </button>
                     ) : (
                       <button
@@ -1522,11 +1527,11 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                         title="展开全画面瀑布流浏览最近素材（支持框选多选）"
                         aria-label="展开为全瀑布流抽屉"
                         onClick={openFullGallery}
-                        className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/10 hover:bg-white/16 text-[11px] font-semibold text-white/84 inline-flex items-center gap-1 cursor-pointer shrink-0 charkle-tabular"
+                        className="charkle-pressable px-2.5 py-[3px] rounded-[var(--win-radius-control)] bg-white/10 hover:bg-white/16 text-[11px] font-semibold text-white/84 inline-flex items-center gap-1 cursor-pointer shrink-0 charkle-tabular"
                       >
-                        {dockEdge === 'right' && <ChevronLeft size={11} />}
+                        {dockEdge === 'right' && <ChevronLeft16Regular className="w-3 h-3" />}
                         <span>全部 ({assets.length})</span>
-                        {dockEdge === 'left' && <ChevronRight size={11} />}
+                        {dockEdge === 'left' && <ChevronRight16Regular className="w-3 h-3" />}
                       </button>
                     )}
                   </div>
@@ -1543,7 +1548,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                             onPointerDown={(e) =>
                               startCardDragOut(e, [asset.id], openFullGallery)
                             }
-                            className="relative w-full aspect-[4/3] rounded-[10px] overflow-hidden bg-white/8 ring-1 ring-white/12 group-hover:ring-white/38 cursor-grab active:cursor-grabbing transition-shadow duration-150"
+                            className="relative w-full aspect-[4/3] rounded-[var(--win-radius-card)] overflow-hidden bg-white/8 ring-1 ring-white/12 group-hover:ring-white/38 cursor-grab active:cursor-grabbing transition-shadow duration-150"
                           >
                             <ShelfAssetThumb
                               asset={asset}
@@ -1567,9 +1572,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                                       ),
                                     );
                                 }}
-                                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                                className="charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
                               >
-                                <Copy size={10} />
+                                <Copy16Regular className="w-3 h-3" />
                               </button>
                               <button
                                 type="button"
@@ -1587,12 +1592,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                                   e.stopPropagation();
                                   openShelfAsset(asset);
                                 }}
-                                className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                                className="charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
                               >
                                 {isPlainWebBookmark(asset) ? (
-                                  <ExternalLink size={10.5} />
+                                  <Open16Regular className="w-3 h-3" />
                                 ) : (
-                                  <Eye size={10.5} />
+                                  <Eye16Regular className="w-3 h-3" />
                                 )}
                               </button>
                             </div>
@@ -1617,9 +1622,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     title="区域截图 (Alt+Shift+A)"
                     aria-label="区域截图采集"
                     onClick={handleStartRegionCapture}
-                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
+                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
                   >
-                    <Camera size={12} className="shrink-0" />
+                    <Camera16Regular className="w-3.5 h-3.5 shrink-0" />
                     <span>区域截图</span>
                   </button>
 
@@ -1628,9 +1633,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     title="采集剪贴板 (Alt+Shift+V)"
                     aria-label="采集剪贴板"
                     onClick={() => void handleCollectClipboard()}
-                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
+                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
                   >
-                    <Clipboard size={12} className="shrink-0" />
+                    <Clipboard16Regular className="w-3.5 h-3.5 shrink-0" />
                     <span>剪贴板</span>
                   </button>
 
@@ -1638,9 +1643,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                     type="button"
                     title={minimalMode ? '退出极简模式并打开主窗' : '打开 Charkle 主窗'}
                     onClick={openMainWindowAndCollapse}
-                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[9px] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
+                    className="charkle-pressable shrink-0 whitespace-nowrap h-[27px] px-2.5 rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/14 text-white/88 inline-flex items-center gap-1.5 text-[11px] font-medium cursor-pointer"
                   >
-                    <LayoutGrid size={12} className="shrink-0" />
+                    <Grid16Regular className="w-3.5 h-3.5 shrink-0" />
                     <span>{minimalMode ? '恢复主窗' : '主窗'}</span>
                   </button>
                 </div>
@@ -1649,7 +1654,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   <div
                     role="radiogroup"
                     aria-label="采集投递目标"
-                    className="inline-flex items-center p-[2.5px] gap-0.5 rounded-[9px] bg-white/8 shrink-0"
+                    className="inline-flex items-center p-[2.5px] gap-0.5 rounded-[var(--win-radius-control)] bg-white/8 shrink-0"
                   >
                     {(
                       [
@@ -1677,7 +1682,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                             persistTargetSelection(opt.id, nextFolderId);
                           }}
                           className={[
-                            'charkle-pressable shrink-0 px-2 py-[3.5px] rounded-[7px] text-[10.5px] cursor-pointer whitespace-nowrap',
+                            'charkle-pressable shrink-0 px-2 py-[3.5px] rounded-[var(--win-radius-control)] text-[10.5px] cursor-pointer whitespace-nowrap',
                             active
                               ? 'bg-white/18 text-white font-semibold'
                               : 'text-white/62 hover:text-white/90 font-medium',
@@ -1690,7 +1695,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   </div>
 
                   {targetMode === 'inbox' && (
-                    <span className="px-2 py-1 rounded-[7px] bg-white/6 text-[10.5px] text-white/68 charkle-tabular shrink-0 whitespace-nowrap">
+                    <span className="px-2 py-1 rounded-[var(--win-radius-control)] bg-white/6 text-[10.5px] text-white/68 charkle-tabular shrink-0 whitespace-nowrap">
                       {inboxCount} 项
                     </span>
                   )}
@@ -1710,7 +1715,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   )}
 
                   {targetMode === 'activeMoodboard' && (
-                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[7px] bg-white/6 text-[10.5px] text-white/86 min-w-0 max-w-[160px]">
+                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-[var(--win-radius-control)] bg-white/6 text-[10.5px] text-white/86 min-w-0 max-w-[160px]">
                       <span className="w-[5px] h-[5px] rounded-full bg-emerald-400 shrink-0" />
                       <span className="truncate">{activeBoardTitle}</span>
                     </span>
@@ -1721,9 +1726,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
               {/* Row 3: Slim 52px Drop Well / Live Clipboard / Status Banner */}
               <div
                 className={[
-                  'h-[52px] shrink-0 rounded-[13px] flex items-center justify-center transition-colors duration-150 px-3.5',
+                  'h-[52px] shrink-0 rounded-[var(--win-radius-card)] flex items-center justify-center transition-colors duration-150 px-3.5',
                   isDropTargeted
-                    ? 'bg-[#3B82F6]/24 border-[1.5px] border-[#3B82F6]/92'
+                    ? 'bg-[var(--accent)]/24 border-[1.5px] border-[var(--accent)]'
                     : 'bg-white/[0.06] border border-dashed border-white/14 hover:bg-white/[0.08]',
                 ].join(' ')}
               >
@@ -1734,7 +1739,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
               <div className="flex-1 min-h-0 flex flex-col gap-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
-                    <span className="px-2.5 py-[3px] rounded-full bg-white/14 text-[11px] font-semibold text-white shrink-0">
+                    <span className="px-2.5 py-[3px] rounded-[var(--win-radius-control)] bg-white/14 text-[11px] font-semibold text-white shrink-0">
                       最近素材
                     </span>
                     <span className="text-[10.5px] text-white/48 truncate">
@@ -1748,10 +1753,10 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                       title="退出极简模式并打开主窗口浏览全部素材"
                       aria-label="恢复主窗看全部"
                       onClick={openMainWindowAndCollapse}
-                      className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/9 hover:bg-white/16 text-[10.5px] font-semibold text-white/78 inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                      className="charkle-pressable px-2.5 py-[3px] rounded-[var(--win-radius-control)] bg-white/9 hover:bg-white/16 text-[10.5px] font-semibold text-white/78 inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
                     >
                       <span>恢复主窗看全部</span>
-                      <ArrowUpRight size={10.5} />
+                      <ArrowUpRight16Regular className="w-3 h-3" />
                     </button>
                   ) : (
                     <button
@@ -1759,10 +1764,10 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                       title="展开全画面瀑布流浏览最近素材（支持框选多选）"
                       aria-label="展开为全瀑布流抽屉"
                       onClick={openFullGallery}
-                      className="charkle-pressable px-2.5 py-[3px] rounded-full bg-white/10 hover:bg-white/16 text-[11px] font-semibold text-white/84 inline-flex items-center gap-1 cursor-pointer shrink-0 charkle-tabular"
+                      className="charkle-pressable px-2.5 py-[3px] rounded-[var(--win-radius-control)] bg-white/10 hover:bg-white/16 text-[11px] font-semibold text-white/84 inline-flex items-center gap-1 cursor-pointer shrink-0 charkle-tabular"
                     >
                       <span>全部 ({assets.length})</span>
-                      <ChevronDown size={11} />
+                      <ChevronDown16Regular className="w-3 h-3" />
                     </button>
                   )}
                 </div>
@@ -1793,7 +1798,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                           onPointerDown={(e) =>
                             startCardDragOut(e, [asset.id], openFullGallery)
                           }
-                          className="relative w-[96px] h-[82px] rounded-[10px] overflow-hidden bg-white/8 ring-1 ring-white/12 group-hover:ring-white/38 cursor-grab active:cursor-grabbing transition-shadow duration-150"
+                          className="relative w-[96px] h-[82px] rounded-[var(--win-radius-card)] overflow-hidden bg-white/8 ring-1 ring-white/12 group-hover:ring-white/38 cursor-grab active:cursor-grabbing transition-shadow duration-150"
                         >
                           <ShelfAssetThumb
                             asset={asset}
@@ -1818,9 +1823,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                                     ),
                                   );
                               }}
-                              className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                              className="charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
                             >
-                              <Copy size={10} />
+                              <Copy16Regular className="w-3 h-3" />
                             </button>
                             <button
                               type="button"
@@ -1838,12 +1843,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                                 e.stopPropagation();
                                 openShelfAsset(asset);
                               }}
-                              className="charkle-pressable w-[22px] h-[22px] rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                              className="charkle-pressable w-[22px] h-[22px] rounded-[var(--win-radius-control)] bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
                             >
                               {isPlainWebBookmark(asset) ? (
-                                <ExternalLink size={10.5} />
+                                <Open16Regular className="w-3 h-3" />
                               ) : (
-                                <Eye size={10.5} />
+                                <Eye16Regular className="w-3 h-3" />
                               )}
                             </button>
                           </div>
@@ -1866,12 +1871,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 /* Side Full-Waterfall 2-Row Compact Header (520 × 700) */
                 <div className="flex flex-col gap-1.5 shrink-0">
                   <div className="flex items-center gap-2">
-                    <span className="px-2.5 py-1 rounded-full bg-white/16 text-[11.5px] font-semibold text-white shrink-0">
+                    <span className="px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/16 text-[11.5px] font-semibold text-white shrink-0">
                       最近素材
                     </span>
 
-                    <div className="flex-1 min-w-0 flex items-center gap-1.5 h-[28px] px-2.5 rounded-full bg-white/9 border border-white/8 focus-within:border-[#3B82F6]/70">
-                      <Search size={11.5} className="text-white/55 shrink-0" />
+                    <div className="flex-1 min-w-0 flex items-center gap-1.5 h-[28px] px-2.5 rounded-[var(--win-radius-control)] bg-white/9 border border-white/10 focus-within:border-[var(--accent)]">
+                      <Search16Regular className="w-3 h-3 text-white/55 shrink-0" />
                       <input
                         type="text"
                         value={searchQuery}
@@ -1886,9 +1891,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                           type="button"
                           aria-label="清除搜索"
                           onClick={() => setSearchQuery('')}
-                          className="text-white/50 hover:text-white cursor-pointer"
+                          className="text-white/50 hover:text-white cursor-pointer inline-flex items-center"
                         >
-                          <X size={11} />
+                          <Dismiss16Regular className="w-3 h-3" />
                         </button>
                       )}
                     </div>
@@ -1897,18 +1902,18 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                       type="button"
                       aria-label="切换为紧凑抽屉"
                       onClick={closeFullGallery}
-                      className="charkle-pressable px-2.5 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-semibold text-white/88 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                      className="charkle-pressable px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/12 hover:bg-white/18 text-[11px] font-semibold text-white/88 inline-flex items-center gap-1 cursor-pointer shrink-0"
                     >
-                      {dockEdge === 'left' && <ChevronLeft size={11} />}
+                      {dockEdge === 'left' && <ChevronLeft16Regular className="w-3 h-3" />}
                       <span>收起</span>
-                      {dockEdge === 'right' && <ChevronRight size={11} />}
+                      {dockEdge === 'right' && <ChevronRight16Regular className="w-3 h-3" />}
                     </button>
                   </div>
 
                   <div className="flex items-center justify-between gap-2 min-h-[22px]">
                     {selectedIds.length > 0 ? (
                       <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-                        <span className="px-2.5 py-0.5 rounded-full bg-[#3B82F6]/20 text-[#60A5FA] text-[11px] font-semibold charkle-tabular">
+                        <span className="px-2.5 py-0.5 rounded-[var(--win-radius-control)] bg-[#5B8DEF]/20 text-[#74A0F7] text-[11px] font-semibold charkle-tabular">
                           已选 {selectedIds.length} 项 · 拖动卡片可直接拖出
                         </span>
                         <button
@@ -1923,15 +1928,15 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                                 ),
                               )
                           }
-                          className="charkle-pressable px-2 py-0.5 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-medium text-white/88 inline-flex items-center gap-1 cursor-pointer"
+                          className="charkle-pressable px-2 py-0.5 rounded-[var(--win-radius-control)] bg-white/12 hover:bg-white/18 text-[11px] font-medium text-white/88 inline-flex items-center gap-1 cursor-pointer"
                         >
-                          <Copy size={10.5} />
+                          <Copy16Regular className="w-3 h-3" />
                           <span>拷贝</span>
                         </button>
                         <button
                           type="button"
                           onClick={() => setSelectedIds([])}
-                          className="charkle-pressable px-2 py-0.5 rounded-full bg-white/8 hover:bg-white/14 text-[11px] text-white/70 hover:text-white cursor-pointer"
+                          className="charkle-pressable px-2 py-0.5 rounded-[var(--win-radius-control)] bg-white/8 hover:bg-white/14 text-[11px] text-white/70 hover:text-white cursor-pointer"
                         >
                           取消
                         </button>
@@ -1945,12 +1950,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                 </div>
               ) : (
               <div className="flex items-center gap-2.5 shrink-0">
-                <span className="px-2.5 py-1 rounded-full bg-white/16 text-[12px] font-semibold text-white shrink-0">
+                <span className="px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/16 text-[12px] font-semibold text-white shrink-0">
                   最近素材
                 </span>
 
-                <div className="flex items-center gap-1.5 w-[210px] h-[28px] px-2.5 rounded-full bg-white/9 border border-white/8 focus-within:border-[#3B82F6]/70">
-                  <Search size={11.5} className="text-white/55 shrink-0" />
+                <div className="flex items-center gap-1.5 w-[210px] h-[28px] px-2.5 rounded-[var(--win-radius-control)] bg-white/9 border border-white/10 focus-within:border-[var(--accent)]">
+                  <Search16Regular className="w-3 h-3 text-white/55 shrink-0" />
                   <input
                     type="text"
                     value={searchQuery}
@@ -1965,16 +1970,16 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                       type="button"
                       aria-label="清除搜索"
                       onClick={() => setSearchQuery('')}
-                      className="text-white/50 hover:text-white cursor-pointer"
+                      className="text-white/50 hover:text-white cursor-pointer inline-flex items-center"
                     >
-                      <X size={11} />
+                      <Dismiss16Regular className="w-3 h-3" />
                     </button>
                   )}
                 </div>
 
                 {selectedIds.length > 0 ? (
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="px-2.5 py-1 rounded-full bg-[#3B82F6]/20 text-[#60A5FA] text-[11px] font-semibold charkle-tabular">
+                    <span className="px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[#5B8DEF]/20 text-[#74A0F7] text-[11px] font-semibold charkle-tabular">
                       已选 {selectedIds.length} 项 · 拖动卡片可直接拖出
                     </span>
                     <button
@@ -1987,15 +1992,15 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                             showBanner(err instanceof Error ? err.message : '无法拷贝所选素材'),
                           )
                       }
-                      className="charkle-pressable px-2 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-medium text-white/88 inline-flex items-center gap-1 cursor-pointer"
+                      className="charkle-pressable px-2 py-1 rounded-[var(--win-radius-control)] bg-white/12 hover:bg-white/18 text-[11px] font-medium text-white/88 inline-flex items-center gap-1 cursor-pointer"
                     >
-                      <Copy size={10.5} />
+                      <Copy16Regular className="w-3 h-3" />
                       <span>拷贝</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setSelectedIds([])}
-                      className="charkle-pressable px-2 py-1 rounded-full bg-white/8 hover:bg-white/14 text-[11px] text-white/70 hover:text-white cursor-pointer"
+                      className="charkle-pressable px-2 py-1 rounded-[var(--win-radius-control)] bg-white/8 hover:bg-white/14 text-[11px] text-white/70 hover:text-white cursor-pointer"
                     >
                       取消
                     </button>
@@ -2012,10 +2017,10 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   type="button"
                   aria-label="切换为紧凑抽屉"
                   onClick={closeFullGallery}
-                  className="charkle-pressable px-2.5 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] font-semibold text-white/88 inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  className="charkle-pressable px-2.5 py-1 rounded-[var(--win-radius-control)] bg-white/12 hover:bg-white/18 text-[11px] font-semibold text-white/88 inline-flex items-center gap-1 cursor-pointer shrink-0"
                 >
                   <span>收起</span>
-                  <ChevronUp size={11} />
+                  <ChevronUp16Regular className="w-3 h-3" />
                 </button>
               </div>
               )}
@@ -2033,7 +2038,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   if (!e.ctrlKey && !e.metaKey) setSelectedIds([]);
                   setMarquee({ startX: x, startY: y, curX: x, curY: y });
                 }}
-                className="relative flex-1 min-h-0 overflow-y-auto charkle-scroll rounded-[14px] bg-black p-1"
+                className="relative flex-1 min-h-0 overflow-y-auto charkle-scroll rounded-[var(--win-radius-card)] bg-black p-1"
               >
                 {filteredAssets.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center gap-2 text-[12px] text-white/52">
@@ -2042,7 +2047,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                       <button
                         type="button"
                         onClick={() => setSearchQuery('')}
-                        className="charkle-pressable px-3 py-1 rounded-full bg-white/12 hover:bg-white/18 text-[11px] text-white/85 cursor-pointer"
+                        className="charkle-pressable px-3 py-1 rounded-[var(--win-radius-control)] bg-white/12 hover:bg-white/18 text-[11px] text-white/85 cursor-pointer"
                       >
                         清除搜索
                       </button>
@@ -2067,8 +2072,8 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                         }
                         onDoubleClick={() => openShelfAsset(asset)}
                         className={[
-                          'group relative break-inside-avoid rounded-[10px] overflow-hidden bg-white/8 cursor-grab active:cursor-grabbing',
-                          selected ? 'ring-2 ring-[#3B82F6]' : 'ring-1 ring-white/10 hover:ring-white/30',
+                          'group relative break-inside-avoid rounded-[var(--win-radius-card)] overflow-hidden bg-white/8 cursor-grab active:cursor-grabbing',
+                          selected ? 'ring-2 ring-[var(--accent)]' : 'ring-1 ring-white/10 hover:ring-white/30',
                         ].join(' ')}
                       >
                         <ShelfAssetThumb
@@ -2089,9 +2094,9 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                                   showBanner(err instanceof Error ? err.message : '无法拷贝该素材'),
                                 );
                             }}
-                            className="charkle-pressable w-6 h-6 rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                            className="charkle-pressable w-6 h-6 rounded-[var(--win-radius-control)] bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
                           >
-                            <Copy size={11} />
+                            <Copy16Regular className="w-3 h-3" />
                           </button>
                           <button
                             type="button"
@@ -2109,12 +2114,12 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                               e.stopPropagation();
                               openShelfAsset(asset);
                             }}
-                            className="charkle-pressable w-6 h-6 rounded-full bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
+                            className="charkle-pressable w-6 h-6 rounded-[var(--win-radius-control)] bg-black/72 hover:bg-black/90 text-white inline-flex items-center justify-center cursor-pointer"
                           >
                             {isPlainWebBookmark(asset) ? (
-                              <ExternalLink size={11.5} />
+                              <Open16Regular className="w-3 h-3" />
                             ) : (
-                              <Eye size={11.5} />
+                              <Eye16Regular className="w-3 h-3" />
                             )}
                           </button>
                         </div>
@@ -2128,7 +2133,7 @@ export const TopEdgeDropShelf: React.FC<TopEdgeDropShelfProps> = ({
                   <div
                     aria-hidden="true"
                     style={marqueeBox}
-                    className="pointer-events-none absolute z-30 rounded-[4px] border border-[#3B82F6] bg-[#3B82F6]/20"
+                    className="pointer-events-none absolute z-30 rounded-[var(--win-radius-control)] border border-[var(--accent)] bg-[var(--accent)]/20"
                   />
                 )}
               </div>

@@ -1,21 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownCircle,
-  ChevronLeft,
-  ChevronRight,
-  Cloud,
-  Copy,
-  ExternalLink,
-  Eye,
-  FolderInput,
-  FolderOpen,
-  Globe,
-  LayoutGrid,
-  RotateCcw,
-  SlidersHorizontal,
-  Sparkles,
-  Trash2,
-} from 'lucide-react';
+  ArrowDownload16Regular,
+  ArrowUndo16Regular,
+  Board16Regular,
+  ChevronDown16Regular,
+  ChevronLeft16Regular,
+  ChevronRight16Regular,
+  Cloud16Regular,
+  Copy16Regular,
+  Delete16Regular,
+  Eye16Regular,
+  FolderArrowRight16Regular,
+  FolderOpen16Regular,
+  Globe16Regular,
+  Open16Regular,
+  Options16Regular,
+  Sparkle16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   Button,
@@ -362,11 +363,6 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isOverlayPresented, tuningOpen]);
 
-  // Prompt floating Liquid Glass pills to resample the clean Ring Gallery page ground on mount
-  useEffect(() => {
-    window.dispatchEvent(new Event('charkle:glass-resample'));
-  }, []);
-
   const isParamsModified = !areRingParamsEqual(params, DEFAULT_RING_GALLERY_PARAMS);
   const activeIsWebLink = activeAsset ? isPlainWebBookmark(activeAsset) : false;
   const contextTargetIds = contextTarget?.targetIds ?? [];
@@ -432,6 +428,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                 key={`${card.virtualIndex}-${asset.id}`}
                 type="button"
                 data-asset-id={asset.id}
+                data-asset-card-id={asset.id}
                 onClick={() => engineRef.current?.selectVirtualIndex(card.virtualIndex)}
                 onDoubleClick={() => handleOpenAsset(asset)}
                 onContextMenu={(e) => {
@@ -479,7 +476,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
         </div>
       )}
 
-      {/* Bottom HUD: Centered Navigation Capsule + Bottom-Right Collapsible Tuning Panel */}
+      {/* Bottom HUD: Centered Navigation Bar + Bottom-Right Collapsible Tuning Panel */}
       <div
         data-ring-hud="true"
         className="pointer-events-none absolute inset-x-[18px] bottom-[18px] z-20 flex items-end justify-center"
@@ -487,9 +484,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
         {activeAsset && (
           <div
             data-testid="ring-gallery-nav-pill"
-            data-pill="true"
-            data-adapt-glass="true"
-            className="pointer-events-auto charkle-glass rounded-full px-2.5 py-1.5 inline-flex items-center gap-2 max-w-[calc(100%-120px)]"
+            className="pointer-events-auto win-acrylic rounded-[var(--win-radius-overlay)] px-2 py-1.5 inline-flex items-center gap-2 max-w-[calc(100%-120px)]"
           >
             <button
               type="button"
@@ -497,17 +492,17 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
               title="上一张 (←)"
               disabled={assets.length <= 1}
               onClick={() => engineRef.current?.step(-1)}
-              className="charkle-pressable h-6 w-6 rounded-full inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.12] cursor-pointer disabled:opacity-30 disabled:cursor-default shrink-0"
+              className="charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer disabled:opacity-30 disabled:cursor-default shrink-0"
             >
-              <ChevronLeft size={13} />
+              <ChevronLeft16Regular className="w-4 h-4" />
             </button>
 
             <div className="flex flex-col items-center min-w-0 max-w-[200px] leading-tight">
-              <span className="text-[12px] font-semibold text-[var(--text-primary)] truncate w-full text-center">
+              <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate w-full text-center">
                 {activeAsset.title}
               </span>
               {activeIndex >= 0 && (
-                <span className="text-[10px] font-medium charkle-mono charkle-tabular text-[var(--text-secondary)]">
+                <span className="text-[10.5px] font-medium charkle-mono charkle-tabular text-[var(--text-secondary)]">
                   {activeIndex + 1} / {assets.length}
                 </span>
               )}
@@ -519,28 +514,27 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
               title="下一张 (→)"
               disabled={assets.length <= 1}
               onClick={() => engineRef.current?.step(1)}
-              className="charkle-pressable h-6 w-6 rounded-full inline-flex items-center justify-center text-[var(--text-primary)]/85 hover:bg-black/[0.06] dark:hover:bg-white/[0.12] cursor-pointer disabled:opacity-30 disabled:cursor-default shrink-0"
+              className="charkle-pressable h-7 w-7 rounded-[var(--win-radius-control)] inline-flex items-center justify-center text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer disabled:opacity-30 disabled:cursor-default shrink-0"
             >
-              <ChevronRight size={13} />
+              <ChevronRight16Regular className="w-4 h-4" />
             </button>
 
-            <div className="h-4 w-px bg-[var(--border-hairline)] shrink-0" />
+            <div className="h-4 w-px bg-[var(--win-stroke-divider)] shrink-0" />
 
             <button
               type="button"
-              data-pill="true"
               title={activeIsWebLink ? '在默认浏览器中打开 (Space)' : '全屏沉浸预览 (Space)'}
               onClick={() => handleOpenAsset(activeAsset)}
-              className="charkle-pressable h-[26px] px-2.5 rounded-full inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text-primary)] hover:bg-black/[0.06] dark:hover:bg-white/[0.12] cursor-pointer whitespace-nowrap shrink-0"
+              className="charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer whitespace-nowrap shrink-0"
             >
               {activeIsWebLink ? (
                 <>
-                  <Globe size={12.5} className="text-[var(--accent)]" />
+                  <Globe16Regular className="w-3.5 h-3.5 text-[var(--accent)]" />
                   <span>浏览器打开</span>
                 </>
               ) : (
                 <>
-                  <CharkleIcon name="quicklook" style="duotone" size={13.5} />
+                  <CharkleIcon name="quicklook" style="duotone" size={14} />
                   <span>沉浸预览</span>
                 </>
               )}
@@ -549,15 +543,14 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
         )}
 
         {/* Bottom-Right Collapsible Live Tuning Control */}
-        <div className="pointer-events-none absolute right-0 bottom-0 flex flex-col items-end gap-2.5">
+        <div className="pointer-events-none absolute right-0 bottom-0 flex flex-col items-end gap-2">
           {tuningOpen && (
             <div
               data-testid="ring-tuning-panel"
-              data-no-lens="true"
-              className="pointer-events-auto charkle-glass charkle-glass-panel charkle-reveal-bottom w-[276px] max-h-[calc(100vh-120px)] overflow-y-auto charkle-scroll p-3.5 rounded-[var(--radius-popover-outer)] flex flex-col gap-2.5"
+              className="pointer-events-auto win-acrylic charkle-reveal-bottom w-[276px] max-h-[calc(100vh-120px)] overflow-y-auto charkle-scroll p-3.5 rounded-[var(--win-radius-overlay)] flex flex-col gap-2.5"
             >
               <div className="flex items-center justify-between">
-                <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+                <span className="text-[12.5px] font-semibold text-[var(--text-primary)]">
                   环形画廊参数
                 </span>
                 <button
@@ -565,7 +558,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                   disabled={!isParamsModified}
                   onClick={() => setParams(createDefaultRingParams())}
                   className={[
-                    'text-[11px] font-medium cursor-pointer disabled:cursor-default',
+                    'text-[11.5px] font-medium cursor-pointer disabled:cursor-default',
                     isParamsModified
                       ? 'text-[var(--accent)] hover:underline'
                       : 'text-[var(--text-tertiary)]',
@@ -575,12 +568,12 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                 </button>
               </div>
 
-              <div className="h-px bg-[var(--border-hairline)]" />
+              <div className="h-px bg-[var(--win-stroke-divider)]" />
 
               <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11.5px]">
+                <div className="flex items-center justify-between text-[12px]">
                   <span className="font-medium text-[var(--text-secondary)]">透视距离</span>
-                  <span className="text-[11px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
+                  <span className="text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
                     {Math.round(params.perspective)}px
                   </span>
                 </div>
@@ -592,7 +585,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                   onChange={(v) => setParams((p) => ({ ...p, perspective: v }))}
                   ariaLabel="透视距离"
                   valueText={`${Math.round(params.perspective)}px`}
-                  variant="glass"
+                  variant="standard"
                   size="sm"
                   className="w-full"
                   data-testid="ring-slider-perspective"
@@ -600,9 +593,9 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
               </div>
 
               <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11.5px]">
+                <div className="flex items-center justify-between text-[12px]">
                   <span className="font-medium text-[var(--text-secondary)]">景深模糊</span>
-                  <span className="text-[11px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
+                  <span className="text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
                     {Math.round(params.depthBlur)}px
                   </span>
                 </div>
@@ -614,7 +607,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                   onChange={(v) => setParams((p) => ({ ...p, depthBlur: v }))}
                   ariaLabel="景深模糊"
                   valueText={`${Math.round(params.depthBlur)}px`}
-                  variant="glass"
+                  variant="standard"
                   size="sm"
                   className="w-full"
                   data-testid="ring-slider-depth-blur"
@@ -622,9 +615,9 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
               </div>
 
               <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11.5px]">
+                <div className="flex items-center justify-between text-[12px]">
                   <span className="font-medium text-[var(--text-secondary)]">远端淡出</span>
-                  <span className="text-[11px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
+                  <span className="text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
                     {Math.round(params.farFade * 100)}%
                   </span>
                 </div>
@@ -636,7 +629,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                   onChange={(v) => setParams((p) => ({ ...p, farFade: v / 100 }))}
                   ariaLabel="远端淡出"
                   valueText={`${Math.round(params.farFade * 100)}%`}
-                  variant="glass"
+                  variant="standard"
                   size="sm"
                   className="w-full"
                   data-testid="ring-slider-far-fade"
@@ -644,9 +637,9 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
               </div>
 
               <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[11.5px]">
+                <div className="flex items-center justify-between text-[12px]">
                   <span className="font-medium text-[var(--text-secondary)]">卡片圆角</span>
-                  <span className="text-[11px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
+                  <span className="text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
                     {Math.round(params.cornerRadius)}px
                   </span>
                 </div>
@@ -658,7 +651,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                   onChange={(v) => setParams((p) => ({ ...p, cornerRadius: v }))}
                   ariaLabel="卡片圆角"
                   valueText={`${Math.round(params.cornerRadius)}px`}
-                  variant="glass"
+                  variant="standard"
                   size="sm"
                   className="w-full"
                   data-testid="ring-slider-corner-radius"
@@ -670,26 +663,24 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
           <button
             type="button"
             data-testid="ring-tuning-toggle"
-            data-pill="true"
-            data-adapt-glass="true"
             aria-expanded={tuningOpen}
             aria-label="环形画廊参数"
             title="调整环形透视、景深模糊、远端淡出与圆角参数"
             onClick={() => setTuningOpen((v) => !v)}
             className={[
-              'pointer-events-auto charkle-pressable charkle-glass rounded-full h-[34px] inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0',
+              'pointer-events-auto charkle-pressable win-acrylic rounded-[var(--win-radius-overlay)] h-8 inline-flex items-center justify-center gap-1.5 cursor-pointer shrink-0',
               tuningOpen
                 ? 'px-3 text-[var(--accent)]'
-                : 'w-[34px] text-[var(--text-primary)]/85',
+                : 'w-8 text-[var(--text-primary)]',
             ].join(' ')}
           >
-            <SlidersHorizontal size={13} />
-            {tuningOpen && <span className="text-[11.5px] font-medium">收起</span>}
+            <Options16Regular className="w-4 h-4" />
+            {tuningOpen && <span className="text-[12px] font-medium">收起</span>}
           </button>
         </div>
       </div>
 
-      {/* Right-Click Frosted Context Menu for Any Card in the Ring */}
+      {/* Right-Click Fluent Acrylic Context Menu for Any Card in the Ring */}
       <Popover
         open={contextTarget !== null}
         onOpenChange={(open) => {
@@ -700,10 +691,10 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
           }
         }}
         anchorPoint={contextTarget?.point ?? null}
-        className="w-[232px] p-1.5"
+        className="w-[236px] p-1"
       >
         {contextTarget && (
-          <div className="flex flex-col gap-0.5 text-[12.5px]">
+          <div className="flex flex-col gap-0.5 text-[13px] leading-[18px]">
             <button
               type="button"
               onClick={() => {
@@ -711,25 +702,24 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                 setContextTarget(null);
                 handleOpenAsset(target);
               }}
-              className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+              className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
             >
-              <span className="inline-flex items-center gap-2">
+              <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
                 {isPlainWebBookmark(contextTarget.asset) ? (
-                  <>
-                    <ExternalLink size={14} className="text-[var(--text-secondary)]" />
-                    在默认浏览器中打开
-                  </>
+                  <Open16Regular className="w-4 h-4" />
                 ) : (
-                  <>
-                    <Eye size={14} className="text-[var(--text-secondary)]" />
-                    沉浸预览
-                  </>
+                  <Eye16Regular className="w-4 h-4" />
                 )}
               </span>
-              <kbd className="text-[10.5px] text-[var(--text-tertiary)]">Space</kbd>
+              <span className="flex-1 text-left truncate">
+                {isPlainWebBookmark(contextTarget.asset) ? '在默认浏览器中打开' : '沉浸预览'}
+              </span>
+              <kbd className="ml-auto pl-3 text-[11px] text-[var(--text-tertiary)] charkle-mono shrink-0">
+                Space
+              </kbd>
             </button>
 
-            <div className="my-1 h-px bg-[var(--border-hairline)]" />
+            <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
 
             {contextTarget.asset.isTrashed || destination.type === 'trash' ? (
               <>
@@ -747,10 +737,10 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                       }),
                     );
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <RotateCcw size={14} className="text-[var(--text-secondary)]" />
-                  放回原处{contextCountSuffix}
+                  <ArrowUndo16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">放回原处{contextCountSuffix}</span>
                 </button>
                 <button
                   type="button"
@@ -759,10 +749,10 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                     setContextTarget(null);
                     setPermDeleteIds(ids);
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
                 >
-                  <Trash2 size={14} />
-                  彻底删除…{contextCountSuffix}
+                  <Delete16Regular className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 text-left truncate">彻底删除…{contextCountSuffix}</span>
                 </button>
               </>
             ) : (
@@ -773,19 +763,21 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                     setBoardSubOpen((v) => !v);
                     setMoveSubOpen(false);
                   }}
-                  className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <span className="inline-flex items-center gap-2">
-                    <LayoutGrid size={14} className="text-[var(--text-secondary)]" />
+                  <Board16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">
                     加入情绪板{contextCountSuffix}
                   </span>
-                  <span className="text-[11px] text-[var(--text-tertiary)]">
-                    {boardSubOpen ? '▾' : '▸'}
-                  </span>
+                  {boardSubOpen ? (
+                    <ChevronDown16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                  ) : (
+                    <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                  )}
                 </button>
 
                 {boardSubOpen && (
-                  <div className="pl-2 pr-1 py-1 border-l border-[var(--border-hairline)] ml-2 flex flex-col gap-0.5 max-h-[180px] overflow-y-auto charkle-scroll">
+                  <div className="pl-2 pr-1 py-1 border-l border-[var(--win-stroke-divider)] ml-2 flex flex-col gap-0.5 max-h-[180px] overflow-y-auto charkle-scroll">
                     {boards.map((board) => (
                       <button
                         key={board.id}
@@ -803,7 +795,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                             }),
                           );
                         }}
-                        className="w-full text-left px-2 py-1 rounded-[var(--radius-card-inner)] text-[12px] text-[var(--text-primary)] truncate cursor-pointer"
+                        className="w-full min-h-[30px] text-left px-2 py-1 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] truncate cursor-pointer"
                       >
                         {board.title}
                       </button>
@@ -816,9 +808,9 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                         if (ids.length > 0) setSelection(ids, ids[0]);
                         setMoodboardGeneratorOpen(true);
                       }}
-                      className="w-full flex items-center gap-1.5 px-2 py-1 rounded-[var(--radius-card-inner)] text-[12px] font-medium text-[var(--accent)] cursor-pointer"
+                      className="w-full min-h-[30px] flex items-center gap-1.5 px-2 py-1 rounded-[var(--win-radius-control)] text-[12.5px] font-medium text-[var(--accent)] hover:bg-[var(--accent-soft)] cursor-pointer"
                     >
-                      <Sparkles size={12} />
+                      <Sparkle16Regular className="w-3.5 h-3.5 shrink-0" />
                       用此素材创建新情绪板…
                     </button>
                   </div>
@@ -830,19 +822,21 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                     setMoveSubOpen((v) => !v);
                     setBoardSubOpen(false);
                   }}
-                  className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <span className="inline-flex items-center gap-2">
-                    <FolderInput size={14} className="text-[var(--text-secondary)]" />
+                  <FolderArrowRight16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">
                     移动到文件夹{contextCountSuffix}
                   </span>
-                  <span className="text-[11px] text-[var(--text-tertiary)]">
-                    {moveSubOpen ? '▾' : '▸'}
-                  </span>
+                  {moveSubOpen ? (
+                    <ChevronDown16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                  ) : (
+                    <ChevronRight16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                  )}
                 </button>
 
                 {moveSubOpen && (
-                  <div className="pl-2 pr-1 py-1 border-l border-[var(--border-hairline)] ml-2">
+                  <div className="pl-2 pr-1 py-1 border-l border-[var(--win-stroke-divider)] ml-2">
                     <FolderMoveMenu
                       folders={folders}
                       currentFolderId={
@@ -874,7 +868,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                   </div>
                 )}
 
-                <div className="my-1 h-px bg-[var(--border-hairline)]" />
+                <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
 
                 <button
                   type="button"
@@ -885,10 +879,10 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                       pushToast({ message: `已拷贝 ${n} 项素材到剪贴板`, tone: 'success' }),
                     );
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <Copy size={14} className="text-[var(--text-secondary)]" />
-                  拷贝素材{contextCountSuffix}
+                  <Copy16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">拷贝素材{contextCountSuffix}</span>
                 </button>
 
                 <button
@@ -898,10 +892,10 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                     setContextTarget(null);
                     void transport.revealInExplorer(id);
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <FolderOpen size={14} className="text-[var(--text-secondary)]" />
-                  在资源管理器中显示
+                  <FolderOpen16Regular className="w-4 h-4 text-[var(--text-secondary)] shrink-0" />
+                  <span className="flex-1 text-left truncate">在资源管理器中显示</span>
                 </button>
 
                 <button
@@ -926,19 +920,23 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                       }),
                     );
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  {contextTarget.asset.pinnedOffline ? (
-                    <Cloud size={14} className="text-[var(--text-secondary)]" />
-                  ) : (
-                    <ArrowDownCircle size={14} className="text-[var(--text-secondary)]" />
-                  )}
-                  {contextTarget.asset.pinnedOffline
-                    ? `取消始终保留在本地${contextCountSuffix}`
-                    : `始终保留在本地${contextCountSuffix}`}
+                  <span className="w-4 h-4 inline-flex items-center justify-center shrink-0 text-[var(--text-secondary)]">
+                    {contextTarget.asset.pinnedOffline ? (
+                      <Cloud16Regular className="w-4 h-4" />
+                    ) : (
+                      <ArrowDownload16Regular className="w-4 h-4" />
+                    )}
+                  </span>
+                  <span className="flex-1 text-left truncate">
+                    {contextTarget.asset.pinnedOffline
+                      ? `取消始终保留在本地${contextCountSuffix}`
+                      : `始终保留在本地${contextCountSuffix}`}
+                  </span>
                 </button>
 
-                <div className="my-1 h-px bg-[var(--border-hairline)]" />
+                <div className="my-1 mx-2 h-px bg-[var(--win-stroke-divider)]" />
 
                 <button
                   type="button"
@@ -952,10 +950,10 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
                       undoPatch: { assetIDs: ids, isTrashed: false },
                     });
                   }}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--danger)] cursor-pointer"
+                  className="w-full min-h-[32px] flex items-center gap-2.5 px-2.5 py-1.5 rounded-[var(--win-radius-control)] text-[var(--danger)] hover:bg-[var(--danger-soft)] cursor-pointer"
                 >
-                  <Trash2 size={14} />
-                  移至回收站{contextCountSuffix}
+                  <Delete16Regular className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 text-left truncate">移至回收站{contextCountSuffix}</span>
                 </button>
               </>
             )}
@@ -970,7 +968,7 @@ export const GalleryRingView: React.FC<GalleryRingViewProps> = ({
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setPermDeleteIds(null)}>
+            <Button variant="standard" onClick={() => setPermDeleteIds(null)}>
               取消
             </Button>
             <Button

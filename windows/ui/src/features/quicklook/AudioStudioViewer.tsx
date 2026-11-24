@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, FolderOpen, Pause, Play, Volume2, VolumeX } from 'lucide-react';
+import {
+  ErrorCircle16Regular,
+  FolderOpen16Regular,
+  Pause16Regular,
+  Play16Filled,
+  Speaker216Regular,
+  SpeakerMute16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { Button, formatDuration } from '../../design-system';
 import type { AssetRecord } from '../../types/domain';
@@ -128,7 +135,7 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="w-full max-w-[580px] mx-auto p-6 rounded-[18px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_24px_60px_rgba(0,0,0,0.40)] flex flex-col gap-5"
+      className="w-full max-w-[580px] mx-auto p-6 rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.40)] flex flex-col gap-5"
     >
       <div className="flex items-center gap-3">
         <button
@@ -139,14 +146,18 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
           style={{ backgroundColor: accentHex }}
           className="charkle-pressable w-11 h-11 rounded-full text-white inline-flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-45"
         >
-          {playing ? <Pause size={17} /> : <Play size={17} className="translate-x-[1px]" />}
+          {playing ? (
+            <Pause16Regular className="w-5 h-5" />
+          ) : (
+            <Play16Filled className="w-5 h-5 translate-x-[1px]" />
+          )}
         </button>
 
         <div className="min-w-0 flex-1">
           <div className="text-[16px] font-semibold text-[var(--text-primary)] truncate">
             {asset.title}
           </div>
-          <div className="text-[11.5px] text-[var(--text-secondary)] truncate mt-0.5">
+          <div className="text-[12px] text-[var(--text-secondary)] truncate mt-0.5">
             {playbackError ? '音频解码受限' : '音频原文件就绪 · 点击或拖动波形可跳转'}
           </div>
         </div>
@@ -163,25 +174,29 @@ export const AudioStudioViewer: React.FC<AudioStudioViewerProps> = ({ asset }) =
               setMuted(next);
               if (audioRef.current) audioRef.current.muted = next;
             }}
-            className="charkle-pressable h-8 w-8 rounded-full bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center cursor-pointer"
+            className="charkle-pressable h-8 w-8 rounded-[var(--win-radius-control)] bg-[var(--win-subtle-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-active)] inline-flex items-center justify-center cursor-pointer"
           >
-            {muted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+            {muted ? (
+              <SpeakerMute16Regular className="w-4 h-4" />
+            ) : (
+              <Speaker216Regular className="w-4 h-4" />
+            )}
           </button>
         </div>
       </div>
 
       {playbackError && (
-        <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-[12px] bg-[var(--danger-soft)]/70 border border-[var(--danger)]/25 text-[12px] text-[var(--danger)]">
+        <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-[var(--win-radius-card)] bg-[var(--danger-soft)]/70 border border-[var(--danger)]/25 text-[12px] text-[var(--danger)]">
           <span className="inline-flex items-center gap-2 min-w-0">
-            <AlertCircle size={14} className="shrink-0" />
+            <ErrorCircle16Regular className="w-4 h-4 shrink-0" />
             <span className="truncate">{playbackError}</span>
           </span>
           <Button
-            variant="secondary"
+            variant="standard"
             size="xs"
             onClick={() => void getTransport().revealInExplorer(asset.id)}
           >
-            <FolderOpen size={12} />
+            <FolderOpen16Regular className="w-3.5 h-3.5" />
             定位文件
           </Button>
         </div>

@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { getTransport } from '../api/transport';
-import { applyThemeToDocument, type ThemeMode } from '../design-system/theme';
+import {
+  applyAccentToDocument,
+  applyThemeToDocument,
+  resolveEffectiveTheme,
+  type ThemeMode,
+} from '../design-system/theme';
 import type {
+  AccentSource,
   GalleryLayoutMode,
   SettingsTabId,
   SidebarDestination,
@@ -61,6 +67,7 @@ export interface GalleryRevealRequest {
 }
 
 const THEME_STORAGE_KEY = 'charkle.win.theme';
+const ACCENT_SOURCE_STORAGE_KEY = 'charkle.win.accentSource';
 const LAYOUT_STORAGE_KEY = 'charkle.win.layout';
 const SCALE_STORAGE_KEY = 'charkle.win.cardScale';
 const ONBOARDING_DONE_KEY = 'charkle.win.onboardingDone.v2';
@@ -148,6 +155,12 @@ function readStoredTheme(): ThemeMode {
   return 'system';
 }
 
+function readStoredAccentSource(): AccentSource {
+  if (typeof localStorage === 'undefined') return 'studio';
+  const raw = localStorage.getItem(ACCENT_SOURCE_STORAGE_KEY);
+  return raw === 'windows' ? 'windows' : 'studio';
+}
+
 function readStoredLayout(): GalleryLayoutMode {
   if (typeof localStorage === 'undefined') return 'verticalMasonry';
   const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
@@ -176,9 +189,11 @@ function readStoredSidebarCollapsed(): boolean {
 
 export interface CoordinatorState {
   themeMode: ThemeMode;
+  accentSource: AccentSource;
   surfaceState: WindowSurfaceState | null;
   sidebarOpen: boolean;
   sidebarCollapsed: boolean;
+  sidebarSearchFocusNonce: number;
   inspectorOpen: boolean;
   inspectorTab: InspectorTab;
   inspectorCardOrder: InspectorCardId[];
@@ -206,11 +221,14 @@ export interface CoordinatorState {
   toasts: ToastItem[];
 
   setThemeMode: (mode: ThemeMode) => Promise<void>;
+  setAccentSource: (source: AccentSource) => void;
+  applySurfaceState: (surface: WindowSurfaceState) => void;
   syncWindowChrome: () => Promise<void>;
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapsed: () => void;
+  requestSidebarSearchFocus: () => void;
   setInspectorOpen: (open: boolean) => void;
   toggleInspector: () => void;
   setInspectorTab: (tab: InspectorTab) => void;
@@ -255,12 +273,15 @@ export interface CoordinatorState {
 let toastSeq = 0;
 let revealSeq = 0;
 let onboardingRunSeq = 0;
+let sidebarSearchFocusSeq = 0;
 
 export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   themeMode: readStoredTheme(),
+  accentSource: readStoredAccentSource(),
   surfaceState: null,
   sidebarOpen: true,
   sidebarCollapsed: readStoredSidebarCollapsed(),
+  sidebarSearchFocusNonce: 0,
   inspectorOpen: true,
   inspectorTab: 'info',
   inspectorCardOrder: readStoredInspectorCardOrder(),
@@ -293,32 +314,80 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
       localStorage.setItem(THEME_STORAGE_KEY, mode);
     }
     const effective = applyThemeToDocument(mode);
+    const isDark = effective === 'dark';
+    applyAccentToDocument(get().accentSource, get().surfaceState?.systemAccentHex, isDark);
     try {
-      const surface = await getTransport().setWindowTheme(effective === 'dark');
+      const surface = await getTransport().setWindowTheme(isDark);
       set({ surfaceState: surface });
       if (typeof document !== 'undefined') {
         document.documentElement.dataset.backdrop = surface.backdrop;
+        document.documentElement.dataset.animations = surface.animationsEnabled
+          ? 'enabled'
+          : 'disabled';
       }
+      applyAccentToDocument(get().accentSource, surface.systemAccentHex, isDark);
     } catch {
       if (typeof document !== 'undefined') {
         document.documentElement.dataset.backdrop = 'solidFallback';
       }
+      applyAccentToDocument(get().accentSource, get().surfaceState?.systemAccentHex, isDark);
     }
+  },
+
+  setAccentSource(source) {
+    set({ accentSource: source });
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(ACCENT_SOURCE_STORAGE_KEY, source);
+    }
+    const mode = get().themeMode;
+    const surface = get().surfaceState;
+    const isDark =
+      mode === 'system'
+        ? (surface?.isDark ?? resolveEffectiveTheme(mode) === 'dark')
+        : mode === 'dark';
+    applyAccentToDocument(source, surface?.systemAccentHex, isDark);
+  },
+
+  applySurfaceState(surface) {
+    set({ surfaceState: surface });
+    const mode = get().themeMode;
+    const isDark = mode === 'system' ? surface.isDark : mode === 'dark';
+    if (typeof document !== 'undefined') {
+      const root = document.documentElement;
+      root.dataset.backdrop = surface.backdrop;
+      root.dataset.animations = surface.animationsEnabled ? 'enabled' : 'disabled';
+      if (mode === 'system') {
+        root.dataset.theme = isDark ? 'dark' : 'light';
+        root.classList.toggle('dark', isDark);
+        const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+        if (favicon) {
+          favicon.href = isDark ? '/app-icons/Charkle-Dark.svg' : '/app-icons/Charkle-Light.svg';
+        }
+      }
+    }
+    applyAccentToDocument(get().accentSource, surface.systemAccentHex, isDark);
   },
 
   async syncWindowChrome() {
     const mode = get().themeMode;
     const effective = applyThemeToDocument(mode);
+    const isDark = effective === 'dark';
+    applyAccentToDocument(get().accentSource, get().surfaceState?.systemAccentHex, isDark);
     try {
-      const surface = await getTransport().setWindowTheme(effective === 'dark');
+      const surface = await getTransport().setWindowTheme(isDark);
       set({ surfaceState: surface });
       if (typeof document !== 'undefined') {
         document.documentElement.dataset.backdrop = surface.backdrop;
+        document.documentElement.dataset.animations = surface.animationsEnabled
+          ? 'enabled'
+          : 'disabled';
       }
+      applyAccentToDocument(get().accentSource, surface.systemAccentHex, isDark);
     } catch {
       if (typeof document !== 'undefined') {
         document.documentElement.dataset.backdrop = 'solidFallback';
       }
+      applyAccentToDocument(get().accentSource, get().surfaceState?.systemAccentHex, isDark);
     }
   },
 
@@ -340,6 +409,17 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   toggleSidebarCollapsed() {
     const next = !get().sidebarCollapsed;
     get().setSidebarCollapsed(next);
+  },
+
+  requestSidebarSearchFocus() {
+    const state = get();
+    if (!state.sidebarOpen) {
+      set({ sidebarOpen: true });
+    }
+    if (state.sidebarCollapsed) {
+      state.setSidebarCollapsed(false);
+    }
+    set({ sidebarSearchFocusNonce: ++sidebarSearchFocusSeq });
   },
 
   setInspectorOpen(open) {

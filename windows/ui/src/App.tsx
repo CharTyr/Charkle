@@ -19,12 +19,32 @@ import { SettingsOverlay } from './features/settings/SettingsOverlay';
 import { SidebarView } from './features/sidebar/SidebarView';
 import {
   isPlainWebBookmark,
+  type QuickLookOriginRect,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
   useSyncAIStore,
 } from './stores';
 import { buildFolderTree, flattenFolderTree } from './types/domain';
+
+function findAssetCardOriginRect(assetId: string): QuickLookOriginRect | null {
+  if (typeof document === 'undefined') return null;
+  const escaped =
+    typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(assetId)
+      : assetId.replace(/"/g, '\\"');
+  const cardEl =
+    document.querySelector(`[data-asset-card-id="${escaped}"]`) ??
+    document.querySelector(`[data-asset-id="${escaped}"]`);
+  const rect = cardEl?.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+}
 
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -417,6 +437,9 @@ export const App: React.FC = () => {
     let unlisten: (() => void) | null = null;
     void getTransport()
       .subscribeEvents({
+        onSurfaceState: (surface) => {
+          useCoordinatorStore.getState().applySurfaceState(surface);
+        },
         onLibraryChanged: () => {
           void refreshAll(useCoordinatorStore.getState().destination);
         },
@@ -476,7 +499,7 @@ export const App: React.FC = () => {
               void useLibraryStore.getState().markAssetOpened(resolved.id);
             } else {
               (document.activeElement as HTMLElement | null)?.blur?.();
-              coord.openQuickLook(assetId, null);
+              coord.openQuickLook(assetId, findAssetCardOriginRect(assetId));
             }
           };
 
@@ -558,6 +581,47 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('focus', handleFocus);
   }, [syncWindowChrome]);
 
+  // Auto-collapse sidebar to 64px compact rail on narrow viewports (< 860px, Fluent 2 §3.2 #1)
+  // without clobbering localStorage or fighting manual expand / Ctrl+F.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const NARROW_SIDEBAR_BREAKPOINT = 860;
+    const isNarrow = () =>
+      window.innerWidth > 0 && window.innerWidth < NARROW_SIDEBAR_BREAKPOINT;
+
+    let wasNarrow = isNarrow();
+    let autoCollapsed = false;
+
+    if (wasNarrow && !useCoordinatorStore.getState().sidebarCollapsed) {
+      autoCollapsed = true;
+      useCoordinatorStore.setState({ sidebarCollapsed: true });
+    }
+
+    const handleResize = () => {
+      const nowNarrow = isNarrow();
+      if (!wasNarrow && nowNarrow) {
+        if (!useCoordinatorStore.getState().sidebarCollapsed) {
+          autoCollapsed = true;
+          useCoordinatorStore.setState({ sidebarCollapsed: true });
+        }
+      } else if (wasNarrow && !nowNarrow) {
+        if (autoCollapsed) {
+          autoCollapsed = false;
+          const userPrefCollapsed =
+            typeof localStorage !== 'undefined' &&
+            localStorage.getItem('charkle.win.sidebarCollapsed') === '1';
+          if (!userPrefCollapsed && useCoordinatorStore.getState().sidebarCollapsed) {
+            useCoordinatorStore.setState({ sidebarCollapsed: false });
+          }
+        }
+      }
+      wasNarrow = nowNarrow;
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   // Refresh assets whenever sidebar destination changes
   useEffect(() => {
     if (destination.type === 'moodboardsHome' || destination.type === 'moodboard') {
@@ -617,6 +681,15 @@ export const App: React.FC = () => {
         if (!coord.settingsOpen && !otherModalOpen) {
           e.preventDefault();
           coord.setJumpOpen(true);
+        }
+        return;
+      }
+
+      // Ctrl+F expands & focuses the single global Sidebar search box (when not in a modal or Quick Look)
+      if (mod && !e.shiftKey && !e.altKey && lowerKey === 'f') {
+        if (!anyBlockingModal && !coord.quickLookAssetId) {
+          e.preventDefault();
+          coord.requestSidebarSearchFocus();
         }
         return;
       }
@@ -885,7 +958,7 @@ export const App: React.FC = () => {
           });
         void lib.markAssetOpened(targetAsset.id);
       } else {
-        coord.openQuickLook(targetId, null);
+        coord.openQuickLook(targetId, findAssetCardOriginRect(targetId));
       }
     };
 
@@ -958,46 +1031,60 @@ export const App: React.FC = () => {
 
   const isMoodboardView =
     destination.type === 'moodboardsHome' || destination.type === 'moodboard';
-  const sidebarTargetWidth = sidebarCollapsed ? 76 : 232;
+  const sidebarTargetWidth = sidebarCollapsed ? 64 : 248;
   const showMainInspector = inspectorOpen && !isMoodboardView;
 
   return (
-    <div className="w-screen h-screen min-h-0 min-w-0 flex flex-col overflow-hidden bg-transparent text-[var(--text-primary)]">
-      <Titlebar />
-
-      <div className="flex-1 min-h-0 min-w-0 h-full flex overflow-hidden">
-        {/* Animated Sidebar Drawer Slot (300ms drawerEase matching macOS MainWindowView) */}
+    <div className="w-screen h-screen min-h-0 min-w-0 flex overflow-hidden bg-transparent text-[var(--text-primary)]">
+      {/* Left Full-Height Mica Alt Navigation Rail (y=0 to bottom; commits width cleanly, GPU inner transform) */}
+      <div
+        aria-hidden={!sidebarOpen}
+        style={{ width: sidebarOpen ? sidebarTargetWidth : 0 }}
+        className={[
+          'shrink-0 min-h-0 h-full overflow-hidden flex justify-end',
+          sidebarOpen ? '' : 'pointer-events-none',
+        ].join(' ')}
+      >
         <div
-          aria-hidden={!sidebarOpen}
+          className="win-drawer-content h-full flex shrink-0"
           style={{
-            width: sidebarOpen ? sidebarTargetWidth : 0,
+            width: sidebarTargetWidth,
+            transform: sidebarOpen ? 'translateX(0)' : 'translateX(-12px)',
             opacity: sidebarOpen ? 1 : 0,
           }}
-          className={[
-            'charkle-drawer-slot shrink-0 min-h-0 h-full overflow-hidden flex justify-end',
-            sidebarOpen ? '' : 'pointer-events-none',
-          ].join(' ')}
         >
           <SidebarView />
         </div>
+      </div>
 
-        <div className="flex-1 min-w-0 min-h-0 h-full flex overflow-hidden">
-          {isMoodboardView ? <MoodboardsHome /> : <GalleryView />}
-        </div>
+      {/* Right Column: Slim 40px Mica Titlebar + Elevated Rounded Content Surface */}
+      <div className="charkle-mica-chrome flex-1 min-w-0 min-h-0 h-full flex flex-col overflow-hidden">
+        <Titlebar />
 
-        {/* Animated Right Inspector Drawer Slot (300ms drawerEase matching macOS MainWindowView) */}
-        <div
-          aria-hidden={!showMainInspector}
-          style={{
-            width: showMainInspector ? 300 : 0,
-            opacity: showMainInspector ? 1 : 0,
-          }}
-          className={[
-            'charkle-drawer-slot shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
-            showMainInspector ? '' : 'pointer-events-none',
-          ].join(' ')}
-        >
-          <InspectorView />
+        <div className="charkle-gallery-surface rounded-tl-[8px] flex-1 min-w-0 min-h-0 flex overflow-hidden bg-[var(--bg-gallery)]">
+          <div className="flex-1 min-w-0 min-h-0 h-full flex overflow-hidden">
+            {isMoodboardView ? <MoodboardsHome /> : <GalleryView />}
+          </div>
+
+          {/* Right 300px Inspector Slot (zero per-frame width transition; commits width once, GPU transform) */}
+          <div
+            aria-hidden={!showMainInspector}
+            style={{ width: showMainInspector ? 300 : 0 }}
+            className={[
+              'shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
+              showMainInspector ? '' : 'pointer-events-none',
+            ].join(' ')}
+          >
+            <div
+              className="win-drawer-content w-[300px] shrink-0 min-h-0 h-full flex"
+              style={{
+                transform: showMainInspector ? 'translateX(0)' : 'translateX(16px)',
+                opacity: showMainInspector ? 1 : 0,
+              }}
+            >
+              <InspectorView />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1017,7 +1104,7 @@ export const App: React.FC = () => {
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setPendingTrashDeleteIds([])}>
+            <Button variant="standard" onClick={() => setPendingTrashDeleteIds([])}>
               取消
             </Button>
             <Button

@@ -1,136 +1,146 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *, [data-kind="dark"], [data-kind="dark"] *));
-
-/* Optical Liquid Glass animatable material tokens */
-@property --m-tint { syntax: '<color>'; inherits: true; initial-value: #ffffff; }
-@property --m-k { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --m-thin { syntax: '<number>'; inherits: true; initial-value: 0.06; }
-@property --m-dense { syntax: '<number>'; inherits: true; initial-value: 0.22; }
-@property --m-blur { syntax: '<number>'; inherits: true; initial-value: 2; }
-@property --m-sat { syntax: '<number>'; inherits: true; initial-value: 1.8; }
-@property --m-bri { syntax: '<number>'; inherits: true; initial-value: 1.06; }
-@property --m-con { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --m-catch { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --m-bevel { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --m-shadow { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --density { syntax: '<number>'; inherits: true; initial-value: 0.35; }
-@property --keep { syntax: '<number>'; inherits: true; initial-value: 1; }
-@property --floor { syntax: '<number>'; inherits: true; initial-value: 0; }
-@property --m-floor-min { syntax: '<number>'; inherits: true; initial-value: 0; }
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
 :root {
-  --u: 1px;
-  /* Gallery-First Neutral Surfaces — Light (DESIGN.md §2.1) */
+  /* =========================================================================
+     Fluent 2 Desktop Surface, Control & Stroke Tokens — Light Mode
+     Canonical authority: .trellis/spec/windows/fluent2-design-system.md §4
+     ========================================================================= */
+  --win-mica-tint: rgba(243, 243, 243, 0.16);
+  --win-solid-base: #F3F3F3;
+  --win-layer-default: rgba(255, 255, 255, 0.72);
+
+  /* Gallery-First Neutral Surfaces (DESIGN.md §2.1 & Fluent 2 §4.1) */
   --bg-gallery: #F6F6F5;
   --bg-elevated: #FFFFFF;
   --bg-subtle: #EDEDE9;
-  --bg-sidebar: #F2F1EE;
-  --bg-inspector: #F1F0EC;
-  --bg-inspector-field: #F6F5F1;
+  --bg-sidebar: #F3F3F3;
+  --bg-inspector: #F3F3F1;
+  --bg-inspector-field: #FFFFFF;
+  --win-surface-inspector: var(--bg-inspector);
+
+  /* Fluent 2 Control Fills */
+  --win-control-fill: rgba(255, 255, 255, 0.72);
+  --win-control-fill-hover: rgba(249, 249, 249, 0.54);
+  --win-control-fill-pressed: rgba(249, 249, 249, 0.32);
+  --win-control-fill-input-active: #FFFFFF;
+
+  /* Fluent 2 Subtle Interaction Fills */
+  --win-subtle-hover: rgba(0, 0, 0, 0.04);
+  --win-subtle-active: rgba(0, 0, 0, 0.06);
+
+  /* Fluent 2 1px Elevation & Surface Strokes */
+  --win-stroke-control: rgba(0, 0, 0, 0.06);
+  --win-stroke-control-bevel: rgba(0, 0, 0, 0.16);
+  --win-stroke-card: rgba(0, 0, 0, 0.06);
+  --win-stroke-surface-card: var(--win-stroke-card);
+  --win-stroke-flyout: rgba(0, 0, 0, 0.08);
+  --win-stroke-divider: rgba(0, 0, 0, 0.06);
+  --win-stroke-accent-top: rgba(255, 255, 255, 0.12);
+  --win-stroke-accent-bevel: rgba(0, 0, 0, 0.35);
+  --win-input-bottom-rest: rgba(0, 0, 0, 0.44);
 
   /* Calibrated Settings Neutral Surfaces — Light */
-  --settings-rail: #F0EFEA;
-  --settings-content: #F6F6F4;
+  --settings-rail: #F3F3F3;
+  --settings-content: #F8F8F7;
   --settings-card: #FFFFFF;
-  --settings-subtle: rgba(0, 0, 0, 0.04);
-  --settings-label: rgba(0, 0, 0, 0.48);
-  --settings-divider: rgba(0, 0, 0, 0.065);
-  --settings-border: rgba(0, 0, 0, 0.08);
+  --settings-subtle: rgba(0, 0, 0, 0.035);
+  --settings-label: rgba(0, 0, 0, 0.56);
+  --settings-divider: var(--win-stroke-divider);
+  --settings-border: var(--win-stroke-card);
   --settings-positive: #15803D;
   --settings-warning: #B45309;
-  --settings-destructive: #DC2626;
+  --settings-destructive: #C42B1C;
 
-  --border-hairline: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.14);
+  --border-hairline: var(--win-stroke-divider);
+  --border-strong: rgba(0, 0, 0, 0.16);
 
-  --text-primary: #18191C;
-  --text-secondary: #5C6069;
-  --text-tertiary: #8A8F99;
+  /* Typography Ink Hierarchy (WCAG AAA/AA) */
+  --text-primary: rgba(0, 0, 0, 0.895);
+  --text-secondary: rgba(0, 0, 0, 0.606);
+  --text-tertiary: rgba(0, 0, 0, 0.445);
 
-  /* Calm Studio Cobalt Accent (strictly zero violet / neon chrome) */
+  /* Calm Studio Cobalt Default Accent (strictly zero violet / neon chrome) */
   --accent: #2A60E0;
   --accent-hover: #2151C7;
+  --accent-pressed: #1A42A8;
   --accent-soft: rgba(42, 96, 224, 0.11);
   --accent-ring: rgba(42, 96, 224, 0.35);
+  --accent-text: #FFFFFF;
 
   --success: #249A4B;
   --success-soft: rgba(36, 154, 75, 0.12);
   --warning: #C98212;
   --warning-soft: rgba(201, 130, 18, 0.13);
-  --danger: #D93B30;
-  --danger-soft: rgba(217, 59, 48, 0.11);
+  --danger: #C42B1C;
+  --danger-soft: rgba(196, 43, 28, 0.11);
 
-  /* Concentric Continuous Radii (4px grid, DESIGN.md §3.2) */
-  --radius-modal: 20px;
-  --radius-dock-outer: 20px;
-  --radius-dock-inner: 12px;
-  --radius-popover-outer: 16px;
-  --radius-popover-inner: 10px;
-  --radius-settings-outer: 14px;
-  --radius-settings-inner: 8px;
-  --radius-card-outer: 12px;
-  --radius-card-inner: 6px;
-  --radius-chip: 8px;
+  /* Fluent 2 Desktop Geometry (4px grid) */
+  --win-radius-control: 4px;
+  --win-radius-card: 8px;
+  --win-radius-overlay: 8px;
+  --win-radius-dialog: 10px;
 
+  /* Compatibility radius aliases mapped strictly onto Fluent 2 geometry */
+  --radius-modal: var(--win-radius-dialog);
+  --radius-dock-outer: var(--win-radius-overlay);
+  --radius-dock-inner: var(--win-radius-control);
+  --radius-popover-outer: var(--win-radius-overlay);
+  --radius-popover-inner: var(--win-radius-control);
+  --radius-settings-outer: var(--win-radius-dialog);
+  --radius-settings-inner: var(--win-radius-control);
+  --radius-card-outer: var(--win-radius-card);
+  --radius-card-inner: var(--win-radius-control);
+  --radius-chip: var(--win-radius-control);
+
+  /* Fluent 2 Elevation & Smoke Scrim */
+  --win-acrylic-bg: rgba(252, 252, 252, 0.85);
+  --win-acrylic-header-bg: rgba(246, 246, 245, 0.82);
+  --win-acrylic-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.14),
+    0 0 0 1px var(--win-stroke-flyout);
+
+  --modal-scrim: rgba(0, 0, 0, 0.24);
   --shadow-modal:
-    0 0 0 1px rgba(0, 0, 0, 0.08),
-    0 24px 64px rgba(0, 0, 0, 0.20),
-    0 6px 18px rgba(0, 0, 0, 0.08);
+    0 20px 48px rgba(0, 0, 0, 0.18),
+    0 4px 12px rgba(0, 0, 0, 0.08),
+    0 0 0 1px var(--win-stroke-flyout);
 
-  /* Restrained Floating Glass / Acrylic (strictly over media/canvas) */
-  --glass-bg: rgba(255, 255, 255, 0.76);
-  --glass-bg-hover: rgba(255, 255, 255, 0.88);
-  --glass-backdrop: blur(22px) saturate(180%) brightness(1.03);
-  --glass-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.88),
-    inset 1px 0 0 rgba(255, 255, 255, 0.56),
-    inset 0 -0.5px 0 rgba(0, 0, 0, 0.04),
-    0 0 0 0.5px rgba(0, 0, 0, 0.08),
-    0 8px 28px rgba(0, 0, 0, 0.08);
+  /* Fluent 2 Motion Timing & Curves (§6.1, fast-out decelerate curves only) */
+  --win-duration-faster: 83ms;
+  --win-duration-fast: 167ms;
+  --win-duration-normal: 250ms;
+  --win-duration-exit: 135ms;
+  --win-ease-out: cubic-bezier(0, 0, 0, 1);
 
-  --glass-dark-bg: rgba(11, 12, 15, 0.88);
-  --glass-dark-backdrop: blur(24px) saturate(180%);
-  --glass-dark-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    inset 1px 0 0 rgba(255, 255, 255, 0.08),
-    0 0 0 0.5px rgba(255, 255, 255, 0.11),
-    0 12px 36px rgba(0, 0, 0, 0.42);
-
-  /* GPU Radial Soft Modal Backdrop Scrim matching macOS CharkleModalBackdrop (DESIGN.md P0-2) */
-  --modal-scrim: radial-gradient(
-    ellipse 78% 72% at 50% 48%,
-    rgba(24, 25, 28, 0.075) 0%,
-    rgba(24, 25, 28, 0.165) 100%
-  );
-
-  /* Role-Mapped Easing Curves & Durations (DESIGN.md §6.2) */
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --ease-out-strong: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Compatibility motion aliases calibrated to Fluent 2 */
+  --ease-out: var(--win-ease-out);
+  --ease-out-strong: var(--win-ease-out);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-  --ease-overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-drawer: var(--win-ease-out);
+  --ease-overshoot: cubic-bezier(0.34, 1.45, 0.64, 1);
+  --ease-spring: var(--win-ease-out);
   --ease-notch-spring: cubic-bezier(0.22, 1.09, 0.36, 1);
 
-  --duration-press: 120ms;
-  --duration-sm: 180ms;
-  --duration-settle: 220ms;
-  --duration-move: 240ms;
-  --duration-md: 240ms;
-  --duration-lg: 280ms;
-  --duration-drawer: 300ms;
-  --duration-notch: 420ms;
-  --duration-notch-exit: 240ms;
-  --duration-exit-sm: 130ms;
-  --duration-exit-md: 170ms;
-  --duration-overshoot: 260ms;
-  --duration-popover-in: 160ms;
-  --duration-popover-out: 110ms;
+  --duration-press: var(--win-duration-faster);
+  --duration-sm: var(--win-duration-fast);
+  --duration-settle: 200ms;
+  --duration-move: var(--win-duration-normal);
+  --duration-md: var(--win-duration-normal);
+  --duration-lg: var(--win-duration-normal);
+  --duration-drawer: 200ms;
+  --duration-notch: 340ms;
+  --duration-notch-exit: 200ms;
+  --duration-exit-sm: var(--win-duration-exit);
+  --duration-exit-md: var(--win-duration-exit);
+  --duration-overshoot: 220ms;
+  --duration-popover-in: var(--win-duration-fast);
+  --duration-popover-out: var(--win-duration-exit);
 
   /* Skeleton shimmer */
   --skeleton-base: rgba(0, 0, 0, 0.055);
-  --skeleton-shine: rgba(255, 255, 255, 0.52);
+  --skeleton-shine: rgba(255, 255, 255, 0.56);
 
   /* Miniature UI vignette tokens (DESIGN.md §5.2) */
   --vignette-bg: #FAFAFA;
@@ -139,49 +149,71 @@
   --vignette-stroke: rgba(0, 0, 0, 0.10);
   --vignette-muted: rgba(0, 0, 0, 0.07);
 
-  /* Windows 11 Mica tint over sidebar rail */
-  --sidebar-mica-bg: rgba(242, 241, 238, 0.58);
+  /* Switch & Slider neutral surfaces */
+  --win-switch-border: rgba(0, 0, 0, 0.54);
+  --win-switch-thumb-off: rgba(0, 0, 0, 0.62);
+  --win-slider-track: rgba(0, 0, 0, 0.22);
+  --win-slider-thumb-outer: #FFFFFF;
 
   color-scheme: light;
 }
 
-@supports (animation-timing-function: linear(0, 1)) {
-  :root {
-    --ease-spring: linear(0, 0.32, 0.78, 1.04, 1.09, 1.06, 1.02, 1, 0.99, 0.99, 1);
-  }
-}
-
 :root[data-theme="dark"],
 .dark {
-  --bg-gallery: #141517;
-  --bg-elevated: #1E2025;
-  --bg-subtle: #24272C;
-  --bg-sidebar: #17191D;
-  --bg-inspector: #131519;
-  --bg-inspector-field: #16181D;
+  --win-mica-tint: rgba(24, 25, 29, 0.24);
+  --win-solid-base: #1C1D21;
+  --win-layer-default: rgba(42, 44, 50, 0.42);
 
-  --settings-rail: #17181B;
-  --settings-content: #121316;
-  --settings-card: #1B1C20;
+  --bg-gallery: #141517;
+  --bg-elevated: #24262C;
+  --bg-subtle: #2A2C33;
+  --bg-sidebar: #1C1D21;
+  --bg-inspector: #181A1E;
+  --bg-inspector-field: #1F2127;
+  --win-surface-inspector: var(--bg-inspector);
+
+  --win-control-fill: rgba(255, 255, 255, 0.06);
+  --win-control-fill-hover: rgba(255, 255, 255, 0.09);
+  --win-control-fill-pressed: rgba(255, 255, 255, 0.04);
+  --win-control-fill-input-active: rgba(30, 32, 38, 0.85);
+
+  --win-subtle-hover: rgba(255, 255, 255, 0.06);
+  --win-subtle-active: rgba(255, 255, 255, 0.09);
+
+  --win-stroke-control: rgba(255, 255, 255, 0.07);
+  --win-stroke-control-bevel: rgba(255, 255, 255, 0.10);
+  --win-stroke-card: rgba(255, 255, 255, 0.075);
+  --win-stroke-surface-card: var(--win-stroke-card);
+  --win-stroke-flyout: rgba(255, 255, 255, 0.11);
+  --win-stroke-divider: rgba(255, 255, 255, 0.08);
+  --win-stroke-accent-top: rgba(255, 255, 255, 0.14);
+  --win-stroke-accent-bevel: rgba(0, 0, 0, 0.25);
+  --win-input-bottom-rest: rgba(255, 255, 255, 0.54);
+
+  --settings-rail: #1C1D21;
+  --settings-content: #16171B;
+  --settings-card: #22242A;
   --settings-subtle: rgba(255, 255, 255, 0.05);
-  --settings-label: rgba(255, 255, 255, 0.46);
-  --settings-divider: rgba(255, 255, 255, 0.065);
-  --settings-border: rgba(255, 255, 255, 0.085);
+  --settings-label: rgba(255, 255, 255, 0.56);
+  --settings-divider: var(--win-stroke-divider);
+  --settings-border: var(--win-stroke-card);
   --settings-positive: #4ADE80;
   --settings-warning: #FBBF24;
   --settings-destructive: #F87171;
 
-  --border-hairline: rgba(255, 255, 255, 0.09);
+  --border-hairline: var(--win-stroke-divider);
   --border-strong: rgba(255, 255, 255, 0.16);
 
-  --text-primary: #F2F3F5;
-  --text-secondary: #A1A6B0;
-  --text-tertiary: #6E737D;
+  --text-primary: #F5F6F8;
+  --text-secondary: rgba(255, 255, 255, 0.76);
+  --text-tertiary: rgba(255, 255, 255, 0.48);
 
   --accent: #5B8DEF;
   --accent-hover: #74A0F7;
-  --accent-soft: rgba(91, 141, 239, 0.16);
+  --accent-pressed: #4A7CE0;
+  --accent-soft: rgba(91, 141, 239, 0.17);
   --accent-ring: rgba(91, 141, 239, 0.44);
+  --accent-text: #0D1117;
 
   --success: #34C769;
   --success-soft: rgba(52, 199, 105, 0.16);
@@ -190,25 +222,17 @@
   --danger: #F2584D;
   --danger-soft: rgba(242, 88, 77, 0.16);
 
-  --glass-bg: rgba(26, 28, 34, 0.78);
-  --glass-bg-hover: rgba(34, 37, 45, 0.88);
-  --glass-backdrop: blur(22px) saturate(165%) brightness(0.94);
-  --glass-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    inset 1px 0 0 rgba(255, 255, 255, 0.08),
-    inset 0 -0.5px 0 rgba(0, 0, 0, 0.3),
-    0 0 0 0.5px rgba(255, 255, 255, 0.10),
-    0 10px 30px rgba(0, 0, 0, 0.38);
+  --win-acrylic-bg: rgba(36, 38, 44, 0.86);
+  --win-acrylic-header-bg: rgba(20, 21, 23, 0.82);
+  --win-acrylic-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.38),
+    0 0 0 1px var(--win-stroke-flyout);
 
-  --modal-scrim: radial-gradient(
-    ellipse 78% 72% at 50% 48%,
-    rgba(6, 7, 10, 0.34) 0%,
-    rgba(6, 7, 10, 0.50) 100%
-  );
+  --modal-scrim: rgba(0, 0, 0, 0.48);
   --shadow-modal:
-    0 0 0 1px rgba(255, 255, 255, 0.09),
-    0 28px 72px rgba(0, 0, 0, 0.62),
-    0 8px 22px rgba(0, 0, 0, 0.36);
+    0 24px 56px rgba(0, 0, 0, 0.56),
+    0 6px 16px rgba(0, 0, 0, 0.34),
+    0 0 0 1px var(--win-stroke-flyout);
 
   --skeleton-base: rgba(255, 255, 255, 0.06);
   --skeleton-shine: rgba(255, 255, 255, 0.11);
@@ -219,23 +243,17 @@
   --vignette-stroke: rgba(255, 255, 255, 0.12);
   --vignette-muted: rgba(255, 255, 255, 0.08);
 
-  --sidebar-mica-bg: rgba(23, 25, 29, 0.62);
+  --win-switch-border: rgba(255, 255, 255, 0.54);
+  --win-switch-thumb-off: rgba(255, 255, 255, 0.78);
+  --win-slider-track: rgba(255, 255, 255, 0.28);
+  --win-slider-thumb-outer: #3A3D45;
 
   color-scheme: dark;
 }
 
-/* Progressive continuous superellipse curvature (DESIGN.md §3.2) */
-@supports (corner-shape: superellipse(1.25)) {
-  :where(*) {
-    corner-shape: superellipse(1.25);
-  }
-  .rounded-full,
-  [data-pill="true"] {
-    corner-shape: round;
-  }
-}
-
-/* Base Reset + Windows Native Typography Stack (DESIGN.md §4.1 & §4.2) */
+/* =========================================================================
+   Base Reset + Windows Native Typography Stack (DESIGN.md §4 & Fluent 2 §4.5)
+   ========================================================================= */
 html,
 body,
 #root {
@@ -252,7 +270,7 @@ body,
 
 :root[data-backdrop="solidFallback"]:not([data-transparent-window="true"]) body,
 :root:not([data-backdrop="mica"]):not([data-transparent-window="true"]) body {
-  background-color: var(--bg-gallery);
+  background-color: var(--win-solid-base);
 }
 
 :root[data-transparent-window="true"],
@@ -269,17 +287,31 @@ kbd,
   font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
 }
 
-/* Mandatory CJK + Latin Typography Switches (DESIGN.md §4.2 & P0-3) */
-h1,
-h2,
-h3,
-.charkle-heading {
-  text-wrap: balance;
+@layer components {
+  .win-display-title {
+    font-family: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 32px;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
 }
 
-p,
-.charkle-prose {
-  text-wrap: pretty;
+/* Mandatory CJK + Latin Typography Switches (DESIGN.md §4.2) — layered in @layer base
+   so Tailwind v4 @layer utilities (.truncate / .whitespace-nowrap) ALWAYS win. */
+@layer base {
+  h1,
+  h2,
+  h3,
+  .charkle-heading {
+    text-wrap: balance;
+  }
+
+  p,
+  .charkle-prose {
+    text-wrap: pretty;
+  }
 }
 
 .charkle-tabular {
@@ -308,820 +340,652 @@ textarea {
   color: var(--text-primary);
 }
 
-/* Windows 11 Mica Chrome Rail (Titlebar & Sidebar) with clean solid fallback on Win10 / non-Mica */
+/* =========================================================================
+   Windows 11 Mica Alt Shell & Elevated Layer Surface (§3 & §4.1)
+   ========================================================================= */
 .charkle-mica-chrome,
 .charkle-sidebar-surface {
-  background-color: var(--bg-sidebar);
+  background-color: var(--win-solid-base);
 }
 
 :root[data-backdrop="mica"] .charkle-mica-chrome,
 :root[data-backdrop="mica"] .charkle-sidebar-surface {
-  background-color: rgba(255, 255, 255, 0.14);
+  background-color: var(--win-mica-tint);
 }
 
-:root[data-theme="dark"][data-backdrop="mica"] .charkle-mica-chrome,
-:root[data-theme="dark"][data-backdrop="mica"] .charkle-sidebar-surface,
-.dark[data-backdrop="mica"] .charkle-mica-chrome,
-.dark[data-backdrop="mica"] .charkle-sidebar-surface {
-  background-color: rgba(20, 22, 26, 0.22);
-}
-
-/* Seamless Mica L-frame: titlebar merges into sidebar rail while elevated gallery carries the hairline */
 :root[data-backdrop="mica"] .charkle-mica-titlebar {
   border-bottom-color: transparent;
 }
 
-/* Elevated center gallery canvas framing Windows 11 Mica Titlebar + Sidebar */
-:root[data-backdrop="mica"] .charkle-gallery-surface {
-  border-top-left-radius: 10px;
-  border-top: 1px solid var(--border-hairline);
-  border-left: 1px solid var(--border-hairline);
-  box-shadow: -1px -1px 0 rgba(255, 255, 255, 0.35);
+/* Elevated Layer Canvas framing the right workspace under the fused 40px Titlebar */
+.charkle-gallery-surface {
+  border-top-left-radius: var(--win-radius-overlay);
+  border-top: 1px solid var(--win-stroke-card);
+  border-left: 1px solid var(--win-stroke-card);
 }
 
-:root[data-theme="dark"][data-backdrop="mica"] .charkle-gallery-surface,
-.dark[data-backdrop="mica"] .charkle-gallery-surface {
-  box-shadow: -1px -1px 0 rgba(255, 255, 255, 0.05);
+/* =========================================================================
+   Fluent 2 1px Control & Input Elevation Borders (§4.2)
+   ========================================================================= */
+.win-control-elevation {
+  border: 1px solid var(--win-stroke-control);
+  border-bottom-color: var(--win-stroke-control-bevel);
 }
 
-/* Crystal-clear Optical Liquid Glass Surfaces (strictly floating over media/canvas).
-   Material declarations: user tint scale (--l-k / --d-k), adaptive tint veil, backdrop-filter
-   + SVG rim lens, top-left inner radial light (::before), catch-light & specular bevel shadows.
-   Default `position: relative` lives strictly inside `@layer components` so Tailwind v4
-   `@layer utilities` (`absolute`, `fixed`, `sticky`) ALWAYS wins on floating overlays. */
+:root[data-theme="dark"] .win-control-elevation,
+.dark .win-control-elevation {
+  border-color: var(--win-stroke-control);
+  border-top-color: var(--win-stroke-control-bevel);
+}
+
+.win-control-elevation:active:not(:disabled) {
+  border-color: var(--win-stroke-control);
+}
+
+.win-accent-elevation {
+  border: 1px solid var(--win-stroke-accent-top);
+  border-bottom-color: var(--win-stroke-accent-bevel);
+}
+
+.win-input-elevation {
+  background-color: var(--win-control-fill);
+  border: 1px solid var(--win-stroke-control);
+  border-bottom-color: var(--win-input-bottom-rest);
+  transition:
+    background-color var(--win-duration-faster) var(--win-ease-out),
+    border-color var(--win-duration-faster) var(--win-ease-out),
+    box-shadow var(--win-duration-faster) var(--win-ease-out);
+}
+
+.win-input-elevation:hover:not(:focus-within):not(:focus) {
+  background-color: var(--win-control-fill-hover);
+}
+
+.win-input-elevation:focus-within,
+.win-input-elevation:focus {
+  background-color: var(--win-control-fill-input-active);
+  border-color: var(--win-stroke-control);
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 -1px 0 0 var(--accent);
+}
+
+/* =========================================================================
+   Fluent 2 Transient Acrylic Surfaces & Smoke Scrim (§4.3)
+   Default position: relative stays strictly inside @layer components so
+   Tailwind v4 @layer utilities (absolute, fixed, sticky) ALWAYS win.
+   ========================================================================= */
 @layer components {
   :where(
-    .charkle-glass,
-    .charkle-glass-dark,
-    .charkle-slider,
-    .charkle-slider-track,
+    .win-acrylic,
+    .win-acrylic-dark,
     .charkle-skeleton
   ) {
     position: relative;
   }
 }
 
-.charkle-glass::before,
-.charkle-glass-dark::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  z-index: -1;
-  background: radial-gradient(
-    ellipse 85% 75% at 15% 8%,
-    rgba(255, 255, 255, 0.30) 0%,
-    rgba(255, 255, 255, 0) 55%
-  );
-}
-
-.charkle-glass[data-kind="dark"]::before,
-:root[data-theme="dark"] .charkle-glass::before,
-.dark .charkle-glass::before,
-.charkle-glass-dark::before {
-  background: radial-gradient(
-    ellipse 85% 75% at 15% 8%,
-    rgba(255, 255, 255, 0.10) 0%,
-    rgba(255, 255, 255, 0) 55%
-  );
-}
-
-.charkle-glass {
-  --m-tint: #ffffff;
-  --m-k: var(--l-k, 1);
-  --m-thin: 0.06;
-  --m-dense: 0.22;
-  --m-blur: 2;
-  --m-sat: 1.8;
-  --m-bri: 1.06;
-  --m-con: 1;
-  --m-catch: 1;
-  --m-bevel: 1;
-  --m-shadow: 1;
-  --density: 0.35;
-  --keep: 1;
-  --floor: 0;
-  --m-floor-min: 0;
-
-  --veil-k: min(1, var(--m-k));
-  --tint-a: min(
-    0.95,
-    max(
-      var(--floor),
-      var(--m-floor-min, 0),
-      calc((var(--m-thin) + (var(--m-dense) - var(--m-thin)) * var(--density)) * var(--m-k))
-    )
-  );
-  --glass-filter:
-    blur(calc(var(--m-blur) * var(--u, 1px)))
-    saturate(var(--m-sat))
-    contrast(calc(1 + (var(--m-con) - 1) * var(--veil-k)))
-    brightness(calc(1 + (var(--m-bri) - 1) * var(--veil-k)))
-    saturate(var(--keep));
-
+.win-acrylic {
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--m-tint) calc(var(--tint-a) * 100%), transparent);
-  -webkit-backdrop-filter: var(--glass-filter);
-  backdrop-filter: var(--glass-filter) var(--glass-lens,);
-  isolation: isolate;
+  background-color: var(--win-acrylic-bg);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  backdrop-filter: blur(28px) saturate(140%);
+  box-shadow: var(--win-acrylic-shadow);
+}
+
+.win-acrylic-header {
+  color: var(--text-primary);
+  background-color: var(--win-acrylic-header-bg);
+  -webkit-backdrop-filter: blur(24px) saturate(135%);
+  backdrop-filter: blur(24px) saturate(135%);
+  border-bottom: 1px solid var(--win-stroke-divider);
+}
+
+.win-acrylic-dark {
+  --text-primary: #F5F6F8;
+  --text-secondary: rgba(245, 246, 248, 0.78);
+  --text-tertiary: rgba(245, 246, 248, 0.54);
+  --border-hairline: rgba(255, 255, 255, 0.12);
+  --win-stroke-divider: rgba(255, 255, 255, 0.12);
+  --win-subtle-hover: rgba(255, 255, 255, 0.08);
+  --win-subtle-active: rgba(255, 255, 255, 0.12);
+
+  color: #F5F6F8;
+  background-color: rgba(24, 25, 29, 0.88);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  backdrop-filter: blur(28px) saturate(140%);
   box-shadow:
-    inset calc(1.5 * var(--u)) calc(1.5 * var(--u)) var(--u) calc(-1 * var(--u)) rgb(255 255 255 / calc(0.95 * var(--m-catch))),
-    inset calc(-1.25 * var(--u)) calc(-1.25 * var(--u)) var(--u) calc(-1 * var(--u)) rgb(255 255 255 / calc(0.62 * var(--m-catch))),
-    inset 0 0 0 calc(0.75 * var(--u)) rgb(255 255 255 / calc(0.45 * var(--m-catch))),
-    0 0 0 calc(0.5 * var(--u)) rgb(0 0 0 / calc(0.12 * var(--m-shadow))),
-    0 calc(4 * var(--u)) calc(16 * var(--u)) rgb(0 0 0 / calc(0.09 * var(--m-shadow))),
-    inset 0 calc(6 * var(--u)) calc(8 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.58 * var(--veil-k) * var(--m-bevel))),
-    inset calc(4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.28 * var(--veil-k) * var(--m-bevel))),
-    inset calc(-4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.16 * var(--veil-k) * var(--m-bevel))),
-    inset 0 calc(-6 * var(--u)) calc(6 * var(--u)) calc(-6 * var(--u)) rgb(0 0 0 / calc(0.05 * var(--veil-k) * var(--m-bevel)));
+    0 12px 32px rgba(0, 0, 0, 0.44),
+    0 0 0 1px rgba(255, 255, 255, 0.12);
 }
 
-.charkle-glass[data-pill="true"],
-.charkle-glass-dark[data-pill="true"] {
-  corner-shape: round;
+.win-smoke-scrim {
+  background-color: var(--modal-scrim);
 }
 
-.charkle-glass[data-kind="dark"],
-:root[data-theme="dark"] .charkle-glass,
-.dark .charkle-glass,
-.charkle-glass-dark {
-  --m-tint: #1e1e22;
-  --m-k: var(--d-k, 1);
-  --m-thin: 0.16;
-  --m-dense: 0.38;
-  --m-blur: 2;
-  --m-sat: 1.6;
-  --m-bri: 0.8;
-  --m-con: 1;
-  --m-catch: 1;
-  --m-bevel: 1;
-  --m-shadow: 1;
-  --density: 0.38;
-  --keep: 1;
-  --floor: 0;
-  --m-floor-min: 0;
-
-  /* Scope adaptive light ink variables so nested controls inside [data-kind="dark"] stay WCAG crisp */
-  --text-primary: #F4F5F7;
-  --text-secondary: rgba(244, 245, 247, 0.78);
-  --text-tertiary: rgba(244, 245, 247, 0.56);
-  --border-hairline: rgba(255, 255, 255, 0.16);
-  --accent: #74A9FF;
-  --accent-soft: rgba(116, 169, 255, 0.24);
-
-  --veil-k: min(1, var(--m-k));
-  --tint-a: min(
-    0.95,
-    max(
-      var(--floor),
-      var(--m-floor-min, 0),
-      calc((var(--m-thin) + (var(--m-dense) - var(--m-thin)) * var(--density)) * var(--m-k))
-    )
-  );
-  --glass-filter:
-    blur(calc(var(--m-blur) * var(--u, 1px)))
-    saturate(var(--m-sat))
-    contrast(calc(1 + (var(--m-con) - 1) * var(--veil-k)))
-    brightness(calc(1 + (var(--m-bri) - 1) * var(--veil-k)))
-    saturate(var(--keep));
-
-  color: #F4F5F7;
-  text-shadow: none;
-  background: color-mix(in srgb, var(--m-tint) calc(var(--tint-a) * 100%), transparent);
-  -webkit-backdrop-filter: var(--glass-filter);
-  backdrop-filter: var(--glass-filter) var(--glass-lens,);
-  isolation: isolate;
-  box-shadow:
-    inset calc(1.25 * var(--u)) calc(1.25 * var(--u)) calc(0.75 * var(--u)) calc(-0.75 * var(--u)) rgb(255 255 255 / calc(0.52 * var(--m-catch))),
-    inset calc(-1 * var(--u)) calc(-1 * var(--u)) calc(0.5 * var(--u)) calc(-0.5 * var(--u)) rgb(255 255 255 / calc(0.20 * var(--m-catch))),
-    inset 0 0 0 calc(0.65 * var(--u)) rgb(255 255 255 / calc(0.13 * var(--m-catch))),
-    0 0 0 calc(0.5 * var(--u)) rgb(0 0 0 / calc(0.32 * var(--m-shadow))),
-    0 calc(6 * var(--u)) calc(22 * var(--u)) rgb(0 0 0 / calc(0.32 * var(--m-shadow))),
-    inset 0 calc(6 * var(--u)) calc(8 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.22 * var(--veil-k) * var(--m-bevel))),
-    inset calc(4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.09 * var(--veil-k) * var(--m-bevel))),
-    inset calc(-4 * var(--u)) 0 calc(6 * var(--u)) calc(-6 * var(--u)) rgb(255 255 255 / calc(0.04 * var(--veil-k) * var(--m-bevel))),
-    inset 0 calc(-6 * var(--u)) calc(6 * var(--u)) calc(-6 * var(--u)) rgb(0 0 0 / calc(0.10 * var(--veil-k) * var(--m-bevel)));
-}
-
-/* Smooth material glide on theme switch and adaptive dark/light luminance flips */
-.charkle-glass:not(.charkle-pressable):not(.charkle-toast-item):not(.charkle-popover-panel):not(.charkle-reveal-top):not(.charkle-reveal-bottom),
-.charkle-glass-dark:not(.charkle-pressable):not(.charkle-toast-item):not(.charkle-popover-panel):not(.charkle-reveal-top):not(.charkle-reveal-bottom) {
-  transition:
-    --m-tint 420ms var(--ease-out),
-    --m-k 420ms var(--ease-out),
-    --m-thin 420ms var(--ease-out),
-    --m-dense 420ms var(--ease-out),
-    --m-blur 420ms var(--ease-out),
-    --m-sat 420ms var(--ease-out),
-    --m-bri 420ms var(--ease-out),
-    --density 420ms var(--ease-out),
-    --floor 420ms var(--ease-out),
-    --keep 420ms var(--ease-out),
-    color 260ms var(--ease-out),
-    box-shadow 420ms var(--ease-out);
-}
-
-.charkle-glass.charkle-pressable,
-.charkle-glass-dark.charkle-pressable {
-  transition:
-    transform var(--duration-press) var(--ease-out),
-    opacity var(--duration-press) var(--ease-out),
-    --m-tint 380ms var(--ease-out),
-    --m-k 240ms var(--ease-out),
-    --m-thin 380ms var(--ease-out),
-    --m-dense 380ms var(--ease-out),
-    --m-bri 380ms var(--ease-out),
-    --density 380ms var(--ease-out),
-    --floor 380ms var(--ease-out),
-    color 240ms var(--ease-out),
-    box-shadow 380ms var(--ease-out);
-}
-
-/* Highlighted rows on light glass menus/popovers: luminous white highlight + crisp white inner stroke */
-.charkle-popover-panel.charkle-glass button:not(:disabled):not([class*="bg-[var(--accent"]):not([class*="bg-[var(--danger"]):hover,
-.charkle-popover-panel.charkle-glass [role="option"]:hover {
-  background-color: rgba(255, 255, 255, 0.42);
-}
-
-.charkle-popover-panel.charkle-glass [role="option"][aria-selected="true"],
-.charkle-popover-panel.charkle-glass [data-selected="true"] {
-  background-color: rgba(255, 255, 255, 0.76);
-  box-shadow: inset 0 0 0 0.75px rgba(255, 255, 255, 0.85);
-}
-
-:root[data-theme="dark"] .charkle-popover-panel.charkle-glass button:not(:disabled):not([class*="bg-[var(--accent"]):not([class*="bg-[var(--danger"]):hover,
-.dark .charkle-popover-panel.charkle-glass button:not(:disabled):not([class*="bg-[var(--accent"]):not([class*="bg-[var(--danger"]):hover,
-:root[data-theme="dark"] .charkle-popover-panel.charkle-glass [role="option"]:hover,
-.dark .charkle-popover-panel.charkle-glass [role="option"]:hover {
-  background-color: rgba(255, 255, 255, 0.10);
-}
-
-:root[data-theme="dark"] .charkle-popover-panel.charkle-glass [role="option"][aria-selected="true"],
-.dark .charkle-popover-panel.charkle-glass [role="option"][aria-selected="true"],
-:root[data-theme="dark"] .charkle-popover-panel.charkle-glass [data-selected="true"],
-.dark .charkle-popover-panel.charkle-glass [data-selected="true"] {
-  background-color: rgba(255, 255, 255, 0.16);
-  box-shadow: inset 0 0 0 0.75px rgba(255, 255, 255, 0.20);
-}
-
-/* Hover tint brightening on interactive liquid-glass buttons (never lifting shadows) */
-@media (hover: hover) and (pointer: fine) {
-  .charkle-glass.charkle-pressable:hover {
-    --m-k: calc(var(--l-k, 1) * 1.14);
-  }
-
-  .charkle-glass[data-kind="dark"].charkle-pressable:hover,
-  :root[data-theme="dark"] .charkle-glass.charkle-pressable:hover,
-  .dark .charkle-glass.charkle-pressable:hover,
-  .charkle-glass-dark.charkle-pressable:hover {
-    --m-k: calc(var(--d-k, 1) * 1.14);
-  }
-}
-
-/* Safari / WebKit safety: keep round corners on backdrop-filter surfaces */
-@supports (-webkit-touch-callout: none) {
-  .charkle-glass,
-  .charkle-glass-dark {
-    corner-shape: round;
-  }
-}
-
-/* Windows desktop "Transparency effects = Off" maps to prefers-reduced-transparency: reduce in WebView2.
-   Keep full optical clear glass active across Light and Dark themes; solid accessibility is governed
-   strictly by forced-colors: active and prefers-contrast: more below. */
+/* =========================================================================
+   Strict Accessibility & Low-Spec Solid Fallbacks (§4.3)
+   Disabled transparency (Windows Settings or Win10 fallback) ALWAYS disables
+   backdrop-filter and presents crisp opaque neutral surfaces.
+   ========================================================================= */
 @media (prefers-reduced-transparency: reduce) {
-  .charkle-glass {
-    --m-thin: 0.06;
-    --m-dense: 0.22;
-    --m-blur: 2;
-    --m-sat: 1.8;
-    --m-bri: 1.06;
-    --floor: 0;
+  .charkle-mica-chrome,
+  .charkle-sidebar-surface {
+    background-color: var(--win-solid-base);
   }
 
-  .charkle-glass[data-kind="dark"],
-  :root[data-theme="dark"] .charkle-glass,
-  .dark .charkle-glass,
-  .charkle-glass-dark {
-    --m-thin: 0.16;
-    --m-dense: 0.38;
-    --m-blur: 2;
-    --m-sat: 1.6;
-    --m-bri: 0.8;
-    --floor: 0;
+  .win-acrylic {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--bg-elevated);
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.16),
+      0 0 0 1px var(--win-stroke-flyout);
+  }
+
+  .win-acrylic-header {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--bg-gallery);
+    border-bottom: 1px solid var(--win-stroke-divider);
+  }
+
+  .win-acrylic-dark {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: #18191D;
+    box-shadow:
+      0 12px 32px rgba(0, 0, 0, 0.48),
+      0 0 0 1px rgba(255, 255, 255, 0.16);
   }
 }
 
-/* Dense-text & Search Studio-Frost Elevation (strictly AFTER prefers-reduced-transparency
-   so Windows "Transparency effects = Off" never resets legibility floors back to 0 / 2px). */
-.charkle-command-palette.charkle-glass {
-  --m-tint: #fcfcfb;
-  --m-thin: 0.86;
-  --m-dense: 0.92;
-  --density: 0.85;
-  --floor: 0.88;
-  --m-floor-min: 0.88;
-  --m-blur: 24;
-  --m-sat: 1.4;
-  --m-bri: 1.02;
+:root[data-backdrop="solidFallback"] .charkle-mica-chrome,
+:root[data-backdrop="solidFallback"] .charkle-sidebar-surface {
+  background-color: var(--win-solid-base);
 }
 
-.charkle-command-palette.charkle-glass[data-kind="dark"],
-:root[data-theme="dark"] .charkle-command-palette.charkle-glass,
-.dark .charkle-command-palette.charkle-glass {
-  --m-tint: #1b1c20;
-  --m-thin: 0.86;
-  --m-dense: 0.93;
-  --density: 0.85;
-  --floor: 0.88;
-  --m-floor-min: 0.88;
-  --m-blur: 24;
-  --m-sat: 1.35;
-  --m-bri: 0.96;
+:root[data-backdrop="solidFallback"] .win-acrylic {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--bg-elevated);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.16),
+    0 0 0 1px var(--win-stroke-flyout);
 }
 
-.charkle-popover-panel.charkle-glass {
-  --m-thin: 0.72;
-  --m-dense: 0.84;
-  --density: 0.85;
-  --floor: 0.78;
-  --m-floor-min: 0.78;
-  --m-blur: 18;
+:root[data-backdrop="solidFallback"] .win-acrylic-header {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--bg-gallery);
+  border-bottom: 1px solid var(--win-stroke-divider);
 }
 
-.charkle-popover-panel.charkle-glass[data-kind="dark"],
-:root[data-theme="dark"] .charkle-popover-panel.charkle-glass,
-.dark .charkle-popover-panel.charkle-glass {
-  --m-thin: 0.78;
-  --m-dense: 0.88;
-  --density: 0.85;
-  --floor: 0.82;
-  --m-floor-min: 0.82;
-  --m-blur: 18;
-}
-
-.charkle-glass-panel.charkle-glass {
-  --m-thin: 0.76;
-  --m-dense: 0.86;
-  --density: 0.85;
-  --floor: 0.80;
-  --m-floor-min: 0.80;
-  --m-blur: 18;
-}
-
-.charkle-glass-panel.charkle-glass[data-kind="dark"],
-:root[data-theme="dark"] .charkle-glass-panel.charkle-glass,
-.dark .charkle-glass-panel.charkle-glass {
-  --m-thin: 0.80;
-  --m-dense: 0.88;
-  --density: 0.85;
-  --floor: 0.82;
-  --m-floor-min: 0.82;
-  --m-blur: 18;
-}
-
-.charkle-toast-glass.charkle-glass {
-  --m-thin: 0.74;
-  --m-dense: 0.86;
-  --density: 0.85;
-  --floor: 0.80;
-  --m-floor-min: 0.80;
-  --m-blur: 18;
-}
-
-.charkle-toast-glass.charkle-glass[data-kind="dark"],
-:root[data-theme="dark"] .charkle-toast-glass.charkle-glass,
-.dark .charkle-toast-glass.charkle-glass {
-  --m-thin: 0.80;
-  --m-dense: 0.88;
-  --density: 0.85;
-  --floor: 0.84;
-  --m-floor-min: 0.84;
-  --m-blur: 18;
-}
-
-.charkle-search-capsule.charkle-glass {
-  --m-thin: 0.44;
-  --m-dense: 0.58;
-  --floor: 0.44;
-  --m-floor-min: 0.44;
-  --m-blur: 10;
-}
-
-.charkle-search-capsule.charkle-glass[data-kind="dark"],
-:root[data-theme="dark"] .charkle-search-capsule.charkle-glass,
-.dark .charkle-search-capsule.charkle-glass {
-  --m-thin: 0.54;
-  --m-dense: 0.68;
-  --floor: 0.54;
-  --m-floor-min: 0.54;
-  --m-blur: 10;
+:root[data-backdrop="solidFallback"] .win-acrylic-dark {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: #18191D;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.48),
+    0 0 0 1px rgba(255, 255, 255, 0.16);
 }
 
 @media (prefers-contrast: more) {
   :root {
-    --border-hairline: rgba(0, 0, 0, 0.22);
-    --border-strong: rgba(0, 0, 0, 0.36);
+    --win-stroke-control: rgba(0, 0, 0, 0.24);
+    --win-stroke-control-bevel: rgba(0, 0, 0, 0.38);
+    --win-stroke-card: rgba(0, 0, 0, 0.24);
+    --win-stroke-flyout: rgba(0, 0, 0, 0.32);
+    --win-stroke-divider: rgba(0, 0, 0, 0.24);
+    --border-hairline: rgba(0, 0, 0, 0.24);
+    --border-strong: rgba(0, 0, 0, 0.40);
   }
 
   :root[data-theme="dark"],
   .dark {
-    --border-hairline: rgba(255, 255, 255, 0.22);
-    --border-strong: rgba(255, 255, 255, 0.36);
-  }
-
-  .charkle-glass,
-  .charkle-search-capsule.charkle-glass {
-    --floor: 0.72;
-    --m-floor-min: 0.72;
-    --m-blur: 12;
-  }
-
-  :root[data-theme="dark"] .charkle-glass,
-  .dark .charkle-glass,
-  :root[data-theme="dark"] .charkle-search-capsule.charkle-glass,
-  .dark .charkle-search-capsule.charkle-glass,
-  .charkle-glass-dark {
-    --floor: 0.78;
-    --m-floor-min: 0.78;
-    --m-blur: 12;
+    --win-stroke-control: rgba(255, 255, 255, 0.24);
+    --win-stroke-control-bevel: rgba(255, 255, 255, 0.36);
+    --win-stroke-card: rgba(255, 255, 255, 0.24);
+    --win-stroke-flyout: rgba(255, 255, 255, 0.32);
+    --win-stroke-divider: rgba(255, 255, 255, 0.24);
+    --border-hairline: rgba(255, 255, 255, 0.24);
+    --border-strong: rgba(255, 255, 255, 0.40);
   }
 }
 
 @media (forced-colors: active) {
-  .charkle-glass,
-  .charkle-glass-dark {
+  .win-acrylic,
+  .win-acrylic-header,
+  .win-acrylic-dark {
     border: 1px solid CanvasText;
-    background: Canvas;
+    background-color: Canvas;
+    color: CanvasText;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+    box-shadow: none;
   }
 }
 
-/* Tactile 5-layer keycap button styles matching macOS CharkleSkeuoButtonStyle (DESIGN.md §7.1) */
-.charkle-skeuo-primary {
-  background: linear-gradient(180deg, #404859 0%, #273042 100%);
-  color: #ffffff;
-  border: 1px solid #12161f;
-  text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.26);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.24),
-    0 3px 8px rgba(18, 22, 31, 0.26),
-    0 1px 2px rgba(0, 0, 0, 0.18);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .charkle-skeuo-primary:hover:not(:disabled) {
-    background: linear-gradient(180deg, #4a5366 0%, #2f394d 100%);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.22),
-      inset 0 -1px 0 rgba(0, 0, 0, 0.24),
-      0 5px 12px rgba(18, 22, 31, 0.30),
-      0 1px 2px rgba(0, 0, 0, 0.18);
-  }
-}
-
-.charkle-skeuo-primary:active:not(:disabled) {
-  background: linear-gradient(180deg, #273042 0%, #404859 100%);
-  transform: translateY(1px);
-  box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.34),
-    0 1px 1px rgba(0, 0, 0, 0.18);
-}
-
-:root[data-theme="dark"] .charkle-skeuo-primary,
-.dark .charkle-skeuo-primary {
-  background: linear-gradient(180deg, #414b60 0%, #283144 100%);
-  border-color: #151923;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.32),
-    0 3px 10px rgba(0, 0, 0, 0.45),
-    0 1px 2px rgba(0, 0, 0, 0.36);
-}
-
-.charkle-skeuo-secondary {
-  background: linear-gradient(180deg, #ffffff 0%, #f1f3f6 100%);
-  color: #1f2633;
-  border: 1px solid rgba(15, 23, 42, 0.14);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.92),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.06),
-    0 3px 7px rgba(15, 23, 42, 0.09),
-    0 1px 2px rgba(15, 23, 42, 0.06);
-}
-
-.charkle-skeuo-secondary:active:not(:disabled) {
-  background: linear-gradient(180deg, #f1f3f6 0%, #ffffff 100%);
-  transform: translateY(1px);
-  box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.14),
-    0 1px 1px rgba(15, 23, 42, 0.06);
-}
-
-:root[data-theme="dark"] .charkle-skeuo-secondary,
-.dark .charkle-skeuo-secondary {
-  background: linear-gradient(180deg, #272a31 0%, #1f2127 100%);
-  color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.14);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
-    0 3px 8px rgba(0, 0, 0, 0.30),
-    0 1px 2px rgba(0, 0, 0, 0.26);
-}
-
-/* Tactile press feedback — never uses transition: all */
+/* =========================================================================
+   Fluent 2 Pressable & Interactive Controls (§5 & §6)
+   Explicit per-property transitions only.
+   ========================================================================= */
 .charkle-pressable {
   transition:
-    transform var(--duration-press) var(--ease-out),
-    opacity var(--duration-press) var(--ease-out),
-    background-color var(--duration-press) var(--ease-out),
-    border-color var(--duration-press) var(--ease-out),
-    color var(--duration-press) var(--ease-out);
+    transform var(--win-duration-faster) var(--win-ease-out),
+    opacity var(--win-duration-faster) var(--win-ease-out),
+    background-color var(--win-duration-faster) var(--win-ease-out),
+    border-color var(--win-duration-faster) var(--win-ease-out),
+    color var(--win-duration-faster) var(--win-ease-out);
 }
 
 .charkle-pressable:active:not(:disabled) {
-  transform: scale(0.97);
-  opacity: 0.88;
+  transform: scale(0.98);
 }
 
-/* Bespoke Precision Slider (Apple/macOS tactile glass pill & studio cobalt standard variants) */
-.charkle-slider {
+/* WinUI 3 ToggleSwitch (40x20px, tactile horizontal thumb stretch on press) */
+.win-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 40px;
+  height: 20px;
+  padding: 0 3px;
+  border-radius: 9999px;
+  border: 1px solid var(--win-switch-border);
+  background-color: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color var(--win-duration-fast) var(--win-ease-out),
+    border-color var(--win-duration-fast) var(--win-ease-out);
+}
+
+.win-switch[data-size="sm"] {
+  width: 34px;
+  height: 18px;
+}
+
+.win-switch:hover:not([data-disabled]):not([data-checked]) {
+  background-color: var(--win-subtle-hover);
+}
+
+.win-switch[data-checked] {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+.win-switch[data-checked]:hover:not([data-disabled]) {
+  background-color: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.win-switch[data-disabled] {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.win-switch-thumb {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background-color: var(--win-switch-thumb-off);
+  transform: translateX(0);
+  transition:
+    transform var(--win-duration-fast) var(--win-ease-out),
+    width var(--win-duration-faster) var(--win-ease-out),
+    height var(--win-duration-faster) var(--win-ease-out),
+    background-color var(--win-duration-fast) var(--win-ease-out);
+}
+
+.win-switch[data-size="sm"] .win-switch-thumb {
+  width: 10px;
+  height: 10px;
+}
+
+.win-switch:hover:not([data-disabled]) .win-switch-thumb {
+  width: 14px;
+  height: 14px;
+}
+
+.win-switch[data-size="sm"]:hover:not([data-disabled]) .win-switch-thumb {
+  width: 12px;
+  height: 12px;
+}
+
+.win-switch[data-checked] .win-switch-thumb {
+  background-color: var(--accent-text);
+  transform: translateX(20px);
+}
+
+.win-switch[data-size="sm"][data-checked] .win-switch-thumb {
+  transform: translateX(16px);
+}
+
+.win-switch[data-checked]:hover:not([data-disabled]) .win-switch-thumb {
+  transform: translateX(18px);
+}
+
+.win-switch[data-size="sm"][data-checked]:hover:not([data-disabled]) .win-switch-thumb {
+  transform: translateX(14px);
+}
+
+.win-switch:active:not([data-disabled]) .win-switch-thumb {
+  width: 17px;
+  height: 14px;
+}
+
+.win-switch[data-size="sm"]:active:not([data-disabled]) .win-switch-thumb {
+  width: 14px;
+  height: 12px;
+}
+
+.win-switch[data-checked]:active:not([data-disabled]) .win-switch-thumb {
+  transform: translateX(15px);
+}
+
+.win-switch[data-size="sm"][data-checked]:active:not([data-disabled]) .win-switch-thumb {
+  transform: translateX(12px);
+}
+
+/* WinUI 3 Dual-Ring Circular Slider (@base-ui/react/slider) */
+.win-slider-root {
+  position: relative;
   display: inline-flex;
   align-items: center;
   touch-action: none;
   user-select: none;
-  outline: none;
-  --slider-track-h: 4px;
-  --slider-thumb-w: 14px;
-  --slider-thumb-h: 14px;
-  --slider-thumb-half: 7px;
 }
 
-.charkle-slider[data-size="sm"] {
-  height: 22px;
+.win-slider-root[data-size="sm"] {
+  height: 24px;
   min-width: 56px;
-  --slider-track-h: 4px;
 }
 
-.charkle-slider[data-size="md"] {
-  height: 26px;
+.win-slider-root[data-size="md"] {
+  height: 28px;
   min-width: 72px;
-  --slider-track-h: 5px;
 }
 
-.charkle-slider[data-variant="glass"][data-size="sm"] {
-  --slider-thumb-w: 18px;
-  --slider-thumb-h: 12px;
-  --slider-thumb-half: 9px;
-}
-
-.charkle-slider[data-variant="glass"][data-size="md"] {
-  --slider-thumb-w: 20px;
-  --slider-thumb-h: 13px;
-  --slider-thumb-half: 10px;
-}
-
-.charkle-slider[data-variant="standard"][data-size="sm"] {
-  --slider-thumb-w: 14px;
-  --slider-thumb-h: 14px;
-  --slider-thumb-half: 7px;
-}
-
-.charkle-slider[data-variant="standard"][data-size="md"] {
-  --slider-thumb-w: 16px;
-  --slider-thumb-h: 16px;
-  --slider-thumb-half: 8px;
-}
-
-.charkle-slider-track {
+.win-slider-control {
+  position: relative;
+  display: flex;
+  align-items: center;
   width: 100%;
-  height: var(--slider-track-h);
+  height: 100%;
+  cursor: pointer;
+}
+
+.win-slider-root[data-disabled] .win-slider-control {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.win-slider-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
   border-radius: 9999px;
-  overflow: hidden;
-  background: rgba(0, 0, 0, 0.11);
-  box-shadow: inset 0 0.5px 1px rgba(0, 0, 0, 0.14);
-  transform: translateX(calc(var(--slider-edge-x, 0px) * 0.35));
-  transition: transform 220ms var(--ease-out);
+  background-color: var(--win-slider-track);
 }
 
-.charkle-slider[data-dragging="true"] .charkle-slider-track {
-  transition: none;
-}
-
-:root[data-theme="dark"] .charkle-slider-track,
-.dark .charkle-slider-track,
-.charkle-glass[data-kind="dark"] .charkle-slider-track,
-.charkle-glass-dark .charkle-slider-track {
-  background: rgba(255, 255, 255, 0.16);
-  box-shadow: inset 0 0.5px 1px rgba(0, 0, 0, 0.28);
-}
-
-.charkle-slider-fill {
-  position: absolute;
-  inset: 0;
+.win-slider-indicator {
+  height: 100%;
   border-radius: 9999px;
-  transform-origin: left center;
-  transform: scaleX(var(--slider-ratio, 0));
-  background: var(--accent);
+  background-color: var(--accent);
 }
 
-.charkle-slider[data-variant="glass"] .charkle-slider-fill {
-  background: rgba(24, 25, 28, 0.42);
-}
-
-:root[data-theme="dark"] .charkle-slider[data-variant="glass"] .charkle-slider-fill,
-.dark .charkle-slider[data-variant="glass"] .charkle-slider-fill,
-.charkle-glass[data-kind="dark"] .charkle-slider[data-variant="glass"] .charkle-slider-fill,
-.charkle-glass-dark .charkle-slider[data-variant="glass"] .charkle-slider-fill {
-  background: rgba(255, 255, 255, 0.68);
-}
-
-.charkle-slider-thumb {
-  position: absolute;
-  top: 50%;
-  left: calc(var(--slider-thumb-half) + (100% - var(--slider-thumb-w)) * var(--slider-ratio, 0));
-  width: var(--slider-thumb-w);
-  height: var(--slider-thumb-h);
+.win-slider-thumb {
+  width: 18px;
+  height: 18px;
   border-radius: 9999px;
-  background: #ffffff;
-  transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1);
+  background-color: var(--win-slider-thumb-outer);
+  border: 1px solid var(--win-stroke-control-bevel);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
   transition:
-    transform 180ms var(--ease-out),
-    background-color 140ms var(--ease-out),
-    box-shadow 180ms var(--ease-out);
-  pointer-events: none;
+    box-shadow var(--win-duration-faster) var(--win-ease-out),
+    border-color var(--win-duration-faster) var(--win-ease-out);
 }
 
-.charkle-slider[data-variant="glass"] .charkle-slider-thumb {
-  box-shadow:
-    0 0 0 0.5px rgba(0, 0, 0, 0.12),
-    0 1.5px 4px rgba(0, 0, 0, 0.18),
-    0 0.5px 1px rgba(0, 0, 0, 0.10),
-    inset 0 1px 0.5px rgba(255, 255, 255, 0.96);
+.win-slider-root[data-size="sm"] .win-slider-thumb {
+  width: 16px;
+  height: 16px;
 }
 
-.charkle-slider[data-variant="standard"] .charkle-slider-thumb {
-  box-shadow:
-    0 0 0 0.5px rgba(0, 0, 0, 0.14),
-    0 1.5px 4px rgba(0, 0, 0, 0.16),
-    0 0.5px 1px rgba(0, 0, 0, 0.10);
+.win-slider-thumb::after {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background-color: var(--accent);
+  transform: scale(1);
+  transition: transform var(--win-duration-faster) var(--win-ease-out);
+}
+
+.win-slider-root[data-size="sm"] .win-slider-thumb::after {
+  width: 8px;
+  height: 8px;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .charkle-slider[data-variant="glass"]:hover:not([data-dragging="true"]) .charkle-slider-thumb {
-    transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.06);
-  }
-
-  .charkle-slider[data-variant="standard"]:hover:not([data-dragging="true"]) .charkle-slider-thumb {
-    transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.07);
+  .win-slider-control:hover .win-slider-thumb::after,
+  .win-slider-thumb:hover::after {
+    transform: scale(1.18);
   }
 }
 
-.charkle-slider[data-variant="glass"][data-dragging="true"] .charkle-slider-thumb {
-  transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.18, 1.12);
-  background: rgba(255, 255, 255, 0.46);
-  -webkit-backdrop-filter: blur(4px) saturate(1.85);
-  backdrop-filter: blur(4px) saturate(1.85);
-  box-shadow:
-    inset 0 1px 1.25px rgba(255, 255, 255, 0.96),
-    inset 0 -0.75px 1px rgba(0, 0, 0, 0.12),
-    0 0 0 0.75px rgba(255, 255, 255, 0.78),
-    0 3px 10px rgba(0, 0, 0, 0.22);
-  transition:
-    transform 150ms var(--ease-spring),
-    background-color 110ms var(--ease-out),
-    box-shadow 140ms var(--ease-out);
+.win-slider-root[data-dragging] .win-slider-thumb::after,
+.win-slider-thumb[data-dragging]::after,
+.win-slider-thumb:active::after {
+  transform: scale(0.86);
 }
 
-.charkle-slider[data-variant="standard"][data-dragging="true"] .charkle-slider-thumb {
-  transform: translate(calc(-50% + var(--slider-edge-x, 0px)), -50%) scale(1.14);
-  box-shadow:
-    0 0 0 0.5px rgba(0, 0, 0, 0.14),
-    0 0 0 3px var(--accent-soft),
-    0 2px 6px rgba(0, 0, 0, 0.20);
-}
-
-.charkle-slider:focus-visible .charkle-slider-thumb {
+.win-slider-thumb:focus-visible,
+.win-slider-thumb:has(:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-/* Interruptible Modal / Sheet Transitions with @starting-style (DESIGN.md P0-2) */
-.charkle-modal-scrim {
-  background: var(--modal-scrim);
+/* =========================================================================
+   Base UI Floating Surface & Dialog Transitions (fast-out decelerate exits)
+   ========================================================================= */
+.win-dialog-backdrop {
   opacity: 1;
-  transition: opacity var(--duration-sm) var(--ease-out);
+  transition: opacity var(--win-duration-fast) var(--win-ease-out);
 }
 
-@starting-style {
-  .charkle-modal-scrim {
-    opacity: 0;
-  }
-}
-
-.charkle-modal-scrim[data-closing="true"] {
+.win-dialog-backdrop[data-starting-style],
+.win-dialog-backdrop[data-ending-style] {
   opacity: 0;
-  transition-duration: var(--duration-exit-md);
 }
 
-.charkle-modal-panel {
+.win-dialog-backdrop[data-ending-style] {
+  transition-duration: var(--win-duration-exit);
+}
+
+.win-dialog-popup {
   opacity: 1;
   transform: scale(1) translateY(0);
   transition:
-    opacity var(--duration-md) var(--ease-out),
-    transform var(--duration-md) var(--ease-out);
+    opacity var(--win-duration-normal) var(--win-ease-out),
+    transform var(--win-duration-normal) var(--win-ease-out);
+}
+
+.win-dialog-popup[data-starting-style] {
+  opacity: 0;
+  transform: scale(0.96) translateY(6px);
+}
+
+.win-dialog-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.97) translateY(4px);
+  transition-duration: var(--win-duration-exit);
+}
+
+.win-flyout-popup {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  transform-origin: var(--transform-origin, top left);
+  transition:
+    opacity var(--win-duration-fast) var(--win-ease-out),
+    transform var(--win-duration-fast) var(--win-ease-out);
+}
+
+.win-flyout-popup[data-starting-style] {
+  opacity: 0;
+  transform: scale(0.96) translateY(-2px);
+}
+
+.win-flyout-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.97);
+  transition-duration: var(--win-duration-exit);
+}
+
+.win-tooltip-popup {
+  opacity: 1;
+  transform: scale(1);
+  transform-origin: var(--transform-origin, bottom center);
+  transition:
+    opacity var(--win-duration-fast) var(--win-ease-out),
+    transform var(--win-duration-fast) var(--win-ease-out);
+}
+
+.win-tooltip-popup[data-starting-style],
+.win-tooltip-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+.win-tooltip-popup[data-ending-style] {
+  transition-duration: 100ms;
+}
+
+/* Base UI Collapsible Panel height + opacity reveal */
+.win-collapsible-panel {
+  overflow: hidden;
+  height: var(--collapsible-panel-height, auto);
+  opacity: 1;
+  transition:
+    height var(--win-duration-fast) var(--win-ease-out),
+    opacity var(--win-duration-fast) var(--win-ease-out);
+}
+
+.win-collapsible-panel[data-starting-style],
+.win-collapsible-panel[data-ending-style] {
+  height: 0;
+  opacity: 0;
+}
+
+.win-collapsible-panel[data-ending-style] {
+  transition-duration: var(--win-duration-exit);
+}
+
+/* =========================================================================
+   Zero-Reflow Drawer Slot & Shared Motion Helpers (§6.2 #5)
+   NEVER transitions layout `width` (eliminates 60Hz masonry relayout jank).
+   ========================================================================= */
+.charkle-drawer-slot {
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.win-drawer-content {
+  transition:
+    transform 200ms var(--win-ease-out),
+    opacity 167ms var(--win-ease-out);
+}
+
+/* Quick Look overlay smooth enter/exit continuity */
+.charkle-quicklook-root {
+  opacity: 1;
+  transition: opacity var(--win-duration-normal) var(--win-ease-out);
 }
 
 @starting-style {
-  .charkle-modal-panel {
+  .charkle-quicklook-root {
     opacity: 0;
-    transform: scale(0.96) translateY(6px);
   }
 }
 
-.charkle-modal-panel[data-closing="true"] {
+.charkle-quicklook-root[data-closing="true"] {
   opacity: 0;
-  transform: scale(0.96) translateY(4px);
-  transition-duration: var(--duration-exit-md);
+  transition-duration: var(--win-duration-exit);
 }
 
-/* Origin-Aware Interruptible Popover (DESIGN.md §6.2 & §6.3) */
-.charkle-popover-panel {
+.charkle-quicklook-stage {
   opacity: 1;
   transform: scale(1);
   transition:
-    opacity var(--duration-popover-in) var(--ease-out),
-    transform var(--duration-popover-in) var(--ease-out);
+    opacity var(--win-duration-normal) var(--win-ease-out),
+    transform var(--win-duration-normal) var(--win-ease-out);
 }
 
 @starting-style {
-  .charkle-popover-panel {
+  .charkle-quicklook-stage {
     opacity: 0;
     transform: scale(0.96);
   }
 }
 
-.charkle-popover-panel[data-closing="true"] {
+.charkle-quicklook-stage[data-closing="true"] {
   opacity: 0;
   transform: scale(0.96);
-  transition-duration: var(--duration-popover-out);
+  transition-duration: var(--win-duration-exit);
 }
 
-/* Interruptible Top-Trailing Toast Entry/Exit matching macOS CharkleToastOverlay (DESIGN.md P0-1) */
-.charkle-toast-item {
+/* Expandable Filter Bar / Batch Action Floating Bar entrance & exit */
+.charkle-reveal-top {
   opacity: 1;
   transform: translateY(0) scale(1);
-  transform-origin: top right;
+  transform-origin: top center;
   transition:
-    opacity var(--duration-sm) var(--ease-out),
-    transform var(--duration-sm) var(--ease-out);
+    opacity var(--win-duration-fast) var(--win-ease-out),
+    transform var(--win-duration-fast) var(--win-ease-out);
 }
 
 @starting-style {
-  .charkle-toast-item {
+  .charkle-reveal-top {
     opacity: 0;
-    transform: translateY(-8px) scale(0.96);
+    transform: translateY(-6px) scale(0.98);
   }
 }
 
-.charkle-toast-item[data-closing="true"] {
+.charkle-reveal-top[data-closing="true"] {
   opacity: 0;
-  transform: scale(0.96);
-  transition-duration: var(--duration-exit-sm);
+  transform: translateY(-4px) scale(0.98);
+  transition-duration: var(--win-duration-exit);
 }
 
-/* Safe-Triangle Submenu Bridge (DESIGN.md §7.4) */
-.charkle-submenu-portal {
-  overflow: visible;
+.charkle-reveal-bottom {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: bottom center;
+  transition:
+    opacity var(--win-duration-fast) var(--win-ease-out),
+    transform var(--win-duration-fast) var(--win-ease-out);
 }
 
-.charkle-submenu-portal[data-bridge="true"]::before {
-  content: "";
-  position: absolute;
-  inset: -100vh -100vw;
-  background: none;
-  z-index: auto;
-  pointer-events: auto;
-  --bridge-slack: 6px;
-  --bridge-edge: clamp(100vw, 50% + var(--pointer-x, -1px) * 100000, 100% - 100vw);
-  --bridge-apex: calc(
-    100vw + var(--pointer-x, 0px) + clamp(-1 * var(--bridge-slack), var(--pointer-x, 0px) * 100000, var(--bridge-slack))
-  );
-  clip-path: polygon(
-    var(--bridge-apex) calc(100vh + var(--pointer-y, 0px) - var(--bridge-slack)),
-    var(--bridge-edge) 100vh,
-    var(--bridge-edge) calc(100% - 100vh),
-    var(--bridge-apex) calc(100vh + var(--pointer-y, 0px) + var(--bridge-slack))
-  );
+@starting-style {
+  .charkle-reveal-bottom {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+
+.charkle-reveal-bottom[data-closing="true"] {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transition-duration: var(--win-duration-exit);
 }
 
 /* Hover-only zoom inside asset frames (gated strictly to fine pointers) */
 .charkle-media-zoom {
-  transition: transform var(--duration-settle) var(--ease-out-strong);
+  transition: transform 200ms var(--win-ease-out);
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -1130,10 +994,10 @@ textarea {
   }
 }
 
-/* Micro overshoot strictly for <= 64px controls (stars, checkboxes, pins) */
+/* Micro pop strictly for <= 64px controls (stars, checkboxes, pins) */
 @keyframes charkle-micro-pop {
   0% {
-    transform: scale(0.86);
+    transform: scale(0.88);
   }
   100% {
     transform: scale(1);
@@ -1141,10 +1005,10 @@ textarea {
 }
 
 .charkle-micro-pop {
-  animation: charkle-micro-pop var(--duration-overshoot) var(--ease-overshoot) both;
+  animation: charkle-micro-pop 200ms var(--ease-overshoot) both;
 }
 
-/* Synchronized Geometry Skeleton Shimmer (DESIGN.md P0-4) */
+/* Synchronized Geometry Skeleton Shimmer */
 @keyframes charkle-skeleton-wave {
   0% {
     transform: translateX(-100%);
@@ -1170,112 +1034,20 @@ textarea {
 /* Filmstrip active thumbnail focus lift */
 .charkle-filmstrip-thumb {
   transition:
-    transform var(--duration-settle) var(--ease-out-strong),
-    opacity var(--duration-sm) var(--ease-out),
-    box-shadow var(--duration-sm) var(--ease-out);
+    transform 200ms var(--win-ease-out),
+    opacity var(--win-duration-fast) var(--win-ease-out),
+    box-shadow var(--win-duration-fast) var(--win-ease-out);
 }
 
 .charkle-filmstrip-thumb[data-active="true"] {
   transform: scale(1.04);
 }
 
-/* Smooth 300ms drawer slot matching macOS MainWindowView Sidebar & Inspector */
-.charkle-drawer-slot {
-  overflow: hidden;
-  flex-shrink: 0;
-  transition:
-    width var(--duration-drawer) var(--ease-drawer),
-    opacity var(--duration-md) var(--ease-out);
-}
-
-/* Quick Look overlay smooth enter/exit continuity */
-.charkle-quicklook-root {
-  opacity: 1;
-  transition: opacity var(--duration-md) var(--ease-out);
-}
-
-@starting-style {
-  .charkle-quicklook-root {
-    opacity: 0;
-  }
-}
-
-.charkle-quicklook-root[data-closing="true"] {
-  opacity: 0;
-  transition-duration: var(--duration-exit-md);
-}
-
-.charkle-quicklook-stage {
-  opacity: 1;
-  transform: scale(1);
-  transition:
-    opacity var(--duration-md) var(--ease-out),
-    transform var(--duration-md) var(--ease-out);
-}
-
-@starting-style {
-  .charkle-quicklook-stage {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-}
-
-.charkle-quicklook-stage[data-closing="true"] {
-  opacity: 0;
-  transform: scale(0.96);
-  transition-duration: var(--duration-exit-md);
-}
-
-/* Expandable Filter Bar / Batch Action Pill entrance & exit */
-.charkle-reveal-top {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  transform-origin: top center;
-  transition:
-    opacity var(--duration-popover-in) var(--ease-out),
-    transform var(--duration-popover-in) var(--ease-out);
-}
-
-@starting-style {
-  .charkle-reveal-top {
-    opacity: 0;
-    transform: translateY(-6px) scale(0.96);
-  }
-}
-
-.charkle-reveal-top[data-closing="true"] {
-  opacity: 0;
-  transform: translateY(-4px) scale(0.96);
-  transition-duration: var(--duration-popover-out);
-}
-
-.charkle-reveal-bottom {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  transform-origin: bottom center;
-  transition:
-    opacity var(--duration-settle) var(--ease-out-strong),
-    transform var(--duration-settle) var(--ease-out-strong);
-}
-
-@starting-style {
-  .charkle-reveal-bottom {
-    opacity: 0;
-    transform: translateY(12px) scale(0.96);
-  }
-}
-
-.charkle-reveal-bottom[data-closing="true"] {
-  opacity: 0;
-  transform: translateY(8px) scale(0.96);
-  transition-duration: var(--duration-exit-sm);
-}
-
 /* Settings pane & Onboarding step directional transitions */
 @keyframes charkle-pane-fade {
   from {
     opacity: 0;
-    transform: translateY(5px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
@@ -1286,7 +1058,7 @@ textarea {
 @keyframes charkle-step-fwd {
   from {
     opacity: 0;
-    transform: translateX(18px);
+    transform: translateX(16px);
   }
   to {
     opacity: 1;
@@ -1297,7 +1069,7 @@ textarea {
 @keyframes charkle-step-back {
   from {
     opacity: 0;
-    transform: translateX(-18px);
+    transform: translateX(-16px);
   }
   to {
     opacity: 1;
@@ -1306,35 +1078,35 @@ textarea {
 }
 
 .charkle-pane-fade {
-  animation: charkle-pane-fade var(--duration-sm) var(--ease-out) both;
+  animation: charkle-pane-fade var(--win-duration-fast) var(--win-ease-out) both;
 }
 
 .charkle-step-fwd {
-  animation: charkle-step-fwd var(--duration-lg) var(--ease-out) both;
+  animation: charkle-step-fwd var(--win-duration-normal) var(--win-ease-out) both;
 }
 
 .charkle-step-back {
-  animation: charkle-step-back var(--duration-lg) var(--ease-out) both;
+  animation: charkle-step-back var(--win-duration-normal) var(--win-ease-out) both;
 }
 
-/* Moodboard Reveal-in-Library Spotlight Pulse matching macOS MasonryTileLayer.animateRevealSpotlight */
+/* Moodboard Reveal-in-Library Spotlight Pulse */
 @keyframes charkle-spotlight-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(42, 96, 224, 0.72), 0 0 0 2.5px var(--accent);
+    box-shadow: 0 0 0 0 var(--accent-ring), 0 0 0 2.5px var(--accent);
   }
   38% {
-    box-shadow: 0 0 0 9px rgba(42, 96, 224, 0.24), 0 0 0 4px var(--accent);
+    box-shadow: 0 0 0 9px var(--accent-soft), 0 0 0 4px var(--accent);
   }
   100% {
-    box-shadow: 0 0 0 16px rgba(42, 96, 224, 0), 0 0 0 2.5px var(--accent);
+    box-shadow: 0 0 0 16px transparent, 0 0 0 2.5px var(--accent);
   }
 }
 
 .charkle-spotlight-pulse {
-  animation: charkle-spotlight-pulse 620ms var(--ease-out-strong) 2;
+  animation: charkle-spotlight-pulse 620ms var(--win-ease-out) 2;
 }
 
-/* Onboarding completion shockwave ring (rare/first-time delight budget) */
+/* Onboarding completion shockwave ring */
 @keyframes charkle-shockwave {
   0% {
     transform: scale(0.72);
@@ -1347,17 +1119,17 @@ textarea {
 }
 
 .charkle-shockwave {
-  animation: charkle-shockwave 680ms var(--ease-out-strong) both;
+  animation: charkle-shockwave 680ms var(--win-ease-out) both;
 }
 
-/* Hardware Notch Shelf fluid spring morph (top / left / right pure-black bezel drawers) */
+/* Hardware Notch Shelf fluid morph */
 .charkle-shelf-shell {
   transform-origin: top center;
   transition:
     width var(--duration-notch) var(--ease-notch-spring),
     height var(--duration-notch) var(--ease-notch-spring),
     transform var(--duration-notch) var(--ease-notch-spring),
-    opacity var(--duration-md) var(--ease-out);
+    opacity var(--win-duration-normal) var(--win-ease-out);
 }
 
 .charkle-shelf-shell[data-dock-edge="left"] {
@@ -1370,52 +1142,75 @@ textarea {
 
 .charkle-shelf-shell[data-expanded="false"] {
   transition:
-    width var(--duration-notch-exit) var(--ease-out),
-    height var(--duration-notch-exit) var(--ease-out),
-    transform var(--duration-notch-exit) var(--ease-out),
-    opacity 190ms var(--ease-out);
+    width var(--duration-notch-exit) var(--win-ease-out),
+    height var(--duration-notch-exit) var(--win-ease-out),
+    transform var(--duration-notch-exit) var(--win-ease-out),
+    opacity 180ms var(--win-ease-out);
 }
 
-/* Reduced Motion: 150ms cross-fade, remove all displacement/springs/shimmer */
+/* =========================================================================
+   Reduced Motion (prefers-reduced-motion & SPI_GETCLIENTAREAANIMATION)
+   150ms pure opacity cross-fade, zero displacement / springs / shimmer.
+   ========================================================================= */
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --duration-press: 150ms;
+    --win-duration-faster: 0ms;
+    --win-duration-fast: 150ms;
+    --win-duration-normal: 150ms;
+    --win-duration-exit: 120ms;
+    --duration-press: 0ms;
     --duration-sm: 150ms;
     --duration-settle: 150ms;
     --duration-move: 150ms;
     --duration-md: 150ms;
     --duration-lg: 150ms;
     --duration-drawer: 150ms;
-    --duration-exit-sm: 150ms;
-    --duration-exit-md: 150ms;
+    --duration-exit-sm: 120ms;
+    --duration-exit-md: 120ms;
     --duration-overshoot: 150ms;
     --duration-popover-in: 150ms;
-    --duration-popover-out: 150ms;
+    --duration-popover-out: 120ms;
     --ease-spring: linear;
     --ease-overshoot: linear;
-    --ease-drawer: var(--ease-out);
+    --ease-drawer: linear;
   }
 
   .charkle-pressable:active:not(:disabled),
-  .charkle-skeuo-primary:active:not(:disabled),
-  .charkle-skeuo-secondary:active:not(:disabled),
   .group:hover .charkle-media-zoom,
   .charkle-filmstrip-thumb[data-active="true"],
-  .charkle-modal-panel,
-  .charkle-modal-panel[data-closing="true"],
-  .charkle-popover-panel,
-  .charkle-popover-panel[data-closing="true"],
-  .charkle-toast-item,
-  .charkle-toast-item[data-closing="true"] {
-    transform: none;
+  .win-dialog-popup,
+  .win-dialog-popup[data-starting-style],
+  .win-dialog-popup[data-ending-style],
+  .win-flyout-popup,
+  .win-flyout-popup[data-starting-style],
+  .win-flyout-popup[data-ending-style],
+  .win-tooltip-popup,
+  .win-tooltip-popup[data-starting-style],
+  .win-tooltip-popup[data-ending-style],
+  .charkle-quicklook-stage,
+  .charkle-quicklook-stage[data-closing="true"],
+  .charkle-reveal-top,
+  .charkle-reveal-bottom,
+  .charkle-shelf-shell,
+  .win-drawer-content {
+    transform: none !important;
   }
 
-  @starting-style {
-    .charkle-modal-panel,
-    .charkle-popover-panel,
-    .charkle-toast-item {
-      transform: none;
-    }
+  .win-collapsible-panel {
+    transition: opacity 150ms linear;
+  }
+
+  .win-switch-thumb,
+  .win-slider-thumb::after {
+    transition: none !important;
+  }
+
+  .win-slider-control:hover .win-slider-thumb::after,
+  .win-slider-thumb:hover::after,
+  .win-slider-root[data-dragging] .win-slider-thumb::after,
+  .win-slider-thumb[data-dragging]::after,
+  .win-slider-thumb:active::after {
+    transform: scale(1) !important;
   }
 
   .charkle-skeleton::after {
@@ -1431,29 +1226,35 @@ textarea {
   .charkle-shockwave {
     animation: none;
   }
-
-  .charkle-quicklook-stage,
-  .charkle-quicklook-stage[data-closing="true"],
-  .charkle-reveal-top,
-  .charkle-reveal-bottom,
-  .charkle-shelf-shell {
-    transform: none !important;
-  }
-
-  .charkle-slider-track,
-  .charkle-slider-thumb {
-    transition: none !important;
-  }
-
-  .charkle-slider[data-variant="glass"]:hover .charkle-slider-thumb,
-  .charkle-slider[data-variant="standard"]:hover .charkle-slider-thumb,
-  .charkle-slider[data-variant="glass"][data-dragging="true"] .charkle-slider-thumb,
-  .charkle-slider[data-variant="standard"][data-dragging="true"] .charkle-slider-thumb {
-    transform: translate(-50%, -50%) scale(1);
-  }
 }
 
-/* Calm Minimal Scrollbars */
+/* Also respect Windows "Animation effects = Off" surfaced via data-animations="disabled" */
+:root[data-animations="disabled"] .charkle-skeleton::after {
+  animation: none;
+  display: none;
+}
+
+:root[data-animations="disabled"] .charkle-micro-pop,
+:root[data-animations="disabled"] .charkle-pane-fade,
+:root[data-animations="disabled"] .charkle-step-fwd,
+:root[data-animations="disabled"] .charkle-step-back,
+:root[data-animations="disabled"] .charkle-spotlight-pulse,
+:root[data-animations="disabled"] .charkle-shockwave {
+  animation: none;
+}
+
+:root[data-animations="disabled"] .win-dialog-popup,
+:root[data-animations="disabled"] .win-flyout-popup,
+:root[data-animations="disabled"] .win-tooltip-popup,
+:root[data-animations="disabled"] .win-drawer-content {
+  transition-property: opacity;
+  transition-duration: 120ms;
+  transform: none !important;
+}
+
+/* =========================================================================
+   Calm Minimal Scrollbars (Windows 11 Overlay Style)
+   ========================================================================= */
 .charkle-scroll-hidden {
   scrollbar-width: none;
   -ms-overflow-style: none;

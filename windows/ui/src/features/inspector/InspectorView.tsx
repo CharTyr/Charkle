@@ -1,40 +1,41 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Aperture,
-  ArrowDown,
-  ArrowDownCircle,
-  ArrowDownToLine,
-  ArrowUp,
-  ArrowUpToLine,
-  Bolt,
-  ChevronsUpDown,
-  Code2,
-  Copy,
-  ExternalLink,
-  FileText,
-  Film,
-  Folder,
-  FolderOpen,
-  Hash,
-  Image as ImageIcon,
-  ImageOff,
-  Images,
-  Info,
-  Layers,
-  MapPin,
-  Palette,
-  RefreshCw,
-  RotateCcw,
-  ScanText,
-  Scissors,
-  Share2,
-  SlidersHorizontal,
-  Sparkles,
-  Star,
-  Trash2,
-  X,
-} from 'lucide-react';
+  AlignBottom16Regular,
+  AlignTop16Regular,
+  ArrowCircleDown16Regular,
+  ArrowDown16Regular,
+  ArrowReset20Regular,
+  ArrowSync16Regular,
+  ArrowUp16Regular,
+  Camera16Regular,
+  ChevronUpDown16Regular,
+  Code16Regular,
+  Color16Regular,
+  Copy16Regular,
+  Cut16Regular,
+  Delete16Regular,
+  Dismiss16Regular,
+  DocumentText16Regular,
+  Filmstrip16Regular,
+  Flash16Regular,
+  Folder16Regular,
+  FolderOpen16Regular,
+  Image16Regular,
+  ImageMultiple16Regular,
+  ImageOff20Regular,
+  Info16Regular,
+  LayerDiagonal16Regular,
+  Location16Regular,
+  NumberSymbol16Regular,
+  Open16Regular,
+  Options16Regular,
+  ScanText16Regular,
+  Share16Regular,
+  Sparkle16Regular,
+  Star16Filled,
+  Star16Regular,
+} from '@fluentui/react-icons';
 import { getTransport, isTauriRuntime } from '../../api/transport';
 import {
   Button,
@@ -195,11 +196,11 @@ function parseTagInput(raw: string): string[] {
 // ---------------------------------------------------------------------------
 
 const InspectorInnerDivider: React.FC = () => (
-  <div className="h-px w-full bg-[var(--border-hairline)]/80" />
+  <div className="h-px w-full bg-[var(--win-stroke-divider)]" />
 );
 
 const InspectorRowDivider: React.FC = () => (
-  <div className="h-px w-full bg-[var(--border-hairline)]/55" />
+  <div className="h-px w-full bg-[var(--win-stroke-divider)] opacity-65" />
 );
 
 const SpecRow: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
@@ -272,10 +273,10 @@ const InspectorSectionCard: React.FC<CardSectionShellProps> = ({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       className={[
-        'rounded-[12px] bg-[var(--bg-elevated)] border p-3 flex flex-col gap-[9px] shadow-[0_1px_3px_rgba(0,0,0,0.035)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.22)] transition-opacity duration-150',
+        'rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border p-3 flex flex-col gap-[9px] shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-opacity duration-150',
         isDraggingSelf
           ? 'opacity-35 border-dashed border-[var(--accent)]/60'
-          : 'border-[var(--border-hairline)]',
+          : 'border-[var(--win-stroke-card)]',
       ].join(' ')}
     >
       <div
@@ -876,7 +877,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="previewIdentity"
           cardId="previewIdentity"
           title="素材预览"
-          icon={<ImageIcon size={12} />}
+          icon={<Image16Regular className="w-3.5 h-3.5" />}
           isDraggingSelf={isDraggingSelf}
           onStartHeaderDrag={handleStartHeaderDrag}
           onHeaderContextMenu={handleHeaderContextMenu}
@@ -916,7 +917,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 }
                 style={{ width: fittedWidth, height: fittedHeight }}
                 className={[
-                  'group relative rounded-[8px] overflow-hidden border border-[var(--border-hairline)] bg-[var(--bg-subtle)]/40 flex items-center justify-center',
+                  'group relative rounded-[var(--win-radius-card)] overflow-hidden border border-[var(--win-stroke-card)] bg-[var(--bg-subtle)]/40 flex items-center justify-center',
                   isQuickLookHosted && !plainBookmark
                     ? 'cursor-default'
                     : 'cursor-pointer charkle-pressable',
@@ -924,7 +925,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               >
                 {previewLoadFailed ? (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-1.5 text-[var(--text-tertiary)]">
-                    <ImageOff size={20} />
+                    <ImageOff20Regular className="w-5 h-5" />
                     <span className="text-[10.5px]">预览暂不可用</span>
                   </div>
                 ) : (
@@ -941,7 +942,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 )}
                 {plainBookmark && (
                   <span className="pointer-events-none absolute bottom-1.5 right-1.5 h-6 w-6 rounded-full bg-black/60 text-white inline-flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                    <ExternalLink size={12} />
+                    <Open16Regular className="w-3.5 h-3.5" />
                   </span>
                 )}
               </button>
@@ -963,7 +964,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     e.currentTarget.blur();
                   }
                 }}
-                className="w-full px-1.5 -mx-1.5 py-0.5 rounded-[6px] bg-transparent hover:bg-[var(--bg-inspector-field)]/70 focus:bg-[var(--bg-inspector-field)] border border-transparent focus:border-[var(--accent)] text-[13.5px] font-semibold text-[var(--text-primary)] outline-none"
+                className="w-full px-1.5 -mx-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-transparent hover:bg-[var(--win-subtle-hover)] focus:bg-[var(--bg-inspector-field)] border border-transparent focus:border-[var(--accent)] text-[13.5px] font-semibold text-[var(--text-primary)] outline-none"
               />
 
               <div className="flex items-center justify-between gap-2">
@@ -985,14 +986,18 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                           );
                         }}
                         className={[
-                          'charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded cursor-pointer',
+                          'charkle-pressable h-5 w-5 inline-flex items-center justify-center rounded-[var(--win-radius-control)] cursor-pointer',
                           filled
                             ? 'text-[#E5B243]'
                             : 'text-[var(--text-tertiary)]/55 hover:text-[var(--text-secondary)]',
                           isPeakStar ? 'charkle-micro-pop' : '',
                         ].join(' ')}
                       >
-                        <Star size={12.5} className={filled ? 'fill-current' : ''} />
+                        {filled ? (
+                          <Star16Filled className="w-3.5 h-3.5" />
+                        ) : (
+                          <Star16Regular className="w-3.5 h-3.5" />
+                        )}
                       </button>
                     );
                   })}
@@ -1021,13 +1026,13 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         : '始终将原文件保留在本机，不会被缓存自动清理'
                     }
                     className={[
-                      'charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10.5px] font-medium border cursor-pointer shrink-0',
+                      'charkle-pressable inline-flex items-center gap-1 px-2 py-1 rounded-[var(--win-radius-control)] text-[10.5px] font-medium border cursor-pointer shrink-0',
                       targetAsset.pinnedOffline
                         ? 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent-ring)]'
-                        : 'bg-[var(--bg-inspector-field)] text-[var(--text-secondary)] border-[var(--border-hairline)] hover:text-[var(--text-primary)]',
+                        : 'bg-[var(--win-control-fill)] text-[var(--text-secondary)] border-[var(--win-stroke-control)] hover:bg-[var(--win-control-fill-hover)] hover:text-[var(--text-primary)]',
                     ].join(' ')}
                   >
-                    <ArrowDownCircle size={11} />
+                    <ArrowCircleDown16Regular className="w-3 h-3" />
                     <span>{targetAsset.pinnedOffline ? '已保留本地' : '保留在本地'}</span>
                   </button>
                 )}
@@ -1049,7 +1054,13 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="quickActions"
           cardId="quickActions"
           title={targetAsset.isTrashed ? '回收站操作' : '快捷操作'}
-          icon={targetAsset.isTrashed ? <Trash2 size={12} /> : <Bolt size={12} />}
+          icon={
+            targetAsset.isTrashed ? (
+              <Delete16Regular className="w-3.5 h-3.5" />
+            ) : (
+              <Flash16Regular className="w-3.5 h-3.5" />
+            )
+          }
           isDraggingSelf={isDraggingSelf}
           onStartHeaderDrag={handleStartHeaderDrag}
           onHeaderContextMenu={handleHeaderContextMenu}
@@ -1065,17 +1076,17 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     destination,
                   ).then(() => pushToast({ message: '已放回原处', tone: 'success' }));
                 }}
-                className="charkle-pressable h-8 px-2.5 rounded-[8px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11.5px] font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="charkle-pressable h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[11.5px] font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <RotateCcw size={12} />
+                <ArrowReset20Regular className="w-3.5 h-3.5" />
                 <span>放回原处</span>
               </button>
               <button
                 type="button"
                 onClick={() => setPendingDeleteIds([targetAsset.id])}
-                className="charkle-pressable h-8 px-2.5 rounded-[8px] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[11.5px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="charkle-pressable h-8 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[11.5px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <Trash2 size={12} />
+                <Delete16Regular className="w-3.5 h-3.5" />
                 <span>彻底删除</span>
               </button>
             </div>
@@ -1101,9 +1112,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         });
                       void markAssetOpened(targetAsset.id);
                     }}
-                    className="charkle-pressable flex-1 min-w-0 h-[29px] px-2 rounded-[8px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11px] font-semibold inline-flex items-center justify-center gap-1 cursor-pointer"
+                    className="charkle-pressable flex-1 min-w-0 h-[29px] px-2 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[11px] font-semibold inline-flex items-center justify-center gap-1 cursor-pointer"
                   >
-                    <ExternalLink size={11.5} className="shrink-0" />
+                    <Open16Regular className="w-3 h-3 shrink-0" />
                     <span className="truncate">在默认浏览器中打开</span>
                   </button>
                   <button
@@ -1127,11 +1138,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         setRefreshingRichAssetId((cur) => (cur === reqAssetId ? null : cur));
                       }
                     }}
-                    className="charkle-pressable h-[29px] px-2 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1 disabled:opacity-50 cursor-pointer shrink-0"
+                    className="charkle-pressable win-control-elevation h-[29px] px-2 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1 disabled:opacity-50 cursor-pointer shrink-0"
                   >
-                    <RefreshCw
-                      size={11}
-                      className={`text-[var(--text-secondary)] shrink-0 ${
+                    <ArrowSync16Regular
+                      className={`w-3 h-3 text-[var(--text-secondary)] shrink-0 ${
                         refreshingRichAssetId === targetAsset.id ? 'animate-spin' : ''
                       }`}
                     />
@@ -1145,7 +1155,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   ref={boardBtnRef}
                   type="button"
                   onClick={() => setBoardMenuOpen((v) => !v)}
-                  className="charkle-pressable h-[29px] px-2 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer min-w-0"
+                  className="charkle-pressable win-control-elevation h-[29px] px-2 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer min-w-0"
                 >
                   <CharkleIcon name="sparkle-board" style="duotone" size={14} />
                   <span className="truncate">加入情绪板</span>
@@ -1156,9 +1166,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   type="button"
                   title={folderPath}
                   onClick={() => setFolderMenuOpen((v) => !v)}
-                  className="charkle-pressable h-[29px] px-2 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer min-w-0"
+                  className="charkle-pressable win-control-elevation h-[29px] px-2 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer min-w-0"
                 >
-                  <Folder size={12} className="text-[var(--text-secondary)] shrink-0" />
+                  <Folder16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
                   <span className="truncate">{folderLabelFor(targetAsset.folderID)}</span>
                 </button>
               </div>
@@ -1172,9 +1182,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       pushToast({ message: '无法定位本地文件', tone: 'error' });
                     })
                   }
-                  className="charkle-pressable flex-1 min-w-0 h-[27px] px-2 rounded-[var(--radius-chip)] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1 cursor-pointer"
+                  className="charkle-pressable win-control-elevation flex-1 min-w-0 h-[27px] px-2 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1 cursor-pointer"
                 >
-                  <FolderOpen size={11.5} className="shrink-0 text-[var(--text-secondary)]" />
+                  <FolderOpen16Regular className="w-3 h-3 shrink-0 text-[var(--text-secondary)]" />
                   <span className="truncate">定位文件</span>
                 </button>
 
@@ -1193,9 +1203,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         }),
                       )
                   }
-                  className="charkle-pressable h-[27px] px-2.5 rounded-[var(--radius-chip)] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  className="charkle-pressable win-control-elevation h-[27px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0"
                 >
-                  <Copy size={11.5} className="text-[var(--text-secondary)]" />
+                  <Copy16Regular className="w-3 h-3 text-[var(--text-secondary)]" />
                   <span>拷贝</span>
                 </button>
 
@@ -1209,9 +1219,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       }),
                     )
                   }
-                  className="charkle-pressable h-[27px] px-2.5 rounded-[var(--radius-chip)] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0"
+                  className="charkle-pressable win-control-elevation h-[27px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center gap-1 cursor-pointer shrink-0"
                 >
-                  <Scissors size={11.5} className="text-[var(--text-secondary)]" />
+                  <Cut16Regular className="w-3 h-3 text-[var(--text-secondary)]" />
                   <span>剪切</span>
                 </button>
               </div>
@@ -1233,9 +1243,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     { forceOutboundOleOnDrag: true },
                   );
                 }}
-                className="charkle-pressable h-[26px] px-2.5 rounded-[var(--radius-chip)] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-grab active:cursor-grabbing select-none"
+                className="charkle-pressable win-control-elevation h-[26px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-grab active:cursor-grabbing select-none"
               >
-                <Share2 size={11} />
+                <Share16Regular className="w-3 h-3" />
                 <span>按住拖出到其他应用</span>
               </span>
 
@@ -1248,9 +1258,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     undoPatch: { assetIDs: [id], isTrashed: false },
                   });
                 }}
-                className="charkle-pressable w-full h-[27px] px-2.5 rounded-[var(--radius-chip)] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[11px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="charkle-pressable w-full h-[27px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[11px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <Trash2 size={11.5} />
+                <Delete16Regular className="w-3 h-3" />
                 <span>移至回收站</span>
               </button>
             </div>
@@ -1266,7 +1276,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="colorsAndTags"
           cardId="colorsAndTags"
           title="色板与标签"
-          icon={<Palette size={12} />}
+          icon={<Color16Regular className="w-3.5 h-3.5" />}
           isDraggingSelf={isDraggingSelf}
           onStartHeaderDrag={handleStartHeaderDrag}
           onHeaderContextMenu={handleHeaderContextMenu}
@@ -1292,10 +1302,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                             e.stopPropagation();
                             setSwatchMenu({ hex, point: { x: e.clientX, y: e.clientY } });
                           }}
-                          className="charkle-pressable inline-flex items-center gap-[5px] px-[7px] py-[4px] rounded-[7px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] cursor-pointer"
+                          className="charkle-pressable win-control-elevation inline-flex items-center gap-[5px] px-[7px] py-[4px] rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] cursor-pointer"
                         >
                           <span
-                            className="w-[13px] h-[13px] rounded-[4px] border border-black/15 dark:border-white/15 shrink-0"
+                            className="w-[13px] h-[13px] rounded-[3px] border border-black/15 dark:border-white/15 shrink-0"
                             style={{ backgroundColor: hex }}
                           />
                           <span className="text-[10px] font-medium charkle-mono text-[var(--text-primary)]">
@@ -1318,7 +1328,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   {targetAsset.tags.map((tag) => (
                     <span
                       key={tag}
-                      className="inline-flex items-center gap-1 px-2 py-[3.5px] rounded-full bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)]"
+                      className="inline-flex items-center gap-1 px-2 py-[3.5px] rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/75 border border-[var(--win-stroke-control)] text-[11px] font-medium text-[var(--text-primary)]"
                     >
                       <span>#{tag}</span>
                       <button
@@ -1332,7 +1342,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         }
                         className="text-[var(--text-tertiary)] hover:text-[var(--danger)] cursor-pointer inline-flex items-center"
                       >
-                        <X size={10} />
+                        <Dismiss16Regular className="w-2.5 h-2.5" />
                       </button>
                     </span>
                   ))}
@@ -1347,9 +1357,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   setNewTagDraft('');
                   void updateAssets({ assetIDs: [targetAsset.id], addTags: parsed }, destination);
                 }}
-                className="flex items-center gap-1.5 px-2 h-[29px] rounded-[8px] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] focus-within:border-[var(--accent)]"
+                className="win-input-elevation flex items-center gap-1.5 px-2 h-[29px] rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)]"
               >
-                <Hash size={11} className="text-[var(--text-tertiary)] shrink-0" />
+                <NumberSymbol16Regular className="w-3 h-3 text-[var(--text-tertiary)] shrink-0" />
                 <input
                   type="text"
                   value={newTagDraft}
@@ -1424,7 +1434,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                           e.stopPropagation();
                           setSuggestedTagMenu({ tag, point: { x: e.clientX, y: e.clientY } });
                         }}
-                        className="charkle-pressable inline-flex items-center gap-[3px] px-2 py-[3.5px] rounded-full bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[11px] font-medium text-[var(--accent)] cursor-pointer"
+                        className="charkle-pressable inline-flex items-center gap-[3px] px-2 py-[3.5px] rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[11px] font-medium text-[var(--accent)] cursor-pointer"
                       >
                         <span>+</span>
                         <span>{tag}</span>
@@ -1450,7 +1460,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="notesAndOCR"
           cardId="notesAndOCR"
           title="备注与识别文本"
-          icon={<FileText size={12} />}
+          icon={<DocumentText16Regular className="w-3.5 h-3.5" />}
           trailing={
             canRunOcr ? (
               <button
@@ -1482,7 +1492,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 }}
                 className="charkle-pressable inline-flex items-center gap-1 text-[10.5px] font-medium text-[var(--accent)] hover:underline disabled:opacity-50 cursor-pointer"
               >
-                <ScanText size={11} />
+                <ScanText16Regular className="w-3 h-3" />
                 <span>
                   {runningOcrAssetId === targetAsset.id
                     ? '识别中…'
@@ -1505,11 +1515,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               placeholder="添加灵感备注、构图笔记或来源说明…"
               onChange={(e) => handleNotesChange(targetAsset, e.target.value)}
               onBlur={() => flushNotesNow(targetAsset)}
-              className="w-full min-h-[64px] max-h-[120px] px-2.5 py-2 rounded-[8px] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] focus:border-[var(--accent)] text-[11.5px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none resize-y charkle-scroll"
+              className="win-input-elevation w-full min-h-[64px] max-h-[120px] px-2.5 py-2 rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)] text-[11.5px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none resize-y charkle-scroll"
             />
 
             {targetAsset.ocrText && (
-              <div className="p-2 rounded-[8px] bg-[var(--bg-inspector-field)] flex flex-col gap-1">
+              <div className="p-2 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/55 flex flex-col gap-1">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[10.5px] font-semibold text-[var(--text-secondary)]">
                     OCR 识别文字
@@ -1529,7 +1539,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             )}
 
             {targetAsset.aiDescription && (
-              <p className="p-2 rounded-[8px] bg-[var(--bg-inspector-field)] text-[11px] leading-relaxed text-[var(--text-secondary)] select-text charkle-wrap-safe">
+              <p className="p-2 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/55 text-[11px] leading-relaxed text-[var(--text-secondary)] select-text charkle-wrap-safe">
                 {targetAsset.aiDescription}
               </p>
             )}
@@ -1578,7 +1588,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               className="inline-flex items-center gap-1 charkle-mono hover:text-[var(--accent)] cursor-pointer"
             >
               <span>{aiGen.seed}</span>
-              <Copy size={10} className="text-[var(--text-tertiary)]" />
+              <Copy16Regular className="w-2.5 h-2.5 text-[var(--text-tertiary)]" />
             </button>
           ),
         });
@@ -1595,10 +1605,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="aiGeneration"
           cardId="aiGeneration"
           title="AI 生图信息"
-          icon={<Sparkles size={12} />}
+          icon={<Sparkle16Regular className="w-3.5 h-3.5" />}
           trailing={
             aiGen.generator ? (
-              <span className="px-2 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] text-[9.5px] font-semibold max-w-[110px] truncate">
+              <span className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] text-[var(--accent)] text-[9.5px] font-semibold max-w-[110px] truncate">
                 {aiGen.generator}
               </span>
             ) : undefined
@@ -1619,11 +1629,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     onClick={() => void copyText(aiGen.prompt!, '已复制正向 Prompt')}
                     className="inline-flex items-center gap-1 text-[10px] font-medium text-[var(--accent)] hover:underline cursor-pointer"
                   >
-                    <Copy size={10} />
+                    <Copy16Regular className="w-2.5 h-2.5" />
                     <span>复制</span>
                   </button>
                 </div>
-                <p className="p-2 rounded-[8px] bg-[var(--bg-inspector-field)] text-[11px] leading-[1.55] text-[var(--text-primary)]/90 select-text charkle-wrap-safe max-h-[128px] overflow-y-auto charkle-scroll">
+                <p className="p-2 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/55 text-[11px] leading-[1.55] text-[var(--text-primary)]/90 select-text charkle-wrap-safe max-h-[128px] overflow-y-auto charkle-scroll">
                   {aiGen.prompt}
                 </p>
               </div>
@@ -1640,11 +1650,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     onClick={() => void copyText(aiGen.negativePrompt!, '已复制负向 Prompt')}
                     className="inline-flex items-center gap-1 text-[10px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
                   >
-                    <Copy size={10} />
+                    <Copy16Regular className="w-2.5 h-2.5" />
                     <span>复制</span>
                   </button>
                 </div>
-                <p className="p-2 rounded-[8px] bg-[var(--bg-inspector-field)] text-[10.5px] leading-[1.5] text-[var(--text-secondary)] select-text charkle-wrap-safe max-h-[92px] overflow-y-auto charkle-scroll">
+                <p className="p-2 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/55 text-[10.5px] leading-[1.5] text-[var(--text-secondary)] select-text charkle-wrap-safe max-h-[92px] overflow-y-auto charkle-scroll">
                   {aiGen.negativePrompt}
                 </p>
               </div>
@@ -1670,7 +1680,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   {aiGen.loras.map((lora) => (
                     <span
                       key={lora}
-                      className="px-2 py-0.5 rounded-[6px] bg-[var(--bg-subtle)] text-[10.5px] font-medium charkle-mono text-[var(--text-primary)]/85"
+                      className="px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)] text-[10.5px] font-medium charkle-mono text-[var(--text-primary)]/85"
                     >
                       {lora}
                     </span>
@@ -1683,9 +1693,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
               <button
                 type="button"
                 onClick={() => void copyText(aiGen.rawParameters!, '已复制完整生图参数')}
-                className="charkle-pressable w-full py-1.5 rounded-[7px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="charkle-pressable win-control-elevation w-full py-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <Layers size={11} className="text-[var(--text-secondary)]" />
+                <LayerDiagonal16Regular className="w-3 h-3 text-[var(--text-secondary)]" />
                 <span>复制完整生图参数</span>
               </button>
             )}
@@ -1739,14 +1749,14 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="photoExif"
           cardId="photoExif"
           title="拍摄参数 (EXIF)"
-          icon={<Aperture size={12} />}
+          icon={<Camera16Regular className="w-3.5 h-3.5" />}
           isDraggingSelf={isDraggingSelf}
           onStartHeaderDrag={handleStartHeaderDrag}
           onHeaderContextMenu={handleHeaderContextMenu}
         >
           <div className="flex flex-col gap-2">
             {summary && (
-              <div className="w-full py-[6.5px] px-2 rounded-[8px] bg-[var(--bg-inspector-field)] text-center text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
+              <div className="w-full py-[6.5px] px-2 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/55 text-center text-[11.5px] font-semibold charkle-mono charkle-tabular text-[var(--text-primary)]">
                 {summary}
               </div>
             )}
@@ -1778,7 +1788,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       }
                       className="inline-flex items-center gap-1 text-[10.5px] font-medium charkle-mono text-[var(--accent)] hover:underline cursor-pointer"
                     >
-                      <MapPin size={10.5} />
+                      <Location16Regular className="w-3 h-3" />
                       <span>{coordText}</span>
                     </button>
                   </div>
@@ -1823,7 +1833,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="mediaSpecs"
           cardId="mediaSpecs"
           title="媒体信息"
-          icon={<Info size={12} />}
+          icon={<Info16Regular className="w-3.5 h-3.5" />}
           trailing={
             canRefreshRich ? (
               <button
@@ -1849,9 +1859,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 }}
                 className="charkle-pressable inline-flex items-center gap-1 text-[10.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--accent)] disabled:opacity-50 cursor-pointer"
               >
-                <RefreshCw
-                  size={10.5}
-                  className={refreshingRichAssetId === targetAsset.id ? 'animate-spin' : ''}
+                <ArrowSync16Regular
+                  className={`w-3 h-3 ${
+                    refreshingRichAssetId === targetAsset.id ? 'animate-spin' : ''
+                  }`}
                 />
                 <span>刷新</span>
               </button>
@@ -1922,7 +1933,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     className="inline-flex items-center gap-1 font-medium text-[var(--accent)] hover:underline truncate min-w-0 cursor-pointer"
                   >
                     <span className="truncate">{sourceHost || '打开链接'}</span>
-                    <ExternalLink size={10} className="shrink-0" />
+                    <Open16Regular className="w-2.5 h-2.5 shrink-0" />
                   </button>
                 </div>
               </>
@@ -1941,7 +1952,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="githubRepo"
           cardId="githubRepo"
           title="GitHub 仓库信息"
-          icon={<Code2 size={12} />}
+          icon={<Code16Regular className="w-3.5 h-3.5" />}
           isDraggingSelf={isDraggingSelf}
           onStartHeaderDrag={handleStartHeaderDrag}
           onHeaderContextMenu={handleHeaderContextMenu}
@@ -1964,9 +1975,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             <button
               type="button"
               onClick={() => openQuickLook(targetAsset.id, null)}
-              className="charkle-pressable w-full py-1.5 px-2.5 rounded-[8px] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[11.5px] font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="charkle-pressable w-full py-1.5 px-2.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[11.5px] font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <FileText size={12} />
+              <DocumentText16Regular className="w-3.5 h-3.5" />
               <span>在应用内阅读完整 README</span>
             </button>
           </div>
@@ -2047,12 +2058,12 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           key="socialMediaExtract"
           cardId="socialMediaExtract"
           title={isXhs ? '笔记媒体提取' : '推文媒体提取'}
-          icon={<Images size={12} />}
+          icon={<ImageMultiple16Regular className="w-3.5 h-3.5" />}
           trailing={
             <div className="inline-flex items-center gap-1.5">
               <span
                 style={{ backgroundColor: platformBg }}
-                className="px-1.5 py-[1px] rounded-full text-[9.5px] font-semibold text-white"
+                className="px-1.5 py-[1px] rounded-[var(--win-radius-control)] text-[9.5px] font-semibold text-white"
               >
                 {platformLabel}
               </span>
@@ -2101,9 +2112,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 type="button"
                 disabled={extractingKey !== null}
                 onClick={() => void handleExtractAll()}
-                className="charkle-pressable w-full px-2.5 py-1.5 rounded-[7px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[11.5px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
+                className="charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[11.5px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-60 cursor-pointer"
               >
-                <Images size={12} />
+                <ImageMultiple16Regular className="w-3.5 h-3.5" />
                 <span>
                   {extractingKey === '__all__'
                     ? '正在提取全部媒体…'
@@ -2124,7 +2135,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   type="button"
                   disabled={extractingKey !== null}
                   onClick={() => void handleExtractOne(att, idx)}
-                  className="charkle-pressable w-full px-2 py-1.5 rounded-[7px] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-2 disabled:opacity-60 cursor-pointer"
+                  className="charkle-pressable w-full px-2 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[var(--accent)] text-[11.5px] font-medium inline-flex items-center gap-2 disabled:opacity-60 cursor-pointer"
                 >
                   {thumbPreview && !isVideoLike && !failedSocialThumbKeys[key] ? (
                     <img
@@ -2133,12 +2144,12 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       onError={() =>
                         setFailedSocialThumbKeys((prev) => ({ ...prev, [key]: true }))
                       }
-                      className="h-5 w-5 rounded-[4px] object-cover bg-[var(--bg-subtle)] shrink-0"
+                      className="h-5 w-5 rounded-[var(--win-radius-control)] object-cover bg-[var(--bg-subtle)] shrink-0"
                     />
                   ) : isVideoLike ? (
-                    <Film size={12} className="shrink-0" />
+                    <Filmstrip16Regular className="w-3.5 h-3.5 shrink-0" />
                   ) : (
-                    <ImageIcon size={12} className="shrink-0" />
+                    <Image16Regular className="w-3.5 h-3.5 shrink-0" />
                   )}
                   <span className="truncate">
                     {extractingKey === key
@@ -2184,7 +2195,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     return (
       <div className="flex flex-col gap-2.5 charkle-pane-fade">
         {/* Card 1: Selection Overview + Primary Action */}
-        <section className="rounded-[12px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] p-3 flex flex-col gap-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.035)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.22)]">
+        <section className="rounded-[var(--win-radius-card)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] p-3 flex flex-col gap-2.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:shadow-[0_1px_2px_rgba(0,0,0,0.2)]">
           <div className="flex flex-col gap-1">
             <div className="text-[14.5px] font-semibold text-[var(--text-primary)] charkle-tabular">
               已选中 {ids.length} 项素材
@@ -2211,17 +2222,17 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       }),
                   );
                 }}
-                className="charkle-pressable w-full px-2.5 py-2 rounded-[8px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-semibold inline-flex items-center gap-2 cursor-pointer"
+                className="charkle-pressable w-full px-2.5 py-2 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-semibold inline-flex items-center gap-2 cursor-pointer"
               >
-                <RotateCcw size={13} />
+                <ArrowReset20Regular className="w-3.5 h-3.5" />
                 <span>全部放回原处</span>
               </button>
               <button
                 type="button"
                 onClick={() => setPendingDeleteIds([...ids])}
-                className="charkle-pressable w-full px-2.5 py-2 rounded-[8px] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[12px] font-medium inline-flex items-center gap-2 cursor-pointer"
+                className="charkle-pressable w-full px-2.5 py-2 rounded-[var(--win-radius-control)] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[12px] font-medium inline-flex items-center gap-2 cursor-pointer"
               >
-                <Trash2 size={13} />
+                <Delete16Regular className="w-3.5 h-3.5" />
                 <span>彻底删除所选 {ids.length} 项</span>
               </button>
             </div>
@@ -2246,9 +2257,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                   setCreatingBatchBoard(false);
                 }
               }}
-              className="charkle-pressable w-full py-2 px-3 rounded-[9px] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 disabled:opacity-60 cursor-pointer"
+              className="charkle-pressable w-full py-2 px-3 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 disabled:opacity-60 cursor-pointer"
             >
-              <Sparkles size={13.5} />
+              <Sparkle16Regular className="w-3.5 h-3.5" />
               <span>{creatingBatchBoard ? '正在生成情绪板…' : '从所选生成情绪板'}</span>
             </button>
           )}
@@ -2257,7 +2268,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
         {!isTrashSelection && (
           <>
             {/* Card 2: Bulk Organize */}
-            <InspectorSectionCard title="批量整理" icon={<Layers size={12} />}>
+            <InspectorSectionCard
+              title="批量整理"
+              icon={<LayerDiagonal16Regular className="w-3.5 h-3.5" />}
+            >
               <div className="flex flex-col gap-2.5">
                 <div className="flex flex-col gap-1">
                   <span className="text-[10.5px] font-medium text-[var(--text-secondary)]">
@@ -2267,11 +2281,11 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     ref={batchFolderBtnRef}
                     type="button"
                     onClick={() => setBatchFolderMenuOpen((v) => !v)}
-                    className="charkle-pressable w-full h-[30px] px-2.5 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center gap-1.5 cursor-pointer"
+                    className="charkle-pressable win-control-elevation w-full h-[30px] px-2.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    <Folder size={12} className="text-[var(--text-secondary)] shrink-0" />
+                    <Folder16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)] shrink-0" />
                     <span className="flex-1 text-left truncate">选择目标文件夹…</span>
-                    <ChevronsUpDown size={11} className="text-[var(--text-tertiary)] shrink-0" />
+                    <ChevronUpDown16Regular className="w-3 h-3 text-[var(--text-tertiary)] shrink-0" />
                   </button>
                 </div>
 
@@ -2286,7 +2300,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       {batchExistingTags.map(([tag, count]) => (
                         <span
                           key={tag}
-                          className="inline-flex items-center gap-1 px-2 py-[3.5px] rounded-full bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] text-[11px] font-medium text-[var(--text-primary)]"
+                          className="inline-flex items-center gap-1 px-2 py-[3.5px] rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/75 border border-[var(--win-stroke-control)] text-[11px] font-medium text-[var(--text-primary)]"
                         >
                           <span>#{tag}</span>
                           {count < ids.length && (
@@ -2311,7 +2325,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                             }
                             className="text-[var(--text-tertiary)] hover:text-[var(--danger)] cursor-pointer inline-flex items-center"
                           >
-                            <X size={10} />
+                            <Dismiss16Regular className="w-2.5 h-2.5" />
                           </button>
                         </span>
                       ))}
@@ -2331,9 +2345,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                           }),
                       );
                     }}
-                    className="flex items-center gap-1.5 px-2 h-[29px] rounded-[8px] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] focus-within:border-[var(--accent)]"
+                    className="win-input-elevation flex items-center gap-1.5 px-2 h-[29px] rounded-[var(--win-radius-control)] bg-[var(--bg-inspector-field)]"
                   >
-                    <Hash size={11} className="text-[var(--text-tertiary)] shrink-0" />
+                    <NumberSymbol16Regular className="w-3 h-3 text-[var(--text-tertiary)] shrink-0" />
                     <input
                       type="text"
                       value={batchTagDraft}
@@ -2412,9 +2426,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         onClick={() =>
                           void updateAssets({ assetIDs: ids, rating: star }, destination)
                         }
-                        className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded text-[#E5B243] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                        className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[#E5B243] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                       >
-                        <Star size={14} className="fill-current" />
+                        <Star16Filled className="w-3.5 h-3.5" />
                       </button>
                     ))}
                   </div>
@@ -2423,7 +2437,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             </InspectorSectionCard>
 
             {/* Card 3: Offline & Actions */}
-            <InspectorSectionCard title="本地与操作" icon={<SlidersHorizontal size={12} />}>
+            <InspectorSectionCard
+              title="本地与操作"
+              icon={<Options16Regular className="w-3.5 h-3.5" />}
+            >
               <div className="flex flex-col gap-2">
                 <button
                   type="button"
@@ -2441,9 +2458,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       }),
                     );
                   }}
-                  className="charkle-pressable w-full px-2.5 py-1.5 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center gap-2 cursor-pointer"
+                  className="charkle-pressable win-control-elevation w-full px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center gap-2 cursor-pointer"
                 >
-                  <ArrowDownCircle size={12.5} className="text-[var(--text-secondary)]" />
+                  <ArrowCircleDown16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                   <span>{allKeptLocally ? '取消全部保留在本地' : '全部始终保留在本地'}</span>
                 </button>
 
@@ -2466,9 +2483,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                           }),
                         )
                     }
-                    className="charkle-pressable px-2.5 py-1.5 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="charkle-pressable win-control-elevation px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <Copy size={12} className="text-[var(--text-secondary)]" />
+                    <Copy16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                     <span>拷贝文件</span>
                   </button>
 
@@ -2482,9 +2499,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                         }),
                       )
                     }
-                    className="charkle-pressable px-2.5 py-1.5 rounded-[8px] bg-[var(--bg-inspector-field)] hover:bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="charkle-pressable win-control-elevation px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] hover:bg-[var(--win-control-fill-hover)] text-[11.5px] font-medium text-[var(--text-primary)] inline-flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <Scissors size={12} className="text-[var(--text-secondary)]" />
+                    <Cut16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                     <span>剪切</span>
                   </button>
                 </div>
@@ -2498,9 +2515,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                       undoPatch: { assetIDs: ids, isTrashed: false },
                     });
                   }}
-                  className="charkle-pressable w-full px-2.5 py-1.5 rounded-[8px] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[11.5px] font-medium inline-flex items-center gap-2 cursor-pointer"
+                  className="charkle-pressable w-full px-2.5 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--danger-soft)] hover:bg-[var(--danger)]/20 text-[var(--danger)] text-[11.5px] font-medium inline-flex items-center gap-2 cursor-pointer"
                 >
-                  <Trash2 size={12.5} />
+                  <Delete16Regular className="w-3.5 h-3.5" />
                   <span>移至回收站</span>
                 </button>
               </div>
@@ -2523,7 +2540,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     <aside
       aria-label="属性检查器"
       data-testid={isQuickLookHosted ? 'quicklook-inspector-view' : 'inspector-view'}
-      className="relative w-[300px] shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--border-hairline)] flex flex-col overflow-hidden"
+      className="relative w-[300px] shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--win-stroke-divider)] flex flex-col overflow-hidden"
     >
       {/* Subtle top ambient tint ONLY for single asset */}
       {asset && (
@@ -2645,7 +2662,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                           : scored.asset.title
                       }
                       style={{ aspectRatio: String(ratio) }}
-                      className="group relative rounded-[var(--radius-settings-inner)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--border-hairline)] hover:border-[var(--accent)] cursor-pointer"
+                      className="group relative rounded-[var(--win-radius-card)] overflow-hidden bg-[var(--bg-elevated)] border border-[var(--win-stroke-card)] hover:border-[var(--accent)] cursor-pointer"
                     >
                       <img
                         src={withThumbCacheBust(
@@ -2676,9 +2693,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     resetInspectorCardOrder();
                     pushToast({ message: '已恢复信息栏默认排序', tone: 'info', durationMs: 2200 });
                   }}
-                  className="charkle-pressable mx-auto mt-0.5 inline-flex items-center gap-1 px-2.5 py-[5px] rounded-full bg-[var(--bg-subtle)]/80 hover:bg-[var(--bg-subtle)] text-[10.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                  className="charkle-pressable mx-auto mt-0.5 inline-flex items-center gap-1 px-2.5 py-[5px] rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)]/80 hover:bg-[var(--bg-subtle)] text-[10.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
-                  <RotateCcw size={10} />
+                  <ArrowReset20Regular className="w-3 h-3" />
                   <span>恢复信息栏默认排序</span>
                 </button>
               )}
@@ -2897,9 +2914,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 moveInspectorCardToTop(cardContextMenu.cardId);
                 setCardContextMenu(null);
               }}
-              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
-              <ArrowUpToLine size={12.5} className="text-[var(--text-secondary)]" />
+              <AlignTop16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
               <span>移到最顶部</span>
             </button>
             <button
@@ -2909,9 +2926,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 stepInspectorCard(cardContextMenu.cardId, -1, visibleSections);
                 setCardContextMenu(null);
               }}
-              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
-              <ArrowUp size={12.5} className="text-[var(--text-secondary)]" />
+              <ArrowUp16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
               <span>上移一项</span>
             </button>
             <button
@@ -2921,9 +2938,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 stepInspectorCard(cardContextMenu.cardId, 1, visibleSections);
                 setCardContextMenu(null);
               }}
-              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
-              <ArrowDown size={12.5} className="text-[var(--text-secondary)]" />
+              <ArrowDown16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
               <span>下移一项</span>
             </button>
             <button
@@ -2933,15 +2950,15 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 moveInspectorCardToBottom(cardContextMenu.cardId);
                 setCardContextMenu(null);
               }}
-              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
             >
-              <ArrowDownToLine size={12.5} className="text-[var(--text-secondary)]" />
+              <AlignBottom16Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
               <span>移到最底部</span>
             </button>
 
             {isOrderCustomized && (
               <>
-                <div className="my-1 h-px bg-[var(--border-hairline)]" />
+                <div className="my-1 h-px bg-[var(--win-stroke-divider)]" />
                 <button
                   type="button"
                   onClick={() => {
@@ -2949,9 +2966,9 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     setCardContextMenu(null);
                     pushToast({ message: '已恢复信息栏默认排序', tone: 'info' });
                   }}
-                  className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] cursor-pointer"
+                  className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-popover-inner)] text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer"
                 >
-                  <RotateCcw size={12.5} className="text-[var(--text-secondary)]" />
+                  <ArrowReset20Regular className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                   <span>恢复默认排序</span>
                 </button>
               </>
@@ -2975,10 +2992,10 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             className="fixed inset-0 z-[180] flex items-center justify-center p-4"
           >
             <div
-              className="charkle-modal-scrim fixed inset-0"
+              className="win-smoke-scrim fixed inset-0"
               onClick={() => setPendingDeleteIds([])}
             />
-            <div className="charkle-modal-panel relative z-10 w-full max-w-[380px] rounded-[var(--radius-dock-outer)] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[var(--shadow-modal)] p-5 flex flex-col gap-3">
+            <div className="relative z-10 w-full max-w-[380px] rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)] p-5 flex flex-col gap-3">
               <div className="text-[15px] font-semibold text-[var(--text-primary)]">
                 彻底删除 {pendingDeleteIds.length} 项素材？
               </div>
@@ -2986,7 +3003,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 彻底删除后将无法从回收站恢复。
               </p>
               <div className="flex items-center justify-end gap-2 pt-1">
-                <Button variant="secondary" size="sm" onClick={() => setPendingDeleteIds([])}>
+                <Button variant="standard" size="sm" onClick={() => setPendingDeleteIds([])}>
                   取消
                 </Button>
                 <Button
@@ -3006,7 +3023,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
           document.body,
         )}
 
-      {/* Floating Pill Drag Ghost (1:1 macOS Capsule drag preview) */}
+      {/* Floating Pill Drag Ghost (Fluent acrylic card preview) */}
       {activeCardDrag &&
         typeof document !== 'undefined' &&
         createPortal(
@@ -3019,7 +3036,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
             }}
             className="pointer-events-none fixed top-0 left-0 z-[260]"
           >
-            <div className="inline-flex items-center gap-1.5 px-3 py-[7px] rounded-full bg-[var(--bg-elevated)] border border-[var(--accent)]/40 shadow-[0_10px_28px_rgba(0,0,0,0.18)] text-[12px] font-semibold text-[var(--text-primary)]">
+            <div className="win-acrylic inline-flex items-center gap-1.5 px-3 py-[7px] rounded-[var(--win-radius-card)] border border-[var(--accent)]/40 text-[12px] font-semibold text-[var(--text-primary)]">
               <span className="text-[var(--accent)] inline-flex items-center">
                 {activeCardDrag.icon}
               </span>

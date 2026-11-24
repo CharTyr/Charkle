@@ -1,6 +1,6 @@
 {
   "name": "charkle-windows-ui",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,11 +12,14 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@base-ui/react": "^1.9.0",
+    "@fluentui/react-icons": "^2.0.347",
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "dompurify": "^3.2.4",
     "lucide-react": "^0.475.0",
     "marked": "^15.0.7",
+    "motion": "^14.14.0",
     "pdfjs-dist": "^4.10.38",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

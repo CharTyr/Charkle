@@ -1,5 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, FolderOpen, RotateCcw } from 'lucide-react';
+import {
+  ArrowCounterclockwise16Regular,
+  Cube24Regular,
+  FolderOpen16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { Button } from '../../design-system';
 import type { AssetRecord } from '../../types/domain';
@@ -207,30 +211,30 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="relative w-full h-full max-w-[960px] max-h-[78vh] mx-auto rounded-[18px] overflow-hidden bg-[#181A20] border border-white/10 shadow-[0_24px_60px_rgba(0,0,0,0.48)]"
+      className="relative w-full h-full max-w-[960px] max-h-[78vh] mx-auto rounded-[var(--win-radius-dialog)] overflow-hidden bg-[#181A20] border border-white/10 shadow-[0_24px_60px_rgba(0,0,0,0.48)]"
     >
       <div ref={mountRef} className="w-full h-full min-h-[420px]" />
 
       {status === 'loading' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-[13px] text-white/75 pointer-events-none">
-          <Box size={24} className="text-[#5B8DEF] animate-pulse" />
+          <Cube24Regular className="w-6 h-6 text-[var(--accent)] animate-pulse" />
           <span>正在加载 3D 场景…</span>
         </div>
       )}
 
       {status === 'error' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-          <Box size={34} className="text-white/55" />
+          <Cube24Regular className="w-8 h-8 text-white/55" />
           <div className="text-[16px] font-semibold text-white">{asset.title}</div>
           <p className="text-[12.5px] text-white/70 max-w-[360px] leading-relaxed">
             {errorMsg || `该 3D 格式（${formatLabel}）暂不支持内嵌预览，可使用默认软件打开。`}
           </p>
           <Button
-            variant="primary"
+            variant="accent"
             size="sm"
             onClick={() => void getTransport().revealInExplorer(asset.id)}
           >
-            <FolderOpen size={13} />
+            <FolderOpen16Regular className="w-4 h-4" />
             在资源管理器中显示
           </Button>
         </div>
@@ -238,15 +242,15 @@ export const Model3DViewer: React.FC<Model3DViewerProps> = ({ asset }) => {
 
       {status === 'ready' && (
         <div className="absolute top-3.5 right-3.5 flex items-center gap-2">
-          <span className="px-2.5 py-1 rounded-full bg-black/55 text-white/90 text-[11px] font-bold charkle-mono">
+          <span className="win-acrylic-dark px-2.5 py-1 rounded-[var(--win-radius-control)] text-white/90 text-[11px] font-bold charkle-mono">
             3D · {formatLabel}
           </span>
           <button
             type="button"
             onClick={() => resetFnRef.current?.()}
-            className="charkle-pressable px-2.5 py-1 rounded-full bg-black/55 hover:bg-black/75 text-white inline-flex items-center gap-1.5 text-[11px] font-semibold cursor-pointer"
+            className="charkle-pressable win-acrylic-dark px-2.5 py-1 rounded-[var(--win-radius-control)] hover:bg-black/75 text-white inline-flex items-center gap-1.5 text-[11.5px] font-medium cursor-pointer"
           >
-            <RotateCcw size={12} />
+            <ArrowCounterclockwise16Regular className="w-3.5 h-3.5" />
             <span>重置视角</span>
           </button>
         </div>

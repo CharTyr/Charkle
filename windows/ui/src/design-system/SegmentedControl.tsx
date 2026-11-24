@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useId } from 'react';
+import { m, WIN_SPRING_SNAPPY } from './MotionPrimitives';
 
 export interface SegmentedOption<T extends string> {
   value: T;
@@ -13,11 +14,15 @@ export interface SegmentedControlProps<T extends string> {
   onChange: (value: T) => void;
   size?: 'xs' | 'sm';
   ariaLabel?: string;
+  /** Optional explicit Motion `layoutId` for shared-pill transitions. */
+  layoutId?: string;
   className?: string;
 }
 
 /**
- * Unified Segmented Control for 2-5 short mutually-exclusive choices (DESIGN.md §7.2 & P1-4).
+ * Fluent 2 Segmented Control for 2-5 short mutually-exclusive choices:
+ * - 4px control radius container with subtle border
+ * - Smooth `motion` `layoutId` sliding highlight pill using `WIN_SPRING_SNAPPY`
  */
 export function SegmentedControl<T extends string>({
   value,
@@ -25,17 +30,23 @@ export function SegmentedControl<T extends string>({
   onChange,
   size = 'xs',
   ariaLabel,
+  layoutId,
   className = '',
 }: SegmentedControlProps<T>) {
+  const autoId = useId();
+  const pillLayoutId = layoutId ?? `win-segmented-pill-${autoId}`;
+
   return (
     <div
       role="radiogroup"
       aria-label={ariaLabel}
       className={[
-        'inline-flex items-center p-[3px] gap-0.5 bg-[var(--bg-subtle)] border border-[var(--border-hairline)]',
-        'rounded-[var(--radius-settings-inner)] select-none',
+        'inline-flex items-center p-[2px] gap-0.5 bg-[var(--bg-subtle)] border border-[var(--win-stroke-control)]',
+        'rounded-[var(--win-radius-control)] select-none',
         className,
-      ].join(' ')}
+      ]
+        .filter(Boolean)
+        .join(' ')}
     >
       {options.map((opt) => {
         const selected = opt.value === value;
@@ -48,16 +59,27 @@ export function SegmentedControl<T extends string>({
             title={opt.title ?? opt.label}
             onClick={() => onChange(opt.value)}
             className={[
-              'charkle-pressable inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer font-medium',
-              'rounded-[var(--radius-card-inner)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]',
-              size === 'xs' ? 'h-6 px-2 text-[11.5px]' : 'h-7 px-2.5 text-[12.5px]',
+              'relative inline-flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer font-medium',
+              'rounded-[3px] transition-colors duration-[83ms] ease-[var(--win-ease-out)]',
+              'focus-visible:outline-2 focus-visible:outline-[var(--accent)]',
+              size === 'xs' ? 'h-6 px-2 text-[12px] leading-[16px]' : 'h-7 px-2.5 text-[13px] leading-[18px]',
               selected
-                ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] shadow-[0_1px_2px_rgba(0,0,0,0.08)]'
+                ? 'text-[var(--text-primary)]'
                 : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
             ].join(' ')}
           >
-            {opt.icon}
-            {opt.label && <span>{opt.label}</span>}
+            {selected && (
+              <m.span
+                layoutId={pillLayoutId}
+                transition={WIN_SPRING_SNAPPY}
+                aria-hidden="true"
+                className="absolute inset-0 rounded-[3px] bg-[var(--bg-elevated)] win-control-elevation shadow-[0_1px_2px_rgba(0,0,0,0.08)]"
+              />
+            )}
+            <span className="relative z-[1] inline-flex items-center justify-center gap-1">
+              {opt.icon}
+              {opt.label && <span>{opt.label}</span>}
+            </span>
           </button>
         );
       })}

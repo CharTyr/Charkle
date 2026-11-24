@@ -1,28 +1,29 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ArrowRightLeft,
-  ArrowUpCircle,
-  ArrowUpRight,
-  BookOpen,
-  CheckCircle2,
-  Clock,
-  FileJson,
-  FolderOpen,
-  Info,
-  KeyRound,
-  Monitor,
-  Moon,
-  RefreshCw,
-  Sun,
-  UserCheck,
-  UserCircle2,
-} from 'lucide-react';
+  ArrowCircleUp16Regular,
+  ArrowSwap16Regular,
+  ArrowSync16Regular,
+  BookOpen16Regular,
+  CheckmarkCircle16Filled,
+  Clock16Regular,
+  Color20Regular,
+  Desktop16Regular,
+  DocumentCode16Regular,
+  FolderOpen16Regular,
+  Info16Regular,
+  Key16Regular,
+  Open16Regular,
+  PersonAvailable16Regular,
+  PersonCircle16Regular,
+  WeatherMoon16Regular,
+  WeatherSunny16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   CharkleSlider,
-  getGlassTintScale,
   SegmentedControl,
-  setGlassTintScale,
+  Switch,
+  useResolvedIsDark,
   type ThemeMode,
 } from '../../design-system';
 import { useCoordinatorStore, useSyncAIStore } from '../../stores';
@@ -184,7 +185,7 @@ export const GoogleOAuthSetupModal: React.FC<{
       onClose={onClose}
       title={
         <span className="inline-flex items-center gap-2">
-          <KeyRound size={16} />
+          <Key16Regular className="w-4 h-4 shrink-0" />
           <span>配置 Google Drive 登录凭据</span>
         </span>
       }
@@ -192,11 +193,11 @@ export const GoogleOAuthSetupModal: React.FC<{
       width="md"
       footer={
         <>
-          <SettingsButton variant="secondary" disabled={busy} onClick={onClose}>
+          <SettingsButton variant="standard" disabled={busy} onClick={onClose}>
             取消
           </SettingsButton>
           <SettingsButton
-            variant="primary"
+            variant="accent"
             loading={busy}
             disabled={!clientId.trim()}
             onClick={() => void handleManualSave()}
@@ -206,24 +207,24 @@ export const GoogleOAuthSetupModal: React.FC<{
         </>
       }
     >
-      <div className="rounded-[10px] bg-[var(--settings-subtle)] border border-[var(--settings-border)] p-3 flex flex-col gap-2.5">
+      <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)] p-3 flex flex-col gap-2.5">
         <button
           type="button"
           onClick={() => void getTransport().openExternalUrl(GDIRECT_TUTORIAL_URL)}
-          className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] hover:underline cursor-pointer self-start"
+          className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] hover:underline cursor-pointer self-start focus-visible:outline-2 focus-visible:outline-[var(--accent)] rounded-[var(--win-radius-control)]"
         >
-          <BookOpen size={13} />
+          <BookOpen16Regular className="w-3.5 h-3.5 shrink-0" />
           <span>查看 Google Cloud 桌面端凭据 3 分钟图文教程</span>
-          <ArrowUpRight size={11} />
+          <Open16Regular className="w-3 h-3 shrink-0" />
         </button>
 
         <div className="flex flex-wrap items-center gap-2">
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             loading={busy}
             onClick={() => void handleImportJson()}
           >
-            <FileJson size={13} />
+            <DocumentCode16Regular className="w-3.5 h-3.5 shrink-0" />
             导入 client_secret.json…
           </SettingsButton>
         </div>
@@ -342,11 +343,11 @@ export const WebDAVEditorModal: React.FC<{
       width="md"
       footer={
         <>
-          <SettingsButton variant="secondary" disabled={saving || testingWebdav} onClick={onClose}>
+          <SettingsButton variant="standard" disabled={saving || testingWebdav} onClick={onClose}>
             取消
           </SettingsButton>
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             loading={testingWebdav}
             disabled={!isUrlValid || saving}
             onClick={() => void handleTest()}
@@ -354,7 +355,7 @@ export const WebDAVEditorModal: React.FC<{
             {testingWebdav ? '测试中…' : '测试连接'}
           </SettingsButton>
           <SettingsButton
-            variant="primary"
+            variant="accent"
             loading={saving}
             disabled={!isUrlValid || testingWebdav}
             onClick={() => void handleSave()}
@@ -420,7 +421,7 @@ export const WebDAVEditorModal: React.FC<{
       {inlineMsg && (
         <div
           className={[
-            'rounded-[9px] px-3 py-2 text-[11.5px] border',
+            'rounded-[var(--win-radius-control)] px-3 py-2 text-[12px] border',
             inlineMsg.ok
               ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
               : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
@@ -532,7 +533,7 @@ export const StorageLocationWizardModal: React.FC<{
       onClose={onClose}
       title={
         <span className="inline-flex items-center gap-2">
-          <ArrowRightLeft size={16} />
+          <ArrowSwap16Regular className="w-4 h-4 shrink-0" />
           <span>更改或转移素材库位置</span>
         </span>
       }
@@ -540,11 +541,11 @@ export const StorageLocationWizardModal: React.FC<{
       width="md"
       footer={
         <>
-          <SettingsButton variant="secondary" disabled={busy} onClick={onClose}>
+          <SettingsButton variant="standard" disabled={busy} onClick={onClose}>
             取消
           </SettingsButton>
           <SettingsButton
-            variant="primary"
+            variant="accent"
             loading={busy}
             disabled={!canConfirm}
             onClick={() => void handleConfirm()}
@@ -601,13 +602,14 @@ export const StorageLocationWizardModal: React.FC<{
             />
           </label>
           {!hasReadyGoogleAccount && (
-            <div className="rounded-[9px] bg-[var(--settings-warning)]/10 border border-[var(--settings-warning)]/25 px-3 py-2 flex items-center justify-between gap-2 text-[11.5px]">
+            <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-warning)]/10 border border-[var(--settings-warning)]/25 px-3 py-2 flex items-center justify-between gap-2 text-[12px]">
               <span className="inline-flex items-center gap-1.5 text-[var(--text-secondary)]">
-                <Info size={13} className="text-[var(--settings-warning)] shrink-0" />
+                <Info16Regular className="w-3.5 h-3.5 text-[var(--settings-warning)] shrink-0" />
                 迁移到 Google Drive 前请先在「云同步」完成账号登录。
               </span>
               <SettingsButton
-                variant="secondary"
+                variant="standard"
+                size="xs"
                 onClick={() => {
                   onClose();
                   setSettingsTab('sync');
@@ -670,7 +672,7 @@ export const StorageLocationWizardModal: React.FC<{
               className="flex-1"
             />
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               onClick={async () => {
                 const picked = await getTransport().pickDirectoryDialog('选择素材库保存文件夹');
                 if (picked) setDraft({ ...draft, localLibraryPath: picked });
@@ -682,11 +684,11 @@ export const StorageLocationWizardModal: React.FC<{
         </div>
       )}
 
-      <div className="rounded-[9px] bg-[var(--settings-subtle)] p-2.5 flex flex-col gap-1">
-        <span className="text-[11.5px] font-semibold text-[var(--text-primary)]">
+      <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] p-3 flex flex-col gap-1">
+        <span className="text-[12px] font-semibold text-[var(--text-primary)]">
           {action === 'migrate' ? '无损迁移流程' : '仅切换说明'}
         </span>
-        <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed whitespace-pre-line">
+        <p className="text-[11.5px] text-[var(--text-secondary)] leading-relaxed whitespace-pre-line">
           {action === 'migrate'
             ? '1. 验证目标位置连通与可写性，避免中断损坏原库；\n2. 自动补全拉取尚未缓存在本机的云端原件；\n3. 将全部文件夹、素材原件与情绪板完整写入新位置并切换为默认存储。'
             : '仅将 Charkle 指向新位置并保存配置，不搬运原位置的现有文件；适合接入已有云端或本地素材库。'}
@@ -706,14 +708,31 @@ const THEME_CARDS: Array<{
   subtitle: string;
   icon: React.ReactNode;
 }> = [
-  { mode: 'system', title: '跟随系统', subtitle: '自动同步浅色与深色', icon: <Monitor size={15} /> },
-  { mode: 'light', title: '浅色画廊', subtitle: '柔和暖白画布底色', icon: <Sun size={15} /> },
-  { mode: 'dark', title: '深色画廊', subtitle: '低眩光专注看图', icon: <Moon size={15} /> },
+  {
+    mode: 'system',
+    title: '跟随系统',
+    subtitle: '自动同步浅色与深色',
+    icon: <Desktop16Regular className="w-4 h-4" />,
+  },
+  {
+    mode: 'light',
+    title: '浅色画廊',
+    subtitle: '柔和暖白画布底色',
+    icon: <WeatherSunny16Regular className="w-4 h-4" />,
+  },
+  {
+    mode: 'dark',
+    title: '深色画廊',
+    subtitle: '低眩光专注看图',
+    icon: <WeatherMoon16Regular className="w-4 h-4" />,
+  },
 ];
 
 export const GeneralSettingsPane: React.FC = () => {
   const themeMode = useCoordinatorStore((s) => s.themeMode);
   const setThemeMode = useCoordinatorStore((s) => s.setThemeMode);
+  const accentSource = useCoordinatorStore((s) => s.accentSource);
+  const setAccentSource = useCoordinatorStore((s) => s.setAccentSource);
   const surfaceState = useCoordinatorStore((s) => s.surfaceState);
   const layoutMode = useCoordinatorStore((s) => s.layoutMode);
   const setLayoutMode = useCoordinatorStore((s) => s.setLayoutMode);
@@ -722,12 +741,15 @@ export const GeneralSettingsPane: React.FC = () => {
   const openOnboarding = useCoordinatorStore((s) => s.openOnboarding);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
   const setStatusFeedback = useSyncAIStore((s) => s.setStatusFeedback);
+  const isDark = useResolvedIsDark(themeMode);
 
   const [autostart, setAutostart] = useState(false);
-  const [lightGlassTint, setLightGlassTint] = useState<number>(() => getGlassTintScale('light'));
-  const [darkGlassTint, setDarkGlassTint] = useState<number>(() => getGlassTintScale('dark'));
-  const isGlassTintCustomized =
-    Math.abs(lightGlassTint - 1) > 0.001 || Math.abs(darkGlassTint - 1) > 0.001;
+
+  const followWindowsAccent = accentSource === 'windows';
+  const defaultStudioHex = isDark ? '#5B8DEF' : '#2A60E0';
+  const systemAccentHex = surfaceState?.systemAccentHex?.trim() || null;
+  const activeAccentHex =
+    followWindowsAccent && systemAccentHex ? systemAccentHex.toUpperCase() : defaultStudioHex;
 
   useEffect(() => {
     void getTransport()
@@ -737,12 +759,14 @@ export const GeneralSettingsPane: React.FC = () => {
   }, []);
 
   return (
-    <div data-testid="settings-pane-general" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-general" className="flex flex-col gap-5">
       <SettingsSection title="外观与画廊">
         <div className="p-4 flex flex-col gap-3">
           <div className="flex flex-col gap-0.5">
-            <div className="text-[13px] font-medium text-[var(--text-primary)]">界面主题</div>
-            <div className="text-[11.5px] text-[var(--text-secondary)]">
+            <div className="text-[13px] leading-[18px] font-medium text-[var(--text-primary)]">
+              界面主题
+            </div>
+            <div className="text-[12px] leading-[16px] text-[var(--text-secondary)]">
               切换 Charkle 的画廊外观主题，点击立即生效。
             </div>
           </div>
@@ -761,120 +785,34 @@ export const GeneralSettingsPane: React.FC = () => {
                     setStatusFeedback(`已切换界面主题为「${card.title}」`, null);
                   }}
                   className={[
-                    'charkle-pressable relative p-3 rounded-[10px] text-left cursor-pointer transition-colors duration-150 motion-reduce:transition-none flex flex-col gap-1.5',
+                    'charkle-pressable relative p-3 rounded-[var(--win-radius-card)] text-left cursor-pointer flex flex-col gap-1.5',
+                    'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
                     selected
-                      ? 'bg-black/[0.06] dark:bg-white/[0.09] border border-black/35 dark:border-white/45'
-                      : 'bg-[var(--settings-subtle)] border border-[var(--settings-border)] hover:border-black/20 dark:hover:border-white/22',
+                      ? 'bg-[var(--accent-soft)] border border-[var(--accent)]'
+                      : 'bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)] hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
                   <div className="flex items-center justify-between">
                     <span
                       className={
-                        selected ? 'text-[var(--text-primary)]' : 'text-[var(--text-secondary)]'
+                        selected ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
                       }
                     >
                       {card.icon}
                     </span>
                     {selected && (
-                      <CheckCircle2 size={14} className="text-[var(--text-primary)]" />
+                      <CheckmarkCircle16Filled className="w-4 h-4 text-[var(--accent)] shrink-0" />
                     )}
                   </div>
-                  <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">
+                  <div className="text-[13px] leading-[18px] font-semibold text-[var(--text-primary)]">
                     {card.title}
                   </div>
-                  <div className="text-[11px] text-[var(--text-secondary)] leading-snug">
+                  <div className="text-[11.5px] leading-[16px] text-[var(--text-secondary)]">
                     {card.subtitle}
                   </div>
                 </button>
               );
             })}
-          </div>
-        </div>
-
-        <SettingsCardDivider />
-
-        <div data-testid="settings-glass-tint-controls" className="px-4 py-3.5 flex flex-col gap-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex flex-col gap-0.5 min-w-0">
-              <div className="text-[13px] font-medium text-[var(--text-primary)]">
-                悬浮液态玻璃质感
-              </div>
-              <div className="text-[11.5px] text-[var(--text-secondary)]">
-                调节浅色与深色模式下悬浮胶囊的透光度，拖动实时生效。
-              </div>
-            </div>
-            {isGlassTintCustomized && (
-              <button
-                type="button"
-                onClick={() => {
-                  setLightGlassTint(1);
-                  setDarkGlassTint(1);
-                  setGlassTintScale('light', 1);
-                  setGlassTintScale('dark', 1);
-                }}
-                className="charkle-pressable shrink-0 text-[12px] font-medium text-[var(--accent)] hover:opacity-80 transition-opacity duration-150 motion-reduce:transition-none cursor-pointer px-1.5 py-0.5 rounded-[6px]"
-              >
-                重置
-              </button>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between text-[12px]">
-                <span className="font-medium text-[var(--text-primary)]">浅色玻璃浓度</span>
-                <span className="text-[11.5px] font-medium text-[var(--text-secondary)] charkle-tabular">
-                  {Math.round(lightGlassTint * 100)}%
-                </span>
-              </div>
-              <CharkleSlider
-                variant="standard"
-                min={0}
-                max={1.5}
-                step={0.05}
-                value={lightGlassTint}
-                valueText={`${Math.round(lightGlassTint * 100)}%`}
-                ariaLabel="浅色玻璃浓度"
-                data-testid="slider-light-glass-tint"
-                onChange={(next) => {
-                  setLightGlassTint(next);
-                  setGlassTintScale('light', next);
-                }}
-                className="w-full"
-              />
-              <div className="flex items-center justify-between text-[10.5px] text-[var(--text-tertiary)] charkle-tabular">
-                <span>0%</span>
-                <span>150%</span>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between text-[12px]">
-                <span className="font-medium text-[var(--text-primary)]">深色玻璃浓度</span>
-                <span className="text-[11.5px] font-medium text-[var(--text-secondary)] charkle-tabular">
-                  {Math.round(darkGlassTint * 100)}%
-                </span>
-              </div>
-              <CharkleSlider
-                variant="standard"
-                min={0}
-                max={1.5}
-                step={0.05}
-                value={darkGlassTint}
-                valueText={`${Math.round(darkGlassTint * 100)}%`}
-                ariaLabel="深色玻璃浓度"
-                data-testid="slider-dark-glass-tint"
-                onChange={(next) => {
-                  setDarkGlassTint(next);
-                  setGlassTintScale('dark', next);
-                }}
-                className="w-full"
-              />
-              <div className="flex items-center justify-between text-[10.5px] text-[var(--text-tertiary)] charkle-tabular">
-                <span>0%</span>
-                <span>150%</span>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -887,7 +825,7 @@ export const GeneralSettingsPane: React.FC = () => {
                 subtitle="开启 Windows 透明效果后，窗口标题栏与侧边栏将呈现柔和的桌面透色"
               >
                 <SettingsButton
-                  variant="secondary"
+                  variant="standard"
                   onClick={() => {
                     void getTransport()
                       .openExternalUrl('ms-settings:colors')
@@ -901,7 +839,7 @@ export const GeneralSettingsPane: React.FC = () => {
                   }}
                 >
                   打开系统设置
-                  <ArrowUpRight size={12.5} />
+                  <Open16Regular className="w-3.5 h-3.5 shrink-0" />
                 </SettingsButton>
               </SettingsRow>
             </div>
@@ -941,6 +879,43 @@ export const GeneralSettingsPane: React.FC = () => {
         </SettingsRow>
       </SettingsSection>
 
+      <SettingsSection title="强调色" data-testid="settings-accent-controls">
+        <SettingsRow
+          icon={<Color20Regular className="w-[18px] h-[18px]" />}
+          title="跟随 Windows 系统强调色"
+          subtitle={
+            followWindowsAccent
+              ? systemAccentHex
+                ? '已同步 Windows 个性化强调色，并自动完成浅/深色对比度校准'
+                : '已开启系统强调色跟随；未读取到系统强调色时将保持工作室钴蓝'
+              : '默认使用工作室钴蓝（#2A60E0 / #5B8DEF）；开启后同步 Windows 个性化强调色'
+          }
+        >
+          <span
+            data-testid="settings-accent-swatch"
+            className="inline-flex items-center gap-1.5 h-7 px-2 rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)] text-[11.5px] font-medium charkle-mono text-[var(--text-primary)] shrink-0"
+          >
+            <span
+              aria-hidden="true"
+              style={{ backgroundColor: activeAccentHex }}
+              className="w-3 h-3 rounded-[3px] border border-black/15 dark:border-white/20 shrink-0"
+            />
+            <span>{activeAccentHex}</span>
+          </span>
+          <Switch
+            checked={followWindowsAccent}
+            ariaLabel="跟随 Windows 系统强调色"
+            onCheckedChange={(checked) => {
+              setAccentSource(checked ? 'windows' : 'studio');
+              setStatusFeedback(
+                checked ? '已开启跟随 Windows 系统强调色' : '已恢复默认工作室钴蓝强调色',
+                null,
+              );
+            }}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
       <SettingsSection title="系统集成">
         <SettingsRow
           title="开机自动启动 Charkle"
@@ -973,7 +948,7 @@ export const GeneralSettingsPane: React.FC = () => {
           title="快速上手引导"
           subtitle="重新配置素材库存储、顶部浮窗、AI 智能与外观偏好（每步均可跳过）"
         >
-          <SettingsButton variant="primary" onClick={openOnboarding}>
+          <SettingsButton variant="accent" onClick={openOnboarding}>
             重新查看
           </SettingsButton>
         </SettingsRow>
@@ -1023,7 +998,7 @@ export const LibrarySettingsPane: React.FC = () => {
   const pinPct = pinnedBytes > 0 ? Math.min(45, Math.max(2, (pinnedBytes / barScale) * 100)) : 0;
 
   return (
-    <div data-testid="settings-pane-library" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-library" className="flex flex-col gap-5">
       <SettingsSection title="当前存储位置">
         <SettingsRow
           title={storageModeHeadline(cfg.mode)}
@@ -1032,22 +1007,22 @@ export const LibrarySettingsPane: React.FC = () => {
         >
           {cfg.mode === 'localOnly' ? (
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               onClick={() =>
                 void openDirectoryInExplorer(cfg.localLibraryPath || diagnostics?.dataDir || '')
               }
             >
-              <FolderOpen size={13} />
+              <FolderOpen16Regular className="w-3.5 h-3.5 shrink-0" />
               打开文件夹
             </SettingsButton>
           ) : (
-            <SettingsButton variant="secondary" onClick={() => setSettingsTab('sync')}>
+            <SettingsButton variant="standard" onClick={() => setSettingsTab('sync')}>
               同步设置
             </SettingsButton>
           )}
 
           <SettingsButton
-            variant="primary"
+            variant="accent"
             disabled={syncing || migrating}
             onClick={() => setShowWizard(true)}
           >
@@ -1063,11 +1038,13 @@ export const LibrarySettingsPane: React.FC = () => {
               subtitle="手动扫描当前本机文件夹内新增的文件并补齐索引"
             >
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 loading={syncing}
                 onClick={() => void syncNow()}
               >
-                <RefreshCw size={12.5} className={syncing ? 'animate-spin motion-reduce:animate-none' : ''} />
+                <ArrowSync16Regular
+                  className={`w-3.5 h-3.5 shrink-0 ${syncing ? 'animate-spin motion-reduce:animate-none' : ''}`}
+                />
                 立即扫描
               </SettingsButton>
             </SettingsRow>
@@ -1077,9 +1054,9 @@ export const LibrarySettingsPane: React.FC = () => {
         {lastMigrationReport && (
           <div
             data-testid="storage-migration-report"
-            className="mx-4 mb-3 rounded-[9px] bg-[var(--settings-positive)]/10 border border-[var(--settings-positive)]/25 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
+            className="mx-4 mb-3 rounded-[var(--win-radius-control)] bg-[var(--settings-positive)]/10 border border-[var(--settings-positive)]/25 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
           >
-            <CheckCircle2 size={15} className="text-[var(--settings-positive)] shrink-0" />
+            <CheckmarkCircle16Filled className="w-4 h-4 text-[var(--settings-positive)] shrink-0" />
             <span>
               素材库已迁移至「{lastMigrationReport.targetLocation}」：
               {lastMigrationReport.migratedAssets} 项素材、{lastMigrationReport.migratedFolders}{' '}
@@ -1118,24 +1095,24 @@ export const LibrarySettingsPane: React.FC = () => {
             </span>
           </div>
 
-          {/* 3-segment proportional stacked bar matching macOS LibrarySettingsPane */}
-          <div className="h-[18px] w-full rounded-[7px] bg-[var(--settings-subtle)] p-[3px] flex items-center gap-[2px] overflow-hidden">
+          {/* 3-segment proportional stacked bar */}
+          <div className="h-[16px] w-full rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] p-[3px] flex items-center gap-[2px] overflow-hidden">
             {thumbPct > 0 && (
               <div
                 style={{ width: `${thumbPct}%`, backgroundColor: '#4E7D96' }}
-                className="h-full rounded-[4px]"
+                className="h-full rounded-[2px]"
               />
             )}
             {origPct > 0 && (
               <div
                 style={{ width: `${origPct}%`, backgroundColor: '#D4A373' }}
-                className="h-full rounded-[4px]"
+                className="h-full rounded-[2px]"
               />
             )}
             {pinPct > 0 && (
               <div
                 style={{ width: `${pinPct}%`, backgroundColor: '#6B8E76' }}
-                className="h-full rounded-[4px]"
+                className="h-full rounded-[2px]"
               />
             )}
           </div>
@@ -1177,13 +1154,13 @@ export const LibrarySettingsPane: React.FC = () => {
 
         <SettingsCardDivider />
 
-        <div className="px-4 py-[13px] flex flex-col gap-2">
+        <div className="px-4 py-3.5 flex flex-col gap-2">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="text-[13px] font-medium text-[var(--text-primary)]">
                 临时原件缓存上限
               </div>
-              <div className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
+              <div className="text-[12px] text-[var(--text-secondary)] mt-0.5">
                 超出上限时按最久未用自动回收，常驻离线素材与预览图不受影响
               </div>
             </div>
@@ -1216,7 +1193,7 @@ export const LibrarySettingsPane: React.FC = () => {
           subtitle="立即释放未设为「始终保留在本地」的临时原件，云端与本地原件安全保留"
         >
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             loading={evicting}
             disabled={syncing || migrating}
             onClick={async () => {
@@ -1313,16 +1290,16 @@ export const SyncSettingsPane: React.FC = () => {
     }
   };
 
-  // State A: Local-only guidance (matches macOS SyncSettingsPane.localOnboardingSection)
+  // State A: Local-only guidance
   if (draft.mode === 'localOnly') {
     return (
-      <div data-testid="settings-pane-sync" className="flex flex-col gap-[22px]">
+      <div data-testid="settings-pane-sync" className="flex flex-col gap-5">
         <SettingsSection title="云端同步服务">
           <SettingsRow
             title="当前素材库仅保存在本机"
             subtitle={`路径：${activeStorageLocationSummary(draft, diagnostics?.dataDir)} · 启用云同步可在多台设备间自动同步并支持团队共享`}
           >
-            <SettingsButton variant="secondary" onClick={() => setSettingsTab('library')}>
+            <SettingsButton variant="standard" onClick={() => setSettingsTab('library')}>
               管理素材库位置
             </SettingsButton>
           </SettingsRow>
@@ -1334,7 +1311,7 @@ export const SyncSettingsPane: React.FC = () => {
             subtitle="推荐 · 原始文件按可读目录保存在你的 Google Drive，支持共享协作与网页端直接拖入新素材"
           >
             <SettingsButton
-              variant="primary"
+              variant="accent"
               onClick={() => persistQuiet({ ...draft, mode: 'directAPIWithGDirect' })}
             >
               启用 Google 同步
@@ -1365,7 +1342,7 @@ export const SyncSettingsPane: React.FC = () => {
             title="WebDAV 云盘"
             subtitle="兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务"
           >
-            <SettingsButton variant="secondary" onClick={() => setShowWebDAVModal(true)}>
+            <SettingsButton variant="standard" onClick={() => setShowWebDAVModal(true)}>
               配置 WebDAV…
             </SettingsButton>
           </SettingsRow>
@@ -1376,8 +1353,8 @@ export const SyncSettingsPane: React.FC = () => {
             title="无损迁移现有素材至云盘"
             subtitle="将当前本机素材、文件夹与情绪板完整搬迁至 Google Drive 或 WebDAV"
           >
-            <SettingsButton variant="secondary" onClick={() => setShowWizard(true)}>
-              <ArrowRightLeft size={13} />
+            <SettingsButton variant="standard" onClick={() => setShowWizard(true)}>
+              <ArrowSwap16Regular className="w-3.5 h-3.5 shrink-0" />
               更改或转移…
             </SettingsButton>
           </SettingsRow>
@@ -1405,17 +1382,14 @@ export const SyncSettingsPane: React.FC = () => {
   }
 
   return (
-    <div data-testid="settings-pane-sync" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-sync" className="flex flex-col gap-5">
       {/* 1. Live Sync Status Section */}
       <SettingsSection title="同步状态">
         <div className="px-4 py-3.5 flex flex-col gap-2.5">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               {isSyncingNow ? (
-                <RefreshCw
-                  size={14}
-                  className="text-[var(--accent)] animate-spin motion-reduce:animate-none shrink-0"
-                />
+                <ArrowSync16Regular className="w-4 h-4 text-[var(--accent)] animate-spin motion-reduce:animate-none shrink-0" />
               ) : (
                 <span
                   style={{ backgroundColor: syncIndicatorColor(syncStatus) }}
@@ -1431,14 +1405,14 @@ export const SyncSettingsPane: React.FC = () => {
                       : syncIdleHeadline(syncStatus)}
                   </span>
                   {isSyncingNow && syncStatus?.progressFraction != null && (
-                    <span className="text-[11px] font-mono font-semibold text-[var(--text-secondary)] charkle-tabular">
+                    <span className="text-[11px] charkle-mono font-semibold text-[var(--text-secondary)] charkle-tabular">
                       {Math.round(syncStatus.progressFraction * 100)}%
                     </span>
                   )}
                 </div>
                 <span
                   className={[
-                    'text-[11.5px] leading-snug line-clamp-2',
+                    'text-[12px] leading-snug line-clamp-2',
                     syncStatus?.lastError && !isSyncingNow
                       ? 'text-[var(--settings-destructive)]'
                       : 'text-[var(--text-secondary)]',
@@ -1454,7 +1428,7 @@ export const SyncSettingsPane: React.FC = () => {
             </div>
 
             <SettingsButton
-              variant="primary"
+              variant="accent"
               loading={isSyncingNow}
               onClick={() => void syncNow()}
             >
@@ -1473,24 +1447,24 @@ export const SyncSettingsPane: React.FC = () => {
             </div>
           )}
 
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-secondary)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--text-secondary)]">
             <div className="flex items-center gap-3">
               <span className="inline-flex items-center gap-1">
-                <Clock size={11} />
+                <Clock16Regular className="w-3 h-3 shrink-0" />
                 {syncStatus?.lastSyncedAt
                   ? `上次同步：${relativeTimeText(syncStatus.lastSyncedAt)}`
                   : '尚未完成首次同步'}
               </span>
               {(syncStatus?.pendingOpCount ?? 0) > 0 && (
                 <span className="inline-flex items-center gap-1 font-medium text-[var(--settings-warning)] charkle-tabular">
-                  <ArrowUpCircle size={11} />
+                  <ArrowCircleUp16Regular className="w-3 h-3 shrink-0" />
                   待上传 {syncStatus?.pendingOpCount} 项
                 </span>
               )}
             </div>
 
             {lastSyncReport && (
-              <span className="text-[10.5px] font-mono text-[var(--text-tertiary)] charkle-tabular">
+              <span className="text-[11px] charkle-mono text-[var(--text-tertiary)] charkle-tabular">
                 ↑ {lastSyncReport.uploadedOps}  ↓ {lastSyncReport.downloadedOps}  +
                 {lastSyncReport.discoveredRemoteAssets} 新发现
               </span>
@@ -1514,13 +1488,13 @@ export const SyncSettingsPane: React.FC = () => {
                 subtitleTone={diagnostics?.gdirect.isMountActive ? 'positive' : 'warning'}
               >
                 <SettingsButton
-                  variant="secondary"
+                  variant="standard"
                   onClick={() => persistQuiet({ ...draft, mode: 'directAPIWithGDirect' })}
                 >
                   切回标准直连
                 </SettingsButton>
                 <SettingsButton
-                  variant="secondary"
+                  variant="standard"
                   onClick={() => setSettingsTab('advancedAbout')}
                 >
                   挂载管理
@@ -1528,13 +1502,13 @@ export const SyncSettingsPane: React.FC = () => {
               </SettingsRow>
             ) : (
               <div>
-                <div className="px-4 py-[13px] flex items-center justify-between gap-3">
+                <div className="px-4 py-3.5 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <span className="h-[38px] w-[38px] rounded-full bg-[var(--settings-subtle)] inline-flex items-center justify-center shrink-0">
                       {activeGoogleAccount ? (
-                        <UserCheck size={18} className="text-[var(--settings-positive)]" />
+                        <PersonAvailable16Regular className="w-5 h-5 text-[var(--settings-positive)]" />
                       ) : (
-                        <UserCircle2 size={18} className="text-[var(--text-secondary)]" />
+                        <PersonCircle16Regular className="w-5 h-5 text-[var(--text-secondary)]" />
                       )}
                     </span>
 
@@ -1551,7 +1525,7 @@ export const SyncSettingsPane: React.FC = () => {
                         )}
                       </div>
 
-                      <span className="text-[11.5px] text-[var(--text-secondary)] leading-snug">
+                      <span className="text-[12px] text-[var(--text-secondary)] leading-snug">
                         {activeGoogleAccount?.displayName
                           ? activeGoogleAccount.email
                           : isUsingGDirectFallback
@@ -1569,14 +1543,14 @@ export const SyncSettingsPane: React.FC = () => {
                     {directAccount ? (
                       <>
                         <SettingsButton
-                          variant="secondary"
+                          variant="standard"
                           disabled={isBusy}
                           onClick={triggerGoogleSignIn}
                         >
                           切换账号
                         </SettingsButton>
                         <SettingsButton
-                          variant="destructive"
+                          variant="danger"
                           disabled={isBusy}
                           onClick={() => void signOutGoogleDrive()}
                         >
@@ -1587,7 +1561,7 @@ export const SyncSettingsPane: React.FC = () => {
                       <>
                         {hasGoogleOAuthClient && (
                           <SettingsButton
-                            variant="secondary"
+                            variant="standard"
                             disabled={isBusy}
                             onClick={() => setShowOAuthModal(true)}
                           >
@@ -1595,7 +1569,7 @@ export const SyncSettingsPane: React.FC = () => {
                           </SettingsButton>
                         )}
                         <SettingsButton
-                          variant="secondary"
+                          variant="standard"
                           loading={signingInGoogle}
                           onClick={triggerGoogleSignIn}
                         >
@@ -1610,7 +1584,7 @@ export const SyncSettingsPane: React.FC = () => {
                   activeGoogleAccount?.storageLimitBytes != null &&
                   activeGoogleAccount.storageLimitBytes > 0 && (
                     <div className="px-4 pb-3 flex flex-col gap-1">
-                      <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)] charkle-tabular">
+                      <div className="flex items-center justify-between text-[11.5px] text-[var(--text-secondary)] charkle-tabular">
                         <span>Google Drive 云端空间</span>
                         <span>
                           {formatBytes(activeGoogleAccount.storageUsedBytes)} /{' '}
@@ -1671,21 +1645,21 @@ export const SyncSettingsPane: React.FC = () => {
           </SettingsSection>
 
           <SettingsSection title="团队共享协作（可选）">
-            <div className="px-4 py-[13px] flex flex-col gap-2.5">
+            <div className="px-4 py-3.5 flex flex-col gap-2.5">
               <div className="flex flex-col gap-0.5">
                 <span className="text-[13px] font-medium text-[var(--text-primary)]">
                   共享协作目录
                 </span>
                 {sharedID ? (
-                  <span className="text-[11.5px] text-[var(--settings-positive)]">
+                  <span className="text-[12px] text-[var(--settings-positive)]">
                     已启用协作模式（目录 ID：{sharedID.slice(0, 12)}…）
                   </span>
                 ) : trimmedShared ? (
-                  <span className="text-[11.5px] text-[var(--settings-warning)]">
+                  <span className="text-[12px] text-[var(--settings-warning)]">
                     链接或 ID 格式无效，请检查是否包含 /folders/…
                   </span>
                 ) : (
-                  <span className="text-[11.5px] text-[var(--text-secondary)]">
+                  <span className="text-[12px] text-[var(--text-secondary)]">
                     粘贴 Google Drive「与我共享」目录链接或 ID，多人可共同整理与浏览
                   </span>
                 )}
@@ -1705,7 +1679,7 @@ export const SyncSettingsPane: React.FC = () => {
                 />
                 {trimmedShared && (
                   <SettingsButton
-                    variant="secondary"
+                    variant="standard"
                     onClick={() => persistQuiet({ ...draft, sharedFolderURLOrID: '' })}
                   >
                     清除
@@ -1742,14 +1716,14 @@ export const SyncSettingsPane: React.FC = () => {
             subtitleTone={isWebDAVConnected ? 'positive' : 'default'}
           >
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               loading={testingWebdav}
               disabled={!draft.webDAVServerURL.trim() || isBusy}
               onClick={() => void testWebdavConnection(draft, null)}
             >
               测试连接
             </SettingsButton>
-            <SettingsButton variant="secondary" onClick={() => setShowWebDAVModal(true)}>
+            <SettingsButton variant="standard" onClick={() => setShowWebDAVModal(true)}>
               编辑配置…
             </SettingsButton>
           </SettingsRow>
@@ -1801,8 +1775,8 @@ export const SyncSettingsPane: React.FC = () => {
           title="切换或无损迁移存储位置"
           subtitle="随时在 Google Drive、WebDAV 与纯本地文件夹之间安全搬家"
         >
-          <SettingsButton variant="secondary" onClick={() => setShowWizard(true)}>
-            <ArrowRightLeft size={13} />
+          <SettingsButton variant="standard" onClick={() => setShowWizard(true)}>
+            <ArrowSwap16Regular className="w-3.5 h-3.5 shrink-0" />
             更改或转移…
           </SettingsButton>
         </SettingsRow>
@@ -1811,9 +1785,9 @@ export const SyncSettingsPane: React.FC = () => {
       {lastMigrationReport && (
         <div
           data-testid="storage-migration-report"
-          className="rounded-[9px] bg-[var(--settings-positive)]/10 border border-[var(--settings-positive)]/25 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
+          className="rounded-[var(--win-radius-card)] bg-[var(--settings-positive)]/10 border border-[var(--settings-positive)]/25 p-3 text-[12px] text-[var(--text-primary)] flex items-center gap-2"
         >
-          <CheckCircle2 size={15} className="text-[var(--settings-positive)] shrink-0" />
+          <CheckmarkCircle16Filled className="w-4 h-4 text-[var(--settings-positive)] shrink-0" />
           <span>
             已完成无损存储迁移：{lastMigrationReport.migratedAssets} 项素材、
             {lastMigrationReport.migratedFolders} 个文件夹、{lastMigrationReport.migratedBoards}{' '}

@@ -1,25 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownCircle,
-  ArrowUpLeft,
-  Ban,
-  ChevronRight,
-  ClipboardPaste,
-  CloudOff,
-  FolderMinus,
-  FolderPlus,
-  MoreHorizontal,
-  Palette,
-  Pencil,
-  Plus,
-  Trash2,
-} from 'lucide-react';
+  Add16Regular,
+  ArrowDownload16Regular,
+  ArrowUpLeft16Regular,
+  ChevronRight12Regular,
+  ClipboardPaste16Regular,
+  CloudOff16Regular,
+  Color16Regular,
+  Delete16Regular,
+  Edit16Regular,
+  FolderAdd16Regular,
+  FolderProhibited16Regular,
+  MoreHorizontal16Regular,
+  Prohibited12Regular,
+} from '@fluentui/react-icons';
 import {
   Button,
   CharkleFolderIcon,
+  DropdownMenu,
   FOLDER_PRESET_COLORS,
+  MenuItem,
+  MenuSeparator,
   ModalShell,
-  Popover,
+  WIN_SPRING_SNAPPY,
+  m,
 } from '../../design-system';
 import {
   getFolderSubtreeAssetCount,
@@ -269,13 +273,13 @@ const FolderRow: React.FC<FolderRowProps> = ({
         }}
         style={{ paddingLeft: 6 + Math.min(depth, 5) * 14 }}
         className={[
-          'group relative flex items-center gap-1 pr-1.5 h-[30px] rounded-[var(--radius-chip)] select-none cursor-pointer transition-colors duration-120',
+          'group relative flex items-center gap-1.5 pr-1.5 h-[34px] rounded-[var(--win-radius-control)] select-none cursor-pointer transition-colors duration-[83ms]',
           isDraggingSelf ? 'opacity-40' : '',
           isMultiSelected
             ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent-ring)] text-[var(--accent)] font-medium'
             : isDestinationSelected
-              ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
-              : 'text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]/80',
+              ? 'bg-[var(--win-subtle-active)] text-[var(--text-primary)] font-medium'
+              : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)]',
           dropZone === 'inside' ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-soft)]' : '',
         ].join(' ')}
         onClick={(e) => {
@@ -283,6 +287,15 @@ const FolderRow: React.FC<FolderRowProps> = ({
           onRowClick(folder, e);
         }}
       >
+        {isDestinationSelected && !isMultiSelected && (
+          <m.span
+            layoutId="win-sidebar-indicator"
+            transition={WIN_SPRING_SNAPPY}
+            aria-hidden="true"
+            className="pointer-events-none absolute left-0 inset-y-0 my-auto w-[3px] h-4 rounded-full bg-[var(--accent)]"
+          />
+        )}
+
         {dropZone === 'before' && (
           <div className="pointer-events-none absolute top-0 left-2 right-2 h-[2px] rounded-full bg-[var(--accent)] z-10" />
         )}
@@ -298,15 +311,14 @@ const FolderRow: React.FC<FolderRowProps> = ({
             if (children.length > 0) onToggleExpand(folder.id);
           }}
           className={[
-            'w-4 h-4 inline-flex items-center justify-center rounded text-[var(--text-tertiary)] shrink-0',
+            'w-4 h-4 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-tertiary)] shrink-0',
             children.length > 0
               ? 'hover:text-[var(--text-primary)] cursor-pointer'
               : 'opacity-0 pointer-events-none',
           ].join(' ')}
         >
-          <ChevronRight
-            size={12}
-            className={`transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`}
+          <ChevronRight12Regular
+            className={`w-3 h-3 transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`}
           />
         </button>
 
@@ -322,6 +334,7 @@ const FolderRow: React.FC<FolderRowProps> = ({
             type="text"
             value={renameDraft}
             autoFocus
+            aria-label="重命名文件夹"
             onClick={(e) => e.stopPropagation()}
             onChange={(e) => setRenameDraft(e.target.value)}
             onBlur={() => void commitRename()}
@@ -337,10 +350,10 @@ const FolderRow: React.FC<FolderRowProps> = ({
                 cancelRename();
               }
             }}
-            className="flex-1 min-w-0 h-5 px-1.5 rounded bg-[var(--bg-elevated)] border border-[var(--accent)] text-[12.5px] text-[var(--text-primary)] outline-none"
+            className="win-input-elevation flex-1 min-w-0 h-6 px-1.5 rounded-[var(--win-radius-control)] text-[13px] text-[var(--text-primary)] outline-none"
           />
         ) : (
-          <span className="truncate flex-1 min-w-0 text-[12.5px] leading-[1.45] py-[1px]">
+          <span className="truncate flex-1 min-w-0 text-[13px] leading-[18px]">
             {folder.name}
           </span>
         )}
@@ -348,12 +361,15 @@ const FolderRow: React.FC<FolderRowProps> = ({
         {!renaming && (
           <>
             {isPinnedOffline && (
-              <span title="文件夹素材始终保留在本地" className="text-[var(--text-tertiary)] shrink-0 group-hover:hidden">
-                <ArrowDownCircle size={10.5} />
+              <span
+                title="文件夹素材始终保留在本地"
+                className="text-[var(--text-tertiary)] shrink-0 group-hover:hidden"
+              >
+                <ArrowDownload16Regular className="w-3 h-3" />
               </span>
             )}
             {liveCount > 0 && (
-              <span className="text-[11px] text-[var(--text-tertiary)] charkle-tabular group-hover:hidden">
+              <span className="text-[11px] text-[var(--text-tertiary)] charkle-tabular group-hover:hidden pr-1">
                 {liveCount}
               </span>
             )}
@@ -366,9 +382,9 @@ const FolderRow: React.FC<FolderRowProps> = ({
                   e.stopPropagation();
                   startCreateChild();
                 }}
-                className="h-5 w-5 inline-flex items-center justify-center rounded text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer"
+                className="h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)] cursor-pointer"
               >
-                <Plus size={12} />
+                <Add16Regular className="w-3.5 h-3.5" />
               </button>
               <button
                 ref={moreBtnRef}
@@ -379,17 +395,17 @@ const FolderRow: React.FC<FolderRowProps> = ({
                   setContextPoint(null);
                   setMenuOpen((v) => !v);
                 }}
-                className="h-5 w-5 inline-flex items-center justify-center rounded text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer"
+                className="h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-secondary)] hover:bg-[var(--win-subtle-hover)] hover:text-[var(--text-primary)] cursor-pointer"
               >
-                <MoreHorizontal size={13} />
+                <MoreHorizontal16Regular className="w-3.5 h-3.5" />
               </button>
             </div>
           </>
         )}
       </div>
 
-      {/* Full macOS-parity Folder Action Menu */}
-      <Popover
+      {/* Fluent 2 Folder Action Dropdown/Context Menu */}
+      <DropdownMenu
         open={menuOpen}
         onOpenChange={(v) => {
           setMenuOpen(v);
@@ -397,198 +413,181 @@ const FolderRow: React.FC<FolderRowProps> = ({
         }}
         anchorEl={contextPoint ? null : moreBtnRef.current}
         anchorPoint={contextPoint}
-        placement="bottom-end"
-        className="w-[222px] p-1"
+        side="bottom"
+        align="end"
+        className="w-[236px]"
       >
-        <div className="flex flex-col gap-0.5 text-[12px]">
-          {!isBatch && cutAssetIds.length > 0 && (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  void pasteCutAssets(folder.id, destination).then((count) =>
-                    pushToast({
-                      message: `已将 ${count} 项素材移至「${folder.name}」`,
-                      tone: 'success',
-                    }),
-                  );
-                }}
-                className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--accent)] font-medium hover:bg-[var(--accent-soft)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-              >
-                <ClipboardPaste size={13} />
-                <span className="truncate">粘贴移动至此（{cutAssetIds.length} 项）</span>
-              </button>
-              <div className="my-1 h-px bg-[var(--border-hairline)]" />
-            </>
-          )}
+        {!isBatch && cutAssetIds.length > 0 && (
+          <>
+            <MenuItem
+              icon={<ClipboardPaste16Regular className="w-4 h-4 text-[var(--accent)]" />}
+              onSelect={() => {
+                setMenuOpen(false);
+                void pasteCutAssets(folder.id, destination).then((count) =>
+                  pushToast({
+                    message: `已将 ${count} 项素材移至「${folder.name}」`,
+                    tone: 'success',
+                  }),
+                );
+              }}
+            >
+              粘贴移动至此（{cutAssetIds.length} 项）
+            </MenuItem>
+            <MenuSeparator />
+          </>
+        )}
 
-          {!isBatch && (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  startCreateChild();
-                }}
-                className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-              >
-                <FolderPlus size={13} className="text-[var(--text-secondary)]" />
-                <span>新建子文件夹…</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  startRename();
-                }}
-                className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-              >
-                <Pencil size={13} className="text-[var(--text-secondary)]" />
-                <span>重命名…</span>
-              </button>
-            </>
-          )}
+        {!isBatch && (
+          <>
+            <MenuItem
+              icon={<FolderAdd16Regular className="w-4 h-4" />}
+              onSelect={() => {
+                setMenuOpen(false);
+                startCreateChild();
+              }}
+            >
+              新建子文件夹…
+            </MenuItem>
+            <MenuItem
+              icon={<Edit16Regular className="w-4 h-4" />}
+              onSelect={() => {
+                setMenuOpen(false);
+                startRename();
+              }}
+            >
+              重命名…
+            </MenuItem>
+          </>
+        )}
 
-          {(folder.parentID != null || isBatch) && (
+        {(folder.parentID != null || isBatch) && (
+          <MenuItem
+            icon={<ArrowUpLeft16Regular className="w-4 h-4" />}
+            onSelect={() => {
+              setMenuOpen(false);
+              void onMoveFolderToRoot(targetFolderIds);
+            }}
+          >
+            移至顶层目录{batchSuffix}
+          </MenuItem>
+        )}
+
+        <MenuSeparator />
+
+        <MenuItem
+          icon={<ArrowDownload16Regular className="w-4 h-4" />}
+          onSelect={() => {
+            setMenuOpen(false);
+            void setFoldersPinnedOffline(targetFolderIds, true, destination).then((count) =>
+              pushToast({
+                message:
+                  count > 0
+                    ? `已将 ${count} 项素材设为始终保留在本地`
+                    : '该文件夹暂无素材',
+                tone: 'info',
+              }),
+            );
+          }}
+        >
+          始终保留在本地{batchSuffix}
+        </MenuItem>
+
+        <MenuItem
+          icon={<CloudOff16Regular className="w-4 h-4" />}
+          onSelect={() => {
+            setMenuOpen(false);
+            void setFoldersPinnedOffline(targetFolderIds, false, destination).then((count) =>
+              pushToast({
+                message:
+                  count > 0
+                    ? `已清理 ${count} 项素材的离线缓存锁定`
+                    : '该文件夹暂无离线锁定素材',
+                tone: 'info',
+              }),
+            );
+          }}
+        >
+          清理离线缓存{batchSuffix}
+        </MenuItem>
+
+        <MenuSeparator />
+
+        {/* Quick Color Dot Strip */}
+        <div className="px-2.5 py-1.5 flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium text-[var(--text-tertiary)]">
+            更改文件夹颜色{batchSuffix}
+          </span>
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
+              title="恢复默认颜色"
+              aria-label="恢复默认颜色"
               onClick={() => {
                 setMenuOpen(false);
-                void onMoveFolderToRoot(targetFolderIds);
+                void onUpdateAppearanceBatch(targetFolderIds, null, undefined);
               }}
-              className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
+              className="charkle-pressable w-[18px] h-[18px] rounded-full bg-[var(--bg-subtle)] border border-[var(--win-stroke-control)] inline-flex items-center justify-center text-[var(--text-secondary)] cursor-pointer"
             >
-              <ArrowUpLeft size={13} className="text-[var(--text-secondary)]" />
-              <span className="truncate">移至顶层目录{batchSuffix}</span>
+              <Prohibited12Regular className="w-2.5 h-2.5" />
             </button>
-          )}
-
-          <div className="my-1 h-px bg-[var(--border-hairline)]" />
-
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              void setFoldersPinnedOffline(targetFolderIds, true, destination).then((count) =>
-                pushToast({
-                  message:
-                    count > 0
-                      ? `已将 ${count} 项素材设为始终保留在本地`
-                      : '该文件夹暂无素材',
-                  tone: 'info',
-                }),
-              );
-            }}
-            className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-          >
-            <ArrowDownCircle size={13} className="text-[var(--text-secondary)]" />
-            <span className="truncate">始终保留在本地{batchSuffix}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              void setFoldersPinnedOffline(targetFolderIds, false, destination).then((count) =>
-                pushToast({
-                  message:
-                    count > 0
-                      ? `已清理 ${count} 项素材的离线缓存锁定`
-                      : '该文件夹暂无离线锁定素材',
-                  tone: 'info',
-                }),
-              );
-            }}
-            className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-          >
-            <CloudOff size={13} className="text-[var(--text-secondary)]" />
-            <span className="truncate">清理离线缓存{batchSuffix}</span>
-          </button>
-
-          <div className="my-1 h-px bg-[var(--border-hairline)]" />
-
-          {/* Quick Color Dot Strip (1:1 macOS quick color picker) */}
-          <div className="px-2.5 py-1.5 flex flex-col gap-1.5">
-            <span className="text-[10.5px] font-medium text-[var(--text-tertiary)]">
-              更改文件夹颜色{batchSuffix}
-            </span>
-            <div className="flex items-center gap-1.5">
+            {FOLDER_PRESET_COLORS.map((preset) => (
               <button
+                key={preset.hex}
                 type="button"
-                title="恢复默认颜色"
+                title={preset.name}
+                aria-label={preset.name}
                 onClick={() => {
                   setMenuOpen(false);
-                  void onUpdateAppearanceBatch(targetFolderIds, null, undefined);
+                  void onUpdateAppearanceBatch(targetFolderIds, preset.hex, undefined);
                 }}
-                className="charkle-pressable w-[18px] h-[18px] rounded-full bg-[var(--bg-subtle)] border border-[var(--border-hairline)] inline-flex items-center justify-center text-[var(--text-secondary)] cursor-pointer"
-              >
-                <Ban size={10} />
-              </button>
-              {FOLDER_PRESET_COLORS.map((preset) => (
-                <button
-                  key={preset.hex}
-                  type="button"
-                  title={preset.name}
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void onUpdateAppearanceBatch(targetFolderIds, preset.hex, undefined);
-                  }}
-                  style={{ backgroundColor: preset.hex }}
-                  className={[
-                    'charkle-pressable w-[18px] h-[18px] rounded-full border border-black/10 cursor-pointer',
-                    folder.colorHex?.toUpperCase() === preset.hex.toUpperCase()
-                      ? 'ring-2 ring-offset-1 ring-[var(--accent)]'
-                      : '',
-                  ].join(' ')}
-                />
-              ))}
-            </div>
+                style={{ backgroundColor: preset.hex }}
+                className={[
+                  'charkle-pressable w-[18px] h-[18px] rounded-full border border-black/10 cursor-pointer',
+                  folder.colorHex?.toUpperCase() === preset.hex.toUpperCase()
+                    ? 'ring-2 ring-offset-1 ring-[var(--accent)]'
+                    : '',
+                ].join(' ')}
+              />
+            ))}
           </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              setCustomOpen(true);
-            }}
-            className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-          >
-            <Palette size={13} className="text-[var(--text-secondary)]" />
-            <span>自定义文件夹…</span>
-          </button>
-
-          <div className="my-1 h-px bg-[var(--border-hairline)]" />
-
-          {/* Dual Folder Delete (1:1 macOS SidebarView.swift) */}
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              void onDeleteFolders(targetFolderIds, false);
-            }}
-            className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-          >
-            <FolderMinus size={13} className="text-[var(--text-secondary)] shrink-0" />
-            <span className="truncate">删除文件夹（素材退回收件箱）</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              const targets = targetFolderIds
-                .map((id) => allFolders.find((f) => f.id === id))
-                .filter((f): f is FolderRecord => Boolean(f));
-              onRequestDeleteWithContents(targets);
-            }}
-            className="charkle-pressable w-full flex items-center gap-2 px-2.5 py-1.5 text-[var(--danger)] hover:bg-[var(--danger-soft)] rounded-[var(--radius-popover-inner)] cursor-pointer text-left"
-          >
-            <Trash2 size={13} className="shrink-0" />
-            <span className="truncate">删除文件夹及其中素材…{batchSuffix}</span>
-          </button>
         </div>
-      </Popover>
+
+        <MenuItem
+          icon={<Color16Regular className="w-4 h-4" />}
+          onSelect={() => {
+            setMenuOpen(false);
+            setCustomOpen(true);
+          }}
+        >
+          自定义文件夹…
+        </MenuItem>
+
+        <MenuSeparator />
+
+        <MenuItem
+          icon={<FolderProhibited16Regular className="w-4 h-4" />}
+          onSelect={() => {
+            setMenuOpen(false);
+            void onDeleteFolders(targetFolderIds, false);
+          }}
+        >
+          删除文件夹（素材退回收件箱）
+        </MenuItem>
+
+        <MenuItem
+          tone="danger"
+          icon={<Delete16Regular className="w-4 h-4" />}
+          onSelect={() => {
+            setMenuOpen(false);
+            const targets = targetFolderIds
+              .map((id) => allFolders.find((f) => f.id === id))
+              .filter((f): f is FolderRecord => Boolean(f));
+            onRequestDeleteWithContents(targets);
+          }}
+        >
+          删除文件夹及其中素材…{batchSuffix}
+        </MenuItem>
+      </DropdownMenu>
 
       <FolderCustomizationPopover
         open={customOpen}
@@ -610,6 +609,7 @@ const FolderRow: React.FC<FolderRowProps> = ({
             type="text"
             value={childDraft}
             autoFocus
+            aria-label="子文件夹名称"
             placeholder="子文件夹名称…"
             onChange={(e) => setChildDraft(e.target.value)}
             onBlur={() => void commitSubfolder()}
@@ -625,7 +625,7 @@ const FolderRow: React.FC<FolderRowProps> = ({
                 cancelCreateChild();
               }
             }}
-            className="w-full h-6 px-2 rounded bg-[var(--bg-elevated)] border border-[var(--accent)] text-[12px] text-[var(--text-primary)] outline-none"
+            className="win-input-elevation w-full h-7 px-2 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] outline-none"
           />
         </div>
       )}
@@ -857,7 +857,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({
 
   if (tree.length === 0) {
     return (
-      <div className="px-3 py-2 text-[11.5px] text-[var(--text-tertiary)]">
+      <div className="px-2.5 py-2 text-[12px] text-[var(--text-tertiary)]">
         暂无文件夹，点击 + 或拖入外部文件夹
       </div>
     );
@@ -899,7 +899,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({
         width="sm"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setPendingDeleteWithContents([])}>
+            <Button variant="standard" onClick={() => setPendingDeleteWithContents([])}>
               取消
             </Button>
             <Button
@@ -915,7 +915,7 @@ export const FolderTree: React.FC<FolderTreeProps> = ({
           </>
         }
       >
-        <p className="text-[13px] text-[var(--text-secondary)] leading-relaxed">
+        <p className="text-[13px] text-[var(--text-secondary)] leading-relaxed charkle-prose">
           {pendingSubtreeCount > 0
             ? `将删除所选文件夹及其子文件夹，并将里面的 ${pendingSubtreeCount} 项素材一并移至回收站（可在回收站中恢复或彻底删除）。`
             : '将删除所选文件夹及其子文件夹。'}

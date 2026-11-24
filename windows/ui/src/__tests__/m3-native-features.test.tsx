@@ -137,7 +137,7 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
     });
   });
 
-  it('exposes Desktop Integration popover (hotkeys/autostart/OCR) and Inspector pointer OLE drag-out + OCR extraction', async () => {
+  it('exposes Desktop Integration settings (hotkeys/autostart/OCR) via Sidebar Settings entry and Inspector pointer OLE drag-out + OCR extraction', async () => {
     render(<App />);
 
     await waitFor(() => {
@@ -146,14 +146,37 @@ describe('Charkle Windows M3 Drop Shelf, Region Capture, OLE Drag-Out & Desktop 
       ).not.toBeNull();
     });
 
-    // Open Desktop Integration Popover in Titlebar
-    fireEvent.click(screen.getByRole('button', { name: '桌面集成设置' }));
+    // Open Settings via the single canonical Sidebar footer entry (Fluent 2 §3.3)
+    fireEvent.click(screen.getByRole('button', { name: '打开设置中心' }));
     await waitFor(() => {
+      expect(screen.getByTestId('settings-overlay')).toBeInTheDocument();
+      expect(screen.getByRole('switch', { name: '开机自动启动 Charkle' })).toBeInTheDocument();
+    });
+
+    // Capture & Shortcuts pane exposes global hotkeys
+    fireEvent.click(screen.getByRole('tab', { name: '采集与快捷键' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-pane-captureShortcuts')).toBeInTheDocument();
       expect(screen.getByText('Alt+Shift+A')).toBeInTheDocument();
       expect(screen.getByText('Alt+Shift+S')).toBeInTheDocument();
       expect(screen.getByText('Alt+Shift+V')).toBeInTheDocument();
-      expect(screen.getByText('zh-Hans-CN')).toBeInTheDocument();
-      expect(screen.getByText('charkle://')).toBeInTheDocument();
+    });
+
+    // Advanced & About pane surfaces offline OCR languages
+    fireEvent.click(screen.getByRole('tab', { name: '高级与关于' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('settings-pane-advancedAbout')).toBeInTheDocument();
+      expect(screen.getByText(/zh-Hans-CN/)).toBeInTheDocument();
+    });
+
+    // Protocol scheme stays registered in desktop integration status
+    const desktopStatus = await mock.getDesktopIntegrationStatus();
+    expect(desktopStatus.deepLinkScheme).toBe('charkle');
+
+    // Close Settings cleanly before interacting with main workspace
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => {
+      expect(screen.queryByTestId('settings-overlay')).not.toBeInTheDocument();
     });
 
     // Select asset 1 -> click Inspector OCR & Pointer-drag OLE Drag-Out chip

@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useMemo } from 'react';
+import { Popover as BasePopover } from '@base-ui/react/popover';
+import { Button } from './Button';
 
 export type PopoverPlacement =
   | 'bottom-start'
@@ -14,6 +15,8 @@ export type PopoverPlacement =
 export interface PopoverProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Optional declarative trigger element rendered via Base UI `render`. */
+  trigger?: React.ReactElement;
   anchorEl?: HTMLElement | null;
   anchorPoint?: { x: number; y: number } | null;
   placement?: PopoverPlacement;
@@ -23,205 +26,119 @@ export interface PopoverProps {
   children: React.ReactNode;
 }
 
-interface ComputedPosition {
-  top: number;
-  left: number;
-  transformOrigin: string;
+function parsePlacement(placement: PopoverPlacement): {
+  side: 'top' | 'bottom' | 'left' | 'right';
+  align: 'start' | 'center' | 'end';
+} {
+  const [side, align = 'start'] = placement.split('-') as [
+    'top' | 'bottom' | 'left' | 'right',
+    'start' | 'center' | 'end',
+  ];
+  return { side, align };
 }
 
+function createVirtualAnchor(point: { x: number; y: number }) {
+  const { x, y } = point;
+  return {
+    getBoundingClientRect: () => ({
+      width: 0,
+      height: 0,
+      x,
+      y,
+      top: y,
+      left: x,
+      right: x,
+      bottom: y,
+      toJSON: () => ({}),
+    }),
+  };
+}
+
+const stopPopoverPropagation = {
+  onMouseDown: (e: React.MouseEvent) => e.stopPropagation(),
+  onPointerDown: (e: React.PointerEvent) => e.stopPropagation(),
+  onClick: (e: React.MouseEvent) => e.stopPropagation(),
+  onDoubleClick: (e: React.MouseEvent) => e.stopPropagation(),
+  onContextMenu: (e: React.MouseEvent) => e.stopPropagation(),
+};
+
 /**
- * Origin-aware interruptible Popover (DESIGN.md §6.2 & §6.3):
- * - Binds `transform-origin` to trigger edge and auto-flips when near viewport edge
- * - Uses CSS transition (`@starting-style` + `[data-closing="true"]`) with `160ms` in / `110ms` out
+ * Fluent 2 Flyout Popover built on `@base-ui/react/popover`:
+ * - Viewport collision flipping and shift positioning via Floating UI
+ * - Supports declarative `trigger`, imperative `anchorEl`, and virtual `anchorPoint`
+ * - `.win-acrylic` surface with strict solid fallback under reduced transparency
  */
 export const Popover: React.FC<PopoverProps> = ({
   open,
   onOpenChange,
+  trigger,
   anchorEl,
   anchorPoint,
   placement = 'bottom-start',
-  offset = 8,
+  offset = 6,
   glass = true,
   className = '',
   children,
 }) => {
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const [rendered, setRendered] = useState(open);
-  const [closing, setClosing] = useState(false);
-  const [pos, setPos] = useState<ComputedPosition | null>(null);
+  const { side, align } = parsePlacement(placement);
 
-  useEffect(() => {
-    if (open) {
-      setClosing(false);
-      setRendered(true);
-      return;
-    }
-    if (!rendered) return;
-    setClosing(true);
-    const timer = window.setTimeout(() => {
-      setRendered(false);
-      setClosing(false);
-    }, 115);
-    return () => window.clearTimeout(timer);
-  }, [open, rendered]);
+  const virtualAnchor = useMemo(
+    () => (anchorPoint ? createVirtualAnchor(anchorPoint) : null),
+    [anchorPoint?.x, anchorPoint?.y],
+  );
 
-  const computePosition = useCallback(() => {
-    const panel = panelRef.current;
-    if (!panel) return;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const margin = 10;
-    const panelRect = panel.getBoundingClientRect();
-    const pw = panelRect.width || 220;
-    const ph = panelRect.height || 140;
+  const anchor = virtualAnchor ?? anchorEl ?? undefined;
 
-    if (anchorPoint) {
-      let left = anchorPoint.x;
-      let top = anchorPoint.y;
-      let originX = 'left';
-      let originY = 'top';
-      if (left + pw > vw - margin) {
-        left = anchorPoint.x - pw;
-        originX = 'right';
-      }
-      if (top + ph > vh - margin) {
-        top = anchorPoint.y - ph;
-        originY = 'bottom';
-      }
-      const clampedLeft = Math.max(margin, Math.min(Math.max(margin, vw - pw - margin), left));
-      const clampedTop = Math.max(margin, Math.min(Math.max(margin, vh - ph - margin), top));
-      setPos({ top: clampedTop, left: clampedLeft, transformOrigin: `${originY} ${originX}` });
-      return;
-    }
-
-    if (!anchorEl) return;
-    const rect = anchorEl.getBoundingClientRect();
-    const [sideRaw, align = 'start'] = placement.split('-') as [
-      'top' | 'bottom' | 'left' | 'right',
-      'start' | 'center' | 'end',
-    ];
-    let side = sideRaw;
-    if (side === 'bottom' && rect.bottom + offset + ph > vh - margin && rect.top - offset - ph >= margin) {
-      side = 'top';
-    } else if (side === 'top' && rect.top - offset - ph < margin && rect.bottom + offset + ph <= vh - margin) {
-      side = 'bottom';
-    } else if (side === 'right' && rect.right + offset + pw > vw - margin && rect.left - offset - pw >= margin) {
-      side = 'left';
-    } else if (side === 'left' && rect.left - offset - pw < margin && rect.right + offset + pw <= vw - margin) {
-      side = 'right';
-    }
-
-    let top = 0;
-    let left = 0;
-    let originX = 'left';
-    let originY = 'top';
-
-    if (side === 'bottom' || side === 'top') {
-      top = side === 'bottom' ? rect.bottom + offset : rect.top - offset - ph;
-      originY = side === 'bottom' ? 'top' : 'bottom';
-      if (align === 'start') {
-        left = rect.left;
-        originX = 'left';
-      } else if (align === 'center') {
-        left = rect.left + rect.width / 2 - pw / 2;
-        originX = 'center';
-      } else {
-        left = rect.right - pw;
-        originX = 'right';
-      }
-    } else {
-      left = side === 'right' ? rect.right + offset : rect.left - offset - pw;
-      originX = side === 'right' ? 'left' : 'right';
-      top = rect.top;
-      originY = 'top';
-    }
-
-    setPos({
-      top: Math.max(margin, Math.min(Math.max(margin, vh - ph - margin), top)),
-      left: Math.max(margin, Math.min(Math.max(margin, vw - pw - margin), left)),
-      transformOrigin: `${originY} ${originX}`,
-    });
-  }, [anchorEl, anchorPoint, placement, offset]);
-
-  useLayoutEffect(() => {
-    if (!rendered) {
-      setPos(null);
-      return;
-    }
-    computePosition();
-    const raf = requestAnimationFrame(computePosition);
-    let ro: ResizeObserver | null = null;
-    if (panelRef.current && typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(computePosition);
-      ro.observe(panelRef.current);
-    }
-    window.addEventListener('resize', computePosition);
-    window.addEventListener('scroll', computePosition, true);
-    return () => {
-      cancelAnimationFrame(raf);
-      ro?.disconnect();
-      window.removeEventListener('resize', computePosition);
-      window.removeEventListener('scroll', computePosition, true);
-    };
-  }, [rendered, computePosition]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (e: MouseEvent) => {
-      const target = e.target as Node | null;
-      if (!target) return;
-      if (panelRef.current?.contains(target)) return;
-      if (anchorEl?.contains(target)) return;
-      onOpenChange(false);
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-        onOpenChange(false);
-      }
-    };
-    document.addEventListener('mousedown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown, true);
-    };
-  }, [open, anchorEl, onOpenChange]);
-
-  if (!rendered || typeof document === 'undefined') return null;
-
-  return createPortal(
-    <div
-      ref={panelRef}
-      role="dialog"
-      data-charkle-popover-open={open ? 'true' : undefined}
-      data-closing={closing ? 'true' : undefined}
-      data-no-lens="true"
-      onMouseDown={(e) => e.stopPropagation()}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.stopPropagation()}
-      className={[
-        'fixed z-[120] rounded-[var(--radius-popover-outer)] charkle-popover-panel charkle-scroll overflow-y-auto',
-        glass
-          ? 'charkle-glass'
-          : 'bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-xl',
-        className,
-      ].join(' ')}
-      style={{
-        top: pos ? pos.top : -9999,
-        left: pos ? pos.left : -9999,
-        maxHeight: 'calc(100vh - 20px)',
-        visibility: pos ? 'visible' : 'hidden',
-        transformOrigin: pos?.transformOrigin ?? 'top left',
+  return (
+    <BasePopover.Root
+      open={open}
+      modal={false}
+      onOpenChange={(nextOpen, details) => {
+        if (
+          !nextOpen &&
+          !trigger &&
+          details.reason === 'outside-press' &&
+          anchorEl &&
+          details.event?.target instanceof Node &&
+          anchorEl.contains(details.event.target)
+        ) {
+          details.cancel();
+          return;
+        }
+        onOpenChange(nextOpen);
       }}
     >
-      {children}
-    </div>,
-    document.body,
+      {trigger && <BasePopover.Trigger render={trigger} />}
+      <BasePopover.Portal>
+        <BasePopover.Positioner
+          anchor={anchor}
+          side={side}
+          align={align}
+          sideOffset={anchorPoint ? 2 : offset}
+          collisionPadding={10}
+          positionMethod="fixed"
+          className="z-[120] outline-none"
+        >
+          <BasePopover.Popup
+            role="dialog"
+            data-charkle-popover-open={open ? 'true' : undefined}
+            className={[
+              'win-flyout-popup rounded-[var(--win-radius-overlay)] charkle-scroll overflow-y-auto outline-none',
+              'max-h-[calc(100vh-20px)]',
+              glass
+                ? 'win-acrylic'
+                : 'bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_8px_24px_rgba(0,0,0,0.16)]',
+              className,
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            {...stopPopoverPropagation}
+          >
+            {children}
+          </BasePopover.Popup>
+        </BasePopover.Positioner>
+      </BasePopover.Portal>
+    </BasePopover.Root>
   );
 };
 
@@ -236,7 +153,7 @@ export interface PopconfirmProps {
 }
 
 /**
- * In-place Popconfirm for single irreversible actions (DESIGN.md §7.3).
+ * In-place Fluent 2 Popconfirm for single irreversible actions.
  */
 export const Popconfirm: React.FC<PopconfirmProps> = ({
   open,
@@ -252,34 +169,30 @@ export const Popconfirm: React.FC<PopconfirmProps> = ({
     onOpenChange={onOpenChange}
     anchorEl={anchorEl}
     placement="bottom-end"
-    className="w-[248px] p-3"
+    className="w-[256px] p-3.5"
   >
-    <div className="text-[13px] font-semibold text-[var(--text-primary)] charkle-heading">
+    <div className="text-[13px] leading-[18px] font-semibold text-[var(--text-primary)] charkle-heading">
       {title}
     </div>
     {description && (
-      <p className="mt-1 text-[12px] text-[var(--text-secondary)] leading-relaxed charkle-prose">
+      <p className="mt-1 text-[12px] leading-[16px] text-[var(--text-secondary)] charkle-prose">
         {description}
       </p>
     )}
     <div className="mt-3 flex items-center justify-end gap-1.5">
-      <button
-        type="button"
-        onClick={() => onOpenChange(false)}
-        className="charkle-pressable h-7 px-2.5 text-[12px] font-medium rounded-[var(--radius-chip)] bg-[var(--bg-subtle)] text-[var(--text-primary)] cursor-pointer"
-      >
+      <Button variant="standard" size="xs" onClick={() => onOpenChange(false)}>
         取消
-      </button>
-      <button
-        type="button"
+      </Button>
+      <Button
+        variant="danger"
+        size="xs"
         onClick={() => {
           onOpenChange(false);
           onConfirm();
         }}
-        className="charkle-pressable h-7 px-2.5 text-[12px] font-medium rounded-[var(--radius-chip)] bg-[var(--danger)] text-white cursor-pointer"
       >
         {confirmLabel}
-      </button>
+      </Button>
     </div>
   </Popover>
 );

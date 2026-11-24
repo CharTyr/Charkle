@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import {
-  ArrowUpRight,
-  Copy,
-  Palette,
-  RefreshCw,
-  ScanText,
-  Search,
-  Sparkles,
-} from 'lucide-react';
+  ArrowSync16Regular,
+  Color16Regular,
+  Copy16Regular,
+  Open16Regular,
+  ScanText16Regular,
+  Search16Regular,
+  Sparkle16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { CharkleSlider, CustomSelect, SegmentedControl } from '../../design-system';
 import { useCoordinatorStore, useSyncAIStore } from '../../stores';
@@ -378,21 +378,21 @@ export const AISettingsPane: React.FC = () => {
   };
 
   return (
-    <div data-testid="settings-pane-ai" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-ai" className="flex flex-col gap-5">
       {/* 1. Built-in Offline Capabilities Strip */}
       <SettingsSection title="基础离线能力" caption="全部免费内置 · 无需下载 · 数据不出本机">
         <div className="px-3.5 py-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
           {(
             [
-              { icon: <Palette size={12.5} />, label: '自动配色提取' },
-              { icon: <Sparkles size={12.5} />, label: '视觉相似推荐' },
-              { icon: <ScanText size={12.5} />, label: '图内文字 OCR' },
-              { icon: <Search size={12.5} />, label: '中文与拼音快搜' },
+              { icon: <Color16Regular className="w-3.5 h-3.5" />, label: '自动配色提取' },
+              { icon: <Sparkle16Regular className="w-3.5 h-3.5" />, label: '视觉相似推荐' },
+              { icon: <ScanText16Regular className="w-3.5 h-3.5" />, label: '图内文字 OCR' },
+              { icon: <Search16Regular className="w-3.5 h-3.5" />, label: '中文与拼音快搜' },
             ] as const
           ).map((badge) => (
             <div
               key={badge.label}
-              className="rounded-[7px] bg-[var(--settings-subtle)] px-2.5 py-1.5 flex items-center justify-center gap-1.5 text-[11.5px] font-medium text-[var(--text-primary)]/88"
+              className="rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] px-2.5 py-1.5 flex items-center justify-center gap-1.5 text-[12px] font-medium text-[var(--text-primary)]"
             >
               <span className="text-[var(--settings-positive)] shrink-0">{badge.icon}</span>
               <span className="truncate">{badge.label}</span>
@@ -411,7 +411,7 @@ export const AISettingsPane: React.FC = () => {
               subtitleTone={aiDraft.provider === 'disabled' ? 'default' : 'warning'}
             >
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 onClick={() => {
                   if (aiDraft.provider === 'disabled' || aiDraft.provider === 'chatGPTSubscription') {
                     setAiDraft(applySmartAIDefaults(aiDraft, 'gemini', aiDraft.customEndpointFormat));
@@ -424,7 +424,7 @@ export const AISettingsPane: React.FC = () => {
                 Gemini / 自定义 API…
               </SettingsButton>
               <SettingsButton
-                variant="primary"
+                variant="accent"
                 loading={signingInChatgpt}
                 onClick={async () => {
                   const reconsent = session.status === 'connected' && !session.sharingEnabled;
@@ -461,20 +461,19 @@ export const AISettingsPane: React.FC = () => {
             subtitleTone="positive"
           >
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               loading={testingAi}
               onClick={async () => {
                 setAiTestRes(await testAiConnection());
               }}
             >
-              <RefreshCw
-                size={12}
-                className={testingAi ? 'animate-spin motion-reduce:animate-none' : ''}
+              <ArrowSync16Regular
+                className={`w-3.5 h-3.5 shrink-0 ${testingAi ? 'animate-spin motion-reduce:animate-none' : ''}`}
               />
               {testingAi ? '测试中…' : '测试连接'}
             </SettingsButton>
             <SettingsButton
-              variant="primary"
+              variant="accent"
               onClick={() => {
                 setApiKeyInput('');
                 setAiTestRes(null);
@@ -490,7 +489,7 @@ export const AISettingsPane: React.FC = () => {
           <div
             data-testid="ai-test-result"
             className={[
-              'mx-4 mb-3 text-[11.5px] px-3 py-2 rounded-[9px] border',
+              'mx-4 mb-3 text-[12px] px-3 py-2 rounded-[var(--win-radius-control)] border',
               aiTestRes.ok
                 ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
                 : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
@@ -694,7 +693,7 @@ export const AISettingsPane: React.FC = () => {
         />
 
         {aiDraft.provider === 'disabled' && (
-          <div className="rounded-[9px] bg-[var(--settings-subtle)] p-3 text-[12px] text-[var(--text-secondary)] leading-relaxed">
+          <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] p-3 text-[12px] text-[var(--text-secondary)] leading-relaxed">
             关闭云端 AI 后，Charkle 仍会使用本机离线引擎完成配色提取、OCR 文字识别、相似推荐与拼音搜索。
           </div>
         )}
@@ -703,9 +702,9 @@ export const AISettingsPane: React.FC = () => {
           <div className="flex flex-col gap-3">
             {session.status === 'connected' ? (
               <>
-                <div className="rounded-[10px] bg-[var(--settings-subtle)] p-3 flex items-center justify-between gap-3">
+                <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] p-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
-                    <span className="h-9 w-9 rounded-full bg-[var(--settings-card)] inline-flex items-center justify-center shrink-0">
+                    <span className="h-9 w-9 rounded-full bg-[var(--settings-card)] border border-[var(--win-stroke-card)] inline-flex items-center justify-center shrink-0">
                       <ChatGPTBrandMark size={18} />
                     </span>
                     <div className="min-w-0">
@@ -728,14 +727,14 @@ export const AISettingsPane: React.FC = () => {
                   <div className="flex items-center gap-1.5 shrink-0">
                     {session.sharingEnabled ? (
                       <SettingsButton
-                        variant="secondary"
+                        variant="standard"
                         onClick={() => void getTransport().openExternalUrl(CHATGPT_USAGE_URL)}
                       >
                         管理用量
                       </SettingsButton>
                     ) : (
                       <SettingsButton
-                        variant="primary"
+                        variant="accent"
                         loading={signingInChatgpt}
                         onClick={() => void signInChatgpt(true, false)}
                       >
@@ -743,7 +742,7 @@ export const AISettingsPane: React.FC = () => {
                       </SettingsButton>
                     )}
                     <SettingsButton
-                      variant="destructive"
+                      variant="danger"
                       onClick={() => void disconnectChatgpt()}
                     >
                       退出
@@ -770,7 +769,7 @@ export const AISettingsPane: React.FC = () => {
                         type="button"
                         disabled={signingInChatgpt}
                         onClick={() => void signInChatgpt(false, true)}
-                        className="text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer disabled:opacity-45"
+                        className="text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer disabled:opacity-45"
                       >
                         切换其他 ChatGPT 账号…
                       </button>
@@ -779,7 +778,7 @@ export const AISettingsPane: React.FC = () => {
                 )}
               </>
             ) : (
-              <div className="rounded-[10px] bg-[var(--settings-subtle)] p-3 flex items-center justify-between gap-3">
+              <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] p-3 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
                   <ChatGPTBrandMark size={20} />
                   <div className="min-w-0">
@@ -794,7 +793,7 @@ export const AISettingsPane: React.FC = () => {
                   </div>
                 </div>
                 <SettingsButton
-                  variant="primary"
+                  variant="accent"
                   loading={signingInChatgpt}
                   onClick={() => void signInChatgpt(false, false)}
                 >
@@ -815,10 +814,10 @@ export const AISettingsPane: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => void getTransport().openExternalUrl(GEMINI_KEY_URL)}
-                  className="text-[11px] font-medium text-[var(--accent)] hover:underline inline-flex items-center gap-0.5 cursor-pointer"
+                  className="text-[11.5px] font-medium text-[var(--accent)] hover:underline inline-flex items-center gap-0.5 cursor-pointer"
                 >
                   <span>前往 Google AI Studio 获取</span>
-                  <ArrowUpRight size={10} />
+                  <Open16Regular className="w-3 h-3 shrink-0" />
                 </button>
               </div>
               <div className="flex gap-2">
@@ -1000,7 +999,7 @@ export const AISettingsPane: React.FC = () => {
           <div
             data-testid="ai-test-result"
             className={[
-              'text-[11.5px] px-3 py-2 rounded-[9px] border',
+              'text-[12px] px-3 py-2 rounded-[var(--win-radius-control)] border',
               aiTestRes.ok
                 ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
                 : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
@@ -1022,24 +1021,24 @@ export const AISettingsPane: React.FC = () => {
           <button
             type="button"
             onClick={() => void getTransport().openExternalUrl(TYPESAFE_HOME_URL)}
-            className="text-[11.5px] font-medium text-[var(--accent)] hover:underline inline-flex items-center gap-0.5 cursor-pointer"
+            className="text-[12px] font-medium text-[var(--accent)] hover:underline inline-flex items-center gap-0.5 cursor-pointer"
           >
             <span>获取密钥</span>
-            <ArrowUpRight size={10.5} />
+            <Open16Regular className="w-3 h-3 shrink-0" />
           </button>
         }
         width="md"
         footer={
           <>
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               disabled={savingTs || testingTypesafe}
               onClick={closeTypeSafeModal}
             >
               取消
             </SettingsButton>
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               loading={testingTypesafe}
               disabled={savingTs || isTsBaseUrlInvalid}
               onClick={async () => {
@@ -1056,7 +1055,7 @@ export const AISettingsPane: React.FC = () => {
               {testingTypesafe ? '测试中…' : '测试连接'}
             </SettingsButton>
             <SettingsButton
-              variant="primary"
+              variant="accent"
               loading={savingTs}
               disabled={testingTypesafe || isTsBaseUrlInvalid}
               onClick={async () => {
@@ -1096,7 +1095,7 @@ export const AISettingsPane: React.FC = () => {
             />
             {hasTypeSafeKey && (
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 onClick={() => void saveTypesafeConfig(tsDraft, { clearApiKey: true, quiet: true })}
               >
                 清除
@@ -1152,7 +1151,7 @@ export const AISettingsPane: React.FC = () => {
           </div>
         </div>
 
-        <div className="rounded-[10px] bg-[var(--settings-subtle)] border border-[var(--settings-border)] overflow-hidden max-h-[240px] overflow-y-auto charkle-scroll">
+        <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)] overflow-hidden max-h-[240px] overflow-y-auto charkle-scroll">
           {(
             [
               {
@@ -1211,7 +1210,7 @@ export const AISettingsPane: React.FC = () => {
                   <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
                     {item.title}
                   </div>
-                  <div className="text-[11px] text-[var(--text-secondary)]">{item.subtitle}</div>
+                  <div className="text-[11.5px] text-[var(--text-secondary)]">{item.subtitle}</div>
                 </div>
                 <SettingsSwitch
                   checked={item.checked}
@@ -1245,7 +1244,7 @@ export const AISettingsPane: React.FC = () => {
         {tsTestRes && (
           <div
             className={[
-              'text-[11.5px] px-3 py-2 rounded-[9px] border',
+              'text-[12px] px-3 py-2 rounded-[var(--win-radius-control)] border',
               tsTestRes.ok
                 ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
                 : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
@@ -1264,14 +1263,14 @@ export const AISettingsPane: React.FC = () => {
         subtitle="记录保存于本机，分别统计普通云端模型与视觉定位引擎的调用消耗。"
         headerRight={
           allTotalRequests > 0 ? (
-            <SettingsButton variant="destructive" onClick={() => void resetAiUsage(null)}>
+            <SettingsButton variant="danger" onClick={() => void resetAiUsage(null)}>
               全部清零
             </SettingsButton>
           ) : undefined
         }
         width="md"
         footer={
-          <SettingsButton variant="primary" onClick={() => setShowUsageModal(false)}>
+          <SettingsButton variant="accent" onClick={() => setShowUsageModal(false)}>
             完成
           </SettingsButton>
         }
@@ -1302,51 +1301,51 @@ const UsageBucketCard: React.FC<{
   emptyHint: string;
   onReset: () => void;
 }> = ({ title, subtitle, bucket, emptyHint, onReset }) => (
-  <div className="rounded-[10px] bg-[var(--settings-subtle)] border border-[var(--settings-border)] p-3 flex flex-col gap-2.5">
+  <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-card)] p-3.5 flex flex-col gap-2.5">
     <div className="flex items-center justify-between gap-2">
       <div className="min-w-0">
-        <div className="text-[12.5px] font-semibold text-[var(--text-primary)]">{title}</div>
-        <div className="text-[11px] text-[var(--text-secondary)]">{subtitle}</div>
+        <div className="text-[13px] font-semibold text-[var(--text-primary)]">{title}</div>
+        <div className="text-[11.5px] text-[var(--text-secondary)]">{subtitle}</div>
       </div>
       {(bucket?.totalRequests ?? 0) > 0 && (
-        <SettingsButton variant="secondary" onClick={onReset}>
+        <SettingsButton variant="standard" size="xs" onClick={onReset}>
           清零
         </SettingsButton>
       )}
     </div>
 
     <div className="grid grid-cols-3 gap-2">
-      <div className="rounded-[8px] bg-[var(--settings-card)] p-2.5">
-        <div className="text-[10.5px] font-medium text-[var(--text-secondary)]">今日调用</div>
+      <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-card)] border border-[var(--win-stroke-divider)] p-2.5">
+        <div className="text-[11px] font-medium text-[var(--text-secondary)]">今日调用</div>
         <div className="text-[14px] font-semibold text-[var(--text-primary)] charkle-tabular mt-0.5">
           {bucket?.todayRequests ?? 0} 次
         </div>
-        <div className="text-[10px] text-[var(--text-tertiary)] charkle-tabular truncate">
+        <div className="text-[10.5px] text-[var(--text-tertiary)] charkle-tabular truncate">
           Token {formatTokenCount(bucket?.todayTotalTokens ?? 0)}
         </div>
       </div>
-      <div className="rounded-[8px] bg-[var(--settings-card)] p-2.5">
-        <div className="text-[10.5px] font-medium text-[var(--text-secondary)]">累计调用</div>
+      <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-card)] border border-[var(--win-stroke-divider)] p-2.5">
+        <div className="text-[11px] font-medium text-[var(--text-secondary)]">累计调用</div>
         <div className="text-[14px] font-semibold text-[var(--text-primary)] charkle-tabular mt-0.5">
           {bucket?.totalRequests ?? 0} 次
         </div>
-        <div className="text-[10px] text-[var(--text-tertiary)] truncate">
+        <div className="text-[10.5px] text-[var(--text-tertiary)] truncate">
           {bucket?.lastModel || '尚未调用'}
         </div>
       </div>
-      <div className="rounded-[8px] bg-[var(--settings-card)] p-2.5">
-        <div className="text-[10.5px] font-medium text-[var(--text-secondary)]">累计 Token</div>
+      <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-card)] border border-[var(--win-stroke-divider)] p-2.5">
+        <div className="text-[11px] font-medium text-[var(--text-secondary)]">累计 Token</div>
         <div className="text-[14px] font-semibold text-[var(--text-primary)] charkle-tabular mt-0.5">
           {formatTokenCount(bucket?.totalTokens ?? 0)}
         </div>
-        <div className="text-[10px] text-[var(--text-tertiary)] charkle-tabular truncate">
+        <div className="text-[10.5px] text-[var(--text-tertiary)] charkle-tabular truncate">
           入 {formatTokenCount(bucket?.totalInputTokens ?? 0)} / 出{' '}
           {formatTokenCount(bucket?.totalOutputTokens ?? 0)}
         </div>
       </div>
     </div>
 
-    <div className="text-[10.5px] text-[var(--text-tertiary)]">
+    <div className="text-[11px] text-[var(--text-tertiary)]">
       {bucket?.lastUsedAt
         ? `最近调用：${bucket.lastProviderLabel || title}${bucket.lastModel ? ` (${bucket.lastModel})` : ''} · ${relativeTimeText(bucket.lastUsedAt)}`
         : emptyHint}
@@ -1421,7 +1420,7 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
   };
 
   return (
-    <div data-testid="settings-pane-externalAgents" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-externalAgents" className="flex flex-col gap-5">
       {/* 1. Service Switches & Safety Boundary */}
       <SettingsSection title="服务开关与安全边界">
         <SettingsRow
@@ -1542,7 +1541,7 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
           subtitle="在终端执行一行命令即可将 Charkle 注册为原生 MCP 工具"
         >
           <SettingsButton
-            variant="primary"
+            variant="accent"
             onClick={() => void copyText(claudeCodeCmd, '已复制 Claude Code 接入命令')}
           >
             一键复制命令
@@ -1565,10 +1564,10 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
           subtitle="复制标准 MCP JSON 配置粘贴至对应客户端的配置文件"
         >
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             onClick={() => void copyText(mcpJson, '已复制 MCP JSON 配置')}
           >
-            <Copy size={12} />
+            <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
             复制 JSON 配置
           </SettingsButton>
         </SettingsRow>
@@ -1586,13 +1585,13 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
       >
         <SettingsRow
           title="本机命令行程序路径"
-          subtitle={<span className="font-mono text-[11px] break-all">{helperPath}</span>}
+          subtitle={<span className="charkle-mono text-[11px] break-all">{helperPath}</span>}
         >
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             onClick={() => void copyText(helperPath, '已复制 charkle 可执行文件路径')}
           >
-            <Copy size={12} />
+            <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
             复制路径
           </SettingsButton>
         </SettingsRow>

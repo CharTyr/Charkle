@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
-import { ExternalLink, RefreshCw } from 'lucide-react';
+import { ArrowSync16Regular, Open16Regular } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
-import { getGitHubLanguageColor } from '../../design-system';
+import { Button, getGitHubLanguageColor } from '../../design-system';
 import { useCoordinatorStore, useLibraryStore } from '../../stores';
 import type { AssetRecord } from '../../types/domain';
 
@@ -79,20 +79,20 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
     <div
       data-testid="quicklook-github-viewer"
       onClick={(e) => e.stopPropagation()}
-      className="w-full max-w-[760px] max-h-[82vh] mx-auto rounded-[18px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden"
+      className="w-full max-w-[760px] max-h-[82vh] mx-auto rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden"
     >
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-6 flex flex-col gap-4">
-        {/* Header: Owner Avatar + owner / repo + Actions (1:1 macOS QuickLookGitHubRepoCard) */}
+        {/* Header: Owner Avatar + owner / repo + Actions */}
         <div className="flex items-center gap-3">
           {avatarUrl && !avatarFailed ? (
             <img
               src={avatarUrl}
               alt={repo.owner}
               onError={() => setAvatarFailed(true)}
-              className="w-9 h-9 rounded-[8px] object-cover shrink-0 bg-[var(--bg-subtle)]"
+              className="w-9 h-9 rounded-[var(--win-radius-card)] object-cover shrink-0 bg-[var(--bg-subtle)]"
             />
           ) : (
-            <div className="w-9 h-9 rounded-[8px] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center text-[16px] font-bold shrink-0">
+            <div className="w-9 h-9 rounded-[var(--win-radius-card)] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center text-[16px] font-bold shrink-0">
               {repo.owner.slice(0, 1).toUpperCase()}
             </div>
           )}
@@ -105,9 +105,11 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
 
           <span className="flex-1" />
 
-          <button
-            type="button"
+          <Button
+            variant="standard"
+            size="icon"
             disabled={refreshing}
+            aria-label="重新同步仓库星标与 README"
             title="重新同步仓库星标与 README"
             onClick={async () => {
               setRefreshing(true);
@@ -122,19 +124,20 @@ export const GitHubRepoViewer: React.FC<GitHubRepoViewerProps> = ({ asset }) => 
                 setRefreshing(false);
               }
             }}
-            className="charkle-pressable w-7 h-7 rounded-full bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[var(--text-primary)] inline-flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-50"
+            className="h-7 w-7 shrink-0"
           >
-            <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
-          </button>
+            <ArrowSync16Regular className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          </Button>
 
-          <button
-            type="button"
+          <Button
+            variant="standard"
+            size="xs"
             onClick={() => openSafeExternal(repoUrl)}
-            className="charkle-pressable inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[12px] font-semibold text-[var(--text-primary)] shrink-0 cursor-pointer"
+            className="shrink-0"
           >
-            <ExternalLink size={12} />
+            <Open16Regular className="w-3.5 h-3.5" />
             <span>GitHub</span>
-          </button>
+          </Button>
         </div>
 
         {/* Description */}

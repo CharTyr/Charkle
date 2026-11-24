@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
-import { Copy } from 'lucide-react';
+import { Copy16Regular } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { Button } from '../../design-system';
 import { useCoordinatorStore } from '../../stores';
@@ -77,11 +77,11 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
     <div
       data-testid="quicklook-document-viewer"
       onClick={(e) => e.stopPropagation()}
-      className="w-full max-w-[740px] max-h-[78vh] mx-auto rounded-[18px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_24px_60px_rgba(0,0,0,0.40)] flex flex-col overflow-hidden"
+      className="w-full max-w-[740px] max-h-[78vh] mx-auto rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.40)] flex flex-col overflow-hidden"
     >
-      <div className="px-6 py-4 border-b border-[var(--border-hairline)] flex items-center justify-between gap-3 shrink-0">
+      <div className="px-6 py-4 border-b border-[var(--win-stroke-divider)] flex items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
-          <span className="px-2 py-1 rounded-[6px] bg-[var(--bg-subtle)] text-[11px] font-bold charkle-mono text-[var(--text-primary)] shrink-0">
+          <span className="px-2 py-1 rounded-[var(--win-radius-control)] bg-[var(--bg-subtle)] text-[11px] font-bold charkle-mono text-[var(--text-primary)] shrink-0">
             {extensionBadge(asset.fileName)}
           </span>
           <span className="text-[16px] font-semibold text-[var(--text-primary)] truncate">
@@ -92,7 +92,7 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
         <div className="flex items-center gap-2 shrink-0">
           {isMarkdown && (
             <Button
-              variant="secondary"
+              variant="standard"
               size="xs"
               onClick={() => setShowRawSource((v) => !v)}
             >
@@ -100,7 +100,7 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
             </Button>
           )}
           <Button
-            variant="secondary"
+            variant="standard"
             size="xs"
             onClick={() => {
               if (!navigator.clipboard?.writeText) {
@@ -117,7 +117,7 @@ export const DocumentMarkdownViewer: React.FC<DocumentMarkdownViewerProps> = ({ 
                 });
             }}
           >
-            <Copy size={12} />
+            <Copy16Regular className="w-3.5 h-3.5" />
             复制全文
           </Button>
         </div>

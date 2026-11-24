@@ -1,19 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Camera,
-  CornerDownLeft,
-  Folder,
-  Hash,
-  Image as ImageIcon,
-  Inbox,
-  LayoutGrid,
-  PanelTop,
-  Search,
-  Settings,
-  Sparkles,
-  XCircle,
-} from 'lucide-react';
+  ArrowEnter16Regular,
+  Board16Filled,
+  Board16Regular,
+  DismissCircle16Regular,
+  Folder16Filled,
+  Folder16Regular,
+  Image16Filled,
+  Image16Regular,
+  MailInbox16Filled,
+  MailInbox16Regular,
+  Screenshot20Filled,
+  Screenshot20Regular,
+  Search20Regular,
+  Settings16Filled,
+  Settings16Regular,
+  Sparkle16Filled,
+  Sparkle16Regular,
+  Tag16Filled,
+  Tag16Regular,
+  WindowHeaderHorizontal20Filled,
+  WindowHeaderHorizontal20Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import {
   isPlainWebBookmark,
@@ -51,39 +60,42 @@ const KIND_LABEL: Record<QuickJumpKind, string> = {
 };
 
 const KindIcon: React.FC<{ kind: QuickJumpKind; active: boolean }> = ({ kind, active }) => {
-  const cls = active ? 'text-[var(--accent)] shrink-0' : 'text-[var(--text-secondary)] shrink-0';
+  const cls = active ? 'w-4 h-4 text-[var(--accent)] shrink-0' : 'w-4 h-4 text-[var(--text-secondary)] shrink-0';
   switch (kind) {
     case 'folder':
-      return <Folder size={15} className={cls} />;
+      return active ? <Folder16Filled className={cls} /> : <Folder16Regular className={cls} />;
     case 'moodboard':
-      return <LayoutGrid size={15} className={cls} />;
+      return active ? <Board16Filled className={cls} /> : <Board16Regular className={cls} />;
     case 'tag':
-      return <Hash size={15} className={cls} />;
+      return active ? <Tag16Filled className={cls} /> : <Tag16Regular className={cls} />;
     case 'asset':
-      return <ImageIcon size={15} className={cls} />;
+      return active ? <Image16Filled className={cls} /> : <Image16Regular className={cls} />;
   }
 };
 
 const CommandIcon: React.FC<{ id: QuickCommandId; active: boolean }> = ({ id, active }) => {
-  const cls = active ? 'text-[var(--accent)] shrink-0' : 'text-[var(--text-secondary)] shrink-0';
+  const cls = active ? 'w-4 h-4 text-[var(--accent)] shrink-0' : 'w-4 h-4 text-[var(--text-secondary)] shrink-0';
   switch (id) {
     case 'newMoodboard':
-      return <Sparkles size={15} className={cls} />;
+      return active ? <Sparkle16Filled className={cls} /> : <Sparkle16Regular className={cls} />;
     case 'openInbox':
-      return <Inbox size={15} className={cls} />;
+      return active ? <MailInbox16Filled className={cls} /> : <MailInbox16Regular className={cls} />;
     case 'toggleShelf':
-      return <PanelTop size={15} className={cls} />;
+      return active ? (
+        <WindowHeaderHorizontal20Filled className={cls} />
+      ) : (
+        <WindowHeaderHorizontal20Regular className={cls} />
+      );
     case 'captureArea':
-      return <Camera size={15} className={cls} />;
+      return active ? <Screenshot20Filled className={cls} /> : <Screenshot20Regular className={cls} />;
     case 'openSettings':
-      return <Settings size={15} className={cls} />;
+      return active ? <Settings16Filled className={cls} /> : <Settings16Regular className={cls} />;
   }
 };
 
 /**
- * 0ms instant Jump Anywhere Spotlight command palette (Ctrl+J / Ctrl+K),
- * 1:1 faithful to macOS `JumpAnywhereView.swift`.
- * Renders above Quick Look (`z-[210]`) with zero sluggish entrance delay.
+ * Strictly 0ms instant Jump Anywhere command palette (Ctrl+J / Ctrl+K).
+ * Renders above Quick Look (`z-[210]`) with Fluent 2 `.win-acrylic` surface and zero entrance/exit delay.
  */
 export const JumpAnywhereModal: React.FC = () => {
   const open = useCoordinatorStore((s) => s.jumpOpen);
@@ -294,21 +306,19 @@ export const JumpAnywhereModal: React.FC = () => {
       onDoubleClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
     >
-      {/* 0ms instant backdrop */}
+      {/* 0ms instant smoke scrim */}
       <div
-        className="fixed inset-0"
-        style={{ background: 'var(--modal-scrim)' }}
+        className="win-smoke-scrim fixed inset-0"
         onClick={() => setOpen(false)}
       />
 
       <div
         data-testid="jump-anywhere-modal"
-        data-no-lens="true"
-        className="relative z-10 w-full max-w-[580px] rounded-[var(--radius-popover-outer)] charkle-glass charkle-command-palette border border-[var(--border-hairline)] shadow-[0_24px_64px_rgba(0,0,0,0.24)] overflow-hidden flex flex-col"
+        className="relative z-10 w-full max-w-[580px] rounded-[var(--win-radius-dialog)] win-acrylic border border-[var(--win-stroke-flyout)] shadow-[var(--shadow-modal)] overflow-hidden flex flex-col"
       >
         {/* Search Header */}
-        <div className="flex items-center gap-2.5 px-4 h-[52px] border-b border-[var(--border-hairline)] shrink-0">
-          <Search size={17} className="text-[var(--text-secondary)] shrink-0" />
+        <div className="flex items-center gap-2.5 px-4 h-[52px] border-b border-[var(--win-stroke-divider)] shrink-0">
+          <Search20Regular className="w-[18px] h-[18px] text-[var(--text-secondary)] shrink-0" />
           <input
             ref={inputRef}
             type="text"
@@ -336,7 +346,7 @@ export const JumpAnywhereModal: React.FC = () => {
             }}
             placeholder="快速跳转情绪板、文件夹、标签或素材（支持拼音）…"
             aria-label="快速跳转搜索框"
-            className="flex-1 bg-transparent text-[15px] font-medium text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/75 outline-none"
+            className="flex-1 bg-transparent text-[14.5px] font-medium text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
           />
           {query && (
             <button
@@ -346,21 +356,21 @@ export const JumpAnywhereModal: React.FC = () => {
                 inputRef.current?.focus();
               }}
               aria-label="清空搜索"
-              className="charkle-pressable text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] cursor-pointer"
+              className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] cursor-pointer inline-flex items-center justify-center"
             >
-              <XCircle size={15} />
+              <DismissCircle16Regular className="w-4 h-4" />
             </button>
           )}
-          <kbd className="text-[10px] font-semibold charkle-mono px-1.5 py-0.5 rounded-[5px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-secondary)] shrink-0">
+          <kbd className="win-control-elevation text-[10.5px] font-medium charkle-mono px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] text-[var(--text-secondary)] shrink-0">
             ESC
           </kbd>
         </div>
 
-        {/* Results */}
+        {/* Results (strictly 0ms instant selection highlight) */}
         <div className="max-h-[360px] overflow-y-auto charkle-scroll py-1.5 px-1.5 flex flex-col gap-0.5">
           {!trimmedQuery ? (
             <>
-              <div className="px-3 pt-1.5 pb-1 text-[10.5px] font-semibold text-[var(--text-secondary)]">
+              <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-[var(--text-tertiary)]">
                 快捷操作
               </div>
               {QUICK_COMMANDS.map((cmd, idx) => {
@@ -375,22 +385,27 @@ export const JumpAnywhereModal: React.FC = () => {
                     onMouseEnter={() => setActiveIndex(idx)}
                     onClick={() => executeCommand(cmd.id)}
                     className={[
-                      'w-full flex items-center gap-2.5 px-3 py-2 rounded-[8px] text-left cursor-pointer transition-colors duration-100',
+                      'relative w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--win-radius-control)] text-left cursor-pointer',
                       active
-                        ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                        : 'text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+                        ? 'bg-[var(--win-subtle-active)] text-[var(--text-primary)] font-medium'
+                        : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)]',
                     ].join(' ')}
                   >
+                    {active && (
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-0 inset-y-0 my-auto w-[3px] h-4 rounded-full bg-[var(--accent)]"
+                      />
+                    )}
                     <CommandIcon id={cmd.id} active={active} />
-                    <span className="flex-1 text-[13px] font-medium truncate">{cmd.title}</span>
+                    <span className="flex-1 text-[13px] leading-[18px] truncate">{cmd.title}</span>
                     {cmd.shortcut && (
-                      <kbd className="text-[10px] font-medium charkle-mono px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)] text-[var(--text-secondary)] shrink-0">
+                      <kbd className="win-control-elevation text-[10.5px] font-medium charkle-mono px-1.5 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] text-[var(--text-secondary)] shrink-0">
                         {cmd.shortcut}
                       </kbd>
                     )}
-                    <CornerDownLeft
-                      size={12}
-                      className={`shrink-0 ${active ? 'opacity-80' : 'opacity-30'}`}
+                    <ArrowEnter16Regular
+                      className={`w-3.5 h-3.5 shrink-0 ${active ? 'text-[var(--accent)] opacity-90' : 'text-[var(--text-tertiary)] opacity-40'}`}
                     />
                   </button>
                 );
@@ -398,7 +413,7 @@ export const JumpAnywhereModal: React.FC = () => {
 
               {matches.length > 0 && (
                 <>
-                  <div className="px-3 pt-2.5 pb-1 text-[10.5px] font-semibold text-[var(--text-secondary)]">
+                  <div className="px-3 pt-2.5 pb-1 text-[11px] font-semibold text-[var(--text-tertiary)]">
                     快速跳转
                   </div>
                   {matches.slice(0, 8).map((match, mIdx) => {
@@ -414,22 +429,28 @@ export const JumpAnywhereModal: React.FC = () => {
                         onMouseEnter={() => setActiveIndex(idx)}
                         onClick={() => executeMatch(match)}
                         className={[
-                          'w-full flex items-center gap-2.5 px-3 py-2 rounded-[8px] text-left cursor-pointer transition-colors duration-100',
+                          'relative w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--win-radius-control)] text-left cursor-pointer',
                           active
-                            ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                            : 'text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+                            ? 'bg-[var(--win-subtle-active)] text-[var(--text-primary)] font-medium'
+                            : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)]',
                         ].join(' ')}
                       >
+                        {active && (
+                          <span
+                            aria-hidden="true"
+                            className="pointer-events-none absolute left-0 inset-y-0 my-auto w-[3px] h-4 rounded-full bg-[var(--accent)]"
+                          />
+                        )}
                         <KindIcon kind={match.kind} active={active} />
                         <div className="flex-1 min-w-0">
-                          <div className="text-[13px] font-medium truncate">{match.title}</div>
+                          <div className="text-[13px] leading-[18px] truncate">{match.title}</div>
                           {match.subtitle && (
-                            <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                            <div className="text-[11.5px] text-[var(--text-secondary)] truncate">
                               {match.subtitle}
                             </div>
                           )}
                         </div>
-                        <span className="text-[10.5px] font-medium px-2 py-0.5 rounded-full bg-[var(--bg-subtle)] text-[var(--text-secondary)] shrink-0">
+                        <span className="text-[11px] font-medium px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] border border-[var(--win-stroke-control)] text-[var(--text-secondary)] shrink-0">
                           {KIND_LABEL[match.kind]}
                         </span>
                       </button>
@@ -443,7 +464,7 @@ export const JumpAnywhereModal: React.FC = () => {
               <div className="text-[13px] font-medium text-[var(--text-secondary)]">
                 未找到与「{query}」匹配的内容
               </div>
-              <div className="text-[11.5px] text-[var(--text-tertiary)]">
+              <div className="text-[12px] text-[var(--text-tertiary)]">
                 试试搜索文件夹名、情绪板标题、标签或拼音首字母
               </div>
             </div>
@@ -460,25 +481,33 @@ export const JumpAnywhereModal: React.FC = () => {
                   onMouseEnter={() => setActiveIndex(idx)}
                   onClick={() => executeMatch(match)}
                   className={[
-                    'w-full flex items-center gap-2.5 px-3 py-2 rounded-[8px] text-left cursor-pointer transition-colors duration-100',
+                    'relative w-full flex items-center gap-2.5 px-3 py-2 rounded-[var(--win-radius-control)] text-left cursor-pointer',
                     active
-                      ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]',
+                      ? 'bg-[var(--win-subtle-active)] text-[var(--text-primary)] font-medium'
+                      : 'text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)]',
                   ].join(' ')}
                 >
+                  {active && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-0 inset-y-0 my-auto w-[3px] h-4 rounded-full bg-[var(--accent)]"
+                    />
+                  )}
                   <KindIcon kind={match.kind} active={active} />
                   <div className="flex-1 min-w-0">
-                    <div className="text-[13px] font-medium truncate">{match.title}</div>
+                    <div className="text-[13px] leading-[18px] truncate">{match.title}</div>
                     {match.subtitle && (
-                      <div className="text-[11px] text-[var(--text-secondary)] truncate">
+                      <div className="text-[11.5px] text-[var(--text-secondary)] truncate">
                         {match.subtitle}
                       </div>
                     )}
                   </div>
-                  <span className="text-[10.5px] font-medium px-2 py-0.5 rounded-full bg-[var(--bg-subtle)] text-[var(--text-secondary)] shrink-0">
+                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-[var(--win-radius-control)] bg-[var(--win-control-fill)] border border-[var(--win-stroke-control)] text-[var(--text-secondary)] shrink-0">
                     {KIND_LABEL[match.kind]}
                   </span>
-                  {active && <CornerDownLeft size={12} className="shrink-0 opacity-75" />}
+                  {active && (
+                    <ArrowEnter16Regular className="w-3.5 h-3.5 shrink-0 text-[var(--accent)] opacity-90" />
+                  )}
                 </button>
               );
             })

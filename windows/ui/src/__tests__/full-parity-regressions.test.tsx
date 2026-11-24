@@ -12,15 +12,10 @@ import {
 import {
   CharkleSlider,
   ErrorBoundary,
-  LENS_DEFAULTS,
-  adapt,
-  getGlassTintScale,
-  hexLuminance,
-  hexPerceivedLuma,
-  pickInk,
-  setGlassTintScale,
-  startLiquidGlassController,
-  tintFloor,
+  applyAccentToDocument,
+  contrastRatio,
+  deriveFluentAccentPalette,
+  relativeLuminance,
 } from '../design-system';
 import { AssetCard } from '../features/gallery/AssetCard';
 import { InspectorView } from '../features/inspector/InspectorView';
@@ -60,6 +55,7 @@ import {
 function resetAllStores() {
   useCoordinatorStore.setState({
     themeMode: 'light',
+    accentSource: 'studio',
     surfaceState: null,
     sidebarOpen: true,
     sidebarCollapsed: false,
@@ -338,10 +334,10 @@ describe('Full macOS Parity Regressions (Inspector, Onboarding, Gallery Glass, M
   });
 
   // -------------------------------------------------------------------------
-  // 3. Gallery Floating Liquid Glass (Zero Scroll-Fade Veil, Zero solidFallback Kill-Switch, ErrorBoundary)
+  // 3. Fluent 2 Gallery Sticky Header, Strict Solid Fallback & ErrorBoundary
   // -------------------------------------------------------------------------
 
-  it('renders floating .charkle-glass top capsules with zero .charkle-scroll-fade-top veil and no solidFallback glass kill-switch', async () => {
+  it('renders Fluent 2 gallery header with zero .charkle-scroll-fade-top veil, strict solidFallback backdrop-filter: none, and ErrorBoundary recovery', async () => {
     document.documentElement.dataset.backdrop = 'solidFallback';
     render(<App />);
 
@@ -351,20 +347,23 @@ describe('Full macOS Parity Regressions (Inspector, Onboarding, Gallery Glass, M
 
     const stage = screen.getByTestId('gallery-stage');
     expect(stage.querySelector('.charkle-scroll-fade-top')).toBeNull();
+    expect(stage.querySelector('.win-acrylic-header')).not.toBeNull();
+    expect(document.querySelector('.win-control-elevation')).not.toBeNull();
 
-    const glassCapsules = stage.querySelectorAll('.charkle-glass');
-    expect(glassCapsules.length).toBeGreaterThanOrEqual(4);
-
-    // Confirm tokens.css never kills .charkle-glass under data-backdrop="solidFallback"
+    // Confirm tokens.css defines Fluent 2 surfaces and strictly enforces backdrop-filter: none
+    // under both prefers-reduced-transparency: reduce and data-backdrop="solidFallback"
     const tokensCss = await loadTokensCss();
     expect(tokensCss.length).toBeGreaterThan(5000);
     expect(tokensCss).not.toMatch(/charkle-scroll-fade-top/);
-    expect(tokensCss).not.toMatch(/\[data-backdrop="solidFallback"\]\s+\.charkle-glass/);
-
-    // Confirm startLiquidGlassController starts cleanly even when data-backdrop="solidFallback"
-    const stopGlass = startLiquidGlassController({ rim: 34, edge: 1.1, power: 2.6, dispersion: 0.16 });
-    expect(typeof stopGlass).toBe('function');
-    stopGlass();
+    expect(tokensCss).toContain('.win-acrylic');
+    expect(tokensCss).toContain('.win-acrylic-header');
+    expect(tokensCss).toContain('.win-control-elevation');
+    expect(tokensCss).toMatch(
+      /@media\s*\(prefers-reduced-transparency:\s*reduce\)[\s\S]*?\.win-acrylic[\s\S]*?backdrop-filter:\s*none/,
+    );
+    expect(tokensCss).toMatch(
+      /:root\[data-backdrop="solidFallback"\]\s+\.win-acrylic\s*\{[\s\S]*?backdrop-filter:\s*none/,
+    );
 
     // Confirm ErrorBoundary catches runtime errors cleanly with recovery UI
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -612,14 +611,18 @@ describe('Full macOS Parity Regressions (Inspector, Onboarding, Gallery Glass, M
 
     const { rerender } = render(<ControlledSliderHarness />);
 
-    const slider = screen.getByTestId('test-glass-slider');
-    expect(slider).toHaveAttribute('role', 'slider');
-    expect(slider).toHaveAttribute('data-variant', 'glass');
-    expect(slider).toHaveAttribute('aria-valuenow', '200');
-    expect(slider).toHaveAttribute('aria-valuetext', '200 px');
+    const sliderRoot = screen.getByTestId('test-glass-slider');
+    const sliderInput = screen.getByRole('slider', { name: '测试缩放滑块' });
+    const sliderControl = sliderRoot.querySelector<HTMLElement>('.win-slider-control')!;
+    const sliderTrack = sliderRoot.querySelector<HTMLElement>('.win-slider-track')!;
+    expect(sliderRoot).toHaveAttribute('data-variant', 'glass');
+    expect(sliderRoot).toHaveAttribute('aria-valuenow', '200');
+    expect(sliderRoot).toHaveAttribute('aria-valuetext', '200 px');
+    expect(sliderInput).toHaveAttribute('aria-valuenow', '200');
+    expect(sliderInput).toHaveAttribute('aria-valuetext', '200 px');
 
-    // Mock bounding box (200px wide, starting at left=100; glass sm thumbHalf=9 -> usable=182px)
-    vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue({
+    // Mock bounding boxes (200px wide, starting at left=100)
+    const mockRect = {
       left: 100,
       top: 0,
       right: 300,
@@ -629,111 +632,137 @@ describe('Full macOS Parity Regressions (Inspector, Onboarding, Gallery Glass, M
       x: 100,
       y: 0,
       toJSON: () => ({}),
-    });
+    };
+    vi.spyOn(sliderRoot, 'getBoundingClientRect').mockReturnValue(mockRect);
+    vi.spyOn(sliderControl, 'getBoundingClientRect').mockReturnValue(mockRect);
+    vi.spyOn(sliderTrack, 'getBoundingClientRect').mockReturnValue(mockRect);
+    // jsdom omits Pointer Capture APIs used by @base-ui/react/slider during drag
+    sliderControl.setPointerCapture = vi.fn();
+    sliderControl.releasePointerCapture = vi.fn();
+    sliderControl.hasPointerCapture = vi.fn(() => true);
 
-    // Pointer drag toward the right edge updates value cleanly and commits on pointerUp
-    fireEvent.pointerDown(slider, { button: 0, pointerId: 1, clientX: 291 });
+    // Pointer drag toward the right & left edges updates value cleanly and commits on pointerUp
+    fireEvent.pointerDown(sliderControl, { button: 0, buttons: 1, pointerId: 1, clientX: 300 });
     expect(onChange).toHaveBeenCalledWith(400);
-    expect(slider).toHaveAttribute('aria-valuenow', '400');
-    fireEvent.pointerMove(slider, { pointerId: 1, clientX: 109 });
+    expect(sliderRoot).toHaveAttribute('aria-valuenow', '400');
+    fireEvent.pointerMove(sliderControl, { pointerId: 1, buttons: 1, clientX: 100 });
     expect(onChange).toHaveBeenCalledWith(100);
-    expect(slider).toHaveAttribute('aria-valuenow', '100');
-    fireEvent.pointerUp(slider, { pointerId: 1, clientX: 109 });
+    expect(sliderRoot).toHaveAttribute('aria-valuenow', '100');
+    fireEvent.pointerUp(sliderControl, { pointerId: 1, buttons: 0, clientX: 100 });
     expect(onChangeEnd).toHaveBeenCalledWith(100);
 
     // Keyboard stepping: ArrowRight (100 -> 110), End (400), ArrowLeft (390), Home (100)
     onChange.mockClear();
     onChangeEnd.mockClear();
-    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    fireEvent.keyDown(sliderRoot, { key: 'ArrowRight' });
     expect(onChange).toHaveBeenCalledWith(110);
     expect(onChangeEnd).toHaveBeenCalledWith(110);
 
-    fireEvent.keyDown(slider, { key: 'End' });
+    fireEvent.keyDown(sliderRoot, { key: 'End' });
     expect(onChange).toHaveBeenCalledWith(400);
 
-    fireEvent.keyDown(slider, { key: 'ArrowLeft' });
+    fireEvent.keyDown(sliderRoot, { key: 'ArrowLeft' });
     expect(onChange).toHaveBeenCalledWith(390);
 
-    fireEvent.keyDown(slider, { key: 'Home' });
+    fireEvent.keyDown(sliderRoot, { key: 'Home' });
     expect(onChange).toHaveBeenCalledWith(100);
 
     // Disabled state suppresses interactions
     onChange.mockClear();
     rerender(<ControlledSliderHarness disabled variant="standard" size="md" />);
-    expect(slider).toHaveAttribute('aria-disabled', 'true');
-    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    expect(sliderRoot).toHaveAttribute('aria-disabled', 'true');
+    expect(sliderInput).toBeDisabled();
+    fireEvent.keyDown(sliderRoot, { key: 'ArrowRight' });
     expect(onChange).not.toHaveBeenCalled();
 
-    // Gallery renders CharkleSlider (role="slider") and zero raw <input type="range">
+    // Gallery renders Fluent 2 CharkleSlider (role="slider") with zero unwrapped raw <input type="range">
     render(<App />);
     await waitFor(() => {
       expect(screen.getByTestId('gallery-stage')).toBeInTheDocument();
     });
-    expect(screen.getByRole('slider', { name: '卡片缩放尺寸' })).toBeInTheDocument();
-    expect(document.querySelectorAll('input[type="range"]').length).toBe(0);
+    const gallerySlider = screen.getByRole('slider', { name: '卡片缩放尺寸' });
+    expect(gallerySlider).toBeInTheDocument();
+    expect(gallerySlider.closest('.win-slider-root')).not.toBeNull();
+    expect(
+      document.querySelectorAll('input[type="range"]:not(.win-slider-root input)').length,
+    ).toBe(0);
   });
 
   // -------------------------------------------------------------------------
-  // 7. Crystal-Clear Optical Liquid Glass & Adaptive Surface Tone Math
+  // 7. Fluent 2 System Accent Contrast Calibration & Reduced-Transparency Guardrails
   // -------------------------------------------------------------------------
 
-  it('keeps clear optical glass calibration and adapts ink/floor cleanly over light, dark, and midtone cards', async () => {
-    expect(LENS_DEFAULTS.rim).toBeGreaterThanOrEqual(36);
-    expect(LENS_DEFAULTS.edge).toBeGreaterThanOrEqual(1.2);
-    expect(LENS_DEFAULTS.dispersion).toBeGreaterThan(0);
+  it('derives WCAG >= 4.5:1 Fluent 2 accent palettes across light/dark extremes and enforces reduced-transparency fallbacks', async () => {
+    const parseHex = (hex: string): [number, number, number] => {
+      const clean = hex.replace('#', '');
+      return [
+        Number.parseInt(clean.slice(0, 2), 16),
+        Number.parseInt(clean.slice(2, 4), 16),
+        Number.parseInt(clean.slice(4, 6), 16),
+      ];
+    };
 
-    // Pure white vs deep charcoal luminance & perceived sRGB luma
-    expect(hexLuminance('#FFFFFF')).toBeCloseTo(1, 3);
-    expect(hexLuminance('#000000')).toBeCloseTo(0, 3);
-    expect(hexPerceivedLuma('#FFFFFF')).toBeCloseTo(1, 3);
-    expect(hexPerceivedLuma('#000000')).toBeCloseTo(0, 3);
+    // Pure white vs pure black WCAG relative luminance & contrast ratio
+    expect(relativeLuminance(255, 255, 255)).toBeCloseTo(1, 3);
+    expect(relativeLuminance(0, 0, 0)).toBeCloseTo(0, 3);
+    expect(contrastRatio(1, 0)).toBeCloseTo(21, 1);
 
-    // Warm-beige / sage pastel cards stay cleanly on Light Glass (dark ink) via perceived sRGB luma
-    const sageLuma = hexPerceivedLuma('#9AB1A4')!;
-    const sandLuma = hexPerceivedLuma('#B5A089')!;
-    const deepDarkLuma = hexPerceivedLuma('#18221D')!;
-    expect(sageLuma).toBeGreaterThan(0.6);
-    expect(sandLuma).toBeGreaterThan(0.6);
-    expect(deepDarkLuma).toBeLessThan(0.2);
-    expect(pickInk(sageLuma, null)).toBe('dark');
-    expect(pickInk(sandLuma, null)).toBe('dark');
-    expect(pickInk(deepDarkLuma, 'dark')).toBe('light');
+    // Null / invalid system accent falls back cleanly to Studio Cobalt
+    const studioLight = deriveFluentAccentPalette(null, false);
+    expect(studioLight.accent).toBe('#2A60E0');
+    expect(studioLight.text).toBe('#FFFFFF');
 
-    // Light backdrop -> dark ink, hysteresis holds across 0.50 ± 0.05 band
-    expect(pickInk(0.85, null)).toBe('dark');
-    expect(pickInk(0.47, 'dark')).toBe('dark'); // within hysteresis (0.50 - 0.05 = 0.45)
-    expect(pickInk(0.35, 'dark')).toBe('light'); // crosses below -> flips to smoky dark glass
+    const studioDark = deriveFluentAccentPalette(null, true);
+    expect(studioDark.accent).toBe('#5B8DEF');
+    expect(studioDark.text).toBe('#0D1117');
 
-    // Dark backdrop -> light ink, hysteresis holds until > 0.55
-    expect(pickInk(0.12, null)).toBe('light');
-    expect(pickInk(0.53, 'light')).toBe('light');
-    expect(pickInk(0.6, 'light')).toBe('dark');
+    // Extreme light (#FFF200) and extreme dark (#0A0B0E) system accents calibrate to >= 4.5:1
+    const lightGalleryLum = relativeLuminance(0xf6, 0xf6, 0xf5);
+    const darkSurfaceLum = relativeLuminance(0x24, 0x26, 0x2c);
 
-    // Clear light surface over bright background needs zero opaque floor
-    expect(tintFloor(0.9, 0.02, 'dark', 1)).toBe(0);
-    // Dark smoky glass over deep dark card also needs zero opaque floor
-    expect(tintFloor(0.04, 0.02, 'light', 0.014)).toBe(0);
-    // Midtone textured imagery lifts tintFloor strictly when raw contrast dips below WCAG 4.5:1
-    const midLightInkFloor = tintFloor(0.42, 0.35, 'light', 0.014);
-    expect(midLightInkFloor).toBeGreaterThan(0.5);
-    expect(midLightInkFloor).toBeLessThanOrEqual(0.92);
-    const darkTexturedFloor = tintFloor(0.24, 0.45, 'dark', 1);
-    expect(darkTexturedFloor).toBeGreaterThan(0.05);
-    expect(darkTexturedFloor).toBeLessThanOrEqual(0.92);
+    for (const rawHex of ['#FFF200', '#0A0B0E', '#0078D4']) {
+      const lightPalette = deriveFluentAccentPalette(rawHex, false);
+      const [lr, lg, lb] = parseHex(lightPalette.accent);
+      const [ltr, ltg, ltb] = parseHex(lightPalette.text);
+      expect(contrastRatio(relativeLuminance(lr, lg, lb), lightGalleryLum)).toBeGreaterThanOrEqual(
+        4.5,
+      );
+      expect(
+        contrastRatio(relativeLuminance(lr, lg, lb), relativeLuminance(ltr, ltg, ltb)),
+      ).toBeGreaterThanOrEqual(4.5);
 
-    // adapt() increases frost density on busier midtone textures and dampens hyper-saturation
-    const calm = adapt({ luminance: 0.92, texture: 0.02, color: 0.05 }, 'dark');
-    const busy = adapt({ luminance: 0.46, texture: 0.65, color: 0.95 }, 'dark');
-    expect(busy.density).toBeGreaterThan(calm.density);
-    expect(busy.keep).toBeLessThan(calm.keep);
+      const darkPalette = deriveFluentAccentPalette(rawHex, true);
+      const [dr, dg, db] = parseHex(darkPalette.accent);
+      const [dtr, dtg, dtb] = parseHex(darkPalette.text);
+      expect(contrastRatio(relativeLuminance(dr, dg, db), darkSurfaceLum)).toBeGreaterThanOrEqual(
+        4.5,
+      );
+      expect(
+        contrastRatio(relativeLuminance(dr, dg, db), relativeLuminance(dtr, dtg, dtb)),
+      ).toBeGreaterThanOrEqual(4.5);
+    }
 
-    // tokens.css keeps optical clear-glass values under prefers-reduced-transparency: reduce
+    // applyAccentToDocument writes CSS tokens and data-accent-source cleanly
+    const applied = applyAccentToDocument('windows', '#FFF200', false);
+    expect(document.documentElement.dataset.accentSource).toBe('windows');
+    expect(document.documentElement.style.getPropertyValue('--accent')).toBe(applied.accent);
+    expect(document.documentElement.style.getPropertyValue('--accent-text')).toBe(applied.text);
+
+    const restored = applyAccentToDocument('studio', '#FFF200', false);
+    expect(restored.accent).toBe('#2A60E0');
+    expect(document.documentElement.dataset.accentSource).toBe('studio');
+
+    // tokens.css declares Fluent 2 surfaces + strict prefers-reduced-transparency backdrop-filter: none
     const tokensCss = await loadTokensCss();
     expect(tokensCss.length).toBeGreaterThan(5000);
-    expect(tokensCss).toMatch(/--m-thin:\s*0\.06/);
-    expect(tokensCss).toMatch(/--m-blur:\s*2/);
+    expect(tokensCss).toContain('.win-acrylic');
+    expect(tokensCss).toContain('.win-acrylic-header');
+    expect(tokensCss).toContain('.win-control-elevation');
     expect(tokensCss).toMatch(/\.charkle-mica-chrome/);
     expect(tokensCss).toMatch(/\.charkle-gallery-surface/);
+    expect(tokensCss).toMatch(
+      /@media\s*\(prefers-reduced-transparency:\s*reduce\)[\s\S]*?backdrop-filter:\s*none/,
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -1003,55 +1032,56 @@ describe('Full macOS Parity Regressions (Inspector, Onboarding, Gallery Glass, M
   });
 
   // -------------------------------------------------------------------------
-  // 11. Settings Glass Tint Sliders (--l-k / --d-k) & MoodboardsHome Adaptive Grid
+  // 11. Settings Windows System Accent Toggle & MoodboardsHome Adaptive Grid
   // -------------------------------------------------------------------------
 
-  it('persists Light & Dark Liquid Glass tint sliders in Settings and renders macOS adaptive MoodboardsHome grid', async () => {
-    setGlassTintScale('light', 1);
-    setGlassTintScale('dark', 1);
-
+  it('toggles Fluent 2 Windows System Accent in Settings and renders adaptive MoodboardsHome grid', async () => {
     useCoordinatorStore.setState({
       settingsOpen: true,
       settingsTab: 'general',
+      accentSource: 'studio',
+      surfaceState: {
+        buildNumber: 26200,
+        backdrop: 'mica',
+        isDark: false,
+        transparencyEnabled: true,
+        animationsEnabled: true,
+        snapLayoutsSupported: true,
+        systemAccentHex: '#0078D4',
+      },
     });
 
     render(<SettingsOverlay />);
 
-    expect(await screen.findByTestId('settings-glass-tint-controls')).toBeInTheDocument();
-    const lightSlider = screen.getByTestId('slider-light-glass-tint');
-    const darkSlider = screen.getByTestId('slider-dark-glass-tint');
+    expect(await screen.findByTestId('settings-accent-controls')).toBeInTheDocument();
+    expect(screen.getByTestId('settings-accent-swatch').textContent).toContain('#2A60E0');
 
-    // Step Light glass tint up (+5%) and Dark glass tint down (-5%) via keyboard
-    fireEvent.keyDown(lightSlider, { key: 'ArrowRight' });
-    fireEvent.keyDown(darkSlider, { key: 'ArrowLeft' });
+    const accentSwitch = screen.getByRole('switch', { name: '跟随 Windows 系统强调色' });
+    expect(accentSwitch).toHaveAttribute('aria-checked', 'false');
 
-    expect(getGlassTintScale('light')).toBeCloseTo(1.05, 2);
-    expect(getGlassTintScale('dark')).toBeCloseTo(0.95, 2);
-    expect(document.documentElement.style.getPropertyValue('--l-k')).toBe('1.05');
-    expect(document.documentElement.style.getPropertyValue('--d-k')).toBe('0.95');
+    // Enabling Windows System Accent updates coordinator store, swatch, and CSS custom property
+    fireEvent.click(accentSwitch);
+    expect(useCoordinatorStore.getState().accentSource).toBe('windows');
+    expect(screen.getByTestId('settings-accent-swatch').textContent).toContain('#0078D4');
+    expect(document.documentElement.dataset.accentSource).toBe('windows');
 
-    // Clicking "重置" restores both scales cleanly to 1.0
-    const resetTintBtn = await screen.findByRole('button', { name: '重置' });
-    fireEvent.click(resetTintBtn);
-    expect(getGlassTintScale('light')).toBe(1);
-    expect(getGlassTintScale('dark')).toBe(1);
+    // Disabling restores Studio Cobalt cleanly
+    fireEvent.click(accentSwitch);
+    expect(useCoordinatorStore.getState().accentSource).toBe('studio');
+    expect(screen.getByTestId('settings-accent-swatch').textContent).toContain('#2A60E0');
+    expect(document.documentElement.dataset.accentSource).toBe('studio');
 
-    // Confirm tokens.css includes radial inner-light ::before, --l-k / --d-k tokens,
-    // and keeps default position: relative strictly inside @layer components so Tailwind v4
-    // @layer utilities (absolute / fixed / sticky) ALWAYS wins on floating glass overlays.
+    // Confirm tokens.css keeps default position: relative on .win-acrylic / .win-acrylic-dark
+    // strictly inside @layer components so Tailwind v4 @layer utilities (absolute / fixed / sticky)
+    // ALWAYS win on floating Fluent Acrylic overlays.
     const tokensCss = await loadTokensCss();
-    expect(tokensCss).toMatch(/\.charkle-glass::before/);
-    expect(tokensCss).toMatch(/--l-k/);
-    expect(tokensCss).toMatch(/--d-k/);
     expect(tokensCss).toMatch(
-      /@layer\s+components\s*\{[\s\S]*?\.charkle-glass[\s\S]*?\.charkle-glass-dark[\s\S]*?position:\s*relative/,
+      /@layer\s+components\s*\{[\s\S]*?\.win-acrylic[\s\S]*?\.win-acrylic-dark[\s\S]*?position:\s*relative/,
     );
-    const cssWithoutLayerComponents = tokensCss
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/@layer\s+components\s*\{[\s\S]*?\n\}/g, '');
-    expect(cssWithoutLayerComponents).not.toMatch(/position:\s*relative/);
+    expect(tokensCss).not.toMatch(/--l-k/);
+    expect(tokensCss).not.toMatch(/--d-k/);
 
-    // Confirm MoodboardsHome uses macOS adaptive card width (260px..310px, never full-width pancake)
+    // Confirm MoodboardsHome uses adaptive card width (260px..310px, never full-width pancake)
     useMoodboardStore.setState({
       boards: [
         {
@@ -1141,8 +1171,8 @@ describe('Full macOS Parity Regressions (Inspector, Onboarding, Gallery Glass, M
     fireEvent.contextMenu(firstSwatch, { clientX: 360, clientY: 250 });
     const ctxMenu = await screen.findByTestId('moodboard-node-context-menu');
     const popoverDialog = ctxMenu.closest('[role="dialog"]');
-    expect(popoverDialog).toHaveClass('charkle-popover-panel');
-    expect(popoverDialog).toHaveAttribute('data-no-lens', 'true');
+    expect(popoverDialog).toHaveClass('win-flyout-popup');
+    expect(popoverDialog).toHaveClass('win-acrylic');
     expect(screen.getByRole('button', { name: /复制色值 #/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /自动同步板内色板/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /从情绪板移除/ })).toBeInTheDocument();

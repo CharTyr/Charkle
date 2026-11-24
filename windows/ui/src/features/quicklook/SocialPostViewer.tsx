@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, Film, ImageOff, ImagePlus, Images, RefreshCw } from 'lucide-react';
+import {
+  ArrowSync16Regular,
+  ImageAdd20Regular,
+  ImageMultiple16Regular,
+  ImageOff20Regular,
+  Open16Regular,
+  VideoClip16Regular,
+  VideoClip24Regular,
+} from '@fluentui/react-icons';
 import { getTransport, isTauriRuntime } from '../../api/transport';
 import {
   getEffectiveSocialAttachments,
@@ -153,7 +161,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
     <div
       data-testid="quicklook-social-viewer"
       onClick={(e) => e.stopPropagation()}
-      className="w-full max-w-[680px] max-h-[82vh] mx-auto rounded-[18px] bg-[var(--bg-elevated)] border border-[var(--border-hairline)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden"
+      className="w-full max-w-[680px] max-h-[82vh] mx-auto rounded-[var(--win-radius-dialog)] bg-[var(--bg-elevated)] border border-[var(--win-stroke-flyout)] shadow-[0_24px_60px_rgba(0,0,0,0.42)] flex flex-col overflow-hidden"
     >
       <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll p-6 flex flex-col gap-4">
         {/* Author Header (1:1 macOS QuickLookSocialPostCard) */}
@@ -242,9 +250,9 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                   type="button"
                   disabled={extractingKey !== null}
                   onClick={() => void handleExtractAll()}
-                  className="charkle-pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[11px] font-semibold text-[var(--accent)] disabled:opacity-50 cursor-pointer"
+                  className="charkle-pressable inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:brightness-95 text-[11.5px] font-semibold text-[var(--accent)] disabled:opacity-50 cursor-pointer"
                 >
-                  <Images size={11.5} />
+                  <ImageMultiple16Regular className="w-3.5 h-3.5" />
                   <span>
                     {extractingKey === '__all__' ? '正在提取…' : '全部提取为独立素材'}
                   </span>
@@ -274,8 +282,8 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                   return (
                     <div key={key} className="flex flex-col gap-1.5">
                       {mediaFailed ? (
-                        <div className="w-full h-[200px] rounded-[12px] bg-[var(--bg-subtle)] border border-[var(--border-hairline)] flex flex-col items-center justify-center gap-2 text-[12px] text-[var(--text-secondary)]">
-                          <Film size={22} className="text-[var(--text-tertiary)]" />
+                        <div className="w-full h-[200px] rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)] border border-[var(--win-stroke-card)] flex flex-col items-center justify-center gap-2 text-[12px] text-[var(--text-secondary)]">
+                          <VideoClip24Regular className="w-6 h-6 text-[var(--text-tertiary)]" />
                           <span>视频暂时无法在线加载</span>
                           <button
                             type="button"
@@ -295,17 +303,17 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                         />
                       )}
                       <div className="flex items-center justify-between">
-                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--text-secondary)]">
-                          <Film size={12} />
+                        <span className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[var(--text-secondary)]">
+                          <VideoClip16Regular className="w-3.5 h-3.5" />
                           {att.kind === 'gif' ? '动图媒体' : '视频媒体'}
                         </span>
                         <button
                           type="button"
                           disabled={extractingKey !== null}
                           onClick={() => void handleExtractOne(att, idx)}
-                          className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--accent-soft)] hover:bg-[var(--accent)]/20 text-[11px] font-semibold text-[var(--accent)] disabled:opacity-50 cursor-pointer"
+                          className="charkle-pressable inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-[var(--accent-soft)] hover:brightness-95 text-[11.5px] font-semibold text-[var(--accent)] disabled:opacity-50 cursor-pointer"
                         >
-                          <Film size={11} />
+                          <VideoClip16Regular className="w-3.5 h-3.5" />
                           <span>{extractingKey === key ? '提取中…' : extractLabel}</span>
                         </button>
                       </div>
@@ -320,13 +328,13 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                   <div
                     key={key}
                     className={[
-                      'relative rounded-[12px] overflow-hidden bg-[var(--bg-subtle)]/70 border border-[var(--border-hairline)]',
+                      'relative rounded-[var(--win-radius-card)] overflow-hidden bg-[var(--bg-subtle)]/70 border border-[var(--win-stroke-card)]',
                       isXiaohongshuMultiGrid ? 'aspect-[3/4]' : '',
                     ].join(' ')}
                   >
                     {mediaFailed || !photoSrc ? (
                       <div className="w-full min-h-[180px] h-full flex flex-col items-center justify-center gap-1.5 p-4 text-center text-[11.5px] text-[var(--text-secondary)]">
-                        <ImageOff size={20} className="text-[var(--text-tertiary)]" />
+                        <ImageOff20Regular className="w-5 h-5 text-[var(--text-tertiary)]" />
                         <span>原图链接已失效或受防盗链限制</span>
                       </div>
                     ) : (
@@ -355,9 +363,9 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                       disabled={extractingKey !== null}
                       title={`将此媒体提取为独立素材，并自动在备注和来源链接中保留原${platform.noun}出处`}
                       onClick={() => void handleExtractOne(att, idx)}
-                      className="charkle-pressable absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-black/75 hover:bg-black/88 text-white text-[11px] font-semibold disabled:opacity-50 cursor-pointer"
+                      className="charkle-pressable absolute bottom-2.5 right-2.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--win-radius-control)] bg-black/75 hover:bg-black/88 text-white text-[11.5px] font-medium disabled:opacity-50 cursor-pointer"
                     >
-                      <ImagePlus size={11.5} />
+                      <ImageAdd20Regular className="w-3.5 h-3.5" />
                       <span>{extractingKey === key ? '提取中…' : extractLabel}</span>
                     </button>
                   </div>
@@ -369,7 +377,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
 
         {/* Media Fetch Failed Banner + Retry CTA */}
         {post.mediaFetchFailed && (
-          <div className="flex flex-col items-start gap-2 p-3 rounded-[10px] bg-[var(--bg-subtle)]">
+          <div className="flex flex-col items-start gap-2 p-3 rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)]">
             <div className="text-[12px] text-[var(--text-secondary)]">
               媒体暂未保存到本地 ·{' '}
               <button
@@ -397,15 +405,15 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                   setRetrying(false);
                 }
               }}
-              className="charkle-pressable inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-semibold disabled:opacity-50 cursor-pointer"
+              className="charkle-pressable inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-medium disabled:opacity-50 cursor-pointer"
             >
-              <RefreshCw size={11.5} className={retrying ? 'animate-spin' : ''} />
+              <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
               <span>重试获取</span>
             </button>
           </div>
         )}
 
-        <div className="h-px bg-[var(--border-hairline)]" />
+        <div className="h-px bg-[var(--win-stroke-divider)]" />
 
         {/* Engagement Counts + Open Original */}
         <div className="flex items-center gap-4 flex-wrap text-[12.5px] charkle-tabular">
@@ -450,7 +458,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
             className="inline-flex items-center gap-1 text-[12.5px] font-semibold text-[var(--accent)] hover:underline cursor-pointer"
           >
             <span>{platform.openLabel}</span>
-            <ExternalLink size={12} />
+            <Open16Regular className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>

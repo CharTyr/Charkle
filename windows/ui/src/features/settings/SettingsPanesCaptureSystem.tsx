@@ -1,18 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Camera,
-  Clipboard,
-  Copy,
-  Download,
-  Eye,
-  EyeOff,
-  FolderOpen,
-  HardDrive,
-  PanelTop,
-  Pin,
-  RefreshCw,
-  RotateCcw,
-} from 'lucide-react';
+  ArrowDownload16Regular,
+  ArrowReset20Regular,
+  ArrowSync16Regular,
+  Camera16Regular,
+  Clipboard16Regular,
+  Copy16Regular,
+  Eye16Regular,
+  EyeOff16Regular,
+  FolderOpen16Regular,
+  HardDrive16Regular,
+  Pin16Filled,
+  Pin16Regular,
+  WindowHeaderHorizontal20Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { CharkleBrandMark, CustomSelect, SegmentedControl } from '../../design-system';
 import { useCoordinatorStore, useLibraryStore, useSyncAIStore } from '../../stores';
@@ -127,7 +128,7 @@ export const DropShelfSettingsPane: React.FC = () => {
   const activeEdgeName = edgeNameLabel(dockEdge);
 
   return (
-    <div data-testid="settings-pane-dropShelf" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-dropShelf" className="flex flex-col gap-5">
       <SettingsSection title="屏幕边缘灵感浮窗">
         <SettingsRow
           title="启用屏幕顶部灵感浮窗"
@@ -235,7 +236,7 @@ export const DropShelfSettingsPane: React.FC = () => {
           disabled={!settings.enabled}
         >
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             disabled={!settings.enabled}
             onClick={async () => {
               try {
@@ -253,11 +254,15 @@ export const DropShelfSettingsPane: React.FC = () => {
               }
             }}
           >
-            <Pin size={12.5} />
+            {pinned ? (
+              <Pin16Filled className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <Pin16Regular className="w-3.5 h-3.5 shrink-0" />
+            )}
             {pinned ? '取消固定' : '固定展开'}
           </SettingsButton>
           <SettingsButton
-            variant="primary"
+            variant="accent"
             disabled={!settings.enabled}
             onClick={() =>
               void getTransport()
@@ -270,7 +275,7 @@ export const DropShelfSettingsPane: React.FC = () => {
                 })
             }
           >
-            <PanelTop size={12.5} />
+            <WindowHeaderHorizontal20Regular className="w-3.5 h-3.5 shrink-0" />
             预览顶部浮窗
           </SettingsButton>
         </SettingsRow>
@@ -351,8 +356,10 @@ export const DropShelfSettingsPane: React.FC = () => {
 
 const ShortcutRow: React.FC<{ description: string; keys: string }> = ({ description, keys }) => (
   <div className="px-4 py-[10px] flex items-center justify-between gap-3">
-    <span className="text-[12.5px] text-[var(--text-primary)] truncate">{description}</span>
-    <kbd className="px-2 py-[3px] rounded-[6px] bg-[var(--settings-subtle)] text-[11px] font-semibold font-mono text-[var(--text-secondary)] shrink-0">
+    <span className="text-[13px] leading-[18px] text-[var(--text-primary)] truncate">
+      {description}
+    </span>
+    <kbd className="px-2 py-[3px] rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] text-[11px] font-semibold charkle-mono text-[var(--text-secondary)] shrink-0">
       {keys}
     </kbd>
   </div>
@@ -426,7 +433,7 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
   };
 
   return (
-    <div data-testid="settings-pane-captureShortcuts" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-captureShortcuts" className="flex flex-col gap-5">
       <SettingsSection title="系统权限与全局采集">
         <SettingsRow
           title="区域截图与剪贴板采集"
@@ -461,38 +468,38 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <label className="flex flex-col gap-1 text-[11.5px]">
               <span className="text-[var(--text-secondary)] inline-flex items-center gap-1">
-                <Camera size={12} />
+                <Camera16Regular className="w-3.5 h-3.5 shrink-0" />
                 区域截图
               </span>
               <SettingsInput
                 type="text"
                 value={hotkeys.captureArea}
                 onChange={(e) => setHotkeys({ ...hotkeys, captureArea: e.target.value })}
-                className="font-mono"
+                className="charkle-mono"
               />
             </label>
             <label className="flex flex-col gap-1 text-[11.5px]">
               <span className="text-[var(--text-secondary)] inline-flex items-center gap-1">
-                <PanelTop size={12} />
+                <WindowHeaderHorizontal20Regular className="w-3.5 h-3.5 shrink-0" />
                 呼出顶部浮窗
               </span>
               <SettingsInput
                 type="text"
                 value={hotkeys.toggleShelf}
                 onChange={(e) => setHotkeys({ ...hotkeys, toggleShelf: e.target.value })}
-                className="font-mono"
+                className="charkle-mono"
               />
             </label>
             <label className="flex flex-col gap-1 text-[11.5px]">
               <span className="text-[var(--text-secondary)] inline-flex items-center gap-1">
-                <Clipboard size={12} />
+                <Clipboard16Regular className="w-3.5 h-3.5 shrink-0" />
                 收藏剪贴板
               </span>
               <SettingsInput
                 type="text"
                 value={hotkeys.collectClipboard}
                 onChange={(e) => setHotkeys({ ...hotkeys, collectClipboard: e.target.value })}
-                className="font-mono"
+                className="charkle-mono"
               />
             </label>
           </div>
@@ -503,14 +510,14 @@ export const CaptureShortcutsSettingsPane: React.FC = () => {
 
           <div className="flex items-center justify-end gap-2">
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               disabled={saving}
               onClick={() => void persistHotkeys({ ...DEFAULT_HOTKEYS, enabled: hotkeys.enabled })}
             >
               恢复默认
             </SettingsButton>
             <SettingsButton
-              variant="primary"
+              variant="accent"
               loading={saving}
               disabled={Boolean(validationError)}
               onClick={() => void persistHotkeys(hotkeys)}
@@ -722,7 +729,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
   const bundledExtDir = bridge?.bundledExtensionDir?.trim() || null;
 
   return (
-    <div data-testid="settings-pane-extensions" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-extensions" className="flex flex-col gap-5">
       <div data-testid="settings-browser-extension-section">
         <SettingsSection title="浏览器扩展（Chrome / Edge / Arc / Brave）">
           <SettingsRow
@@ -786,21 +793,21 @@ export const ExtensionsSettingsPane: React.FC = () => {
           >
             {bundledExtDir && (
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 onClick={() => void copyToClipboard(bundledExtDir, '已复制浏览器扩展目录路径')}
               >
-                <Copy size={12} />
+                <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
                 复制扩展目录
               </SettingsButton>
             )}
             <SettingsButton
-              variant="primary"
+              variant="accent"
               loading={revealingExt}
               disabled={!bridge}
               data-testid="reveal-browser-extension-btn"
               onClick={() => void handleRevealExtension()}
             >
-              <FolderOpen size={12.5} />
+              <FolderOpen16Regular className="w-3.5 h-3.5 shrink-0" />
               在资源管理器中定位扩展
             </SettingsButton>
           </SettingsRow>
@@ -832,20 +839,21 @@ export const ExtensionsSettingsPane: React.FC = () => {
                   <span className="text-[12px] font-semibold text-[var(--text-primary)]">
                     本机桥接地址
                   </span>
-                  <span className="font-mono text-[11.5px] text-[var(--text-secondary)] select-all break-all">
+                  <span className="charkle-mono text-[11.5px] text-[var(--text-secondary)] select-all break-all">
                     {bridgeBaseUrl}
                   </span>
                 </div>
                 <SettingsButton
-                  variant="secondary"
+                  variant="standard"
+                  size="xs"
                   onClick={() => void copyToClipboard(bridgeBaseUrl, '已复制本机桥接地址')}
                 >
-                  <Copy size={12} />
+                  <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
                   复制地址
                 </SettingsButton>
               </div>
 
-              <div className="h-px bg-[var(--settings-divider)]" />
+              <div className="h-px bg-[var(--win-stroke-divider)]" />
 
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0 flex-1 flex flex-col gap-0.5">
@@ -854,7 +862,7 @@ export const ExtensionsSettingsPane: React.FC = () => {
                   </span>
                   <span
                     data-testid="extension-bridge-token-value"
-                    className="font-mono text-[11.5px] text-[var(--text-secondary)] select-all break-all"
+                    className="charkle-mono text-[11.5px] text-[var(--text-secondary)] select-all break-all"
                   >
                     {revealToken
                       ? bridge?.accessToken || ''
@@ -863,33 +871,39 @@ export const ExtensionsSettingsPane: React.FC = () => {
                 </div>
                 <div className="shrink-0 flex items-center gap-1.5">
                   <SettingsButton
-                    variant="secondary"
+                    variant="standard"
+                    size="xs"
                     onClick={() => setRevealToken((prev) => !prev)}
                   >
-                    {revealToken ? <EyeOff size={12} /> : <Eye size={12} />}
+                    {revealToken ? (
+                      <EyeOff16Regular className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <Eye16Regular className="w-3.5 h-3.5 shrink-0" />
+                    )}
                     {revealToken ? '隐藏' : '显示'}
                   </SettingsButton>
                   <SettingsButton
-                    variant="secondary"
+                    variant="standard"
+                    size="xs"
                     disabled={!bridge?.accessToken}
                     onClick={() =>
                       bridge?.accessToken &&
                       void copyToClipboard(bridge.accessToken, '已复制访问令牌')
                     }
                   >
-                    <Copy size={12} />
+                    <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
                     复制令牌
                   </SettingsButton>
                   <SettingsButton
-                    variant="secondary"
+                    variant="standard"
+                    size="xs"
                     loading={regeneratingToken}
                     disabled={!bridge}
                     data-testid="regenerate-extension-token-btn"
                     onClick={() => void handleRegenerateToken()}
                   >
-                    <RefreshCw
-                      size={12}
-                      className={regeneratingToken ? 'animate-spin motion-reduce:animate-none' : ''}
+                    <ArrowSync16Regular
+                      className={`w-3.5 h-3.5 shrink-0 ${regeneratingToken ? 'animate-spin motion-reduce:animate-none' : ''}`}
                     />
                     重新生成令牌
                   </SettingsButton>
@@ -906,8 +920,8 @@ export const ExtensionsSettingsPane: React.FC = () => {
           subtitle="已内置于 Charkle · 纯本地离线导入，无需 API 密钥，无损保留独立图层、原图像素与 GIF"
           subtitleTone="positive"
         >
-          <SettingsButton variant="primary" onClick={() => void handleExportPlugin()}>
-            <Download size={13} />
+          <SettingsButton variant="accent" onClick={() => void handleExportPlugin()}>
+            <ArrowDownload16Regular className="w-3.5 h-3.5 shrink-0" />
             导出插件包…
           </SettingsButton>
         </SettingsRow>
@@ -930,17 +944,17 @@ export const ExtensionsSettingsPane: React.FC = () => {
             <SettingsCardDivider />
             <SettingsRow
               title="插件清单路径（manifest.json）"
-              subtitle={<span className="font-mono text-[11px] break-all">{manifestPath}</span>}
+              subtitle={<span className="charkle-mono text-[11px] break-all">{manifestPath}</span>}
             >
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 onClick={() => void openDirectoryInExplorer(exportedPath)}
               >
-                <FolderOpen size={12.5} />
+                <FolderOpen16Regular className="w-3.5 h-3.5 shrink-0" />
                 打开目录
               </SettingsButton>
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 onClick={() =>
                   void copyToClipboard(manifestPath, '已复制 Figma 插件 manifest.json 路径')
                 }
@@ -1021,7 +1035,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
   const copyDiagnostics = async () => {
     const payload = JSON.stringify(
       {
-        appVersion: diagnostics?.appVersion ?? '1.0.1',
+        appVersion: diagnostics?.appVersion ?? '1.2.0',
         schemaVersion: diagnostics?.schemaVersion ?? 2,
         dataDir: diagnostics?.dataDir,
         databasePath: diagnostics?.databasePath,
@@ -1041,7 +1055,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
   };
 
   return (
-    <div data-testid="settings-pane-advancedAbout" className="flex flex-col gap-[22px]">
+    <div data-testid="settings-pane-advancedAbout" className="flex flex-col gap-5">
       {/* 1. Google Drive Advanced Channel (gdirect & Mounted Volume) */}
       <SettingsSection title="Google Drive 高级通道（gdirect）">
         <SettingsRow
@@ -1114,16 +1128,15 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
             }
           >
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               loading={rebuildingVisualIndex}
               onClick={async () => {
                 await rebuildLocalVisualIndex(assets.map((a) => a.id));
                 await refreshAll(destination);
               }}
             >
-              <RefreshCw
-                size={12}
-                className={rebuildingVisualIndex ? 'animate-spin motion-reduce:animate-none' : ''}
+              <ArrowSync16Regular
+                className={`w-3.5 h-3.5 shrink-0 ${rebuildingVisualIndex ? 'animate-spin motion-reduce:animate-none' : ''}`}
               />
               {rebuildingVisualIndex ? '扫描中…' : '开始扫描'}
             </SettingsButton>
@@ -1148,16 +1161,16 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
         <SettingsRow
           title="打开应用数据目录"
           subtitle={
-            <span className="font-mono text-[11px] break-all">
+            <span className="charkle-mono text-[11px] break-all">
               {diagnostics?.dataDir ?? '%APPDATA%\\app.charkle.windows'}
             </span>
           }
         >
           <SettingsButton
-            variant="secondary"
+            variant="standard"
             onClick={() => void openDirectoryInExplorer(diagnostics?.dataDir ?? '')}
           >
-            <FolderOpen size={13} />
+            <FolderOpen16Regular className="w-3.5 h-3.5 shrink-0" />
             打开目录
           </SettingsButton>
         </SettingsRow>
@@ -1168,8 +1181,8 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           title="快速上手引导"
           subtitle="重新打开 6 步交互式引导，逐项核对素材库存储、顶部浮窗、AI 与外观设置"
         >
-          <SettingsButton variant="secondary" onClick={openOnboarding}>
-            <RotateCcw size={13} />
+          <SettingsButton variant="standard" onClick={openOnboarding}>
+            <ArrowReset20Regular className="w-3.5 h-3.5 shrink-0" />
             重新运行新手引导
           </SettingsButton>
         </SettingsRow>
@@ -1180,8 +1193,8 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           title="系统诊断快照"
           subtitle={`离线文字识别语言：${(diagnostics?.ocr.availableLanguages ?? []).join('、') || '默认系统语言'}`}
         >
-          <SettingsButton variant="secondary" onClick={() => void copyDiagnostics()}>
-            <Copy size={13} />
+          <SettingsButton variant="standard" onClick={() => void copyDiagnostics()}>
+            <Copy16Regular className="w-3.5 h-3.5 shrink-0" />
             复制诊断快照
           </SettingsButton>
         </SettingsRow>
@@ -1194,11 +1207,11 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           <div className="min-w-0 flex-1 flex flex-col gap-0.5">
             <div className="flex items-center gap-2">
               <span className="text-[14px] font-semibold text-[var(--text-primary)]">Charkle</span>
-              <span className="text-[11px] font-medium font-mono text-[var(--text-secondary)] charkle-tabular">
-                v{diagnostics?.appVersion ?? '1.0.1'}
+              <span className="text-[11px] font-medium charkle-mono text-[var(--text-secondary)] charkle-tabular">
+                v{diagnostics?.appVersion ?? '1.2.0'}
               </span>
             </div>
-            <span className="text-[11.5px] text-[var(--text-secondary)]">
+            <span className="text-[12px] text-[var(--text-secondary)]">
               面向设计师的视觉素材库与 10 秒情绪板创作台 · 本机离线视觉引擎 + 可读云端存储
             </span>
           </div>
@@ -1212,7 +1225,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
         autoSignInAfterSave={false}
       />
 
-      {/* Sub-Modal 2: Local Mount Management Sheet (mirrors gdirectMountSheet) */}
+      {/* Sub-Modal 2: Local Mount Management Sheet */}
       <SettingsSubModal
         open={showMountModal}
         onClose={() => {
@@ -1227,7 +1240,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
         }}
         title={
           <span className="inline-flex items-center gap-2">
-            <HardDrive size={16} />
+            <HardDrive16Regular className="w-4 h-4 shrink-0" />
             <span>本地挂载盘管理</span>
           </span>
         }
@@ -1236,14 +1249,14 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
         footer={
           <>
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               onClick={() => void refreshSettingsData()}
             >
               刷新挂载状态
             </SettingsButton>
             {draftSync.mode === 'gdirectMount' && isMountActive && (
               <SettingsButton
-                variant="secondary"
+                variant="standard"
                 loading={syncing}
                 onClick={() => void syncNow()}
               >
@@ -1251,7 +1264,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
               </SettingsButton>
             )}
             <SettingsButton
-              variant="primary"
+              variant="accent"
               onClick={() => {
                 persistSyncQuiet(draftSync);
                 setShowMountModal(false);
@@ -1262,12 +1275,12 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           </>
         }
       >
-        <div className="rounded-[10px] bg-[var(--settings-subtle)] p-3 flex items-center justify-between gap-3">
+        <div className="rounded-[var(--win-radius-card)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] p-3 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[12.5px] font-medium text-[var(--text-primary)]">
               Google Drive 接入模式
             </div>
-            <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">
+            <div className="text-[11.5px] text-[var(--text-secondary)] mt-0.5">
               若映射盘离线或断连，可随时切回「正常直连（推荐）」
             </div>
           </div>
@@ -1296,7 +1309,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
               className="flex-1"
             />
             <SettingsButton
-              variant="secondary"
+              variant="standard"
               onClick={async () => {
                 const picked = await getTransport().pickDirectoryDialog('选择挂载根目录');
                 if (picked) persistSyncQuiet({ ...draftSync, mountPath: picked });
@@ -1307,7 +1320,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           </div>
         </label>
 
-        <div className="rounded-[9px] bg-[var(--settings-subtle)] px-3 py-2 flex items-center justify-between text-[11.5px]">
+        <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] px-3 py-2 flex items-center justify-between text-[12px]">
           <span className="text-[var(--text-secondary)]">
             当前卷状态：{isMountActive ? '卷已就绪' : '未检测到活跃挂载路径'}
           </span>

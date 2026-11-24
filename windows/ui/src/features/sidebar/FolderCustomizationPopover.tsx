@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Ban, LayoutGrid, Smile } from 'lucide-react';
 import {
+  Emoji16Regular,
+  Grid16Regular,
+  Prohibited12Regular,
+} from '@fluentui/react-icons';
+import {
+  Button,
   CharkleFolderIcon,
   FOLDER_PRESET_COLORS,
   Popover,
@@ -106,8 +111,8 @@ export interface FolderCustomizationPopoverProps {
 }
 
 /**
- * 1:1 macOS `FolderCustomizationPopover.swift`:
- * - Live 58px folder preview + folder title
+ * Fluent 2 Folder Customization Flyout:
+ * - Live 56px folder preview + folder title
  * - Reset dot + 7 preset folder colors + custom color picker
  * - 4 categorized 48-icon gallery OR 32-emoji + custom emoji picker
  * - Bottom footer: Clear | Emoji/Icon mode toggle
@@ -159,7 +164,7 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
             size={56}
             isActive={false}
           />
-          <span className="text-[12.5px] font-semibold text-[var(--text-primary)] truncate max-w-full">
+          <span className="text-[13px] font-semibold text-[var(--text-primary)] truncate max-w-full">
             {folderName}
           </span>
         </div>
@@ -173,10 +178,11 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
             onClick={() => onApply(null, customSymbol)}
             className={[
               'charkle-pressable w-[22px] h-[22px] rounded-full bg-[var(--bg-subtle)] inline-flex items-center justify-center text-[var(--text-secondary)] cursor-pointer',
-              !colorHex ? 'ring-2 ring-[var(--accent)]' : 'border border-[var(--border-hairline)]',
+              'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
+              !colorHex ? 'ring-2 ring-[var(--accent)]' : 'border border-[var(--win-stroke-control)]',
             ].join(' ')}
           >
-            <Ban size={12} />
+            <Prohibited12Regular className="w-3 h-3" />
           </button>
 
           {FOLDER_PRESET_COLORS.map((preset) => {
@@ -190,6 +196,7 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
                 onClick={() => onApply(preset.hex, customSymbol)}
                 className={[
                   'charkle-pressable w-[22px] h-[22px] rounded-full cursor-pointer border border-black/10',
+                  'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
                   active ? 'ring-2 ring-offset-1 ring-[var(--accent)]' : '',
                 ].join(' ')}
                 style={{ backgroundColor: preset.hex }}
@@ -215,7 +222,7 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
           </label>
         </div>
 
-        <div className="h-px bg-[var(--border-hairline)]" />
+        <div className="h-px bg-[var(--win-stroke-divider)]" />
 
         {/* Categorized Symbol Gallery or Emoji Picker */}
         <div className="h-[246px] overflow-y-auto charkle-scroll p-3.5">
@@ -233,18 +240,21 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
                   value={customEmojiInput}
                   onChange={(e) => setCustomEmojiInput(e.target.value)}
                   placeholder="输入任意表情符号…"
-                  className="flex-1 min-w-0 h-7 px-2 rounded-[7px] bg-[var(--bg-inspector-field)] border border-[var(--border-hairline)] focus:border-[var(--accent)] text-[12.5px] text-[var(--text-primary)] outline-none"
+                  aria-label="输入任意表情符号"
+                  className="win-input-elevation flex-1 min-w-0 h-8 px-2.5 rounded-[var(--win-radius-control)] text-[12.5px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
                 />
-                <button
+                <Button
                   type="submit"
+                  variant="standard"
+                  size="xs"
                   disabled={!customEmojiInput.trim()}
-                  className="charkle-pressable h-7 px-2.5 rounded-[7px] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[11.5px] font-medium text-[var(--text-primary)] disabled:opacity-45 cursor-pointer"
+                  className="h-8"
                 >
                   应用
-                </button>
+                </Button>
               </form>
 
-              <div className="grid grid-cols-8 gap-1.5">
+              <div className="grid grid-cols-8 gap-1">
                 {EMOJI_PRESETS.map((emoji) => {
                   const token = `emoji:${emoji}`;
                   const active = customSymbol === token;
@@ -252,10 +262,14 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
                     <button
                       key={emoji}
                       type="button"
+                      aria-label={`选择表情 ${emoji}`}
                       onClick={() => onApply(colorHex, active ? null : token)}
                       className={[
-                        'charkle-pressable h-[30px] w-[30px] inline-flex items-center justify-center rounded-[7px] text-[17px] cursor-pointer',
-                        active ? 'bg-[var(--accent-soft)]' : 'hover:bg-[var(--bg-subtle)]',
+                        'charkle-pressable h-[30px] w-[30px] inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[16px] cursor-pointer',
+                        'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
+                        active
+                          ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent-ring)]'
+                          : 'hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)]',
                       ].join(' ')}
                     >
                       {emoji}
@@ -281,12 +295,14 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
                         <button
                           key={sym}
                           type="button"
+                          aria-label={`选择图标 ${sym}`}
                           onClick={() => onApply(colorHex, active ? null : token)}
                           className={[
-                            'charkle-pressable h-[30px] inline-flex items-center justify-center rounded-[7px] cursor-pointer',
+                            'charkle-pressable h-[30px] inline-flex items-center justify-center rounded-[var(--win-radius-control)] cursor-pointer',
+                            'focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]',
                             active
-                              ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                              : 'bg-[var(--bg-subtle)]/55 text-[var(--text-primary)]/76 hover:bg-[var(--bg-subtle)]',
+                              ? 'bg-[var(--accent-soft)] text-[var(--accent)] ring-1 ring-[var(--accent-ring)]'
+                              : 'bg-[var(--win-control-fill)] text-[var(--text-primary)]/80 hover:bg-[var(--win-subtle-hover)] active:bg-[var(--win-subtle-active)]',
                           ].join(' ')}
                         >
                           <Icon size={14.5} strokeWidth={1.85} />
@@ -300,31 +316,33 @@ export const FolderCustomizationPopover: React.FC<FolderCustomizationPopoverProp
           )}
         </div>
 
-        <div className="h-px bg-[var(--border-hairline)]" />
+        <div className="h-px bg-[var(--win-stroke-divider)]" />
 
         {/* Footer: Clear | Symbol/Emoji Switch */}
         <div className="p-2.5 grid grid-cols-2 gap-2">
-          <button
-            type="button"
+          <Button
+            variant="standard"
+            size="sm"
             onClick={() => onApply(null, null)}
-            className="charkle-pressable py-1.5 rounded-[7px] bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[12px] font-medium text-[var(--text-primary)] cursor-pointer"
+            className="w-full justify-center"
           >
-            清除
-          </button>
+            清除样式
+          </Button>
 
-          <button
-            type="button"
+          <Button
+            variant="standard"
+            size="sm"
+            active={showEmojiMode}
             onClick={() => setShowEmojiMode((v) => !v)}
-            className={[
-              'charkle-pressable py-1.5 rounded-[7px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer',
-              showEmojiMode
-                ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                : 'bg-[var(--bg-subtle)] hover:bg-[var(--border-hairline)] text-[var(--text-primary)]',
-            ].join(' ')}
+            className="w-full justify-center"
           >
-            {showEmojiMode ? <LayoutGrid size={12.5} /> : <Smile size={12.5} />}
+            {showEmojiMode ? (
+              <Grid16Regular className="w-3.5 h-3.5" />
+            ) : (
+              <Emoji16Regular className="w-3.5 h-3.5" />
+            )}
             <span>{showEmojiMode ? '系统图标' : '表情符号'}</span>
-          </button>
+          </Button>
         </div>
       </div>
     </Popover>

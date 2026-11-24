@@ -1,5 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Folder, Inbox, LayoutGrid, X } from 'lucide-react';
+import {
+  Board16Regular,
+  Checkmark16Regular,
+  Dismiss16Regular,
+  Folder16Regular,
+  MailInbox16Regular,
+} from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
 import { CustomSelect, type SelectOption } from '../../design-system';
 import {
@@ -284,7 +290,7 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
       {errorMessage && (
         <div
           role="alert"
-          className="pointer-events-none charkle-glass-dark absolute top-6 left-1/2 -translate-x-1/2 z-40 rounded-full px-3.5 py-1.5 text-[12px] text-rose-300 border border-rose-400/35 whitespace-nowrap"
+          className="pointer-events-none win-acrylic-dark absolute top-6 left-1/2 -translate-x-1/2 z-40 rounded-[var(--win-radius-overlay)] px-3.5 py-1.5 text-[12px] text-rose-300 border border-rose-400/35 whitespace-nowrap"
         >
           {errorMessage}
         </div>
@@ -292,7 +298,7 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
 
       {/* Minimal top-center hint before dragging begins */}
       {!hasActiveSelection && !errorMessage && (
-        <div className="pointer-events-none charkle-glass-dark absolute top-6 left-1/2 -translate-x-1/2 z-30 rounded-full px-3.5 py-1.5 text-[12px] text-white/90 whitespace-nowrap">
+        <div className="pointer-events-none win-acrylic-dark absolute top-6 left-1/2 -translate-x-1/2 z-30 rounded-[var(--win-radius-overlay)] px-3.5 py-1.5 text-[12px] text-white/90 whitespace-nowrap">
           拖拽框选截图区域 · 右键或 Esc 取消
         </div>
       )}
@@ -323,13 +329,13 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
             width: normalized.width,
             height: normalized.height,
           }}
-          className="pointer-events-none absolute border-2 border-[#5B8DEF] shadow-[0_0_0_9999px_rgba(0,0,0,0.42)]"
+          className="pointer-events-none absolute border-2 border-[var(--accent)] shadow-[0_0_0_9999px_rgba(0,0,0,0.42)]"
         >
           {physicalCrop && (
             <div
               data-testid="capture-size-badge"
               className={[
-                'charkle-glass-dark absolute px-2 py-0.5 rounded-[6px] text-[11.5px] font-medium charkle-tabular whitespace-nowrap',
+                'win-acrylic-dark absolute px-2 py-0.5 rounded-[var(--win-radius-control)] text-[11.5px] font-medium charkle-tabular whitespace-nowrap',
                 normalized.top < 32 ? 'top-1.5 left-1.5' : '-top-7 left-0',
               ].join(' ')}
             >
@@ -344,7 +350,7 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
         <div
           aria-hidden="true"
           style={{ left: Math.max(12, loupeLeft), top: Math.max(12, loupeTop) }}
-          className="pointer-events-none absolute z-30 rounded-[12px] overflow-hidden border border-white/25 bg-[#0b0c0f] shadow-2xl"
+          className="pointer-events-none absolute z-30 rounded-[var(--win-radius-overlay)] overflow-hidden border border-white/25 bg-[#0b0c0f] shadow-2xl"
         >
           <canvas
             ref={loupeCanvasRef}
@@ -365,14 +371,22 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
       {/* Floating Target & Confirm Toolbar */}
       <div
         data-capture-toolbar="true"
-        className="charkle-glass-dark absolute bottom-6 left-1/2 -translate-x-1/2 z-40 rounded-full px-3 py-1.5 flex items-center gap-2 text-[12px]"
+        className="win-acrylic-dark absolute bottom-6 left-1/2 -translate-x-1/2 z-40 rounded-[var(--win-radius-overlay)] px-2.5 py-1.5 flex items-center gap-2 text-[12px]"
       >
-        <div className="inline-flex items-center gap-1 bg-white/8 rounded-full p-0.5">
+        <div className="inline-flex items-center gap-0.5 bg-white/8 rounded-[var(--win-radius-control)] p-0.5">
           {(
             [
-              { id: 'inbox', label: '收件箱', icon: <Inbox size={11.5} /> },
-              { id: 'folder', label: folders.find((f) => f.id === selectedFolderId)?.name ?? '文件夹', icon: <Folder size={11.5} /> },
-              { id: 'activeMoodboard', label: '情绪板', icon: <LayoutGrid size={11.5} /> },
+              { id: 'inbox', label: '收件箱', icon: <MailInbox16Regular className="w-3.5 h-3.5" /> },
+              {
+                id: 'folder',
+                label: folders.find((f) => f.id === selectedFolderId)?.name ?? '文件夹',
+                icon: <Folder16Regular className="w-3.5 h-3.5" />,
+              },
+              {
+                id: 'activeMoodboard',
+                label: '情绪板',
+                icon: <Board16Regular className="w-3.5 h-3.5" />,
+              },
             ] as const
           ).map((opt) => (
             <button
@@ -385,8 +399,10 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
                 }
               }}
               className={[
-                'charkle-pressable h-6 px-2 rounded-full inline-flex items-center gap-1 cursor-pointer text-[11.5px]',
-                targetMode === opt.id ? 'bg-[#5B8DEF] text-white font-medium' : 'text-white/75 hover:text-white',
+                'charkle-pressable h-6 px-2 rounded-[var(--win-radius-control)] inline-flex items-center gap-1 cursor-pointer text-[11.5px]',
+                targetMode === opt.id
+                  ? 'bg-[var(--accent)] text-[var(--accent-text)] font-medium'
+                  : 'text-white/75 hover:text-white hover:bg-white/8',
               ].join(' ')}
             >
               {opt.icon}
@@ -410,18 +426,18 @@ export const RegionCaptureOverlay: React.FC<RegionCaptureOverlayProps> = ({ toke
           type="button"
           disabled={!physicalCrop || physicalCrop.width < 4 || physicalCrop.height < 4 || submitting}
           onClick={() => void handleCommit()}
-          className="charkle-pressable h-7 px-3 rounded-full bg-[#5B8DEF] hover:bg-[#74A0F7] disabled:opacity-40 text-white font-medium inline-flex items-center gap-1 cursor-pointer"
+          className="charkle-pressable h-7 px-3 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-40 text-[var(--accent-text)] font-medium inline-flex items-center gap-1 cursor-pointer"
         >
-          <Check size={13.5} />
+          <Checkmark16Regular className="w-3.5 h-3.5" />
           <span>保存截图 (Enter)</span>
         </button>
 
         <button
           type="button"
           onClick={() => void handleCancel()}
-          className="charkle-pressable h-7 px-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white/85 inline-flex items-center gap-1 cursor-pointer"
+          className="charkle-pressable h-7 px-2.5 rounded-[var(--win-radius-control)] bg-white/10 hover:bg-white/20 text-white/85 inline-flex items-center gap-1 cursor-pointer"
         >
-          <X size={13.5} />
+          <Dismiss16Regular className="w-3.5 h-3.5" />
           <span>取消 (Esc)</span>
         </button>
       </div>
