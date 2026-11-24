@@ -4,9 +4,9 @@ import CharkleCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Gallery-First primary window shell with restrained Apple Liquid Glass floating controls,
-/// soft scroll edge fade, expandable visual/CIELAB filter bar, Inbox Triage bar, Moodboards Home,
-/// Dual-Mode Moodboard Studio, adaptive Inspector, Quick Look continuity, and Jump Anywhere.
+/// Gallery-First primary window shell with restrained Apple Liquid Glass floating islands,
+/// soft scroll edge fade, unified inline token search + filter popover, Inbox Triage bar,
+/// Moodboards Home, Dual-Mode Moodboard Studio, adaptive Inspector, Quick Look continuity, and Jump Anywhere.
 public struct MainWindowView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -37,11 +37,9 @@ public struct MainWindowView: View {
     @State private var galleryViewportWidth: CGFloat = 960
     @FocusState private var isSubfolderFieldFocused: Bool
 
-    private static let filterColorPresets: [String] = [
-        "#1E2024", "#5C6B73", "#3D5A80", "#4E7D96",
-        "#6B8E76", "#D4A373", "#BA6B55", "#E5B243",
-        "#C8B8A6", "#F0EEE9"
-    ]
+    private var activeAccent: Color {
+        CharkleTheme.accent(for: colorScheme, source: coordinator.accentSource)
+    }
 
     public init(
         coordinator: AppCoordinatorStore,
@@ -313,6 +311,8 @@ public struct MainWindowView: View {
             CharkleToastOverlay(coordinator: coordinator)
                 .zIndex(300)
         }
+        .environment(\.charkleAccentSource, coordinator.accentSource)
+        .tint(activeAccent)
         .background {
             ZStack {
                 CharkleWindowChromeBridge()
@@ -350,9 +350,13 @@ public struct MainWindowView: View {
                 moodboards: moodboards,
                 syncAndAI: syncAndAI
             )
+            .environment(\.charkleAccentSource, coordinator.accentSource)
+            .tint(activeAccent)
         }
         .sheet(isPresented: $showInboxBatchTriageSheet) {
             inboxBatchTriageSheet
+                .environment(\.charkleAccentSource, coordinator.accentSource)
+                .tint(activeAccent)
         }
         .sheet(isPresented: Binding(
             get: { coordinator.isSmartFolderEditorPresented },
@@ -368,6 +372,8 @@ public struct MainWindowView: View {
                     navigate(to: .smartFolder(saved.id))
                 }
             }
+            .environment(\.charkleAccentSource, coordinator.accentSource)
+            .tint(activeAccent)
         }
         .alert(
             pendingPermanentDeleteIDs.count == library.assets.count && coordinator.selectedDestination == .trash && pendingPermanentDeleteIDs.count > 1
@@ -460,19 +466,20 @@ public struct MainWindowView: View {
         }
     }
 
-    // MARK: - 1. Library Gallery Stage (Floating Liquid Glass Top Bar + Filter Bar + Inbox Triage + Virtualized Masonry)
+    // MARK: - 1. Library Gallery Stage (Section Context + 3 Liquid Glass Islands + Virtualized Masonry)
 
     private var libraryGalleryStage: some View {
         let isInbox = coordinator.selectedDestination == .inbox
         let isTrash = coordinator.selectedDestination == .trash
         let activeFolderID: UUID? = if case .folder(let fid) = coordinator.selectedDestination { fid } else { nil }
+        let activeFolderChildren: [FolderRecord] = activeFolderID.map { library.childFolders(of: $0) } ?? []
+        let showFolderSubbar = activeFolderID != nil && (!activeFolderChildren.isEmpty || galleryViewportWidth < 680)
         let topInset: CGFloat = {
-            var base: CGFloat = 64
-            if library.semanticSearchReport != nil { base += 46 }
-            if coordinator.isVisualFilterBarPresented { base += 92 }
-            if isInbox && !library.assets.isEmpty { base += 54 }
-            if isTrash && !library.assets.isEmpty { base += 54 }
-            if activeFolderID != nil { base += 54 }
+            var base: CGFloat = 62
+            if library.semanticSearchReport != nil { base += 44 }
+            if isInbox && !library.assets.isEmpty { base += 50 }
+            if isTrash && !library.assets.isEmpty { base += 50 }
+            if showFolderSubbar { base += 50 }
             return base
         }()
 
@@ -829,9 +836,9 @@ public struct MainWindowView: View {
                 )
             }
 
-            // Floating Liquid Glass Top Control Stack
+            // Floating Liquid Glass Top Control Stack (Section Context + Max 3 Cohesive Islands + On-Demand Subbar)
             VStack(spacing: 8) {
-                floatingTopBar
+                floatingTopBar(activeFolderID: activeFolderID, showFolderSubbar: showFolderSubbar)
                     .background {
                         CharkleWindowDragArea()
                             .padding(.top, -10)
@@ -841,11 +848,6 @@ public struct MainWindowView: View {
                 if let report = library.semanticSearchReport {
                     semanticSearchStatusBar(report)
                         .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
-                }
-
-                if coordinator.isVisualFilterBarPresented {
-                    floatingVisualFilterBar
-                        .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.96, reduced: reduceMotion))
                 }
 
                 if isInbox && !library.assets.isEmpty {
@@ -858,22 +860,13 @@ public struct MainWindowView: View {
                         .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
                 }
 
-                if let activeFolderID {
-                    folderSubfoldersBar(folderID: activeFolderID)
+                if showFolderSubbar, let activeFolderID {
+                    folderSubfoldersBar(folderID: activeFolderID, showInlineBreadcrumb: galleryViewportWidth < 680)
                         .transition(CharkleMotion.originTransition(anchor: .top, scale: 0.98, reduced: reduceMotion))
                 }
             }
             .padding(.horizontal, galleryViewportWidth < 560 ? 12 : 18)
             .padding(.top, 10)
-            .animation(
-                CharkleMotion.enterExit(
-                    coordinator.isVisualFilterBarPresented,
-                    enter: CharkleMotion.popoverEnter,
-                    exit: CharkleMotion.popoverExit,
-                    reduced: reduceMotion
-                ),
-                value: coordinator.isVisualFilterBarPresented
-            )
             .animation(
                 CharkleMotion.enterExit(isInbox && !library.assets.isEmpty, reduced: reduceMotion),
                 value: isInbox && !library.assets.isEmpty
@@ -883,8 +876,8 @@ public struct MainWindowView: View {
                 value: isTrash && !library.assets.isEmpty
             )
             .animation(
-                CharkleMotion.enterExit(activeFolderID != nil, reduced: reduceMotion),
-                value: activeFolderID
+                CharkleMotion.enterExit(showFolderSubbar, reduced: reduceMotion),
+                value: showFolderSubbar
             )
 
             // Bottom-Center Floating Multi-Select Batch Action Pill (≥2 items selected)
@@ -897,6 +890,7 @@ public struct MainWindowView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .charkleScrollEdgeSoft(for: .top)
         .animation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion), value: library.selectedAssetIDs.count >= 2)
         .onKeyPress(characters: CharacterSet(charactersIn: "123456789")) { press in
             let primaryMods = press.modifiers.intersection([.command, .option, .control, .shift])
@@ -926,424 +920,692 @@ public struct MainWindowView: View {
         }
     }
 
-    // MARK: - Floating Liquid Glass Top Bar
+    // MARK: - Floating Liquid Glass Top Bar (Section Context + Max 3 Cohesive Islands)
 
-    private var floatingTopBar: some View {
-        let isUltraCompact = galleryViewportWidth < 630
+    private func floatingTopBar(activeFolderID: UUID?, showFolderSubbar: Bool) -> some View {
+        let isUltraCompact = galleryViewportWidth < 600
+        let showContextTitle = galleryViewportWidth >= 680
         let supportsDensity = coordinator.galleryLayoutMode == .verticalMasonry || coordinator.galleryLayoutMode == .horizontalJustified
-        let showDensitySlider = galleryViewportWidth >= 790 && supportsDensity
-        let showFullSyncLabel = galleryViewportWidth >= 870
-        let showFullCTALabel = galleryViewportWidth >= 950
-        let showSemanticText = galleryViewportWidth >= 950
+        let showDensitySlider = galleryViewportWidth >= 840 && supportsDensity
+        let showSortLabel = galleryViewportWidth >= 1040
+        let showFullSyncLabel = galleryViewportWidth >= 1040
+        let showFilterText = galleryViewportWidth >= 980
         let barSpacing: CGFloat = isUltraCompact ? 6 : 8
+        let contextMaxWidth: CGFloat = galleryViewportWidth >= 1160 ? 250 : (galleryViewportWidth >= 920 ? 190 : 136)
 
         return CharkleGlassContainer(spacing: barSpacing) {
             HStack(spacing: barSpacing) {
-                // Search capsule
-                HStack(spacing: 6) {
-                    CharkleIcon("search", style: .duotone, size: 16, color: library.semanticSearchEnabled ? Color.accentColor : .secondary, isActive: library.semanticSearchEnabled)
-                    TextField(
-                        isUltraCompact
-                            ? (library.semanticSearchEnabled ? "语义搜图…" : "搜索素材…")
-                            : (library.semanticSearchEnabled ? "自然语言语义搜图，回车检索…" : "搜索素材、标签、OCR 文字或拼音…"),
-                        text: $searchDraft
+                if showContextTitle {
+                    topContextHeader(
+                        activeFolderID: activeFolderID,
+                        showInlineSubfolderButton: activeFolderID != nil && !showFolderSubbar
                     )
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
-                    .frame(
-                        minWidth: isUltraCompact ? 44 : 72,
-                        idealWidth: isUltraCompact ? 120 : 168,
-                        maxWidth: isUltraCompact ? .infinity : 260
-                    )
-                    .onSubmit {
-                        let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !q.isEmpty else { return }
-                        if library.semanticSearchEnabled {
-                            triggerSemanticSearch()
-                        }
-                    }
+                    .frame(maxWidth: contextMaxWidth, alignment: .leading)
 
-                    if !searchDraft.isEmpty {
-                        Button {
-                            searchDraft = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    Button {
-                        let trimmed = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if library.semanticSearchEnabled && trimmed.isEmpty {
-                            library.semanticSearchEnabled = false
-                            Task { await library.clearSemanticSearch() }
-                        } else {
-                            library.semanticSearchEnabled = true
-                            if !trimmed.isEmpty {
-                                triggerSemanticSearch()
-                            } else {
-                                coordinator.showToast("已开启语义搜图模式：输入描述后按回车检索", icon: "sparkles")
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            if library.isRunningSemanticSearch {
-                                ProgressView().controlSize(.mini)
-                            } else {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            if showSemanticText {
-                                Text("语义")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .lineLimit(1)
-                            }
-                        }
-                        .foregroundStyle(library.semanticSearchEnabled ? Color.white : Color.accentColor)
-                        .padding(.horizontal, showSemanticText ? 7 : 6)
-                        .padding(.vertical, 3)
-                        .background(
-                            library.semanticSearchEnabled ? Color.accentColor : Color.accentColor.opacity(0.12),
-                            in: Capsule(style: .continuous)
-                        )
-                        .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .buttonStyle(.plain)
-                    .help("混合视觉语义搜图（结合视觉评分、语义向量与全文检索）")
-                }
-                .padding(.horizontal, isUltraCompact ? 10 : 12)
-                .padding(.vertical, 7)
-                .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                .layoutPriority(isUltraCompact ? 0 : 1)
-
-                // Visual Filter Toggle (⇧⌘S)
-                Button {
-                    let willOpen = !coordinator.isVisualFilterBarPresented
-                    withAnimation(
-                        CharkleMotion.enterExit(
-                            willOpen,
-                            enter: CharkleMotion.popoverEnter,
-                            exit: CharkleMotion.popoverExit,
-                            reduced: reduceMotion
-                        )
-                    ) {
-                        coordinator.isVisualFilterBarPresented = willOpen
-                    }
-                } label: {
-                    if isUltraCompact {
-                        ZStack(alignment: .topTrailing) {
-                            CharkleIcon("filter", style: .duotone, size: 16, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary, isActive: coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters)
-                                .frame(width: 30, height: 30)
-                            if library.filter.hasActiveVisualFilters {
-                                Circle()
-                                    .fill(Color.accentColor)
-                                    .frame(width: 6, height: 6)
-                                    .offset(x: -5, y: 5)
-                            }
-                        }
-                        .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
-                    } else {
-                        HStack(spacing: 5) {
-                            CharkleIcon("filter", style: .duotone, size: 17, color: (coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters) ? Color.accentColor : .primary, isActive: coordinator.isVisualFilterBarPresented || library.filter.hasActiveVisualFilters)
-                            Text("筛选")
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(1)
-                            if library.filter.hasActiveVisualFilters {
-                                Circle()
-                                    .fill(Color.accentColor)
-                                    .frame(width: 6, height: 6)
-                            }
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 7)
-                        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
-                    }
-                }
-                .buttonStyle(CharkleTactileButtonStyle())
-                .help("展开视觉与色彩筛选条 (⇧⌘S)")
-
-                // Sort Picker Pill
-                Menu {
-                    ForEach(SortOrder.allCases, id: \.self) { order in
-                        Button {
-                            library.filter.sortBy = order
-                            Task { await library.refreshAssets() }
-                        } label: {
-                            HStack {
-                                Text(order.localizedLabel)
-                                if library.filter.sortBy == order {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    if isUltraCompact {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.primary.opacity(0.84))
-                            .frame(width: 30, height: 30)
-                            .charkleLiquidGlass(.regular, in: Circle())
-                    } else {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.up.arrow.down")
-                                .font(.system(size: 11))
-                            Text(library.filter.sortBy.localizedLabel)
-                                .font(.system(size: 11.5, weight: .medium))
-                                .lineLimit(1)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                    }
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(isUltraCompact ? .hidden : .automatic)
-                .fixedSize()
-                .help("排序方式：\(library.filter.sortBy.localizedLabel)")
-
-                // Gallery View Mode Switcher (collapses into compact Menu with density actions when narrow)
-                if isUltraCompact {
-                    let activeModeIcon: String = switch coordinator.galleryLayoutMode {
-                    case .verticalMasonry: "masonry-vertical"
-                    case .horizontalJustified: "masonry-horizontal"
-                    case .galleryFilmstrip: "quicklook"
-                    case .ringGallery: "gallery-ring"
-                    }
-                    Menu {
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                coordinator.galleryLayoutMode = .verticalMasonry
-                            }
-                        } label: {
-                            if coordinator.galleryLayoutMode == .verticalMasonry {
-                                Label("纵向瀑布流", systemImage: "checkmark")
-                            } else {
-                                Text("纵向瀑布流")
-                            }
-                        }
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                coordinator.galleryLayoutMode = .horizontalJustified
-                            }
-                        } label: {
-                            if coordinator.galleryLayoutMode == .horizontalJustified {
-                                Label("横向等高瀑布流", systemImage: "checkmark")
-                            } else {
-                                Text("横向等高瀑布流")
-                            }
-                        }
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                coordinator.galleryLayoutMode = .galleryFilmstrip
-                            }
-                        } label: {
-                            if coordinator.galleryLayoutMode == .galleryFilmstrip {
-                                Label("画廊视图", systemImage: "checkmark")
-                            } else {
-                                Text("画廊视图")
-                            }
-                        }
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                coordinator.galleryLayoutMode = .ringGallery
-                            }
-                        } label: {
-                            if coordinator.galleryLayoutMode == .ringGallery {
-                                Label("环形画廊", systemImage: "checkmark")
-                            } else {
-                                Text("环形画廊")
-                            }
-                        }
-                        if supportsDensity {
-                            Divider()
-                            Button("放大卡片") {
-                                coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
-                                    currentWidth: CGFloat(coordinator.targetColumnWidth),
-                                    direction: 1,
-                                    layoutMode: coordinator.galleryLayoutMode,
-                                    containerWidth: galleryViewportWidth
-                                ))
-                            }
-                            Button("缩小卡片") {
-                                coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
-                                    currentWidth: CGFloat(coordinator.targetColumnWidth),
-                                    direction: -1,
-                                    layoutMode: coordinator.galleryLayoutMode,
-                                    containerWidth: galleryViewportWidth
-                                ))
-                            }
-                        }
-                    } label: {
-                        CharkleIcon(activeModeIcon, style: .duotone, size: 15.5, isActive: true)
-                            .frame(width: 30, height: 30)
-                            .charkleLiquidGlass(.regular, in: Circle())
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("切换视图与缩放密度（也支持双指捏合或 ⌘+滚轮）")
-                } else {
-                    HStack(spacing: 2) {
-                        layoutModeButton(mode: .verticalMasonry, icon: "masonry-vertical", helpText: "纵向瀑布流")
-                        layoutModeButton(mode: .horizontalJustified, icon: "masonry-horizontal", helpText: "横向等高瀑布流（竖图自动对齐）")
-                        layoutModeButton(mode: .galleryFilmstrip, icon: "quicklook", helpText: "画廊视图（底部胶片挑图）")
-                        layoutModeButton(mode: .ringGallery, icon: "gallery-ring", helpText: "环形画廊（3D 外圈景深浏览）")
-                    }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 3.5)
-                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                    .fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 4)
                 }
 
-                // Column / Row Density Slider Pill (synced with trackpad pinch & ⌘+scroll)
-                if showDensitySlider {
-                    HStack(spacing: 6) {
-                        Button {
-                            coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
-                                currentWidth: CGFloat(coordinator.targetColumnWidth),
-                                direction: -1,
-                                layoutMode: coordinator.galleryLayoutMode,
-                                containerWidth: galleryViewportWidth
-                            ))
-                        } label: {
-                            Image(systemName: "square.grid.3x3")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("缩小卡片、显示更多列（也支持双指捏合或 ⌘+滚轮）")
-
-                        Slider(value: Binding(
-                            get: { coordinator.targetColumnWidth },
-                            set: { coordinator.targetColumnWidth = $0 }
-                        ), in: 130...420)
-                        .frame(width: showFullCTALabel ? 64 : 52)
-
-                        Button {
-                            coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
-                                currentWidth: CGFloat(coordinator.targetColumnWidth),
-                                direction: 1,
-                                layoutMode: coordinator.galleryLayoutMode,
-                                containerWidth: galleryViewportWidth
-                            ))
-                        } label: {
-                            Image(systemName: "square.grid.2x2")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("放大卡片、更清晰浏览细节（也支持双指捏合或 ⌘+滚轮）")
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
-                    .help("支持触控板双指捏合缩放或按住 ⌘+滚轮缩放")
-                }
-
-                if !isUltraCompact {
-                    Spacer(minLength: 0)
-                }
-
-                // Rapid Moodboard Generator CTA Pill
-                Button {
-                    coordinator.presentMoodboardGenerator(
-                        entry: library.selectedAssetIDs.count >= 2 ? .selection : .prompt
-                    )
-                } label: {
-                    if isUltraCompact {
-                        CharkleIcon("sparkle-board", style: .duotone, size: 16, color: Color.accentColor, isActive: true)
-                            .frame(width: 30, height: 30)
-                            .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
-                    } else {
-                        HStack(spacing: 5) {
-                            CharkleIcon("sparkle-board", style: .duotone, size: 17, color: Color.accentColor, isActive: true)
-                            Text(showFullCTALabel ? "快速生成情绪板" : "生成")
-                                .font(.system(size: 12, weight: .semibold))
-                                .lineLimit(1)
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, showFullCTALabel ? 12 : 10)
-                        .padding(.vertical, 7)
-                        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
-                    }
-                }
-                .buttonStyle(CharkleTactileButtonStyle())
-                .help("快速生成情绪板 (⌘N)")
-
-                // Isolated Sync Status Pill so 20Hz live sync progress updates never re-render MainWindowView or VirtualizedMasonryView
-                FloatingSyncStatusPill(
-                    syncAndAI: syncAndAI,
-                    compact: !showFullSyncLabel,
-                    onOpenSettings: {
-                        let targetTab: CharkleSettingsTab = syncAndAI.syncConfig.mode == .localOnly ? .library : .sync
-                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
-                            coordinator.openSettings(tab: targetTab)
-                        }
-                    },
-                    onTriggerManualSync: triggerManualCloudSync
+                // Island 1: Unified Token Search & Filter Popover
+                searchAndFilterIsland(
+                    isUltraCompact: isUltraCompact,
+                    showFilterText: showFilterText
                 )
 
-                // Inspector Toggle
-                Button {
-                    coordinator.isInspectorVisible.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(coordinator.isInspectorVisible ? Color.accentColor : .secondary)
-                        .frame(width: 30, height: 30)
-                        .charkleLiquidGlass(.regular, in: Circle(), interactive: true)
-                }
-                .buttonStyle(CharkleTactileButtonStyle())
-                .help("显示 / 隐藏右侧检查器 (⌘⌥I)")
+                // Island 2: View Switcher, Sort & Compact Density
+                viewSortDensityIsland(
+                    isUltraCompact: isUltraCompact,
+                    supportsDensity: supportsDensity,
+                    showDensitySlider: showDensitySlider,
+                    showSortLabel: showSortLabel
+                )
+
+                // Island 3: Moodboard Generator CTA, Isolated Sync Pill & Inspector Toggle
+                actionSyncInspectorIsland(
+                    isUltraCompact: isUltraCompact,
+                    showFullSyncLabel: showFullSyncLabel
+                )
             }
             .frame(minWidth: 0, maxWidth: .infinity)
         }
     }
 
-    // MARK: - Expandable Floating Liquid Glass Visual Filter Bar
+    private var currentDestinationTitle: String {
+        switch coordinator.selectedDestination {
+        case .allItems: "全部素材"
+        case .inbox: "收件箱"
+        case .untagged: "未打标签"
+        case .recent: "最近添加"
+        case .trash: "废纸篓"
+        case .moodboardsHome: "所有情绪板"
+        case .moodboard(let id):
+            moodboards.boards.first(where: { $0.id == id })?.title ?? "情绪板"
+        case .folder(let id):
+            library.folders.first(where: { $0.id == id })?.name ?? "文件夹"
+        case .smartFolder(let id):
+            library.smartFolders.first(where: { $0.id == id })?.name ?? "智能文件夹"
+        case .tag(let name):
+            "#\(name)"
+        }
+    }
 
-    private var floatingVisualFilterBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Row 1: All 7 MediaKind Chips + Clear Filter
-            HStack(spacing: 6) {
-                Text("媒体")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, alignment: .leading)
+    @ViewBuilder
+    private func topContextHeader(activeFolderID: UUID?, showInlineSubfolderButton: Bool) -> some View {
+        if let folderID = activeFolderID {
+            let crumbs = library.folderBreadcrumbs(for: folderID)
+            let visibleCrumbs = Array(crumbs.suffix(2))
+            let hiddenAncestors = crumbs.count > 2 ? Array(crumbs.dropLast(2)) : []
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 5) {
-                        ForEach(MediaKind.allCases, id: \.self) { kind in
-                            let active = library.filter.kinds.contains(kind)
-                            Button {
-                                if active { library.filter.kinds.remove(kind) }
-                                else { library.filter.kinds.insert(kind) }
-                                Task { await library.refreshAssets() }
-                            } label: {
-                                Text(kind.localizedLabel)
-                                    .font(.system(size: 11, weight: active ? .semibold : .medium))
-                                    .foregroundStyle(active ? .white : .primary.opacity(0.84))
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 4)
-                                    .background(
-                                        active ? Color.accentColor : Color.primary.opacity(0.06),
-                                        in: Capsule(style: .continuous)
-                                    )
+            HStack(spacing: 5) {
+                if !hiddenAncestors.isEmpty {
+                    Menu {
+                        ForEach(hiddenAncestors) { ancestor in
+                            Button(ancestor.name) {
+                                navigate(to: .folder(ancestor.id))
                             }
-                            .buttonStyle(.plain)
+                        }
+                    } label: {
+                        Text("…")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                            .frame(width: 18, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+
+                ForEach(Array(visibleCrumbs.enumerated()), id: \.element.id) { index, crumb in
+                    let isCurrent = crumb.id == folderID
+                    if index > 0 {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Button {
+                        navigate(to: .folder(crumb.id))
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isCurrent {
+                                CharkleFolderIcon(
+                                    colorHex: crumb.colorHex,
+                                    customSymbol: crumb.customSymbol,
+                                    size: 15,
+                                    isActive: true
+                                )
+                            }
+                            Text(crumb.name)
+                                .font(.system(size: isCurrent ? 15 : 13, weight: isCurrent ? .semibold : .medium))
+                                .tracking(isCurrent ? -0.2 : 0)
+                                .foregroundStyle(isCurrent ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .layoutPriority(isCurrent ? 1 : 0)
+                }
+
+                Text("\(library.assets.count)")
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    .fixedSize(horizontal: true, vertical: false)
+
+                if showInlineSubfolderButton {
+                    Button {
+                        subfolderNameDraft = ""
+                        showCreateSubfolderPopover = true
+                    } label: {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    }
+                    .buttonStyle(CharkleButtonStyle(.subtle, size: .icon, iconDimension: 24))
+                    .help("在此文件夹内新建子文件夹")
+                    .popover(isPresented: $showCreateSubfolderPopover, arrowEdge: .bottom) {
+                        createSubfolderPopoverContent(parentID: folderID)
+                            .environment(\.charkleAccentSource, coordinator.accentSource)
+                            .tint(activeAccent)
+                    }
+                }
+            }
+            .padding(.leading, 2)
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(currentDestinationTitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .tracking(-0.2)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Text("\(library.assets.count)")
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.leading, 2)
+        }
+    }
+
+    private var activeFilterTokens: [CharkleFilterToken] {
+        var tokens: [CharkleFilterToken] = []
+        if let hex = library.filter.selectedColorHex {
+            tokens.append(.color(hex))
+        }
+        for kind in MediaKind.allCases where library.filter.kinds.contains(kind) {
+            tokens.append(.mediaKind(kind))
+        }
+        if let shape = library.filter.shape {
+            tokens.append(.orientation(shape))
+        }
+        if library.filter.minRating > 0 {
+            tokens.append(.minRating(library.filter.minRating))
+        }
+        for tag in library.filter.tags.sorted(by: { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }) {
+            tokens.append(.tag(tag))
+        }
+        if library.filter.onlyPinnedOffline {
+            tokens.append(.pinnedOffline)
+        }
+        return tokens
+    }
+
+    private var hasActiveVisualPopoverFilters: Bool {
+        !library.filter.kinds.isEmpty
+            || library.filter.selectedColorHex != nil
+            || library.filter.shape != nil
+            || library.filter.minRating > 0
+            || library.filter.onlyPinnedOffline
+    }
+
+    private func removeFilterToken(_ token: CharkleFilterToken) {
+        switch token.kind {
+        case .color:
+            library.filter.selectedColorHex = nil
+        case .mediaKind(let kind):
+            library.filter.kinds.remove(kind)
+        case .orientation:
+            library.filter.shape = nil
+        case .minRating:
+            library.filter.minRating = 0
+        case .tag(let name):
+            library.filter.tags.remove(name)
+            if case .tag(let destTag) = coordinator.selectedDestination,
+               destTag.caseInsensitiveCompare(name) == .orderedSame {
+                coordinator.selectedDestination = .allItems
+            }
+        case .pinnedOffline:
+            library.filter.onlyPinnedOffline = false
+        }
+        Task { await library.refreshAssets() }
+    }
+
+    private func clearVisualPopoverFilters() {
+        library.filter.kinds.removeAll()
+        library.filter.selectedColorHex = nil
+        library.filter.shape = nil
+        library.filter.minRating = 0
+        library.filter.onlyPinnedOffline = false
+        Task { await library.refreshAssets() }
+    }
+
+    private func searchAndFilterIsland(isUltraCompact: Bool, showFilterText: Bool) -> some View {
+        let tokens = activeFilterTokens
+        let isFilterActive = coordinator.isVisualFilterBarPresented || hasActiveVisualPopoverFilters
+
+        return CharkleTokenSearchField(
+            text: $searchDraft,
+            tokens: tokens,
+            onRemoveToken: removeFilterToken,
+            placeholder: isUltraCompact
+                ? (library.semanticSearchEnabled ? "语义搜图…" : "搜索素材…")
+                : (library.semanticSearchEnabled ? "描述画面，回车语义搜图…" : "搜索素材、标签、备注或颜色…"),
+            semanticSearchEnabled: library.semanticSearchEnabled,
+            isRunningSemanticSearch: library.isRunningSemanticSearch,
+            showsSemanticToggle: true,
+            compact: galleryViewportWidth < 960,
+            wrapsInGlassIsland: true,
+            onSubmit: {
+                let q = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !q.isEmpty else { return }
+                if library.semanticSearchEnabled {
+                    triggerSemanticSearch()
+                }
+            },
+            onToggleSemanticSearch: {
+                let trimmed = searchDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                if library.semanticSearchEnabled && trimmed.isEmpty {
+                    library.semanticSearchEnabled = false
+                    Task { await library.clearSemanticSearch() }
+                } else {
+                    library.semanticSearchEnabled = true
+                    if !trimmed.isEmpty {
+                        triggerSemanticSearch()
+                    } else {
+                        coordinator.showToast("已开启语义搜图模式：输入描述后按回车检索", icon: "sparkles")
+                    }
+                }
+            }
+        ) {
+            Button {
+                coordinator.isVisualFilterBarPresented.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .symbolVariant(isFilterActive ? .fill : .none)
+                    if showFilterText {
+                        Text("筛选")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .lineLimit(1)
+                    }
+                }
+                .foregroundStyle(isFilterActive ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                .padding(.horizontal, showFilterText ? 7 : 5)
+                .frame(height: 24)
+                .background(
+                    isFilterActive
+                        ? CharkleTheme.accentSoft(for: colorScheme, source: coordinator.accentSource)
+                        : Color.clear,
+                    in: Capsule(style: .continuous)
+                )
+                .contentShape(Capsule(style: .continuous))
+            }
+            .buttonStyle(CharkleTactileButtonStyle())
+            .fixedSize(horizontal: true, vertical: false)
+            .help("色彩、媒体与评分筛选 (⇧⌘S)")
+            .popover(
+                isPresented: Binding(
+                    get: { coordinator.isVisualFilterBarPresented },
+                    set: { coordinator.isVisualFilterBarPresented = $0 }
+                ),
+                arrowEdge: .bottom
+            ) {
+                visualFilterPopoverContent
+                    .environment(\.charkleAccentSource, coordinator.accentSource)
+                    .tint(activeAccent)
+            }
+        }
+        .frame(
+            minWidth: isUltraCompact ? 110 : 168,
+            idealWidth: tokens.isEmpty
+                ? (galleryViewportWidth >= 1120 ? 260 : 206)
+                : (galleryViewportWidth >= 1120 ? 340 : 250),
+            maxWidth: isUltraCompact
+                ? .infinity
+                : (tokens.isEmpty
+                    ? (galleryViewportWidth >= 1200 ? 320 : 248)
+                    : (galleryViewportWidth >= 1200 ? 420 : 310))
+        )
+        .layoutPriority(isUltraCompact ? 0 : 1)
+    }
+
+    private func viewSortDensityIsland(
+        isUltraCompact: Bool,
+        supportsDensity: Bool,
+        showDensitySlider: Bool,
+        showSortLabel: Bool
+    ) -> some View {
+        HStack(spacing: isUltraCompact ? 4 : 6) {
+            if isUltraCompact {
+                // Ultra-compact (< 600pt): single menu holding layout modes + density steps
+                Menu {
+                    ForEach(GalleryLayoutMode.allCases, id: \.self) { mode in
+                        Button {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                coordinator.galleryLayoutMode = mode
+                            }
+                        } label: {
+                            if coordinator.galleryLayoutMode == mode {
+                                Label(mode.localizedLabel, systemImage: "checkmark")
+                            } else {
+                                Text(mode.localizedLabel)
+                            }
+                        }
+                    }
+                    if supportsDensity {
+                        Divider()
+                        Button("放大卡片") {
+                            stepGalleryDensity(direction: 1)
+                        }
+                        Button("缩小卡片") {
+                            stepGalleryDensity(direction: -1)
+                        }
+                        Button("恢复默认尺寸") {
+                            coordinator.targetColumnWidth = 228
+                        }
+                    }
+                } label: {
+                    Image(systemName: Self.layoutModeSymbol(for: coordinator.galleryLayoutMode))
+                        .font(.system(size: 13, weight: .medium))
+                        .symbolVariant(.fill)
+                        .foregroundStyle(activeAccent)
+                        .frame(width: 26, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("切换视图与缩放密度（也支持双指捏合或 ⌘+滚轮）")
+            } else {
+                CharkleSegmentedControl(
+                    selection: Binding(
+                        get: { coordinator.galleryLayoutMode },
+                        set: { coordinator.galleryLayoutMode = $0 }
+                    ),
+                    options: GalleryLayoutMode.allCases,
+                    size: .compact,
+                    fullWidth: false,
+                    useAccentForSelected: true,
+                    systemImage: { Self.layoutModeSymbol(for: $0) },
+                    helpText: { Self.layoutModeHelpText(for: $0) }
+                )
+            }
+
+            CharkleHairlineDivider(axis: .vertical)
+                .frame(height: 15)
+
+            // Sort Menu
+            Menu {
+                ForEach(SortOrder.allCases, id: \.self) { order in
+                    Button {
+                        library.filter.sortBy = order
+                        Task { await library.refreshAssets() }
+                    } label: {
+                        HStack {
+                            Text(order.localizedLabel)
+                            if library.filter.sortBy == order {
+                                Image(systemName: "checkmark")
+                            }
                         }
                     }
                 }
+            } label: {
+                if showSortLabel {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                        Text(library.filter.sortBy.localizedLabel)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.primary.opacity(0.88))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 4)
+                    .frame(height: 24)
+                    .contentShape(Rectangle())
+                } else {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(showSortLabel ? .automatic : .hidden)
+            .fixedSize()
+            .help("排序方式：\(library.filter.sortBy.localizedLabel)")
 
+            // Compact Density Control (inline slider >= 840pt; compact menu on 600..<840pt)
+            if supportsDensity && !isUltraCompact {
+                CharkleHairlineDivider(axis: .vertical)
+                    .frame(height: 15)
+
+                if showDensitySlider {
+                    HStack(spacing: 4) {
+                        Button {
+                            stepGalleryDensity(direction: -1)
+                        } label: {
+                            Image(systemName: "minus")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                                .frame(width: 18, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("缩小卡片、显示更多列（也支持双指捏合或 ⌘+滚轮）")
+
+                        Slider(
+                            value: Binding(
+                                get: { coordinator.targetColumnWidth },
+                                set: { coordinator.targetColumnWidth = $0 }
+                            ),
+                            in: 130...420
+                        )
+                        .controlSize(.mini)
+                        .frame(width: galleryViewportWidth >= 1180 ? 64 : 50)
+
+                        Button {
+                            stepGalleryDensity(direction: 1)
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                                .frame(width: 18, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("放大卡片、更清晰浏览细节（也支持双指捏合或 ⌘+滚轮）")
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help("支持触控板双指捏合缩放或按住 ⌘+滚轮缩放")
+                } else {
+                    Menu {
+                        Button("放大卡片") {
+                            stepGalleryDensity(direction: 1)
+                        }
+                        Button("缩小卡片") {
+                            stepGalleryDensity(direction: -1)
+                        }
+                        Divider()
+                        Button("恢复默认尺寸") {
+                            coordinator.targetColumnWidth = 228
+                        }
+                    } label: {
+                        Image(systemName: "plus.forwardslash.minus")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("调整卡片密度（也支持双指捏合或 ⌘+滚轮）")
+                }
+            }
+        }
+        .padding(.horizontal, isUltraCompact ? 6 : 7)
+        .frame(height: 34)
+        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func actionSyncInspectorIsland(isUltraCompact: Bool, showFullSyncLabel: Bool) -> some View {
+        let ctaLabel: String? = if galleryViewportWidth >= 1180 {
+            "快速生成情绪板"
+        } else if galleryViewportWidth >= 1020 {
+            "生成情绪板"
+        } else if galleryViewportWidth >= 740 {
+            "生成"
+        } else {
+            nil
+        }
+
+        return HStack(spacing: isUltraCompact ? 4 : 6) {
+            // Rapid Moodboard Generator CTA
+            Button {
+                coordinator.presentMoodboardGenerator(
+                    entry: library.selectedAssetIDs.count >= 2 ? .selection : .prompt
+                )
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "sparkles.rectangle.stack")
+                        .font(.system(size: 13, weight: .medium))
+                        .symbolVariant(.fill)
+                        .foregroundStyle(activeAccent)
+                    if let ctaLabel {
+                        Text(ctaLabel)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.primary.opacity(0.90))
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, ctaLabel != nil ? 6 : 4)
+                .frame(minWidth: 26, minHeight: 24, maxHeight: 24)
+                .contentShape(Capsule(style: .continuous))
+            }
+            .buttonStyle(CharkleTactileButtonStyle())
+            .fixedSize(horizontal: true, vertical: false)
+            .help("快速生成情绪板 (⌘N)")
+
+            CharkleHairlineDivider(axis: .vertical)
+                .frame(height: 15)
+
+            // Isolated Sync Status Pill so 20Hz live sync progress updates never re-render MainWindowView or VirtualizedMasonryView
+            FloatingSyncStatusPill(
+                syncAndAI: syncAndAI,
+                compact: !showFullSyncLabel,
+                embeddedInIsland: true,
+                onOpenSettings: {
+                    let targetTab: CharkleSettingsTab = syncAndAI.syncConfig.mode == .localOnly ? .library : .sync
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                        coordinator.openSettings(tab: targetTab)
+                    }
+                },
+                onTriggerManualSync: triggerManualCloudSync
+            )
+
+            CharkleHairlineDivider(axis: .vertical)
+                .frame(height: 15)
+
+            // Inspector Toggle
+            Button {
+                coordinator.isInspectorVisible.toggle()
+            } label: {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 13.5, weight: .medium))
+                    .symbolVariant(coordinator.isInspectorVisible ? .fill : .none)
+                    .foregroundStyle(coordinator.isInspectorVisible ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                    .frame(width: 26, height: 24)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(CharkleTactileButtonStyle())
+            .help("显示 / 隐藏右侧检查器 (⌘⌥I)")
+        }
+        .padding(.horizontal, isUltraCompact ? 6 : 8)
+        .frame(height: 34)
+        .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func stepGalleryDensity(direction: Int) {
+        coordinator.targetColumnWidth = Double(MasonryLayoutEngine.steppedColumnWidth(
+            currentWidth: CGFloat(coordinator.targetColumnWidth),
+            direction: direction,
+            layoutMode: coordinator.galleryLayoutMode,
+            containerWidth: galleryViewportWidth
+        ))
+    }
+
+    // MARK: - Lightweight Visual & Color Filter Popover (Replaces Heavy 92pt Stacked Strip)
+
+    private var visualFilterPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("筛选条件")
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 4)
+                if hasActiveVisualPopoverFilters {
+                    Button("清除全部") {
+                        clearVisualPopoverFilters()
+                    }
+                    .buttonStyle(CharkleButtonStyle(.subtle, size: .xs))
+                }
+            }
 
-                // Aspect Shape Pills
-                HStack(spacing: 4) {
+            CharkleHairlineDivider()
+
+            // Color Filter with 10 studio swatches + native NSColorSampler screen eyedropper + HEX + CIELAB tolerance
+            CharkleColorFilterPopover(
+                selectedColorHex: Binding(
+                    get: { library.filter.selectedColorHex },
+                    set: { library.filter.selectedColorHex = $0 }
+                ),
+                colorTolerance: Binding(
+                    get: { library.filter.colorTolerance },
+                    set: { library.filter.colorTolerance = $0 }
+                ),
+                title: "主色调",
+                embedded: true,
+                onSelectColor: { _ in
+                    Task { await library.refreshAssets() }
+                },
+                onToleranceChange: { _ in
+                    Task { await library.refreshAssets() }
+                }
+            )
+
+            CharkleHairlineDivider()
+
+            // Media Kinds
+            VStack(alignment: .leading, spacing: 7) {
+                Text("媒体类型")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+
+                CharkleFlowLayout(spacing: 6, lineSpacing: 6) {
+                    ForEach(MediaKind.allCases, id: \.self) { kind in
+                        let active = library.filter.kinds.contains(kind)
+                        Button {
+                            if active { library.filter.kinds.remove(kind) }
+                            else { library.filter.kinds.insert(kind) }
+                            Task { await library.refreshAssets() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: Self.mediaKindSymbol(for: kind))
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .symbolVariant(active ? .fill : .none)
+                                Text(kind.localizedLabel)
+                                    .font(.system(size: 11.5, weight: active ? .semibold : .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(
+                                active
+                                    ? CharkleTheme.accentButtonForeground(for: colorScheme, source: coordinator.accentSource)
+                                    : Color.primary.opacity(0.84)
+                            )
+                            .padding(.horizontal, 9)
+                            .frame(height: 24)
+                            .background(
+                                active
+                                    ? CharkleTheme.accentButtonFill(for: colorScheme, source: coordinator.accentSource)
+                                    : CharkleTheme.surfaceSubtle(for: colorScheme),
+                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                            )
+                        }
+                        .buttonStyle(CharkleTactileButtonStyle())
+                    }
+                }
+            }
+
+            CharkleHairlineDivider()
+
+            // Aspect Orientation
+            VStack(alignment: .leading, spacing: 7) {
+                Text("画幅比例")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+
+                HStack(spacing: 6) {
                     ForEach(AspectShape.allCases, id: \.self) { shape in
                         let active = library.filter.shape == shape
                         Button {
@@ -1351,173 +1613,114 @@ public struct MainWindowView: View {
                             Task { await library.refreshAssets() }
                         } label: {
                             Text(shape.localizedLabel)
-                                .font(.system(size: 11, weight: active ? .semibold : .medium))
+                                .font(.system(size: 11.5, weight: active ? .semibold : .medium))
                                 .lineLimit(1)
-                                .foregroundStyle(active ? .white : .secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
+                                .foregroundStyle(
+                                    active
+                                        ? CharkleTheme.accentButtonForeground(for: colorScheme, source: coordinator.accentSource)
+                                        : Color.primary.opacity(0.84)
+                                )
+                                .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
                                 .background(
-                                    active ? Color.accentColor : Color.primary.opacity(0.05),
-                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    active
+                                        ? CharkleTheme.accentButtonFill(for: colorScheme, source: coordinator.accentSource)
+                                        : CharkleTheme.surfaceSubtle(for: colorScheme),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                                 )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CharkleTactileButtonStyle())
                     }
-                }
-                .fixedSize(horizontal: true, vertical: false)
-
-                if library.filter.hasActiveVisualFilters {
-                    Button("清除") {
-                        library.filter.clearVisualFilters()
-                        Task { await library.refreshAssets() }
-                    }
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .buttonStyle(.plain)
-                    .fixedSize(horizontal: true, vertical: false)
                 }
             }
 
-            // Row 2: Friendly Color Filter + Tolerance Range + Rating + Kept Locally (horizontally scrollable on narrow windows)
-            HStack(spacing: 6) {
-                Text("色彩")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, alignment: .leading)
+            CharkleHairlineDivider()
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        HStack(spacing: 5) {
-                            ForEach(Self.filterColorPresets, id: \.self) { hex in
-                                let selected = library.filter.selectedColorHex?.uppercased() == hex
-                                Button {
-                                    library.filter.selectedColorHex = selected ? nil : hex
-                                    Task { await library.refreshAssets() }
-                                } label: {
-                                    Circle()
-                                        .fill(Color(charkleHex: hex))
-                                        .frame(width: 17, height: 17)
-                                        .overlay(
-                                            Circle().strokeBorder(
-                                                selected ? Color.accentColor : Color.primary.opacity(0.18),
-                                                lineWidth: selected ? 2.5 : 0.75
-                                            )
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                                .help("按主色调筛选 \(hex)")
-                            }
+            // Minimum Rating + Local Offline Retention
+            HStack(spacing: 8) {
+                HStack(spacing: 3) {
+                    Text("最低评分")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                        .padding(.trailing, 3)
 
-                            // Custom color picker (natural NSColorWell size via fixedSize so it never overlaps adjacent swatches)
-                            ColorPicker(
-                                "",
-                                selection: Binding(
-                                    get: {
-                                        Color(charkleHex: library.filter.selectedColorHex ?? "#3D5A80")
-                                    },
-                                    set: { newColor in
-                                        if let hex = Self.hexString(from: newColor) {
-                                            library.filter.selectedColorHex = hex
-                                            Task { await library.refreshAssets() }
-                                        }
-                                    }
-                                ),
-                                supportsOpacity: false
-                            )
-                            .labelsHidden()
-                            .fixedSize()
-                            .padding(.leading, 4)
-                            .help("自定义颜色或吸管取色")
-
-                            if library.filter.selectedColorHex != nil {
-                                HStack(spacing: 5) {
-                                    Text("精确")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
-                                    Slider(value: Binding(
-                                        get: { library.filter.colorTolerance },
-                                        set: { newVal in
-                                            library.filter.colorTolerance = newVal
-                                            Task { await library.refreshAssets() }
-                                        }
-                                    ), in: 10...55)
-                                    .frame(width: 74)
-                                    .help("调节颜色匹配范围：越靠左越接近所选颜色，越靠右包含更多相近色调")
-                                    Text("宽松")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
-                                    Text(colorToleranceLabel(library.filter.colorTolerance))
-                                        .font(.system(size: 10, weight: .medium))
-                                        .foregroundStyle(Color.accentColor)
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 2)
-                                        .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
-                                    Button {
-                                        library.filter.selectedColorHex = nil
-                                        Task { await library.refreshAssets() }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 11.5))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("清除颜色筛选")
-                                }
-                                .padding(.leading, 4)
-                            }
-                        }
-
-                        Divider().frame(height: 16)
-
-                        // Minimum Rating Filter
-                        HStack(spacing: 3) {
-                            Text("评分")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            ForEach(1...5, id: \.self) { star in
-                                Button {
-                                    library.filter.minRating = (library.filter.minRating == star) ? 0 : star
-                                    Task { await library.refreshAssets() }
-                                } label: {
-                                    Image(systemName: star <= library.filter.minRating ? "star.fill" : "star")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(star <= library.filter.minRating ? Color(charkleHex: "#E5B243") : .secondary.opacity(0.5))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-
-                        Divider().frame(height: 16)
-
-                        // Kept Locally (iCloud-style) Filter Toggle
+                    ForEach(1...5, id: \.self) { star in
+                        let filled = star <= library.filter.minRating
                         Button {
-                            library.filter.onlyPinnedOffline.toggle()
+                            library.filter.minRating = (library.filter.minRating == star) ? 0 : star
                             Task { await library.refreshAssets() }
                         } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: library.filter.onlyPinnedOffline ? "arrow.down.circle.fill" : "arrow.down.circle")
-                                    .font(.system(size: 10.5))
-                                Text("已保留在本地")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .lineLimit(1)
-                            }
-                            .foregroundStyle(library.filter.onlyPinnedOffline ? Color.accentColor : .secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                library.filter.onlyPinnedOffline ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.05),
-                                in: Capsule(style: .continuous)
-                            )
+                            Image(systemName: "star")
+                                .font(.system(size: 12.5, weight: .medium))
+                                .symbolVariant(filled ? .fill : .none)
+                                .foregroundStyle(filled ? Color(charkleHex: "#E5B243") : CharkleTheme.secondaryInk(for: colorScheme).opacity(0.55))
+                                .frame(width: 20, height: 22)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .help("筛选 \(star) 星及以上素材")
                     }
-                    .padding(.vertical, 1)
                 }
+
+                Spacer(minLength: 6)
+
+                Button {
+                    library.filter.onlyPinnedOffline.toggle()
+                    Task { await library.refreshAssets() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 11, weight: .medium))
+                            .symbolVariant(library.filter.onlyPinnedOffline ? .fill : .none)
+                        Text("本地保留")
+                            .font(.system(size: 11.5, weight: library.filter.onlyPinnedOffline ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(library.filter.onlyPinnedOffline ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(
+                        library.filter.onlyPinnedOffline
+                            ? CharkleTheme.accentSoft(for: colorScheme, source: coordinator.accentSource)
+                            : CharkleTheme.surfaceSubtle(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                    )
+                }
+                .buttonStyle(CharkleTactileButtonStyle())
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.popoverOuter, style: .continuous))
+        .padding(14)
+        .frame(width: 336)
+    }
+
+    private static func layoutModeSymbol(for mode: GalleryLayoutMode) -> String {
+        switch mode {
+        case .verticalMasonry: "rectangle.split.3x1"
+        case .horizontalJustified: "rectangle.split.1x2"
+        case .galleryFilmstrip: "film"
+        case .ringGallery: "square.stack.3d.forward.dottedline"
+        }
+    }
+
+    private static func layoutModeHelpText(for mode: GalleryLayoutMode) -> String {
+        switch mode {
+        case .verticalMasonry: "纵向瀑布流"
+        case .horizontalJustified: "横向等高瀑布流（竖图自动对齐）"
+        case .galleryFilmstrip: "画廊视图（底部胶片挑图）"
+        case .ringGallery: "环形画廊（3D 外圈景深浏览）"
+        }
+    }
+
+    private static func mediaKindSymbol(for kind: MediaKind) -> String {
+        switch kind {
+        case .image: "photo"
+        case .animatedImage: "photo.stack"
+        case .video: "video"
+        case .webBookmark: "globe"
+        case .document: "doc.text"
+        case .designFile: "square.on.circle"
+        case .audio: "waveform"
+        case .model3D: "cube"
+        }
     }
 
     // MARK: - Hybrid Semantic Search Status Pill & Inbox Batch Triage Sheet
@@ -1552,7 +1755,7 @@ public struct MainWindowView: View {
         HStack(spacing: 10) {
             Image(systemName: "sparkles")
                 .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(activeAccent)
             Text(report.summary)
                 .font(.system(size: 11.5, weight: .medium))
                 .lineLimit(1)
@@ -1561,12 +1764,10 @@ public struct MainWindowView: View {
                 library.semanticSearchEnabled = false
                 Task { await library.clearSemanticSearch() }
             }
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color.accentColor)
-            .buttonStyle(.plain)
+            .buttonStyle(CharkleButtonStyle(.subtle, size: .xs))
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
         .charkleLiquidGlass(.regular, in: Capsule(style: .continuous))
     }
 
@@ -1579,7 +1780,7 @@ public struct MainWindowView: View {
             HStack(spacing: 10) {
                 Image(systemName: "wand.and.stars")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(activeAccent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("收件箱智能分拣预览")
                         .font(.system(size: 15, weight: .semibold))
@@ -1609,7 +1810,7 @@ public struct MainWindowView: View {
                                 } label: {
                                     Image(systemName: !hasTarget ? "minus.circle" : (isChecked ? "checkmark.circle.fill" : "circle"))
                                         .font(.system(size: 16))
-                                        .foregroundStyle(!hasTarget ? Color.secondary.opacity(0.45) : (isChecked ? Color.accentColor : Color.secondary))
+                                        .foregroundStyle(!hasTarget ? Color.secondary.opacity(0.45) : (isChecked ? activeAccent : Color.secondary))
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(!hasTarget)
@@ -1646,11 +1847,13 @@ public struct MainWindowView: View {
                                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                     }
-                                    .foregroundStyle(rec.confidence >= 0.65 ? Color.accentColor : Color.primary)
+                                    .foregroundStyle(rec.confidence >= 0.65 ? activeAccent : Color.primary)
                                     .padding(.horizontal, 9)
                                     .padding(.vertical, 4)
                                     .background(
-                                        (rec.confidence >= 0.65 ? Color.accentColor : Color.primary).opacity(0.10),
+                                        rec.confidence >= 0.65
+                                            ? CharkleTheme.accentSoft(for: colorScheme, source: coordinator.accentSource)
+                                            : Color.primary.opacity(0.08),
                                         in: Capsule(style: .continuous)
                                     )
                                 } else {
@@ -1680,7 +1883,7 @@ public struct MainWindowView: View {
                             selectedTriageIDs = Set(actionable.map(\.assetID))
                         }
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
                 }
 
                 Spacer()
@@ -1688,6 +1891,7 @@ public struct MainWindowView: View {
                 Button("取消") {
                     showInboxBatchTriageSheet = false
                 }
+                .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
                 .keyboardShortcut(.cancelAction)
 
                 Button("归档已勾选 (\(selectedRecs.count) 项)") {
@@ -1698,7 +1902,7 @@ public struct MainWindowView: View {
                         coordinator.showToast("智能分拣完成：已归档 \(moved) 项素材", icon: "checkmark.circle.fill")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(CharkleButtonStyle(.accent, size: .sm))
                 .keyboardShortcut(.defaultAction)
                 .disabled(selectedRecs.isEmpty)
             }
@@ -1721,7 +1925,10 @@ public struct MainWindowView: View {
         let isNarrowBar = galleryViewportWidth < 620
         return HStack(spacing: isNarrowBar ? 7 : 10) {
             HStack(spacing: 6) {
-                CharkleIcon("inbox", style: .duotone, size: 14, color: Color.accentColor)
+                Image(systemName: "tray.and.arrow.down")
+                    .font(.system(size: 13, weight: .medium))
+                    .symbolVariant(.fill)
+                    .foregroundStyle(activeAccent)
                 Text(isNarrowBar ? "\(library.inboxCount) 项" : "待整理 \(library.inboxCount) 项")
                     .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
@@ -1729,7 +1936,7 @@ public struct MainWindowView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
 
-            Divider().frame(height: 16)
+            CharkleHairlineDivider(axis: .vertical).frame(height: 15)
 
             // AI Suggested Folder 1-Click Pill
             if let suggestion = library.suggestedFolder, !targetIDs.isEmpty {
@@ -1746,10 +1953,10 @@ public struct MainWindowView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .lineLimit(1)
                     }
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(activeAccent)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule(style: .continuous))
+                    .background(CharkleTheme.accentSoft(for: colorScheme, source: coordinator.accentSource), in: Capsule(style: .continuous))
                     .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
@@ -1772,10 +1979,10 @@ public struct MainWindowView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .lineLimit(1)
                     }
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(activeAccent)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
-                    .background(Color.accentColor.opacity(0.10), in: Capsule(style: .continuous))
+                    .background(CharkleTheme.accentSoft(for: colorScheme, source: coordinator.accentSource), in: Capsule(style: .continuous))
                     .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
@@ -1866,7 +2073,10 @@ public struct MainWindowView: View {
                 }
             } label: {
                 HStack(spacing: 4) {
-                    CharkleIcon("sparkle-board", style: .duotone, size: 12.5, color: Color.accentColor)
+                    Image(systemName: "sparkles.rectangle.stack")
+                        .font(.system(size: 12, weight: .medium))
+                        .symbolVariant(.fill)
+                        .foregroundStyle(activeAccent)
                     Text(isNarrowBar ? "收入板" : "一键收入情绪板")
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
@@ -1906,64 +2116,59 @@ public struct MainWindowView: View {
                 }
             } label: {
                 Label("全部放回原处", systemImage: "arrow.uturn.backward")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.07), in: Capsule(style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CharkleButtonStyle(.standard, size: .xs, cornerRadius: 999))
 
             Button(role: .destructive) {
                 pendingPermanentDeleteIDs = allIDs
             } label: {
                 Label("清空废纸篓…", systemImage: "trash.slash")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.red.opacity(0.10), in: Capsule(style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CharkleButtonStyle(.destructive, size: .xs, cornerRadius: 999))
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    // MARK: - Folder Breadcrumb + Subfolders Strip + Click-Outside Popover Creator
+    // MARK: - Folder Subfolders Strip + Click-Outside Popover Creator
 
-    private func folderSubfoldersBar(folderID: UUID) -> some View {
+    private func folderSubfoldersBar(folderID: UUID, showInlineBreadcrumb: Bool) -> some View {
         let crumbs = library.folderBreadcrumbs(for: folderID)
         let children = library.childFolders(of: folderID)
 
         return HStack(spacing: 10) {
-            // Breadcrumb path
-            HStack(spacing: 4) {
-                ForEach(Array(crumbs.enumerated()), id: \.element.id) { index, crumb in
-                    if index > 0 {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Button {
-                        navigate(to: .folder(crumb.id))
-                    } label: {
-                        HStack(spacing: 4) {
-                            if index == 0 {
-                                CharkleFolderIcon(colorHex: crumb.colorHex, customSymbol: crumb.customSymbol, size: 15, isActive: true)
-                            }
-                            Text(crumb.name)
-                                .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
-                                .foregroundStyle(crumb.id == folderID ? Color.primary : Color.secondary)
-                                .lineLimit(1)
+            if showInlineBreadcrumb {
+                // Compact breadcrumb path when top context title is hidden on narrow viewports
+                HStack(spacing: 4) {
+                    ForEach(Array(crumbs.enumerated()), id: \.element.id) { index, crumb in
+                        if index > 0 {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.tertiary)
                         }
+                        Button {
+                            navigate(to: .folder(crumb.id))
+                        } label: {
+                            HStack(spacing: 4) {
+                                if index == 0 {
+                                    CharkleFolderIcon(colorHex: crumb.colorHex, customSymbol: crumb.customSymbol, size: 15, isActive: true)
+                                }
+                                Text(crumb.name)
+                                    .font(.system(size: 12, weight: crumb.id == folderID ? .semibold : .medium))
+                                    .foregroundStyle(crumb.id == folderID ? Color.primary : Color.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
             if !children.isEmpty {
-                Divider().frame(height: 15)
+                if showInlineBreadcrumb {
+                    CharkleHairlineDivider(axis: .vertical).frame(height: 15)
+                }
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(children) { child in
@@ -2001,48 +2206,53 @@ public struct MainWindowView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11, weight: .medium))
                     Text(galleryViewportWidth < 580 ? "新建" : "新建子文件夹")
                         .font(.system(size: 11.5, weight: .medium))
                         .lineLimit(1)
                 }
                 .fixedSize(horizontal: true, vertical: false)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(activeAccent)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.11), in: Capsule(style: .continuous))
+                .padding(.vertical, 4)
+                .background(CharkleTheme.accentSoft(for: colorScheme, source: coordinator.accentSource), in: Capsule(style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CharkleTactileButtonStyle())
             .popover(isPresented: $showCreateSubfolderPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("新建子文件夹")
-                        .font(.system(size: 12.5, weight: .semibold))
-                    HStack(spacing: 6) {
-                        TextField("子文件夹名称", text: $subfolderNameDraft)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12))
-                            .frame(width: 190)
-                            .focused($isSubfolderFieldFocused)
-                            .onSubmit { commitNewSubfolder(parentID: folderID) }
-                        Button("创建") {
-                            commitNewSubfolder(parentID: folderID)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .disabled(subfolderNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
-                .padding(14)
-                .onAppear {
-                    DispatchQueue.main.async {
-                        isSubfolderFieldFocused = true
-                    }
-                }
+                createSubfolderPopoverContent(parentID: folderID)
+                    .environment(\.charkleAccentSource, coordinator.accentSource)
+                    .tint(activeAccent)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .charkleLiquidGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func createSubfolderPopoverContent(parentID: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("新建子文件夹")
+                .font(.system(size: 12.5, weight: .semibold))
+            HStack(spacing: 6) {
+                TextField("子文件夹名称", text: $subfolderNameDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .frame(width: 190)
+                    .focused($isSubfolderFieldFocused)
+                    .onSubmit { commitNewSubfolder(parentID: parentID) }
+                Button("创建") {
+                    commitNewSubfolder(parentID: parentID)
+                }
+                .buttonStyle(CharkleButtonStyle(.accent, size: .xs))
+                .disabled(subfolderNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(14)
+        .onAppear {
+            DispatchQueue.main.async {
+                isSubfolderFieldFocused = true
+            }
+        }
     }
 
     private func triggerAIRetagging(for ids: [UUID]) {
@@ -2092,20 +2302,6 @@ public struct MainWindowView: View {
         }
     }
 
-    private func colorToleranceLabel(_ tolerance: Double) -> String {
-        if tolerance <= 18 { return "精确" }
-        if tolerance <= 34 { return "适中" }
-        return "宽松"
-    }
-
-    private static func hexString(from color: Color) -> String? {
-        guard let ns = NSColor(color).usingColorSpace(.sRGB) else { return nil }
-        let r = Int((ns.redComponent * 255).rounded())
-        let g = Int((ns.greenComponent * 255).rounded())
-        let b = Int((ns.blueComponent * 255).rounded())
-        return String(format: "#%02X%02X%02X", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
-    }
-
     private var inboxZeroCelebrationView: some View {
         InboxZeroCelebrationView(
             onBrowseAll: { navigate(to: .allItems) },
@@ -2146,12 +2342,15 @@ public struct MainWindowView: View {
                         Button("清除筛选条件") {
                             searchDraft = ""
                             library.filter.clearVisualFilters()
+                            if case .tag = coordinator.selectedDestination {
+                                coordinator.selectedDestination = .allItems
+                            }
                             Task { await library.refreshAssets() }
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .md))
                     }
                     Button("采集剪贴板 (⌥⇧V)") { onCollectClipboard() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(CharkleButtonStyle(.accent, size: .md))
                 }
             }
         }
@@ -2177,7 +2376,7 @@ public struct MainWindowView: View {
                     .lineLimit(1)
                     .padding(.leading, 4)
 
-                Rectangle().fill(CharkleTheme.hairline(for: colorScheme)).frame(width: 1, height: 16)
+                CharkleHairlineDivider(axis: .vertical).frame(height: 16)
 
                 if isTrashSelection {
                     Button {
@@ -2187,25 +2386,15 @@ public struct MainWindowView: View {
                         }
                     } label: {
                         Label("放回原处", systemImage: "arrow.uturn.backward")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 6)
-                            .background(Color.accentColor, in: Capsule(style: .continuous))
                     }
-                    .buttonStyle(CharkleTactileButtonStyle())
+                    .buttonStyle(CharkleButtonStyle(.accent, size: .xs, cornerRadius: 999))
 
                     Button(role: .destructive) {
                         pendingPermanentDeleteIDs = ids
                     } label: {
                         Label("彻底删除", systemImage: "trash.slash")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.red.opacity(0.10), in: Capsule(style: .continuous))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CharkleButtonStyle(.destructive, size: .xs, cornerRadius: 999))
                 } else {
                     Button {
                         Task {
@@ -2216,17 +2405,14 @@ public struct MainWindowView: View {
                         }
                     } label: {
                         HStack(spacing: 5) {
-                            CharkleIcon("sparkle-board", style: .duotone, size: 13.5, color: .white)
+                            Image(systemName: "sparkles.rectangle.stack")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .symbolVariant(.fill)
                             Text(isCompactPill ? "生成板" : "生成情绪板")
-                                .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)
                         }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, isCompactPill ? 9 : 11)
-                        .padding(.vertical, 6)
-                        .background(Color.accentColor, in: Capsule(style: .continuous))
                     }
-                    .buttonStyle(CharkleTactileButtonStyle())
+                    .buttonStyle(CharkleButtonStyle(.accent, size: .xs, cornerRadius: 999))
 
                     Menu {
                         CharkleHierarchicalFolderMenuContent(
@@ -2354,9 +2540,10 @@ public struct MainWindowView: View {
                             )
                         }
                     } label: {
-                        Image(systemName: allKeptLocally ? "arrow.down.circle.fill" : "arrow.down.circle")
-                            .font(.system(size: 13))
-                            .foregroundStyle(allKeptLocally ? Color.accentColor : Color.primary)
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 13, weight: .medium))
+                            .symbolVariant(allKeptLocally ? .fill : .none)
+                            .foregroundStyle(allKeptLocally ? activeAccent : Color.primary)
                             .frame(width: 26, height: 26)
                     }
                     .buttonStyle(.plain)
@@ -2379,8 +2566,8 @@ public struct MainWindowView: View {
                         }
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.red)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(CharkleTheme.destructive(for: colorScheme))
                             .frame(width: 26, height: 26)
                     }
                     .buttonStyle(.plain)
@@ -2428,17 +2615,19 @@ public struct MainWindowView: View {
                     } label: {
                         Text("新建空白板")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
 
                     Button {
                         coordinator.presentMoodboardGenerator(entry: .prompt)
                     } label: {
                         HStack(spacing: 5) {
-                            CharkleIcon("sparkle-board", style: .duotone, size: 14, color: .white)
+                            Image(systemName: "sparkles.rectangle.stack")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .symbolVariant(.fill)
                             Text("10 秒快速生成")
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(CharkleButtonStyle(.accent, size: .sm))
                 }
 
                 if moodboards.boards.isEmpty {
@@ -2459,12 +2648,12 @@ public struct MainWindowView: View {
                                     }
                                 }
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(CharkleButtonStyle(.standard, size: .md))
 
                             Button("10 秒快速生成") {
                                 coordinator.presentMoodboardGenerator(entry: .prompt)
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(CharkleButtonStyle(.accent, size: .md))
                         }
                         .padding(.top, 2)
                     }
@@ -2477,7 +2666,10 @@ public struct MainWindowView: View {
                             coordinator.presentMoodboardGenerator(entry: .prompt)
                         } label: {
                             VStack(spacing: 10) {
-                                CharkleIcon("sparkle-board", style: .layered, size: 42, color: Color.accentColor)
+                                Image(systemName: "sparkles.rectangle.stack")
+                                    .font(.system(size: 28, weight: .medium))
+                                    .symbolVariant(.fill)
+                                    .foregroundStyle(activeAccent)
                                 Text("新建灵感情绪板")
                                     .font(.system(size: 14, weight: .semibold))
                                 Text("支持灵感词 / 种子图 / 配色定调 / 框选成板")
@@ -2493,7 +2685,7 @@ public struct MainWindowView: View {
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
+                                    .strokeBorder(activeAccent.opacity(0.35), style: StrokeStyle(lineWidth: 1.25, dash: [6, 5]))
                             )
                         }
                         .buttonStyle(CharkleTactileButtonStyle())
@@ -2531,7 +2723,9 @@ public struct MainWindowView: View {
                     if previewIDs.isEmpty {
                         ZStack {
                             CharkleTheme.surfaceSubtle(for: colorScheme)
-                            CharkleIcon("moodboard", style: .layered, size: 32, color: .secondary.opacity(0.5))
+                            Image(systemName: "rectangle.3.group")
+                                .font(.system(size: 26, weight: .regular))
+                                .foregroundStyle(.secondary.opacity(0.45))
                         }
                     } else {
                         LazyVGrid(columns: [GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3)], spacing: 3) {
@@ -2573,17 +2767,18 @@ public struct MainWindowView: View {
                         .lineLimit(1)
                     Spacer()
                     if isActive {
+                        let pos = CharkleTheme.positive(for: colorScheme)
                         Text("活跃板")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.green)
+                            .foregroundStyle(pos)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.12), in: Capsule(style: .continuous))
+                            .background(pos.opacity(0.12), in: Capsule(style: .continuous))
                     }
                     if board.pinnedOffline {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 11))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(activeAccent)
                             .help("已始终保留在本地")
                     }
                 }
@@ -2845,7 +3040,9 @@ public struct MainWindowView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "sidebar.right")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 12.5, weight: .medium))
+                            .symbolVariant(coordinator.isInspectorVisible ? .fill : .none)
+                            .foregroundStyle(coordinator.isInspectorVisible ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                         if galleryViewportWidth >= 520 {
                             Text(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
                                 .font(.system(size: 11.5, weight: .medium))
@@ -2853,12 +3050,12 @@ public struct MainWindowView: View {
                         }
                     }
                     .padding(.horizontal, galleryViewportWidth >= 520 ? 10 : 8)
-                    .padding(.vertical, 6)
+                    .frame(height: 34)
                     .charkleLiquidGlass(.regular, in: Capsule(style: .continuous), interactive: true)
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
                 .help(coordinator.isInspectorVisible ? "收起候选栏" : "候选替换池")
-                .padding(.top, 12)
+                .padding(.top, 10)
                 .padding(.trailing, 14)
             }
         } else {
@@ -2956,24 +3153,6 @@ public struct MainWindowView: View {
                 coordinator.showToast("已定位到「\(resolvedLabel)」", icon: "scope")
             }
         }
-    }
-
-    private func layoutModeButton(mode: GalleryLayoutMode, icon: String, helpText: String) -> some View {
-        let active = coordinator.galleryLayoutMode == mode
-        return Button {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                coordinator.galleryLayoutMode = mode
-            }
-        } label: {
-            CharkleIcon(icon, style: .duotone, size: 16, isActive: active)
-                .frame(width: 28, height: 24)
-                .background(
-                    active ? Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10) : Color.clear,
-                    in: Capsule(style: .continuous)
-                )
-        }
-        .buttonStyle(.plain)
-        .help(helpText)
     }
 
     private func isEditingText(in window: NSWindow?) -> Bool {
@@ -3323,12 +3502,20 @@ public struct MainWindowView: View {
 /// Isolated top-bar sync pill & progress popover so frequent live sync progress broadcasts
 /// update only this compact control rather than triggering full Gallery / MainWindowView diffs.
 private struct FloatingSyncStatusPill: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
+
     let syncAndAI: SyncAndAIStore
     var compact: Bool = false
+    var embeddedInIsland: Bool = true
     let onOpenSettings: () -> Void
     let onTriggerManualSync: () -> Void
 
     @State private var showSyncPopover: Bool = false
+
+    private var activeAccent: Color {
+        CharkleTheme.accent(for: colorScheme, source: accentSource)
+    }
 
     var body: some View {
         Button {
@@ -3341,7 +3528,40 @@ private struct FloatingSyncStatusPill: View {
                 }
             }
         } label: {
-            if compact {
+            if embeddedInIsland {
+                if compact {
+                    ZStack {
+                        if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Circle()
+                                .fill(syncDotColor)
+                                .frame(width: 7.5, height: 7.5)
+                        }
+                    }
+                    .frame(width: 24, height: 24)
+                    .contentShape(Circle())
+                } else {
+                    HStack(spacing: 5) {
+                        if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Circle()
+                                .fill(syncDotColor)
+                                .frame(width: 7, height: 7)
+                        }
+                        Text(syncPillLabel)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.primary.opacity(0.88))
+                            .lineLimit(1)
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 5)
+                    .frame(height: 24)
+                    .contentShape(Capsule(style: .continuous))
+                }
+            } else if compact {
                 ZStack {
                     if syncAndAI.syncStatus.isSyncing || syncAndAI.isBusy {
                         ProgressView().controlSize(.mini)
@@ -3376,6 +3596,8 @@ private struct FloatingSyncStatusPill: View {
         .buttonStyle(CharkleTactileButtonStyle())
         .popover(isPresented: $showSyncPopover, arrowEdge: .bottom) {
             cloudSyncProgressPopover
+                .environment(\.charkleAccentSource, accentSource)
+                .tint(activeAccent)
         }
         .contextMenu {
             if syncAndAI.syncConfig.mode != .localOnly {
@@ -3391,11 +3613,11 @@ private struct FloatingSyncStatusPill: View {
 
     private var syncDotColor: Color {
         switch syncAndAI.syncStatus.phase {
-        case .error: return .red
-        case .scanning, .uploading, .downloading, .merging: return .orange
+        case .error: return CharkleTheme.destructive(for: colorScheme)
+        case .scanning, .uploading, .downloading, .merging: return CharkleTheme.warning(for: colorScheme)
         case .idle:
-            if syncAndAI.syncConfig.mode == .localOnly { return .secondary }
-            return syncAndAI.syncStatus.pendingOpCount > 0 ? .orange : .green
+            if syncAndAI.syncConfig.mode == .localOnly { return CharkleTheme.secondaryInk(for: colorScheme) }
+            return syncAndAI.syncStatus.pendingOpCount > 0 ? CharkleTheme.warning(for: colorScheme) : CharkleTheme.positive(for: colorScheme)
         }
     }
 
@@ -3448,7 +3670,7 @@ private struct FloatingSyncStatusPill: View {
                             Text(percentText)
                                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                                 .monospacedDigit()
-                                .foregroundStyle(Color.accentColor)
+                                .foregroundStyle(activeAccent)
                         }
                     }
                     Text(syncAndAI.syncConfig.activeStorageLocationSummary)
@@ -3465,11 +3687,11 @@ private struct FloatingSyncStatusPill: View {
                     if let fraction = status.progressFraction {
                         ProgressView(value: min(1.0, max(0.0, fraction)))
                             .progressViewStyle(.linear)
-                            .tint(Color.accentColor)
+                            .tint(activeAccent)
                     } else {
                         ProgressView()
                             .progressViewStyle(.linear)
-                            .tint(Color.accentColor)
+                            .tint(activeAccent)
                     }
                     if let detail = status.currentDetail, !detail.isEmpty {
                         Text(detail)
@@ -3480,13 +3702,14 @@ private struct FloatingSyncStatusPill: View {
                     }
                 }
             } else if let err = status.lastError, !err.isEmpty {
+                let errColor = CharkleTheme.destructive(for: colorScheme)
                 Text(err)
                     .font(.system(size: 11))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(errColor)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(errColor.opacity(0.08), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -3507,7 +3730,7 @@ private struct FloatingSyncStatusPill: View {
                     Text(status.pendingOpCount > 0 ? "\(status.pendingOpCount) 项" : "已清空")
                         .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
-                        .foregroundStyle(status.pendingOpCount > 0 ? .orange : .secondary)
+                        .foregroundStyle(status.pendingOpCount > 0 ? CharkleTheme.warning(for: colorScheme) : .secondary)
                 }
                 if let report = syncAndAI.lastSyncReport {
                     HStack {
@@ -3522,25 +3745,22 @@ private struct FloatingSyncStatusPill: View {
                 }
             }
             .padding(9)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
 
             HStack(spacing: 8) {
                 Button {
                     onTriggerManualSync()
                 } label: {
                     Text(isSyncing ? "同步中…" : "立即同步")
-                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(CharkleButtonStyle(.accent, size: .sm, fullWidth: true))
                 .disabled(isSyncing)
 
                 Button("存储设置…") {
                     showSyncPopover = false
                     onOpenSettings()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(CharkleButtonStyle(.standard, size: .sm))
             }
         }
         .padding(14)
@@ -3588,9 +3808,9 @@ private struct InboxZeroCelebrationView: View {
                     .frame(maxWidth: 420)
                 HStack(spacing: 10) {
                     Button("浏览全部素材", action: onBrowseAll)
-                        .buttonStyle(.bordered)
+                        .buttonStyle(CharkleButtonStyle(.standard, size: .md))
                     Button("10 秒生成情绪板", action: onGenerateBoard)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(CharkleButtonStyle(.accent, size: .md))
                 }
                 .padding(.top, 4)
             }

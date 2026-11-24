@@ -7,6 +7,7 @@ import SwiftUI
 /// TypeSafe visual enhancement (human-labeled), and compact usage summary with detail sheet.
 public struct AISettingsPane: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
 
     public let syncAndAI: SyncAndAIStore
 
@@ -96,7 +97,7 @@ public struct AISettingsPane: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             offlineCapabilitiesSection
             cloudIntelligenceSection
             visualEnhancementSection
@@ -146,31 +147,35 @@ public struct AISettingsPane: View {
 
     private var offlineCapabilitiesSection: some View {
         SettingsSection("基础离线能力", caption: "全部 Mac 免费内置 · 无需下载 · 数据不出本机") {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
                 offlineBadge(icon: "paintpalette", label: "自动配色提取")
+                CharkleHairlineDivider(axis: .vertical)
+                    .frame(height: 18)
                 offlineBadge(icon: "sparkles.rectangle.stack", label: "视觉相似推荐")
+                CharkleHairlineDivider(axis: .vertical)
+                    .frame(height: 18)
                 offlineBadge(icon: "text.viewfinder", label: "图内文字 OCR")
+                CharkleHairlineDivider(axis: .vertical)
+                    .frame(height: 18)
                 offlineBadge(icon: "magnifyingglass", label: "中文与拼音快搜")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 10)
         }
     }
 
     private func offlineBadge(icon: String, label: String) -> some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(SettingsPalette.positiveInk(for: colorScheme))
             Text(label)
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.primary.opacity(0.88))
                 .lineLimit(1)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity)
-        .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, minHeight: 24)
     }
 
     // MARK: - Cloud AI Section
@@ -209,7 +214,7 @@ public struct AISettingsPane: View {
                                 } else {
                                     SettingsHelpers.chatGPTBrandMark(
                                         size: 13.5,
-                                        color: colorScheme == .dark ? Color(charkleHex: "#111215") : .white
+                                        color: CharkleTheme.accentButtonForeground(for: colorScheme, source: accentSource)
                                     )
                                 }
                                 Text(syncAndAI.isSigningInChatGPT ? "等待授权…" : "使用 ChatGPT 登录")
@@ -438,7 +443,10 @@ public struct AISettingsPane: View {
                     .foregroundStyle(.secondary)
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(
+                        SettingsPalette.subtleFill(for: colorScheme),
+                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+                    )
 
             case .chatGPTSubscription:
                 chatGPTConfigContent
@@ -843,7 +851,14 @@ public struct AISettingsPane: View {
                         isOn: $draftTypeSafeConfig.enableCuratorVisualRerank
                     )
                 }
-                .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(
+                    SettingsPalette.subtleFill(for: colorScheme),
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+                        .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
+                )
                 .charkleCleanScrollbars(hidden: false)
             }
             .frame(maxHeight: 240)
@@ -981,49 +996,58 @@ public struct AISettingsPane: View {
         emptyHint: String,
         onReset: @escaping () -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 1.5) {
+                        Text(title)
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if bucket.totalRequests > 0 {
+                        Button("清零", action: onReset)
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                    }
                 }
-                Spacer()
-                if bucket.totalRequests > 0 {
-                    Button("清零", action: onReset)
-                        .buttonStyle(SettingsSecondaryButtonStyle())
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                SettingsCardDivider()
+
+                HStack(spacing: 0) {
+                    metricCell("今日调用", value: "\(bucket.todayRequests) 次", detail: "Token \(CloudAIUsageSummary.formatTokenCount(bucket.todayTotalTokens))")
+                    CharkleHairlineDivider(axis: .vertical)
+                        .frame(height: 40)
+                    metricCell("累计调用", value: "\(bucket.totalRequests) 次", detail: bucket.lastModel ?? "尚未调用")
+                    CharkleHairlineDivider(axis: .vertical)
+                        .frame(height: 40)
+                    metricCell("累计 Token", value: CloudAIUsageSummary.formatTokenCount(bucket.totalTokens), detail: "入 \(CloudAIUsageSummary.formatTokenCount(bucket.totalInputTokens)) / 出 \(CloudAIUsageSummary.formatTokenCount(bucket.totalOutputTokens))")
                 }
-            }
+                .padding(.vertical, 10)
 
-            HStack(spacing: 8) {
-                metricBox("今日调用", value: "\(bucket.todayRequests) 次", detail: "Token \(CloudAIUsageSummary.formatTokenCount(bucket.todayTotalTokens))")
-                metricBox("累计调用", value: "\(bucket.totalRequests) 次", detail: bucket.lastModel ?? "尚未调用")
-                metricBox("累计 Token", value: CloudAIUsageSummary.formatTokenCount(bucket.totalTokens), detail: "入 \(CloudAIUsageSummary.formatTokenCount(bucket.totalInputTokens)) / 出 \(CloudAIUsageSummary.formatTokenCount(bucket.totalOutputTokens))")
-            }
+                SettingsCardDivider()
 
-            if let usedAt = bucket.lastUsedAt {
-                let provider = bucket.lastProviderLabel ?? title
-                let modelPart = bucket.lastModel.map { " (\($0))" } ?? ""
-                Text("最近调用：\(provider)\(modelPart) · \(SettingsHelpers.relativeTimeText(usedAt))")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
-            } else {
-                Text(emptyHint)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.tertiary)
+                Group {
+                    if let usedAt = bucket.lastUsedAt {
+                        let provider = bucket.lastProviderLabel ?? title
+                        let modelPart = bucket.lastModel.map { " (\($0))" } ?? ""
+                        Text("最近调用：\(provider)\(modelPart) · \(SettingsHelpers.relativeTimeText(usedAt))")
+                    } else {
+                        Text(emptyHint)
+                    }
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
             }
         }
-        .padding(12)
-        .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
-        )
     }
 
-    private func metricBox(_ title: String, value: String, detail: String) -> some View {
+    private func metricCell(_ title: String, value: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(.system(size: 10.5, weight: .medium))
@@ -1038,8 +1062,7 @@ public struct AISettingsPane: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(9)
-        .background(SettingsPalette.cardBackground(for: colorScheme), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 14)
     }
 
     // MARK: - Helpers

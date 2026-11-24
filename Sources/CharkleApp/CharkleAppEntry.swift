@@ -621,9 +621,11 @@ final class CharkleAppDelegate: NSObject, NSApplicationDelegate {
 
 private struct MainWindowSceneHost: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.colorScheme) private var colorScheme
     let runtime: CharkleRuntime
 
     var body: some View {
+        let accentSource = runtime.coordinator.accentSource
         MainWindowView(
             coordinator: runtime.coordinator,
             library: runtime.library,
@@ -637,6 +639,8 @@ private struct MainWindowSceneHost: View {
             onEnterMinimalCaptureMode: { runtime.enterMinimalCaptureMode() },
             onAppReady: { runtime.startAppKitServicesIfNeeded() }
         )
+        .environment(\.charkleAccentSource, accentSource)
+        .tint(CharkleTheme.accent(for: colorScheme, source: accentSource))
         .onAppear {
             runtime.openMainWindowHandler = {
                 openWindow(id: "main")
@@ -726,7 +730,7 @@ struct CharkleApp: App {
     var body: some Scene {
         WindowGroup("Charkle", id: "main") {
             MainWindowSceneHost(runtime: runtime)
-                .frame(minWidth: 1020, minHeight: 660)
+                .frame(minWidth: 800, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1360, height: 860)
@@ -804,7 +808,7 @@ struct CharkleApp: App {
                 }
                 .keyboardShortcut("j", modifiers: .command)
 
-                Button("显示 / 隐藏视觉筛选条") {
+                Button("显示 / 隐藏筛选面板") {
                     runtime.coordinator.isVisualFilterBarPresented.toggle()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])

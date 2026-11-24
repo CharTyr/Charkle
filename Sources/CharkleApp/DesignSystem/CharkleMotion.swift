@@ -169,20 +169,17 @@ public struct CharkleTactileButtonStyle: ButtonStyle {
     }
 }
 
-// MARK: - Skeuomorphic Tactile Keycap Button Style
+// MARK: - Legacy Button Style Forwarding Wrapper (Converged onto CharkleButtonStyle)
 
-public enum CharkleSkeuoVariant: Sendable {
+public nonisolated enum CharkleSkeuoVariant: Sendable {
     case primary
     case secondary
 }
 
-/// Calm, top-lit 5-layer tactile button (face gradient, 1pt outer edge,
-/// inner top highlight, inner bottom shade, dual-layer contact + lift shadow, 1pt press travel).
+/// Thin backwards-compatible forwarding wrapper to `CharkleButtonStyle`.
+/// Retires the multi-layer keycap bevel chrome while keeping all existing call sites compiling cleanly
+/// onto the unified macOS native button family (`.accent` / `.standard`, `.md` 32pt height).
 public struct CharkleSkeuoButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.isEnabled) private var isEnabled
-
     private let variant: CharkleSkeuoVariant
 
     public init(_ variant: CharkleSkeuoVariant = .primary) {
@@ -190,123 +187,11 @@ public struct CharkleSkeuoButtonStyle: ButtonStyle {
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        SkeuoButtonBody(
-            configuration: configuration,
-            variant: variant,
-            colorScheme: colorScheme,
-            reduceMotion: reduceMotion,
-            isEnabled: isEnabled
-        )
-    }
-
-    private struct SkeuoButtonBody: View {
-        let configuration: Configuration
-        let variant: CharkleSkeuoVariant
-        let colorScheme: ColorScheme
-        let reduceMotion: Bool
-        let isEnabled: Bool
-
-        @State private var isHovered: Bool = false
-
-        var body: some View {
-            let pressed = configuration.isPressed && isEnabled
-            let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-
-            let topColor: Color
-            let bottomColor: Color
-            let borderColor: Color
-            let topHighlight: Color
-            let bottomShade: Color
-            let labelColor: Color
-            let contactShadow: Color
-            let liftShadow: Color
-
-            switch variant {
-            case .primary:
-                if colorScheme == .dark {
-                    topColor = isHovered ? Color(charkleHex: "#4D5870") : Color(charkleHex: "#414B60")
-                    bottomColor = isHovered ? Color(charkleHex: "#313A4D") : Color(charkleHex: "#283144")
-                    borderColor = Color(charkleHex: "#151923")
-                    topHighlight = Color.white.opacity(0.22)
-                    bottomShade = Color.black.opacity(0.32)
-                    labelColor = .white
-                    contactShadow = Color.black.opacity(0.36)
-                    liftShadow = Color.black.opacity(0.45)
-                } else {
-                    topColor = isHovered ? Color(charkleHex: "#4A5366") : Color(charkleHex: "#404859")
-                    bottomColor = isHovered ? Color(charkleHex: "#2F394D") : Color(charkleHex: "#273042")
-                    borderColor = Color(charkleHex: "#12161F")
-                    topHighlight = Color.white.opacity(0.18)
-                    bottomShade = Color.black.opacity(0.24)
-                    labelColor = .white
-                    contactShadow = Color.black.opacity(0.18)
-                    liftShadow = Color(charkleHex: "#12161F").opacity(0.28)
-                }
-            case .secondary:
-                if colorScheme == .dark {
-                    topColor = isHovered ? Color(charkleHex: "#2E3139") : Color(charkleHex: "#272A31")
-                    bottomColor = isHovered ? Color(charkleHex: "#23262C") : Color(charkleHex: "#1F2127")
-                    borderColor = Color.white.opacity(0.14)
-                    topHighlight = Color.white.opacity(0.12)
-                    bottomShade = Color.black.opacity(0.28)
-                    labelColor = .primary
-                    contactShadow = Color.black.opacity(0.26)
-                    liftShadow = Color.black.opacity(0.30)
-                } else {
-                    topColor = Color.white
-                    bottomColor = isHovered ? Color(charkleHex: "#F7F8FA") : Color(charkleHex: "#F1F3F6")
-                    borderColor = Color(charkleHex: "#0F172A").opacity(0.14)
-                    topHighlight = Color.white.opacity(0.92)
-                    bottomShade = Color.black.opacity(0.06)
-                    labelColor = Color(charkleHex: "#1F2633")
-                    contactShadow = Color(charkleHex: "#0F172A").opacity(0.06)
-                    liftShadow = Color(charkleHex: "#0F172A").opacity(0.09)
-                }
-            }
-
-            let faceGradient = LinearGradient(
-                colors: pressed ? [bottomColor, topColor] : [topColor, bottomColor],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            return configuration.label
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(labelColor)
-                .shadow(color: variant == .primary ? Color.black.opacity(0.26) : .clear, radius: 0, y: -1)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 36)
-                .background(faceGradient, in: shape)
-                .overlay {
-                    // Inner top highlight / pressed inner top shadow + bottom shade (strictly following inner radius)
-                    shape
-                        .strokeBorder(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: pressed ? Color.black.opacity(variant == .primary ? 0.34 : 0.14) : topHighlight, location: 0.0),
-                                    .init(color: .clear, location: 0.28),
-                                    .init(color: .clear, location: 0.78),
-                                    .init(color: pressed ? .clear : bottomShade, location: 1.0)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                            lineWidth: 1
-                        )
-                        .padding(0.75)
-                }
-                .overlay(shape.strokeBorder(borderColor, lineWidth: 1))
-                .shadow(color: pressed ? contactShadow : liftShadow, radius: pressed ? 1 : (isHovered ? 10 : 7), y: pressed ? 1 : (isHovered ? 5 : 3))
-                .shadow(color: contactShadow, radius: 1.5, y: 1)
-                .offset(y: pressed && !reduceMotion ? 1 : 0)
-                .opacity(isEnabled ? 1.0 : 0.45)
-                .contentShape(shape)
-                .onHover { hovering in
-                    withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
-                        isHovered = hovering
-                    }
-                }
-                .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: pressed)
+        let mappedVariant: CharkleButtonVariant = switch variant {
+        case .primary: .accent
+        case .secondary: .standard
         }
+        CharkleButtonStyle(mappedVariant, size: .md)
+            .makeBody(configuration: configuration)
     }
 }

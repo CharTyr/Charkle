@@ -6,7 +6,9 @@ import SwiftUI
 /// expansion with a quiet hover affordance and `accessibilityReduceMotion` support.
 public struct CharkleDisclosureGroup<Label: View, Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @Binding public var isExpanded: Bool
     private let headerVerticalPadding: CGFloat
@@ -14,6 +16,8 @@ public struct CharkleDisclosureGroup<Label: View, Content: View>: View {
     private let negativeHorizontalBleed: CGFloat
     private let headerCornerRadius: CGFloat
     private let showHoverHighlight: Bool
+    private let showsTopDivider: Bool
+    private let accentChevronWhenExpanded: Bool
     private let content: () -> Content
     private let label: () -> Label
 
@@ -26,6 +30,8 @@ public struct CharkleDisclosureGroup<Label: View, Content: View>: View {
         negativeHorizontalBleed: CGFloat = 6,
         headerCornerRadius: CGFloat = CharkleTheme.Radius.chip,
         showHoverHighlight: Bool = true,
+        showsTopDivider: Bool = false,
+        accentChevronWhenExpanded: Bool = false,
         @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder label: @escaping () -> Label
     ) {
@@ -35,12 +41,19 @@ public struct CharkleDisclosureGroup<Label: View, Content: View>: View {
         self.negativeHorizontalBleed = negativeHorizontalBleed
         self.headerCornerRadius = headerCornerRadius
         self.showHoverHighlight = showHoverHighlight
+        self.showsTopDivider = showsTopDivider
+        self.accentChevronWhenExpanded = accentChevronWhenExpanded
         self.content = content
         self.label = label
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if showsTopDivider {
+                CharkleHairlineDivider()
+                    .padding(.bottom, 4)
+            }
+
             Button {
                 withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
                     isExpanded.toggle()
@@ -49,11 +62,7 @@ public struct CharkleDisclosureGroup<Label: View, Content: View>: View {
                 HStack(spacing: 7) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundStyle(
-                            isHovered || isExpanded
-                                ? Color.primary.opacity(0.78)
-                                : Color.secondary.opacity(0.82)
-                        )
+                        .foregroundStyle(chevronColor)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 12, height: 12)
 
@@ -64,21 +73,40 @@ public struct CharkleDisclosureGroup<Label: View, Content: View>: View {
                 .padding(.vertical, headerVerticalPadding)
                 .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
                 .background(
-                    showHoverHighlight && isHovered
-                        ? Color.primary.opacity(colorScheme == .dark ? 0.065 : 0.045)
-                        : Color.clear,
+                    hoverFillColor,
                     in: RoundedRectangle(cornerRadius: headerCornerRadius, style: .continuous)
                 )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .padding(.horizontal, -negativeHorizontalBleed)
-            .onHover { isHovered = $0 }
+            .onHover { hovering in
+                withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+                    isHovered = hovering
+                }
+            }
 
             if isExpanded {
                 content()
                     .transition(CharkleMotion.revealTransition(offsetY: -3, reduced: reduceMotion))
             }
         }
+    }
+
+    private var chevronColor: Color {
+        if isExpanded && accentChevronWhenExpanded {
+            return CharkleTheme.accent(for: colorScheme, source: accentSource)
+        }
+        return (isHovered || isExpanded)
+            ? Color.primary.opacity(0.80)
+            : CharkleTheme.secondaryInk(for: colorScheme)
+    }
+
+    private var hoverFillColor: Color {
+        guard showHoverHighlight && isHovered else { return .clear }
+        if reduceTransparency {
+            return CharkleTheme.surfaceSubtle(for: colorScheme)
+        }
+        return Color.primary.opacity(colorScheme == .dark ? 0.065 : 0.045)
     }
 }

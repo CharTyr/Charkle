@@ -6,7 +6,9 @@ import SwiftUI
 /// - Hovering a toast pauses auto-dismiss immediately and resumes the remaining time on hover exit.
 public struct CharkleToastOverlay: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     public let coordinator: AppCoordinatorStore
 
@@ -23,7 +25,9 @@ public struct CharkleToastOverlay: View {
                         CharkleToastRow(
                             toast: toast,
                             colorScheme: colorScheme,
+                            accentSource: accentSource,
                             reduceMotion: reduceMotion,
+                            reduceTransparency: reduceTransparency,
                             onHoverChange: { hovering in
                                 if hovering {
                                     coordinator.pauseToast(toast.id)
@@ -68,12 +72,15 @@ public struct CharkleToastOverlay: View {
 private struct CharkleToastRow: View {
     let toast: CharkleToast
     let colorScheme: ColorScheme
+    let accentSource: CharkleAccentSource
     let reduceMotion: Bool
+    let reduceTransparency: Bool
     let onHoverChange: (Bool) -> Void
     let onAction: () -> Void
     let onDismiss: () -> Void
 
     @State private var isHovered: Bool = false
+    @State private var isDismissHovered: Bool = false
 
     private var hasAction: Bool {
         toast.actionTitle != nil
@@ -115,7 +122,19 @@ private struct CharkleToastRow: View {
                         .foregroundStyle(accentTint)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
-                        .background(accentTint.opacity(colorScheme == .dark ? 0.18 : 0.11), in: innerShape)
+                        .background(
+                            CharkleTheme.accentSoft(for: colorScheme, source: accentSource),
+                            in: innerShape
+                        )
+                        .overlay {
+                            if reduceTransparency {
+                                innerShape
+                                    .strokeBorder(
+                                        CharkleTheme.accentBorder(for: colorScheme, source: accentSource),
+                                        lineWidth: CharkleTheme.hairlineWidth
+                                    )
+                            }
+                        }
                 }
                 .buttonStyle(CharkleTactileButtonStyle())
             }
@@ -124,14 +143,16 @@ private struct CharkleToastRow: View {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
                         .font(.system(size: 9.5, weight: .bold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isDismissHovered ? Color.primary : CharkleTheme.secondaryInk(for: colorScheme))
                         .frame(width: 22, height: 22)
                         .background(
-                            isHovered ? Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.06) : .clear,
+                            isDismissHovered ? Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.07) : .clear,
                             in: innerShape
                         )
+                        .contentShape(innerShape)
                 }
                 .buttonStyle(.plain)
+                .onHover { isDismissHovered = $0 }
                 .help("关闭提示")
             }
         }
@@ -148,15 +169,15 @@ private struct CharkleToastRow: View {
     }
 
     private var accentTint: Color {
-        colorScheme == .dark ? Color(charkleHex: "#5B8DEF") : Color(charkleHex: "#2A60E0")
+        CharkleTheme.accent(for: colorScheme, source: accentSource)
     }
 
     private var toneColor: Color {
         switch toast.tone {
-        case .neutral: return accentTint
-        case .success: return colorScheme == .dark ? Color(charkleHex: "#34C769") : Color(charkleHex: "#249A4B")
-        case .warning: return colorScheme == .dark ? Color(charkleHex: "#F2B23E") : Color(charkleHex: "#C98212")
-        case .error: return colorScheme == .dark ? Color(charkleHex: "#F2584D") : Color(charkleHex: "#D93B30")
+        case .neutral: accentTint
+        case .success: CharkleTheme.positive(for: colorScheme)
+        case .warning: CharkleTheme.warning(for: colorScheme)
+        case .error: CharkleTheme.destructive(for: colorScheme)
         }
     }
 }

@@ -22,7 +22,7 @@ public struct NotchShelfSettingsPane: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             SettingsSection("顶部灵感浮窗") {
                 SettingsRow(
                     title: "启用屏幕顶部灵感浮窗",

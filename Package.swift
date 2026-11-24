@@ -24,6 +24,10 @@ let package = Package(
             targets: ["CharkleCLI"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts.git", from: "2.4.0"),
+        .package(url: "https://github.com/gonzalezreal/textual.git", from: "0.5.0")
+    ],
     targets: [
         .target(
             name: "CharkleCore",
@@ -48,7 +52,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "CharkleApp",
-            dependencies: ["CharkleCore", "CharkleCanvas"],
+            dependencies: [
+                "CharkleCore",
+                "CharkleCanvas",
+                .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
+                .product(name: "Textual", package: "textual")
+            ],
             path: "Sources/CharkleApp",
             resources: [
                 .process("Resources")

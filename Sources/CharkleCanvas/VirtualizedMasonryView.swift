@@ -1843,6 +1843,24 @@ private final class MasonryHoverOverlayLayer {
     }
 }
 
+// MARK: - Read-Only Source-Card Geometry Reporter (Quick Look Connected Motion)
+
+/// Read-only registry reporting the current visible window-space frame (top-left origin,
+/// matching SwiftUI full-bleed window coordinates) of a gallery card for Quick Look transitions.
+public final class MasonryCardGeometryRegistry {
+    public static let shared = MasonryCardGeometryRegistry()
+
+    fileprivate weak var activeDocumentView: MasonryDocumentView?
+
+    private init() {}
+
+    /// Returns the card's frame in top-left window content coordinates when the card intersects
+    /// the active gallery viewport; returns `nil` when off-screen or outside masonry modes.
+    public func visibleCardRectInWindow(for assetID: UUID) -> CGRect? {
+        activeDocumentView?.visibleCardRectInWindow(for: assetID)
+    }
+}
+
 // MARK: - Menu Action Closure Helper
 
 private final class MasonryMenuActionTarget: NSObject {
@@ -2000,6 +2018,9 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window == nil {
+            if MasonryCardGeometryRegistry.shared.activeDocumentView === self {
+                MasonryCardGeometryRegistry.shared.activeDocumentView = nil
+            }
             hoverMediaPreview.stop()
             legacyPinchSettleWorkItem?.cancel()
             legacyPinchSettleWorkItem = nil
@@ -2012,8 +2033,26 @@ private final class MasonryDocumentView: NSView, NSDraggingSource {
                 tile.loadTask = nil
             }
         } else {
+            MasonryCardGeometryRegistry.shared.activeDocumentView = self
             handleViewportFrameChanged()
         }
+    }
+
+    func visibleCardRectInWindow(for assetID: UUID) -> CGRect? {
+        guard let window, let contentView = window.contentView else { return nil }
+        guard let index = assetIndexByID[assetID], index < layout.items.count else { return nil }
+        let cardRect = layout.items[index].rect
+        guard cardRect.intersects(visibleRect) else { return nil }
+        let rectInContent = convert(cardRect, to: contentView)
+        let contentHeight = contentView.bounds.height
+        guard contentHeight > 0 else { return nil }
+        let topLeftY = contentView.isFlipped ? rectInContent.minY : (contentHeight - rectInContent.maxY)
+        return CGRect(
+            x: rectInContent.minX,
+            y: topLeftY,
+            width: rectInContent.width,
+            height: rectInContent.height
+        )
     }
 
     override func viewDidChangeBackingProperties() {

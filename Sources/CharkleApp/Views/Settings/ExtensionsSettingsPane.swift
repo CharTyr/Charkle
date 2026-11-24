@@ -37,7 +37,7 @@ public struct ExtensionsSettingsPane: View {
         let extManifestURL = extDir?.appending(path: "manifest.json")
         let safariEmbedded = ExtensionBridgeController.isSafariExtensionEmbedded()
 
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             SettingsSection("浏览器扩展（Safari 与 Chrome）") {
                 SettingsRow(
                     title: "桌面端本地连接桥接",
@@ -172,7 +172,7 @@ public struct ExtensionsSettingsPane: View {
                             .fixedSize()
                         }
 
-                        Divider()
+                        CharkleHairlineDivider()
 
                         HStack(alignment: .center, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {

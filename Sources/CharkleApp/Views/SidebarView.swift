@@ -5,14 +5,19 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Refined translucent macOS Sidebar supporting:
-/// - Smooth collapse into an icon-only rail (`56pt` <-> `226pt`)
-/// - Custom duotone solid SVG icons (`18–20pt`)
+/// - Smooth collapse into an icon-only rail (`76pt` <-> `232pt`) with zero-flicker fixed inner frames
+/// - Crisp SF Symbols dual-state navigation icons (`.symbolVariant(.fill)`) + custom colored folder vectors
 /// - Smart Folders with live rule matching
 /// - Hierarchical Folders with in-app drag-to-reorder / drag-to-nest AND external Finder folder drop
 /// - Capped Tags section (Top 10 most-used + up to 5 recent frequent + searchable All Tags popover)
 public struct SidebarView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var activeAccent: Color {
+        CharkleTheme.accent(for: colorScheme, source: accentSource)
+    }
 
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
@@ -261,25 +266,28 @@ public struct SidebarView: View {
                 .frame(height: 36)
 
             // Pinned top controls cleanly beneath the traffic lights
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Button {
                     coordinator.isSidebarCollapsed = false
                 } label: {
-                    CharkleIcon("sidebar-toggle", style: .duotone, size: 20, isActive: false)
-                        .frame(width: 36, height: 34)
-                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(CharkleButtonStyle(.subtle, size: .icon, iconDimension: 34))
                 .help("展开侧边栏 (⌘\\)")
 
                 Button {
                     coordinator.isJumpAnywherePresented = true
                 } label: {
-                    CharkleIcon("search", style: .duotone, size: 19, isActive: false)
-                        .frame(width: 36, height: 34)
-                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
+                        .frame(width: 34, height: 32)
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(CharkleTactileButtonStyle())
                 .help("快速跳转 (⌘J)")
             }
             .padding(.top, 2)
@@ -288,98 +296,109 @@ public struct SidebarView: View {
             railDivider
 
             ScrollView(.vertical) {
-                VStack(spacing: 8) {
-                railButton(destination: .allItems, icon: "library", tooltip: "全部素材")
-                railButton(
-                    destination: .inbox,
-                    icon: "inbox",
-                    tooltip: "收件箱 (\(library.inboxCount))",
-                    showDot: library.inboxCount > 0,
-                    isDropHighlighted: dropTargetedInbox
-                )
-                .onDrop(of: [.plainText, .fileURL, .url, .image], isTargeted: $dropTargetedInbox) { providers in
-                    handleDrop(providers: providers, folderID: nil, boardID: nil)
-                }
-                railButton(destination: .untagged, icon: "untagged", tooltip: "未打标签")
-                railButton(destination: .recent, icon: "recent", tooltip: "最近添加")
-                railButton(destination: .moodboardsHome, icon: "moodboard", tooltip: "所有情绪板")
-
-                if !library.smartFolders.isEmpty {
-                    railDivider
-                    ForEach(library.smartFolders.prefix(6)) { sf in
-                        railButton(
-                            destination: .smartFolder(sf.id),
-                            icon: "smart-folder",
-                            tooltip: "智能文件夹：\(sf.name) (\(library.matchingCount(for: sf)))"
-                        )
+                VStack(spacing: 6) {
+                    railButton(destination: .allItems, symbolName: "square.grid.2x2", tooltip: "全部素材")
+                    railButton(
+                        destination: .inbox,
+                        symbolName: "tray.and.arrow.down",
+                        tooltip: "收件箱 (\(library.inboxCount))",
+                        showDot: library.inboxCount > 0,
+                        isDropHighlighted: dropTargetedInbox
+                    )
+                    .onDrop(of: [.plainText, .fileURL, .url, .image], isTargeted: $dropTargetedInbox) { providers in
+                        handleDrop(providers: providers, folderID: nil, boardID: nil)
                     }
-                }
+                    railButton(destination: .untagged, symbolName: "tag.slash", tooltip: "未打标签")
+                    railButton(destination: .recent, symbolName: "clock", tooltip: "最近添加")
+                    railButton(destination: .moodboardsHome, symbolName: "rectangle.3.group", tooltip: "所有情绪板")
 
-                let topFolders = library.childFolders(of: nil)
-                if !topFolders.isEmpty {
-                    railDivider
-                    ForEach(topFolders.prefix(8)) { folder in
-                        let isSelected = coordinator.selectedDestination == .folder(folder.id)
-                        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        Button {
-                            withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
-                                onSelectDestination(.folder(folder.id))
-                            }
-                        } label: {
-                            CharkleFolderIcon(
-                                colorHex: folder.colorHex,
-                                customSymbol: folder.customSymbol,
-                                size: 20,
-                                isActive: isSelected
+                    if !library.smartFolders.isEmpty {
+                        railDivider
+                        ForEach(library.smartFolders.prefix(6)) { sf in
+                            railButton(
+                                destination: .smartFolder(sf.id),
+                                symbolName: "folder.badge.gearshape",
+                                tooltip: "智能文件夹：\(sf.name) (\(library.matchingCount(for: sf)))"
                             )
-                            .frame(width: 38, height: 34)
-                            .background {
-                                if isSelected {
-                                    shape
-                                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
-                                        .matchedGeometryEffect(id: "sidebar-collapsed-selection-pill", in: collapsedSelectionNamespace)
-                                } else if dropTargetedFolderID == folder.id {
-                                    shape
-                                        .fill(Color.accentColor.opacity(0.18))
-                                        .overlay(shape.strokeBorder(Color.accentColor, lineWidth: 1.5))
+                        }
+                    }
+
+                    let topFolders = library.childFolders(of: nil)
+                    if !topFolders.isEmpty {
+                        railDivider
+                        ForEach(topFolders.prefix(8)) { folder in
+                            let isSelected = coordinator.selectedDestination == .folder(folder.id)
+                            let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                            Button {
+                                withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
+                                    onSelectDestination(.folder(folder.id))
                                 }
+                            } label: {
+                                CharkleFolderIcon(
+                                    colorHex: folder.colorHex,
+                                    customSymbol: folder.customSymbol,
+                                    size: 19,
+                                    isActive: isSelected
+                                )
+                                .frame(width: 38, height: 34)
+                                .background {
+                                    if isSelected {
+                                        shape
+                                            .fill(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
+                                            .matchedGeometryEffect(id: "sidebar-collapsed-selection-pill", in: collapsedSelectionNamespace)
+                                    } else if dropTargetedFolderID == folder.id {
+                                        shape
+                                            .fill(activeAccent.opacity(0.18))
+                                            .overlay(shape.strokeBorder(activeAccent, lineWidth: 1.5))
+                                    }
+                                }
+                                .contentShape(shape)
                             }
-                            .contentShape(shape)
+                            .buttonStyle(.plain)
+                            .help("\(folder.name) (\(library.subtreeAssetCount(for: folder.id)))")
+                            .onDrop(
+                                of: [.plainText, .fileURL, .url, .image],
+                                isTargeted: Binding(
+                                    get: { dropTargetedFolderID == folder.id },
+                                    set: { targeted in
+                                        dropTargetedFolderID = targeted ? folder.id : (dropTargetedFolderID == folder.id ? nil : dropTargetedFolderID)
+                                    }
+                                )
+                            ) { providers in
+                                handleDrop(providers: providers, folderID: folder.id, boardID: nil)
+                            }
+                        }
+                    }
+
+                    railDivider
+
+                    if !library.tagCounts.isEmpty {
+                        Button {
+                            isAllTagsPopoverPresented = true
+                        } label: {
+                            Image(systemName: "tag")
+                                .font(.system(size: 15, weight: .medium))
+                                .symbolVariant(isAllTagsPopoverPresented ? .fill : .none)
+                                .foregroundStyle(isAllTagsPopoverPresented ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                                .frame(width: 38, height: 34)
+                                .background(
+                                    isAllTagsPopoverPresented
+                                        ? Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
+                                        : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
+                                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                         }
                         .buttonStyle(.plain)
-                        .help("\(folder.name) (\(library.subtreeAssetCount(for: folder.id)))")
-                        .onDrop(
-                            of: [.plainText, .fileURL, .url, .image],
-                            isTargeted: Binding(
-                                get: { dropTargetedFolderID == folder.id },
-                                set: { targeted in
-                                    dropTargetedFolderID = targeted ? folder.id : (dropTargetedFolderID == folder.id ? nil : dropTargetedFolderID)
-                                }
-                            )
-                        ) { providers in
-                            handleDrop(providers: providers, folderID: folder.id, boardID: nil)
+                        .help("查看全部标签 (\(library.tagCounts.count))")
+                        .popover(isPresented: $isAllTagsPopoverPresented, arrowEdge: .trailing) {
+                            allTagsPopoverContent
+                                .environment(\.charkleAccentSource, accentSource)
+                                .tint(activeAccent)
                         }
                     }
-                }
 
-                railDivider
-
-                if !library.tagCounts.isEmpty {
-                    Button {
-                        isAllTagsPopoverPresented = true
-                    } label: {
-                        CharkleIcon("tag", style: .duotone, size: 19, isActive: isAllTagsPopoverPresented)
-                            .frame(width: 36, height: 34)
-                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .help("查看全部标签 (\(library.tagCounts.count))")
-                    .popover(isPresented: $isAllTagsPopoverPresented, arrowEdge: .trailing) {
-                        allTagsPopoverContent
-                    }
-                }
-
-                    railButton(destination: .trash, icon: "trash", tooltip: "废纸篓")
+                    railButton(destination: .trash, symbolName: "trash", tooltip: "废纸篓")
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, 6)
@@ -389,24 +408,25 @@ public struct SidebarView: View {
             .scrollIndicators(.hidden)
             .clipped()
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: 0.75)
+            CharkleHairlineDivider()
 
             Button {
                 withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
                     coordinator.openSettings()
                 }
             } label: {
-                CharkleIcon("settings", style: .duotone, size: 19, isActive: coordinator.isSettingsPresented)
+                Image(systemName: "gearshape")
+                    .font(.system(size: 15.5, weight: .medium))
+                    .symbolVariant(coordinator.isSettingsPresented ? .fill : .none)
+                    .foregroundStyle(coordinator.isSettingsPresented ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                     .frame(width: 38, height: 34)
                     .background(
                         coordinator.isSettingsPresented
                             ? Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09)
                             : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                     )
-                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("设置 (⌘,)")
@@ -416,27 +436,30 @@ public struct SidebarView: View {
 
     private var railDivider: some View {
         Rectangle()
-            .fill(CharkleTheme.hairline(for: colorScheme).opacity(0.85))
-            .frame(width: 24, height: 0.75)
+            .fill(CharkleTheme.hairline(for: colorScheme))
+            .frame(width: 24, height: CharkleTheme.hairlineWidth)
             .padding(.vertical, 2)
     }
 
     private func railButton(
         destination: SidebarDestination,
-        icon: String,
+        symbolName: String,
         tooltip: String,
         showDot: Bool = false,
         isDropHighlighted: Bool = false
     ) -> some View {
         let isSelected = coordinator.selectedDestination == destination
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
         return Button {
             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
                 onSelectDestination(destination)
             }
         } label: {
             ZStack(alignment: .topTrailing) {
-                CharkleIcon(icon, style: .duotone, size: 20, color: isSelected ? Color.accentColor : .secondary, isActive: isSelected)
+                Image(systemName: symbolName)
+                    .font(.system(size: 15.5, weight: isSelected ? .semibold : .medium))
+                    .symbolVariant(isSelected ? .fill : .none)
+                    .foregroundStyle(isSelected ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
                     .frame(width: 38, height: 34)
                     .background {
                         if isSelected {
@@ -445,14 +468,14 @@ public struct SidebarView: View {
                                 .matchedGeometryEffect(id: "sidebar-collapsed-selection-pill", in: collapsedSelectionNamespace)
                         } else if isDropHighlighted {
                             shape
-                                .fill(Color.accentColor.opacity(0.18))
-                                .overlay(shape.strokeBorder(Color.accentColor, lineWidth: 1.5))
+                                .fill(activeAccent.opacity(0.18))
+                                .overlay(shape.strokeBorder(activeAccent, lineWidth: 1.5))
                         }
                     }
 
                 if showDot {
                     Circle()
-                        .fill(Color.accentColor)
+                        .fill(activeAccent)
                         .frame(width: 7, height: 7)
                         .offset(x: -5, y: 5)
                 }
@@ -478,27 +501,28 @@ public struct SidebarView: View {
                     Button {
                         coordinator.isJumpAnywherePresented = true
                     } label: {
-                        HStack(spacing: 3) {
-                            CharkleIcon("search", style: .duotone, size: 12)
+                        HStack(spacing: 4) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 10.5, weight: .medium))
                             Text("⌘J")
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                         }
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3.5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CharkleTactileButtonStyle())
                     .help("快速跳转 (⌘J)")
 
                     Button {
                         coordinator.isSidebarCollapsed = true
                     } label: {
-                        CharkleIcon("sidebar-toggle", style: .duotone, size: 17)
-                            .frame(width: 24, height: 24)
-                            .contentShape(Rectangle())
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CharkleButtonStyle(.subtle, size: .icon, iconDimension: 26))
                     .help("收起为仅图标侧边栏 (⌘\\)")
                 }
                 .padding(.horizontal, 12)
@@ -527,13 +551,13 @@ public struct SidebarView: View {
                     sectionHeader("素材库")
                     sidebarRow(
                         destination: .allItems,
-                        iconName: "library",
+                        symbolName: "square.grid.2x2",
                         title: "全部素材",
                         badgeCount: library.allAssetsByID.values.filter { !$0.isTrashed }.count
                     )
                     sidebarRow(
                         destination: .inbox,
-                        iconName: "inbox",
+                        symbolName: "tray.and.arrow.down",
                         title: "收件箱",
                         badgeCount: library.inboxCount,
                         emphasizeBadge: library.inboxCount > 0,
@@ -556,18 +580,18 @@ public struct SidebarView: View {
                     }
                     sidebarRow(
                         destination: .untagged,
-                        iconName: "untagged",
+                        symbolName: "tag.slash",
                         title: "未打标签",
                         badgeCount: library.allAssetsByID.values.filter { !$0.isTrashed && $0.tags.isEmpty }.count
                     )
                     sidebarRow(
                         destination: .recent,
-                        iconName: "recent",
+                        symbolName: "clock",
                         title: "最近添加"
                     )
                     sidebarRow(
                         destination: .trash,
-                        iconName: "trash",
+                        symbolName: "trash",
                         title: "废纸篓"
                     )
                 }
@@ -584,23 +608,19 @@ public struct SidebarView: View {
                         } label: {
                             HStack(spacing: 3) {
                                 Image(systemName: "plus")
-                                    .font(.system(size: 10, weight: .bold))
+                                    .font(.system(size: 9.5, weight: .semibold))
                                 Text("快速生成")
                                     .font(.system(size: 10.5, weight: .medium))
                             }
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
                         }
-                        .buttonStyle(CharkleTactileButtonStyle())
+                        .buttonStyle(CharkleButtonStyle(.subtle, size: .xs, cornerRadius: 999))
                         .help("4 入口 10 秒快速生成情绪板")
                     }
                     .padding(.trailing, 10)
 
                     sidebarRow(
                         destination: .moodboardsHome,
-                        iconName: "moodboard",
+                        symbolName: "rectangle.3.group",
                         title: "所有情绪板",
                         badgeCount: moodboards.boards.count
                     )
@@ -609,7 +629,7 @@ public struct SidebarView: View {
                         let isActiveTarget = coordinator.activeMoodboardID == board.id
                         sidebarRow(
                             destination: .moodboard(board.id),
-                            iconName: "sparkle-board",
+                            symbolName: "sparkles.rectangle.stack",
                             title: board.title,
                             badgeCount: board.itemCount,
                             isActiveMoodboard: isActiveTarget,
@@ -683,7 +703,9 @@ public struct SidebarView: View {
                             coordinator.isSmartFolderEditorPresented = true
                         } label: {
                             HStack(spacing: 6) {
-                                CharkleIcon("smart-folder", style: .duotone, size: 16)
+                                Image(systemName: "folder.badge.gearshape")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                    .foregroundStyle(.tertiary)
                                 Text("定义规则自动归集素材…")
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(.tertiary)
@@ -697,7 +719,7 @@ public struct SidebarView: View {
                         ForEach(library.smartFolders) { sf in
                             sidebarRow(
                                 destination: .smartFolder(sf.id),
-                                iconName: "smart-folder",
+                                symbolName: "folder.badge.gearshape",
                                 title: sf.name,
                                 badgeCount: library.matchingCount(for: sf),
                                 dotColorHex: sf.colorHex
@@ -769,7 +791,7 @@ public struct SidebarView: View {
                     .padding(.vertical, 2)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(dropTargetedFolderRoot ? Color.accentColor.opacity(0.14) : Color.clear)
+                            .fill(dropTargetedFolderRoot ? activeAccent.opacity(0.14) : Color.clear)
                             .padding(.horizontal, 8)
                     )
                     .onDrop(of: [.plainText, .fileURL, .url], isTargeted: $dropTargetedFolderRoot) { providers in
@@ -868,9 +890,7 @@ public struct SidebarView: View {
             .scrollIndicators(.hidden)
             .clipped()
 
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(height: 0.75)
+            CharkleHairlineDivider()
 
             Button {
                 withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
@@ -878,7 +898,11 @@ public struct SidebarView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    CharkleIcon("settings", style: .duotone, size: 17, isActive: coordinator.isSettingsPresented)
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14.5, weight: coordinator.isSettingsPresented ? .semibold : .medium))
+                        .symbolVariant(coordinator.isSettingsPresented ? .fill : .none)
+                        .foregroundStyle(coordinator.isSettingsPresented ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                        .frame(width: 18, height: 18)
                     Text("设置")
                         .font(.system(size: 12.5, weight: coordinator.isSettingsPresented ? .semibold : .medium))
                         .foregroundStyle(coordinator.isSettingsPresented ? Color.primary : Color.primary.opacity(0.84))
@@ -893,9 +917,9 @@ public struct SidebarView: View {
                     coordinator.isSettingsPresented
                         ? Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08)
                         : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 8)
@@ -960,6 +984,8 @@ public struct SidebarView: View {
                 .padding(.bottom, 4)
                 .popover(isPresented: $isAllTagsPopoverPresented, arrowEdge: .trailing) {
                     allTagsPopoverContent
+                        .environment(\.charkleAccentSource, accentSource)
+                        .tint(activeAccent)
                 }
                 .help("查看并搜索全部 \(library.tagCounts.count) 个标签")
 
@@ -985,7 +1011,7 @@ public struct SidebarView: View {
                 if let extra = extraSelectedTag {
                     sidebarRow(
                         destination: .tag(extra.name),
-                        iconName: "tag",
+                        symbolName: "tag",
                         title: "#\(extra.name)",
                         badgeCount: extra.count
                     )
@@ -1001,7 +1027,7 @@ public struct SidebarView: View {
                     ForEach(recentFive) { tag in
                         sidebarRow(
                             destination: .tag(tag.name),
-                            iconName: "tag",
+                            symbolName: "tag",
                             title: "#\(tag.name)",
                             badgeCount: tag.count
                         )
@@ -1020,7 +1046,7 @@ public struct SidebarView: View {
                     ForEach(topNonDuplicate) { tag in
                         sidebarRow(
                             destination: .tag(tag.name),
-                            iconName: "tag",
+                            symbolName: "tag",
                             title: "#\(tag.name)",
                             badgeCount: tag.count
                         )
@@ -1042,7 +1068,7 @@ public struct SidebarView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 10)
                         .frame(height: 26)
-                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal, 8)
@@ -1066,7 +1092,9 @@ public struct SidebarView: View {
 
         return VStack(spacing: 0) {
             HStack(spacing: 8) {
-                CharkleIcon("search", style: .duotone, size: 15)
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(CharkleTheme.secondaryInk(for: colorScheme))
                 TextField("搜索全部 \(library.tagCounts.count) 个标签…", text: $allTagsSearchQuery)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12.5))
@@ -1085,17 +1113,13 @@ public struct SidebarView: View {
                 } label: {
                     Text(allTagsSortByCount ? "按数量" : "按名称")
                         .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(CharkleButtonStyle(.subtle, size: .xs, cornerRadius: 999))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
 
-            Divider()
+            CharkleHairlineDivider()
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -1106,7 +1130,11 @@ public struct SidebarView: View {
                             isAllTagsPopoverPresented = false
                         } label: {
                             HStack(spacing: 8) {
-                                CharkleIcon("tag", style: .duotone, size: 16, isActive: selected)
+                                Image(systemName: "tag")
+                                    .font(.system(size: 13.5, weight: selected ? .semibold : .medium))
+                                    .symbolVariant(selected ? .fill : .none)
+                                    .foregroundStyle(selected ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                                    .frame(width: 16, height: 16)
                                 Text("#\(tag.name)")
                                     .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
                                     .lineLimit(1)
@@ -1119,8 +1147,8 @@ public struct SidebarView: View {
                             .padding(.horizontal, 10)
                             .frame(height: 28)
                             .background(
-                                selected ? Color.accentColor.opacity(0.12) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                selected ? CharkleTheme.accentSoft(for: colorScheme, source: accentSource) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
                             )
                             .contentShape(Rectangle())
                         }
@@ -1167,10 +1195,10 @@ public struct SidebarView: View {
             if isTargeted {
                 HStack(spacing: 0) {
                     Circle()
-                        .fill(Color.accentColor)
+                        .fill(activeAccent)
                         .frame(width: 6, height: 6)
                     Rectangle()
-                        .fill(Color.accentColor)
+                        .fill(activeAccent)
                         .frame(height: 2)
                 }
                 .padding(.leading, 18 + indent)
@@ -1298,16 +1326,16 @@ public struct SidebarView: View {
         .background {
             if isMultiSelected && selectedFolderIDs.count > 1 {
                 rowShape
-                    .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.24 : 0.16))
-                    .overlay(rowShape.strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1))
+                    .fill(activeAccent.opacity(colorScheme == .dark ? 0.24 : 0.16))
+                    .overlay(rowShape.strokeBorder(activeAccent.opacity(0.55), lineWidth: 1))
             } else if isDestinationSelected {
                 rowShape
                     .fill(Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.08))
                     .matchedGeometryEffect(id: "sidebar-expanded-selection-pill", in: expandedSelectionNamespace)
             } else if isDropHighlighted {
                 rowShape
-                    .fill(Color.accentColor.opacity(0.16))
-                    .overlay(rowShape.strokeBorder(Color.accentColor, lineWidth: 1.5))
+                    .fill(activeAccent.opacity(0.16))
+                    .overlay(rowShape.strokeBorder(activeAccent, lineWidth: 1.5))
             }
         }
         .contentShape(rowShape)
@@ -1355,6 +1383,8 @@ public struct SidebarView: View {
                     }
                 }
             }
+            .environment(\.charkleAccentSource, accentSource)
+            .tint(activeAccent)
         }
         .onHover { hovering in
             if hovering {
@@ -1544,8 +1574,7 @@ public struct SidebarView: View {
                 .onSubmit { commitNewFolder() }
                 .onExitCommand { cancelFolderCreation() }
             Button("创建") { commitNewFolder() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(CharkleButtonStyle(.accent, size: .xs))
                 .disabled(newFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.leading, 12 + indent)
@@ -1574,7 +1603,7 @@ public struct SidebarView: View {
                 .onSubmit { commitFolderRename(folderID: folder.id) }
                 .onExitCommand { renamingFolderID = nil }
             Button("好") { commitFolderRename(folderID: folder.id) }
-                .controlSize(.small)
+                .buttonStyle(CharkleButtonStyle(.standard, size: .xs))
         }
         .padding(.leading, 12 + indent)
         .padding(.trailing, 12)
@@ -1723,11 +1752,24 @@ private struct ClickOutsideDismissAnchor: NSViewRepresentable {
 }
 
 /// Native macOS translucent sidebar surface (`NSVisualEffectView(.sidebar)`) without `NavigationSplitView`'s
-/// hidden-titlebar scroll pocket hit-testing offset.
-public struct CharkleSidebarMaterialBackground: NSViewRepresentable {
+/// hidden-titlebar scroll pocket hit-testing offset, falling back to calibrated neutral solid surface under Reduce Transparency.
+public struct CharkleSidebarMaterialBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
     public init() {}
 
-    public func makeNSView(context: Context) -> NSVisualEffectView {
+    public var body: some View {
+        if reduceTransparency {
+            colorScheme == .dark ? Color(charkleHex: "#17191D") : Color(charkleHex: "#F2F1EE")
+        } else {
+            SidebarVisualEffectView()
+        }
+    }
+}
+
+private struct SidebarVisualEffectView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.material = .sidebar
         view.blendingMode = .behindWindow
@@ -1735,7 +1777,7 @@ public struct CharkleSidebarMaterialBackground: NSViewRepresentable {
         return view
     }
 
-    public func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = .sidebar
     }
 }
@@ -1743,10 +1785,7 @@ public struct CharkleSidebarMaterialBackground: NSViewRepresentable {
 extension SidebarView {
 
     private var sidebarSectionDivider: some View {
-        Rectangle()
-            .fill(CharkleTheme.hairline(for: colorScheme).opacity(0.85))
-            .frame(height: 0.75)
-            .padding(.horizontal, 14)
+        CharkleHairlineDivider(horizontalInset: 14)
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -1760,7 +1799,7 @@ extension SidebarView {
 
     private func sidebarRow(
         destination: SidebarDestination,
-        iconName: String,
+        symbolName: String,
         title: String,
         badgeCount: Int? = nil,
         emphasizeBadge: Bool = false,
@@ -1770,7 +1809,7 @@ extension SidebarView {
         dotColorHex: String? = nil
     ) -> some View {
         let isSelected = coordinator.selectedDestination == destination
-        let rowShape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        let rowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
 
         return Button {
             withAnimation(CharkleMotion.accessible(CharkleMotion.settleStrong, reduced: reduceMotion)) {
@@ -1778,13 +1817,11 @@ extension SidebarView {
             }
         } label: {
             HStack(spacing: 8) {
-                CharkleIcon(
-                    iconName,
-                    style: .duotone,
-                    size: 18,
-                    color: isSelected ? Color.accentColor : .secondary,
-                    isActive: isSelected
-                )
+                Image(systemName: symbolName)
+                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
+                    .symbolVariant(isSelected ? .fill : .none)
+                    .foregroundStyle(isSelected ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                    .frame(width: 18, height: 18)
 
                 Text(title)
                     .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
@@ -1801,7 +1838,7 @@ extension SidebarView {
 
                 if isActiveMoodboard {
                     Circle()
-                        .fill(Color.green)
+                        .fill(CharkleTheme.positive(for: colorScheme))
                         .frame(width: 6, height: 6)
                         .help("当前活跃情绪板（刘海直投目标）")
                 }
@@ -1817,12 +1854,17 @@ extension SidebarView {
                     Text("\(count)")
                         .font(.system(size: 10.5, weight: emphasizeBadge ? .semibold : .medium, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(emphasizeBadge ? .white : .secondary)
+                        .foregroundStyle(
+                            emphasizeBadge
+                                ? CharkleTheme.accentButtonForeground(for: colorScheme, source: accentSource)
+                                : CharkleTheme.secondaryInk(for: colorScheme)
+                        )
                         .padding(.horizontal, emphasizeBadge ? 6 : 4)
                         .padding(.vertical, emphasizeBadge ? 2 : 1)
                         .background {
                             if emphasizeBadge {
-                                Capsule(style: .continuous).fill(Color.accentColor)
+                                Capsule(style: .continuous)
+                                    .fill(CharkleTheme.accentButtonFill(for: colorScheme, source: accentSource))
                             }
                         }
                 }
@@ -1836,8 +1878,8 @@ extension SidebarView {
                         .matchedGeometryEffect(id: "sidebar-expanded-selection-pill", in: expandedSelectionNamespace)
                 } else if isDropHighlighted {
                     rowShape
-                        .fill(Color.accentColor.opacity(0.16))
-                        .overlay(rowShape.strokeBorder(Color.accentColor, lineWidth: 1.5))
+                        .fill(activeAccent.opacity(0.16))
+                        .overlay(rowShape.strokeBorder(activeAccent, lineWidth: 1.5))
                 }
             }
             .contentShape(rowShape)

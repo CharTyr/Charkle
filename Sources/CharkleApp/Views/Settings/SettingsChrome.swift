@@ -8,47 +8,47 @@ import UniformTypeIdentifiers
 
 public enum SettingsPalette {
     public static func railBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#17181B") : Color(charkleHex: "#F0EFEA")
+        CharkleTheme.inspectorBackground(for: scheme)
     }
 
     public static func contentBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#121316") : Color(charkleHex: "#F6F6F4")
+        CharkleTheme.galleryGround(for: scheme)
     }
 
     public static func cardBackground(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#1B1C20") : Color(charkleHex: "#FFFFFF")
+        CharkleTheme.surfaceElevated(for: scheme)
     }
 
     public static func subtleFill(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.04)
+        scheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.04)
     }
 
     public static func sectionLabel(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.46) : Color.black.opacity(0.48)
+        CharkleTheme.secondaryInk(for: scheme)
     }
 
     public static func rowDivider(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.065) : Color.black.opacity(0.065)
+        CharkleTheme.hairline(for: scheme)
     }
 
     public static func border(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color.white.opacity(0.085) : Color.black.opacity(0.08)
+        CharkleTheme.hairline(for: scheme)
     }
 
     public static func positiveInk(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#4ADE80") : Color(charkleHex: "#15803D")
+        CharkleTheme.positive(for: scheme)
     }
 
     public static func warningInk(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#FBBF24") : Color(charkleHex: "#B45309")
+        CharkleTheme.warning(for: scheme)
     }
 
     public static func destructiveInk(for scheme: ColorScheme) -> Color {
-        scheme == .dark ? Color(charkleHex: "#F87171") : Color(charkleHex: "#DC2626")
+        CharkleTheme.destructive(for: scheme)
     }
 }
 
-// MARK: - External Section Header + Rounded Card Container
+// MARK: - External Section Header + Single-Layer Grouped Form Container
 
 public struct SettingsSection<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -64,18 +64,18 @@ public struct SettingsSection<Content: View>: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
                 if let caption, !caption.isEmpty {
                     Text(caption)
                         .font(.system(size: 11))
-                        .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme).opacity(0.75))
+                        .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme).opacity(0.78))
                 }
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 4)
 
             SettingsCard {
                 content
@@ -86,6 +86,7 @@ public struct SettingsSection<Content: View>: View {
 
 public struct SettingsCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     private let content: Content
 
     public init(@ViewBuilder content: () -> Content) {
@@ -93,17 +94,19 @@ public struct SettingsCard<Content: View>: View {
     }
 
     public var body: some View {
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
         VStack(alignment: .leading, spacing: 0) {
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            SettingsPalette.cardBackground(for: colorScheme),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
+        .background(SettingsPalette.cardBackground(for: colorScheme), in: shape)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: 0.75)
+            shape.strokeBorder(
+                reduceTransparency
+                    ? Color.primary.opacity(colorScheme == .dark ? 0.20 : 0.16)
+                    : SettingsPalette.border(for: colorScheme),
+                lineWidth: reduceTransparency ? 1.0 : CharkleTheme.hairlineWidth
+            )
         )
     }
 }
@@ -116,12 +119,12 @@ public struct SettingsCardDivider: View {
     public var body: some View {
         Rectangle()
             .fill(SettingsPalette.rowDivider(for: colorScheme))
-            .frame(height: 0.75)
-            .padding(.horizontal, 16)
+            .frame(height: CharkleTheme.hairlineWidth)
+            .padding(.horizontal, 14)
     }
 }
 
-// MARK: - Clean Row & Inline Guide Disclosure
+// MARK: - Grouped Form Row & Flush Inline Guide Disclosure
 
 public struct SettingsRow<Control: View>: View {
     public let title: String
@@ -143,7 +146,7 @@ public struct SettingsRow<Control: View>: View {
 
     public var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2.5) {
                 Text(title)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.primary)
@@ -154,19 +157,21 @@ public struct SettingsRow<Control: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: 10)
+            Spacer(minLength: 12)
             control
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
+        .frame(minHeight: 28)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10.5)
     }
 }
 
-/// Quiet inline disclosure link (`如何开启 >`, `查看安装步骤 >`)
-/// that keeps the default surface calm while offering step-by-step guidance right in context.
+/// Quiet inline disclosure row (`如何开启`, `查看安装步骤`) rendered flush inside `SettingsCard`
+/// with a `0.5pt` hairline separation instead of a nested bordered card box.
 public struct InlineGuideDisclosure<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     public let title: String
     private let content: Content
@@ -186,27 +191,30 @@ public struct InlineGuideDisclosure<Content: View>: View {
                     isExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 5) {
-                    Text(title)
-                        .font(.system(size: 11.5, weight: .medium))
+                HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 10, height: 10)
+                    Text(title)
+                        .font(.system(size: 11.5, weight: .medium))
                     Spacer(minLength: 0)
                 }
                 .foregroundStyle(
                     isHovered || isExpanded
-                        ? Color.primary.opacity(0.84)
+                        ? Color.primary.opacity(0.86)
                         : SettingsPalette.sectionLabel(for: colorScheme)
                 )
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
                 .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
                 .background(
                     isHovered
-                        ? Color.primary.opacity(colorScheme == .dark ? 0.055 : 0.04)
+                        ? (reduceTransparency
+                            ? CharkleTheme.surfaceSubtle(for: colorScheme)
+                            : Color.primary.opacity(colorScheme == .dark ? 0.055 : 0.04))
                         : Color.clear,
-                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
                 )
                 .contentShape(Rectangle())
             }
@@ -218,21 +226,14 @@ public struct InlineGuideDisclosure<Content: View>: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
+                    CharkleHairlineDivider()
+                        .padding(.bottom, 2)
                     content
                 }
-                .padding(12)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    SettingsPalette.subtleFill(for: colorScheme),
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(SettingsPalette.border(for: colorScheme).opacity(0.75), lineWidth: 0.75)
-                )
-                .padding(.horizontal, 16)
-                .padding(.bottom, 14)
-                .transition(CharkleMotion.revealTransition(offsetY: -4, reduced: reduceMotion))
+                .transition(CharkleMotion.revealTransition(offsetY: -3, reduced: reduceMotion))
             }
         }
     }
@@ -255,11 +256,16 @@ public struct SettingsGuideStep: View {
         HStack(alignment: .top, spacing: 9) {
             Text(number)
                 .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                .monospacedDigit()
+                .foregroundStyle(Color.primary.opacity(0.84))
                 .frame(width: 18, height: 18)
                 .background(
-                    colorScheme == .dark ? Color.white.opacity(0.86) : Color.black.opacity(0.80),
+                    CharkleTheme.surfaceSubtle(for: colorScheme),
                     in: Circle()
+                )
+                .overlay(
+                    Circle()
+                        .strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
                 )
                 .padding(.top, 1)
 
@@ -269,7 +275,7 @@ public struct SettingsGuideStep: View {
                     .foregroundStyle(.primary)
                 if let detail, !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 11))
+                        .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -279,86 +285,29 @@ public struct SettingsGuideStep: View {
     }
 }
 
-// MARK: - Monochrome High-Contrast Primary / Subtle Secondary / Soft Destructive Button Styles
+// MARK: - Unified Button Styles (Delegating Directly to CharkleButtonStyle)
 
 public struct SettingsPrimaryButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     public init() {}
 
     public func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(colorScheme == .dark ? Color(charkleHex: "#111215") : Color.white)
-            .padding(.horizontal, 13)
-            .padding(.vertical, 6.5)
-            .background(
-                (colorScheme == .dark ? Color.white : Color(charkleHex: "#18191D"))
-                    .opacity(isEnabled ? (configuration.isPressed ? 0.84 : 1.0) : 0.35),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1.0)
-            .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: configuration.isPressed)
+        CharkleButtonStyle(.accent, size: .sm).makeBody(configuration: configuration)
     }
 }
 
 public struct SettingsSecondaryButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     public init() {}
 
     public func makeBody(configuration: Configuration) -> some View {
-        let fillOpacity: Double = colorScheme == .dark
-            ? (configuration.isPressed ? 0.13 : 0.08)
-            : (configuration.isPressed ? 0.09 : 0.05)
-        let strokeOpacity: Double = colorScheme == .dark ? 0.12 : 0.10
-
-        configuration.label
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(Color.primary.opacity(isEnabled ? 0.92 : 0.40))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6.5)
-            .background(
-                Color.primary.opacity(fillOpacity),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(strokeOpacity), lineWidth: 0.75)
-            )
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1.0)
-            .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: configuration.isPressed)
+        CharkleButtonStyle(.standard, size: .sm).makeBody(configuration: configuration)
     }
 }
 
 public struct SettingsDestructiveButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     public init() {}
 
     public func makeBody(configuration: Configuration) -> some View {
-        let ink = SettingsPalette.destructiveInk(for: colorScheme)
-        configuration.label
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(ink.opacity(isEnabled ? 1.0 : 0.45))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6.5)
-            .background(
-                ink.opacity(configuration.isPressed ? 0.16 : 0.08),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(ink.opacity(0.22), lineWidth: 0.75)
-            )
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1.0)
-            .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: configuration.isPressed)
+        CharkleButtonStyle(.destructive, size: .sm).makeBody(configuration: configuration)
     }
 }
 
@@ -380,8 +329,8 @@ public struct SettingsStatusBadge: View {
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(tint)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 2.5)
+        .padding(.horizontal, 7.5)
+        .padding(.vertical, 3)
         .background(tint.opacity(0.12), in: Capsule(style: .continuous))
     }
 }
@@ -412,6 +361,7 @@ public struct SettingsSheetFeedbackBanner: View {
         let tint = isError
             ? SettingsPalette.destructiveInk(for: colorScheme)
             : SettingsPalette.positiveInk(for: colorScheme)
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
         return HStack(spacing: 8) {
             Image(systemName: isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                 .font(.system(size: 12))
@@ -429,10 +379,9 @@ public struct SettingsSheetFeedbackBanner: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
-        .background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(tint.opacity(0.11), in: shape)
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(tint.opacity(0.22), lineWidth: 0.75)
+            shape.strokeBorder(tint.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 }
@@ -448,14 +397,14 @@ public struct SettingsCodeSnippet: View {
 
     public var body: some View {
         Text(text)
-            .font(.system(size: 10.5, design: .monospaced))
+            .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(.secondary)
             .textSelection(.enabled)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 colorScheme == .dark ? Color.black.opacity(0.32) : Color.black.opacity(0.045),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
             )
     }
 }

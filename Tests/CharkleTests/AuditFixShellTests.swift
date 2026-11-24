@@ -99,8 +99,13 @@ struct AuditFixShellTests {
         #expect(!iconMgr.contains("NSWorkspace.shared.setIcon("))
         #expect(iconMgr.contains("app.applicationIconImage = dockImg"))
 
+        let infoPlist = try readSource("Resources/Info.plist")
+        let plistBuildMatch = try #require(
+            infoPlist.firstMatch(of: /<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/)
+        )
+        let plistBuild = String(plistBuildMatch.1)
         let aboutPane = try readSource("Sources/CharkleApp/Views/Settings/AdvancedAboutSettingsPane.swift")
-        #expect(aboutPane.contains("CFBundleVersion") && aboutPane.contains("?? \"5\""))
+        #expect(aboutPane.contains("CFBundleVersion") && aboutPane.contains("?? \"\(plistBuild)\""))
     }
 
     @Test("JumpAnywhereView, MoodboardGeneratorSheet, and Settings modal sheets uphold interaction and feedback invariants")

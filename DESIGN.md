@@ -16,7 +16,7 @@ Charkle 是面向视觉创作者的**灵感收集库与 10 秒情绪板工作台
 2. **一套语言贯穿三端，拒绝局部漂移（同魂不同壳）**
    - 整套产品只允许一套颜色 Token、一套 4pt 空间网格、一套清晰圆角阶梯、一套按钮家族与一套动效体系。
    - 禁止在业务页面散落手写十六进制色值、临时像素圆角（如 `7px` / `9px`）或重复造同职责的弹窗/提示组件。
-   - **宿主原生壳层适配**：三端严格共享品牌哲学、中性画布、默认工作室钴蓝强调色与核心交互契约；Windows 端在窗口外壳、Fluent 2 / WinUI 3 控件几何、Mica Alt / Acrylic 材质、可选系统强调色与原生动效上遵循专属平台规范 [`.trellis/spec/windows/fluent2-design-system.md`](.trellis/spec/windows/fluent2-design-system.md)，不在 WebView2 内仿制 macOS 液态玻璃折射胶囊或双层顶栏。
+   - **宿主原生壳层适配**：三端严格共享品牌哲学、中性画布、默认工作室钴蓝强调色与核心交互契约；macOS 端在原生 3 玻璃岛顶栏、`CharkleControls` 原语、无套壳 Hairline 检查器、可选系统强调色及原生 SwiftPM 组件选型上遵循专属平台规范 [`.trellis/spec/macos/native-design-system.md`](.trellis/spec/macos/native-design-system.md)；Windows 端在窗口外壳、Fluent 2 / WinUI 3 控件几何、Mica Alt / Acrylic 材质、可选系统强调色与原生动效上遵循专属平台规范 [`.trellis/spec/windows/fluent2-design-system.md`](.trellis/spec/windows/fluent2-design-system.md)，不在 WebView2 内仿制 macOS 液态玻璃折射胶囊或双层顶栏。
 3. **克制的光学材质，绝不玻璃叠玻璃**
    - 液态玻璃（macOS Liquid Glass / Web `backdrop-filter` / Windows 11 Mica & Acrylic）**仅限悬浮在媒体与画布之上的控制层**（顶部筛选胶囊、情绪板底部工具坞、多选批处理浮条、Quick Look 控制栏、顶部收纳浮窗）。
    - 绝不在纯色背景上使用半透明毛玻璃（会发灰发脏），绝不玻璃叠玻璃，并始终提供 `Reduce Transparency` 高对比度实色降级。

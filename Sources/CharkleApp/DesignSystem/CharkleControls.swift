@@ -126,7 +126,7 @@ public struct CharkleButtonStyle: ButtonStyle {
                 .padding(.horizontal, horizontalPadding)
                 .frame(
                     minWidth: size == .icon ? iconDimension : nil,
-                    maxWidth: fullWidth ? .infinity : nil,
+                    maxWidth: fullWidth ? .infinity : (size == .icon ? iconDimension : nil),
                     minHeight: controlHeight,
                     maxHeight: size == .icon ? iconDimension : nil
                 )
@@ -729,9 +729,9 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
                     if let reorderActions {
                         CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered)
                             .help("按住拖拽可自由调整排序 · 右键可快速置顶或恢复默认")
-                            .onDrag(reorderActions.onBeginDrag) {
+                            .onDrag(reorderActions.onBeginDrag, preview: {
                                 dragPreviewPill
-                            }
+                            })
                     } else {
                         CharkleReorderGrip(isHighlighted: isReorderHighlighted || isHeaderHovered)
                     }
@@ -767,9 +767,9 @@ public struct CharkleInspectorSection<HeaderTrailing: View, Content: View>: View
             if let reorderActions {
                 staticHeader
                     .help("按住标题栏拖拽可自由调整排序 · 右键可快速置顶或恢复默认")
-                    .onDrag(reorderActions.onBeginDrag) {
+                    .onDrag(reorderActions.onBeginDrag, preview: {
                         dragPreviewPill
-                    }
+                    })
                     .modifier(OptionalReorderContextMenuModifier(actions: reorderActions, reduceMotion: reduceMotion))
             } else {
                 staticHeader
@@ -1233,21 +1233,29 @@ public struct CharkleTokenSearchField<FilterTrigger: View>: View {
                 .frame(width: 14)
 
             if !tokens.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(tokens) { token in
-                            CharkleFilterTokenChip(token: token) {
-                                withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
-                                    onRemoveToken(token)
-                                }
+                let maxTokensWidth: CGFloat = compact ? 116 : 196
+                let tokenRow = HStack(spacing: 4) {
+                    ForEach(tokens) { token in
+                        CharkleFilterTokenChip(token: token) {
+                            withAnimation(CharkleMotion.accessible(CharkleMotion.exitSm, reduced: reduceMotion)) {
+                                onRemoveToken(token)
                             }
-                            .transition(CharkleMotion.originTransition(anchor: .leading, scale: 0.94, reduced: reduceMotion))
                         }
+                        .transition(CharkleMotion.originTransition(anchor: .leading, scale: 0.94, reduced: reduceMotion))
                     }
                 }
-                .scrollIndicators(.hidden)
-                .frame(maxWidth: compact ? 116 : 196)
-                .fixedSize(horizontal: true, vertical: false)
+
+                ViewThatFits(in: .horizontal) {
+                    tokenRow
+                        .fixedSize(horizontal: true, vertical: false)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        tokenRow
+                            .charkleCleanScrollbars(hidden: true)
+                    }
+                    .scrollIndicators(.hidden)
+                }
+                .frame(maxWidth: maxTokensWidth, alignment: .leading)
             }
 
             TextField(placeholder, text: $text)

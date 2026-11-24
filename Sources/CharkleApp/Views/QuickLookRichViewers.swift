@@ -6,8 +6,9 @@ import ModelIO
 import SceneKit
 import SceneKit.ModelIO
 import SwiftUI
+import Textual
 
-// MARK: - 1. GitHub Repository + README Reader Card (Reference Screenshot Style)
+// MARK: - 1. GitHub Repository + README Reader Card
 
 struct QuickLookGitHubRepoCard: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -229,7 +230,7 @@ struct QuickLookGitHubRepoCard: View {
         case "rust": Color(charkleHex: "#DEA584")
         case "go": Color(charkleHex: "#00ADD8")
         case "html": Color(charkleHex: "#E34C26")
-        case "css": Color(charkleHex: "#563D7C")
+        case "css": Color(charkleHex: "#264DE4")
         default: Color(charkleHex: "#60A5FA")
         }
     }
@@ -313,13 +314,14 @@ struct QuickLookSocialPostCard: View {
                         .textSelection(.enabled)
                 }
 
-                // Post Body Text (always live, crisp & selectable)
+                // Post Body Text (native Textual rich formatting & selection)
                 if !post.bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(post.bodyText)
-                        .font(.system(size: 15))
-                        .lineSpacing(5)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    QuickLookSocialRichTextView(
+                        text: post.bodyText,
+                        isArticle: post.articleTitle != nil,
+                        fontSize: 15
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Quoted Post
@@ -330,11 +332,12 @@ struct QuickLookSocialPostCard: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.secondary)
                         }
-                        Text(quotedText)
-                            .font(.system(size: 13.5))
-                            .foregroundStyle(.primary.opacity(0.85))
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
+                        QuickLookSocialRichTextView(
+                            text: quotedText,
+                            isArticle: false,
+                            fontSize: 13.5
+                        )
+                        .foregroundStyle(.primary.opacity(0.86))
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -396,7 +399,7 @@ struct QuickLookSocialPostCard: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
 
-                // Media Fetch Failed Banner + Try Again CTA (matching Img 3)
+                // Media Fetch Failed Banner + Retry CTA
                 if post.mediaFetchFailed {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 6) {
@@ -718,8 +721,7 @@ struct QuickLookMarkdownReaderCard: View {
                     Button(showRawSource ? "渲染视图" : "查看原文") {
                         showRawSource.toggle()
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.charkle(.standard, size: .xs))
                 }
 
                 Button {
@@ -728,10 +730,8 @@ struct QuickLookMarkdownReaderCard: View {
                     pb.setString(fullText, forType: .string)
                 } label: {
                     Label("复制全文", systemImage: "doc.on.doc")
-                        .font(.system(size: 11.5, weight: .medium))
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.charkle(.standard, size: .xs))
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
@@ -785,29 +785,37 @@ struct QuickLookMarkdownReaderCard: View {
 
 // MARK: - Cached Remote Image Loader (Supports SVG, WebP, PNG, JPEG, GIF)
 
-private final class RemoteImageMemoryCache: @unchecked Sendable {
+private nonisolated final class RemoteImageBox: @unchecked Sendable {
+    let image: NSImage
+    init(_ image: NSImage) { self.image = image }
+}
+
+private nonisolated final class RemoteImageMemoryCache: @unchecked Sendable {
     static let shared = RemoteImageMemoryCache()
-    private let cache = NSCache<NSString, NSImage>()
+    private let cache = NSCache<NSString, RemoteImageBox>()
 
     private init() {
         cache.countLimit = 120
         cache.totalCostLimit = 96 * 1024 * 1024
     }
 
-    func image(for url: URL) -> NSImage? {
+    func box(for url: URL) -> RemoteImageBox? {
         cache.object(forKey: url.absoluteString as NSString)
     }
 
-    func store(_ image: NSImage, for url: URL) {
-        let w = max(1, Int(image.size.width))
-        let h = max(1, Int(image.size.height))
-        cache.setObject(image, forKey: url.absoluteString as NSString, cost: w * h * 4)
+    func image(for url: URL) -> NSImage? {
+        box(for: url)?.image
     }
-}
 
-private nonisolated final class RemoteImageBox: @unchecked Sendable {
-    let image: NSImage
-    init(_ image: NSImage) { self.image = image }
+    func store(_ box: RemoteImageBox, for url: URL) {
+        let w = max(1, Int(box.image.size.width))
+        let h = max(1, Int(box.image.size.height))
+        cache.setObject(box, forKey: url.absoluteString as NSString, cost: w * h * 4)
+    }
+
+    func store(_ image: NSImage, for url: URL) {
+        store(RemoteImageBox(image), for: url)
+    }
 }
 
 private nonisolated enum RemoteImageFetcher {
@@ -938,479 +946,683 @@ private struct RemoteCachedImageView<Placeholder: View, Failure: View>: View {
     }
 }
 
-// MARK: - Parsed Markdown Block Cache (Zero Main-Thread Re-Parsing)
+// MARK: - Native Textual Rich Markdown Renderer (GitHub README, Documents & Social Posts)
 
-private final class ParsedMarkdownCache: @unchecked Sendable {
-    static let shared = ParsedMarkdownCache()
+private enum CharkleMarkdownNormalizer {
+    private static let cache: NSCache<NSString, NSString> = {
+        let c = NSCache<NSString, NSString>()
+        c.countLimit = 64
+        return c
+    }()
 
-    private final class Box: @unchecked Sendable {
-        let blocks: [MarkdownBlock]
-        init(_ blocks: [MarkdownBlock]) { self.blocks = blocks }
-    }
-
-    private let cache = NSCache<NSString, Box>()
-
-    private init() {
-        cache.countLimit = 48
-    }
-
-    func key(markdown: String, urlContext: MarkdownURLContext) -> NSString {
+    static func normalize(_ markdown: String, urlContext: MarkdownURLContext) -> String {
         var hasher = Hasher()
         hasher.combine(markdown)
         hasher.combine(urlContext)
-        return "\(markdown.count)-\(hasher.finalize())" as NSString
+        let cacheKey = "\(markdown.count)-\(hasher.finalize())" as NSString
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached as String
+        }
+        let result = normalizeUncached(markdown, urlContext: urlContext)
+        cache.setObject(result as NSString, forKey: cacheKey)
+        return result
     }
 
-    func blocks(for key: NSString) -> [MarkdownBlock]? {
-        cache.object(forKey: key)?.blocks
+    static func prepareSocialText(_ raw: String, forceBlockMode: Bool) -> (markdown: String, useStructuredBlocks: Bool) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ("", false) }
+        let useBlocks = forceBlockMode || containsBlockMarkdown(trimmed)
+        let linked = autoLinkBareURLs(in: trimmed)
+        return (linked, useBlocks)
     }
 
-    func store(_ blocks: [MarkdownBlock], for key: NSString) {
-        cache.setObject(Box(blocks), forKey: key)
+    private static func containsBlockMarkdown(_ text: String) -> Bool {
+        if text.contains("```") || text.contains("~~~") { return true }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var listLines = 0
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.range(of: #"^#{1,6}[ \t]+\S"#, options: .regularExpression) != nil {
+                return true
+            }
+            if line.hasPrefix("> ") {
+                return true
+            }
+            if line.range(of: #"^([-*+]|[0-9]+\.)[ \t]+\S"#, options: .regularExpression) != nil {
+                listLines += 1
+                if listLines >= 2 { return true }
+            }
+        }
+        return false
+    }
+
+    private static func autoLinkBareURLs(in text: String) -> String {
+        // Skip fenced code blocks while converting standalone https?:// URLs into Markdown autolinks.
+        let segments = splitFencedCodeBlocks(text)
+        let pattern = #"(?<!\]\()(?<!<)(https?://[^\s<>\)\]]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+
+        return segments.map { segment in
+            guard !segment.isCode else { return segment.text }
+            let ns = segment.text as NSString
+            let matches = regex.matches(in: segment.text, range: NSRange(location: 0, length: ns.length))
+            guard !matches.isEmpty else { return segment.text }
+
+            var output = segment.text
+            for match in matches.reversed() {
+                guard let range = Range(match.range(at: 1), in: output) else { continue }
+                var urlStr = String(output[range])
+                var trailing = ""
+                while let last = urlStr.last, ".,;:!?".contains(last) {
+                    trailing.insert(urlStr.removeLast(), at: trailing.startIndex)
+                }
+                guard !urlStr.isEmpty else { continue }
+                output.replaceSubrange(range, with: "[\(urlStr)](\(urlStr))\(trailing)")
+            }
+            return output
+        }.joined()
+    }
+
+    private struct CodeSegment {
+        let text: String
+        let isCode: Bool
+    }
+
+    private static func splitFencedCodeBlocks(_ input: String) -> [CodeSegment] {
+        let lines = input.components(separatedBy: "\n")
+        var segments: [CodeSegment] = []
+        var buffer: [String] = []
+        var inCode = false
+        var fenceChar: Character = "`"
+        var fenceLength = 3
+
+        func flush() {
+            guard !buffer.isEmpty else { return }
+            segments.append(CodeSegment(text: buffer.joined(separator: "\n"), isCode: inCode))
+            buffer.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !inCode {
+                if let (ch, len) = openingFence(trimmed) {
+                    if !buffer.isEmpty {
+                        segments.append(CodeSegment(text: buffer.joined(separator: "\n") + "\n", isCode: false))
+                        buffer.removeAll(keepingCapacity: true)
+                    }
+                    inCode = true
+                    fenceChar = ch
+                    fenceLength = len
+                    buffer.append(line)
+                } else {
+                    buffer.append(line)
+                }
+            } else {
+                buffer.append(line)
+                if isClosingFence(trimmed, char: fenceChar, minLength: fenceLength) {
+                    segments.append(CodeSegment(text: buffer.joined(separator: "\n") + "\n", isCode: true))
+                    buffer.removeAll(keepingCapacity: true)
+                    inCode = false
+                }
+            }
+        }
+        flush()
+        return segments
+    }
+
+    private static func openingFence(_ trimmedLine: String) -> (Character, Int)? {
+        guard let first = trimmedLine.first, first == "`" || first == "~" else { return nil }
+        let count = trimmedLine.prefix(while: { $0 == first }).count
+        return count >= 3 ? (first, count) : nil
+    }
+
+    private static func isClosingFence(_ trimmedLine: String, char: Character, minLength: Int) -> Bool {
+        let count = trimmedLine.prefix(while: { $0 == char }).count
+        guard count >= minLength else { return false }
+        return trimmedLine.dropFirst(count).trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private static func normalizeUncached(_ markdown: String, urlContext: MarkdownURLContext) -> String {
+        let unified = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let segments = splitFencedCodeBlocks(unified)
+        let transformed = segments.map { segment in
+            segment.isCode ? segment.text : normalizeProseSegment(segment.text, urlContext: urlContext)
+        }.joined()
+        return collapseExcessBlankLines(transformed).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizeProseSegment(_ raw: String, urlContext: MarkdownURLContext) -> String {
+        var s = raw
+        // Strip HTML comments
+        s = replacingRegex(s, pattern: #"<!--[\s\S]*?-->"#, with: "")
+
+        // Convert linked HTML images: <a href="..."><img ...></a> -> [![alt](src)](href)
+        s = replaceLinkedImages(in: s, urlContext: urlContext)
+
+        // Convert standalone HTML images: <img ...> -> ![alt](src)
+        s = replaceStandaloneImages(in: s, urlContext: urlContext)
+
+        // Convert HTML headings <h1..h6> -> Markdown headings
+        s = replaceHTMLHeadings(in: s)
+
+        // Convert HTML links <a href="...">label</a> -> [label](url)
+        s = replaceHTMLAnchors(in: s, urlContext: urlContext)
+
+        // Convert HTML <summary>title</summary> into bold lead-in
+        s = replacingRegex(s, pattern: #"(?is)<summary\b[^>]*>([\s\S]*?)</summary>"#, with: "\n**$1**\n")
+
+        // Convert inline emphasis & code tags
+        s = replacingRegex(s, pattern: #"(?is)<(?:strong|b)\b[^>]*>([\s\S]*?)</(?:strong|b)>"#, with: "**$1**")
+        s = replacingRegex(s, pattern: #"(?is)<(?:em|i)\b[^>]*>([\s\S]*?)</(?:em|i)>"#, with: "*$1*")
+        s = replacingRegex(s, pattern: #"(?is)<(?:code|kbd)\b[^>]*>([\s\S]*?)</(?:code|kbd)>"#, with: "`$1`")
+        s = replacingRegex(s, pattern: #"(?i)<br\s*/?>"#, with: "  \n")
+        s = replacingRegex(s, pattern: #"(?i)<hr\s*/?>"#, with: "\n---\n")
+
+        // Remove inline formatting wrapper tags without injecting artificial line breaks
+        s = replacingRegex(s, pattern: #"(?i)</?(?:span|sub|sup)\b[^>]*>"#, with: "")
+
+        // Remove purely structural block HTML tags so Markdown inside them renders cleanly
+        s = replacingRegex(
+            s,
+            pattern: #"(?i)</?(?:div|p|picture|source|details|center|section|article|header|footer|figure|figcaption|table|thead|tbody|tr|td|th)\b[^>]*>"#,
+            with: "\n"
+        )
+
+        // Normalize GitHub alert blockquotes (> [!NOTE], > [!TIP], > [!IMPORTANT], > [!WARNING], > [!CAUTION])
+        s = replacingRegex(
+            s,
+            pattern: #"(?m)^([ \t]*>[ \t]*)\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*$"#,
+            with: "$1**$2**  "
+        )
+
+        return decodeHTMLEntities(s)
+    }
+
+    private static func replaceLinkedImages(in input: String, urlContext: MarkdownURLContext) -> String {
+        let pattern = #"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>\s*(<img\b[^>]*>)\s*</a>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        let ns = input as NSString
+        let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return input }
+
+        var output = input
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range(at: 0), in: output),
+                  let hrefRange = Range(match.range(at: 1), in: output),
+                  let imgRange = Range(match.range(at: 2), in: output) else { continue }
+            let href = urlContext.resolveLinkURL(decodeHTMLEntities(String(output[hrefRange])))
+            let imgTag = String(output[imgRange])
+            if let rawSrc = extractHTMLAttribute("src", from: imgTag), !rawSrc.isEmpty {
+                let resolvedSrc = urlContext.resolveAssetURL(decodeHTMLEntities(rawSrc))
+                let alt = extractHTMLAttribute("alt", from: imgTag).map(decodeHTMLEntities) ?? ""
+                output.replaceSubrange(fullRange, with: "[![\(alt)](\(resolvedSrc))](\(href))")
+            }
+        }
+        return output
+    }
+
+    private static func replaceStandaloneImages(in input: String, urlContext: MarkdownURLContext) -> String {
+        let pattern = #"(?i)<img\b[^>]*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        let ns = input as NSString
+        let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return input }
+
+        var output = input
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range(at: 0), in: output) else { continue }
+            let imgTag = String(output[fullRange])
+            guard let rawSrc = extractHTMLAttribute("src", from: imgTag), !rawSrc.isEmpty else {
+                output.replaceSubrange(fullRange, with: "")
+                continue
+            }
+            let resolvedSrc = urlContext.resolveAssetURL(decodeHTMLEntities(rawSrc))
+            let alt = extractHTMLAttribute("alt", from: imgTag).map(decodeHTMLEntities) ?? ""
+            output.replaceSubrange(fullRange, with: "![\(alt)](\(resolvedSrc))")
+        }
+        return output
+    }
+
+    private static func replaceHTMLHeadings(in input: String) -> String {
+        let pattern = #"(?is)<h([1-6])\b[^>]*>([\s\S]*?)</h\1>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        let ns = input as NSString
+        let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return input }
+
+        var output = input
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range(at: 0), in: output),
+                  let levelRange = Range(match.range(at: 1), in: output),
+                  let bodyRange = Range(match.range(at: 2), in: output),
+                  let level = Int(output[levelRange]) else { continue }
+            let hashes = String(repeating: "#", count: max(1, min(6, level)))
+            let text = replacingRegex(String(output[bodyRange]), pattern: #"<[^>]+>"#, with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            output.replaceSubrange(fullRange, with: "\n\(hashes) \(text)\n")
+        }
+        return output
+    }
+
+    private static func replaceHTMLAnchors(in input: String, urlContext: MarkdownURLContext) -> String {
+        let pattern = #"(?is)<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)</a>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        let ns = input as NSString
+        let matches = regex.matches(in: input, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return input }
+
+        var output = input
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range(at: 0), in: output),
+                  let hrefRange = Range(match.range(at: 1), in: output),
+                  let labelRange = Range(match.range(at: 2), in: output) else { continue }
+            let href = urlContext.resolveLinkURL(decodeHTMLEntities(String(output[hrefRange])))
+            let label = replacingRegex(String(output[labelRange]), pattern: #"<[^>]+>"#, with: "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let replacement = label.isEmpty ? "[\(href)](\(href))" : "[\(label)](\(href))"
+            output.replaceSubrange(fullRange, with: replacement)
+        }
+        return output
+    }
+
+    private static func extractHTMLAttribute(_ name: String, from tag: String) -> String? {
+        let pattern = #"(?i)\b\#(name)\s*=\s*(?:"([^"]*)"|'([^']*)')"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = tag as NSString
+        guard let match = regex.firstMatch(in: tag, range: NSRange(location: 0, length: ns.length)) else {
+            return nil
+        }
+        if match.range(at: 1).location != NSNotFound, let r = Range(match.range(at: 1), in: tag) {
+            return String(tag[r])
+        }
+        if match.range(at: 2).location != NSNotFound, let r = Range(match.range(at: 2), in: tag) {
+            return String(tag[r])
+        }
+        return nil
+    }
+
+    private static func replacingRegex(_ input: String, pattern: String, with template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return input }
+        let range = NSRange(location: 0, length: (input as NSString).length)
+        return regex.stringByReplacingMatches(in: input, range: range, withTemplate: template)
+    }
+
+    private static func decodeHTMLEntities(_ input: String) -> String {
+        guard input.contains("&") else { return input }
+        var s = input
+        let entities: [(String, String)] = [
+            ("&amp;", "&"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&quot;", "\""),
+            ("&#39;", "'"),
+            ("&apos;", "'"),
+            ("&nbsp;", " "),
+            ("&middot;", "·"),
+            ("&mdash;", "—"),
+            ("&ndash;", "–"),
+            ("&copy;", "©")
+        ]
+        for (entity, value) in entities {
+            s = s.replacingOccurrences(of: entity, with: value)
+        }
+        return s
+    }
+
+    private static func collapseExcessBlankLines(_ input: String) -> String {
+        replacingRegex(input, pattern: #"\n{3,}"#, with: "\n\n")
     }
 }
 
-/// High-performance GitHub-Flavored Markdown & README HTML renderer.
-/// Parses off-main-thread once with `NSCache` memoization and virtualizes blocks via `LazyVStack`,
-/// supporting centered HTML hero headers, SVG/WebP/PNG/GIF images, GFM tables, alerts, `<details>`,
-/// ordered/task lists, inline links, and code blocks.
-struct QuickLookMarkdownContentView: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let markdown: String
+private nonisolated struct CharkleMarkdownImageAttachment: Textual.Attachment {
+    let url: URL
+    let imageBox: RemoteImageBox
+    let naturalSize: CGSize
+    let altText: String
+
+    var description: String { altText }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.url == rhs.url && lhs.altText == rhs.altText
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(url)
+        hasher.combine(altText)
+    }
+
+    @MainActor
+    var body: some View {
+        let isBadge = naturalSize.height <= 36 && naturalSize.width <= 320
+        Image(nsImage: imageBox.image)
+            .renderingMode(.original)
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: isBadge ? 4 : 8, style: .continuous))
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, in _: TextEnvironmentValues) -> CGSize {
+        let rawW = max(1, naturalSize.width)
+        let rawH = max(1, naturalSize.height)
+        let aspect = rawW / rawH
+        let maxW = proposal.width ?? rawW
+        var width = min(maxW, rawW)
+        var height = width / aspect
+        let maxH: CGFloat = (rawH <= 36 && rawW <= 320) ? 32 : 440
+        if height > maxH {
+            height = maxH
+            width = height * aspect
+        }
+        return CGSize(width: max(1, width), height: max(1, height))
+    }
+
+    func pngData() -> Data? {
+        guard let tiff = imageBox.image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+}
+
+private nonisolated struct CharkleMarkdownAttachmentLoader: AttachmentLoader {
     let urlContext: MarkdownURLContext
 
-    @State private var blocks: [MarkdownBlock]
-
-    init(markdown: String, urlContext: MarkdownURLContext = MarkdownURLContext()) {
-        self.markdown = markdown
-        self.urlContext = urlContext
-        let key = ParsedMarkdownCache.shared.key(markdown: markdown, urlContext: urlContext)
-        if let cached = ParsedMarkdownCache.shared.blocks(for: key) {
-            _blocks = State(initialValue: cached)
-        } else if markdown.count <= 3_500 {
-            let parsed = MarkdownDocumentParser.parse(markdown, urlContext: urlContext)
-            ParsedMarkdownCache.shared.store(parsed, for: key)
-            _blocks = State(initialValue: parsed)
-        } else {
-            _blocks = State(initialValue: [])
+    func attachment(
+        for url: URL,
+        text: String,
+        environment _: ColorEnvironmentValues
+    ) async throws -> CharkleMarkdownImageAttachment {
+        let resolvedString = urlContext.resolveAssetURL(url.absoluteString)
+        guard let targetURL = URL(string: resolvedString) else {
+            throw URLError(.badURL)
         }
-    }
-
-    private var cacheKey: NSString {
-        ParsedMarkdownCache.shared.key(markdown: markdown, urlContext: urlContext)
-    }
-
-    var body: some View {
-        LazyVStack(alignment: .leading, spacing: 11) {
-            ForEach(blocks) { block in
-                MarkdownBlockRowView(block: block, colorScheme: colorScheme)
-            }
+        if let cached = RemoteImageMemoryCache.shared.box(for: targetURL) {
+            return CharkleMarkdownImageAttachment(
+                url: targetURL,
+                imageBox: cached,
+                naturalSize: cached.image.size,
+                altText: text
+            )
         }
-        .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .task(id: cacheKey) {
-            let key = cacheKey
-            if let cached = ParsedMarkdownCache.shared.blocks(for: key) {
-                if blocks != cached { blocks = cached }
-                return
+        guard let box = await RemoteImageFetcher.fetchImageOffMain(url: targetURL) else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        RemoteImageMemoryCache.shared.store(box, for: targetURL)
+        return CharkleMarkdownImageAttachment(
+            url: targetURL,
+            imageBox: box,
+            naturalSize: box.image.size,
+            altText: text
+        )
+    }
+}
+
+private enum CharkleTextualStyles {
+    static let inlineStyle: InlineStyle = InlineStyle()
+        .code(
+            .monospaced,
+            .fontScale(0.86),
+            .backgroundColor(
+                DynamicColor(
+                    light: Color.black.opacity(0.055),
+                    dark: Color.white.opacity(0.09)
+                )
+            )
+        )
+        .strong(.fontWeight(.semibold))
+        .link(
+            .foregroundColor(
+                DynamicColor(
+                    light: Color(charkleHex: "#2A60E0"),
+                    dark: Color(charkleHex: "#5B8DEF")
+                )
+            )
+        )
+
+    /// Calibrated studio syntax-highlighting palette (Light/Dark contrast, strictly zero violet hues).
+    static let highlighterTheme = StructuredText.HighlighterTheme(
+        foregroundColor: DynamicColor(
+            light: Color(charkleHex: "#1F2328"),
+            dark: Color(charkleHex: "#E6EDF3")
+        ),
+        backgroundColor: DynamicColor(
+            light: Color(charkleHex: "#F3F4F6"),
+            dark: Color(charkleHex: "#1C1F26")
+        ),
+        tokenProperties: [
+            .keyword: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#2A60E0"), dark: Color(charkleHex: "#5B8DEF"))),
+                .fontWeight(.semibold)
+            ),
+            .builtin: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#0E7490"), dark: Color(charkleHex: "#38BDF8")))
+            ),
+            .literal: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#2A60E0"), dark: Color(charkleHex: "#5B8DEF"))),
+                .fontWeight(.semibold)
+            ),
+            .boolean: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#B45309"), dark: Color(charkleHex: "#FBBF24"))),
+                .fontWeight(.semibold)
+            ),
+            .string: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#B91C1C"), dark: Color(charkleHex: "#F87171")))
+            ),
+            .char: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#B45309"), dark: Color(charkleHex: "#FBBF24")))
+            ),
+            .regex: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#B91C1C"), dark: Color(charkleHex: "#F87171")))
+            ),
+            .url: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#2A60E0"), dark: Color(charkleHex: "#5B8DEF")))
+            ),
+            .number: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#B45309"), dark: Color(charkleHex: "#FBBF24")))
+            ),
+            .className: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#047857"), dark: Color(charkleHex: "#34D399")))
+            ),
+            .function: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#0F766E"), dark: Color(charkleHex: "#2DD4BF")))
+            ),
+            .functionName: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#0F766E"), dark: Color(charkleHex: "#2DD4BF")))
+            ),
+            .variable: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#1D4ED8"), dark: Color(charkleHex: "#79C0FF")))
+            ),
+            .constant: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#0369A1"), dark: Color(charkleHex: "#79C0FF")))
+            ),
+            .property: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#0369A1"), dark: Color(charkleHex: "#79C0FF")))
+            ),
+            .comment: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#6B7280"), dark: Color(charkleHex: "#8B949E")))
+            ),
+            .blockComment: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#6B7280"), dark: Color(charkleHex: "#8B949E")))
+            ),
+            .docComment: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#6B7280"), dark: Color(charkleHex: "#8B949E")))
+            ),
+            .preprocessor: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#9A3412"), dark: Color(charkleHex: "#FB923C")))
+            ),
+            .directive: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#9A3412"), dark: Color(charkleHex: "#FB923C")))
+            ),
+            .attribute: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#92400E"), dark: Color(charkleHex: "#F59E0B")))
+            ),
+            .tag: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#047857"), dark: Color(charkleHex: "#34D399")))
+            ),
+            .attributeName: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#0369A1"), dark: Color(charkleHex: "#79C0FF")))
+            ),
+            .inserted: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#15803D"), dark: Color(charkleHex: "#4ADE80")))
+            ),
+            .deleted: AnyTextProperty(
+                .foregroundColor(DynamicColor(light: Color(charkleHex: "#DC2626"), dark: Color(charkleHex: "#F87171")))
+            )
+        ]
+    )
+
+    static var openURLAction: OpenURLAction {
+        OpenURLAction { url in
+            guard let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" || scheme == "mailto" else {
+                return .discarded
             }
-            let src = markdown
-            let ctx = urlContext
-            let parsed = await Task.detached(priority: .userInitiated) {
-                MarkdownDocumentParser.parse(src, urlContext: ctx)
-            }.value
-            guard !Task.isCancelled else { return }
-            ParsedMarkdownCache.shared.store(parsed, for: key)
-            blocks = parsed
+            NSWorkspace.shared.open(url)
+            return .handled
         }
     }
 }
 
-private struct MarkdownBlockRowView: View {
-    let block: MarkdownBlock
-    let colorScheme: ColorScheme
-
-    var body: some View {
-        switch block {
-        case .heading(_, let level, let text, let alignment):
-            VStack(alignment: horizontalAlignment(for: alignment), spacing: 6) {
-                inlineMarkdownText(text)
-                    .font(.system(
-                        size: level == 1 ? 22 : (level == 2 ? 17.5 : (level == 3 ? 15 : 13.5)),
-                        weight: .bold
-                    ))
-                    .multilineTextAlignment(textAlignment(for: alignment))
-                    .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
-
-                if level <= 2 && alignment == .leading {
-                    Rectangle()
-                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.08))
-                        .frame(height: 0.75)
-                }
-            }
-            .padding(.top, level <= 2 ? 8 : 4)
-
-        case .paragraph(_, let text, let alignment):
-            inlineMarkdownText(text)
-                .font(.system(size: 13.5))
-                .lineSpacing(5)
-                .multilineTextAlignment(textAlignment(for: alignment))
-                .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
-
-        case .image(_, let item, let alignment):
-            markdownImageElement(item, isInlineBadge: false)
-                .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
-                .padding(.vertical, 2)
-
-        case .imageRow(_, let items, let alignment):
-            QuickLookFlowWrap(spacing: 6) {
-                ForEach(items) { item in
-                    markdownImageElement(item, isInlineBadge: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: frameAlignment(for: alignment))
-            .padding(.vertical, 2)
-
-        case .code(_, let lang, let content):
-            MarkdownCodeBlockView(language: lang, content: content, colorScheme: colorScheme)
-
-        case .quote(_, let alertKind, let text):
-            let accent = alertAccentColor(for: alertKind)
-            HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(accent)
-                    .frame(width: 3)
-                VStack(alignment: .leading, spacing: 4) {
-                    if let alertKind {
-                        Text(alertKind.label.uppercased())
-                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                            .foregroundStyle(accent)
-                    }
-                    if !text.isEmpty {
-                        inlineMarkdownText(text)
-                            .font(.system(size: 13))
-                            .foregroundStyle(alertKind == nil ? Color.secondary : Color.primary.opacity(0.88))
-                            .lineSpacing(4)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.horizontal, alertKind == nil ? 0 : 10)
-            .padding(.vertical, alertKind == nil ? 2 : 8)
-            .background(
-                alertKind == nil ? Color.clear : accent.opacity(colorScheme == .dark ? 0.12 : 0.08),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-
-        case .listItem(_, let marker, let indent, let text):
-            HStack(alignment: .top, spacing: 8) {
-                switch marker {
-                case .bullet:
-                    Text("•")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14, alignment: .center)
-                case .ordered(let num):
-                    Text("\(num).")
-                        .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 20, alignment: .trailing)
-                case .task(let checked):
-                    Image(systemName: checked ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(checked ? Color.accentColor : .secondary)
-                        .padding(.top, 2)
-                }
-                inlineMarkdownText(text)
-                    .font(.system(size: 13.5))
-                    .lineSpacing(4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.leading, CGFloat(indent) * 16)
-
-        case .table(_, let headers, let alignments, let rows):
-            MarkdownTableView(
-                headers: headers,
-                alignments: alignments,
-                rows: rows,
-                colorScheme: colorScheme
-            )
-
-        case .details(_, let summary, let children):
-            MarkdownDetailsDisclosureView(summary: summary, children: children, colorScheme: colorScheme)
-
-        case .divider:
-            Divider().padding(.vertical, 4)
-        }
-    }
-
-    @ViewBuilder
-    private func markdownImageElement(_ item: MarkdownImageItem, isInlineBadge: Bool) -> some View {
-        if let url = URL(string: item.url) {
-            let fixedW = item.width.map { CGFloat(min($0, 680)) }
-            let fixedH = item.height.map { CGFloat(min($0, 480)) }
-            let maxH: CGFloat? = isInlineBadge ? 28 : (fixedH == nil ? 420 : nil)
-
-            let imageBody = RemoteCachedImageView(
-                url: url,
-                contentMode: .fit,
-                fixedWidth: fixedW,
-                fixedHeight: fixedH,
-                maxHeight: maxH
-            ) {
-                if fixedW != nil || fixedH != nil {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.primary.opacity(0.05))
-                        .frame(width: fixedW ?? 72, height: fixedH ?? 72)
-                } else if !isInlineBadge {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(0.04))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 120)
-                }
-            } failurePlaceholder: {
-                if !item.alt.isEmpty {
-                    Text(item.alt)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: isInlineBadge ? 4 : 10, style: .continuous))
-
-            if let linkStr = item.linkURL, let linkURL = URL(string: linkStr) {
-                Button {
-                    NSWorkspace.shared.open(linkURL)
-                } label: {
-                    imageBody
-                }
-                .buttonStyle(.plain)
-            } else {
-                imageBody
-            }
-        }
-    }
-
-    private func inlineMarkdownText(_ raw: String) -> Text {
-        if let attributed = try? AttributedString(
-            markdown: raw,
-            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            return Text(attributed)
-        }
-        return Text(raw)
-    }
-
-    private func horizontalAlignment(for alignment: MarkdownAlignment) -> HorizontalAlignment {
-        switch alignment {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
-
-    private func frameAlignment(for alignment: MarkdownAlignment) -> Alignment {
-        switch alignment {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
-
-    private func textAlignment(for alignment: MarkdownAlignment) -> TextAlignment {
-        switch alignment {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
-        }
-    }
-
-    private func alertAccentColor(for kind: MarkdownAlertKind?) -> Color {
-        switch kind {
-        case .none: Color.accentColor.opacity(0.55)
-        case .note: Color(charkleHex: "#3B82F6")
-        case .tip: Color(charkleHex: "#16A34A")
-        case .important: Color(charkleHex: "#2A60E0")
-        case .warning: Color(charkleHex: "#D97706")
-        case .caution: Color(charkleHex: "#DC2626")
-        }
+private struct CharkleCodeBlockStyle: StructuredText.CodeBlockStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        CharkleCodeBlockBodyView(configuration: configuration)
     }
 }
 
-private struct MarkdownCodeBlockView: View {
-    let language: String
-    let content: String
-    let colorScheme: ColorScheme
+private struct CharkleCodeBlockBodyView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
+    let configuration: StructuredText.CodeBlockStyleConfiguration
     @State private var copied: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let language = (configuration.languageHint ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let accent = CharkleTheme.accent(for: colorScheme, source: accentSource)
+
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Text(language.isEmpty ? "CODE" : language.uppercased())
-                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(content, forType: .string)
+                    configuration.codeBlock.copyToPasteboard()
                     copied = true
                     Task {
                         try? await Task.sleep(for: .seconds(1.2))
                         copied = false
                     }
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 3.5) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 9.5, weight: .semibold))
                         Text(copied ? "已复制" : "复制")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 10.5, weight: .medium))
                     }
-                    .foregroundStyle(copied ? Color.accentColor : .secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2.5)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .foregroundStyle(copied ? accent : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.055),
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    )
                 }
                 .buttonStyle(.plain)
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 9)
+            .padding(.bottom, 6)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(content)
-                    .font(.system(size: 12, design: .monospaced))
-                    .lineSpacing(3.5)
-                    .textSelection(.enabled)
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(height: CharkleTheme.hairlineWidth)
+
+            Overflow {
+                configuration.label
+                    .textual.lineSpacing(.fontScaled(0.24))
+                    .textual.fontScale(0.88)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .monospaced()
+                    .padding(12)
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.045), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06), lineWidth: 0.5)
+        .background(
+            Color.primary.opacity(colorScheme == .dark ? 0.075 : 0.04),
+            in: shape
         )
+        .overlay(
+            shape.strokeBorder(CharkleTheme.hairline(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
+        )
+        .textual.blockSpacing(.init(top: 4, bottom: 12))
     }
 }
 
-private struct MarkdownTableView: View {
-    let headers: [String]
-    let alignments: [MarkdownAlignment]
-    let rows: [[String]]
-    let colorScheme: ColorScheme
+/// Native SwiftUI Markdown renderer powered by `Textual`, supporting GitHub READMEs,
+/// documents, GFM tables, syntax-highlighted copyable code blocks, remote/SVG images,
+/// and native text selection with calibrated Light/Dark contrast.
+struct QuickLookMarkdownContentView: View {
+    let markdown: String
+    let urlContext: MarkdownURLContext
+    var fontSize: CGFloat = 13.5
+
+    init(
+        markdown: String,
+        urlContext: MarkdownURLContext = MarkdownURLContext(),
+        fontSize: CGFloat = 13.5
+    ) {
+        self.markdown = markdown
+        self.urlContext = urlContext
+        self.fontSize = fontSize
+    }
 
     var body: some View {
-        let colCount = max(1, headers.count)
-        let borderColor = Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.09)
-        let headerBg = Color.primary.opacity(colorScheme == .dark ? 0.075 : 0.045)
-        let stripeBg = Color.primary.opacity(colorScheme == .dark ? 0.035 : 0.02)
-        let tableContent = Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-            GridRow {
-                ForEach(0..<colCount, id: \.self) { col in
-                    let align = col < alignments.count ? alignments[col] : .leading
-                    inlineCellText(col < headers.count ? headers[col] : "", isHeader: true)
-                        .multilineTextAlignment(textAlignment(align))
-                        .frame(maxWidth: .infinity, alignment: frameAlignment(align))
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 8)
-                }
-            }
-            .background(headerBg)
-
-            ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, row in
-                Divider().overlay(borderColor)
-                GridRow {
-                    ForEach(0..<colCount, id: \.self) { col in
-                        let align = col < alignments.count ? alignments[col] : .leading
-                        let rawCell = col < row.count ? row[col] : ""
-                        inlineCellText(rawCell, isHeader: false)
-                            .multilineTextAlignment(textAlignment(align))
-                            .frame(maxWidth: .infinity, alignment: frameAlignment(align))
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 8)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .background(rowIdx.isMultiple(of: 2) ? Color.clear : stripeBg)
-            }
-        }
-        .background(Color.primary.opacity(colorScheme == .dark ? 0.03 : 0.015))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(borderColor, lineWidth: 0.75)
-        )
-
-        if colCount > 4 {
-            ScrollView(.horizontal, showsIndicators: false) {
-                tableContent.frame(minWidth: CGFloat(colCount) * 140)
-            }
+        let normalized = CharkleMarkdownNormalizer.normalize(markdown, urlContext: urlContext)
+        if normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Text("暂无可预览正文")
+                .font(.system(size: fontSize))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            tableContent
-        }
-    }
-
-    private func inlineCellText(_ raw: String, isHeader: Bool) -> Text {
-        let baseFont: Font = isHeader ? .system(size: 12, weight: .semibold) : .system(size: 12.5)
-        if let attributed = try? AttributedString(
-            markdown: raw,
-            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            return Text(attributed).font(baseFont)
-        }
-        return Text(raw).font(baseFont)
-    }
-
-    private func frameAlignment(_ align: MarkdownAlignment) -> Alignment {
-        switch align {
-        case .leading: .topLeading
-        case .center: .top
-        case .trailing: .topTrailing
-        }
-    }
-
-    private func textAlignment(_ align: MarkdownAlignment) -> TextAlignment {
-        switch align {
-        case .leading: .leading
-        case .center: .center
-        case .trailing: .trailing
+            StructuredText(markdown: normalized, baseURL: urlContext.webLinkBaseURL)
+                .font(.system(size: fontSize))
+                .textual.structuredTextStyle(.gitHub)
+                .textual.inlineStyle(CharkleTextualStyles.inlineStyle)
+                .textual.codeBlockStyle(CharkleCodeBlockStyle())
+                .textual.highlighterTheme(CharkleTextualStyles.highlighterTheme)
+                .textual.overflowMode(.scroll)
+                .textual.imageAttachmentLoader(CharkleMarkdownAttachmentLoader(urlContext: urlContext))
+                .textual.textSelection(.enabled)
+                .environment(\.openURL, CharkleTextualStyles.openURLAction)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
 
-private struct MarkdownDetailsDisclosureView: View {
-    let summary: String
-    let children: [MarkdownBlock]
-    let colorScheme: ColorScheme
-    @State private var isExpanded: Bool = false
+/// Renders rich social post copy via `Textual` (`StructuredText` for articles & block Markdown;
+/// `InlineText` preserving line breaks for standard posts and quotes).
+private struct QuickLookSocialRichTextView: View {
+    let text: String
+    let isArticle: Bool
+    let fontSize: CGFloat
 
     var body: some View {
-        CharkleDisclosureGroup(
-            isExpanded: $isExpanded,
-            headerVerticalPadding: 4,
-            headerHorizontalPadding: 6,
-            negativeHorizontalBleed: 6
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(children) { child in
-                    MarkdownBlockRowView(block: child, colorScheme: colorScheme)
-                }
-            }
-            .padding(.top, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } label: {
-            Text(summary)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
+        let prepared = CharkleMarkdownNormalizer.prepareSocialText(text, forceBlockMode: isArticle)
+        if prepared.useStructuredBlocks {
+            QuickLookMarkdownContentView(markdown: prepared.markdown, fontSize: fontSize)
+        } else {
+            InlineText(markdown: prepared.markdown)
+                .font(.system(size: fontSize))
+                .lineSpacing(5)
+                .textual.inlineStyle(CharkleTextualStyles.inlineStyle)
+                .textual.textSelection(.enabled)
+                .environment(\.openURL, CharkleTextualStyles.openURLAction)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.07), lineWidth: 0.5)
-        )
     }
 }
 
@@ -1467,7 +1679,7 @@ struct QuickLookModel3DViewer: View {
                         Button("使用默认软件打开") {
                             NSWorkspace.shared.open(url)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.charkle(.accent, size: .sm))
                     }
                 }
                 .padding(32)

@@ -17,6 +17,7 @@
 
 | Guide | Description | Status |
 |-------|-------------|--------|
+| [macOS Native Design & Component Spec](../macos/native-design-system.md) | Canonical macOS 15–26/27 native shell, anti-slop geometry, `CharkleControls` primitives, AppKit bridges, SwiftPM UI selections, and 120fps zero-flicker motion contracts | Active |
 | [Directory Structure](./directory-structure.md) | `CharkleCanvas` and `CharkleApp` layout, resource bundling, component placement | Active |
 | [Component Guidelines](./component-guidelines.md) | SwiftUI composition, duotone SVG icons, macOS menu color swatches, Notch morphing clip contract, rich viewers | Active |
 | [AppKit Bridge Guidelines](./appkit-bridge-guidelines.md) | SwiftUI↔AppKit drag/drop rules, `nonisolated isFlipped`, multi-item drag, pasteboard caching, GPU zoom animations | Active |

@@ -1,102 +1,103 @@
-import Carbon
+import AppKit
 import Foundation
+import KeyboardShortcuts
 import os
 
 private let hotkeyLogger = Logger(subsystem: "com.charkle.app", category: "Hotkeys")
 
-/// Registers system-wide macOS global hotkeys using Carbon `RegisterEventHotKey`:
-/// - `⌥⇧A`: Interactive region screenshot capture into Charkle
-/// - `⌥⇧S`: Toggle MacBook Notch Shelf anywhere
-/// - `⌥⇧V`: Quick-collect current clipboard into Charkle
+public extension KeyboardShortcuts.Name {
+    static let captureArea = Self("charkle.captureArea", default: .init(.a, modifiers: [.option, .shift]))
+    static let collectClipboard = Self("charkle.collectClipboard", default: .init(.v, modifiers: [.option, .shift]))
+    static let toggleNotchShelf = Self("charkle.toggleNotchShelf", default: .init(.s, modifiers: [.option, .shift]))
+}
+
+/// Manages system-wide macOS global hotkeys backed by `KeyboardShortcuts`:
+/// - `captureArea` (default `⌥⇧A`): Interactive region screenshot capture into Charkle
+/// - `collectClipboard` (default `⌥⇧V`): Quick-collect current clipboard into Charkle
+/// - `toggleNotchShelf` (default `⌥⇧S`): Toggle MacBook Notch Shelf anywhere
 public final class GlobalHotkeyManager {
-    public enum Action: UInt32, Hashable, Sendable {
+    public enum Action: UInt32, Hashable, Sendable, CaseIterable {
         case captureArea = 1
         case toggleNotchShelf = 2
         case quickPasteClipboard = 3
+
+        public var shortcutName: KeyboardShortcuts.Name {
+            switch self {
+            case .captureArea: .captureArea
+            case .toggleNotchShelf: .toggleNotchShelf
+            case .quickPasteClipboard: .collectClipboard
+            }
+        }
     }
 
-    private nonisolated static let hotKeySignature: OSType = 0x4348_4B4C // 'CHKL'
+    public static let allShortcutNames: [KeyboardShortcuts.Name] = [
+        .captureArea,
+        .collectClipboard,
+        .toggleNotchShelf
+    ]
 
-    private var eventHandlerRef: EventHandlerRef?
-    private var hotKeyRefs: [EventHotKeyRef] = []
+    public static func shortcutName(for action: Action) -> KeyboardShortcuts.Name {
+        action.shortcutName
+    }
+
+    public static func displayString(for name: KeyboardShortcuts.Name, fallback: String) -> String {
+        if let shortcut = KeyboardShortcuts.getShortcut(for: name) {
+            return shortcut.description
+        }
+        return fallback
+    }
+
+    public static func resetDefaults() {
+        KeyboardShortcuts.reset(allShortcutNames)
+    }
+
     private var onTrigger: ((Action) -> Void)?
     public private(set) var conflictedActions: Set<Action> = []
+
+    public var isEnabled: Bool = false {
+        didSet {
+            guard isEnabled != oldValue else { return }
+            if isEnabled {
+                KeyboardShortcuts.enable(Self.allShortcutNames)
+            } else {
+                KeyboardShortcuts.disable(Self.allShortcutNames)
+            }
+        }
+    }
 
     public init() {}
 
     public func register(onTrigger: @escaping (Action) -> Void) {
-        unregister()
+        removeRegisteredHandlers()
         self.onTrigger = onTrigger
+        self.conflictedActions.removeAll()
 
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
+        self.isEnabled = true
 
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let status = InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, eventRef, userData -> OSStatus in
-                guard let userData, let eventRef else { return OSStatus(eventNotHandledErr) }
-                var hotKeyID = EventHotKeyID()
-                let err = GetEventParameter(
-                    eventRef,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID
-                )
-                guard err == noErr,
-                      hotKeyID.signature == GlobalHotkeyManager.hotKeySignature,
-                      let action = Action(rawValue: hotKeyID.id) else {
-                    return OSStatus(eventNotHandledErr)
+        for action in Action.allCases {
+            let name = action.shortcutName
+            KeyboardShortcuts.onKeyDown(for: name) { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isEnabled else { return }
+                    self.onTrigger?(action)
                 }
-                let manager = Unmanaged<GlobalHotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in
-                    manager.onTrigger?(action)
-                }
-                return noErr
-            },
-            1,
-            &eventType,
-            selfPtr,
-            &eventHandlerRef
-        )
-
-        guard status == noErr else {
-            hotkeyLogger.warning("InstallEventHandler failed with status \(status)")
-            return
+            }
         }
-
-        let mods = UInt32(optionKey | shiftKey)
-        registerSingle(keyCode: UInt32(kVK_ANSI_A), modifiers: mods, action: .captureArea)
-        registerSingle(keyCode: UInt32(kVK_ANSI_S), modifiers: mods, action: .toggleNotchShelf)
-        registerSingle(keyCode: UInt32(kVK_ANSI_V), modifiers: mods, action: .quickPasteClipboard)
-    }
-
-    private func registerSingle(keyCode: UInt32, modifiers: UInt32, action: Action) {
-        var ref: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: action.rawValue)
-        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
-        if status == noErr, let ref {
-            hotKeyRefs.append(ref)
-        } else {
-            conflictedActions.insert(action)
-            hotkeyLogger.warning("RegisterEventHotKey action=\(action.rawValue) failed with status \(status) (possible global shortcut conflict)")
-        }
+        KeyboardShortcuts.enable(Self.allShortcutNames)
+        hotkeyLogger.debug("Registered \(Self.allShortcutNames.count) global shortcuts via KeyboardShortcuts")
     }
 
     public func unregister() {
-        for ref in hotKeyRefs {
-            UnregisterEventHotKey(ref)
-        }
-        hotKeyRefs.removeAll()
-        conflictedActions.removeAll()
-        if let handler = eventHandlerRef {
-            RemoveEventHandler(handler)
-            eventHandlerRef = nil
+        self.isEnabled = false
+        KeyboardShortcuts.disable(Self.allShortcutNames)
+        removeRegisteredHandlers()
+        self.onTrigger = nil
+        self.conflictedActions.removeAll()
+    }
+
+    private func removeRegisteredHandlers() {
+        for name in Self.allShortcutNames {
+            KeyboardShortcuts.removeHandler(for: name)
         }
     }
 

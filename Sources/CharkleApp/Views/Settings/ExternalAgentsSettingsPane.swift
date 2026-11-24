@@ -59,7 +59,7 @@ public struct ExternalAgentsSettingsPane: View {
             }
         )
 
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             SettingsSection("服务开关与安全边界") {
                 SettingsRow(
                     title: "启用 MCP 服务",
@@ -264,7 +264,10 @@ public struct ExternalAgentsSettingsPane: View {
                 }
 
                 InlineGuideDisclosure("不知道怎么跟 AI 开口？查看 3 条推荐对话示例") {
-                    ForEach(Self.samplePrompts, id: \.title) { item in
+                    ForEach(Array(Self.samplePrompts.enumerated()), id: \.element.title) { index, item in
+                        if index > 0 {
+                            CharkleHairlineDivider()
+                        }
                         HStack(alignment: .top, spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.title)

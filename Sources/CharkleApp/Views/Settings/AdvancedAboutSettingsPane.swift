@@ -23,10 +23,10 @@ public struct AdvancedAboutSettingsPane: View {
     public var body: some View {
         let snap = syncAndAI.gdirectSnapshot
         let healthyNodeCount = snap.endpoints.filter(\.healthy).count
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
-        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "5"
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.0"
+        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "6"
 
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             SettingsSection("Google Drive 高级通道（gdirect）") {
                 SettingsRow(
                     title: "Google 登录凭据（OAuth Client）",
@@ -152,8 +152,8 @@ public struct AdvancedAboutSettingsPane: View {
                     if let progress = syncAndAI.rebuildVisualIndexProgress, progress.total > 0 {
                         ProgressView(value: Double(progress.completed) / Double(progress.total))
                             .progressViewStyle(.linear)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 12)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 11)
                     }
                 }
 
@@ -192,6 +192,7 @@ public struct AdvancedAboutSettingsPane: View {
                                 .font(.system(size: 14, weight: .semibold))
                             Text("v\(appVersion) (\(buildNumber))")
                                 .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .monospacedDigit()
                                 .foregroundStyle(.secondary)
                         }
                         Text("面向设计师的视觉素材库与 10 秒情绪板创作台 · Apple Vision 离线引擎 + 可读云端存储")
@@ -200,8 +201,8 @@ public struct AdvancedAboutSettingsPane: View {
                     }
                     Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
             }
         }
         .onAppear {
@@ -271,7 +272,14 @@ public struct AdvancedAboutSettingsPane: View {
                 .frame(width: 224)
             }
             .padding(12)
-            .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(
+                SettingsPalette.subtleFill(for: colorScheme),
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+                    .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
+            )
 
             if snap.accounts.count > 1 {
                 HStack {

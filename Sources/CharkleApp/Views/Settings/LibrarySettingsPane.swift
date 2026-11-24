@@ -41,7 +41,7 @@ public struct LibrarySettingsPane: View {
         let totalUsed = stats.thumbnailBytes + stats.originalCacheBytes + stats.pinnedOfflineBytes
         let barScale = max(Int64(1), max(totalUsed, stats.budgetBytes))
 
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             SettingsSection("当前存储位置") {
                 SettingsRow(
                     title: storageHeadline(for: cfg),
@@ -174,8 +174,8 @@ public struct LibrarySettingsPane: View {
                         legendItem(color: Color(charkleHex: "#6B8E76"), title: "常驻离线（\(stats.pinnedAssetCount) 项）", bytes: stats.pinnedOfflineBytes)
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
 
                 SettingsCardDivider()
 
@@ -199,8 +199,8 @@ public struct LibrarySettingsPane: View {
                         }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 13)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
 
                 SettingsCardDivider()
 
@@ -395,7 +395,7 @@ public struct LibrarySettingsPane: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 SettingsPalette.subtleFill(for: colorScheme),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
             )
 
             HStack {

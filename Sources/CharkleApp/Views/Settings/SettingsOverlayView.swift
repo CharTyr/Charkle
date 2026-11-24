@@ -43,10 +43,10 @@ public struct SettingsOverlayView: View {
             CharkleModalBackdrop(onTap: onClose)
 
             GeometryReader { geo in
-                let modalWidth = min(max(680, geo.size.width - 72), 840)
-                let modalHeight = min(max(500, geo.size.height - 68), 636)
+                let modalWidth = min(max(680, geo.size.width - 72), 880)
+                let modalHeight = min(max(500, geo.size.height - 68), 640)
 
-                let cardShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+                let cardShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsOuter, style: .continuous)
                 SettingsContentShell(
                     coordinator: coordinator,
                     library: library,
@@ -71,7 +71,7 @@ public struct SettingsOverlayView: View {
                     cardShape
                         .strokeBorder(
                             colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08),
-                            lineWidth: 0.75
+                            lineWidth: CharkleTheme.hairlineWidth
                         )
                 )
                 .scaleEffect(cardAppeared || reduceMotion ? 1.0 : 0.97)
@@ -95,6 +95,10 @@ public struct SettingsOverlayView: View {
 public struct SettingsContentShell: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @State private var hoveredTab: CharkleSettingsTab? = nil
+    @Namespace private var navSelectionNamespace
 
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore?
@@ -125,20 +129,24 @@ public struct SettingsContentShell: View {
         self.onClose = onClose
     }
 
+    private var activeAccent: Color {
+        CharkleTheme.accent(for: colorScheme, source: coordinator.accentSource)
+    }
+
     public var body: some View {
         HStack(spacing: 0) {
             navigationRail
-                .frame(width: 204)
+                .frame(width: 208)
                 .background(SettingsPalette.railBackground(for: colorScheme))
 
-            Rectangle()
-                .fill(colorScheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.045))
-                .frame(width: 0.5)
+            CharkleHairlineDivider(axis: .vertical)
 
             contentColumn
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(SettingsPalette.contentBackground(for: colorScheme))
         }
+        .environment(\.charkleAccentSource, coordinator.accentSource)
+        .tint(activeAccent)
         .task {
             // Avoid mutating 13 observable properties mid-open-animation when cached state is already populated.
             if syncAndAI.hasLoadedInitialState {
@@ -155,21 +163,21 @@ public struct SettingsContentShell: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text("设置")
-                    .font(.system(size: 14.5, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.primary)
                 Spacer()
             }
             .padding(.horizontal, 16)
-            .frame(height: 52)
+            .frame(height: 50)
 
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     ForEach(CharkleSettingsSection.allCases) { section in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(section.title)
-                                .font(.system(size: 10.5, weight: .medium))
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(SettingsPalette.sectionLabel(for: colorScheme))
-                                .padding(.horizontal, 12)
+                                .padding(.horizontal, 10)
                                 .padding(.bottom, 3)
 
                             ForEach(section.tabs) { tab in
@@ -178,7 +186,7 @@ public struct SettingsContentShell: View {
                         }
                     }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
                 .padding(.bottom, 16)
                 .charkleCleanScrollbars(hidden: true)
             }
@@ -188,35 +196,66 @@ public struct SettingsContentShell: View {
 
     private func sidebarItem(for tab: CharkleSettingsTab) -> some View {
         let active = coordinator.selectedSettingsTab == tab
+        let hovered = hoveredTab == tab
+        let rowShape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+
         return Button {
-            withAnimation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion)) {
+            withAnimation(CharkleMotion.accessible(CharkleMotion.moveOnScreen, reduced: reduceMotion)) {
                 coordinator.selectedSettingsTab = tab
             }
         } label: {
             HStack(spacing: 9) {
-                CharkleIcon(
-                    tab.iconName,
-                    style: .duotone,
-                    size: 15,
-                    color: active ? .primary : .secondary,
-                    isActive: active
-                )
+                Image(systemName: sfSymbolName(for: tab))
+                    .font(.system(size: 13.5, weight: active ? .semibold : .medium))
+                    .symbolVariant(active ? .fill : .none)
+                    .foregroundStyle(active ? activeAccent : CharkleTheme.secondaryInk(for: colorScheme))
+                    .frame(width: 18, height: 18)
                 Text(tab.label)
-                    .font(.system(size: 12.5, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Color.primary : Color.primary.opacity(0.76))
+                    .font(.system(size: 13, weight: active ? .semibold : .regular))
+                    .foregroundStyle(active ? Color.primary : Color.primary.opacity(hovered ? 0.90 : 0.78))
+                    .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                active
-                    ? Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.075)
-                    : Color.clear,
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .frame(height: 30)
+            .background {
+                if active {
+                    rowShape
+                        .fill(
+                            reduceTransparency
+                                ? CharkleTheme.surfaceElevated(for: colorScheme)
+                                : Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.075)
+                        )
+                        .matchedGeometryEffect(id: "settings-rail-selection", in: navSelectionNamespace)
+                } else if hovered {
+                    rowShape
+                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.055 : 0.04))
+                }
+            }
+            .contentShape(rowShape)
         }
         .buttonStyle(.plain)
+        .onHover { isHovering in
+            if isHovering {
+                hoveredTab = tab
+            } else if hoveredTab == tab {
+                hoveredTab = nil
+            }
+        }
+    }
+
+    private func sfSymbolName(for tab: CharkleSettingsTab) -> String {
+        switch tab {
+        case .general: "gearshape"
+        case .library: "photo.stack"
+        case .sync: "icloud"
+        case .notchShelf: "tray.and.arrow.down"
+        case .captureShortcuts: "keyboard"
+        case .ai: "sparkles"
+        case .externalAgents: "terminal"
+        case .extensions: "puzzlepiece.extension"
+        case .advancedAbout: "wrench.and.screwdriver"
+        }
     }
 
     // MARK: - Right Content Column
@@ -239,21 +278,15 @@ public struct SettingsContentShell: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 26, height: 26)
-                            .background(SettingsPalette.subtleFill(for: colorScheme), in: Circle())
-                            .contentShape(Circle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.charkle(.subtle, size: .icon, iconDimension: 28))
                     .help("关闭设置 (Esc)")
                 }
             }
             .padding(.horizontal, 24)
-            .frame(height: 52)
+            .frame(height: 50)
 
-            Rectangle()
-                .fill(colorScheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.045))
-                .frame(height: 0.5)
+            CharkleHairlineDivider()
 
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 18) {
@@ -269,7 +302,7 @@ public struct SettingsContentShell: View {
                     activePane
                 }
                 .padding(.horizontal, 24)
-                .padding(.vertical, 20)
+                .padding(.vertical, 18)
                 .charkleCleanScrollbars(hidden: false)
                 .animation(
                     CharkleMotion.enterExit(hasFeedbackBanner, reduced: reduceMotion),
@@ -323,6 +356,7 @@ public struct SettingsContentShell: View {
         let tint = isError
             ? SettingsPalette.destructiveInk(for: colorScheme)
             : SettingsPalette.positiveInk(for: colorScheme)
+        let shape = RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
         return HStack(spacing: 8) {
             Image(systemName: isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(tint)
@@ -341,10 +375,9 @@ public struct SettingsContentShell: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(tint.opacity(0.11), in: shape)
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(tint.opacity(0.22), lineWidth: 0.75)
+            shape.strokeBorder(tint.opacity(0.22), lineWidth: CharkleTheme.hairlineWidth)
         )
     }
 }

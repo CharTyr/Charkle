@@ -27,7 +27,7 @@ public struct SyncSettingsPane: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 18) {
             if draftConfig.mode == .localOnly {
                 localOnboardingSection
             } else {
@@ -212,8 +212,8 @@ public struct SyncSettingsPane: View {
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
     }
 
@@ -347,8 +347,8 @@ public struct SyncSettingsPane: View {
                             .disabled(syncAndAI.isBusy)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 13)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
 
                     if let used = activeAccount?.storageUsedBytes,
                        let limit = activeAccount?.storageLimitBytes, limit > 0 {
@@ -367,8 +367,8 @@ public struct SyncSettingsPane: View {
                             ProgressView(value: ratio)
                                 .progressViewStyle(.linear)
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 11)
                     }
 
                     if !syncAndAI.hasGoogleOAuthClient && directAccount == nil {
@@ -466,12 +466,20 @@ public struct SyncSettingsPane: View {
                                     ProgressView().controlSize(.mini)
                                 }
                                 Text("选择与我共享")
+                                    .font(.system(size: 12.5, weight: .medium))
                             }
                         }
                         .menuStyle(.borderlessButton)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(SettingsPalette.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .padding(.horizontal, 11)
+                        .frame(minHeight: 28)
+                        .background(
+                            SettingsPalette.subtleFill(for: colorScheme),
+                            in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: CharkleTheme.Radius.settingsInner, style: .continuous)
+                                .strokeBorder(SettingsPalette.border(for: colorScheme), lineWidth: CharkleTheme.hairlineWidth)
+                        )
                         .fixedSize()
                         .task(id: isSignedIn) {
                             if isSignedIn && syncAndAI.sharedFolders.isEmpty && !syncAndAI.isLoadingSharedFolders {
@@ -500,8 +508,8 @@ public struct SyncSettingsPane: View {
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 13)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
 
             InlineGuideDisclosure("如何与团队成员共享同一个素材库") {
                 SettingsGuideStep(

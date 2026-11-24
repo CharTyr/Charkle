@@ -10,6 +10,7 @@ import SwiftUI
 /// and dedicated playback/inspection for all 7 `MediaKind`s.
 public struct QuickLookOverlayView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.charkleAccentSource) private var accentSource
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public let asset: AssetRecord
@@ -27,6 +28,11 @@ public struct QuickLookOverlayView: View {
     @State private var isLoadingOriginalImage: Bool = false
     @State private var isLongStripScrollMode: Bool = false
     @State private var stageAppeared: Bool = false
+    @State private var backdropVisible: Bool = false
+    @State private var isDismissing: Bool = false
+    @State private var connectedSourceRect: CGRect?
+    @State private var dismissTargetRect: CGRect?
+    @State private var dismissTask: Task<Void, Never>?
     @State private var zoomScale: CGFloat = 1.0
     @State private var gestureStartScale: CGFloat?
     @State private var panOffset: CGSize = .zero
@@ -35,6 +41,7 @@ public struct QuickLookOverlayView: View {
     @State private var flipHorizontal: Bool = false
     @State private var flipVertical: Bool = false
     @State private var stageViewportSize: CGSize = CGSize(width: 960, height: 640)
+    @State private var stageCenterInWindow: CGPoint = .zero
     @State private var showSecondaryControls: Bool = false
     @State private var confirmPermanentDelete: Bool = false
 
@@ -113,6 +120,87 @@ public struct QuickLookOverlayView: View {
         self.onStep = onStep
         self.onCopyHex = onCopyHex
         self.onFilterByColor = onFilterByColor
+        _connectedSourceRect = State(
+            initialValue: MasonryCardGeometryRegistry.shared.visibleCardRectInWindow(for: asset.id)
+        )
+    }
+
+    private var activeConnectedRect: CGRect? {
+        isDismissing ? dismissTargetRect : connectedSourceRect
+    }
+
+    private func estimatedFittedStageSize() -> CGSize {
+        let availW = max(160, stageViewportSize.width - (coordinator.isInspectorVisible ? 56 : 96))
+        let availH = max(160, stageViewportSize.height)
+        if asset.isGitHubRepo || asset.isSocialPost || asset.mediaKind == .document {
+            return CGSize(width: min(740, availW), height: min(640, availH))
+        }
+        let ratio = CGFloat(max(0.25, min(4.0, asset.aspectRatio)))
+        if availW / availH > ratio {
+            return CGSize(width: availH * ratio, height: availH)
+        } else {
+            return CGSize(width: availW, height: availW / ratio)
+        }
+    }
+
+    private func resolvedStageCenter() -> CGPoint {
+        if stageCenterInWindow.x > 40, stageCenterInWindow.y > 40 {
+            return stageCenterInWindow
+        }
+        if let bounds = NSApp.keyWindow?.contentView?.bounds, bounds.width > 0, bounds.height > 0 {
+            let stageWidth = max(200, bounds.width - (coordinator.isInspectorVisible ? 300 : 0))
+            return CGPoint(x: stageWidth * 0.5, y: bounds.height * 0.5)
+        }
+        return CGPoint(x: stageViewportSize.width * 0.5, y: stageViewportSize.height * 0.5)
+    }
+
+    private var collapsedStageScale: CGFloat {
+        guard !reduceMotion else { return 1.0 }
+        guard let rect = activeConnectedRect, rect.width > 24, rect.height > 24 else {
+            return 0.94
+        }
+        let fitted = estimatedFittedStageSize()
+        let rawScale = min(rect.width / max(1, fitted.width), rect.height / max(1, fitted.height))
+        return max(0.36, min(0.94, rawScale))
+    }
+
+    private var collapsedStageOffset: CGSize {
+        guard !reduceMotion, let rect = activeConnectedRect, rect.width > 24, rect.height > 24 else {
+            return .zero
+        }
+        let center = resolvedStageCenter()
+        return CGSize(
+            width: rect.midX - center.x,
+            height: rect.midY - center.y
+        )
+    }
+
+    private func performDismiss() {
+        guard !isDismissing else { return }
+        isDismissing = true
+        dismissTask?.cancel()
+
+        if reduceMotion {
+            onClose()
+            return
+        }
+
+        let canFlyBack = zoomScale <= 1.05 && !hasActiveVisualTransform && !isLongStripScrollMode
+        dismissTargetRect = canFlyBack
+            ? MasonryCardGeometryRegistry.shared.visibleCardRectInWindow(for: asset.id)
+            : nil
+
+        withAnimation(CharkleMotion.exitSm) {
+            stageAppeared = false
+            showSecondaryControls = false
+            backdropVisible = false
+        }
+
+        dismissTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(125))
+            guard !Task.isCancelled else { return }
+            onClose()
+        }
     }
 
     public var body: some View {
@@ -123,8 +211,9 @@ public struct QuickLookOverlayView: View {
                     (colorScheme == .dark ? Color.black.opacity(0.76) : Color(charkleHex: "#151619").opacity(0.68))
                     CharkleTheme.ambientTint(from: asset.dominantColors.first?.hex, scheme: .dark)
                 }
+                .opacity(backdropVisible ? 1.0 : 0.0)
                 .ignoresSafeArea()
-                .onTapGesture { onClose() }
+                .onTapGesture { performDismiss() }
 
                 // Hero Media Stage
                 VStack(spacing: 0) {
@@ -149,14 +238,18 @@ public struct QuickLookOverlayView: View {
                         } label: {
                             Image(systemName: "sidebar.right")
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(coordinator.isInspectorVisible ? Color.accentColor : .white.opacity(0.86))
+                                .foregroundStyle(
+                                    coordinator.isInspectorVisible
+                                        ? CharkleTheme.accent(for: .dark, source: accentSource)
+                                        : .white.opacity(0.86)
+                                )
                                 .frame(width: 28, height: 28)
                                 .charkleLiquidGlass(.darkNotch, in: Circle(), interactive: true)
                         }
                         .buttonStyle(CharkleTactileButtonStyle())
                         .help("显示 / 隐藏右侧详情栏 (⌘⌥I)")
 
-                        Button(action: onClose) {
+                        Button(action: performDismiss) {
                             Image(systemName: "xmark")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(.white.opacity(0.86))
@@ -172,20 +265,33 @@ public struct QuickLookOverlayView: View {
 
                     Spacer(minLength: 12)
 
-                    // Center Media Surface
+                    // Center Media Surface (connected physical spring entrance + fast ease-out exit)
                     mediaStage
-                        .scaleEffect(stageAppeared || reduceMotion ? 1.0 : 0.97)
+                        .scaleEffect(stageAppeared ? 1.0 : collapsedStageScale)
+                        .offset(stageAppeared ? .zero : collapsedStageOffset)
                         .opacity(stageAppeared ? 1.0 : 0.0)
-                        .animation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion), value: stageAppeared)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background {
                             Color.clear
-                                .onGeometryChange(for: CGSize.self) { proxy in
-                                    CGSize(width: floor(max(0, proxy.size.width)), height: floor(proxy.size.height))
-                                } action: { _, newSize in
-                                    if newSize.width > 80, newSize.height > 80,
-                                       (abs(newSize.width - stageViewportSize.width) >= 2 || abs(newSize.height - stageViewportSize.height) >= 2) {
-                                        stageViewportSize = newSize
+                                .onGeometryChange(for: CGRect.self) { proxy in
+                                    let f = proxy.frame(in: .global)
+                                    return CGRect(
+                                        x: floor(f.origin.x),
+                                        y: floor(f.origin.y),
+                                        width: floor(max(0, f.size.width)),
+                                        height: floor(max(0, f.size.height))
+                                    )
+                                } action: { _, newFrame in
+                                    if newFrame.width > 80, newFrame.height > 80 {
+                                        if abs(newFrame.width - stageViewportSize.width) >= 2
+                                            || abs(newFrame.height - stageViewportSize.height) >= 2 {
+                                            stageViewportSize = newFrame.size
+                                        }
+                                        let newCenter = CGPoint(x: newFrame.midX, y: newFrame.midY)
+                                        if abs(newCenter.x - stageCenterInWindow.x) >= 2
+                                            || abs(newCenter.y - stageCenterInWindow.y) >= 2 {
+                                            stageCenterInWindow = newCenter
+                                        }
                                     }
                                 }
                         }
@@ -251,7 +357,7 @@ public struct QuickLookOverlayView: View {
                         : coordinator.quickLookPlaylist + [target.id]
                     coordinator.openQuickLook(assetID: target.id, playlist: playlist)
                 },
-                onRequestCloseQuickLook: onClose
+                onRequestCloseQuickLook: performDismiss
             )
             .frame(width: 300)
             .frame(maxHeight: .infinity)
@@ -323,14 +429,26 @@ public struct QuickLookOverlayView: View {
             if let keyWindow = NSApp.keyWindow, isEditingText(in: keyWindow) {
                 keyWindow.makeFirstResponder(nil)
             }
-            stageAppeared = true
+            if connectedSourceRect == nil {
+                connectedSourceRect = MasonryCardGeometryRegistry.shared.visibleCardRectInWindow(for: asset.id)
+            }
+            withAnimation(CharkleMotion.accessible(CharkleMotion.enterSm, reduced: reduceMotion)) {
+                backdropVisible = true
+            }
+            withAnimation(CharkleMotion.accessible(CharkleMotion.gestureSpring, reduced: reduceMotion)) {
+                stageAppeared = true
+            }
             if reduceMotion {
                 showSecondaryControls = true
             } else {
-                withAnimation(CharkleMotion.enterSm.delay(0.04)) {
+                withAnimation(CharkleMotion.enterSm.delay(0.05)) {
                     showSecondaryControls = true
                 }
             }
+        }
+        .onDisappear {
+            dismissTask?.cancel()
+            dismissTask = nil
         }
     }
 
@@ -577,11 +695,8 @@ public struct QuickLookOverlayView: View {
                         NSWorkspace.shared.open(url)
                     } label: {
                         Label("在默认浏览器中打开", systemImage: "safari")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.charkle(.accent, size: .sm))
                     .padding(16)
                 }
             }
@@ -652,7 +767,9 @@ public struct QuickLookOverlayView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(
-                                isLongStripScrollMode ? Color.accentColor.opacity(0.78) : Color.white.opacity(0.14),
+                                isLongStripScrollMode
+                                    ? CharkleTheme.accent(for: .dark, source: accentSource).opacity(0.82)
+                                    : Color.white.opacity(0.14),
                                 in: Capsule(style: .continuous)
                             )
                         }
@@ -719,7 +836,10 @@ public struct QuickLookOverlayView: View {
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 4)
-                                .background(Color.accentColor.opacity(0.72), in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous))
+                                .background(
+                                    CharkleTheme.accent(for: .dark, source: accentSource).opacity(0.78),
+                                    in: RoundedRectangle(cornerRadius: CharkleTheme.Radius.chip, style: .continuous)
+                                )
                             }
                             .buttonStyle(CharkleTactileButtonStyle())
                             .help("还原旋转与翻转")
@@ -904,6 +1024,7 @@ public struct QuickLookOverlayView: View {
     }
 
     private func handleQuickLookKeyDown(_ event: NSEvent) -> NSEvent? {
+        if isDismissing { return nil }
         if confirmPermanentDelete { return event }
         if event.window?.attachedSheet != nil || NSApp.modalWindow != nil { return event }
 
@@ -934,7 +1055,7 @@ public struct QuickLookOverlayView: View {
             switch event.keyCode {
             case 49, 53: // Space or Escape -> close Quick Look immediately
                 if event.isARepeat { return nil }
-                onClose()
+                performDismiss()
                 return nil
             case 123: // Left Arrow
                 onStep(-1)
@@ -987,7 +1108,7 @@ public struct QuickLookOverlayView: View {
                 .foregroundStyle(isActive ? Color.white : .white.opacity(0.9))
                 .frame(width: 28, height: 28)
                 .background(
-                    isActive ? Color.accentColor.opacity(0.78) : Color.clear,
+                    isActive ? CharkleTheme.accent(for: .dark, source: accentSource).opacity(0.82) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                 )
         }
