@@ -1521,9 +1521,34 @@ impl XPostURLParser {
         h == "twimg.com" || h.ends_with(".twimg.com")
     }
 
+    /// Returns `true` when the host belongs to Pixiv's image CDN (`*.pximg.net`).
+    pub fn is_pixiv_media_host(host: Option<&str>) -> bool {
+        let Some(raw) = host else {
+            return false;
+        };
+        let h = raw.trim().to_ascii_lowercase();
+        h == "pximg.net" || h.ends_with(".pximg.net")
+    }
+
+    /// Returns `true` when the host belongs to Instagram / Threads CDN (`*.cdninstagram.com`, `*.fbcdn.net`).
+    pub fn is_instagram_media_host(host: Option<&str>) -> bool {
+        let Some(raw) = host else {
+            return false;
+        };
+        let h = raw.trim().to_ascii_lowercase();
+        h == "cdninstagram.com"
+            || h.ends_with(".cdninstagram.com")
+            || h == "fbcdn.net"
+            || h.ends_with(".fbcdn.net")
+    }
+
     /// Strict HTTPS CDN host allowlist for the local `/proxy-social` image cache proxy.
     pub fn is_allowed_social_proxy_host(host: Option<&str>) -> bool {
-        if XiaohongshuURLParser::is_xiaohongshu_media_host(host) || Self::is_x_media_host(host) {
+        if XiaohongshuURLParser::is_xiaohongshu_media_host(host)
+            || Self::is_x_media_host(host)
+            || Self::is_pixiv_media_host(host)
+            || Self::is_instagram_media_host(host)
+        {
             return true;
         }
         let Some(raw) = host else {
@@ -1537,10 +1562,6 @@ impl XPostURLParser {
             || h.ends_with(".bsky.app")
             || h == "bsky.social"
             || h.ends_with(".bsky.social")
-            || h == "cdninstagram.com"
-            || h.ends_with(".cdninstagram.com")
-            || h == "fbcdn.net"
-            || h.ends_with(".fbcdn.net")
     }
 
     /// Rewrites `pbs.twimg.com/media/...` photo URLs with query parameter `name=orig`.
@@ -1650,6 +1671,14 @@ pub enum SocialPostReference {
         canonical_url: String,
     },
     Xiaohongshu(XiaohongshuNoteReference),
+    Pixiv {
+        illust_id: String,
+        canonical_url: String,
+    },
+    Instagram {
+        shortcode: String,
+        canonical_url: String,
+    },
 }
 
 impl SocialPostReference {
@@ -1659,6 +1688,8 @@ impl SocialPostReference {
             Self::Threads { .. } => SocialPlatform::Threads,
             Self::Bluesky { .. } => SocialPlatform::Bluesky,
             Self::Xiaohongshu(_) => SocialPlatform::Xiaohongshu,
+            Self::Pixiv { .. } => SocialPlatform::Pixiv,
+            Self::Instagram { .. } => SocialPlatform::Instagram,
         }
     }
 
@@ -1668,6 +1699,8 @@ impl SocialPostReference {
             Self::Threads { canonical_url, .. } => canonical_url.clone(),
             Self::Bluesky { canonical_url, .. } => canonical_url.clone(),
             Self::Xiaohongshu(r) => r.canonical_url(),
+            Self::Pixiv { canonical_url, .. } => canonical_url.clone(),
+            Self::Instagram { canonical_url, .. } => canonical_url.clone(),
         }
     }
 
@@ -1680,6 +1713,8 @@ impl SocialPostReference {
                 format!("bsky:{}:{rkey}", handle.to_ascii_lowercase())
             }
             Self::Xiaohongshu(r) => r.dedup_key(),
+            Self::Pixiv { illust_id, .. } => format!("pixiv:{illust_id}"),
+            Self::Instagram { shortcode, .. } => format!("ig:{shortcode}"),
         }
     }
 }
@@ -1758,6 +1793,73 @@ impl SocialPostURLParser {
                     rkey: rkey.to_string(),
                     canonical_url: format!("https://bsky.app/profile/{handle}/post/{rkey}"),
                 });
+            }
+        }
+
+        if matches!(
+            host.as_str(),
+            "pixiv.net" | "www.pixiv.net" | "touch.pixiv.net"
+        ) {
+            // /artworks/<id> or /<locale>/artworks/<id>
+            if let Some(art_idx) = segments
+                .iter()
+                .position(|s| s.eq_ignore_ascii_case("artworks"))
+            {
+                if let Some(&id) = segments.get(art_idx + 1) {
+                    if !id.is_empty() && id.len() <= 24 && id.bytes().all(|b| b.is_ascii_digit()) {
+                        return Some(SocialPostReference::Pixiv {
+                            illust_id: id.to_string(),
+                            canonical_url: format!("https://www.pixiv.net/artworks/{id}"),
+                        });
+                    }
+                }
+            }
+            // Legacy /member_illust.php?illust_id=<id>
+            if let Some((_, id)) = url
+                .query_pairs()
+                .find(|(k, _)| k.eq_ignore_ascii_case("illust_id"))
+            {
+                let trimmed = id.trim();
+                if !trimmed.is_empty()
+                    && trimmed.len() <= 24
+                    && trimmed.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Some(SocialPostReference::Pixiv {
+                        illust_id: trimmed.to_string(),
+                        canonical_url: format!("https://www.pixiv.net/artworks/{trimmed}"),
+                    });
+                }
+            }
+        }
+
+        if matches!(
+            host.as_str(),
+            "instagram.com" | "www.instagram.com" | "m.instagram.com"
+        ) {
+            if let Some(idx) = segments.iter().position(|s| {
+                let lower = s.to_ascii_lowercase();
+                matches!(lower.as_str(), "p" | "reel" | "reels" | "tv")
+            }) {
+                if let Some(&code) = segments.get(idx + 1) {
+                    if !code.is_empty()
+                        && code.len() <= 40
+                        && code
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    {
+                        let kind_seg = if segments[idx].eq_ignore_ascii_case("reel")
+                            || segments[idx].eq_ignore_ascii_case("reels")
+                        {
+                            "reel"
+                        } else {
+                            "p"
+                        };
+                        return Some(SocialPostReference::Instagram {
+                            shortcode: code.to_string(),
+                            canonical_url: format!("https://www.instagram.com/{kind_seg}/{code}/"),
+                        });
+                    }
+                }
             }
         }
 
@@ -2013,12 +2115,100 @@ impl SocialPostResolver {
             SocialPostReference::Xiaohongshu(xhs_ref) => {
                 XiaohongshuPostResolver::resolve(xhs_ref).await
             }
+            SocialPostReference::Pixiv {
+                illust_id,
+                canonical_url,
+            } => Some(
+                Self::resolve_og_fallback(SocialPlatform::Pixiv, illust_id, canonical_url).await,
+            ),
+            SocialPostReference::Instagram {
+                shortcode,
+                canonical_url,
+            } => Some(
+                Self::resolve_og_fallback(SocialPlatform::Instagram, shortcode, canonical_url)
+                    .await,
+            ),
         }
     }
 
     pub async fn download_media_bytes(
         url_str: &str,
         kind: SocialMediaAttachmentKind,
+    ) -> Option<(Vec<u8>, String)> {
+        Self::download_media_bytes_with_referer(url_str, kind, None).await
+    }
+
+    /// Resolves host-aware anti-hotlink `Referer` headers for social media CDN downloads
+    /// (Pixiv `*.pximg.net`, Xiaohongshu `*.xhscdn.com`, Instagram/Threads `*.cdninstagram.com` /
+    /// `*.fbcdn.net`, or explicit web referer fallback).
+    pub fn resolve_cdn_referer<'a>(
+        url: &Url,
+        explicit_referer: Option<&'a str>,
+    ) -> Option<&'a str> {
+        let host = url.host_str();
+        if XPostURLParser::is_pixiv_media_host(host) {
+            return Some("https://www.pixiv.net/");
+        }
+        if XiaohongshuURLParser::is_xiaohongshu_media_host(host) {
+            return Some(XIAOHONGSHU_REFERER);
+        }
+        if XPostURLParser::is_instagram_media_host(host) {
+            return explicit_referer
+                .filter(|r| {
+                    Url::parse(r)
+                        .ok()
+                        .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                })
+                .or(Some("https://www.instagram.com/"));
+        }
+        explicit_referer.filter(|r| {
+            Url::parse(r)
+                .ok()
+                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+        })
+    }
+
+    /// Returns `true` if `url` is a public `http`/`https` destination (blocks loopback / RFC1918 /
+    /// link-local SSRF targets).
+    pub fn is_safe_public_media_url(url: &Url) -> bool {
+        if !WebBookmarkResolver::is_web_url(url) {
+            return false;
+        }
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let lower = host.to_ascii_lowercase();
+        if lower == "localhost"
+            || lower.ends_with(".localhost")
+            || lower.ends_with(".local")
+            || lower == "0.0.0.0"
+        {
+            return false;
+        }
+        if let Ok(ip) = lower.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            return match ip {
+                std::net::IpAddr::V4(v4) => {
+                    !v4.is_private()
+                        && !v4.is_loopback()
+                        && !v4.is_link_local()
+                        && !v4.is_unspecified()
+                        && !v4.is_broadcast()
+                }
+                std::net::IpAddr::V6(v6) => {
+                    !v6.is_loopback()
+                        && !v6.is_unspecified()
+                        && (v6.segments()[0] & 0xfe00) != 0xfc00
+                        && (v6.segments()[0] & 0xffc0) != 0xfe80
+                }
+            };
+        }
+        true
+    }
+
+    pub async fn download_media_bytes_with_referer(
+        url_str: &str,
+        kind: SocialMediaAttachmentKind,
+        referer: Option<&str>,
     ) -> Option<(Vec<u8>, String)> {
         let max_bytes = if kind == SocialMediaAttachmentKind::Photo {
             MAX_SOCIAL_PHOTO_BYTES
@@ -2036,21 +2226,26 @@ impl SocialPostResolver {
             let Ok(url) = Url::parse(&candidate) else {
                 continue;
             };
-            if !WebBookmarkResolver::is_web_url(&url) {
+            if !Self::is_safe_public_media_url(&url) {
                 continue;
             }
-            let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
+            if url.path().to_ascii_lowercase().ends_with(".m3u8") {
+                continue;
+            }
+            let effective_referer = Self::resolve_cdn_referer(&url, referer);
             for attempt in 0..2 {
                 let mut req = client.get(url.clone()).header(
                     "Accept",
                     "image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*;q=0.8",
                 );
-                if is_xhs {
-                    req = req.header("Referer", XIAOHONGSHU_REFERER);
+                if let Some(ref_hdr) = effective_referer {
+                    req = req.header("Referer", ref_hdr);
                 }
                 match req.send().await {
                     Ok(resp) => {
-                        if !resp.status().is_success() {
+                        if !Self::is_safe_public_media_url(resp.url())
+                            || !resp.status().is_success()
+                        {
                             break;
                         }
                         let mime = resp
@@ -3085,7 +3280,7 @@ pub async fn fetch_or_cache_social_media(
         .build()
         .map_err(|e| XhsProxyError::Upstream(e.to_string()))?;
 
-    let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
+    let effective_referer = SocialPostResolver::resolve_cdn_referer(&url, None);
     let candidates = XPostURLParser::twitter_image_download_candidates(url.as_str());
     let mut last_err = XhsProxyError::Upstream("Upstream social media fetch failed".to_string());
 
@@ -3103,8 +3298,8 @@ pub async fn fetch_or_cache_social_media(
                 "Accept",
                 "image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*;q=0.8",
             );
-            if is_xhs {
-                req = req.header("Referer", XIAOHONGSHU_REFERER);
+            if let Some(ref_hdr) = effective_referer {
+                req = req.header("Referer", ref_hdr);
             }
             match req.send().await {
                 Ok(resp) => {

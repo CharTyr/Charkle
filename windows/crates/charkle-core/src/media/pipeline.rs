@@ -733,7 +733,10 @@ impl MediaPipeline {
                         meta.effective_attachments().len() <= 1
                             && (body_trimmed.is_empty() || body_trimmed == title_trimmed)
                     }
-                    SocialPlatform::Threads | SocialPlatform::Bluesky => false,
+                    SocialPlatform::Threads
+                    | SocialPlatform::Bluesky
+                    | SocialPlatform::Pixiv
+                    | SocialPlatform::Instagram => false,
                 };
 
                 let mut live_extracted_tags = Vec::new();
@@ -1192,6 +1195,74 @@ impl MediaPipeline {
             rich.ai_generation = Some(ai);
         }
         asset.rich_metadata = Some(rich);
+    }
+
+    /// Offline ingestion path for `.eaglepack`/`.library` `.url`/`.webloc` web bookmarks that
+    /// already include a pre-rendered thumbnail screenshot, avoiding network/WebView stalls.
+    pub async fn ingest_pre_resolved_web_page(
+        &self,
+        url: &Url,
+        title: &str,
+        notes: &str,
+        domain: &str,
+        poster: DynamicImage,
+        folder_id: Option<Uuid>,
+    ) -> CoreResult<MediaImportResult> {
+        let asset_id = Uuid::new_v4();
+        let temp_dir = std::env::temp_dir().join(format!("charkle-offline-bm-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir)?;
+        struct TempGuard(PathBuf);
+        impl Drop for TempGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = TempGuard(temp_dir.clone());
+
+        let base = Self::clean_name(if title.trim().is_empty() {
+            domain
+        } else {
+            title
+        });
+        let file_name = format!("{base}.url");
+        let staged = temp_dir.join(&file_name);
+        fs::write(&staged, format!("[InternetShortcut]\r\nURL={url}\r\n"))?;
+        let digests = Self::digests(&staged)?;
+
+        let mut asset = AssetRecord::new(
+            if title.trim().is_empty() {
+                domain.to_string()
+            } else {
+                title.to_string()
+            },
+            file_name,
+        );
+        asset.id = asset_id;
+        asset.folder_id = folder_id;
+        asset.content_hash = digests.sha256;
+        asset.media_kind = MediaKind::WebBookmark;
+        asset.mime_type = "text/uri-list".to_string();
+        asset.file_size_bytes = digests.bytes;
+        asset.source_url = Some(url.to_string());
+        asset.source_domain = Some(domain.to_string());
+        asset.notes = notes.to_string();
+        asset.is_local_original_cached = true;
+        if !notes.trim().is_empty() {
+            asset.rich_metadata = Some(AssetRichMetadata {
+                text_excerpt: Some(notes.to_string()),
+                ..AssetRichMetadata::default()
+            });
+        }
+        asset.ocr_text = Some(format!("{}\n{}", asset.title, domain));
+
+        let title_owned = asset.title.clone();
+        self.render_and_write_thumbnails(&staged, &mut asset, Some(&title_owned), Some(poster))
+            .await?;
+        let installed = self.install_original(&staged, &asset, false)?;
+        Ok(MediaImportResult {
+            asset,
+            original_path: installed,
+        })
     }
 
     /// Re-renders thumbnails, dimensions, metadata, audio waveforms, and dominant colors for

@@ -16,6 +16,7 @@ import {
 } from './sidebarResize';
 import type {
   AccentSource,
+  DeduplicationScanScope,
   GalleryLayoutMode,
   SettingsTabId,
   SidebarDestination,
@@ -261,6 +262,8 @@ export interface CoordinatorState {
   resumeOnboardingOnSettingsClose: boolean;
   moodboardGeneratorOpen: boolean;
   moodboardGeneratorEntry: MoodboardGeneratorEntry;
+  dedupOpen: boolean;
+  dedupInitialScope: DeduplicationScanScope;
   activeMoodboardId: string | null;
   toasts: ToastItem[];
 
@@ -317,6 +320,8 @@ export interface CoordinatorState {
   completeOnboarding: () => void;
   setMoodboardGeneratorOpen: (open: boolean) => void;
   openMoodboardGenerator: (entry?: MoodboardGeneratorEntry) => void;
+  openDeduplication: (scope?: DeduplicationScanScope) => void;
+  closeDeduplication: () => void;
   setActiveMoodboardId: (id: string | null) => void;
   pushToast: (toast: Omit<ToastItem, 'id'>) => string;
   dismissToast: (id: string) => void;
@@ -361,6 +366,8 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   resumeOnboardingOnSettingsClose: false,
   moodboardGeneratorOpen: false,
   moodboardGeneratorEntry: 'prompt',
+  dedupOpen: false,
+  dedupInitialScope: { type: 'allActive' },
   activeMoodboardId: null,
   toasts: [],
 
@@ -786,6 +793,27 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
       quickLookAssetId: null,
       quickLookOriginRect: null,
     });
+  },
+
+  openDeduplication(scope) {
+    const dest = get().destination;
+    const resolvedScope: DeduplicationScanScope =
+      scope ??
+      (dest.type === 'folder'
+        ? { type: 'folder', folderID: dest.id, includeSubfolders: true }
+        : dest.type === 'inbox'
+          ? { type: 'inbox' }
+          : { type: 'allActive' });
+    set({
+      dedupOpen: true,
+      dedupInitialScope: resolvedScope,
+      jumpOpen: false,
+      settingsOpen: false,
+    });
+  },
+
+  closeDeduplication() {
+    set({ dedupOpen: false });
   },
 
   setActiveMoodboardId(id) {

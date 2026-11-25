@@ -8,16 +8,16 @@ import { useAppUpdateStore, useCoordinatorStore, useSyncAIStore } from '../store
 import { isDirectGoogleDriveAccount, type AppReleaseUpdate } from '../types/domain';
 
 const SAMPLE_UPDATE: AppReleaseUpdate = {
-  tagName: 'v1.3.0',
-  version: '1.3.0',
-  title: 'Charkle 1.3.0',
+  tagName: 'v1.4.0',
+  version: '1.4.0',
+  title: 'Charkle 1.4.0',
   releaseNotes:
     '## Windows 11\n- 新增应用内自动检查更新与 SHA-256 校验\n- 修复云同步账号显示<script>alert(1)</script>',
-  htmlUrl: 'https://github.com/CharTyr/Charkle/releases/tag/v1.3.0',
+  htmlUrl: 'https://github.com/CharTyr/Charkle/releases/tag/v1.4.0',
   publishedAt: '2026-11-24T12:00:00Z',
-  assetName: 'Charkle_1.3.0_x64-setup.exe',
+  assetName: 'Charkle_1.4.0_x64-setup.exe',
   downloadUrl:
-    'https://github.com/CharTyr/Charkle/releases/download/v1.3.0/Charkle_1.3.0_x64-setup.exe',
+    'https://github.com/CharTyr/Charkle/releases/download/v1.4.0/Charkle_1.4.0_x64-setup.exe',
   assetSizeBytes: 21_400_000,
   expectedSha256: '1dc089f37e073529daeb95cb4709896132ebe045b557bb03ac8326c3ee00620b',
 };
@@ -73,7 +73,7 @@ describe('Windows In-App Updater, Cloud Sync Account Isolation & gdirect Install
     await useAppUpdateStore.getState().checkForUpdatesManually({ presentSheet: true });
     await useAppUpdateStore.getState().skipCurrentUpdate();
 
-    expect(useAppUpdateStore.getState().skippedVersion).toBe('1.3.0');
+    expect(useAppUpdateStore.getState().skippedVersion).toBe('1.4.0');
     expect(useAppUpdateStore.getState().sheetOpen).toBe(false);
 
     // Clear skip and verify automatic check notifies once when outside throttle window
@@ -98,8 +98,8 @@ describe('Windows In-App Updater, Cloud Sync Account Isolation & gdirect Install
 
     render(<AppUpdateModal />);
 
-    expect(await screen.findByText('发现新版本 v1.3.0')).toBeInTheDocument();
-    expect(screen.getByText(/v1\.2\.2 → v1\.3\.0/)).toBeInTheDocument();
+    expect(await screen.findByText('发现新版本 v1.4.0')).toBeInTheDocument();
+    expect(screen.getByText(/v1\.3\.0 → v1\.4\.0/)).toBeInTheDocument();
     expect(screen.getByText(/新增应用内自动检查更新与 SHA-256 校验/)).toBeInTheDocument();
     // Script tag must be stripped by DOMPurify
     expect(document.querySelector('script')).toBeNull();
@@ -187,6 +187,6 @@ describe('Windows In-App Updater, Cloud Sync Account Isolation & gdirect Install
     // Inline software update check (up-to-date case)
     const checkBtn = screen.getByRole('button', { name: /立即检查更新/ });
     fireEvent.click(checkBtn);
-    expect(await screen.findByText(/当前已是最新正式版本 v1\.2\.2/)).toBeInTheDocument();
+    expect(await screen.findByText(/当前已是最新正式版本 v1\.3\.0/)).toBeInTheDocument();
   });
 });

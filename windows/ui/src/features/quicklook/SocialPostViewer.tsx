@@ -64,9 +64,11 @@ const PLATFORM_META: Record<
   { name: string; openLabel: string; badgeBg: string; noun: string }
 > = {
   x: { name: 'X', openLabel: '在 X 中打开', badgeBg: '#18181B', noun: '推文' },
-  threads: { name: 'Threads', openLabel: '在 Threads 中打开', badgeBg: '#27272A', noun: '推文' },
-  bluesky: { name: 'Bluesky', openLabel: '在 Bluesky 中打开', badgeBg: '#0284C7', noun: '推文' },
+  threads: { name: 'Threads', openLabel: '在 Threads 中打开', badgeBg: '#27272A', noun: '贴文' },
+  bluesky: { name: 'Bluesky', openLabel: '在 Bluesky 中打开', badgeBg: '#0284C7', noun: '贴文' },
   xiaohongshu: { name: '小红书', openLabel: '在小红书中打开', badgeBg: '#FF2442', noun: '笔记' },
+  pixiv: { name: 'Pixiv', openLabel: '在 Pixiv 打开', badgeBg: '#0096FA', noun: '作品' },
+  instagram: { name: 'Instagram', openLabel: '在 Instagram 打开', badgeBg: '#D93B58', noun: '贴文' },
 };
 
 export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => {

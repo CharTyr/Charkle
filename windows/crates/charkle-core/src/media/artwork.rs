@@ -143,6 +143,8 @@ impl MediaArtwork {
             SocialPlatform::Threads => "#27272A",
             SocialPlatform::Bluesky => "#0284C7",
             SocialPlatform::Xiaohongshu => "#FF2442",
+            SocialPlatform::Pixiv => "#0096FA",
+            SocialPlatform::Instagram => "#D93B58",
         };
 
         let mut handle_parts = Vec::new();
@@ -196,12 +198,7 @@ impl MediaArtwork {
         if let Some(v) = meta.view_count {
             metrics.push(format!("{} 浏览", format_metric_count(v)));
         }
-        let open_action = match meta.platform {
-            SocialPlatform::X => "在 X 中查看",
-            SocialPlatform::Threads => "在 Threads 中查看",
-            SocialPlatform::Bluesky => "在 Bluesky 中查看",
-            SocialPlatform::Xiaohongshu => "在小红书中查看",
-        };
+        let open_action = meta.platform.open_action_label();
         let footer_text = if metrics.is_empty() {
             open_action.to_string()
         } else {

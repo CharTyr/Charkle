@@ -15,10 +15,12 @@ import {
   Open16Regular,
   PersonAvailable16Regular,
   PersonCircle16Regular,
+  Sparkle16Regular,
   WeatherMoon16Regular,
   WeatherSunny16Regular,
 } from '@fluentui/react-icons';
 import { getTransport } from '../../api/transport';
+import { runMaterialPackageImport } from '../import/materialPackageImport';
 import {
   CharkleSlider,
   SegmentedControl,
@@ -962,6 +964,8 @@ export const GeneralSettingsPane: React.FC = () => {
 
 export const LibrarySettingsPane: React.FC = () => {
   const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
+  const closeSettings = useCoordinatorStore((s) => s.closeSettings);
+  const openDeduplication = useCoordinatorStore((s) => s.openDeduplication);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const cacheStats = useSyncAIStore((s) => s.cacheStats);
   const diagnostics = useSyncAIStore((s) => s.diagnostics);
@@ -1081,6 +1085,52 @@ export const LibrarySettingsPane: React.FC = () => {
             detail="原始文件均按可读文件夹保存，不锁定专有格式，在文件资源管理器或网盘网页端都能直接查看。"
           />
         </InlineGuideDisclosure>
+      </SettingsSection>
+
+      <SettingsSection title="导入与智能整理">
+        <SettingsRow
+          title="外部素材包导入"
+          subtitle="无损导入 .eaglepack 压缩包或 .library 素材库目录（保留文件夹层级、配色、标签、评分与注释）；也可直接拖拽到主窗口"
+        >
+          <SettingsButton
+            variant="standard"
+            onClick={() => {
+              closeSettings();
+              void runMaterialPackageImport('files');
+            }}
+          >
+            <FolderOpen16Regular className="w-3.5 h-3.5 shrink-0" />
+            选择素材包 (.eaglepack)…
+          </SettingsButton>
+          <SettingsButton
+            variant="standard"
+            onClick={() => {
+              closeSettings();
+              void runMaterialPackageImport('directory');
+            }}
+          >
+            <FolderOpen16Regular className="w-3.5 h-3.5 shrink-0" />
+            选择素材库目录 (.library)…
+          </SettingsButton>
+        </SettingsRow>
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="全媒体智能去重"
+          subtitle="纯本机确定性算法扫描全部 8 类媒体的重复与压缩副本，自动评选最高画质母版并无损改绑情绪板引用"
+        >
+          <SettingsButton
+            variant="accent"
+            onClick={() => {
+              closeSettings();
+              openDeduplication({ type: 'allActive' });
+            }}
+          >
+            <Sparkle16Regular className="w-3.5 h-3.5 shrink-0" />
+            扫描重复素材…
+          </SettingsButton>
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection title="本机缓存空间">

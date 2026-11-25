@@ -25,11 +25,15 @@ use uuid::Uuid;
 
 use crate::engine::LiveCharkleEngine;
 use crate::error::{CoreError, CoreResult};
-use crate::media::resolvers::{canonical_dedup_key, SocialPostURLParser, WebBookmarkResolver};
+use crate::media::eaglepack::StagingDirGuard;
+use crate::media::resolvers::{
+    canonical_dedup_key, SocialPostReference, SocialPostResolver, SocialPostURLParser,
+    WebBookmarkResolver, XPostReference,
+};
 use crate::media::xiaohongshu::XiaohongshuPostResolver;
 use crate::models::core::{
-    FilterCriteria, SocialMediaAttachment, SocialMediaAttachmentKind, SocialPlatform,
-    SocialPostMetadata,
+    AssetRecord, FilterCriteria, MediaKind, SocialMediaAttachment, SocialMediaAttachmentKind,
+    SocialPlatform, SocialPostMetadata,
 };
 use crate::models::media::CaptureInput;
 use crate::wire::swift_codec::format_swift_uuid;
@@ -1041,11 +1045,16 @@ fn handle_get_boards(
 
 fn fetch_existing_source_keys(
     engine: &LiveCharkleEngine,
-) -> CoreResult<(HashSet<String>, HashSet<String>)> {
+) -> CoreResult<(HashSet<String>, HashSet<String>, HashSet<String>)> {
     let assets = engine.fetch_assets(&FilterCriteria::default())?;
     let mut sources = HashSet::new();
     let mut keys = HashSet::new();
+    let mut media_keys = HashSet::new();
     for asset in assets {
+        let is_real_media = matches!(
+            asset.media_kind,
+            MediaKind::Image | MediaKind::AnimatedImage | MediaKind::Video
+        );
         if let Some(src) = asset
             .source_url
             .as_deref()
@@ -1054,6 +1063,9 @@ fn fetch_existing_source_keys(
         {
             sources.insert(src.to_string());
             if let Some(k) = canonical_dedup_key(src) {
+                if is_real_media {
+                    media_keys.insert(k.clone());
+                }
                 keys.insert(k);
             }
         }
@@ -1066,11 +1078,14 @@ fn fetch_existing_source_keys(
         {
             sources.insert(orig.to_string());
             if let Some(k) = canonical_dedup_key(orig) {
+                if is_real_media {
+                    media_keys.insert(k.clone());
+                }
                 keys.insert(k);
             }
         }
     }
-    Ok((sources, keys))
+    Ok((sources, keys, media_keys))
 }
 
 fn handle_get_existing_sources(
@@ -1078,11 +1093,13 @@ fn handle_get_existing_sources(
     cors_headers: Vec<(String, String)>,
 ) -> HttpResponse {
     match fetch_existing_source_keys(engine) {
-        Ok((sources, keys)) => {
+        Ok((sources, keys, media_keys)) => {
             let mut source_list: Vec<String> = sources.into_iter().collect();
             let mut key_list: Vec<String> = keys.into_iter().collect();
+            let mut media_key_list: Vec<String> = media_keys.into_iter().collect();
             source_list.sort();
             key_list.sort();
+            media_key_list.sort();
             HttpResponse::json(
                 200,
                 cors_headers,
@@ -1090,6 +1107,7 @@ fn handle_get_existing_sources(
                     "count": key_list.len(),
                     "sources": source_list,
                     "canonicalKeys": key_list,
+                    "mediaCanonicalKeys": media_key_list,
                 }),
             )
         }
@@ -1099,6 +1117,695 @@ fn handle_get_existing_sources(
             json!({ "error": err.to_string(), "code": "INTERNAL_ERROR" }),
         ),
     }
+}
+
+#[derive(Debug, Clone)]
+struct SocialMediaBatchItem {
+    kind: SocialMediaAttachmentKind,
+    url: String,
+    thumbnail_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SocialMediaBatchJob {
+    platform: SocialPlatform,
+    post_id: String,
+    dedup_key: String,
+    original_url: String,
+    author_name: String,
+    author_handle: String,
+    published_at_text: Option<String>,
+    title: String,
+    body_text: String,
+    subfolder_name: Option<String>,
+    organize_mode: String,
+    include_videos: bool,
+    has_video: bool,
+    needs_enrich: bool,
+    referer: Option<String>,
+    tags: Vec<String>,
+    media: Vec<SocialMediaBatchItem>,
+}
+
+fn parse_social_media_job(item: &serde_json::Map<String, Value>) -> Option<SocialMediaBatchJob> {
+    let raw_url = item
+        .get("originalURL")
+        .or_else(|| item.get("url"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let parsed_url = Url::parse(raw_url).ok()?;
+    if !WebBookmarkResolver::is_web_url(&parsed_url) {
+        return None;
+    }
+
+    let raw_platform = item
+        .get("platform")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let parsed_ref = SocialPostURLParser::parse(&parsed_url);
+    let platform = SocialPlatform::from_raw(raw_platform)
+        .or_else(|| parsed_ref.as_ref().map(SocialPostReference::platform))
+        .unwrap_or(SocialPlatform::X);
+
+    let post_id = item
+        .get("postID")
+        .or_else(|| item.get("tweetID"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            parsed_ref.as_ref().map(|r| match r {
+                SocialPostReference::X(x) => x.tweet_id.clone(),
+                SocialPostReference::Threads { post_id, .. } => post_id.clone(),
+                SocialPostReference::Bluesky { rkey, .. } => rkey.clone(),
+                SocialPostReference::Xiaohongshu(xhs) => {
+                    xhs.note_id.clone().unwrap_or_else(|| xhs.dedup_key())
+                }
+                SocialPostReference::Pixiv { illust_id, .. } => illust_id.clone(),
+                SocialPostReference::Instagram { shortcode, .. } => shortcode.clone(),
+            })
+        })
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string()[..8].to_string());
+
+    let dedup_key = item
+        .get("dedupKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| canonical_dedup_key(raw_url))
+        .unwrap_or_else(|| format!("{}:{post_id}", platform.raw_value()));
+
+    let author_name_raw = item
+        .get("authorName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let author_handle_raw = item
+        .get("authorHandle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .trim_start_matches('@');
+    let author_handle = if !author_handle_raw.is_empty() {
+        author_handle_raw.to_string()
+    } else if !author_name_raw.is_empty() {
+        author_name_raw.to_string()
+    } else {
+        platform.raw_value().to_string()
+    };
+    let author_name = if !author_name_raw.is_empty() {
+        author_name_raw.to_string()
+    } else {
+        author_handle.clone()
+    };
+
+    let published_at_text = item
+        .get("publishedAtText")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let title = item
+        .get("title")
+        .or_else(|| item.get("articleTitle"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let body_text = item
+        .get("bodyText")
+        .or_else(|| item.get("notes"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let subfolder_name = item
+        .get("subfolderName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let organize_mode = item
+        .get("organizeMode")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "per_post".to_string());
+    let include_videos = item
+        .get("includeVideos")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let has_video = item
+        .get("hasVideo")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let needs_enrich = item
+        .get("needsEnrich")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let referer = item
+        .get("referer")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let tags: Vec<String> = item
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut media = Vec::new();
+    let mut seen_urls = HashSet::new();
+    if let Some(raw_media) = item
+        .get("media")
+        .or_else(|| item.get("attachments"))
+        .and_then(Value::as_array)
+    {
+        for m in raw_media {
+            let Some(u) = m
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if Url::parse(u)
+                .ok()
+                .is_none_or(|parsed| !WebBookmarkResolver::is_web_url(&parsed))
+            {
+                continue;
+            }
+            if !seen_urls.insert(u.to_string()) {
+                continue;
+            }
+            let kind = match m
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("video") => SocialMediaAttachmentKind::Video,
+                Some("gif" | "animated_gif") => SocialMediaAttachmentKind::Gif,
+                _ => SocialMediaAttachmentKind::Photo,
+            };
+            let thumbnail_url = m
+                .get("thumbnailURL")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            media.push(SocialMediaBatchItem {
+                kind,
+                url: u.to_string(),
+                thumbnail_url,
+            });
+        }
+    }
+
+    Some(SocialMediaBatchJob {
+        platform,
+        post_id,
+        dedup_key,
+        original_url: raw_url.to_string(),
+        author_name,
+        author_handle,
+        published_at_text,
+        title,
+        body_text,
+        subfolder_name,
+        organize_mode,
+        include_videos,
+        has_video,
+        needs_enrich,
+        referer,
+        tags,
+        media,
+    })
+}
+
+fn compact_date_prefix(published_at_text: Option<&str>) -> String {
+    let Some(raw) = published_at_text else {
+        return String::new();
+    };
+    let digits: String = raw
+        .chars()
+        .take(10)
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    if digits.len() == 8 {
+        digits
+    } else {
+        String::new()
+    }
+}
+
+fn clean_tweet_headline(body: &str, max_chars: usize) -> String {
+    let mut cleaned = String::with_capacity(body.len());
+    for token in body.split_whitespace() {
+        if token.starts_with("http://t.co/") || token.starts_with("https://t.co/") {
+            continue;
+        }
+        if !cleaned.is_empty() {
+            cleaned.push(' ');
+        }
+        for ch in token.chars() {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                cleaned.push(' ');
+            } else {
+                cleaned.push(ch);
+            }
+        }
+    }
+    let collapsed: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn synthesize_post_subfolder_name(
+    platform: SocialPlatform,
+    post_id: &str,
+    published_at_text: Option<&str>,
+    headline_source: &str,
+) -> String {
+    let suffix: String = if post_id.chars().count() > 6 {
+        post_id
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect()
+    } else {
+        post_id.to_string()
+    };
+    let date_part = published_at_text
+        .map(str::trim)
+        .filter(|s| s.len() >= 10)
+        .and_then(|s| {
+            let b = &s.as_bytes()[..10];
+            if b[0..4].iter().all(u8::is_ascii_digit)
+                && b[4] == b'-'
+                && b[5..7].iter().all(u8::is_ascii_digit)
+                && b[7] == b'-'
+                && b[8..10].iter().all(u8::is_ascii_digit)
+            {
+                Some(&s[..10])
+            } else {
+                None
+            }
+        })
+        .unwrap_or("");
+    let snippet = clean_tweet_headline(headline_source, 28);
+    let mut parts = Vec::new();
+    if !date_part.is_empty() {
+        parts.push(date_part.to_string());
+    }
+    if !snippet.is_empty() {
+        parts.push(format!("{snippet} [{suffix}]"));
+    } else {
+        parts.push(format!("{} {post_id}", platform.post_noun()));
+    }
+    parts.join(" · ")
+}
+
+fn sanitize_bridge_filename_part(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    if cleaned.is_empty() {
+        "media".to_string()
+    } else {
+        cleaned
+    }
+}
+
+async fn ingest_social_media_jobs(
+    engine: &LiveCharkleEngine,
+    jobs: Vec<SocialMediaBatchJob>,
+    root_folder_id: Option<Uuid>,
+    target_board_id: Option<Uuid>,
+) -> CoreResult<(Vec<AssetRecord>, usize, usize)> {
+    let staging_root =
+        std::env::temp_dir().join(format!("charkle-social-author-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&staging_root)?;
+    let mut staging_guard = StagingDirGuard::new();
+    staging_guard.push(staging_root.clone());
+
+    let mut existing_folders = engine.fetch_folders()?;
+    let mut created_assets: Vec<AssetRecord> = Vec::new();
+    let mut posts_imported = 0usize;
+    let mut created_folders_count = 0usize;
+
+    for job in jobs {
+        let mut resolved_media = job.media.clone();
+        let resolved_title = job.title.clone();
+        let mut resolved_body = job.body_text.clone();
+        let mut resolved_author_name = job.author_name.clone();
+        let mut resolved_handle = job.author_handle.clone();
+        let mut resolved_published_at = job.published_at_text.clone();
+
+        let has_direct_video_file = resolved_media.iter().any(|m| {
+            matches!(
+                m.kind,
+                SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+            ) && m.url.to_ascii_lowercase().contains(".mp4")
+        });
+        let should_resolve_online = job.needs_enrich
+            || resolved_media.is_empty()
+            || (job.platform == SocialPlatform::X
+                && job.include_videos
+                && job.has_video
+                && !has_direct_video_file);
+
+        if should_resolve_online {
+            let social_ref_opt = if job.platform == SocialPlatform::X {
+                Some(SocialPostReference::X(XPostReference {
+                    handle: resolved_handle.clone(),
+                    tweet_id: job.post_id.clone(),
+                }))
+            } else if job.platform == SocialPlatform::Bluesky {
+                Url::parse(&job.original_url)
+                    .ok()
+                    .and_then(|u| SocialPostURLParser::parse(&u))
+            } else {
+                None
+            };
+            if let Some(social_ref) = social_ref_opt {
+                if let Some(resolved) = SocialPostResolver::resolve(&social_ref).await {
+                    let enriched: Vec<SocialMediaBatchItem> = resolved
+                        .metadata
+                        .effective_attachments()
+                        .into_iter()
+                        .filter(|att| {
+                            Url::parse(&att.url)
+                                .ok()
+                                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                        })
+                        .map(|att| SocialMediaBatchItem {
+                            kind: att.kind,
+                            url: att.url,
+                            thumbnail_url: att.thumbnail_url,
+                        })
+                        .collect();
+                    if !enriched.is_empty() {
+                        resolved_media = enriched;
+                    }
+                    if resolved_body.is_empty() && !resolved.metadata.body_text.trim().is_empty() {
+                        resolved_body = resolved.metadata.body_text.trim().to_string();
+                    }
+                    if !resolved.metadata.author_name.trim().is_empty() {
+                        resolved_author_name = resolved.metadata.author_name.trim().to_string();
+                    }
+                    if !resolved.metadata.author_handle.trim().is_empty() {
+                        resolved_handle = resolved.metadata.author_handle.trim().to_string();
+                    }
+                    if resolved_published_at.is_none() {
+                        resolved_published_at = resolved.metadata.published_at_text.clone();
+                    }
+                }
+            }
+        }
+
+        if !job.include_videos {
+            resolved_media.retain(|m| m.kind == SocialMediaAttachmentKind::Photo);
+        }
+        if resolved_media.is_empty() {
+            continue;
+        }
+
+        let post_folder_id = if job.organize_mode == "flat"
+            || (job.organize_mode == "multi_only" && resolved_media.len() < 2)
+        {
+            root_folder_id
+        } else {
+            let headline_src = if resolved_title.is_empty() {
+                resolved_body.as_str()
+            } else {
+                resolved_title.as_str()
+            };
+            let folder_name = job
+                .subfolder_name
+                .clone()
+                .unwrap_or_else(|| {
+                    synthesize_post_subfolder_name(
+                        job.platform,
+                        &job.post_id,
+                        resolved_published_at.as_deref(),
+                        headline_src,
+                    )
+                })
+                .trim()
+                .to_string();
+            let safe_folder_name = if folder_name.is_empty() {
+                format!("{} {}", job.platform.post_noun(), job.post_id)
+            } else {
+                folder_name
+            };
+            if let Some(existing) = existing_folders.iter().find(|f| {
+                f.parent_id == root_folder_id
+                    && f.name.trim().eq_ignore_ascii_case(&safe_folder_name)
+            }) {
+                Some(existing.id)
+            } else {
+                let created = engine.create_folder(&safe_folder_name, root_folder_id)?;
+                let id = created.id;
+                existing_folders.push(created);
+                created_folders_count += 1;
+                Some(id)
+            }
+        };
+
+        let post_dir = staging_root.join(format!(
+            "{}_{}",
+            job.platform.raw_value(),
+            sanitize_bridge_filename_part(&job.post_id)
+        ));
+        let _ = std::fs::create_dir_all(&post_dir);
+
+        let date_compact = compact_date_prefix(resolved_published_at.as_deref());
+        let handle_part = sanitize_bridge_filename_part(&resolved_handle);
+        let post_id_part = sanitize_bridge_filename_part(&job.post_id);
+        let referer_owned = job.referer.clone();
+
+        let mut join_set: tokio::task::JoinSet<(usize, Option<PathBuf>)> =
+            tokio::task::JoinSet::new();
+        for (idx, item) in resolved_media.iter().cloned().enumerate() {
+            let base_name = if date_compact.is_empty() {
+                format!("{handle_part}_{post_id_part}_{:02}", idx + 1)
+            } else {
+                format!("{date_compact}_{handle_part}_{post_id_part}_{:02}", idx + 1)
+            };
+            let post_dir_clone = post_dir.clone();
+            let referer_clone = referer_owned.clone();
+            join_set.spawn(async move {
+                let primary = SocialPostResolver::download_media_bytes_with_referer(
+                    &item.url,
+                    item.kind,
+                    referer_clone.as_deref(),
+                )
+                .await;
+                let downloaded = match primary {
+                    Some(res) => Some(res),
+                    None => {
+                        if let Some(ref thumb) = item.thumbnail_url {
+                            SocialPostResolver::download_media_bytes_with_referer(
+                                thumb,
+                                SocialMediaAttachmentKind::Photo,
+                                referer_clone.as_deref(),
+                            )
+                            .await
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some((bytes, ext)) = downloaded {
+                    let clean_ext = if ext.trim().is_empty() {
+                        "jpg"
+                    } else {
+                        ext.trim().trim_start_matches('.')
+                    };
+                    let dest = post_dir_clone.join(format!("{base_name}.{clean_ext}"));
+                    if std::fs::write(&dest, &bytes).is_ok() {
+                        return (idx, Some(dest));
+                    }
+                }
+                (idx, None)
+            });
+        }
+
+        let mut downloaded_files: Vec<(usize, PathBuf)> = Vec::new();
+        while let Some(res) = join_set.join_next().await {
+            if let Ok((idx, Some(path))) = res {
+                downloaded_files.push((idx, path));
+            }
+        }
+        downloaded_files.sort_by_key(|(idx, _)| *idx);
+        if downloaded_files.is_empty() {
+            continue;
+        }
+
+        let inputs: Vec<CaptureInput> = downloaded_files
+            .into_iter()
+            .map(|(_, path)| CaptureInput::FilePath(path))
+            .collect();
+        let ingested = engine
+            .ingest(inputs, post_folder_id, target_board_id)
+            .await?;
+        if ingested.is_empty() {
+            continue;
+        }
+
+        let clean_snippet = clean_tweet_headline(
+            if resolved_title.is_empty() {
+                resolved_body.as_str()
+            } else {
+                resolved_title.as_str()
+            },
+            36,
+        );
+
+        let mut note_sections = Vec::new();
+        let author_line = if matches!(
+            job.platform,
+            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu
+        ) {
+            resolved_author_name.clone()
+        } else if resolved_author_name.eq_ignore_ascii_case(&resolved_handle) {
+            format!("@{resolved_handle}")
+        } else {
+            format!("{resolved_author_name} (@{resolved_handle})")
+        };
+        note_sections.push(author_line);
+        if !resolved_title.is_empty() {
+            note_sections.push(resolved_title.clone());
+        }
+        if let Some(ref published) = resolved_published_at {
+            if !published.is_empty() {
+                note_sections.push(format!("发布时间：{published}"));
+            }
+        }
+        if !resolved_body.is_empty() && resolved_body != resolved_title {
+            note_sections.push(resolved_body.clone());
+        }
+        let source_prefix = match job.platform {
+            SocialPlatform::X => "原推文：",
+            SocialPlatform::Pixiv => "原作品：",
+            SocialPlatform::Xiaohongshu => "原笔记：",
+            SocialPlatform::Bluesky | SocialPlatform::Threads | SocialPlatform::Instagram => {
+                "原贴文："
+            }
+        };
+        note_sections.push(format!("{source_prefix}{}", job.original_url));
+        let formatted_notes = note_sections.join("\n\n");
+
+        let mut merged_tags: HashSet<String> = job
+            .tags
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        merged_tags.insert(job.platform.display_name().to_string());
+        if matches!(
+            job.platform,
+            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu
+        ) {
+            if !resolved_author_name.is_empty() {
+                merged_tags.insert(resolved_author_name.clone());
+            }
+        } else {
+            merged_tags.insert(format!("@{resolved_handle}"));
+            if !resolved_author_name.is_empty()
+                && !resolved_author_name.eq_ignore_ascii_case(&resolved_handle)
+            {
+                merged_tags.insert(resolved_author_name.clone());
+            }
+        }
+        let mut sorted_tags: Vec<String> = merged_tags.into_iter().collect();
+        sorted_tags.sort();
+
+        let source_domain = Url::parse(&job.original_url)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from));
+        let author_prefix = if matches!(
+            job.platform,
+            SocialPlatform::Pixiv | SocialPlatform::Xiaohongshu
+        ) {
+            resolved_author_name.clone()
+        } else {
+            format!("@{resolved_handle}")
+        };
+        let total_count = ingested.len();
+
+        for (idx, mut asset) in ingested.into_iter().enumerate() {
+            let base_title = if !clean_snippet.is_empty() {
+                format!("{author_prefix} · {clean_snippet}")
+            } else {
+                format!("{author_prefix} · {}", job.post_id)
+            };
+            asset.title = if total_count > 1 {
+                format!("{base_title} ({}/{total_count})", idx + 1)
+            } else {
+                base_title
+            };
+            asset.notes = formatted_notes.clone();
+            asset.source_url = Some(job.original_url.clone());
+            if asset.source_domain.is_none() {
+                asset.source_domain = source_domain.clone();
+            }
+            let mut tag_seen: HashMap<String, String> = HashMap::new();
+            for t in asset.tags.iter().chain(sorted_tags.iter()) {
+                let clean = t.trim();
+                if !clean.is_empty() {
+                    tag_seen
+                        .entry(clean.to_lowercase())
+                        .or_insert_with(|| clean.to_string());
+                }
+            }
+            let mut final_tags: Vec<String> = tag_seen.into_values().collect();
+            final_tags.sort();
+            asset.tags = final_tags;
+
+            match engine.database().save_asset_locally(&asset, true) {
+                Ok(saved) => created_assets.push(saved),
+                Err(_) => created_assets.push(asset),
+            }
+        }
+        posts_imported += 1;
+    }
+
+    if !created_assets.is_empty() {
+        engine.notify_external_change();
+    }
+
+    Ok((created_assets, posts_imported, created_folders_count))
 }
 
 async fn handle_ingest(
@@ -1143,15 +1850,16 @@ async fn handle_ingest(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let mut known_keys = if skip_duplicates {
+    let (mut known_keys, mut known_media_keys) = if skip_duplicates {
         fetch_existing_source_keys(engine)
-            .map(|(_, k)| k)
+            .map(|(_, k, mk)| (k, mk))
             .unwrap_or_default()
     } else {
-        HashSet::new()
+        (HashSet::new(), HashSet::new())
     };
 
     let mut parsed_inputs: Vec<CaptureInput> = Vec::new();
+    let mut social_media_jobs: Vec<SocialMediaBatchJob> = Vec::new();
     let mut skipped: usize = 0;
 
     for item in raw_inputs {
@@ -1299,11 +2007,21 @@ async fn handle_ingest(
                     tags,
                 });
             }
+            "socialMedia" | "tweetMedia" => {
+                let Some(job) = parse_social_media_job(obj) else {
+                    continue;
+                };
+                if skip_duplicates && !known_media_keys.insert(job.dedup_key.clone()) {
+                    skipped += 1;
+                    continue;
+                }
+                social_media_jobs.push(job);
+            }
             _ => continue,
         }
     }
 
-    if parsed_inputs.is_empty() && skipped > 0 {
+    if parsed_inputs.is_empty() && social_media_jobs.is_empty() && skipped > 0 {
         return HttpResponse::json(
             200,
             cors_headers,
@@ -1311,11 +2029,14 @@ async fn handle_ingest(
                 "assets": [],
                 "created": 0,
                 "skipped": skipped,
+                "postsImported": 0,
+                "tweetsImported": 0,
+                "createdFolders": 0,
             }),
         );
     }
 
-    if parsed_inputs.is_empty() {
+    if parsed_inputs.is_empty() && social_media_jobs.is_empty() {
         return HttpResponse::json(
             400,
             cors_headers,
@@ -1323,54 +2044,91 @@ async fn handle_ingest(
         );
     }
 
-    match engine
-        .ingest(parsed_inputs, target_folder_id, target_board_id)
-        .await
-    {
-        Ok(created) => {
-            if !created.is_empty() {
-                schedule_debounced_mutation(
-                    pending_mutations,
-                    on_mutated,
-                    created.len(),
-                    0,
-                    target_folder_id,
-                    target_board_id,
+    let mut all_created: Vec<AssetRecord> = Vec::new();
+    let mut posts_imported = 0usize;
+    let mut created_folders = 0usize;
+
+    if !parsed_inputs.is_empty() {
+        match engine
+            .ingest(parsed_inputs, target_folder_id, target_board_id)
+            .await
+        {
+            Ok(created) => all_created.extend(created),
+            Err(err) => {
+                return HttpResponse::json(
+                    500,
+                    cors_headers,
+                    json!({ "error": err.to_string(), "code": "INTERNAL_ERROR" }),
                 );
             }
-            let serialized_assets: Vec<Value> = created
-                .iter()
-                .map(|asset| {
-                    let mut map = serde_json::Map::new();
-                    map.insert("id".to_string(), json!(format_swift_uuid(&asset.id)));
-                    map.insert("title".to_string(), json!(asset.title));
-                    map.insert("mediaKind".to_string(), json!(asset.media_kind.raw_value()));
-                    if let Some(ref src) = asset.source_url {
-                        map.insert("sourceURL".to_string(), json!(src));
-                    }
-                    if let Some(fid) = asset.folder_id {
-                        map.insert("folderID".to_string(), json!(format_swift_uuid(&fid)));
-                    }
-                    Value::Object(map)
-                })
-                .collect();
-
-            HttpResponse::json(
-                201,
-                cors_headers,
-                json!({
-                    "assets": serialized_assets,
-                    "created": created.len(),
-                    "skipped": skipped,
-                }),
-            )
         }
-        Err(err) => HttpResponse::json(
-            500,
-            cors_headers,
-            json!({ "error": err.to_string(), "code": "INTERNAL_ERROR" }),
-        ),
     }
+
+    if !social_media_jobs.is_empty() {
+        match ingest_social_media_jobs(engine, social_media_jobs, target_folder_id, target_board_id)
+            .await
+        {
+            Ok((social_assets, imported_posts, folders_created)) => {
+                all_created.extend(social_assets);
+                posts_imported += imported_posts;
+                created_folders += folders_created;
+            }
+            Err(err) => {
+                return HttpResponse::json(
+                    500,
+                    cors_headers,
+                    json!({ "error": err.to_string(), "code": "INTERNAL_ERROR" }),
+                );
+            }
+        }
+    }
+
+    if !all_created.is_empty() || created_folders > 0 {
+        schedule_debounced_mutation(
+            pending_mutations,
+            on_mutated,
+            all_created.len(),
+            created_folders,
+            target_folder_id,
+            target_board_id,
+        );
+    }
+
+    let serialized_assets: Vec<Value> = all_created
+        .iter()
+        .map(|asset| {
+            let mut map = serde_json::Map::new();
+            map.insert("id".to_string(), json!(format_swift_uuid(&asset.id)));
+            map.insert("title".to_string(), json!(asset.title));
+            map.insert("mediaKind".to_string(), json!(asset.media_kind.raw_value()));
+            if let Some(ref src) = asset.source_url {
+                map.insert("sourceURL".to_string(), json!(src));
+            }
+            if let Some(fid) = asset.folder_id {
+                map.insert("folderID".to_string(), json!(format_swift_uuid(&fid)));
+            }
+            Value::Object(map)
+        })
+        .collect();
+
+    let status_code = if all_created.is_empty() && skipped > 0 {
+        200
+    } else {
+        201
+    };
+
+    HttpResponse::json(
+        status_code,
+        cors_headers,
+        json!({
+            "assets": serialized_assets,
+            "created": all_created.len(),
+            "skipped": skipped,
+            "postsImported": posts_imported,
+            "tweetsImported": posts_imported,
+            "createdFolders": created_folders,
+        }),
+    )
 }
 
 async fn handle_multipart_upload(
@@ -1608,17 +2366,10 @@ fn parse_social_bookmark_payload(
         .get("platform")
         .and_then(Value::as_str)
         .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    let platform = match raw_platform.as_str() {
-        "x" | "twitter" => SocialPlatform::X,
-        "threads" => SocialPlatform::Threads,
-        "bluesky" | "bsky" => SocialPlatform::Bluesky,
-        "xiaohongshu" | "xhs" => SocialPlatform::Xiaohongshu,
-        _ => SocialPostURLParser::parse(&parsed_url)
-            .map(|r| r.platform())
-            .unwrap_or(SocialPlatform::X),
-    };
+        .trim();
+    let platform = SocialPlatform::from_raw(raw_platform)
+        .or_else(|| SocialPostURLParser::parse(&parsed_url).map(|r| r.platform()))
+        .unwrap_or(SocialPlatform::X);
 
     let author_name = item
         .get("authorName")
@@ -2394,6 +3145,193 @@ mod tests {
         assert_eq!(body["created"], 1);
         assert_eq!(body["skipped"], 0);
 
+        bridge.stop().await;
+    }
+
+    #[tokio::test]
+    async fn existing_sources_media_keys_exclude_web_bookmarks_and_parse_v130_social_jobs() {
+        let (_tmp, engine, bridge, port, token) = spawn_test_bridge().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+        let auth = format!("Bearer {token}");
+
+        // 1. Ingest a Pixiv socialBookmark (WebBookmark) -> appears in canonicalKeys, NOT mediaCanonicalKeys
+        let cover_png = MediaArtwork::encode_png(&DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            48,
+            48,
+            Rgba([0, 150, 250, 255]),
+        )))
+        .unwrap();
+        let cover_data_url = format!("data:image/png;base64,{}", BASE64_STD.encode(&cover_png));
+
+        let bm_res = client
+            .post(format!("{base}/api/v1/assets/ingest"))
+            .header("Authorization", &auth)
+            .json(&json!({
+                "skipDuplicates": true,
+                "inputs": [{
+                    "type": "socialBookmark",
+                    "platform": "pixiv",
+                    "originalURL": "https://www.pixiv.net/artworks/12556677",
+                    "authorName": "青岚",
+                    "authorHandle": "543210",
+                    "articleTitle": "星夜水彩合集",
+                    "bodyText": "水彩插画练习",
+                    "coverDataUrl": cover_data_url,
+                    "tags": ["水彩"]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bm_res.status(), 201);
+
+        let existing1: Value = client
+            .get(format!("{base}/api/v1/assets/existing-sources"))
+            .header("Authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let canonical1: Vec<&str> = existing1["canonicalKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let media1: Vec<&str> = existing1["mediaCanonicalKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(canonical1.contains(&"pixiv:12556677"));
+        assert!(
+            !media1.contains(&"pixiv:12556677"),
+            "WebBookmark must NOT pollute mediaCanonicalKeys"
+        );
+
+        // 2. Ingest an actual image asset whose sourceURL is the same Pixiv artwork -> now in mediaCanonicalKeys
+        let img_res = client
+            .post(format!("{base}/api/v1/assets/ingest"))
+            .header("Authorization", &auth)
+            .json(&json!({
+                "inputs": [{
+                    "type": "imageData",
+                    "base64Data": cover_data_url,
+                    "suggestedName": "pixiv_12556677_p0.png",
+                    "sourceURL": "https://www.pixiv.net/en/artworks/12556677"
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(img_res.status(), 201);
+
+        let existing2: Value = client
+            .get(format!("{base}/api/v1/assets/existing-sources"))
+            .header("Authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let media2: Vec<&str> = existing2["mediaCanonicalKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(media2.contains(&"pixiv:12556677"));
+
+        // 3. Re-submitting socialMedia with same dedupKey & skipDuplicates=true skips cleanly
+        let dup_social = client
+            .post(format!("{base}/api/v1/assets/ingest"))
+            .header("Authorization", &auth)
+            .json(&json!({
+                "skipDuplicates": true,
+                "inputs": [{
+                    "type": "socialMedia",
+                    "platform": "pixiv",
+                    "postID": "12556677",
+                    "dedupKey": "pixiv:12556677",
+                    "originalURL": "https://www.pixiv.net/artworks/12556677",
+                    "authorName": "青岚",
+                    "authorHandle": "543210",
+                    "media": [{ "kind": "photo", "url": "https://i.pximg.net/img-original/img/12556677_p0.png" }]
+                }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(dup_social.status(), 200);
+        let dup_json: Value = dup_social.json().await.unwrap();
+        assert_eq!(dup_json["skipped"], 1);
+        assert_eq!(dup_json["created"], 0);
+        assert_eq!(dup_json["postsImported"], 0);
+
+        // 4. Unit-check socialMedia & legacy tweetMedia job parsing across all 6 platforms + Pixiv Referer
+        let pixiv_obj = json!({
+            "type": "socialMedia",
+            "platform": "pixiv",
+            "postID": "99887766",
+            "originalURL": "https://www.pixiv.net/artworks/99887766",
+            "authorName": "青岚",
+            "authorHandle": "543210",
+            "organizeMode": "multi_only",
+            "referer": "https://www.pixiv.net/",
+            "media": [{ "kind": "photo", "url": "https://i.pximg.net/img-original/img/99887766_p0.jpg" }]
+        });
+        let job_px = parse_social_media_job(pixiv_obj.as_object().unwrap()).unwrap();
+        assert_eq!(job_px.platform, SocialPlatform::Pixiv);
+        assert_eq!(job_px.dedup_key, "pixiv:99887766");
+        assert_eq!(job_px.organize_mode, "multi_only");
+        assert_eq!(
+            SocialPostResolver::resolve_cdn_referer(
+                &Url::parse(&job_px.media[0].url).unwrap(),
+                None
+            ),
+            Some("https://www.pixiv.net/")
+        );
+
+        let ig_obj = json!({
+            "type": "socialMedia",
+            "platform": "instagram",
+            "originalURL": "https://www.instagram.com/p/C9AbCdEfGhI/",
+            "authorHandle": "@studio_ig",
+            "media": [{ "kind": "photo", "url": "https://scontent.cdninstagram.com/v/t51/photo.jpg?sig=abc" }]
+        });
+        let job_ig = parse_social_media_job(ig_obj.as_object().unwrap()).unwrap();
+        assert_eq!(job_ig.platform, SocialPlatform::Instagram);
+        assert_eq!(job_ig.dedup_key, "ig:C9AbCdEfGhI");
+        assert_eq!(job_ig.author_handle, "studio_ig");
+
+        let legacy_x = json!({
+            "type": "tweetMedia",
+            "tweetID": "1889900112233445566",
+            "originalURL": "https://x.com/artist_x/status/1889900112233445566",
+            "authorHandle": "artist_x",
+            "media": [{ "kind": "photo", "url": "https://pbs.twimg.com/media/AbCdEfG.jpg" }]
+        });
+        let job_x = parse_social_media_job(legacy_x.as_object().unwrap()).unwrap();
+        assert_eq!(job_x.platform, SocialPlatform::X);
+        assert_eq!(job_x.post_id, "1889900112233445566");
+        assert_eq!(job_x.dedup_key, "x:1889900112233445566");
+
+        let bsky_obj = json!({
+            "type": "socialMedia",
+            "platform": "bluesky",
+            "originalURL": "https://bsky.app/profile/alice.bsky.social/post/3kabcdefg",
+            "media": []
+        });
+        let job_bsky = parse_social_media_job(bsky_obj.as_object().unwrap()).unwrap();
+        assert_eq!(job_bsky.platform, SocialPlatform::Bluesky);
+        assert_eq!(job_bsky.dedup_key, "bsky:alice.bsky.social:3kabcdefg");
+
+        let _ = engine;
         bridge.stop().await;
     }
 }

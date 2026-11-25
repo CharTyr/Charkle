@@ -55,7 +55,7 @@ export type GalleryLayoutMode =
   | 'galleryFilmstrip'
   | 'ringGallery';
 
-export type SocialPlatform = 'x' | 'threads' | 'bluesky' | 'xiaohongshu';
+export type SocialPlatform = 'x' | 'threads' | 'bluesky' | 'xiaohongshu' | 'pixiv' | 'instagram';
 export type SocialMediaAttachmentKind = 'photo' | 'video' | 'gif';
 export type SmartFolderMatchMode = 'all' | 'any';
 export type NoteStyle = 'paper' | 'ink' | 'warm' | 'sage' | 'slate';
@@ -177,7 +177,9 @@ export function resolveSocialMediaUrl(
       host === 'cdninstagram.com' ||
       host.endsWith('.cdninstagram.com') ||
       host === 'fbcdn.net' ||
-      host.endsWith('.fbcdn.net')
+      host.endsWith('.fbcdn.net') ||
+      host === 'pximg.net' ||
+      host.endsWith('.pximg.net')
     ) {
       return `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(trimmed)}`;
     }
@@ -1303,3 +1305,77 @@ export type AppUpdateState =
       reason: string;
     }
   | { status: 'failed'; message: string; update?: AppReleaseUpdate | null };
+
+// =========================================================================
+// Material Package Importer (.eaglepack / .library) & Classical Smart Dedup
+// =========================================================================
+
+export interface MaterialPackageImportResult {
+  packageName: string;
+  importedAssetCount: number;
+  createdFolderCount: number;
+  rootFolderID: string | null;
+  skippedDeletedCount: number;
+  skippedMissingCount: number;
+}
+
+export type DeduplicationSensitivity = 'strict' | 'balanced' | 'relaxed';
+
+export type DuplicateMatchKind =
+  | 'exactBinary'
+  | 'nearIdentical'
+  | 'canonicalLink'
+  | 'normalizedText'
+  | 'audioWaveform';
+
+export type DuplicateDisposalMode = 'moveToTrash' | 'permanentlyDelete';
+
+export type DeduplicationScanScope =
+  | { type: 'allActive' }
+  | { type: 'inbox' }
+  | { type: 'folder'; folderID: string; includeSubfolders: boolean };
+
+export interface DuplicateAssetCandidate {
+  asset: AssetRecord;
+  qualityScore: number;
+  resolutionPixels: number;
+  formatLabel: string;
+  isLosslessFormat: boolean;
+  sharpnessScore: number;
+  isRecommendedKeep: boolean;
+  isReferencedByBoard: boolean;
+  similarityToKeeper: number;
+  qualityReasons: string[];
+}
+
+export interface DuplicateGroup {
+  id: string;
+  primaryMediaKind: MediaKind;
+  matchKind: DuplicateMatchKind;
+  similarityScore: number;
+  recommendedKeepAssetID: string;
+  candidates: DuplicateAssetCandidate[];
+  reclaimableBytes: number;
+}
+
+export interface DeduplicationScanReport {
+  scannedAssetCount: number;
+  skippedNonVisualCount: number;
+  groups: DuplicateGroup[];
+  totalDuplicateItems: number;
+  totalReclaimableBytes: number;
+  durationSeconds: number;
+}
+
+export interface DeduplicationResolutionPlan {
+  keepAssetID: string;
+  removeAssetIDs: string[];
+}
+
+export interface DeduplicationCleanupResult {
+  resolvedGroupCount: number;
+  removedAssetCount: number;
+  reclaimedBytes: number;
+  mergedMetadataCount: number;
+  updatedBoardCount: number;
+}

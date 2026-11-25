@@ -13,6 +13,7 @@ import {
   FolderProhibited16Regular,
   MoreHorizontal16Regular,
   Prohibited12Regular,
+  Sparkle16Regular,
 } from '@fluentui/react-icons';
 import {
   Button,
@@ -127,6 +128,7 @@ const FolderRow: React.FC<FolderRowProps> = ({
   const expanded = expandedIds.has(folder.id);
 
   const destination = useCoordinatorStore((s) => s.destination);
+  const openDeduplication = useCoordinatorStore((s) => s.openDeduplication);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
   const allAssets = useLibraryStore((s) => s.allAssets);
   const cutAssetIds = useLibraryStore((s) => s.cutAssetIds);
@@ -475,6 +477,19 @@ const FolderRow: React.FC<FolderRowProps> = ({
               }}
             >
               重命名…
+            </MenuItem>
+            <MenuItem
+              icon={<Sparkle16Regular className="w-4 h-4" />}
+              onSelect={() => {
+                setMenuOpen(false);
+                openDeduplication({
+                  type: 'folder',
+                  folderID: folder.id,
+                  includeSubfolders: true,
+                });
+              }}
+            >
+              在此文件夹中智能去重…
             </MenuItem>
           </>
         )}

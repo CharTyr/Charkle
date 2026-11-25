@@ -24,10 +24,16 @@ use crate::media::artwork::MediaArtwork;
 use crate::media::metadata::ImageMetadataExtractor;
 use crate::media::resolvers::{
     GitHubRepoResolver, GitHubRepoURLParser, SocialPostResolver, SocialPostURLParser,
-    WebBookmarkResolver,
+    WebBookmarkResolver, WebURLParser,
 };
 use crate::media::xiaohongshu::XiaohongshuURLParser;
-use crate::media::{LocalVisualDescriptor, MediaPipeline, SampleLibrarySeeder};
+use crate::media::{
+    CachedDedupFingerprintEntry, DeduplicationCleanupResult, DeduplicationResolutionPlan,
+    DeduplicationScanReport, DeduplicationScanScope, DeduplicationSensitivity,
+    DuplicateDisposalMode, EaglePackImporter, IndexedMediaAsset, LocalVisualDescriptor,
+    MaterialPackageImportResult, MediaPipeline, ParsedEagleFolder, SampleLibrarySeeder,
+    SmartDeduplicator, StagingDirGuard,
+};
 use crate::models::core::{
     AssetBatchPatch, AssetRecord, FilterCriteria, FolderRecord, FolderSuggestion, LabColor,
     MediaKind, QuickJumpMatch, ScoredAsset, SmartFolderRecord, SocialMediaAttachmentKind,
@@ -97,6 +103,7 @@ pub struct LiveCharkleEngine {
     mount_inspector: Arc<dyn VolumeMountInspector>,
     injected_transport: Option<Arc<dyn DriveTransport>>,
     events: broadcast::Sender<EngineEvent>,
+    dedup_cache: std::sync::Mutex<Option<HashMap<Uuid, CachedDedupFingerprintEntry>>>,
 }
 
 impl LiveCharkleEngine {
@@ -157,6 +164,7 @@ impl LiveCharkleEngine {
             mount_inspector,
             injected_transport,
             events,
+            dedup_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -602,6 +610,9 @@ impl LiveCharkleEngine {
     }
 
     /// Ingests one or more `CaptureInput` items into the library and optional target folder/board.
+    /// Recognized `.eaglepack` archives and `.library` / extracted pack directories are automatically
+    /// routed through the lossless material package importer so internal `.info/` sidecars are never
+    /// imported as junk assets.
     pub async fn ingest(
         &self,
         inputs: Vec<CaptureInput>,
@@ -622,8 +633,38 @@ impl LiveCharkleEngine {
             return Ok(Vec::new());
         }
 
-        let mut prepared = Vec::with_capacity(inputs.len());
+        let mut package_paths: Vec<PathBuf> = Vec::new();
+        let mut normal_inputs: Vec<CaptureInput> = Vec::with_capacity(inputs.len());
         for input in inputs {
+            if let CaptureInput::FilePath(ref p) = input {
+                if EaglePackImporter::is_recognized_material_package(p, false) {
+                    package_paths.push(p.clone());
+                    continue;
+                }
+            }
+            normal_inputs.push(input);
+        }
+
+        let mut all_committed: Vec<AssetRecord> = Vec::new();
+        for pkg_path in package_paths {
+            let pkg_res = self
+                .import_material_package_internal(
+                    &pkg_path,
+                    target_folder_id,
+                    target_board_id,
+                    false,
+                    false,
+                )
+                .await?;
+            all_committed.extend(pkg_res.imported_assets);
+        }
+
+        if normal_inputs.is_empty() {
+            return Ok(all_committed);
+        }
+
+        let mut prepared = Vec::with_capacity(normal_inputs.len());
+        for input in normal_inputs {
             let mut result = match self.media.ingest(input, target_folder_id, None).await {
                 Ok(item) => item,
                 Err(err) => {
@@ -671,47 +712,7 @@ impl LiveCharkleEngine {
         }
 
         if let Some(bid) = target_board_id {
-            if let Some(mut board) = self.db.board(bid)? {
-                let base_order = board
-                    .nodes
-                    .iter()
-                    .map(|n| n.editorial_order)
-                    .max()
-                    .unwrap_or(-1)
-                    + 1;
-                let base_z = board.nodes.iter().map(|n| n.z_index).max().unwrap_or(-1) + 1;
-                let top = board
-                    .nodes
-                    .iter()
-                    .map(|n| n.frame.y + n.frame.height)
-                    .fold(-16.0_f64, f64::max)
-                    + 16.0;
-
-                for (idx, asset) in committed.iter().enumerate() {
-                    let w = 280.0;
-                    let h = (w / asset.aspect_ratio().clamp(0.5, 2.0)).round();
-                    let offset = idx as i32;
-                    board.nodes.push(BoardNode {
-                        id: Uuid::new_v4(),
-                        kind: BoardNodeKind::AssetRef {
-                            asset_id: asset.id,
-                            crop: None,
-                            weight: 1,
-                            autoplay_loop: true,
-                        },
-                        frame: BoardRect::new((idx as f64) * 304.0, top, w, h),
-                        z_index: base_z + offset,
-                        rotation_degrees: 0.0,
-                        flip_horizontal: false,
-                        flip_vertical: false,
-                        is_locked: false,
-                        editorial_order: base_order + offset,
-                        updated_at: Utc::now(),
-                    });
-                }
-                let _ = self.db.save_board_locally(&board)?;
-                self.emit(EngineEvent::BoardUpdated(bid));
-            }
+            self.append_assets_to_board(bid, &committed)?;
         }
 
         let keep_ids: HashSet<Uuid> = committed.iter().map(|a| a.id).collect();
@@ -720,11 +721,400 @@ impl LiveCharkleEngine {
             .cache_stats_and_evict(&self.db, true, &keep_ids, None)?;
 
         self.emit(EngineEvent::LibraryChanged);
-        Ok(committed)
+        all_committed.extend(committed);
+        Ok(all_committed)
     }
 
-    /// Ingests raw OS file and/or folder paths, mirroring any dropped directories as Charkle
-    /// folders (and nested subfolders) under `target_folder_id`, reusing case-insensitively
+    fn append_assets_to_board(&self, bid: Uuid, assets: &[AssetRecord]) -> CoreResult<()> {
+        if assets.is_empty() {
+            return Ok(());
+        }
+        if let Some(mut board) = self.db.board(bid)? {
+            let base_order = board
+                .nodes
+                .iter()
+                .map(|n| n.editorial_order)
+                .max()
+                .unwrap_or(-1)
+                + 1;
+            let base_z = board.nodes.iter().map(|n| n.z_index).max().unwrap_or(-1) + 1;
+            let top = board
+                .nodes
+                .iter()
+                .map(|n| n.frame.y + n.frame.height)
+                .fold(-16.0_f64, f64::max)
+                + 16.0;
+
+            for (idx, asset) in assets.iter().enumerate() {
+                let w = 280.0;
+                let h = (w / asset.aspect_ratio().clamp(0.5, 2.0)).round();
+                let offset = idx as i32;
+                board.nodes.push(BoardNode {
+                    id: Uuid::new_v4(),
+                    kind: BoardNodeKind::AssetRef {
+                        asset_id: asset.id,
+                        crop: None,
+                        weight: 1,
+                        autoplay_loop: true,
+                    },
+                    frame: BoardRect::new((idx as f64) * 304.0, top, w, h),
+                    z_index: base_z + offset,
+                    rotation_degrees: 0.0,
+                    flip_horizontal: false,
+                    flip_vertical: false,
+                    is_locked: false,
+                    editorial_order: base_order + offset,
+                    updated_at: Utc::now(),
+                });
+            }
+            let _ = self.db.save_board_locally(&board)?;
+            self.emit(EngineEvent::BoardUpdated(bid));
+        }
+        Ok(())
+    }
+
+    /// Explicitly imports an `.eaglepack` archive, extracted pack directory, `.library` bundle,
+    /// or a generic `.zip` exported package (`allow_generic_zip = true`), tolerating individual
+    /// corrupt/missing items without aborting valid siblings.
+    pub async fn import_material_package(
+        &self,
+        path: &Path,
+        target_folder_id: Option<Uuid>,
+        target_board_id: Option<Uuid>,
+    ) -> CoreResult<MaterialPackageImportResult> {
+        self.import_material_package_internal(path, target_folder_id, target_board_id, true, true)
+            .await
+    }
+
+    async fn import_material_package_internal(
+        &self,
+        path: &Path,
+        target_folder_id: Option<Uuid>,
+        target_board_id: Option<Uuid>,
+        allow_generic_zip: bool,
+        tolerates_item_errors: bool,
+    ) -> CoreResult<MaterialPackageImportResult> {
+        if let Some(fid) = target_folder_id {
+            if self.db.folder(fid)?.is_none() {
+                return Err(CoreError::NotFound(format_swift_uuid(&fid)));
+            }
+        }
+        if let Some(bid) = target_board_id {
+            if self.db.board(bid)?.is_none() {
+                return Err(CoreError::NotFound(format_swift_uuid(&bid)));
+            }
+        }
+
+        let path_owned = path.to_path_buf();
+        let parsed = tokio::task::spawn_blocking(move || {
+            EaglePackImporter::unpack_and_parse(&path_owned, allow_generic_zip)
+        })
+        .await
+        .map_err(|e| CoreError::Media(format!("Material package parse task failed: {e}")))??;
+
+        // Staging extraction directory MUST stay alive until every file has been copied into
+        // Charkle's permanent library storage, and always be cleaned up on return/error.
+        let mut staging_guard = StagingDirGuard::new();
+        if let Some(staging_dir) = parsed.staging_directory_to_cleanup {
+            staging_guard.push(staging_dir);
+        }
+
+        let mut folders_snapshot = self.db.fetch_folders()?;
+        let mut folder_id_map: HashMap<String, Uuid> = HashMap::new();
+        let mut created_folder_count = 0usize;
+
+        fn find_or_create_package_folder(
+            engine: &LiveCharkleEngine,
+            raw_name: &str,
+            parent_id: Option<Uuid>,
+            color_hex: Option<&str>,
+            folders_snapshot: &mut Vec<FolderRecord>,
+            created_count: &mut usize,
+        ) -> CoreResult<FolderRecord> {
+            let trimmed = raw_name.trim();
+            let clean_name = if trimmed.is_empty() {
+                "未命名文件夹".to_string()
+            } else {
+                let sanitized: String = trimmed
+                    .chars()
+                    .map(|c| {
+                        if c.is_control()
+                            || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                        {
+                            '_'
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                let no_dots = sanitized.trim().trim_start_matches('.').trim();
+                let truncated: String = no_dots.chars().take(120).collect();
+                let base = truncated.trim();
+                if base.is_empty() {
+                    "未命名文件夹".to_string()
+                } else if parent_id.is_none() && base.eq_ignore_ascii_case("Inbox") {
+                    "Inbox 导入".to_string()
+                } else {
+                    base.to_string()
+                }
+            };
+
+            if let Some(existing) = folders_snapshot
+                .iter()
+                .find(|f| f.parent_id == parent_id && f.name.eq_ignore_ascii_case(&clean_name))
+            {
+                return Ok(existing.clone());
+            }
+
+            let mut created = engine.create_folder(&clean_name, parent_id)?;
+            if let Some(hex) = color_hex.map(str::trim).filter(|s| !s.is_empty()) {
+                if let Ok(styled) =
+                    engine.update_folder_appearance(created.id, Some(hex.to_string()), None)
+                {
+                    created = styled;
+                }
+            }
+            folders_snapshot.push(created.clone());
+            *created_count += 1;
+            Ok(created)
+        }
+
+        fn mirror_eagle_folders(
+            engine: &LiveCharkleEngine,
+            nodes: &[ParsedEagleFolder],
+            parent_id: Option<Uuid>,
+            folders_snapshot: &mut Vec<FolderRecord>,
+            folder_id_map: &mut HashMap<String, Uuid>,
+            created_count: &mut usize,
+        ) -> CoreResult<()> {
+            for node in nodes {
+                let folder = find_or_create_package_folder(
+                    engine,
+                    &node.name,
+                    parent_id,
+                    node.color_hex.as_deref(),
+                    folders_snapshot,
+                    created_count,
+                )?;
+                folder_id_map.insert(node.source_id.clone(), folder.id);
+                if !node.children.is_empty() {
+                    mirror_eagle_folders(
+                        engine,
+                        &node.children,
+                        Some(folder.id),
+                        folders_snapshot,
+                        folder_id_map,
+                        created_count,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+
+        let (root_folder_id, fallback_folder_id) = if parsed.root_folders.len() == 1 {
+            // Single root folder tree (typical folder-exported `.eaglepack`): mirror directly without A/A nesting.
+            mirror_eagle_folders(
+                self,
+                &parsed.root_folders,
+                target_folder_id,
+                &mut folders_snapshot,
+                &mut folder_id_map,
+                &mut created_folder_count,
+            )?;
+            let single_root = folder_id_map
+                .get(&parsed.root_folders[0].source_id)
+                .copied();
+            (single_root, single_root)
+        } else {
+            // Multiple roots (full `.library` / multi-folder pack) or loose items: group cleanly under `<packageName>`.
+            let container = find_or_create_package_folder(
+                self,
+                &parsed.package_name,
+                target_folder_id,
+                None,
+                &mut folders_snapshot,
+                &mut created_folder_count,
+            )?;
+            if !parsed.root_folders.is_empty() {
+                mirror_eagle_folders(
+                    self,
+                    &parsed.root_folders,
+                    Some(container.id),
+                    &mut folders_snapshot,
+                    &mut folder_id_map,
+                    &mut created_folder_count,
+                )?;
+            }
+            (Some(container.id), Some(container.id))
+        };
+
+        let mut prepared: Vec<AssetRecord> = Vec::with_capacity(parsed.items.len());
+        let mut skipped_missing_count = parsed.skipped_missing_count;
+
+        for item in parsed.items {
+            let mapped_folder_id = item
+                .folder_ids
+                .iter()
+                .find_map(|sid| folder_id_map.get(sid).copied())
+                .or(fallback_folder_id);
+
+            let ingest_res = if item.is_web_bookmark {
+                if let Some(ref bm_url) = item.source_url {
+                    let offline_poster = item
+                        .thumbnail_path
+                        .as_deref()
+                        .and_then(|p| image::open(p).ok());
+                    if let Some(poster) = offline_poster {
+                        let domain = WebURLParser::clean_domain(bm_url)
+                            .or_else(|| bm_url.host_str().map(String::from))
+                            .unwrap_or_else(|| "web.link".to_string());
+                        self.media
+                            .ingest_pre_resolved_web_page(
+                                bm_url,
+                                &item.title,
+                                &item.notes,
+                                &domain,
+                                poster,
+                                mapped_folder_id,
+                            )
+                            .await
+                    } else {
+                        self.media
+                            .ingest(
+                                CaptureInput::WebUrl {
+                                    url: bm_url.to_string(),
+                                    title: Some(item.title.clone()),
+                                    notes: Some(item.notes.clone()),
+                                },
+                                mapped_folder_id,
+                                None,
+                            )
+                            .await
+                    }
+                } else {
+                    skipped_missing_count += 1;
+                    continue;
+                }
+            } else if let Some(ref file_path) = item.file_path {
+                self.media
+                    .ingest(
+                        CaptureInput::FilePath(file_path.clone()),
+                        mapped_folder_id,
+                        None,
+                    )
+                    .await
+            } else {
+                skipped_missing_count += 1;
+                continue;
+            };
+
+            let mut result = match ingest_res {
+                Ok(res) => res,
+                Err(err) => {
+                    if tolerates_item_errors {
+                        tracing::warn!(
+                            source_id = %item.source_id,
+                            %err,
+                            "Skipping unreadable item during material package import"
+                        );
+                        skipped_missing_count += 1;
+                        continue;
+                    }
+                    for prev in &prepared {
+                        self.media.remove_files_for_asset(prev);
+                    }
+                    return Err(err);
+                }
+            };
+
+            // Apply lossless metadata overrides from `<ID>.info/metadata.json` / `pack.json`.
+            let clean_title = item.title.trim();
+            if !clean_title.is_empty() {
+                result.asset.title = clean_title.to_string();
+            }
+            if !item.tags.is_empty() {
+                let mut merged_tags: HashMap<String, String> = HashMap::new();
+                for t in result.asset.tags.iter().chain(item.tags.iter()) {
+                    let clean = t.trim();
+                    let norm = search_text::normalize(clean);
+                    if !norm.is_empty() {
+                        merged_tags.entry(norm).or_insert_with(|| clean.to_string());
+                    }
+                }
+                let mut sorted: Vec<String> = merged_tags.into_values().collect();
+                sorted.sort();
+                result.asset.tags = sorted;
+            }
+            if item.rating > 0 {
+                result.asset.rating = item.rating.clamp(0, 5);
+            }
+            let clean_notes = item.notes.trim();
+            if !clean_notes.is_empty() {
+                result.asset.notes = clean_notes.to_string();
+            }
+            if let Some(ref src_url) = item.source_url {
+                let has_source = result
+                    .asset
+                    .source_url
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+                if !has_source {
+                    result.asset.source_url = Some(src_url.to_string());
+                    result.asset.source_domain = WebURLParser::clean_domain(src_url)
+                        .or_else(|| src_url.host_str().map(String::from));
+                }
+            }
+            if let Some(created_at) = item.created_at {
+                result.asset.created_at = created_at;
+            }
+            if let Some(updated_at) = item.updated_at {
+                result.asset.updated_at = result.asset.created_at.max(updated_at);
+            }
+
+            prepared.push(result.asset);
+        }
+
+        let config = self.sync_config();
+        let mut committed = Vec::with_capacity(prepared.len());
+        for asset in prepared {
+            let saved = self.db.save_asset_locally(&asset, true)?;
+            self.db.touch_original(saved.id, Utc::now())?;
+            if config.sync_thumbnails {
+                self.db.mark_projection("thumbnails", saved.id)?;
+            }
+            let _ = self.index_local_visual_descriptor(&saved);
+            committed.push(saved);
+        }
+
+        if let Some(bid) = target_board_id {
+            self.append_assets_to_board(bid, &committed)?;
+        }
+
+        if !committed.is_empty() {
+            let keep_ids: HashSet<Uuid> = committed.iter().map(|a| a.id).collect();
+            let _ = self
+                .media
+                .cache_stats_and_evict(&self.db, true, &keep_ids, None)?;
+        }
+
+        if !committed.is_empty() || created_folder_count > 0 {
+            self.emit(EngineEvent::LibraryChanged);
+        }
+
+        Ok(MaterialPackageImportResult {
+            package_name: parsed.package_name,
+            imported_asset_count: committed.len(),
+            created_folder_count,
+            root_folder_id,
+            skipped_deleted_count: parsed.skipped_deleted_count,
+            skipped_missing_count,
+            imported_assets: committed,
+        })
+    }
+
+    /// Ingests raw OS file and/or folder paths, intercepting `.eaglepack`/`.library` material
+    /// packages before raw directory walking, mirroring any remaining dropped directories as
+    /// Charkle folders (and nested subfolders) under `target_folder_id`, reusing case-insensitively
     /// matching sibling folders when present, and importing loose files directly into
     /// `target_folder_id`.
     ///
@@ -751,11 +1141,47 @@ impl LiveCharkleEngine {
             return Ok(IngestPathsReport::default());
         }
 
-        let plan = tokio::task::spawn_blocking(move || plan_local_path_ingest(raw_paths))
+        let mut package_paths: Vec<PathBuf> = Vec::new();
+        let mut normal_paths: Vec<PathBuf> = Vec::with_capacity(raw_paths.len());
+        for raw in raw_paths {
+            if EaglePackImporter::is_recognized_material_package(&raw, false) {
+                package_paths.push(raw);
+            } else {
+                normal_paths.push(raw);
+            }
+        }
+
+        let mut report = IngestPathsReport::default();
+        for pkg_path in package_paths {
+            let pkg = self
+                .import_material_package_internal(
+                    &pkg_path,
+                    target_folder_id,
+                    target_board_id,
+                    false,
+                    true,
+                )
+                .await?;
+            report.assets.extend(pkg.imported_assets);
+            report.skipped_files += pkg.skipped_missing_count;
+            if let Some(root_fid) = pkg.root_folder_id {
+                if let Ok(Some(folder)) = self.db.folder(root_fid) {
+                    report.matched_folder_names.push(folder.name.clone());
+                    if pkg.created_folder_count > 0 {
+                        report.created_folders.push(folder);
+                    }
+                }
+            }
+        }
+
+        if normal_paths.is_empty() {
+            return Ok(report);
+        }
+
+        let plan = tokio::task::spawn_blocking(move || plan_local_path_ingest(normal_paths))
             .await
             .map_err(|e| CoreError::Media(format!("Path scan task failed: {e}")))?;
 
-        let mut report = IngestPathsReport::default();
         let mut folders_snapshot = self.db.fetch_folders()?;
         let mut ingest_groups: Vec<(Option<Uuid>, Vec<PathBuf>)> = Vec::new();
 
@@ -926,6 +1352,304 @@ impl LiveCharkleEngine {
     /// Updates `last_opened_at` locally without emitting a cloud sync operation.
     pub fn mark_asset_opened(&self, id: Uuid) -> CoreResult<Option<AssetRecord>> {
         self.db.mark_asset_opened(id)
+    }
+
+    // =========================================================================
+    // Classical Non-AI Multi-Media Smart Deduplication
+    // =========================================================================
+
+    fn dedup_cache_path(&self) -> PathBuf {
+        self.media.directory.join("dedup-fingerprints-v1.json")
+    }
+
+    fn load_dedup_cache_snapshot(&self) -> HashMap<Uuid, CachedDedupFingerprintEntry> {
+        let mut guard = self.dedup_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref map) = *guard {
+            return map.clone();
+        }
+        let mut loaded = HashMap::new();
+        if let Ok(raw) = std::fs::read(self.dedup_cache_path()) {
+            if let Ok(decoded) =
+                serde_json::from_slice::<HashMap<String, CachedDedupFingerprintEntry>>(&raw)
+            {
+                for (k, v) in decoded {
+                    if let Ok(id) = Uuid::parse_str(&k) {
+                        loaded.insert(id, v);
+                    }
+                }
+            }
+        }
+        *guard = Some(loaded.clone());
+        loaded
+    }
+
+    fn persist_dedup_cache_map(&self, map: &HashMap<Uuid, CachedDedupFingerprintEntry>) {
+        let mut encoded: HashMap<String, &CachedDedupFingerprintEntry> =
+            HashMap::with_capacity(map.len());
+        for (id, entry) in map {
+            encoded.insert(format_swift_uuid(id), entry);
+        }
+        let Ok(bytes) = serde_json::to_vec(&encoded) else {
+            return;
+        };
+        let path = self.dedup_cache_path();
+        let tmp = self.media.directory.join("dedup-fingerprints-v1.json.tmp");
+        if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    /// Scans active non-trashed assets within `scope` across all 8 `MediaKind`s using purely
+    /// classical deterministic algorithms (zero AI / zero cloud), caching visual perceptual
+    /// fingerprints in `<media_root>/dedup-fingerprints-v1.json`.
+    pub async fn scan_duplicates(
+        &self,
+        scope: DeduplicationScanScope,
+        sensitivity: DeduplicationSensitivity,
+        media_kinds: Option<Vec<MediaKind>>,
+    ) -> CoreResult<DeduplicationScanReport> {
+        let started = std::time::Instant::now();
+        let mut criteria = FilterCriteria {
+            include_trashed: false,
+            ..FilterCriteria::default()
+        };
+        if let Some(kinds) = media_kinds {
+            if !kinds.is_empty() {
+                criteria.kinds = kinds.into_iter().collect();
+            }
+        }
+        match scope {
+            DeduplicationScanScope::AllActive => {}
+            DeduplicationScanScope::Inbox => {
+                criteria.only_inbox = true;
+            }
+            DeduplicationScanScope::Folder {
+                folder_id,
+                include_subfolders,
+            } => {
+                criteria.folder_id = Some(folder_id);
+                criteria.include_subfolders = include_subfolders;
+            }
+        }
+
+        let scoped_assets = self.db.fetch_assets(&criteria, None)?;
+        if scoped_assets.len() < 2 {
+            return Ok(DeduplicationScanReport {
+                scanned_asset_count: scoped_assets.len(),
+                skipped_non_visual_count: 0,
+                groups: Vec::new(),
+                total_duplicate_items: 0,
+                total_reclaimable_bytes: 0,
+                duration_seconds: started.elapsed().as_secs_f64(),
+            });
+        }
+
+        let boards = self.db.fetch_boards()?;
+        let mut board_referenced_asset_ids: HashSet<Uuid> = HashSet::new();
+        for board in &boards {
+            for node in &board.nodes {
+                if let BoardNodeKind::AssetRef { asset_id, .. } = node.kind {
+                    board_referenced_asset_ids.insert(asset_id);
+                }
+            }
+        }
+
+        let mut cache_map = self.load_dedup_cache_snapshot();
+        let mut fingerprints: HashMap<Uuid, crate::media::ClassicalImageFingerprint> =
+            HashMap::with_capacity(scoped_assets.len());
+        let mut to_compute_visual: Vec<(Uuid, String, f64, PathBuf)> = Vec::new();
+        let mut bookmark_keys: HashMap<Uuid, String> = HashMap::new();
+        let mut to_hash_docs: Vec<(AssetRecord, Option<PathBuf>)> = Vec::new();
+
+        for asset in &scoped_assets {
+            if SmartDeduplicator::needs_visual_fingerprint(asset.media_kind) {
+                if !asset.content_hash.is_empty() {
+                    if let Some(cached) = cache_map.get(&asset.id) {
+                        if cached.content_hash == asset.content_hash {
+                            fingerprints.insert(asset.id, cached.fingerprint.clone());
+                            continue;
+                        }
+                    }
+                }
+                if let Some(path) = self
+                    .media
+                    .thumbnail_url(asset.id, ThumbnailTier::Grid520)
+                    .or_else(|| self.media.cached_original(asset))
+                {
+                    to_compute_visual.push((
+                        asset.id,
+                        asset.content_hash.clone(),
+                        asset.aspect_ratio(),
+                        path,
+                    ));
+                }
+            } else if asset.media_kind == MediaKind::WebBookmark {
+                if let Some(key) = SmartDeduplicator::canonical_bookmark_key(asset) {
+                    bookmark_keys.insert(asset.id, key);
+                }
+            } else if asset.media_kind == MediaKind::Document {
+                to_hash_docs.push((asset.clone(), self.media.cached_original(asset)));
+            }
+        }
+
+        if !to_compute_visual.is_empty() {
+            let max_concurrency = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(2, 8);
+            let mut next_idx = 0usize;
+            let mut cache_mutated = false;
+            let mut join_set = tokio::task::JoinSet::new();
+
+            while next_idx < to_compute_visual.len() && join_set.len() < max_concurrency {
+                let (asset_id, content_hash, aspect, path) = to_compute_visual[next_idx].clone();
+                next_idx += 1;
+                join_set.spawn_blocking(move || {
+                    let fp = SmartDeduplicator::compute_fingerprint_from_path(&path, Some(aspect));
+                    (asset_id, content_hash, fp)
+                });
+            }
+
+            while let Some(res) = join_set.join_next().await {
+                if let Ok((asset_id, content_hash, Some(fp))) = res {
+                    fingerprints.insert(asset_id, fp.clone());
+                    if !content_hash.is_empty() {
+                        cache_map.insert(
+                            asset_id,
+                            CachedDedupFingerprintEntry {
+                                content_hash,
+                                fingerprint: fp,
+                            },
+                        );
+                        cache_mutated = true;
+                    }
+                }
+                if next_idx < to_compute_visual.len() {
+                    let (asset_id, content_hash, aspect, path) =
+                        to_compute_visual[next_idx].clone();
+                    next_idx += 1;
+                    join_set.spawn_blocking(move || {
+                        let fp =
+                            SmartDeduplicator::compute_fingerprint_from_path(&path, Some(aspect));
+                        (asset_id, content_hash, fp)
+                    });
+                }
+            }
+
+            if cache_mutated {
+                let active_ids: HashSet<Uuid> = scoped_assets.iter().map(|a| a.id).collect();
+                if cache_map.len() > 5_000usize.max(active_ids.len() * 2) {
+                    cache_map.retain(|id, _| active_ids.contains(id));
+                }
+                {
+                    let mut guard = self.dedup_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = Some(cache_map.clone());
+                }
+                self.persist_dedup_cache_map(&cache_map);
+            }
+        }
+
+        let doc_text_hashes: HashMap<Uuid, String> = if to_hash_docs.is_empty() {
+            HashMap::new()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let mut out = HashMap::new();
+                for (asset, path) in to_hash_docs {
+                    if let Some(h) =
+                        SmartDeduplicator::normalized_document_text_hash(&asset, path.as_deref())
+                    {
+                        out.insert(asset.id, h);
+                    }
+                }
+                out
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        let scanned_asset_count = scoped_assets.len();
+        let indexed: Vec<IndexedMediaAsset> = scoped_assets
+            .into_iter()
+            .map(|asset| {
+                let id = asset.id;
+                IndexedMediaAsset {
+                    asset,
+                    fingerprint: fingerprints.remove(&id),
+                    canonical_bookmark_key: bookmark_keys.remove(&id),
+                    normalized_text_hash: doc_text_hashes.get(&id).cloned(),
+                }
+            })
+            .collect();
+
+        let groups = tokio::task::spawn_blocking(move || {
+            SmartDeduplicator::cluster_duplicates(
+                &indexed,
+                sensitivity,
+                &board_referenced_asset_ids,
+            )
+        })
+        .await
+        .map_err(|e| CoreError::Media(format!("Duplicate clustering task failed: {e}")))?;
+
+        let total_duplicate_items: usize = groups
+            .iter()
+            .map(|g| g.candidates.len().saturating_sub(1))
+            .sum();
+        let total_reclaimable_bytes: i64 = groups.iter().map(|g| g.reclaimable_bytes).sum();
+
+        Ok(DeduplicationScanReport {
+            scanned_asset_count,
+            skipped_non_visual_count: 0,
+            groups,
+            total_duplicate_items,
+            total_reclaimable_bytes,
+            duration_seconds: started.elapsed().as_secs_f64(),
+        })
+    }
+
+    /// Resolves duplicate groups atomically inside a single SQLite transaction, merging lossless
+    /// metadata, seamlessly rebinding Moodboard references, and either moving duplicates to Trash
+    /// or permanently deleting them with cache cleanup.
+    pub fn resolve_duplicate_groups(
+        &self,
+        plans: &[DeduplicationResolutionPlan],
+        disposal: DuplicateDisposalMode,
+        merge_metadata: bool,
+    ) -> CoreResult<DeduplicationCleanupResult> {
+        let (result, updated_board_ids, permanent_delete_ids) = self
+            .db
+            .resolve_duplicate_groups_tx(plans, disposal, merge_metadata)?;
+
+        if disposal == DuplicateDisposalMode::PermanentlyDelete && !permanent_delete_ids.is_empty()
+        {
+            self.permanently_delete_assets(&permanent_delete_ids)?;
+            let mut cache_map = self.load_dedup_cache_snapshot();
+            let mut changed = false;
+            for rid in &permanent_delete_ids {
+                if cache_map.remove(rid).is_some() {
+                    changed = true;
+                }
+            }
+            if changed {
+                {
+                    let mut guard = self.dedup_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    *guard = Some(cache_map.clone());
+                }
+                self.persist_dedup_cache_map(&cache_map);
+            }
+        }
+
+        for bid in &updated_board_ids {
+            self.emit(EngineEvent::BoardUpdated(*bid));
+        }
+        if result.removed_asset_count > 0 || result.merged_metadata_count > 0 {
+            self.emit(EngineEvent::LibraryChanged);
+        }
+
+        Ok(result)
     }
 
     // =========================================================================
@@ -3421,5 +4145,477 @@ mod tests {
             report3.assets[0].folder_id,
             Some(report3.created_folders[0].id)
         );
+    }
+
+    #[tokio::test]
+    async fn eaglepack_zip_and_library_dir_import_losslessly_without_sidecar_junk() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let dir = tempdir().unwrap();
+        let engine = LiveCharkleEngine::open(dir.path()).unwrap();
+        let work_dir = tempdir().unwrap();
+
+        let png_bytes = MediaArtwork::encode_png(&image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_fn(96, 64, |x, y| {
+                image::Rgba([(x * 2) as u8, (y * 3) as u8, 180, 255])
+            }),
+        ))
+        .unwrap();
+        let bm_thumb_bytes = MediaArtwork::encode_png(&image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_fn(120, 80, |x, _| image::Rgba([24, 96, (x * 2) as u8, 255])),
+        ))
+        .unwrap();
+
+        // 1. Build a complete `.eaglepack` ZIP archive with single root folder, nested colored child,
+        //    image asset with tags/star/annotation/url/btime, offline `.url` bookmark with `_thumbnail.png`,
+        //    and an `isDeleted: true` item that MUST be skipped.
+        let pack_path = work_dir.path().join("TypographyRefs.eaglepack");
+        {
+            let file = std::fs::File::create(&pack_path).unwrap();
+            let mut zw = ZipWriter::new(file);
+            let opts = SimpleFileOptions::default();
+
+            let pack_json = serde_json::json!({
+                "folder": {
+                    "id": "F_ROOT",
+                    "name": "排版灵感",
+                    "iconColor": "blue",
+                    "children": [
+                        {
+                            "id": "F_CHILD",
+                            "name": "书签集合",
+                            "iconColor": "green",
+                            "children": []
+                        }
+                    ]
+                },
+                "images": [
+                    {
+                        "id": "ITEM_IMG_1",
+                        "name": "Swiss Grid / 01",
+                        "ext": "png",
+                        "tags": ["Swiss", "swiss", "排版"],
+                        "star": 4,
+                        "annotation": "网格节奏极佳",
+                        "url": "https://example.com/swiss-grid",
+                        "btime": 1700000000000_i64,
+                        "folders": ["F_ROOT"]
+                    },
+                    {
+                        "id": "ITEM_BM_1",
+                        "name": "Type Foundry",
+                        "ext": "url",
+                        "tags": ["字体"],
+                        "rating": 5,
+                        "annotation": "离线书签截图",
+                        "folders": ["F_CHILD"]
+                    },
+                    {
+                        "id": "ITEM_DEL_1",
+                        "name": "Deleted Item",
+                        "ext": "png",
+                        "isDeleted": true,
+                        "folders": ["F_ROOT"]
+                    }
+                ]
+            });
+            zw.start_file("pack.json", opts).unwrap();
+            zw.write_all(pack_json.to_string().as_bytes()).unwrap();
+
+            zw.start_file("images/ITEM_IMG_1.info/metadata.json", opts)
+                .unwrap();
+            zw.write_all(br#"{"id":"ITEM_IMG_1","name":"Swiss Grid / 01","ext":"png"}"#)
+                .unwrap();
+            zw.start_file("images/ITEM_IMG_1.info/Swiss Grid _ 01.png", opts)
+                .unwrap();
+            zw.write_all(&png_bytes).unwrap();
+            zw.start_file("images/ITEM_IMG_1.info/Swiss Grid _ 01_thumbnail.png", opts)
+                .unwrap();
+            zw.write_all(&png_bytes).unwrap();
+
+            zw.start_file("images/ITEM_BM_1.info/metadata.json", opts)
+                .unwrap();
+            zw.write_all(br#"{"id":"ITEM_BM_1","name":"Type Foundry","ext":"url"}"#)
+                .unwrap();
+            zw.start_file("images/ITEM_BM_1.info/Type Foundry.url", opts)
+                .unwrap();
+            zw.write_all(b"[InternetShortcut]\r\nURL=https://foundry.example.org/specimen\r\n")
+                .unwrap();
+            zw.start_file("images/ITEM_BM_1.info/Type Foundry_thumbnail.png", opts)
+                .unwrap();
+            zw.write_all(&bm_thumb_bytes).unwrap();
+
+            zw.start_file("images/ITEM_DEL_1.info/metadata.json", opts)
+                .unwrap();
+            zw.write_all(br#"{"id":"ITEM_DEL_1","isDeleted":true}"#)
+                .unwrap();
+            zw.start_file("images/ITEM_DEL_1.info/Deleted Item.png", opts)
+                .unwrap();
+            zw.write_all(&png_bytes).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let res = engine
+            .import_material_package(&pack_path, None, None)
+            .await
+            .unwrap();
+        assert_eq!(res.imported_asset_count, 2);
+        assert_eq!(res.created_folder_count, 2);
+        assert_eq!(res.skipped_deleted_count, 1);
+        assert_eq!(res.skipped_missing_count, 0);
+        assert!(res.root_folder_id.is_some());
+
+        let folders = engine.fetch_folders().unwrap();
+        let root_f = folders
+            .iter()
+            .find(|f| f.name == "排版灵感" && f.parent_id.is_none())
+            .expect("root folder mirrored without double nesting");
+        assert_eq!(root_f.color_hex.as_deref(), Some("#3B82F6"));
+        let child_f = folders
+            .iter()
+            .find(|f| f.name == "书签集合" && f.parent_id == Some(root_f.id))
+            .expect("child folder mirrored");
+        assert_eq!(child_f.color_hex.as_deref(), Some("#22C55E"));
+
+        let assets = engine.fetch_assets(&FilterCriteria::default()).unwrap();
+        assert_eq!(
+            assets.len(),
+            2,
+            "must not import metadata.json or _thumbnail.png"
+        );
+
+        let img_asset = assets
+            .iter()
+            .find(|a| a.title == "Swiss Grid / 01")
+            .expect("preserved original slash title");
+        assert_eq!(img_asset.folder_id, Some(root_f.id));
+        assert_eq!(img_asset.rating, 4);
+        assert_eq!(img_asset.notes, "网格节奏极佳");
+        assert_eq!(
+            img_asset.source_url.as_deref(),
+            Some("https://example.com/swiss-grid")
+        );
+        assert_eq!(img_asset.created_at.timestamp(), 1_700_000_000);
+        assert_eq!(img_asset.tags.len(), 2);
+
+        let bm_asset = assets
+            .iter()
+            .find(|a| a.title == "Type Foundry")
+            .expect("offline .url bookmark imported");
+        assert_eq!(bm_asset.media_kind, MediaKind::WebBookmark);
+        assert_eq!(bm_asset.folder_id, Some(child_f.id));
+        assert_eq!(bm_asset.rating, 5);
+        assert_eq!(
+            bm_asset.source_url.as_deref(),
+            Some("https://foundry.example.org/specimen")
+        );
+        assert_eq!((bm_asset.pixel_width, bm_asset.pixel_height), (120, 80));
+
+        // 2. Dropping a `.library` directory into `ingest_local_paths` intercepts it cleanly
+        let lib_dir = work_dir.path().join("StudioArchive.library");
+        let item_info = lib_dir.join("images").join("L1.info");
+        std::fs::create_dir_all(&item_info).unwrap();
+        std::fs::write(
+            lib_dir.join("metadata.json"),
+            r#"{"folders":[{"id":"FL1","name":"Inbox","children":[]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            item_info.join("metadata.json"),
+            r#"{"id":"L1","name":"Poster / Hero","ext":"png","folders":["FL1"],"tags":["Hero"]}"#,
+        )
+        .unwrap();
+        std::fs::write(item_info.join("Poster _ Hero.png"), &png_bytes).unwrap();
+
+        let drop_report = engine
+            .ingest_local_paths(vec![lib_dir], None, None)
+            .await
+            .unwrap();
+        assert_eq!(drop_report.assets.len(), 1);
+        assert_eq!(drop_report.assets[0].title, "Poster / Hero");
+        let folders_after = engine.fetch_folders().unwrap();
+        assert!(
+            folders_after.iter().any(|f| f.name == "Inbox 导入"),
+            "root Inbox folder must normalize to Inbox 导入"
+        );
+        assert!(
+            !folders_after
+                .iter()
+                .any(|f| f.name == "images" || f.name.ends_with(".info")),
+            "must never create raw .info or images folders for dropped .library"
+        );
+    }
+
+    #[tokio::test]
+    async fn smart_dedup_scan_and_resolve_merges_metadata_rebinds_boards_and_isolates_buckets() {
+        use crate::models::core::{AssetBatchPatch, FolderAssignment, PhotoExifMetadata};
+        use crate::models::moodboard::{BoardNode, BoardNodeKind, BoardRect, MoodboardDocument};
+
+        let dir = tempdir().unwrap();
+        let engine = LiveCharkleEngine::open(dir.path()).unwrap();
+        let work = tempdir().unwrap();
+
+        // Generate a textured image (high-res PNG master + scaled compressed JPEG duplicate)
+        let hi_res =
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(256, 192, |x, y| {
+                let r = ((x * 7 + y * 3) % 256) as u8;
+                let g = (((x ^ y) * 5 + 40) % 256) as u8;
+                let b = ((y * 9 + 120) % 256) as u8;
+                image::Rgba([r, g, b, 255])
+            }));
+        let hi_png_path = work.path().join("master_hq.png");
+        hi_res.save(&hi_png_path).unwrap();
+
+        let lo_res = hi_res.resize_exact(128, 96, image::imageops::FilterType::Triangle);
+        let lo_jpg_path = work.path().join("copy_low.jpg");
+        let jpg_bytes = MediaArtwork::encode_jpeg(&lo_res, 82).unwrap();
+        std::fs::write(&lo_jpg_path, jpg_bytes).unwrap();
+
+        // Also create an unrelated color-shifted version (must NOT match!)
+        let diff_color =
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(256, 192, |x, y| {
+                let r = ((y * 9 + 120) % 256) as u8;
+                let g = ((x * 7 + y * 3) % 256) as u8;
+                let b = (((x ^ y) * 5 + 40) % 256) as u8;
+                image::Rgba([r, g, b, 255])
+            }));
+        let diff_path = work.path().join("different_palette.png");
+        diff_color.save(&diff_path).unwrap();
+
+        // Also create two text documents with identical normalized text (different whitespace/CRLF)
+        let doc_a = work.path().join("spec_a.md");
+        let doc_b = work.path().join("spec_b.txt");
+        std::fs::write(
+            &doc_a,
+            "Charkle Visual Architecture Guide:\n\nDeterministic classical algorithms ensure zero cloud dependency and predictable deduplication results.",
+        )
+        .unwrap();
+        std::fs::write(
+            &doc_b,
+            "Charkle  Visual   Architecture Guide:\r\nDeterministic classical algorithms ensure zero cloud dependency and predictable deduplication results.  ",
+        )
+        .unwrap();
+
+        let archive_folder = engine.create_folder("摄影精选", None).unwrap();
+
+        let created_hi = engine
+            .ingest(vec![CaptureInput::FilePath(hi_png_path)], None, None)
+            .await
+            .unwrap();
+        let hi_id = created_hi[0].id;
+
+        let created_lo = engine
+            .ingest(
+                vec![CaptureInput::FilePath(lo_jpg_path)],
+                Some(archive_folder.id),
+                None,
+            )
+            .await
+            .unwrap();
+        let lo_id = created_lo[0].id;
+
+        let _created_diff = engine
+            .ingest(vec![CaptureInput::FilePath(diff_path)], None, None)
+            .await
+            .unwrap();
+        let created_docs = engine
+            .ingest(
+                vec![CaptureInput::FilePath(doc_a), CaptureInput::FilePath(doc_b)],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created_docs.len(), 2);
+
+        // Attach metadata exclusively onto the lower-quality JPEG duplicate to verify lossless merge
+        engine
+            .update_assets(&AssetBatchPatch {
+                asset_ids: vec![lo_id],
+                rating: Some(5),
+                notes: Some("客户最终确认色稿".to_string()),
+                add_tags: vec!["终稿".to_string(), "印刷".to_string()],
+                pinned_offline: Some(true),
+                folder_assignment: FolderAssignment::Folder(archive_folder.id),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut lo_rec = engine.fetch_asset(lo_id).unwrap().unwrap();
+        lo_rec.source_url = Some("https://studio.example.com/artwork/42".to_string());
+        let mut lo_rich = lo_rec.rich_metadata.clone().unwrap_or_default();
+        lo_rich.photo_exif = Some(PhotoExifMetadata {
+            camera_make: Some("Leica".to_string()),
+            camera_model: Some("Q3".to_string()),
+            ..Default::default()
+        });
+        lo_rec.rich_metadata = Some(lo_rich);
+        engine.db().save_asset_locally(&lo_rec, true).unwrap();
+
+        // Create two Moodboards:
+        // - board1 references ONLY lo_id -> must rebind to hi_id
+        // - board2 references BOTH hi_id and lo_id -> must deduplicate so hi_id appears once
+        let mut board1 = MoodboardDocument::new("主视觉情绪板");
+        board1.nodes.push(BoardNode {
+            id: Uuid::new_v4(),
+            kind: BoardNodeKind::AssetRef {
+                asset_id: lo_id,
+                crop: None,
+                weight: 1,
+                autoplay_loop: true,
+            },
+            frame: BoardRect::new(0.0, 0.0, 280.0, 210.0),
+            z_index: 0,
+            rotation_degrees: 0.0,
+            flip_horizontal: false,
+            flip_vertical: false,
+            is_locked: false,
+            editorial_order: 0,
+            updated_at: Utc::now(),
+        });
+        let board1 = engine.save_board(&board1).unwrap();
+
+        let mut board2 = MoodboardDocument::new("重复引用情绪板");
+        for (idx, aid) in [hi_id, lo_id].into_iter().enumerate() {
+            board2.nodes.push(BoardNode {
+                id: Uuid::new_v4(),
+                kind: BoardNodeKind::AssetRef {
+                    asset_id: aid,
+                    crop: None,
+                    weight: 1,
+                    autoplay_loop: true,
+                },
+                frame: BoardRect::new((idx as f64) * 300.0, 0.0, 280.0, 210.0),
+                z_index: idx as i32,
+                rotation_degrees: 0.0,
+                flip_horizontal: false,
+                flip_vertical: false,
+                is_locked: false,
+                editorial_order: idx as i32,
+                updated_at: Utc::now(),
+            });
+        }
+        let board2 = engine.save_board(&board2).unwrap();
+
+        // Scan duplicates across all active media
+        let report = engine
+            .scan_duplicates(
+                DeduplicationScanScope::AllActive,
+                DeduplicationSensitivity::Balanced,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.scanned_asset_count, 5);
+        assert!(
+            engine
+                .media()
+                .directory
+                .join("dedup-fingerprints-v1.json")
+                .is_file(),
+            "fingerprint cache must be persisted"
+        );
+
+        let img_group = report
+            .groups
+            .iter()
+            .find(|g| g.primary_media_kind == MediaKind::Image)
+            .expect("PNG + scaled JPG clustered as image duplicates");
+        assert_eq!(
+            img_group.candidates.len(),
+            2,
+            "different palette must NOT cluster"
+        );
+        assert_eq!(
+            img_group.recommended_keep_asset_id, hi_id,
+            "high-res lossless PNG must be recommended over low-res JPG"
+        );
+
+        let doc_group = report
+            .groups
+            .iter()
+            .find(|g| g.primary_media_kind == MediaKind::Document)
+            .expect("normalized text docs must cluster");
+        assert_eq!(doc_group.candidates.len(), 2);
+
+        // Resolve the image duplicate group into Trash with lossless metadata merge
+        let cleanup = engine
+            .resolve_duplicate_groups(
+                &[DeduplicationResolutionPlan {
+                    keep_asset_id: hi_id,
+                    remove_asset_ids: vec![lo_id],
+                }],
+                DuplicateDisposalMode::MoveToTrash,
+                true,
+            )
+            .unwrap();
+        assert_eq!(cleanup.resolved_group_count, 1);
+        assert_eq!(cleanup.removed_asset_count, 1);
+        assert_eq!(cleanup.merged_metadata_count, 1);
+        assert_eq!(cleanup.updated_board_count, 2);
+
+        let keeper_after = engine.fetch_asset(hi_id).unwrap().unwrap();
+        assert!(!keeper_after.is_trashed);
+        assert_eq!(keeper_after.rating, 5);
+        assert_eq!(keeper_after.folder_id, Some(archive_folder.id));
+        assert!(keeper_after.tags.iter().any(|t| t == "终稿"));
+        assert!(keeper_after.tags.iter().any(|t| t == "印刷"));
+        assert!(keeper_after.notes.contains("客户最终确认色稿"));
+        assert_eq!(
+            keeper_after.source_url.as_deref(),
+            Some("https://studio.example.com/artwork/42")
+        );
+        assert!(keeper_after.pinned_offline);
+        assert_eq!(
+            keeper_after
+                .rich_metadata
+                .as_ref()
+                .and_then(|r| r.photo_exif.as_ref())
+                .and_then(|e| e.camera_make.as_deref()),
+            Some("Leica")
+        );
+
+        let dup_after = engine.fetch_asset(lo_id).unwrap().unwrap();
+        assert!(dup_after.is_trashed);
+
+        let board1_after = engine.fetch_board(board1.id).unwrap().unwrap();
+        assert_eq!(board1_after.nodes.len(), 1);
+        assert!(matches!(
+            board1_after.nodes[0].kind,
+            BoardNodeKind::AssetRef { asset_id, .. } if asset_id == hi_id
+        ));
+
+        let board2_after = engine.fetch_board(board2.id).unwrap().unwrap();
+        assert_eq!(
+            board2_after.nodes.len(),
+            1,
+            "redundant duplicate AssetRef on board2 must be deduplicated"
+        );
+        assert!(matches!(
+            board2_after.nodes[0].kind,
+            BoardNodeKind::AssetRef { asset_id, .. } if asset_id == hi_id
+        ));
+
+        // Resolve document group permanently
+        let doc_keep = doc_group.recommended_keep_asset_id;
+        let doc_remove: Vec<Uuid> = doc_group
+            .candidates
+            .iter()
+            .map(|c| c.asset.id)
+            .filter(|id| *id != doc_keep)
+            .collect();
+        let perm_cleanup = engine
+            .resolve_duplicate_groups(
+                &[DeduplicationResolutionPlan {
+                    keep_asset_id: doc_keep,
+                    remove_asset_ids: doc_remove.clone(),
+                }],
+                DuplicateDisposalMode::PermanentlyDelete,
+                true,
+            )
+            .unwrap();
+        assert_eq!(perm_cleanup.removed_asset_count, 1);
+        assert!(engine.fetch_asset(doc_remove[0]).unwrap().is_none());
     }
 }

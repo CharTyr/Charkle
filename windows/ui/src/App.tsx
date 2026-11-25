@@ -5,12 +5,14 @@ import { QuickCaptureModal } from './features/capture/QuickCaptureModal';
 import { PaneResizeDivider } from './features/chrome/PaneResizeDivider';
 import { Titlebar } from './features/chrome/Titlebar';
 import { WindowResizeEdges } from './features/chrome/WindowResizeEdges';
+import { SmartDeduplicationModal } from './features/dedup/SmartDeduplicationModal';
 import {
   PointerDragGhostLayer,
   registerPointerDragHandlers,
 } from './features/dnd/PointerDragContext';
 import { useTauriFileDrop } from './features/dnd/useTauriFileDrop';
 import { GalleryView } from './features/gallery/GalleryView';
+import { runMaterialPackageImport } from './features/import/materialPackageImport';
 import { InspectorView } from './features/inspector/InspectorView';
 import { JumpAnywhereModal } from './features/jump/JumpAnywhereModal';
 import { MoodboardGeneratorModal } from './features/moodboard/MoodboardGeneratorModal';
@@ -729,6 +731,7 @@ export const App: React.FC = () => {
         coord.captureOpen ||
         coord.onboardingOpen ||
         coord.moodboardGeneratorOpen ||
+        coord.dedupOpen ||
         hasNonQuickLookModal();
       const anyBlockingModal =
         coord.jumpOpen || coord.settingsOpen || otherModalOpen;
@@ -780,6 +783,22 @@ export const App: React.FC = () => {
         return;
       }
 
+      // Ctrl+Shift+D opens/closes Smart Deduplication Modal
+      if (mod && e.shiftKey && !e.altKey && lowerKey === 'd') {
+        if (coord.dedupOpen) {
+          if (!coord.quickLookAssetId) {
+            e.preventDefault();
+            coord.closeDeduplication();
+          }
+          return;
+        }
+        if (!anyBlockingModal && !typing && !coord.quickLookAssetId) {
+          e.preventDefault();
+          coord.openDeduplication();
+        }
+        return;
+      }
+
       if (anyBlockingModal || typing) {
         return;
       }
@@ -794,6 +813,13 @@ export const App: React.FC = () => {
       if (mod && !e.shiftKey && !e.altKey && lowerKey === 'n') {
         e.preventDefault();
         coord.setCaptureOpen(true);
+        return;
+      }
+
+      // Ctrl+Shift+I opens Material Package Importer (.eaglepack / .zip)
+      if (mod && e.shiftKey && !e.altKey && lowerKey === 'i') {
+        e.preventDefault();
+        void runMaterialPackageImport('files');
         return;
       }
 
@@ -983,7 +1009,7 @@ export const App: React.FC = () => {
 
       if (
         document.querySelector(
-          '[data-charkle-popover-open="true"], [data-inspector-delete-open="true"], [data-quicklook-delete-open="true"], [role="dialog"][aria-modal="true"]:not([data-testid="quicklook-overlay"])',
+          '[data-charkle-popover-open="true"], [data-inspector-delete-open="true"], [data-quicklook-delete-open="true"], [role="dialog"][aria-modal="true"]:not([data-testid="quicklook-overlay"]):not([data-testid="smart-dedup-modal"])',
         )
       ) {
         return;
@@ -999,6 +1025,9 @@ export const App: React.FC = () => {
         coord.closeQuickLook();
         return;
       }
+
+      // When Smart Deduplication modal is open without Quick Look, don't capture Space for background gallery
+      if (coord.dedupOpen) return;
 
       // Case 2: Quick Look is CLOSED -> Moodboard owns Space (Hold = Pan, Tap = Quick Look)
       const inMoodboard =
@@ -1055,6 +1084,7 @@ export const App: React.FC = () => {
         coord.settingsOpen ||
         coord.onboardingOpen ||
         coord.moodboardGeneratorOpen ||
+        coord.dedupOpen ||
         document.querySelector('[role="dialog"][aria-modal="true"]')
       ) {
         return;
@@ -1250,6 +1280,7 @@ export const App: React.FC = () => {
         </div>
       </div>
 
+      <SmartDeduplicationModal />
       <QuickLookOverlay />
       <JumpAnywhereModal />
       <QuickCaptureModal />

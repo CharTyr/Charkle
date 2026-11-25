@@ -10,6 +10,7 @@ import {
   Delete16Regular,
   Dismiss12Regular,
   Edit16Regular,
+  FolderOpen16Regular,
   MoreHorizontal16Regular,
   Options16Regular,
   PanelLeftContract20Regular,
@@ -54,6 +55,7 @@ import {
   type SyncStatus,
 } from '../../types/domain';
 import { useDndStore } from '../dnd/dndStore';
+import { runMaterialPackageImport } from '../import/materialPackageImport';
 import { FolderTree } from './FolderTree';
 import { SmartFolderEditorModal } from './SmartFolderEditorModal';
 
@@ -221,6 +223,7 @@ export const SidebarView: React.FC = () => {
   const openSettings = useCoordinatorStore((s) => s.openSettings);
   const setCaptureOpen = useCoordinatorStore((s) => s.setCaptureOpen);
   const openMoodboardGenerator = useCoordinatorStore((s) => s.openMoodboardGenerator);
+  const openDeduplication = useCoordinatorStore((s) => s.openDeduplication);
   const activeMoodboardId = useCoordinatorStore((s) => s.activeMoodboardId);
   const setActiveMoodboardId = useCoordinatorStore((s) => s.setActiveMoodboardId);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
@@ -1179,7 +1182,24 @@ export const SidebarView: React.FC = () => {
         {/* Scrollable Navigation Sections */}
         <div className="flex-1 min-h-0 overflow-y-auto charkle-scroll-hidden px-2 pb-2.5 flex flex-col gap-3">
           {/* Section 1: Library */}
-          <nav aria-label="素材库导航" className="flex flex-col gap-0.5">
+          <section className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-between px-2 pb-0.5">
+              <span className="text-[11px] font-semibold tracking-[0.02em] text-[var(--text-tertiary)]">
+                素材库
+              </span>
+              <Tooltip content="全媒体智能去重" shortcut="Ctrl+Shift+D" side="right">
+                <button
+                  type="button"
+                  aria-label="全媒体智能去重"
+                  data-testid="sidebar-smart-dedup-btn"
+                  onClick={() => openDeduplication({ type: 'allActive' })}
+                  className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-tertiary)] hover:text-[var(--accent)] hover:bg-[var(--win-subtle-hover)] cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]"
+                >
+                  <Sparkle16Regular className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
+            </div>
+            <nav aria-label="素材库导航" className="flex flex-col gap-0.5">
             <NavRow
               iconName="library"
               label="全部素材"
@@ -1225,7 +1245,8 @@ export const SidebarView: React.FC = () => {
               active={isDestEqual(destination, { type: 'trash' })}
               onClick={() => setDestination({ type: 'trash' })}
             />
-          </nav>
+            </nav>
+          </section>
 
           <div className="h-px bg-[var(--win-stroke-divider)] mx-1.5" />
 
@@ -1420,6 +1441,17 @@ export const SidebarView: React.FC = () => {
                 文件夹
               </span>
               <div className="flex items-center gap-0.5">
+                <Tooltip content="导入外部素材包 (.eaglepack / .zip)" shortcut="Ctrl+Shift+I" side="right">
+                  <button
+                    type="button"
+                    aria-label="导入外部素材包"
+                    data-testid="sidebar-import-package-btn"
+                    onClick={() => void runMaterialPackageImport('files')}
+                    className="charkle-pressable h-6 w-6 inline-flex items-center justify-center rounded-[var(--win-radius-control)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--accent)]"
+                  >
+                    <FolderOpen16Regular className="w-3.5 h-3.5" />
+                  </button>
+                </Tooltip>
                 {folders.length > 1 && (
                   <Tooltip content="排序文件夹" side="right">
                     <button

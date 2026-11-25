@@ -4,6 +4,8 @@
 pub mod artwork;
 pub mod audio;
 pub mod color;
+pub mod dedup;
+pub mod eaglepack;
 pub mod metadata;
 pub mod pipeline;
 pub mod resolvers;
@@ -13,6 +15,16 @@ pub mod xiaohongshu;
 pub use artwork::MediaArtwork;
 pub use audio::{analyze_audio, AudioAnalysis, WAVEFORM_BARS};
 pub use color::ColorExtractor;
+pub use dedup::{
+    CachedDedupFingerprintEntry, ClassicalImageFingerprint, DeduplicationCleanupResult,
+    DeduplicationResolutionPlan, DeduplicationScanReport, DeduplicationScanScope,
+    DeduplicationSensitivity, DuplicateAssetCandidate, DuplicateDisposalMode, DuplicateGroup,
+    DuplicateMatchKind, IndexedMediaAsset, SmartDeduplicator,
+};
+pub use eaglepack::{
+    EaglePackImporter, MaterialPackageImportResult, ParsedEagleAsset, ParsedEagleFolder,
+    ParsedEaglePackage, StagingDirGuard,
+};
 pub use metadata::{ExtractedImageMetadata, ImageMetadataExtractor};
 pub use pipeline::{
     FileDigests, MediaImportResult, MediaPipeline, OriginalEntry, SampleLibrarySeeder,

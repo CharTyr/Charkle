@@ -116,15 +116,42 @@ pub enum SocialPlatform {
     Threads,
     Bluesky,
     Xiaohongshu,
+    Pixiv,
+    Instagram,
 }
 
 impl SocialPlatform {
+    pub fn raw_value(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Threads => "threads",
+            Self::Bluesky => "bluesky",
+            Self::Xiaohongshu => "xiaohongshu",
+            Self::Pixiv => "pixiv",
+            Self::Instagram => "instagram",
+        }
+    }
+
+    pub fn from_raw(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "x" | "twitter" => Some(Self::X),
+            "threads" => Some(Self::Threads),
+            "bluesky" | "bsky" => Some(Self::Bluesky),
+            "xiaohongshu" | "xhs" | "rednote" => Some(Self::Xiaohongshu),
+            "pixiv" => Some(Self::Pixiv),
+            "instagram" | "ig" => Some(Self::Instagram),
+            _ => None,
+        }
+    }
+
     pub fn display_name(self) -> &'static str {
         match self {
             Self::X => "X",
             Self::Threads => "Threads",
             Self::Bluesky => "Bluesky",
             Self::Xiaohongshu => "小红书",
+            Self::Pixiv => "Pixiv",
+            Self::Instagram => "Instagram",
         }
     }
 
@@ -132,12 +159,20 @@ impl SocialPlatform {
         match self {
             Self::X => "推文",
             Self::Xiaohongshu => "笔记",
-            Self::Threads | Self::Bluesky => "贴文",
+            Self::Pixiv => "作品",
+            Self::Threads | Self::Bluesky | Self::Instagram => "贴文",
         }
     }
 
-    pub fn post_type_label(self) -> String {
-        format!("{} {}", self.display_name(), self.post_noun())
+    pub fn post_type_label(self) -> &'static str {
+        match self {
+            Self::X => "X 推文",
+            Self::Threads => "Threads 贴文",
+            Self::Bluesky => "Bluesky 贴文",
+            Self::Xiaohongshu => "小红书 笔记",
+            Self::Pixiv => "Pixiv 作品",
+            Self::Instagram => "Instagram 贴文",
+        }
     }
 
     pub fn open_action_label(self) -> &'static str {
@@ -146,6 +181,8 @@ impl SocialPlatform {
             Self::Threads => "在 Threads 打开",
             Self::Bluesky => "在 Bluesky 打开",
             Self::Xiaohongshu => "在小红书打开",
+            Self::Pixiv => "在 Pixiv 打开",
+            Self::Instagram => "在 Instagram 打开",
         }
     }
 }
@@ -1014,7 +1051,7 @@ impl AssetRecord {
             .as_ref()
             .and_then(|m| m.social_post.as_ref())
         {
-            return post.platform.post_type_label();
+            return post.platform.post_type_label().to_string();
         }
         if self.is_github_repo() {
             return "GitHub 仓库".to_string();

@@ -118,6 +118,8 @@ function displayTypeLabel(asset: AssetRecord): string {
     if (p === 'threads') return 'Threads 动态';
     if (p === 'bluesky') return 'Bluesky 动态';
     if (p === 'xiaohongshu') return '小红书笔记';
+    if (p === 'pixiv') return 'Pixiv 作品';
+    if (p === 'instagram') return 'Instagram 贴文';
   }
   const lower = asset.fileName.toLowerCase();
   if (lower.endsWith('.swatch')) return '灵感色卡';
@@ -1994,23 +1996,38 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
 
       const inTauri = isTauriRuntime();
       const isXhs = post.platform === 'xiaohongshu';
-      const postNoun = isXhs ? '笔记' : '推文';
+      const postNoun =
+        post.platform === 'xiaohongshu'
+          ? '笔记'
+          : post.platform === 'pixiv'
+            ? '作品'
+            : post.platform === 'x'
+              ? '推文'
+              : '贴文';
       const platformLabel =
         post.platform === 'xiaohongshu'
           ? '小红书'
-          : post.platform === 'threads'
-            ? 'Threads'
-            : post.platform === 'bluesky'
-              ? 'Bluesky'
-              : 'X';
+          : post.platform === 'pixiv'
+            ? 'Pixiv'
+            : post.platform === 'instagram'
+              ? 'Instagram'
+              : post.platform === 'threads'
+                ? 'Threads'
+                : post.platform === 'bluesky'
+                  ? 'Bluesky'
+                  : 'X';
       const platformBg =
         post.platform === 'xiaohongshu'
           ? '#FF2442'
-          : post.platform === 'bluesky'
-            ? '#0284C7'
-            : post.platform === 'threads'
-              ? '#27272A'
-              : '#18181B';
+          : post.platform === 'pixiv'
+            ? '#0096FA'
+            : post.platform === 'instagram'
+              ? '#D93B58'
+              : post.platform === 'bluesky'
+                ? '#0284C7'
+                : post.platform === 'threads'
+                  ? '#27272A'
+                  : '#18181B';
       const avatarSrc = resolveSocialMediaUrl(post.authorAvatarURL, inTauri);
       const displayHandle = formatSocialDisplayHandle(post);
 

@@ -433,6 +433,9 @@ pub fn run() {
             commands::assets::suggest_folder,
             commands::assets::hydrate_image_metadata,
             commands::assets::refresh_rich_asset,
+            commands::assets::import_material_packages,
+            commands::assets::scan_duplicates,
+            commands::assets::resolve_duplicate_groups,
             // Folders, Smart Folders & Tags
             commands::folders::fetch_folders,
             commands::folders::create_folder,

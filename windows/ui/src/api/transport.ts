@@ -22,9 +22,15 @@ import {
   type CloudAIUsageCategory,
   type CloudAIUsageSummary,
   type DeepLinkPayload,
+  type DeduplicationCleanupResult,
+  type DeduplicationResolutionPlan,
+  type DeduplicationScanReport,
+  type DeduplicationScanScope,
+  type DeduplicationSensitivity,
   type DesktopIntegrationStatus,
   type DragOutOutcome,
   type DriveSyncConfig,
+  type DuplicateDisposalMode,
   type EditorialLayoutResult,
   type ExtensionBridgeStateDto,
   type ExternalAgentConfig,
@@ -38,6 +44,8 @@ import {
   type GDirectInstallResult,
   type HotkeyConfig,
   type InboxTriageRecommendation,
+  type MaterialPackageImportResult,
+  type MediaKind,
   type MoodboardAgentStep,
   type MoodboardCurationRequest,
   type MoodboardDocument,
@@ -137,6 +145,21 @@ export interface CharkleTransport {
   suggestFolder(assetId: string): Promise<FolderSuggestion | null>;
   hydrateImageMetadata(id: string): Promise<AssetRecord | null>;
   refreshRichAsset(id: string): Promise<AssetRecord>;
+  importMaterialPackages(
+    paths: string[],
+    targetFolderId?: string | null,
+    targetBoardId?: string | null,
+  ): Promise<MaterialPackageImportResult[]>;
+  scanDuplicates(
+    scope: DeduplicationScanScope,
+    sensitivity: DeduplicationSensitivity,
+    mediaKinds?: MediaKind[] | null,
+  ): Promise<DeduplicationScanReport>;
+  resolveDuplicateGroups(
+    plans: DeduplicationResolutionPlan[],
+    disposal: DuplicateDisposalMode,
+    mergeMetadata: boolean,
+  ): Promise<DeduplicationCleanupResult>;
 
   // Folders, Smart Folders & Tags
   fetchFolders(): Promise<FolderRecord[]>;
@@ -169,6 +192,7 @@ export interface CharkleTransport {
   openDirectoryInExplorer(path: string): Promise<void>;
   openExternalUrl(url: string): Promise<void>;
   pickFilesDialog(): Promise<string[]>;
+  pickMaterialPackageFilesDialog(): Promise<string[]>;
   pickJsonFileDialog(title?: string): Promise<string | null>;
 
   // Sync
@@ -382,6 +406,42 @@ export class TauriTransport implements CharkleTransport {
     return invoke('refresh_rich_asset', { id });
   }
 
+  importMaterialPackages(
+    paths: string[],
+    targetFolderId?: string | null,
+    targetBoardId?: string | null,
+  ): Promise<MaterialPackageImportResult[]> {
+    return invoke('import_material_packages', {
+      paths,
+      targetFolderId: targetFolderId ?? null,
+      targetBoardId: targetBoardId ?? null,
+    });
+  }
+
+  scanDuplicates(
+    scope: DeduplicationScanScope,
+    sensitivity: DeduplicationSensitivity,
+    mediaKinds?: MediaKind[] | null,
+  ): Promise<DeduplicationScanReport> {
+    return invoke('scan_duplicates', {
+      scope,
+      sensitivity,
+      mediaKinds: mediaKinds && mediaKinds.length > 0 ? mediaKinds : null,
+    });
+  }
+
+  resolveDuplicateGroups(
+    plans: DeduplicationResolutionPlan[],
+    disposal: DuplicateDisposalMode,
+    mergeMetadata: boolean,
+  ): Promise<DeduplicationCleanupResult> {
+    return invoke('resolve_duplicate_groups', {
+      plans,
+      disposal,
+      mergeMetadata,
+    });
+  }
+
   fetchFolders(): Promise<FolderRecord[]> {
     return invoke('fetch_folders');
   }
@@ -484,6 +544,17 @@ export class TauriTransport implements CharkleTransport {
 
   async pickFilesDialog(): Promise<string[]> {
     const selected = await openDialog({ multiple: true, directory: false });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
+  }
+
+  async pickMaterialPackageFilesDialog(): Promise<string[]> {
+    const selected = await openDialog({
+      multiple: true,
+      directory: false,
+      title: '选择外部素材包 (.eaglepack / .zip)',
+      filters: [{ name: '素材包 (.eaglepack / .zip)', extensions: ['eaglepack', 'zip'] }],
+    });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
@@ -2697,7 +2768,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.2.2',
+      appVersion: '1.3.0',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -2818,7 +2889,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.2.2',
+    currentVersion: '1.3.0',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,
@@ -3007,6 +3078,237 @@ export class InMemoryMockTransport implements CharkleTransport {
     for (const listener of this.surfaceListeners) {
       listener(state);
     }
+  }
+
+  /** Mock helpers for tests inspecting material package import & smart dedup flows. */
+  public mockMaterialPackagePaths: string[] = [];
+  public mockLibraryDirectoryPath: string | null = null;
+  public mockDuplicateReport: DeduplicationScanReport | null = null;
+  public mockResolvedDedupCalls: Array<{
+    plans: DeduplicationResolutionPlan[];
+    disposal: DuplicateDisposalMode;
+    mergeMetadata: boolean;
+  }> = [];
+  public mockImportedPackagePaths: string[] = [];
+
+  async pickMaterialPackageFilesDialog(): Promise<string[]> {
+    return [...this.mockMaterialPackagePaths];
+  }
+
+  async importMaterialPackages(
+    paths: string[],
+    targetFolderId?: string | null,
+  ): Promise<MaterialPackageImportResult[]> {
+    this.mockImportedPackagePaths.push(...paths);
+    const out: MaterialPackageImportResult[] = [];
+    for (const p of paths) {
+      const base = p.split(/[\\/]/).pop() ?? 'MaterialPack';
+      const packageName = base.replace(/\.(eaglepack|library|zip)$/i, '') || 'MaterialPack';
+      const folder = await this.createFolder(packageName, targetFolderId ?? null);
+      const created = await this.ingestText(
+        `${packageName} 示例`,
+        `Imported from ${base}`,
+        null,
+        folder.id,
+      );
+      out.push({
+        packageName,
+        importedAssetCount: created.length,
+        createdFolderCount: 1,
+        rootFolderID: folder.id,
+        skippedDeletedCount: 0,
+        skippedMissingCount: 0,
+      });
+    }
+    return out;
+  }
+
+  async scanDuplicates(
+    scope: DeduplicationScanScope,
+    _sensitivity: DeduplicationSensitivity,
+    mediaKinds?: MediaKind[] | null,
+  ): Promise<DeduplicationScanReport> {
+    if (this.mockDuplicateReport) {
+      const allowedKinds = mediaKinds && mediaKinds.length > 0 ? new Set(mediaKinds) : null;
+      const groups = allowedKinds
+        ? this.mockDuplicateReport.groups.filter((g) => allowedKinds.has(g.primaryMediaKind))
+        : this.mockDuplicateReport.groups;
+      return {
+        ...this.mockDuplicateReport,
+        groups,
+        totalDuplicateItems: groups.reduce((s, g) => s + Math.max(0, g.candidates.length - 1), 0),
+        totalReclaimableBytes: groups.reduce((s, g) => s + g.reclaimableBytes, 0),
+      };
+    }
+
+    const active = this.assets.filter((a) => {
+      if (a.isTrashed) return false;
+      if (scope.type === 'inbox' && a.folderID != null) return false;
+      if (scope.type === 'folder' && a.folderID !== scope.folderID) return false;
+      if (mediaKinds && mediaKinds.length > 0 && !mediaKinds.includes(a.mediaKind)) return false;
+      return true;
+    });
+
+    const byKey = new Map<string, AssetRecord[]>();
+    for (const asset of active) {
+      const key =
+        asset.contentHash?.trim() ||
+        `${asset.mediaKind}:${asset.title.trim().toLowerCase()}`;
+      const list = byKey.get(key) ?? [];
+      list.push(asset);
+      byKey.set(key, list);
+    }
+
+    const groups: DeduplicationScanReport['groups'] = [];
+    for (const members of byKey.values()) {
+      if (members.length < 2) continue;
+      const sorted = [...members].sort(
+        (a, b) =>
+          b.pixelWidth * b.pixelHeight - a.pixelWidth * a.pixelHeight ||
+          b.fileSizeBytes - a.fileSizeBytes,
+      );
+      const keeper = sorted[0];
+      const reclaimableBytes = sorted.slice(1).reduce((s, a) => s + Math.max(0, a.fileSizeBytes), 0);
+      groups.push({
+        id: `dup-${keeper.id}`,
+        primaryMediaKind: keeper.mediaKind,
+        matchKind: keeper.contentHash ? 'exactBinary' : 'nearIdentical',
+        similarityScore: 1,
+        recommendedKeepAssetID: keeper.id,
+        reclaimableBytes,
+        candidates: sorted.map((asset, idx) => ({
+          asset,
+          qualityScore: 1000 - idx * 50,
+          resolutionPixels: Math.max(1, asset.pixelWidth * asset.pixelHeight),
+          formatLabel: asset.fileName.split('.').pop()?.toUpperCase() || 'FILE',
+          isLosslessFormat: /\.png$/i.test(asset.fileName),
+          sharpnessScore: 42,
+          isRecommendedKeep: idx === 0,
+          isReferencedByBoard: false,
+          similarityToKeeper: 1,
+          qualityReasons: idx === 0 ? ['最高画质'] : [],
+        })),
+      });
+    }
+
+    return {
+      scannedAssetCount: active.length,
+      skippedNonVisualCount: 0,
+      groups,
+      totalDuplicateItems: groups.reduce((s, g) => s + Math.max(0, g.candidates.length - 1), 0),
+      totalReclaimableBytes: groups.reduce((s, g) => s + g.reclaimableBytes, 0),
+      durationSeconds: 0.02,
+    };
+  }
+
+  async resolveDuplicateGroups(
+    plans: DeduplicationResolutionPlan[],
+    disposal: DuplicateDisposalMode,
+    mergeMetadata: boolean,
+  ): Promise<DeduplicationCleanupResult> {
+    this.mockResolvedDedupCalls.push({ plans, disposal, mergeMetadata });
+    let resolvedGroupCount = 0;
+    let removedAssetCount = 0;
+    let reclaimedBytes = 0;
+    let mergedMetadataCount = 0;
+    let updatedBoardCount = 0;
+
+    for (const plan of plans) {
+      const keeper = this.assets.find((a) => a.id === plan.keepAssetID && !a.isTrashed);
+      if (!keeper) continue;
+      const toRemove = plan.removeAssetIDs
+        .filter((id) => id !== plan.keepAssetID)
+        .map((id) => this.assets.find((a) => a.id === id && !a.isTrashed))
+        .filter((a): a is AssetRecord => Boolean(a));
+      if (toRemove.length === 0) continue;
+      resolvedGroupCount += 1;
+
+      if (mergeMetadata) {
+        const tagSet = new Set(keeper.tags);
+        let mutated = false;
+        for (const dup of toRemove) {
+          for (const t of dup.tags) {
+            if (!tagSet.has(t)) {
+              tagSet.add(t);
+              mutated = true;
+            }
+          }
+          if (dup.rating > keeper.rating) {
+            keeper.rating = dup.rating;
+            mutated = true;
+          }
+          if (!keeper.folderID && dup.folderID) {
+            keeper.folderID = dup.folderID;
+            mutated = true;
+          }
+          if (!keeper.sourceURL && dup.sourceURL) {
+            keeper.sourceURL = dup.sourceURL;
+            keeper.sourceDomain = dup.sourceDomain;
+            mutated = true;
+          }
+          if (dup.notes.trim() && !keeper.notes.includes(dup.notes.trim())) {
+            keeper.notes = keeper.notes.trim()
+              ? `${keeper.notes.trim()}\n\n${dup.notes.trim()}`
+              : dup.notes.trim();
+            mutated = true;
+          }
+        }
+        if (mutated) {
+          keeper.tags = Array.from(tagSet).sort();
+          mergedMetadataCount += 1;
+        }
+      }
+
+      const removeSet = new Set(toRemove.map((a) => a.id));
+      for (const board of this.boards) {
+        let changed = false;
+        const seenKeeper = new Set<string>();
+        board.nodes = board.nodes.filter((n) => {
+          if ('assetRef' in n.kind) {
+            const aid = n.kind.assetRef.assetID;
+            if (removeSet.has(aid)) {
+              changed = true;
+              if (seenKeeper.has(keeper.id)) return false;
+              n.kind.assetRef.assetID = keeper.id;
+              seenKeeper.add(keeper.id);
+            } else if (aid === keeper.id) {
+              seenKeeper.add(keeper.id);
+            }
+          }
+          return true;
+        });
+        if (changed) updatedBoardCount += 1;
+      }
+
+      for (const dup of toRemove) {
+        reclaimedBytes += Math.max(0, dup.fileSizeBytes);
+        removedAssetCount += 1;
+        if (disposal === 'moveToTrash') {
+          dup.isTrashed = true;
+        }
+      }
+      if (disposal === 'permanentlyDelete') {
+        this.assets = this.assets.filter((a) => !removeSet.has(a.id));
+      }
+    }
+
+    if (this.mockDuplicateReport) {
+      const removedAll = new Set(plans.flatMap((p) => p.removeAssetIDs));
+      this.mockDuplicateReport = {
+        ...this.mockDuplicateReport,
+        groups: this.mockDuplicateReport.groups.filter(
+          (g) => !g.candidates.some((c) => removedAll.has(c.asset.id)),
+        ),
+      };
+    }
+
+    return {
+      resolvedGroupCount,
+      removedAssetCount,
+      reclaimedBytes,
+      mergedMetadataCount,
+      updatedBoardCount,
+    };
   }
 
   /** Helper for tests inspecting smart folder evaluation. */

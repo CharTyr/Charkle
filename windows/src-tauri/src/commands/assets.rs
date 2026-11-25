@@ -2,8 +2,13 @@ use std::path::PathBuf;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STD;
 use base64::Engine;
+use charkle_core::media::{
+    DeduplicationCleanupResult, DeduplicationResolutionPlan, DeduplicationScanReport,
+    DeduplicationScanScope, DeduplicationSensitivity, DuplicateDisposalMode,
+    MaterialPackageImportResult,
+};
 use charkle_core::models::core::{
-    AssetBatchPatch, AssetRecord, FilterCriteria, FolderSuggestion, ScoredAsset,
+    AssetBatchPatch, AssetRecord, FilterCriteria, FolderSuggestion, MediaKind, ScoredAsset,
 };
 use charkle_core::models::media::CaptureInput;
 use tauri::State;
@@ -211,5 +216,57 @@ pub async fn refresh_rich_asset(state: State<'_, AppState>, id: String) -> IpcRe
         .engine
         .refresh_rich_asset(uuid)
         .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn import_material_packages(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    target_folder_id: Option<String>,
+    target_board_id: Option<String>,
+) -> IpcResult<Vec<MaterialPackageImportResult>> {
+    let folder = parse_optional_uuid(target_folder_id)?;
+    let board = parse_optional_uuid(target_board_id)?;
+    let mut results = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        let imported = state
+            .engine
+            .import_material_package(&path, folder, board)
+            .await?;
+        results.push(imported);
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn scan_duplicates(
+    state: State<'_, AppState>,
+    scope: DeduplicationScanScope,
+    sensitivity: DeduplicationSensitivity,
+    media_kinds: Option<Vec<MediaKind>>,
+) -> IpcResult<DeduplicationScanReport> {
+    state
+        .engine
+        .scan_duplicates(scope, sensitivity, media_kinds)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn resolve_duplicate_groups(
+    state: State<'_, AppState>,
+    plans: Vec<DeduplicationResolutionPlan>,
+    disposal: DuplicateDisposalMode,
+    merge_metadata: bool,
+) -> IpcResult<DeduplicationCleanupResult> {
+    state
+        .engine
+        .resolve_duplicate_groups(&plans, disposal, merge_metadata)
         .map_err(Into::into)
 }

@@ -11,6 +11,7 @@
 
 import {
   autoPairLocalDesktop,
+  CharkleApiError,
   createOrReuseFolder,
   fetchExistingSources,
   ingestColorSwatch,
@@ -18,7 +19,9 @@ import {
   ingestImageUrl,
   ingestImageUrlsBatch,
   ingestSocialBookmarksChunk,
+  ingestSocialMediaChunk,
   ingestTextSnippet,
+  ingestTweetMediaChunk,
   ingestUrl,
   probeLocalDesktop,
   testConnection,
@@ -69,28 +72,66 @@ const MENU_ITEMS = [
 
 let badgeClearTimer = null;
 
-function registerContextMenus() {
-  if (!ext?.contextMenus) return;
-  try {
-    ext.contextMenus.removeAll(() => {
-      for (const item of MENU_ITEMS) {
-        try {
-          ext.contextMenus.create(item, () => {
-            void ext.runtime?.lastError;
+function createContextMenuItems(contextMenus, runtime, preferPromise) {
+  for (const item of MENU_ITEMS) {
+    try {
+      const maybePromise = preferPromise
+        ? contextMenus.create(item)
+        : contextMenus.create(item, () => {
+            void runtime?.lastError;
           });
-        } catch {
-          // ignore browser-specific menu creation quirk
-        }
+      if (maybePromise && typeof maybePromise.catch === 'function') {
+        maybePromise.catch(() => {});
       }
+    } catch {
+      // ignore browser-specific menu creation quirk
+    }
+  }
+}
+
+export function registerContextMenus(
+  api = ext,
+  { preferPromise = Boolean(globalThis.browser) } = {},
+) {
+  if (!api?.contextMenus) return;
+  let created = false;
+  const createAll = () => {
+    if (created) return;
+    created = true;
+    createContextMenuItems(api.contextMenus, api.runtime, preferPromise);
+  };
+  try {
+    if (preferPromise) {
+      const res = api.contextMenus.removeAll();
+      if (res && typeof res.then === 'function') {
+        return res.then(createAll, createAll);
+      }
+      createAll();
+      return;
+    }
+    const res = api.contextMenus.removeAll(() => {
+      void api.runtime?.lastError;
+      createAll();
     });
+    if (res && typeof res.then === 'function') {
+      return res.then(createAll, createAll);
+    }
   } catch {
-    // ignore if contextMenus unavailable
+    try {
+      const fallback = api.contextMenus.removeAll();
+      if (fallback && typeof fallback.then === 'function') {
+        return fallback.then(createAll, createAll);
+      }
+      createAll();
+    } catch {
+      // ignore if contextMenus unavailable
+    }
   }
 }
 
 let activeAutoPairPromise = null;
 
-function isRetryableDesktopError(err) {
+export function isRetryableDesktopError(err) {
   if (!err) return false;
   const code = String(err.code || '');
   const status = Number(err.status || 0);
@@ -219,7 +260,7 @@ async function attemptAutoPairDesktop({ force = false } = {}) {
  * Ensures an active configuration (auto-pairing with local Charkle desktop if needed)
  * and self-heals once if the desktop bridge port changed or token was regenerated.
  */
-async function withDesktopAutoHeal(operation) {
+export async function withDesktopAutoHeal(operation) {
   let config = await getConfig();
   if (!isConfigured(config) && config.connectionMode !== 'web') {
     const paired = await attemptAutoPairDesktop({ force: false }).catch(() => null);
@@ -250,12 +291,12 @@ async function withDesktopAutoHeal(operation) {
   }
 }
 
-ext.runtime?.onInstalled?.addListener(() => {
+ext?.runtime?.onInstalled?.addListener(() => {
   registerContextMenus();
   void attemptAutoPairDesktop({ force: false }).catch(() => {});
 });
 
-ext.runtime?.onStartup?.addListener(() => {
+ext?.runtime?.onStartup?.addListener(() => {
   registerContextMenus();
   void attemptAutoPairDesktop({ force: false }).catch(() => {});
 });
@@ -275,9 +316,12 @@ function setActionBadge(text, color, clearAfterMs = 0) {
   }
   if (clearAfterMs > 0) {
     badgeClearTimer = setTimeout(() => {
-      Promise.resolve(ext.action.setBadgeText?.({ text: '' })).catch(() => {});
+      Promise.resolve(ext?.action?.setBadgeText?.({ text: '' })).catch(() => {});
       badgeClearTimer = null;
     }, clearAfterMs);
+    if (badgeClearTimer && typeof badgeClearTimer.unref === 'function') {
+      badgeClearTimer.unref();
+    }
   }
 }
 
@@ -406,37 +450,42 @@ async function requireConfiguredOrPrompt(tab) {
   return config;
 }
 
-async function captureVisibleTabAndIngest(tab, overrideTarget = null) {
-  const config = await requireConfiguredOrPrompt(tab);
-  if (!config) {
-    throw new Error('尚未连接 Charkle，请先在设置中配置。');
-  }
+export async function captureVisibleTabAndIngest(tab, overrideTarget = null) {
   if (!tab || typeof tab.windowId !== 'number') {
     throw new Error('无法获取当前标签页窗口。');
   }
 
-  const target = overrideTarget || resolveActiveTarget(config);
   flashBusyBadge();
   try {
-    const dataUrl = await ext.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    let dataUrl = null;
     const fileName = buildScreenshotFileName(tab.title);
-    const res = await ingestImageDataUrl(
-      config,
-      dataUrl,
-      fileName,
-      isCapturablePageUrl(tab.url) ? tab.url : null,
-      target.targetFolderId,
-      target.targetBoardId,
-    );
+    const result = await withDesktopAutoHeal(async (cfg) => {
+      const target =
+        typeof overrideTarget === 'function'
+          ? overrideTarget(cfg)
+          : overrideTarget || resolveActiveTarget(cfg);
+      if (!dataUrl) {
+        dataUrl = await ext.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      }
+      const res = await ingestImageDataUrl(
+        cfg,
+        dataUrl,
+        fileName,
+        isCapturablePageUrl(tab.url) ? tab.url : null,
+        target.targetFolderId,
+        target.targetBoardId,
+      );
+      return { res, target, dataUrl };
+    });
     flashSuccessBadge();
-    return { res, target, dataUrl };
+    return result;
   } catch (err) {
     flashErrorBadge();
     throw err;
   }
 }
 
-async function captureCurrentPage(tab) {
+export async function captureCurrentPage(tab) {
   const config = await requireConfiguredOrPrompt(tab);
   if (!config) return;
 
@@ -447,7 +496,6 @@ async function captureCurrentPage(tab) {
     return;
   }
 
-  const target = resolveActiveTarget(config);
   const sourceInfo = detectSpecialSource(pageUrl);
   flashBusyBadge();
   await sendTabToast(tab?.id, pageUrl, {
@@ -468,25 +516,29 @@ async function captureCurrentPage(tab) {
       }
     }
 
-    let res;
-    if (preExtractedBookmark) {
-      res = await ingestSocialBookmarksChunk(
-        config,
-        [preExtractedBookmark],
-        target.targetFolderId,
-        target.targetBoardId,
-        { skipDuplicates: false },
-      );
-    } else {
-      res = await ingestUrl(
-        config,
-        pageUrl,
-        tab?.title || '',
-        '',
-        target.targetFolderId,
-        target.targetBoardId,
-      );
-    }
+    const { res, target } = await withDesktopAutoHeal(async (cfg) => {
+      const t = resolveActiveTarget(cfg);
+      let r;
+      if (preExtractedBookmark) {
+        r = await ingestSocialBookmarksChunk(
+          cfg,
+          [preExtractedBookmark],
+          t.targetFolderId,
+          t.targetBoardId,
+          { skipDuplicates: false },
+        );
+      } else {
+        r = await ingestUrl(
+          cfg,
+          pageUrl,
+          tab?.title || '',
+          '',
+          t.targetFolderId,
+          t.targetBoardId,
+        );
+      }
+      return { res: r, target: t };
+    });
     const savedTitle = res?.assets?.[0]?.title || tab?.title || sourceInfo.hostname;
     flashSuccessBadge();
     await notifyUser(tab, 'success', `已收藏到 ${target.label}`, savedTitle);
@@ -500,11 +552,9 @@ async function captureCurrentPage(tab) {
   }
 }
 
-ext.contextMenus?.onClicked?.addListener(async (info, tab) => {
+export async function handleContextMenuClick(info, tab) {
   const config = await requireConfiguredOrPrompt(tab);
   if (!config) return;
-
-  const target = resolveActiveTarget(config);
 
   switch (info.menuItemId) {
     case 'charkle-save-image': {
@@ -516,14 +566,18 @@ ext.contextMenus?.onClicked?.addListener(async (info, tab) => {
         message: '正在收藏图片…',
       });
       try {
-        const res = await ingestImageUrl(
-          config,
-          srcUrl,
-          info.pageUrl || tab?.url || null,
-          tab?.title || '',
-          target.targetFolderId,
-          target.targetBoardId,
-        );
+        const { res, target } = await withDesktopAutoHeal(async (cfg) => {
+          const t = resolveActiveTarget(cfg);
+          const r = await ingestImageUrl(
+            cfg,
+            srcUrl,
+            info.pageUrl || tab?.url || null,
+            tab?.title || '',
+            t.targetFolderId,
+            t.targetBoardId,
+          );
+          return { res: r, target: t };
+        });
         const savedTitle = res?.assets?.[0]?.title || '图片';
         flashSuccessBadge();
         await notifyUser(tab, 'success', `已收藏图片到 ${target.label}`, savedTitle);
@@ -544,26 +598,30 @@ ext.contextMenus?.onClicked?.addListener(async (info, tab) => {
         message: `正在收藏${sourceInfo.badgeText}…`,
       });
       try {
-        let res;
-        if (isDirectImageUrl(linkUrl)) {
-          res = await ingestImageUrl(
-            config,
-            linkUrl,
-            info.pageUrl || tab?.url || null,
-            info.selectionText || '',
-            target.targetFolderId,
-            target.targetBoardId,
-          );
-        } else {
-          res = await ingestUrl(
-            config,
-            linkUrl,
-            info.selectionText || '',
-            info.pageUrl ? `摘自：${info.pageUrl}` : '',
-            target.targetFolderId,
-            target.targetBoardId,
-          );
-        }
+        const { res, target } = await withDesktopAutoHeal(async (cfg) => {
+          const t = resolveActiveTarget(cfg);
+          let r;
+          if (isDirectImageUrl(linkUrl)) {
+            r = await ingestImageUrl(
+              cfg,
+              linkUrl,
+              info.pageUrl || tab?.url || null,
+              info.selectionText || '',
+              t.targetFolderId,
+              t.targetBoardId,
+            );
+          } else {
+            r = await ingestUrl(
+              cfg,
+              linkUrl,
+              info.selectionText || '',
+              info.pageUrl ? `摘自：${info.pageUrl}` : '',
+              t.targetFolderId,
+              t.targetBoardId,
+            );
+          }
+          return { res: r, target: t };
+        });
         const savedTitle = res?.assets?.[0]?.title || sourceInfo.hostname || linkUrl;
         flashSuccessBadge();
         await notifyUser(tab, 'success', `已收藏到 ${target.label}`, savedTitle);
@@ -584,14 +642,18 @@ ext.contextMenus?.onClicked?.addListener(async (info, tab) => {
       });
       try {
         const title = tab?.title ? `${tab.title} · 摘录` : '文字摘录';
-        const res = await ingestTextSnippet(
-          config,
-          title,
-          text,
-          info.pageUrl || tab?.url || null,
-          target.targetFolderId,
-          target.targetBoardId,
-        );
+        const { res, target } = await withDesktopAutoHeal(async (cfg) => {
+          const t = resolveActiveTarget(cfg);
+          const r = await ingestTextSnippet(
+            cfg,
+            title,
+            text,
+            info.pageUrl || tab?.url || null,
+            t.targetFolderId,
+            t.targetBoardId,
+          );
+          return { res: r, target: t };
+        });
         const savedTitle = res?.assets?.[0]?.title || title;
         flashSuccessBadge();
         await notifyUser(tab, 'success', `已收藏文字到 ${target.label}`, savedTitle);
@@ -609,7 +671,7 @@ ext.contextMenus?.onClicked?.addListener(async (info, tab) => {
 
     case 'charkle-capture-visible': {
       try {
-        const { res } = await captureVisibleTabAndIngest(tab, target);
+        const { res, target } = await captureVisibleTabAndIngest(tab);
         const savedTitle = res?.assets?.[0]?.title || '页面截屏';
         await notifyUser(tab, 'success', `已截取画面到 ${target.label}`, savedTitle);
       } catch (err) {
@@ -618,9 +680,11 @@ ext.contextMenus?.onClicked?.addListener(async (info, tab) => {
       return;
     }
   }
-});
+}
 
-ext.commands?.onCommand?.addListener(async (command) => {
+ext?.contextMenus?.onClicked?.addListener(handleContextMenuClick);
+
+ext?.commands?.onCommand?.addListener(async (command) => {
   if (command === 'quick-capture-page') {
     const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
     if (tab) {
@@ -640,7 +704,7 @@ function resolveMessageTarget(config, msg) {
   return resolveActiveTarget(config);
 }
 
-async function handleMessage(msg, sender) {
+export async function handleMessage(msg, sender) {
   if (!msg || typeof msg.type !== 'string') {
     return { ok: false, error: '无效消息。' };
   }
@@ -809,6 +873,10 @@ async function handleMessage(msg, sender) {
         'bookmarkStopOnKnownStreak',
         'bookmarkEnrichXhsDetails',
         'bookmarkMaxCount',
+        'authorMediaOrganizeMode',
+        'authorMediaIncludeVideos',
+        'authorMediaSkipRetweets',
+        'xhsProfileCollectMode',
       ];
       for (const key of allowedKeys) {
         if (key in msg) patch[key] = msg[key];
@@ -825,6 +893,97 @@ async function handleMessage(msg, sender) {
     case 'FETCH_EXISTING_SOURCES': {
       const res = await withDesktopAutoHeal((cfg) => fetchExistingSources(cfg));
       return { ok: true, ...res };
+    }
+
+    case 'ENSURE_AUTHOR_ROOT_FOLDER': {
+      const folderName = String(msg.name || '').trim();
+      if (!folderName) {
+        return { ok: false, error: '缺少作者文件夹名称。' };
+      }
+      const { created, refreshed, parentLabel } = await withDesktopAutoHeal(async (cfg) => {
+        const active = resolveActiveTarget(cfg);
+        const parentId =
+          'parentId' in msg
+            ? msg.parentId || null
+            : active.mode === 'folder'
+              ? active.targetFolderId
+              : null;
+        // If user already selected a folder with the same name as the author folder, reuse it directly instead of nesting `@a/@a`.
+        if (
+          parentId &&
+          active.label &&
+          active.label.trim().toLowerCase() === folderName.toLowerCase()
+        ) {
+          return {
+            created: { folder: { id: parentId, name: active.label }, reused: true },
+            refreshed: null,
+            parentLabel: active.label,
+          };
+        }
+        const c = await createOrReuseFolder(cfg, folderName, parentId, { reuseExisting: true });
+        const r = c.reused ? null : await testConnection(cfg).catch(() => null);
+        return { created: c, refreshed: r, parentLabel: active.mode === 'folder' ? active.label : '' };
+      });
+      if (refreshed) {
+        await saveConfig({
+          cachedFolders: refreshed.folders,
+          cachedBoards: refreshed.boards,
+        });
+      }
+      const folder = created.folder;
+      const displayLabel =
+        parentLabel && parentLabel.toLowerCase() !== (folder?.name || folderName).toLowerCase()
+          ? `${parentLabel} / ${folder?.name || folderName}`
+          : folder?.name || folderName;
+      return {
+        ok: true,
+        folder,
+        reused: Boolean(created.reused),
+        targetLabel: displayLabel,
+      };
+    }
+
+    case 'INGEST_SOCIAL_MEDIA_CHUNK':
+    case 'INGEST_TWEET_MEDIA_CHUNK': {
+      const posts = Array.isArray(msg.posts) ? msg.posts : Array.isArray(msg.tweets) ? msg.tweets : [];
+      if (posts.length === 0) {
+        const cfg = await getConfig();
+        return {
+          ok: true,
+          assets: [],
+          created: 0,
+          postsImported: 0,
+          tweetsImported: 0,
+          skipped: 0,
+          createdFolders: 0,
+          targetLabel: resolveMessageTarget(cfg, msg).label,
+        };
+      }
+      flashBusyBadge(msg.badgeText || '…');
+      try {
+        const useUnified = msg.type === 'INGEST_SOCIAL_MEDIA_CHUNK';
+        const { res, target } = await withDesktopAutoHeal(async (cfg) => {
+          const t = resolveMessageTarget(cfg, msg);
+          const ingestFn = useUnified ? ingestSocialMediaChunk : ingestTweetMediaChunk;
+          const r = await ingestFn(
+            cfg,
+            posts,
+            t.targetFolderId,
+            t.targetBoardId,
+            { skipDuplicates: msg.skipDuplicates !== false },
+          );
+          return { res: r, target: t };
+        });
+        if (msg.isFinalChunk) {
+          flashSuccessBadge();
+        }
+        return { ok: true, ...res, targetLabel: target.label };
+      } catch (err) {
+        if (msg.isFinalChunk) {
+          flashErrorBadge();
+        }
+        throw err;
+      }
     }
 
     case 'INGEST_SOCIAL_BOOKMARKS_CHUNK': {
@@ -869,7 +1028,8 @@ async function handleMessage(msg, sender) {
       const job = msg.job;
       if (job) {
         if (job.status === 'running') {
-          const badge = job.imported > 0 ? String(Math.min(999, job.imported)) : '…';
+          const count = job.mode === 'author_media' ? (job.mediaImported || job.imported || 0) : (job.imported || 0);
+          const badge = count > 0 ? String(Math.min(999, count)) : '…';
           flashBusyBadge(badge);
         } else if (job.status === 'done') {
           flashSuccessBadge();
@@ -968,7 +1128,7 @@ async function handleMessage(msg, sender) {
               concurrency: 3,
               onProgress(progress) {
                 Promise.resolve(
-                  ext.runtime.sendMessage({
+                  ext?.runtime?.sendMessage?.({
                     type: 'BATCH_INGEST_PROGRESS',
                     ...progress,
                   }),
@@ -976,6 +1136,15 @@ async function handleMessage(msg, sender) {
               },
             },
           );
+          if (s.succeeded === 0) {
+            const retryable = s.errors.find((entry) => isRetryableDesktopError(entry));
+            if (retryable) {
+              throw new CharkleApiError(retryable.message || '批量收藏图片失败', {
+                status: Number(retryable.status || 0),
+                code: String(retryable.code || 'API_ERROR'),
+              });
+            }
+          }
           return { summary: s, target: t };
         });
         if (summary.succeeded > 0) {
@@ -983,7 +1152,14 @@ async function handleMessage(msg, sender) {
         } else {
           flashErrorBadge();
         }
-        return { ok: summary.succeeded > 0, ...summary, targetLabel: target.label };
+        return {
+          ok: summary.succeeded > 0,
+          ...summary,
+          ...(summary.succeeded === 0
+            ? { error: summary.errors[0]?.message || '批量收藏图片失败' }
+            : {}),
+          targetLabel: target.label,
+        };
       } catch (err) {
         flashErrorBadge();
         throw err;
@@ -991,14 +1167,14 @@ async function handleMessage(msg, sender) {
     }
 
     case 'CAPTURE_VISIBLE_TAB': {
-      const config = await getConfig();
-      const target = resolveMessageTarget(config, msg);
       let tab = msg.tab || null;
       if (!tab) {
         const [activeTab] = await ext.tabs.query({ active: true, currentWindow: true });
         tab = activeTab || null;
       }
-      const { res, dataUrl } = await captureVisibleTabAndIngest(tab, target);
+      const { res, target, dataUrl } = await captureVisibleTabAndIngest(tab, (cfg) =>
+        resolveMessageTarget(cfg, msg),
+      );
       return {
         ok: true,
         assets: res.assets || [],
@@ -1062,7 +1238,7 @@ async function handleMessage(msg, sender) {
   }
 }
 
-ext.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
+ext?.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
   handleMessage(msg, sender)
     .then((result) => sendResponse(result))
     .catch((err) => {

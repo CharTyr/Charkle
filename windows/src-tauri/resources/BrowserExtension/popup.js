@@ -1,5 +1,5 @@
 /**
- * Charkle Extension — Popup Workbench Controller (Chrome & Safari)
+ * Charkle Extension — Calm Studio Popup Controller (Chrome & Safari)
  */
 
 import { isLargeImageCandidate } from './lib/image-filter.js';
@@ -8,6 +8,7 @@ import {
   DEFAULT_DESKTOP_SERVER_URL,
   getConfig,
   isConfigured,
+  resolveActiveTarget,
 } from './lib/storage.js';
 import {
   detectBookmarkCollectionPage,
@@ -19,6 +20,24 @@ import {
 
 const ext = globalThis.browser ?? globalThis.chrome;
 const $ = (id) => document.getElementById(id);
+
+const PLATFORM_BADGE_MAP = {
+  x: { author_media: 'X 作者', likes: 'X 喜欢', default: 'X 书签' },
+  pixiv: { bookmarks: 'Pixiv 收藏', default: 'Pixiv 画师' },
+  bluesky: { likes: 'Bluesky 喜欢', default: 'Bluesky 作者' },
+  threads: { author_media: 'Threads 作者', likes: 'Threads 喜欢', default: 'Threads 保存' },
+  instagram: { author_media: 'Instagram', default: 'IG 收藏' },
+  xiaohongshu: { profile: '小红书作者', likes: '小红书点赞', default: '小红书' },
+};
+
+const PLATFORM_NOUN_MAP = {
+  x: '推文',
+  pixiv: '作品',
+  bluesky: '贴文',
+  threads: '贴文',
+  instagram: '贴文',
+  xiaohongshu: '笔记',
+};
 
 const state = {
   config: null,
@@ -33,6 +52,9 @@ const state = {
   imagesScanned: false,
   isBusy: false,
   currentHex: '#2A60E0',
+  organizeMode: 'per_tweet',
+  maxCount: 0,
+  xhsCollectMode: 'media',
 };
 
 let statusTimer = null;
@@ -78,6 +100,16 @@ function getEffectivePageUrl() {
   return state.activeTab?.url || '';
 }
 
+function isMediaModeForPage(page) {
+  if (!page?.supported) return false;
+  if (['pixiv', 'bluesky', 'threads', 'instagram'].includes(page.platform)) return true;
+  if (page.platform === 'x' && page.pageKind === 'author_media') return true;
+  if (page.platform === 'xiaohongshu' && page.pageKind === 'profile' && state.xhsCollectMode === 'media') {
+    return true;
+  }
+  return false;
+}
+
 // MARK: - Status & Header Helpers
 
 function setConnectionIndicator(connState, label) {
@@ -113,13 +145,17 @@ function hideStatus() {
   $('status-banner').hidden = true;
 }
 
-// MARK: - Target Selector Rendering
+// MARK: - Compact Collapsible Destination Bar
 
 function renderTargetControls() {
   const cfg = state.config;
   if (!cfg) return;
 
   const mode = cfg.targetMode || 'inbox';
+  const activeTarget = resolveActiveTarget(cfg);
+  const modeTag = mode === 'folder' ? '文件夹 · ' : mode === 'board' ? '情绪板 · ' : '';
+  $('dest-active-label').textContent = `${modeTag}${activeTarget.label}`;
+
   for (const btn of document.querySelectorAll('.seg-btn[data-target-mode]')) {
     btn.setAttribute('aria-checked', String(btn.dataset.targetMode === mode));
   }
@@ -215,7 +251,7 @@ async function refreshTargetsLive(silent = false) {
         'error',
         res?.error ||
           (isDesktop
-            ? 'Charkle 桌面端暂未运行，请打开 Mac 上的 Charkle 应用后点击「同步」重连。'
+            ? 'Charkle 桌面端暂未运行，请打开 Charkle 应用后点击同步重连。'
             : '无法连接 Charkle，请检查设置。'),
         isDesktop ? 5500 : 4500,
       );
@@ -239,11 +275,11 @@ async function refreshTargetsLive(silent = false) {
   }
 }
 
-// MARK: - Tabs
+// MARK: - Mode Rail Tabs
 
 function switchTab(tabKey) {
   state.activePanel = tabKey;
-  for (const btn of document.querySelectorAll('.tab-btn[data-tab]')) {
+  for (const btn of document.querySelectorAll('.mode-btn[data-tab]')) {
     const selected = btn.dataset.tab === tabKey;
     btn.setAttribute('aria-selected', String(selected));
     btn.tabIndex = selected ? 0 : -1;
@@ -256,7 +292,7 @@ function switchTab(tabKey) {
   }
 }
 
-// MARK: - Tab 1: Current Page & Screenshot
+// MARK: - Panel 1: Current Page & Screenshot
 
 function hydratePageTab() {
   const tab = state.activeTab;
@@ -361,7 +397,89 @@ async function handleCaptureVisible() {
   }
 }
 
-// MARK: - Tab 2: Batch Bookmarks Import (X & Xiaohongshu)
+// MARK: - Panel 2: Context-First 6-Platform Batch Collector
+
+function renderBatchSegmentedState() {
+  for (const btn of document.querySelectorAll('.seg-btn[data-org-mode]')) {
+    btn.setAttribute('aria-checked', String(btn.dataset.orgMode === state.organizeMode));
+  }
+  for (const btn of document.querySelectorAll('.seg-btn[data-max-count]')) {
+    btn.setAttribute('aria-checked', String(Number(btn.dataset.maxCount) === state.maxCount));
+  }
+  for (const btn of document.querySelectorAll('.seg-btn[data-xhs-mode]')) {
+    btn.setAttribute('aria-checked', String(btn.dataset.xhsMode === state.xhsCollectMode));
+  }
+}
+
+function updateBatchRulesSummary() {
+  const page = state.collectionPage;
+  if (!page?.supported) return;
+  const isMedia = isMediaModeForPage(page);
+  const noun = PLATFORM_NOUN_MAP[page.platform] || '作品';
+  const parts = [];
+
+  if (isMedia) {
+    if (state.organizeMode === 'flat') parts.push('平铺在作者目录');
+    else if (state.organizeMode === 'multi_only') parts.push(`仅多图${noun}建目录`);
+    else parts.push(`按${noun}建子目录`);
+
+    if (page.platform !== 'pixiv') {
+      parts.push($('bm-opt-include-videos').checked ? '含视频' : '仅图片');
+    }
+    if (['x', 'bluesky', 'threads'].includes(page.platform) && page.pageKind === 'author_media') {
+      if ($('bm-opt-skip-retweets').checked) parts.push('仅原创');
+    }
+  } else {
+    parts.push('富卡片书签模式');
+    if (page.platform === 'xiaohongshu' && $('bm-opt-xhs-detail').checked) {
+      parts.push('提取多图正文');
+    }
+  }
+
+  if ($('bm-opt-skip-dups').checked) {
+    parts.push($('bm-opt-stop-streak').checked ? '增量去重' : '跳过重复');
+  }
+  if (state.maxCount > 0) {
+    parts.push(`最多 ${state.maxCount} 条`);
+  }
+
+  $('bm-rules-summary').textContent = parts.join(' · ');
+
+  const startBtn = $('btn-bm-start');
+  const jobActive =
+    state.bookmarkJob &&
+    (state.bookmarkJob.status === 'running' || state.bookmarkJob.status === 'paused');
+  if (!jobActive) {
+    startBtn.textContent = getBatchStartButtonLabel(page, isMedia);
+  }
+}
+
+function getBatchStartButtonLabel(page, isMedia) {
+  if (!page?.supported) return '开始批量采集';
+  if (page.platform === 'pixiv') {
+    return page.pageKind === 'bookmarks' ? '一键采集 Pixiv 收藏作品' : '一键采集画师全部作品';
+  }
+  if (isMedia) {
+    const noun = PLATFORM_NOUN_MAP[page.platform] || '作品';
+    return state.organizeMode === 'flat' ? '一键采集全部媒体' : `一键采集全部媒体（按${noun}整理）`;
+  }
+  return '一键扫描并批量导入';
+}
+
+function syncBatchModeVisibility() {
+  const page = state.collectionPage;
+  if (!page?.supported) return;
+  const isMedia = isMediaModeForPage(page);
+  const noun = PLATFORM_NOUN_MAP[page.platform] || '作品';
+
+  $('bm-author-media-opts').hidden = !isMedia;
+  $('bm-opt-videos-row').hidden = page.platform === 'pixiv';
+  $('bm-opt-retweets-row').hidden =
+    !['x', 'bluesky', 'threads'].includes(page.platform) || page.pageKind !== 'author_media';
+  $('bm-opt-xhs-row').hidden = !(page.platform === 'xiaohongshu' && !isMedia);
+  $('bm-opt-max-count-label').textContent = isMedia ? `单次${noun}上限` : '单次导入上限';
+  updateBatchRulesSummary();
+}
 
 function hydrateBookmarksTab() {
   const pageUrl = getEffectivePageUrl();
@@ -379,31 +497,41 @@ function hydrateBookmarksTab() {
   $('bm-opt-skip-dups').checked = cfg.bookmarkSkipDuplicates !== false;
   $('bm-opt-stop-streak').checked = cfg.bookmarkStopOnKnownStreak !== false;
   $('bm-opt-xhs-detail').checked = cfg.bookmarkEnrichXhsDetails !== false;
-  $('bm-opt-max-count').value = String(cfg.bookmarkMaxCount || 0);
+  $('bm-opt-include-videos').checked = cfg.authorMediaIncludeVideos !== false;
+  $('bm-opt-skip-retweets').checked = cfg.authorMediaSkipRetweets !== false;
+
+  const rawOrg = cfg.authorMediaOrganizeMode || 'per_tweet';
+  state.organizeMode = rawOrg === 'per_post' ? 'per_tweet' : rawOrg;
+  state.maxCount = [0, 30, 100, 300].includes(Number(cfg.bookmarkMaxCount))
+    ? Number(cfg.bookmarkMaxCount)
+    : 0;
+  state.xhsCollectMode = cfg.xhsProfileCollectMode === 'bookmarks' ? 'bookmarks' : 'media';
+
+  renderBatchSegmentedState();
 
   const supportedBlock = $('bm-supported-block');
   const guideBlock = $('bm-guide-block');
+  const tabDot = $('tab-bookmarks-dot');
 
   if (detected.supported) {
     supportedBlock.hidden = false;
     guideBlock.hidden = true;
     const badge = $('bm-platform-badge');
     badge.dataset.kind = detected.platform;
-    badge.textContent =
-      detected.platform === 'xiaohongshu'
-        ? '小红书'
-        : detected.pageKind === 'likes'
-          ? 'X 喜欢'
-          : 'X 书签';
+    const badgeGroup = PLATFORM_BADGE_MAP[detected.platform] || { default: '批量采集' };
+    badge.textContent = badgeGroup[detected.pageKind] || badgeGroup.default;
+
     $('bm-page-label').textContent = detected.label;
-    $('btn-bm-quick-folder').textContent = `+ ${detected.suggestedFolderName}`;
-    $('bm-opt-xhs-row').hidden = detected.platform !== 'xiaohongshu';
-    if (detected.isCollectionRoute !== false) {
-      $('tab-bookmarks').textContent = '收藏导入 ·';
-    }
+    $('bm-page-label').title = detected.label;
+    $('btn-bm-quick-folder').textContent = `+ ${detected.suggestedFolderName || '专属目录'}`;
+    $('bm-xhs-mode-wrap').hidden = !(detected.platform === 'xiaohongshu' && detected.pageKind === 'profile');
+
+    tabDot.hidden = detected.isCollectionRoute === false;
+    syncBatchModeVisibility();
   } else {
     supportedBlock.hidden = true;
     guideBlock.hidden = false;
+    tabDot.hidden = true;
   }
 
   renderBookmarkJobProgress(state.pageContext?.bookmarkJob || state.bookmarkJob);
@@ -414,6 +542,8 @@ function renderBookmarkJobProgress(job) {
   const card = $('bm-progress-card');
   const startBtn = $('btn-bm-start');
   const controls = $('bm-progress-controls');
+  const isMedia = job?.mode === 'author_media' || isMediaModeForPage(state.collectionPage);
+  const noun = PLATFORM_NOUN_MAP[job?.platform || state.collectionPage?.platform] || '作品';
 
   if (!job || job.status === 'idle') {
     card.hidden = true;
@@ -436,7 +566,9 @@ function renderBookmarkJobProgress(job) {
   $('bm-bar-fill').style.width = `${pct}%`;
 
   const failSuffix = job.failed > 0 ? ` · 失败 ${job.failed}` : '';
-  $('bm-progress-stats').textContent = `发现 ${job.discovered || 0} · 导入 ${job.imported || 0} · 跳过 ${job.skipped || 0}${failSuffix}`;
+  $('bm-progress-stats').textContent = isMedia
+    ? `${noun} ${job.discovered || 0} · 文件入库 ${job.mediaImported || 0} · 跳过 ${job.skipped || 0}${failSuffix}`
+    : `发现 ${job.discovered || 0} · 导入 ${job.imported || 0} · 跳过 ${job.skipped || 0}${failSuffix}`;
   $('bm-progress-last').textContent = job.lastItemTitle ? `最新：${job.lastItemTitle}` : '';
 
   const isActive = job.status === 'running' || job.status === 'paused';
@@ -445,8 +577,21 @@ function renderBookmarkJobProgress(job) {
   startBtn.hidden = isActive;
   startBtn.disabled = isActive;
   if (!isActive) {
-    startBtn.textContent = '再次扫描并导入新增';
+    startBtn.textContent = isMedia ? '再次扫描并采集新增' : '再次扫描并导入新增';
   }
+}
+
+async function persistBatchOptions() {
+  await persistTargetPatch({
+    bookmarkSkipDuplicates: $('bm-opt-skip-dups').checked,
+    bookmarkStopOnKnownStreak: $('bm-opt-stop-streak').checked,
+    bookmarkEnrichXhsDetails: $('bm-opt-xhs-detail').checked,
+    bookmarkMaxCount: state.maxCount,
+    authorMediaOrganizeMode: state.organizeMode,
+    authorMediaIncludeVideos: $('bm-opt-include-videos').checked,
+    authorMediaSkipRetweets: $('bm-opt-skip-retweets').checked,
+    xhsProfileCollectMode: state.xhsCollectMode,
+  });
 }
 
 async function handleStartBookmarkImport() {
@@ -456,16 +601,14 @@ async function handleStartBookmarkImport() {
   const skipDuplicates = $('bm-opt-skip-dups').checked;
   const stopOnKnownStreak = $('bm-opt-stop-streak').checked;
   const enrichXhsDetails = $('bm-opt-xhs-detail').checked;
-  const maxCount = Number($('bm-opt-max-count').value || 0);
+  const includeVideos = $('bm-opt-include-videos').checked;
+  const skipRetweets = $('bm-opt-skip-retweets').checked;
 
-  await persistTargetPatch({
-    bookmarkSkipDuplicates: skipDuplicates,
-    bookmarkStopOnKnownStreak: stopOnKnownStreak,
-    bookmarkEnrichXhsDetails: enrichXhsDetails,
-    bookmarkMaxCount: maxCount,
-  });
+  await persistBatchOptions();
 
+  const isMedia = isMediaModeForPage(state.collectionPage);
   const btn = $('btn-bm-start');
+  const defaultBtnLabel = getBatchStartButtonLabel(state.collectionPage, isMedia);
   btn.disabled = true;
   btn.textContent = '正在启动…';
 
@@ -475,10 +618,15 @@ async function handleStartBookmarkImport() {
       skipDuplicates,
       stopOnKnownStreak,
       enrichXhsDetails,
-      maxCount,
+      maxCount: state.maxCount,
+      organizeMode: state.organizeMode,
+      includeVideos,
+      skipRetweets,
+      xhsCollectMode: state.xhsCollectMode,
       preferredPlatform: state.collectionPage?.platform || null,
       preferredLabel: state.collectionPage?.label || null,
       preferredPageKind: state.collectionPage?.pageKind || null,
+      preferredAuthorHandle: state.collectionPage?.authorHandle || null,
     },
   });
 
@@ -486,11 +634,11 @@ async function handleStartBookmarkImport() {
     renderBookmarkJobProgress(res.job);
   }
   if (res?.ok) {
-    btn.textContent = '一键扫描并批量导入';
+    btn.textContent = defaultBtnLabel;
   } else {
-    showStatus('error', res?.error || '无法在当前标签页启动批量导入，请刷新页面后重试。', 4500);
+    showStatus('error', res?.error || '无法在当前标签页启动批量采集，请刷新页面后重试。', 4500);
     btn.disabled = false;
-    btn.textContent = '一键扫描并批量导入';
+    btn.textContent = defaultBtnLabel;
   }
 }
 
@@ -505,8 +653,8 @@ async function handleQuickCreateCollectionFolder() {
       renderTargetControls();
       showStatus(
         'success',
-        res.reused ? `已切换目标至现有文件夹「${suggested}」` : `已新建并选中文件夹「${suggested}」`,
-        2600,
+        res.reused ? `已切换目标至「${suggested}」` : `已新建并选中「${suggested}」`,
+        2400,
       );
     } else {
       showStatus('error', res?.error || '创建文件夹失败', 3800);
@@ -516,7 +664,7 @@ async function handleQuickCreateCollectionFolder() {
   }
 }
 
-// MARK: - Tab 3: Batch Image Grabber
+// MARK: - Panel 3: Batch Image Grabber
 
 function updateImagesSelectionUI() {
   const count = state.selectedImageUrls.size;
@@ -676,7 +824,7 @@ async function handleSaveSelectedImages() {
   }
 }
 
-// MARK: - Tab 4: Text Snippet
+// MARK: - Panel 4: Text Snippet
 
 function hydrateTextTab() {
   const titleEl = $('text-title-input');
@@ -749,7 +897,7 @@ async function handleSaveText() {
   }
 }
 
-// MARK: - Tab 5: Color Swatch & EyeDropper
+// MARK: - Panel 5: Color Swatch & EyeDropper
 
 function updateSwatchPreview(rawHex, syncInputs = true) {
   const normalized = normalizeHexColor(rawHex);
@@ -892,7 +1040,7 @@ async function probeDesktopInOnboarding(silent = false) {
     if (!silent) {
       infoEl.hidden = true;
       errEl.textContent =
-        res?.error || '未检测到运行中的 Charkle 桌面端，请先打开 Mac 上的 Charkle 应用后重试。';
+        res?.error || '未检测到运行中的 Charkle 桌面端，请先打开 Charkle 应用后重试。';
       errEl.hidden = false;
     }
     return false;
@@ -947,7 +1095,7 @@ async function handleOnboardingSubmit(e) {
     errEl.hidden = false;
   } finally {
     saveBtn.disabled = false;
-    saveBtn.textContent = '测试并保存手动配置';
+    saveBtn.textContent = '测试并保存';
   }
 }
 
@@ -970,14 +1118,14 @@ async function enterWorkbenchMode(shouldRefreshLive = true) {
   hydrateTextTab();
   initColorTab();
 
-  // Auto-focus Bookmark Import tab when on a genuine X Bookmarks/History/Likes or Xiaohongshu Collect page, or a job is active!
+  // Context-first auto-selection: Batch collector when on any supported creator/collection page or active job
   const jobRunning =
     state.bookmarkJob &&
     (state.bookmarkJob.status === 'running' || state.bookmarkJob.status === 'paused');
   if ((state.collectionPage.supported && state.collectionPage.isCollectionRoute !== false) || jobRunning) {
     switchTab('bookmarks');
   } else if (state.pageContext?.selection && state.pageContext.selection.length >= 2) {
-    $('tab-text').textContent = '文字 ·';
+    $('tab-text-dot').hidden = false;
   }
 
   if (shouldRefreshLive) {
@@ -1047,8 +1195,9 @@ function bindEvents() {
 
   $('onboarding-form').addEventListener('submit', handleOnboardingSubmit);
 
-  // Target Bar
-  $('btn-refresh-targets').addEventListener('click', () => {
+  // Destination Drawer
+  $('btn-refresh-targets').addEventListener('click', (e) => {
+    e.stopPropagation();
     void refreshTargetsLive(false);
   });
 
@@ -1077,6 +1226,7 @@ function bindEvents() {
       targetFolderId: id,
       targetFolderName: matched?.name || '',
     });
+    renderTargetControls();
   });
 
   $('select-board').addEventListener('change', async (e) => {
@@ -1087,10 +1237,11 @@ function bindEvents() {
       targetBoardId: id,
       targetBoardName: matched?.title || '',
     });
+    renderTargetControls();
   });
 
-  // Action Tabs + Keyboard Navigation
-  const tabButtons = Array.from(document.querySelectorAll('.tab-btn[data-tab]'));
+  // Mode Rail + Keyboard Arrow Navigation
+  const tabButtons = Array.from(document.querySelectorAll('.mode-btn[data-tab]'));
   for (let i = 0; i < tabButtons.length; i++) {
     const btn = tabButtons[i];
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -1105,11 +1256,11 @@ function bindEvents() {
     });
   }
 
-  // Tab 1
+  // Panel 1: Current Page
   $('btn-save-page').addEventListener('click', () => void handleSavePage());
   $('btn-capture-visible').addEventListener('click', () => void handleCaptureVisible());
 
-  // Tab 2: Bookmarks Batch Importer
+  // Panel 2: Batch Collector
   $('btn-bm-start').addEventListener('click', () => void handleStartBookmarkImport());
   $('btn-bm-quick-folder').addEventListener('click', () => void handleQuickCreateCollectionFolder());
   $('btn-bm-pause').addEventListener('click', async () => {
@@ -1123,24 +1274,65 @@ function bindEvents() {
     const res = await queryTabContent(state.activeTab, { type: 'STOP_BOOKMARK_IMPORT' });
     if (res?.job) renderBookmarkJobProgress(res.job);
   });
-  $('btn-goto-x-bookmarks').addEventListener('click', () => {
-    ext.tabs.create({ url: 'https://x.com/i/bookmarks' });
-  });
-  $('btn-goto-xhs-collect').addEventListener('click', () => {
-    ext.tabs.create({ url: 'https://www.xiaohongshu.com/explore' });
-  });
 
-  // Tab 3: Images
+  for (const btn of document.querySelectorAll('.seg-btn[data-org-mode]')) {
+    btn.addEventListener('click', () => {
+      state.organizeMode = btn.dataset.orgMode || 'per_tweet';
+      renderBatchSegmentedState();
+      updateBatchRulesSummary();
+      void persistBatchOptions();
+    });
+  }
+
+  for (const btn of document.querySelectorAll('.seg-btn[data-max-count]')) {
+    btn.addEventListener('click', () => {
+      state.maxCount = Number(btn.dataset.maxCount || 0);
+      renderBatchSegmentedState();
+      updateBatchRulesSummary();
+      void persistBatchOptions();
+    });
+  }
+
+  for (const btn of document.querySelectorAll('.seg-btn[data-xhs-mode]')) {
+    btn.addEventListener('click', () => {
+      state.xhsCollectMode = btn.dataset.xhsMode === 'bookmarks' ? 'bookmarks' : 'media';
+      renderBatchSegmentedState();
+      syncBatchModeVisibility();
+      void persistBatchOptions();
+    });
+  }
+
+  for (const id of [
+    'bm-opt-include-videos',
+    'bm-opt-skip-retweets',
+    'bm-opt-xhs-detail',
+    'bm-opt-skip-dups',
+    'bm-opt-stop-streak',
+  ]) {
+    $(id).addEventListener('change', () => {
+      updateBatchRulesSummary();
+      void persistBatchOptions();
+    });
+  }
+
+  for (const tile of document.querySelectorAll('.platform-tile[data-open-url]')) {
+    tile.addEventListener('click', () => {
+      const targetUrl = tile.dataset.openUrl;
+      if (targetUrl) ext.tabs.create({ url: targetUrl });
+    });
+  }
+
+  // Panel 3: Images
   $('btn-select-large').addEventListener('click', handleSelectLargeImages);
   $('btn-clear-images').addEventListener('click', handleClearImages);
   $('btn-rescan-images').addEventListener('click', () => void scanCurrentPageImages());
   $('btn-save-images').addEventListener('click', () => void handleSaveSelectedImages());
 
-  // Tab 4: Text
+  // Panel 4: Text
   $('text-body-input').addEventListener('input', updateTextCharCount);
   $('btn-save-text').addEventListener('click', () => void handleSaveText());
 
-  // Tab 5: Color
+  // Panel 5: Color
   $('btn-eyedropper').addEventListener('click', () => void handleEyeDropper());
   $('color-native-input').addEventListener('input', (e) => {
     updateSwatchPreview(e.target.value, true);
@@ -1185,7 +1377,6 @@ async function init() {
     return;
   }
 
-  // Zero-config same-machine desktop auto-pairing before ever showing onboarding!
   if (state.config?.connectionMode !== 'web') {
     setConnectionIndicator('checking', '自动连接中…');
     const paired = await sendBg({ type: 'AUTO_PAIR_LOCAL_DESKTOP', force: false }).catch(() => null);

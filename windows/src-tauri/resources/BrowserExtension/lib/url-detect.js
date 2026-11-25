@@ -4,6 +4,15 @@
  * Shared across Chrome and Safari extension builds.
  */
 
+import {
+  buildCreatorRootFolderName,
+  detectBlueskyProfileUrl,
+  detectInstagramProfileUrl,
+  detectPixivCollectionUrl,
+  detectThreadsProfileUrl,
+  detectXAuthorProfileUrl,
+} from './social-collectors.js';
+
 const X_HOSTS = new Set([
   'x.com',
   'twitter.com',
@@ -37,6 +46,10 @@ const XHS_HOSTS = new Set([
 ]);
 
 const XHS_SHORT_HOSTS = new Set(['xhslink.com', 'www.xhslink.com']);
+
+const PIXIV_HOSTS = new Set(['pixiv.net', 'www.pixiv.net', 'touch.pixiv.net']);
+
+const INSTAGRAM_HOSTS = new Set(['instagram.com', 'www.instagram.com', 'm.instagram.com']);
 
 const GITHUB_HOSTS = new Set(['github.com', 'www.github.com']);
 
@@ -307,6 +320,49 @@ export function detectSpecialSource(rawUrl) {
     }
   }
 
+  // Pixiv artwork
+  if (PIXIV_HOSTS.has(host)) {
+    const artIdx = parts.findIndex((seg) => seg.toLowerCase() === 'artworks');
+    if (artIdx >= 0 && parts[artIdx + 1] && /^\d{1,16}$/.test(parts[artIdx + 1])) {
+      return {
+        kind: 'pixiv',
+        label: 'Pixiv 作品',
+        badgeText: 'Pixiv 作品',
+        actionLabel: '收藏 Pixiv 作品',
+        hostname: 'pixiv.net',
+        postID: parts[artIdx + 1],
+      };
+    }
+    if (parts[0]?.toLowerCase() === 'member_illust.php') {
+      const id = (u.searchParams.get('illust_id') || '').trim();
+      if (/^\d{1,16}$/.test(id)) {
+        return {
+          kind: 'pixiv',
+          label: 'Pixiv 作品',
+          badgeText: 'Pixiv 作品',
+          actionLabel: '收藏 Pixiv 作品',
+          hostname: 'pixiv.net',
+          postID: id,
+        };
+      }
+    }
+  }
+
+  // Instagram post / reel
+  if (INSTAGRAM_HOSTS.has(host)) {
+    const igIdx = parts.findIndex((seg) => ['p', 'reel', 'reels', 'tv'].includes(seg.toLowerCase()));
+    if (igIdx >= 0 && parts[igIdx + 1] && /^[a-zA-Z0-9_-]{4,40}$/.test(parts[igIdx + 1])) {
+      return {
+        kind: 'instagram',
+        label: 'Instagram 贴文',
+        badgeText: 'Instagram',
+        actionLabel: '收藏 Instagram 贴文',
+        hostname: 'instagram.com',
+        postID: parts[igIdx + 1],
+      };
+    }
+  }
+
   // GitHub repository
   if (GITHUB_HOSTS.has(host) && parts.length >= 2) {
     const owner = parts[0];
@@ -461,6 +517,20 @@ export function detectBookmarkCollectionPage(rawUrl) {
         suggestedFolderName: 'X 书签',
       };
     }
+    // Author profile / media pages: /<handle>, /<handle>/media, /<handle>/highlights, /<handle>/with_replies
+    const authorProfile = detectXAuthorProfileUrl(u.href);
+    if (authorProfile) {
+      return {
+        supported: true,
+        isCollectionRoute: true,
+        platform: 'x',
+        pageKind: 'author_media',
+        authorHandle: authorProfile.handle,
+        isMediaTab: authorProfile.isMediaTab,
+        label: `X 作者媒体 · @${authorProfile.handle}`,
+        suggestedFolderName: `@${authorProfile.handle}`,
+      };
+    }
   }
 
   if (XHS_HOSTS.has(host)) {
@@ -516,6 +586,100 @@ export function detectBookmarkCollectionPage(rawUrl) {
     }
   }
 
+  // Bluesky author profile / media / likes
+  const bskyProfile = detectBlueskyProfileUrl(u.href);
+  if (bskyProfile) {
+    return {
+      supported: true,
+      isCollectionRoute: true,
+      platform: 'bluesky',
+      pageKind: bskyProfile.pageKind,
+      authorHandle: bskyProfile.handle,
+      isMediaTab: bskyProfile.isMediaTab,
+      label: bskyProfile.isLikes
+        ? `Bluesky 喜欢 · @${bskyProfile.handle}`
+        : `Bluesky 作者媒体 · @${bskyProfile.handle}`,
+      suggestedFolderName: bskyProfile.isLikes
+        ? 'Bluesky 喜欢'
+        : buildCreatorRootFolderName('bluesky', bskyProfile.handle),
+    };
+  }
+
+  // Pixiv artist works & bookmarks
+  const pixivPage = detectPixivCollectionUrl(u.href);
+  if (pixivPage) {
+    const isBookmarks = pixivPage.pageKind === 'bookmarks';
+    const filterLabel =
+      pixivPage.workFilter === 'illusts'
+        ? '插画'
+        : pixivPage.workFilter === 'manga'
+          ? '漫画'
+          : '全部作品';
+    return {
+      supported: true,
+      isCollectionRoute: true,
+      platform: 'pixiv',
+      pageKind: pixivPage.pageKind,
+      authorHandle: pixivPage.userId,
+      workFilter: pixivPage.workFilter,
+      bookmarkTag: pixivPage.bookmarkTag,
+      rest: pixivPage.rest,
+      label: isBookmarks
+        ? pixivPage.bookmarkTag
+          ? `Pixiv 收藏 · #${pixivPage.bookmarkTag}`
+          : 'Pixiv 收藏作品'
+        : `Pixiv 画师${filterLabel}`,
+      suggestedFolderName: isBookmarks
+        ? pixivPage.bookmarkTag
+          ? `Pixiv 收藏 · ${pixivPage.bookmarkTag}`
+          : 'Pixiv 收藏'
+        : `Pixiv #${pixivPage.userId}`,
+    };
+  }
+
+  // Threads author profile / saved / liked
+  const threadsPage = detectThreadsProfileUrl(u.href);
+  if (threadsPage) {
+    const isAuthor = threadsPage.pageKind === 'author_media';
+    return {
+      supported: true,
+      isCollectionRoute: true,
+      platform: 'threads',
+      pageKind: threadsPage.pageKind,
+      authorHandle: threadsPage.handle,
+      isMediaTab: Boolean(threadsPage.isMediaTab),
+      label: isAuthor
+        ? `Threads 作者媒体 · @${threadsPage.handle}`
+        : threadsPage.pageKind === 'likes'
+          ? 'Threads 喜欢列表'
+          : 'Threads 已保存列表',
+      suggestedFolderName: isAuthor
+        ? buildCreatorRootFolderName('threads', threadsPage.handle)
+        : threadsPage.pageKind === 'likes'
+          ? 'Threads 喜欢'
+          : 'Threads 收藏',
+    };
+  }
+
+  // Instagram author profile / reels / saved
+  const igPage = detectInstagramProfileUrl(u.href);
+  if (igPage) {
+    const isAuthor = igPage.pageKind === 'author_media';
+    return {
+      supported: true,
+      isCollectionRoute: true,
+      platform: 'instagram',
+      pageKind: igPage.pageKind,
+      authorHandle: igPage.handle,
+      label: isAuthor
+        ? `Instagram 作者媒体 · @${igPage.handle}`
+        : `Instagram 收藏 · @${igPage.handle}`,
+      suggestedFolderName: isAuthor
+        ? buildCreatorRootFolderName('instagram', igPage.handle)
+        : 'Instagram 收藏',
+    };
+  }
+
   return {
     supported: false,
     isCollectionRoute: false,
@@ -544,6 +708,12 @@ export function canonicalDedupKey(rawUrl) {
   }
   if (info.kind === 'bluesky' && info.handle && info.postID) {
     return `bsky:${info.handle.toLowerCase()}:${info.postID}`;
+  }
+  if (info.kind === 'pixiv' && info.postID) {
+    return `pixiv:${info.postID}`;
+  }
+  if (info.kind === 'instagram' && info.postID) {
+    return `ig:${info.postID}`;
   }
   return `url:${trimmed.toLowerCase()}`;
 }

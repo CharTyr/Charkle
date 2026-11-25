@@ -32,20 +32,33 @@ import {
 } from '../../stores';
 import type { AssetRecord, QuickJumpKind, QuickJumpMatch } from '../../types/domain';
 
-type QuickCommandId = 'newMoodboard' | 'openInbox' | 'toggleShelf' | 'captureArea' | 'openSettings';
+type QuickCommandId =
+  | 'newMoodboard'
+  | 'smartDedup'
+  | 'openInbox'
+  | 'toggleShelf'
+  | 'captureArea'
+  | 'openSettings';
 
 interface QuickCommandItem {
   id: QuickCommandId;
   title: string;
   shortcut?: string;
+  keywords?: string[];
 }
 
 const QUICK_COMMANDS: QuickCommandItem[] = [
-  { id: 'newMoodboard', title: '快速生成情绪板…' },
-  { id: 'openInbox', title: '前往收件箱清理台' },
-  { id: 'toggleShelf', title: '展开 / 收起顶部悬浮窗', shortcut: 'Alt+Shift+S' },
-  { id: 'captureArea', title: '交互式区域截图', shortcut: 'Alt+Shift+A' },
-  { id: 'openSettings', title: '打开设置', shortcut: 'Ctrl+,' },
+  { id: 'newMoodboard', title: '快速生成情绪板…', keywords: ['情绪板', 'moodboard', '生成'] },
+  {
+    id: 'smartDedup',
+    title: '智能去重',
+    shortcut: 'Ctrl+Shift+D',
+    keywords: ['去重', '重复', 'dedup', 'duplicate', '智能去重'],
+  },
+  { id: 'openInbox', title: '前往收件箱清理台', keywords: ['收件箱', 'inbox'] },
+  { id: 'toggleShelf', title: '展开 / 收起顶部悬浮窗', shortcut: 'Alt+Shift+S', keywords: ['悬浮窗', 'shelf'] },
+  { id: 'captureArea', title: '交互式区域截图', shortcut: 'Alt+Shift+A', keywords: ['截图', 'capture'] },
+  { id: 'openSettings', title: '打开设置', shortcut: 'Ctrl+,', keywords: ['设置', 'settings'] },
 ];
 
 type SelectableRow =
@@ -78,6 +91,8 @@ const CommandIcon: React.FC<{ id: QuickCommandId; active: boolean }> = ({ id, ac
   switch (id) {
     case 'newMoodboard':
       return active ? <Sparkle16Filled className={cls} /> : <Sparkle16Regular className={cls} />;
+    case 'smartDedup':
+      return active ? <Sparkle16Filled className={cls} /> : <Sparkle16Regular className={cls} />;
     case 'openInbox':
       return active ? <MailInbox16Filled className={cls} /> : <MailInbox16Regular className={cls} />;
     case 'toggleShelf':
@@ -106,6 +121,7 @@ export const JumpAnywhereModal: React.FC = () => {
   const closeQuickLook = useCoordinatorStore((s) => s.closeQuickLook);
   const requestGalleryReveal = useCoordinatorStore((s) => s.requestGalleryReveal);
   const openMoodboardGenerator = useCoordinatorStore((s) => s.openMoodboardGenerator);
+  const openDeduplication = useCoordinatorStore((s) => s.openDeduplication);
   const openSettings = useCoordinatorStore((s) => s.openSettings);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
@@ -161,7 +177,16 @@ export const JumpAnywhereModal: React.FC = () => {
         ...matches.slice(0, 8).map((match): SelectableRow => ({ kind: 'match', match })),
       ];
     }
-    return matches.map((match): SelectableRow => ({ kind: 'match', match }));
+    const lower = trimmedQuery.toLowerCase();
+    const matchedCommands = QUICK_COMMANDS.filter(
+      (c) =>
+        c.title.toLowerCase().includes(lower) ||
+        c.keywords?.some((kw) => kw.toLowerCase().includes(lower)),
+    );
+    return [
+      ...matchedCommands.map((command): SelectableRow => ({ kind: 'command', command })),
+      ...matches.map((match): SelectableRow => ({ kind: 'match', match })),
+    ];
   }, [trimmedQuery, matches]);
 
   useEffect(() => {
@@ -197,6 +222,8 @@ export const JumpAnywhereModal: React.FC = () => {
     closeQuickLook();
     if (cmd === 'newMoodboard') {
       openMoodboardGenerator('prompt');
+    } else if (cmd === 'smartDedup') {
+      openDeduplication();
     } else if (cmd === 'openInbox') {
       setDestination({ type: 'inbox' });
     } else if (cmd === 'toggleShelf') {

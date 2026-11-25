@@ -2181,16 +2181,282 @@ impl LibraryDatabase {
     }
 
     pub fn save_board_locally(&self, board: &MoodboardDocument) -> CoreResult<MoodboardDocument> {
+        self.with_transaction(|conn| Self::save_board_locally_conn(conn, board))
+    }
+
+    fn save_board_locally_conn(
+        conn: &Connection,
+        board: &MoodboardDocument,
+    ) -> CoreResult<MoodboardDocument> {
+        if Self::is_tombstoned_conn(conn, "board", board.id)? {
+            return Err(CoreError::NotFound(format_swift_uuid(&board.id)));
+        }
+        let existing = Self::board_by_id_conn(conn, board.id)?;
+        let delta = BoardChanges::diff(board, existing.as_ref())?;
+        if !delta.is_empty() {
+            Self::record_conn(conn, SyncOperationChange::Board(delta), true)?;
+        }
+        Ok(Self::board_by_id_conn(conn, board.id)?.unwrap_or_else(|| board.clone()))
+    }
+
+    /// Atomically resolves duplicate groups inside a single `BEGIN IMMEDIATE` transaction:
+    /// optionally merges lossless metadata onto each kept master asset, rebinds (and deduplicates)
+    /// Moodboard `AssetRef` nodes pointing at removed duplicates, and soft-trashes removed items
+    /// when `disposal == MoveToTrash` (or returns IDs for permanent deletion cleanup).
+    pub fn resolve_duplicate_groups_tx(
+        &self,
+        plans: &[crate::media::DeduplicationResolutionPlan],
+        disposal: crate::media::DuplicateDisposalMode,
+        merge_metadata: bool,
+    ) -> CoreResult<(
+        crate::media::DeduplicationCleanupResult,
+        Vec<Uuid>,
+        Vec<Uuid>,
+    )> {
+        use crate::media::{DeduplicationCleanupResult, DuplicateDisposalMode};
+        use crate::models::core::AssetRichMetadata;
+        use crate::models::moodboard::BoardNodeKind;
+
+        if plans.is_empty() {
+            return Ok((
+                DeduplicationCleanupResult::default(),
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+
         self.with_transaction(|conn| {
-            if Self::is_tombstoned_conn(conn, "board", board.id)? {
-                return Err(CoreError::NotFound(format_swift_uuid(&board.id)));
+            let mut replacement_map: HashMap<Uuid, Uuid> = HashMap::new();
+            let mut all_remove_ids: Vec<Uuid> = Vec::new();
+            let mut seen_remove_ids: HashSet<Uuid> = HashSet::new();
+            let mut resolved_group_count = 0usize;
+            let mut reclaimed_bytes = 0i64;
+            let mut merged_metadata_count = 0usize;
+
+            for plan in plans {
+                let Some(mut keeper) = Self::asset_by_id_conn(conn, plan.keep_asset_id)? else {
+                    continue;
+                };
+                if keeper.is_trashed {
+                    continue;
+                }
+
+                let mut group_removed_assets: Vec<AssetRecord> = Vec::new();
+                for &rid in &plan.remove_asset_ids {
+                    if rid == plan.keep_asset_id || !seen_remove_ids.insert(rid) {
+                        continue;
+                    }
+                    if let Some(candidate) = Self::asset_by_id_conn(conn, rid)? {
+                        if candidate.is_trashed {
+                            continue;
+                        }
+                        reclaimed_bytes += candidate.file_size_bytes.max(0);
+                        replacement_map.insert(rid, plan.keep_asset_id);
+                        all_remove_ids.push(rid);
+                        group_removed_assets.push(candidate);
+                    }
+                }
+                if group_removed_assets.is_empty() {
+                    continue;
+                }
+                resolved_group_count += 1;
+
+                if merge_metadata {
+                    let mut did_mutate_keeper = false;
+                    let mut tag_lookup = tag_map(&keeper.tags);
+                    let original_tag_count = tag_lookup.len();
+
+                    for dup in &group_removed_assets {
+                        for raw_tag in &dup.tags {
+                            let clean = raw_tag.trim();
+                            if clean.is_empty() {
+                                continue;
+                            }
+                            let norm = search_text::normalize(clean);
+                            if !norm.is_empty() {
+                                tag_lookup.entry(norm).or_insert_with(|| clean.to_string());
+                            }
+                        }
+                        if dup.rating > keeper.rating {
+                            keeper.rating = dup.rating.clamp(0, 5);
+                            did_mutate_keeper = true;
+                        }
+                        if keeper.folder_id.is_none() {
+                            if let Some(dup_folder) = dup.folder_id {
+                                if Self::folder_by_id_conn(conn, dup_folder)?.is_some() {
+                                    keeper.folder_id = Some(dup_folder);
+                                    did_mutate_keeper = true;
+                                }
+                            }
+                        }
+                        let keeper_has_source = keeper
+                            .source_url
+                            .as_deref()
+                            .is_some_and(|s| !s.trim().is_empty());
+                        if !keeper_has_source {
+                            if let Some(dup_src) = dup
+                                .source_url
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                            {
+                                keeper.source_url = Some(dup_src.to_string());
+                                keeper.source_domain = dup.source_domain.clone().or_else(|| {
+                                    url::Url::parse(dup_src)
+                                        .ok()
+                                        .and_then(|u| u.host_str().map(String::from))
+                                });
+                                did_mutate_keeper = true;
+                            }
+                        }
+                        let dup_notes = dup.notes.trim();
+                        let keeper_notes = keeper.notes.trim().to_string();
+                        if !dup_notes.is_empty() {
+                            if keeper_notes.is_empty() {
+                                keeper.notes = dup_notes.to_string();
+                                did_mutate_keeper = true;
+                            } else if !keeper_notes
+                                .to_lowercase()
+                                .contains(&dup_notes.to_lowercase())
+                            {
+                                keeper.notes = format!("{keeper_notes}\n\n{dup_notes}");
+                                did_mutate_keeper = true;
+                            }
+                        }
+                        if dup.pinned_offline && !keeper.pinned_offline {
+                            keeper.pinned_offline = true;
+                            did_mutate_keeper = true;
+                        }
+                        if let Some(dup_exif) = dup
+                            .rich_metadata
+                            .as_ref()
+                            .and_then(|r| r.photo_exif.as_ref())
+                        {
+                            let keeper_has_exif = keeper
+                                .rich_metadata
+                                .as_ref()
+                                .and_then(|r| r.photo_exif.as_ref())
+                                .is_some_and(|e| e.has_meaningful_camera_exif());
+                            if dup_exif.has_meaningful_camera_exif() && !keeper_has_exif {
+                                let mut rich = keeper
+                                    .rich_metadata
+                                    .clone()
+                                    .unwrap_or_else(AssetRichMetadata::default);
+                                rich.photo_exif = Some(dup_exif.clone());
+                                keeper.rich_metadata = Some(rich);
+                                did_mutate_keeper = true;
+                            }
+                        }
+                        if let Some(dup_ai) = dup
+                            .rich_metadata
+                            .as_ref()
+                            .and_then(|r| r.ai_generation.as_ref())
+                        {
+                            let keeper_has_ai = keeper
+                                .rich_metadata
+                                .as_ref()
+                                .and_then(|r| r.ai_generation.as_ref())
+                                .is_some_and(|ai| !ai.is_empty());
+                            if !dup_ai.is_empty() && !keeper_has_ai {
+                                let mut rich = keeper
+                                    .rich_metadata
+                                    .clone()
+                                    .unwrap_or_else(AssetRichMetadata::default);
+                                rich.ai_generation = Some(dup_ai.clone());
+                                keeper.rich_metadata = Some(rich);
+                                did_mutate_keeper = true;
+                            }
+                        }
+                    }
+
+                    if tag_lookup.len() != original_tag_count {
+                        let mut sorted_tags: Vec<String> = tag_lookup.into_values().collect();
+                        sorted_tags.sort();
+                        keeper.tags = sorted_tags;
+                        did_mutate_keeper = true;
+                    }
+
+                    if did_mutate_keeper {
+                        Self::save_asset_locally_conn(conn, &keeper, true)?;
+                        merged_metadata_count += 1;
+                    }
+                }
             }
-            let existing = Self::board_by_id_conn(conn, board.id)?;
-            let delta = BoardChanges::diff(board, existing.as_ref())?;
-            if !delta.is_empty() {
-                Self::record_conn(conn, SyncOperationChange::Board(delta), true)?;
+
+            // Seamlessly re-point any Moodboard AssetRef nodes referencing removed duplicates onto
+            // the kept master asset, deduplicating if that board already contains the kept asset.
+            let mut updated_board_ids: Vec<Uuid> = Vec::new();
+            if !replacement_map.is_empty() {
+                let all_boards = Self::fetch_boards_conn(conn)?;
+                let now = Utc::now();
+                for mut board in all_boards {
+                    let mut board_changed = false;
+                    let mut existing_kept_targets: HashSet<Uuid> = board
+                        .nodes
+                        .iter()
+                        .filter_map(|n| match n.kind {
+                            BoardNodeKind::AssetRef { asset_id, .. }
+                                if !replacement_map.contains_key(&asset_id) =>
+                            {
+                                Some(asset_id)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+
+                    let mut new_nodes = Vec::with_capacity(board.nodes.len());
+                    for mut node in board.nodes {
+                        if let BoardNodeKind::AssetRef { asset_id, .. } = &mut node.kind {
+                            if let Some(&new_asset_id) = replacement_map.get(asset_id) {
+                                if new_asset_id != *asset_id {
+                                    board_changed = true;
+                                    if existing_kept_targets.insert(new_asset_id) {
+                                        *asset_id = new_asset_id;
+                                        node.updated_at = now;
+                                        new_nodes.push(node);
+                                    }
+                                    // Else: board already references `new_asset_id`, drop redundant duplicate node.
+                                    continue;
+                                }
+                            }
+                        }
+                        new_nodes.push(node);
+                    }
+                    board.nodes = new_nodes;
+
+                    if board_changed {
+                        board.updated_at = now;
+                        let _ = Self::save_board_locally_conn(conn, &board)?;
+                        updated_board_ids.push(board.id);
+                    }
+                }
             }
-            Ok(Self::board_by_id_conn(conn, board.id)?.unwrap_or_else(|| board.clone()))
+
+            if disposal == DuplicateDisposalMode::MoveToTrash {
+                for &rid in &all_remove_ids {
+                    if let Some(mut dup) = Self::asset_by_id_conn(conn, rid)? {
+                        if !dup.is_trashed {
+                            dup.is_trashed = true;
+                            Self::save_asset_locally_conn(conn, &dup, true)?;
+                        }
+                    }
+                }
+            }
+
+            let permanent_delete_ids = if disposal == DuplicateDisposalMode::PermanentlyDelete {
+                all_remove_ids.clone()
+            } else {
+                Vec::new()
+            };
+
+            let result = DeduplicationCleanupResult {
+                resolved_group_count,
+                removed_asset_count: all_remove_ids.len(),
+                reclaimed_bytes,
+                merged_metadata_count,
+                updated_board_count: updated_board_ids.len(),
+            };
+            Ok((result, updated_board_ids, permanent_delete_ids))
         })
     }
 
