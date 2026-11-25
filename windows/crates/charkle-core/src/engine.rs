@@ -57,6 +57,23 @@ use crate::wire::swift_codec::{format_swift_uuid, upper_uuid, upper_uuid_vec};
 
 const WEBDAV_PASSWORD_VAULT_KEY: &str = "sync.webdav.password";
 
+/// Single ranked hit returned by [`LiveCharkleEngine::semantic_search_local`].
+#[derive(Debug, Clone)]
+pub struct LocalSemanticSearchHit {
+    pub asset: AssetRecord,
+    pub score: f64,
+    pub reason: String,
+    pub source_label: &'static str,
+}
+
+/// Report returned by [`LiveCharkleEngine::semantic_search_local`].
+#[derive(Debug, Clone)]
+pub struct LocalSemanticSearchReport {
+    pub query: String,
+    pub summary: String,
+    pub hits: Vec<LocalSemanticSearchHit>,
+}
+
 /// Broadcast events pushed to Tauri WebView or CLI listeners.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
@@ -185,6 +202,403 @@ impl LiveCharkleEngine {
 
     pub fn fetch_asset(&self, id: Uuid) -> CoreResult<Option<AssetRecord>> {
         self.db.asset(id)
+    }
+
+    pub fn asset_ids_matching_prefix(&self, prefix: &str, limit: usize) -> CoreResult<Vec<Uuid>> {
+        self.db.asset_ids_matching_prefix(prefix, limit)
+    }
+
+    pub fn folder_ids_matching_prefix(&self, prefix: &str, limit: usize) -> CoreResult<Vec<Uuid>> {
+        self.db.folder_ids_matching_prefix(prefix, limit)
+    }
+
+    pub fn board_ids_matching_prefix(&self, prefix: &str, limit: usize) -> CoreResult<Vec<Uuid>> {
+        self.db.board_ids_matching_prefix(prefix, limit)
+    }
+
+    pub fn visual_descriptors_for_assets(
+        &self,
+        assets: &[AssetRecord],
+        priority_ids: &[Uuid],
+        max_extract: usize,
+    ) -> HashMap<Uuid, LocalVisualDescriptor> {
+        self.ensure_visual_descriptors(assets, priority_ids, max_extract)
+    }
+
+    pub fn vectors_map(&self) -> CoreResult<HashMap<Uuid, AssetVector>> {
+        self.db.vectors()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn db(&self) -> &LibraryDatabase {
+        &self.db
+    }
+
+    /// Computes calibrated pairwise visual similarity in `0.0..=1.0` between two assets using
+    /// local perceptual visual descriptors, cached embeddings, and weighted CIELAB palette proximity.
+    pub fn visual_pair_similarity(
+        a: &AssetRecord,
+        b: &AssetRecord,
+        vectors: &HashMap<Uuid, crate::models::media::AssetVector>,
+        descriptors: &HashMap<Uuid, LocalVisualDescriptor>,
+    ) -> f64 {
+        let mut best = 0.0_f64;
+        if let (Some(da), Some(db)) = (descriptors.get(&a.id), descriptors.get(&b.id)) {
+            best = best.max(da.similarity(db));
+        }
+        if let (Some(va), Some(vb)) = (vectors.get(&a.id), vectors.get(&b.id)) {
+            if let (Some(ea), Some(eb)) = (va.embedding.as_deref(), vb.embedding.as_deref()) {
+                if ea.len() == eb.len() && !ea.is_empty() {
+                    if let Some(cos) = crate::models::media::cosine_similarity(ea, eb) {
+                        best = best.max(f64::from(cos.clamp(0.0, 1.0)));
+                    }
+                }
+            }
+        }
+        if !a.dominant_colors.is_empty() && !b.dominant_colors.is_empty() {
+            let mut min_de = f64::INFINITY;
+            for ca in a.dominant_colors.iter().take(3) {
+                for cb in b.dominant_colors.iter().take(3) {
+                    let de = ca.delta_e_2000(cb);
+                    if de.is_finite() && de < min_de {
+                        min_de = de;
+                    }
+                }
+            }
+            if min_de < 22.0 {
+                best = best.max((1.0 - min_de / 22.0) * 0.65);
+            }
+        }
+        best.clamp(0.0, 1.0)
+    }
+
+    /// Local bilingual EN↔ZH + CJK tokenization + CIELAB tone/aspect/color + positive seed
+    /// + negative `unlike_asset_ids` repulsion hybrid semantic search.
+    pub fn semantic_search_local(
+        &self,
+        query: &str,
+        criteria: &FilterCriteria,
+        limit: usize,
+        seed_asset_ids: &[Uuid],
+        unlike_asset_ids: &[Uuid],
+    ) -> CoreResult<LocalSemanticSearchReport> {
+        use crate::intelligence::VisualQueryIntelligence;
+
+        let trimmed = query.trim();
+        let mut base_criteria = criteria.clone();
+        base_criteria.search_query.clear();
+        let candidates = self.db.fetch_assets(&base_criteria, None)?;
+        if candidates.is_empty() {
+            return Ok(LocalSemanticSearchReport {
+                query: trimmed.to_string(),
+                summary: format!("语义检索「{trimmed}」未命中匹配素材"),
+                hits: Vec::new(),
+            });
+        }
+
+        let folders = self.db.fetch_folders()?;
+        let folder_by_id: HashMap<Uuid, &FolderRecord> =
+            folders.iter().map(|f| (f.id, f)).collect();
+        let folder_paths: HashMap<Uuid, String> = folders
+            .iter()
+            .map(|f| (f.id, build_folder_display_path(f.id, &folder_by_id)))
+            .collect();
+
+        let base_terms = search_text::query_terms(trimmed);
+        let visual_hints = VisualQueryIntelligence::parse_visual_hints(trimmed, &base_terms);
+        let norm_base_terms: Vec<String> = base_terms
+            .iter()
+            .map(|t| search_text::normalize(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let norm_expanded_terms: Vec<String> = visual_hints
+            .expanded_terms
+            .iter()
+            .map(|t| search_text::normalize(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let norm_full_query = search_text::normalize(trimmed);
+
+        let vectors = self.db.vectors().unwrap_or_default();
+        let mut seed_assets = Vec::new();
+        for &sid in seed_asset_ids {
+            if let Some(a) = self.db.asset(sid)? {
+                seed_assets.push(a);
+            }
+        }
+        let mut unlike_assets = Vec::new();
+        for &uid in unlike_asset_ids {
+            if let Some(a) = self.db.asset(uid)? {
+                unlike_assets.push(a);
+            }
+        }
+        let need_visual = !seed_assets.is_empty() || !unlike_assets.is_empty();
+        let descriptors = if need_visual {
+            let mut all_for_desc = candidates.clone();
+            all_for_desc.extend(seed_assets.iter().cloned());
+            all_for_desc.extend(unlike_assets.iter().cloned());
+            let mut priority = Vec::new();
+            priority.extend_from_slice(seed_asset_ids);
+            priority.extend_from_slice(unlike_asset_ids);
+            self.ensure_visual_descriptors(&all_for_desc, &priority, 200)
+        } else {
+            HashMap::new()
+        };
+
+        let seed_set: HashSet<Uuid> = seed_asset_ids.iter().copied().collect();
+        let unlike_set: HashSet<Uuid> = unlike_asset_ids.iter().copied().collect();
+        let has_visual_hints = !visual_hints.tones.is_empty()
+            || !visual_hints.aspect_shapes.is_empty()
+            || !visual_hints.target_colors.is_empty();
+
+        let mut hits: Vec<LocalSemanticSearchHit> = Vec::new();
+        for asset in candidates {
+            if unlike_set.contains(&asset.id) {
+                continue;
+            }
+            if trimmed.is_empty() && seed_set.contains(&asset.id) {
+                continue;
+            }
+
+            let folder_path = asset
+                .folder_id
+                .and_then(|fid| folder_paths.get(&fid))
+                .map(String::as_str)
+                .unwrap_or("");
+            let title_norm = search_text::normalize(&asset.title);
+            let file_norm = search_text::normalize(&asset.file_name);
+            let desc_norm = search_text::normalize(asset.ai_description.as_deref().unwrap_or(""));
+            let notes_norm = search_text::normalize(&asset.notes);
+            let ocr_norm = search_text::normalize(asset.ocr_text.as_deref().unwrap_or(""));
+            let folder_norm = search_text::normalize(folder_path);
+            let tags_norm: Vec<String> = asset
+                .tags
+                .iter()
+                .chain(asset.suggested_tags.iter())
+                .map(|t| search_text::normalize(t))
+                .filter(|t| !t.is_empty())
+                .collect();
+
+            let mut raw_text = 0.0_f64;
+            let mut ft_boost = 0.0_f64;
+
+            if !norm_full_query.is_empty() {
+                if title_norm.contains(&norm_full_query) {
+                    raw_text += 0.55;
+                } else if tags_norm.iter().any(|t| t == &norm_full_query) {
+                    ft_boost += 0.55;
+                } else if desc_norm.contains(&norm_full_query)
+                    || notes_norm.contains(&norm_full_query)
+                {
+                    raw_text += 0.42;
+                } else if folder_norm.contains(&norm_full_query) {
+                    ft_boost += 0.36;
+                }
+            }
+
+            if !norm_base_terms.is_empty() {
+                let mut matched_base = 0usize;
+                for term in &norm_base_terms {
+                    let mut term_hit = false;
+                    if tags_norm.iter().any(|t| t == term || t.contains(term)) {
+                        ft_boost += 0.30;
+                        term_hit = true;
+                    }
+                    if folder_norm.contains(term) {
+                        ft_boost += 0.22;
+                        term_hit = true;
+                    }
+                    if title_norm.contains(term) || file_norm.contains(term) {
+                        raw_text += 0.26;
+                        term_hit = true;
+                    } else if desc_norm.contains(term)
+                        || notes_norm.contains(term)
+                        || ocr_norm.contains(term)
+                    {
+                        raw_text += 0.18;
+                        term_hit = true;
+                    } else if search_text::fuzzy_score(term, &asset.title).is_some() {
+                        raw_text += 0.14;
+                        term_hit = true;
+                    }
+                    if term_hit {
+                        matched_base += 1;
+                    }
+                }
+                if matched_base > 0 {
+                    let coverage = matched_base as f64 / norm_base_terms.len() as f64;
+                    raw_text += coverage * 0.22;
+                }
+            }
+
+            if !norm_expanded_terms.is_empty() {
+                let mut exp_hits = 0usize;
+                for term in &norm_expanded_terms {
+                    if tags_norm.iter().any(|t| t == term || t.contains(term)) {
+                        ft_boost += 0.22;
+                        exp_hits += 1;
+                    } else if folder_norm.contains(term) {
+                        ft_boost += 0.16;
+                        exp_hits += 1;
+                    } else if title_norm.contains(term)
+                        || desc_norm.contains(term)
+                        || notes_norm.contains(term)
+                    {
+                        raw_text += 0.14;
+                        exp_hits += 1;
+                    }
+                }
+                if exp_hits > 0 {
+                    raw_text += (exp_hits.min(3) as f64) * 0.05;
+                }
+            }
+
+            let t_score = (raw_text + ft_boost).min(1.0);
+
+            let s_score = if !seed_assets.is_empty() {
+                seed_assets
+                    .iter()
+                    .map(|seed| Self::visual_pair_similarity(&asset, seed, &vectors, &descriptors))
+                    .fold(0.0_f64, f64::max)
+            } else {
+                0.0
+            };
+
+            let hint_match = VisualQueryIntelligence::visual_hint_score(&asset, &visual_hints);
+            let h_score = hint_match.as_ref().map(|(s, _)| *s).unwrap_or(0.0);
+
+            let mut reasons: Vec<String> = Vec::new();
+            let mut combined: f64;
+            let source_label: &'static str;
+
+            if s_score >= 0.22 && t_score > 0.05 {
+                reasons.push(format!(
+                    "种子视觉相似 {}%",
+                    (s_score * 100.0).round() as i32
+                ));
+                reasons.push("语义分词/标签命中".to_string());
+                if let Some((hs, ref hr)) = hint_match {
+                    if hs >= 0.48 {
+                        reasons.push(hr.clone());
+                    }
+                }
+                combined = (s_score * 0.50 + t_score * 0.52 + h_score * 0.14).min(1.0);
+                source_label = "本地多信号(视觉+全文)";
+            } else if s_score >= 0.25 && trimmed.is_empty() {
+                reasons.push(format!(
+                    "种子视觉相似 {}%",
+                    (s_score * 100.0).round() as i32
+                ));
+                combined = s_score;
+                source_label = "种子视觉相似";
+            } else if t_score > 0.05 {
+                if ft_boost > 0.0 && raw_text > 0.0 {
+                    reasons.push("双语分词 + 标签/目录命中".to_string());
+                } else if ft_boost > 0.0 {
+                    reasons.push("标签/目录命中".to_string());
+                } else {
+                    reasons.push("分词/标签/拼音匹配".to_string());
+                }
+                if let Some((hs, ref hr)) = hint_match {
+                    if hs >= 0.45 {
+                        reasons.push(hr.clone());
+                        combined = (t_score * 0.78 + hs * 0.26).min(1.0);
+                    } else {
+                        let aspect_penalty = if !visual_hints.aspect_shapes.is_empty()
+                            && !visual_hints.aspect_shapes.contains(&asset.aspect_shape())
+                        {
+                            0.78
+                        } else {
+                            1.0
+                        };
+                        combined = t_score * 0.88 * aspect_penalty;
+                    }
+                } else {
+                    let aspect_penalty = if !visual_hints.aspect_shapes.is_empty()
+                        && !visual_hints.aspect_shapes.contains(&asset.aspect_shape())
+                    {
+                        0.78
+                    } else {
+                        1.0
+                    };
+                    combined = t_score * 0.88 * aspect_penalty;
+                }
+                source_label = "本机多信号";
+            } else if let Some((hs, ref hr)) = hint_match {
+                if hs >= 0.62 && !visual_hints.tones.is_empty() {
+                    reasons.push(hr.clone());
+                    combined = hs * 0.72;
+                    source_label = "CIELAB 视觉氛围";
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            // Apply negative visual repulsion when `unlike_asset_ids` is provided
+            if !unlike_assets.is_empty() {
+                let max_neg = unlike_assets
+                    .iter()
+                    .map(|neg| Self::visual_pair_similarity(&asset, neg, &vectors, &descriptors))
+                    .fold(0.0_f64, f64::max);
+                if max_neg >= 0.42 {
+                    let penalty = (1.0 - (max_neg - 0.35) * 1.15).max(0.15);
+                    combined *= penalty;
+                }
+            }
+
+            combined = (combined + (asset.rating as f64) * 0.015).min(1.0);
+            if combined < 0.08 {
+                continue;
+            }
+
+            hits.push(LocalSemanticSearchHit {
+                asset,
+                score: combined,
+                reason: reasons.join(" · "),
+                source_label,
+            });
+        }
+
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit.max(1));
+
+        let mut engines = Vec::new();
+        if !seed_assets.is_empty() {
+            engines.push("本地种子视觉");
+        }
+        if !unlike_assets.is_empty() {
+            engines.push("负向视觉排斥");
+        }
+        if has_visual_hints {
+            engines.push("CIELAB氛围/画幅");
+        }
+        if engines.is_empty() {
+            engines.push("本机双语分词/标签/拼音");
+        }
+        let summary = if hits.is_empty() {
+            format!(
+                "语义检索「{trimmed}」未命中高度相关素材（{}）",
+                engines.join(" + ")
+            )
+        } else {
+            format!(
+                "语义检索「{trimmed}」命中 {} 项素材（{}）",
+                hits.len(),
+                engines.join(" + ")
+            )
+        };
+
+        Ok(LocalSemanticSearchReport {
+            query: trimmed.to_string(),
+            summary,
+            hits,
+        })
     }
 
     /// Ingests one or more `CaptureInput` items into the library and optional target folder/board.

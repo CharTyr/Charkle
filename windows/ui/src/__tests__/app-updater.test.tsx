@@ -99,7 +99,7 @@ describe('Windows In-App Updater, Cloud Sync Account Isolation & gdirect Install
     render(<AppUpdateModal />);
 
     expect(await screen.findByText('发现新版本 v1.3.0')).toBeInTheDocument();
-    expect(screen.getByText(/v1\.2\.1 → v1\.3\.0/)).toBeInTheDocument();
+    expect(screen.getByText(/v1\.2\.2 → v1\.3\.0/)).toBeInTheDocument();
     expect(screen.getByText(/新增应用内自动检查更新与 SHA-256 校验/)).toBeInTheDocument();
     // Script tag must be stripped by DOMPurify
     expect(document.querySelector('script')).toBeNull();
@@ -187,6 +187,6 @@ describe('Windows In-App Updater, Cloud Sync Account Isolation & gdirect Install
     // Inline software update check (up-to-date case)
     const checkBtn = screen.getByRole('button', { name: /立即检查更新/ });
     fireEvent.click(checkBtn);
-    expect(await screen.findByText(/当前已是最新正式版本 v1\.2\.1/)).toBeInTheDocument();
+    expect(await screen.findByText(/当前已是最新正式版本 v1\.2\.2/)).toBeInTheDocument();
   });
 });

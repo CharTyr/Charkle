@@ -442,12 +442,13 @@ describe('Round 5 Full macOS Parity Regressions (3D Ring Gallery, Responsive Doc
   // -------------------------------------------------------------------------
 
   it('renders 64px collapsed Sidebar, 4th Ring Gallery option & Minimal Shelf Mode in Settings, and parses share copy URLs cleanly', async () => {
-    // 1. Collapsed Sidebar is 64px wide (Fluent 2 §3.2)
+    // 1. Collapsed Sidebar renders compact rail filling parent 76px slot
     useCoordinatorStore.setState({ sidebarCollapsed: true });
     const { container: sidebarContainer, unmount: unmountSidebar } = render(<SidebarView />);
     const aside = sidebarContainer.querySelector('aside');
     expect(aside).not.toBeNull();
-    expect(aside!.className).toContain('w-[64px]');
+    expect(aside).toHaveAttribute('data-collapsed', 'true');
+    expect(aside!.className).toContain('w-full');
     unmountSidebar();
 
     // 2. Settings -> General shows 4th option "环形画廊"

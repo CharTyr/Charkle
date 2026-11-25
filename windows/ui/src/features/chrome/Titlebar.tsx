@@ -50,9 +50,13 @@ export const Titlebar: React.FC = () => {
   const setThemeMode = useCoordinatorStore((s) => s.setThemeMode);
   const sidebarOpen = useCoordinatorStore((s) => s.sidebarOpen);
   const sidebarCollapsed = useCoordinatorStore((s) => s.sidebarCollapsed);
+  const sidebarWidth = useCoordinatorStore((s) => s.sidebarWidth);
   const setSidebarOpen = useCoordinatorStore((s) => s.setSidebarOpen);
   const inspectorOpen = useCoordinatorStore((s) => s.inspectorOpen);
+  const inspectorWidth = useCoordinatorStore((s) => s.inspectorWidth);
   const toggleInspector = useCoordinatorStore((s) => s.toggleInspector);
+  const isMaximized = useCoordinatorStore((s) => s.windowMaximized);
+  const setIsMaximized = useCoordinatorStore((s) => s.setWindowMaximized);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
 
   const folders = useLibraryStore((s) => s.folders);
@@ -61,7 +65,6 @@ export const Titlebar: React.FC = () => {
 
   const headerRef = useRef<HTMLElement | null>(null);
   const maxBtnRef = useRef<HTMLButtonElement | null>(null);
-  const [isMaximized, setIsMaximized] = useState(false);
   const [startingCapture, setStartingCapture] = useState(false);
   const [shelfExpanded, setShelfExpanded] = useState(false);
   const [togglingShelf, setTogglingShelf] = useState(false);
@@ -193,7 +196,7 @@ export const Titlebar: React.FC = () => {
   useEffect(() => {
     const raf = requestAnimationFrame(reportMaximizeRect);
     return () => cancelAnimationFrame(raf);
-  }, [sidebarOpen, sidebarCollapsed, inspectorOpen, reportMaximizeRect]);
+  }, [sidebarOpen, sidebarCollapsed, sidebarWidth, inspectorOpen, inspectorWidth, reportMaximizeRect]);
 
   const handleToggleMaximize = async () => {
     try {

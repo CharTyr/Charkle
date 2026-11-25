@@ -1596,18 +1596,20 @@ export const ExternalAgentsSettingsPane: React.FC = () => {
           </SettingsButton>
         </SettingsRow>
 
-        <InlineGuideDisclosure title="常用命令行示例（交互终端自动排版，管道自动输出 JSON）">
+        <InlineGuideDisclosure title="常用命令行示例（交互终端自动排版，管道自动输出单行紧凑 JSON）">
           <SettingsCodeSnippet
             text={[
               'charkle-cli.exe doctor',
               'charkle-cli.exe overview',
-              'charkle-cli.exe search "暖调陶艺" --subfolders --limit 20',
-              'charkle-cli.exe semantic "极简陶瓷质感" --limit 12',
-              'charkle-cli.exe similar <asset-uuid> --limit 8',
+              'charkle-cli.exe search --folder 插画 --tone cool --diversify --out sheet.jpg',
+              'charkle-cli.exe semantic "夏日海边蓝天女孩" --fast --diversify --limit 12',
+              'charkle-cli.exe semantic --queries "人物动态,夏日海边晴空,极简白底" --out brief.jpg',
+              'charkle-cli.exe similar <asset-id> --unlike-ids <avoid-id> --limit 8',
+              'charkle-cli.exe asset <id1> <id2> <id3>',
               'charkle-cli.exe inbox --suggest',
-              'charkle-cli.exe contact-sheet --inbox --out inbox.jpg',
-              'charkle-cli.exe board patch <board-id> --add-note "配色已定稿"',
-              'charkle-cli.exe board export <board-id> --out board.png --dark',
+              'charkle-cli.exe patch-board <board-id> --note "配色已定稿"',
+              'charkle-cli.exe export-board <board-id> --output board.png',
+              'charkle-cli.exe completions powershell',
             ].join('\n')}
           />
         </InlineGuideDisclosure>

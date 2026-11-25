@@ -234,13 +234,13 @@ describe('Fluent 2 Desktop Redesign Architecture & Regressions', () => {
       expect(screen.getByTestId('gallery-stage')).toBeInTheDocument();
     });
 
-    // Starts collapsed as 64px icon rail with compact search icon button
+    // Starts collapsed as 76px icon rail with compact search icon button
     const collapsedAside = screen.getByRole('complementary', { name: '主导航侧边栏' });
     expect(collapsedAside).toHaveAttribute('data-collapsed', 'true');
-    expect(collapsedAside.className).toContain('w-[64px]');
+    expect(screen.getByTestId('sidebar-slot').style.width).toBe('76px');
     expect(screen.queryByRole('textbox', { name: '搜索素材' })).toBeNull();
 
-    // Ctrl+F automatically expands the 248px Sidebar and focuses the single search input
+    // Ctrl+F automatically expands the Sidebar and focuses the single search input
     fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
 
     await waitFor(() => {
@@ -249,7 +249,8 @@ describe('Fluent 2 Desktop Redesign Architecture & Regressions', () => {
       expect(document.activeElement).toBe(searchInput);
     });
     const expandedAside = screen.getByRole('complementary', { name: '主导航侧边栏' });
-    expect(expandedAside.className).toContain('w-[248px]');
+    expect(expandedAside).toHaveAttribute('data-collapsed', 'false');
+    expect(screen.getByTestId('sidebar-slot').style.width).toBe('232px');
 
     // Blur search input and verify Ctrl+J opens JumpAnywhereModal instantaneously
     (document.activeElement as HTMLElement | null)?.blur?.();

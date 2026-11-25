@@ -765,7 +765,7 @@ export const SidebarView: React.FC = () => {
           aria-label="主导航侧边栏"
           data-collapsed="true"
           data-backdrop={surfaceState?.backdrop ?? 'solidFallback'}
-          className="charkle-sidebar-surface w-[64px] shrink-0 h-full flex flex-col items-center select-none"
+          className="charkle-sidebar-surface w-full min-w-0 shrink-0 h-full flex flex-col items-center select-none"
         >
           {/* Top 40px Drag Header — centered BrandMark */}
           <div
@@ -1052,7 +1052,7 @@ export const SidebarView: React.FC = () => {
         aria-label="主导航侧边栏"
         data-collapsed="false"
         data-backdrop={surfaceState?.backdrop ?? 'solidFallback'}
-        className="charkle-sidebar-surface w-[248px] shrink-0 h-full flex flex-col select-none"
+        className="charkle-sidebar-surface w-full min-w-0 shrink-0 h-full flex flex-col select-none"
       >
         {/* Top 40px Drag Header: BrandMark + Wordmark + Collapse (Ctrl+\) + Quick Capture (Ctrl+N) */}
         <div

@@ -1,18 +1,42 @@
 //! Visual contact-sheet renderer (`contact_sheet.rs`) for External Agents (`render_contact_sheet`)
 //! and multimodal visual inspection.
 //!
-//! Renders up to 16 asset thumbnails into a crisp numbered grid image (JPEG) with badge numbers
-//! so multimodal agents can visually inspect 16 candidates in a single image call.
+//! Renders up to 24 asset thumbnails into a crisp numbered grid image (JPEG, `512..=1920` px wide)
+//! with zero-padded `#01..#24` badges so multimodal agents can visually inspect candidates in a
+//! single low-token image call.
 
 use std::io::Cursor;
 
+use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+use image::{DynamicImage, Rgba, RgbaImage};
 
 use crate::error::{CoreError, CoreResult};
 use crate::media::MediaPipeline;
 use crate::models::core::AssetRecord;
 use crate::models::media::ThumbnailTier;
+
+pub const CONTACT_SHEET_MIN_WIDTH: u32 = 512;
+pub const CONTACT_SHEET_MAX_WIDTH: u32 = 1920;
+pub const CONTACT_SHEET_DEFAULT_WIDTH: u32 = 1024;
+pub const CONTACT_SHEET_MAX_ASSETS: usize = 24;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContactSheetOptions {
+    pub columns: Option<u32>,
+    pub max_width: u32,
+    pub jpeg_quality: u8,
+}
+
+impl Default for ContactSheetOptions {
+    fn default() -> Self {
+        Self {
+            columns: None,
+            max_width: CONTACT_SHEET_DEFAULT_WIDTH,
+            jpeg_quality: 74,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ContactSheetResult {
@@ -22,22 +46,47 @@ pub struct ContactSheetResult {
     pub slots: Vec<(usize, AssetRecord)>,
 }
 
-/// Renders up to 16 assets into a clean numbered contact sheet JPEG.
-pub fn render_contact_sheet(
+/// Renders up to 24 assets into a clean numbered contact sheet JPEG with configurable width
+/// (`512..=1920`) and JPEG quality.
+pub fn render_contact_sheet_with_options(
     assets: &[AssetRecord],
     media: &MediaPipeline,
-    columns: u32,
+    options: ContactSheetOptions,
 ) -> CoreResult<ContactSheetResult> {
-    let items: Vec<AssetRecord> = assets.iter().take(16).cloned().collect();
-    let cols = columns.clamp(1, 4).min(items.len().max(1) as u32);
-    let rows = (items.len().max(1) as u32).div_ceil(cols);
-    let cell_w = 240u32;
-    let cell_h = 180u32;
-    let gap = 12u32;
-    let pad = 16u32;
+    let items: Vec<AssetRecord> = assets
+        .iter()
+        .take(CONTACT_SHEET_MAX_ASSETS)
+        .cloned()
+        .collect();
+    let count = items.len().max(1) as u32;
+    let default_cols = match count {
+        1 => 1,
+        2 => 2,
+        3 | 4 => 2,
+        5..=9 => 3,
+        _ => 4,
+    };
+    let cols = options
+        .columns
+        .unwrap_or(default_cols)
+        .clamp(1, 6)
+        .min(count);
+    let rows = count.div_ceil(cols);
 
-    let canvas_w = pad * 2 + cols * cell_w + (cols.saturating_sub(1)) * gap;
-    let canvas_h = pad * 2 + rows * cell_h + (rows.saturating_sub(1)) * gap;
+    let max_width = options
+        .max_width
+        .clamp(CONTACT_SHEET_MIN_WIDTH, CONTACT_SHEET_MAX_WIDTH);
+    let gap = if max_width <= 640 { 8u32 } else { 12u32 };
+    let pad = if max_width <= 640 { 12u32 } else { 16u32 };
+
+    let usable_w = max_width
+        .saturating_sub(pad * 2 + cols.saturating_sub(1) * gap)
+        .max(cols * 96);
+    let cell_w = (usable_w / cols).max(96);
+    let cell_h = ((cell_w as f64) * 0.75).round().max(72.0) as u32;
+
+    let canvas_w = pad * 2 + cols * cell_w + cols.saturating_sub(1) * gap;
+    let canvas_h = pad * 2 + rows * cell_h + rows.saturating_sub(1) * gap;
     let mut canvas = RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([244, 244, 242, 255]));
     let mut slots = Vec::with_capacity(items.len());
 
@@ -57,10 +106,15 @@ pub fn render_contact_sheet(
             Rgba([230, 232, 236, 255]),
         );
 
-        // Try loading grid thumbnail or original
+        // Try loading grid thumbnail, preview thumbnail, or local original
         let loaded = media
             .thumbnail_url(asset.id, ThumbnailTier::Grid520)
             .and_then(|p| image::open(p).ok())
+            .or_else(|| {
+                media
+                    .thumbnail_url(asset.id, ThumbnailTier::Preview1400)
+                    .and_then(|p| image::open(p).ok())
+            })
             .or_else(|| {
                 let orig = media.original_path(&asset);
                 image::open(orig).ok()
@@ -84,21 +138,21 @@ pub fn render_contact_sheet(
             }
         }
 
-        // Crisp dark numbered pill badge in top-left corner (#1 .. #16)
-        let badge_w = 34u32;
-        let badge_h = 24u32;
+        // Crisp dark numbered pill badge in top-left corner (#01 .. #24)
+        let badge_w = 40u32;
+        let badge_h = 22u32;
         fill_rect(
             &mut canvas,
-            ox + 8,
-            oy + 8,
+            ox + 6,
+            oy + 6,
             badge_w,
             badge_h,
-            Rgba([20, 22, 26, 220]),
+            Rgba([20, 22, 26, 228]),
         );
-        draw_small_number(
+        draw_badge_label(
             &mut canvas,
-            ox + 14,
-            oy + 14,
+            ox + 10,
+            oy + 12,
             idx + 1,
             Rgba([255, 255, 255, 255]),
         );
@@ -106,10 +160,13 @@ pub fn render_contact_sheet(
         slots.push((idx + 1, asset));
     }
 
+    let rgb = DynamicImage::ImageRgba8(canvas).to_rgb8();
     let mut jpeg_bytes = Vec::new();
-    DynamicImage::ImageRgba8(canvas)
-        .to_rgb8()
-        .write_to(&mut Cursor::new(&mut jpeg_bytes), ImageFormat::Jpeg)
+    let quality = options.jpeg_quality.clamp(50, 95);
+    let mut cursor = Cursor::new(&mut jpeg_bytes);
+    let mut encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
+    encoder
+        .encode_image(&rgb)
         .map_err(|e| CoreError::Media(format!("联系表 JPEG 编码失败：{e}")))?;
 
     Ok(ContactSheetResult {
@@ -118,6 +175,23 @@ pub fn render_contact_sheet(
         height: canvas_h,
         slots,
     })
+}
+
+/// Backward-compatible wrapper rendering a numbered contact sheet JPEG with explicit column count.
+pub fn render_contact_sheet(
+    assets: &[AssetRecord],
+    media: &MediaPipeline,
+    columns: u32,
+) -> CoreResult<ContactSheetResult> {
+    render_contact_sheet_with_options(
+        assets,
+        media,
+        ContactSheetOptions {
+            columns: Some(columns.clamp(1, 6)),
+            max_width: CONTACT_SHEET_DEFAULT_WIDTH,
+            jpeg_quality: 74,
+        },
+    )
 }
 
 fn fill_rect(img: &mut RgbaImage, x: u32, y: u32, w: u32, h: u32, color: Rgba<u8>) {
@@ -143,8 +217,9 @@ fn parse_hex_rgb(hex: &str) -> Option<[u8; 3]> {
     ])
 }
 
-/// Tiny 3x5 bitmap digit renderer (scaled 2x) for numbered contact-sheet slot badges (1..16).
-fn draw_small_number(img: &mut RgbaImage, x: u32, y: u32, num: usize, color: Rgba<u8>) {
+/// Tiny 3x5 bitmap renderer (scaled 2x) for zero-padded `#01..#24` contact-sheet badges.
+fn draw_badge_label(img: &mut RgbaImage, x: u32, y: u32, num: usize, color: Rgba<u8>) {
+    const HASH_GLYPH: [u8; 5] = [0b101, 0b111, 0b101, 0b111, 0b101];
     const DIGITS: [[u8; 5]; 10] = [
         [0b111, 0b101, 0b101, 0b101, 0b111],
         [0b010, 0b110, 0b010, 0b010, 0b111],
@@ -157,12 +232,18 @@ fn draw_small_number(img: &mut RgbaImage, x: u32, y: u32, num: usize, color: Rgb
         [0b111, 0b101, 0b111, 0b101, 0b111],
         [0b111, 0b101, 0b111, 0b001, 0b111],
     ];
-    let text = num.to_string();
+    let text = format!("#{num:02}");
     let mut cursor_x = x;
     for ch in text.chars() {
-        let d = (ch as u8).saturating_sub(b'0') as usize;
-        if d < 10 {
-            for (row_idx, row_bits) in DIGITS[d].iter().enumerate() {
+        let glyph = if ch == '#' {
+            Some(&HASH_GLYPH)
+        } else if ch.is_ascii_digit() {
+            Some(&DIGITS[(ch as u8 - b'0') as usize])
+        } else {
+            None
+        };
+        if let Some(rows) = glyph {
+            for (row_idx, row_bits) in rows.iter().enumerate() {
                 for col_idx in 0..3 {
                     if (row_bits >> (2 - col_idx)) & 1 == 1 {
                         fill_rect(
@@ -188,28 +269,46 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn renders_numbered_contact_sheet_jpeg() {
+    fn renders_numbered_contact_sheet_jpeg_and_respects_512_floor_and_24_cap() {
         let dir = tempdir().unwrap();
         let media = MediaPipeline::new(dir.path()).unwrap();
-        let mut a1 = AssetRecord::new("Poster A", "a.jpg");
-        a1.dominant_colors = vec![LabColor {
-            hex: "#2A60E0".into(),
-            l: 45.0,
-            a: 20.0,
-            b: -60.0,
-            proportion: 1.0,
-        }];
-        let mut a2 = AssetRecord::new("Poster B", "b.jpg");
-        a2.dominant_colors = vec![LabColor {
-            hex: "#D95D48".into(),
-            l: 55.0,
-            a: 45.0,
-            b: 30.0,
-            proportion: 1.0,
-        }];
-        let sheet = render_contact_sheet(&[a1, a2], &media, 4).unwrap();
-        assert_eq!(sheet.slots.len(), 2);
+        let assets: Vec<AssetRecord> = (0..26)
+            .map(|idx| {
+                let mut a = AssetRecord::new(format!("Poster {idx}"), format!("p{idx}.jpg"));
+                a.dominant_colors = vec![LabColor::from_hex(
+                    if idx % 2 == 0 { "#2A60E0" } else { "#D95D48" },
+                    1.0,
+                )];
+                a
+            })
+            .collect();
+
+        let sheet = render_contact_sheet_with_options(
+            &assets,
+            &media,
+            ContactSheetOptions {
+                columns: None,
+                max_width: 512,
+                jpeg_quality: 74,
+            },
+        )
+        .unwrap();
+        assert_eq!(sheet.slots.len(), 24);
         assert_eq!(&sheet.jpeg_bytes[0..2], &[0xFF, 0xD8]);
-        assert!(sheet.width >= 500);
+        assert!(sheet.width <= 512);
+        assert!(sheet.width >= 480);
+
+        // Requesting below floor clamps to 512
+        let clamped = render_contact_sheet_with_options(
+            &assets[..4],
+            &media,
+            ContactSheetOptions {
+                columns: Some(2),
+                max_width: 200,
+                jpeg_quality: 74,
+            },
+        )
+        .unwrap();
+        assert!(clamped.width >= 480 && clamped.width <= 512);
     }
 }

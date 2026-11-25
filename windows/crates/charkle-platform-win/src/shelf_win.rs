@@ -952,20 +952,363 @@ pub fn should_show_drop_catcher(
     near.then_some(rc)
 }
 
+// =============================================================================
+// Predictive Low-Altitude Top Shelf Approach & System UI Auto-Yield (v1.2.2)
+// =============================================================================
+
+/// DPI-independent logical pixel rectangle (DIPs, Windows Y-down screen coordinates).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShelfRectDip {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ShelfRectDip {
+    pub fn from_monitor_rect(mon: MonitorRect, dpi_scale: f64) -> Self {
+        let scale = dpi_scale.clamp(1.0, 4.0);
+        Self {
+            left: mon.left as f64 / scale,
+            top: mon.top as f64 / scale,
+            width: mon.width() as f64 / scale,
+            height: mon.height() as f64 / scale,
+        }
+    }
+
+    pub fn from_client_rect(rc: ClientRect, dpi_scale: f64) -> Self {
+        let scale = dpi_scale.clamp(1.0, 4.0);
+        Self {
+            left: rc.x as f64 / scale,
+            top: rc.y as f64 / scale,
+            width: rc.width as f64 / scale,
+            height: rc.height as f64 / scale,
+        }
+    }
+
+    pub fn mid_x(&self) -> f64 {
+        self.left + self.width * 0.5
+    }
+
+    pub fn right(&self) -> f64 {
+        self.left + self.width
+    }
+
+    pub fn bottom(&self) -> f64 {
+        self.top + self.height
+    }
+}
+
+/// Time-stamped cursor motion sample in DPI-independent logical pixels (Y-down).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShelfDragMotionSample {
+    pub x: f64,
+    pub y: f64,
+    pub timestamp_secs: f64,
+}
+
+/// Pure, DPI-independent geometry model for 3-tier predictive upward drag approach toward
+/// the Top-Edge Drop Shelf (1:1 parity with macOS `NotchDropGeometry` in logical pixels).
+pub struct ShelfDropGeometry;
+
+impl ShelfDropGeometry {
+    pub const TOP_DIRECT_BAND_DIP: f64 = 76.0;
+    pub const TOP_DIRECT_HALF_WIDTH_DIP: f64 = 176.0;
+    pub const TOP_SLOW_BAND_DIP: f64 = 136.0;
+    pub const TOP_SLOW_HALF_WIDTH_DIP: f64 = 220.0;
+    pub const TOP_SLOW_MIN_UPWARD_TRAVEL_DIP: f64 = 24.0;
+    pub const TOP_SLOW_MIN_UPWARD_SPEED_DIP: f64 = 25.0;
+    pub const TOP_FAST_MIN_BAND_DIP: f64 = 260.0;
+    pub const TOP_FAST_MAX_BAND_DIP: f64 = 350.0;
+    pub const TOP_FAST_BAND_RATIO: f64 = 0.32;
+    pub const TOP_FAST_MAX_HALF_WIDTH_DIP: f64 = 320.0;
+    pub const TOP_FAST_HALF_WIDTH_RATIO: f64 = 0.34;
+    pub const TOP_FAST_MIN_UPWARD_TRAVEL_DIP: f64 = 36.0;
+    pub const TOP_FAST_MIN_UPWARD_SPEED_DIP: f64 = 240.0;
+    pub const TOP_FAST_LEAD_TIME_SECS: f64 = 0.26;
+    pub const TOP_FAST_PROJECTED_HALF_WIDTH_DIP: f64 = 290.0;
+    pub const TOP_DOWNWARD_CANCEL_DIP: f64 = -14.0;
+    pub const APPROACH_GRACE_SECS: f64 = 0.45;
+    pub const APPROACH_GRACE_MARGIN_DIP: f64 = 48.0;
+    pub const APPROACH_GRACE_REVERSAL_SPEED_DIP: f64 = -80.0;
+
+    /// Computes `(vx_dip_per_sec, upward_vy_dip_per_sec)` where positive `upward_vy` means
+    /// moving UP toward the top monitor bezel (decreasing Windows screen Y).
+    /// Returns `(0.0, 0.0)` if samples are stale (`> 0.14s`) so pausing mid-drag decays velocity.
+    pub fn recent_drag_velocity_dip(
+        samples: &[ShelfDragMotionSample],
+        now_secs: f64,
+    ) -> (f64, f64) {
+        let Some(&latest) = samples.last() else {
+            return (0.0, 0.0);
+        };
+        if !now_secs.is_finite() || now_secs - latest.timestamp_secs > 0.14 {
+            return (0.0, 0.0);
+        }
+
+        let mut anchor: Option<ShelfDragMotionSample> = None;
+        for sample in samples.iter().rev().skip(1) {
+            let dt = latest.timestamp_secs - sample.timestamp_secs;
+            if dt > 0.14 {
+                break;
+            }
+            anchor = Some(*sample);
+            if dt >= 0.018 {
+                break;
+            }
+        }
+        let Some(anchor) = anchor else {
+            return (0.0, 0.0);
+        };
+        let dt = latest.timestamp_secs - anchor.timestamp_secs;
+        if dt < 0.008 {
+            return (0.0, 0.0);
+        }
+        let vx = (latest.x - anchor.x) / dt;
+        // Windows Y increases downward, so upward velocity is `(anchor.y - latest.y) / dt`.
+        let upward_vy = (anchor.y - latest.y) / dt;
+        (vx, upward_vy)
+    }
+
+    /// Evaluates the 3-tier predictive low-altitude upward drag trigger in DIP coordinates:
+    /// - Tier 1 (Direct arrival): within `76 DIP` of top bezel & `±176 DIP` of center; suppresses
+    ///   downward drags (`total_upward_travel <= -14 DIP`) away from app titlebars/tabs.
+    /// - Tier 2 (Slow upward approach): within `136 DIP` & `±220 DIP`, upward travel `>= 24 DIP`,
+    ///   upward speed `>= 25 DIP/s` and `>= 0.50 * |vx|`.
+    /// - Tier 3 (Fast ballistic corridor): within `clamp(H * 0.32, 260, 350)` DIP & `min(320, W * 0.34)`,
+    ///   upward travel `>= 36 DIP`, upward speed `>= 240 DIP/s` & `>= 0.65 * |vx|`, and 260ms
+    ///   projected arrival within `<= 76 DIP` of top and `±290 DIP` of center.
+    pub fn should_trigger_upward_drag_approach(
+        point_dip: (f64, f64),
+        monitor_dip: ShelfRectDip,
+        drag_start_dip: Option<(f64, f64)>,
+        samples: &[ShelfDragMotionSample],
+        now_secs: f64,
+    ) -> bool {
+        if monitor_dip.width <= 0.0 || monitor_dip.height <= 0.0 {
+            return false;
+        }
+        let dist_from_top = point_dip.1 - monitor_dip.top;
+        if dist_from_top < -8.0 {
+            return false;
+        }
+
+        let mid_x = monitor_dip.mid_x();
+        let dx_from_center = (point_dip.0 - mid_x).abs();
+        let total_upward_travel = drag_start_dip.map(|s| s.1 - point_dip.1).unwrap_or(0.0);
+        let (vx, upward_vy) = Self::recent_drag_velocity_dip(samples, now_secs);
+
+        // Tier 1: Direct top-center arrival band
+        if dist_from_top <= Self::TOP_DIRECT_BAND_DIP
+            && dx_from_center <= Self::TOP_DIRECT_HALF_WIDTH_DIP
+        {
+            if drag_start_dip.is_some() && total_upward_travel <= Self::TOP_DOWNWARD_CANCEL_DIP {
+                return false;
+            }
+            return true;
+        }
+
+        // Tier 2: Low-altitude slow/steady upward drag
+        if dist_from_top <= Self::TOP_SLOW_BAND_DIP
+            && dx_from_center <= Self::TOP_SLOW_HALF_WIDTH_DIP
+            && total_upward_travel >= Self::TOP_SLOW_MIN_UPWARD_TRAVEL_DIP
+            && upward_vy >= Self::TOP_SLOW_MIN_UPWARD_SPEED_DIP
+            && upward_vy >= vx.abs() * 0.50
+        {
+            return true;
+        }
+
+        // Tier 3: Fast upward 260ms ballistic corridor
+        let corridor_depth = (monitor_dip.height * Self::TOP_FAST_BAND_RATIO)
+            .clamp(Self::TOP_FAST_MIN_BAND_DIP, Self::TOP_FAST_MAX_BAND_DIP);
+        let corridor_half_w = Self::TOP_FAST_MAX_HALF_WIDTH_DIP
+            .min(monitor_dip.width * Self::TOP_FAST_HALF_WIDTH_RATIO);
+        if dist_from_top <= corridor_depth
+            && dx_from_center <= corridor_half_w
+            && total_upward_travel >= Self::TOP_FAST_MIN_UPWARD_TRAVEL_DIP
+            && upward_vy >= Self::TOP_FAST_MIN_UPWARD_SPEED_DIP
+            && upward_vy >= vx.abs() * 0.65
+        {
+            let projected_dist = dist_from_top - upward_vy * Self::TOP_FAST_LEAD_TIME_SECS;
+            let projected_x = point_dip.0 + vx * Self::TOP_FAST_LEAD_TIME_SECS;
+            if projected_dist <= Self::TOP_DIRECT_BAND_DIP
+                && (projected_x - mid_x).abs() <= Self::TOP_FAST_PROJECTED_HALF_WIDTH_DIP
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Evaluates whether a predictively expanded shelf should stay open during its `0.45s`
+    /// approach grace window while the user finishes dragging into the capsule.
+    pub fn should_hold_early_expand_grace(
+        point_dip: (f64, f64),
+        capsule_dip: Option<ShelfRectDip>,
+        upward_vy_dip: f64,
+        elapsed_since_trigger_secs: f64,
+    ) -> bool {
+        if elapsed_since_trigger_secs < 0.0
+            || elapsed_since_trigger_secs > Self::APPROACH_GRACE_SECS
+        {
+            return false;
+        }
+        if upward_vy_dip < Self::APPROACH_GRACE_REVERSAL_SPEED_DIP {
+            return false;
+        }
+        let Some(cap) = capsule_dip else {
+            return true;
+        };
+        let m = Self::APPROACH_GRACE_MARGIN_DIP;
+        let near_capsule = point_dip.0 >= cap.left - m
+            && point_dip.0 <= cap.right() + m
+            && point_dip.1 >= cap.top - 12.0
+            && point_dip.1 <= cap.bottom() + m;
+        near_capsule
+            || (upward_vy_dip >= 0.0
+                && point_dip.0 >= cap.left - m * 2.0
+                && point_dip.0 <= cap.right() + m * 2.0
+                && point_dip.1 <= cap.bottom() + 180.0)
+    }
+}
+
+/// Returns `true` for Windows Task View / Multitasking / Virtual Desktops shell overlay classes
+/// that the Top-Edge Drop Shelf must immediately yield to.
+pub fn is_system_task_view_class(class_name: &str) -> bool {
+    let trimmed = class_name.trim();
+    trimmed.eq_ignore_ascii_case("XamlExplorerHostIslandWindow")
+        || trimmed.eq_ignore_ascii_case("MultitaskingViewFrame")
+}
+
+/// Returns `true` for ordinary Windows desktop/taskbar shell classes that must NEVER be
+/// mistaken for an exclusive fullscreen app.
+pub fn is_desktop_shell_class(class_name: &str) -> bool {
+    let trimmed = class_name.trim();
+    trimmed.eq_ignore_ascii_case("Progman")
+        || trimmed.eq_ignore_ascii_case("WorkerW")
+        || trimmed.eq_ignore_ascii_case("Shell_TrayWnd")
+        || trimmed.eq_ignore_ascii_case("Shell_SecondaryTrayWnd")
+}
+
+/// Pure predicate deciding whether a foreground window covering `fg_rect` on `active_monitor`
+/// should cause the Drop Shelf to auto-yield (Task View or borderless fullscreen video/game).
+pub fn should_yield_for_foreground_window(
+    class_name: &str,
+    is_own_process: bool,
+    is_visible: bool,
+    is_minimized: bool,
+    fg_rect: MonitorRect,
+    active_monitor: MonitorRect,
+) -> bool {
+    if is_own_process || !is_visible || is_minimized {
+        return false;
+    }
+    if is_system_task_view_class(class_name) {
+        return true;
+    }
+    if is_desktop_shell_class(class_name)
+        || active_monitor.width() <= 0
+        || active_monitor.height() <= 0
+    {
+        return false;
+    }
+    // Borderless fullscreen app/video covering the entire monitor (including taskbar area)
+    fg_rect.left <= active_monitor.left
+        && fg_rect.top <= active_monitor.top
+        && fg_rect.right >= active_monitor.right
+        && fg_rect.bottom >= active_monitor.bottom
+}
+
+#[cfg(target_os = "windows")]
+fn is_system_overlay_or_fullscreen_blocking(active_monitor: MonitorRect) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
+        QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible,
+    };
+
+    // 1. OS-level exclusive fullscreen / presentation / fullscreen-video state probe.
+    if let Ok(state) = unsafe { SHQueryUserNotificationState() } {
+        if matches!(
+            state,
+            QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE
+        ) {
+            return true;
+        }
+    }
+
+    // 2. Foreground window class check for Task View / Virtual Desktops & borderless fullscreen.
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() {
+        return false;
+    }
+    let mut fg_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
+    let is_own_process = fg_pid == unsafe { GetCurrentProcessId() };
+    let is_visible = unsafe { IsWindowVisible(fg) }.as_bool();
+    let is_minimized = unsafe { IsIconic(fg) }.as_bool();
+
+    let mut cls_buf = [0u16; 128];
+    let cls_len = unsafe { GetClassNameW(fg, &mut cls_buf) };
+    let cls_name = if cls_len > 0 {
+        String::from_utf16_lossy(&cls_buf[..cls_len as usize])
+    } else {
+        String::new()
+    };
+
+    let mut rc = RECT::default();
+    let fg_rect = if unsafe { GetWindowRect(fg, &mut rc) }.is_ok() {
+        MonitorRect {
+            left: rc.left,
+            top: rc.top,
+            right: rc.right,
+            bottom: rc.bottom,
+        }
+    } else {
+        MonitorRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        }
+    };
+
+    should_yield_for_foreground_window(
+        &cls_name,
+        is_own_process,
+        is_visible,
+        is_minimized,
+        fg_rect,
+        active_monitor,
+    )
+}
+
 /// Starts a lightweight background cursor monitor that:
-/// 1. Springs the Drop Shelf open immediately when dragging into any display's docked bezel strip.
+/// 1. Predictively springs the Top-Edge Drop Shelf open via 3-tier low-altitude upward drag
+///    approach (DPI-independent DIPs) or side-edge bezel drag.
 /// 2. Optionally springs the Drop Shelf open when hovering at the docked bezel for ~180ms.
-/// 3. Smoothly auto-collapses an unpinned Drop Shelf after the cursor leaves the active capsule.
-/// 4. Coordinates the own-thread Win32 Drop Catcher overlay via `on_sync_catcher` during external drags.
-pub fn start_top_edge_monitor_with_catcher<FOpen, FClose, FSyncCatcher>(
+/// 3. Smoothly auto-collapses an unpinned Drop Shelf after the cursor leaves the active capsule
+///    (respecting a `0.45s` predictive approach grace window).
+/// 4. Auto-yields immediately when Windows Task View / Virtual Desktops or an exclusive fullscreen
+///    app/video is active.
+/// 5. Coordinates the own-thread Win32 Drop Catcher overlay via `on_sync_catcher` during external drags.
+pub fn start_top_edge_monitor_with_yield<FOpen, FClose, FYield, FSyncCatcher>(
     config: ShelfMonitorConfig,
     on_open: FOpen,
     on_auto_collapse: FClose,
+    on_system_yield: FYield,
     on_sync_catcher: FSyncCatcher,
 ) -> TopEdgeDragMonitorHandle
 where
     FOpen: Fn() + Send + 'static,
     FClose: Fn() + Send + 'static,
+    FYield: Fn() + Send + 'static,
     FSyncCatcher: Fn(Option<ClientRect>) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
@@ -980,6 +1323,7 @@ where
             use windows::Win32::Graphics::Gdi::{
                 GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
             };
+            use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
             use windows::Win32::UI::Input::KeyboardAndMouse::{
                 GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
             };
@@ -987,6 +1331,7 @@ where
                 GetCursorPos, GetSystemMetrics, SM_SWAPBUTTON,
             };
 
+            let start_epoch = Instant::now();
             let mut drag_triggered = false;
             let mut prev_drag_button_down = false;
             let mut external_drag_active = false;
@@ -995,14 +1340,26 @@ where
             let mut outside_since: Option<Instant> = None;
             let mut stale_drag_since: Option<Instant> = None;
             let mut open_cooldown_until: Option<Instant> = None;
+            let mut early_expand_at: Option<Instant> = None;
+            let mut drag_start_dip: Option<(f64, f64)> = None;
+            let mut motion_samples: Vec<ShelfDragMotionSample> = Vec::with_capacity(24);
+            let mut last_hmon_key: Option<isize> = None;
+            let mut cached_dpi_scale: f64 = 1.0;
+            let mut idle_ticks: u32 = 0;
 
             while !stop_clone.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(35));
+                let active_sampling = external_drag_active
+                    || config.shelf_expanded.load(Ordering::Relaxed)
+                    || hover_since.is_some();
+                std::thread::sleep(Duration::from_millis(if active_sampling { 16 } else { 45 }));
 
                 if !config.enabled.load(Ordering::Relaxed) {
                     drag_triggered = false;
                     prev_drag_button_down = false;
                     external_drag_active = false;
+                    drag_start_dip = None;
+                    motion_samples.clear();
+                    early_expand_at = None;
                     EXTERNAL_DRAG_ACTIVE.store(false, Ordering::Relaxed);
                     if last_catcher_rect.take().is_some() {
                         on_sync_catcher(None);
@@ -1045,17 +1402,106 @@ where
                             && pt.y < rc.y + rc.height
                     });
 
+                let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+                let hmon_key = hmon.0 as isize;
+                if last_hmon_key != Some(hmon_key) {
+                    last_hmon_key = Some(hmon_key);
+                    let mut dpi_x: u32 = 96;
+                    let mut dpi_y: u32 = 96;
+                    let _ = unsafe {
+                        GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y)
+                    };
+                    cached_dpi_scale = (dpi_x as f64 / 96.0).clamp(1.0, 4.0);
+                    // Reset predictive drag history cleanly on cross-monitor transitions.
+                    drag_start_dip = None;
+                    motion_samples.clear();
+                }
+
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if !unsafe { GetMonitorInfoW(hmon, &mut info) }.as_bool() {
+                    continue;
+                }
+
+                let mon = info.rcMonitor;
+                let work = info.rcWork;
+                let mon_rect = MonitorRect {
+                    left: mon.left,
+                    top: mon.top,
+                    right: mon.right,
+                    bottom: mon.bottom,
+                };
+                let mon_dip = ShelfRectDip::from_monitor_rect(mon_rect, cached_dpi_scale);
+                let pt_dip = (
+                    pt.x as f64 / cached_dpi_scale,
+                    pt.y as f64 / cached_dpi_scale,
+                );
+                let now_secs = start_epoch.elapsed().as_secs_f64();
+
                 if any_drag_button_down && !prev_drag_button_down {
                     // Only treat presses that originated OUTSIDE the visible shelf capsule as
                     // external drags (clicks, marquee box-select, scroll drags, and outbound card
                     // drags starting inside the shelf never activate the drop catcher).
                     external_drag_active = !inside_capsule_strict;
+                    if external_drag_active {
+                        drag_start_dip = Some(pt_dip);
+                        motion_samples.clear();
+                        motion_samples.push(ShelfDragMotionSample {
+                            x: pt_dip.0,
+                            y: pt_dip.1,
+                            timestamp_secs: now_secs,
+                        });
+                    } else {
+                        drag_start_dip = None;
+                        motion_samples.clear();
+                    }
                 } else if !any_drag_button_down {
                     external_drag_active = false;
                     drag_triggered = false;
+                    drag_start_dip = None;
+                    motion_samples.clear();
+                    early_expand_at = None;
+                } else if external_drag_active {
+                    if drag_start_dip.is_none() {
+                        drag_start_dip = Some(pt_dip);
+                    }
+                    motion_samples.push(ShelfDragMotionSample {
+                        x: pt_dip.0,
+                        y: pt_dip.1,
+                        timestamp_secs: now_secs,
+                    });
+                    let cutoff = now_secs - 0.25;
+                    while motion_samples.len() > 24
+                        || motion_samples
+                            .first()
+                            .is_some_and(|s| s.timestamp_secs < cutoff)
+                    {
+                        motion_samples.remove(0);
+                    }
                 }
                 prev_drag_button_down = any_drag_button_down;
                 EXTERNAL_DRAG_ACTIVE.store(external_drag_active, Ordering::Relaxed);
+
+                // Probe Windows Task View / Virtual Desktops / Exclusive Fullscreen auto-yield.
+                idle_ticks = idle_ticks.wrapping_add(1);
+                let should_probe_system_ui = external_drag_active
+                    || is_expanded
+                    || hover_since.is_some()
+                    || idle_ticks % 6 == 0;
+                if should_probe_system_ui && is_system_overlay_or_fullscreen_blocking(mon_rect) {
+                    hover_since = None;
+                    outside_since = None;
+                    early_expand_at = None;
+                    if last_catcher_rect.take().is_some() {
+                        on_sync_catcher(None);
+                    }
+                    if is_expanded {
+                        on_system_yield();
+                    }
+                    continue;
+                }
 
                 let desired_catcher = should_show_drop_catcher(
                     is_expanded,
@@ -1071,17 +1517,6 @@ where
                     on_sync_catcher(desired_catcher);
                 }
 
-                let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
-                let mut info = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    ..Default::default()
-                };
-                if !unsafe { GetMonitorInfoW(hmon, &mut info) }.as_bool() {
-                    continue;
-                }
-
-                let mon = info.rcMonitor;
-                let work = info.rcWork;
                 let center_x = (mon.left + mon.right) / 2;
                 let work_center_y = (work.top + work.bottom) / 2;
                 let edge = ShelfDockEdge::from_u8(config.dock_edge.load(Ordering::Relaxed));
@@ -1089,56 +1524,70 @@ where
 
                 if !is_expanded {
                     outside_since = None;
-                    let in_drag_strip = match edge {
-                        ShelfDockEdge::Top => {
-                            pt.y >= mon.top
-                                && pt.y <= mon.top + 10
-                                && (pt.x - center_x).abs() <= 220
+                    early_expand_at = None;
+                    if external_drag_active {
+                        let triggered = match edge {
+                            ShelfDockEdge::Top => {
+                                ShelfDropGeometry::should_trigger_upward_drag_approach(
+                                    pt_dip,
+                                    mon_dip,
+                                    drag_start_dip,
+                                    &motion_samples,
+                                    now_secs,
+                                )
+                            }
+                            ShelfDockEdge::Left => {
+                                let strip = (10.0 * cached_dpi_scale).round() as i32;
+                                let half = (220.0 * cached_dpi_scale).round() as i32;
+                                pt.x >= mon.left
+                                    && pt.x <= mon.left + strip
+                                    && (pt.y - work_center_y).abs() <= half
+                            }
+                            ShelfDockEdge::Right => {
+                                let strip = (10.0 * cached_dpi_scale).round() as i32;
+                                let half = (220.0 * cached_dpi_scale).round() as i32;
+                                pt.x >= mon.right - strip
+                                    && pt.x <= mon.right
+                                    && (pt.y - work_center_y).abs() <= half
+                            }
+                        };
+                        if triggered {
+                            if !drag_triggered
+                                && open_cooldown_until.is_none_or(|t| Instant::now() >= t)
+                            {
+                                drag_triggered = true;
+                                hover_since = None;
+                                let now = Instant::now();
+                                open_cooldown_until = Some(now + Duration::from_millis(450));
+                                if edge == ShelfDockEdge::Top && (pt_dip.1 - mon_dip.top) > 12.0 {
+                                    early_expand_at = Some(now);
+                                }
+                                on_open();
+                            }
+                            continue;
                         }
-                        ShelfDockEdge::Left => {
-                            pt.x >= mon.left
-                                && pt.x <= mon.left + 10
-                                && (pt.y - work_center_y).abs() <= 220
-                        }
-                        ShelfDockEdge::Right => {
-                            pt.x >= mon.right - 10
-                                && pt.x <= mon.right
-                                && (pt.y - work_center_y).abs() <= 220
-                        }
-                    };
-                    if any_drag_button_down && in_drag_strip {
-                        if !drag_triggered
-                            && open_cooldown_until.is_none_or(|t| Instant::now() >= t)
-                        {
-                            drag_triggered = true;
-                            hover_since = None;
-                            open_cooldown_until = Some(Instant::now() + Duration::from_millis(450));
-                            on_open();
-                        }
-                        continue;
-                    }
-                    if !any_drag_button_down {
-                        drag_triggered = false;
                     }
 
                     // Optional docked-edge hover dwell trigger (~180ms) matching macOS NotchShelfController
                     if !any_drag_button_down && config.hover_trigger_enabled.load(Ordering::Relaxed)
                     {
+                        let strip_h = (3.0 * cached_dpi_scale).round().max(3.0) as i32;
+                        let strip_half = (140.0 * cached_dpi_scale).round() as i32;
                         let in_hover_strip = match edge {
                             ShelfDockEdge::Top => {
                                 pt.y >= mon.top
-                                    && pt.y <= mon.top + 3
-                                    && (pt.x - center_x).abs() <= 140
+                                    && pt.y <= mon.top + strip_h
+                                    && (pt.x - center_x).abs() <= strip_half
                             }
                             ShelfDockEdge::Left => {
                                 pt.x >= mon.left
-                                    && pt.x <= mon.left + 3
-                                    && (pt.y - work_center_y).abs() <= 140
+                                    && pt.x <= mon.left + strip_h
+                                    && (pt.y - work_center_y).abs() <= strip_half
                             }
                             ShelfDockEdge::Right => {
-                                pt.x >= mon.right - 3
+                                pt.x >= mon.right - strip_h
                                     && pt.x <= mon.right
-                                    && (pt.y - work_center_y).abs() <= 140
+                                    && (pt.y - work_center_y).abs() <= strip_half
                             }
                         };
                         if in_hover_strip && open_cooldown_until.is_none_or(|t| Instant::now() >= t)
@@ -1182,26 +1631,48 @@ where
                         continue;
                     }
 
+                    // Honor the 0.45s predictive approach grace window unless the user clearly
+                    // reverses downward away from the shelf.
+                    let (_, upward_vy) =
+                        ShelfDropGeometry::recent_drag_velocity_dip(&motion_samples, now_secs);
+                    if let Some(early_started) = early_expand_at {
+                        let capsule_dip = active_rc
+                            .map(|rc| ShelfRectDip::from_client_rect(rc, cached_dpi_scale));
+                        if any_drag_button_down
+                            && ShelfDropGeometry::should_hold_early_expand_grace(
+                                pt_dip,
+                                capsule_dip,
+                                upward_vy,
+                                early_started.elapsed().as_secs_f64(),
+                            )
+                        {
+                            outside_since = None;
+                            continue;
+                        }
+                        early_expand_at = None;
+                    }
+
                     // Auto-collapse unpinned shelf once cursor leaves the active capsule rect
-                    // (+24px outward grace, +8px bezel grace on the docked edge).
+                    // (+24 DIP outward grace, +8 DIP bezel grace on the docked edge).
                     let inside_capsule = if let Some(rc) = active_rc {
-                        let margin = 24;
+                        let margin = (24.0 * cached_dpi_scale).round() as i32;
+                        let edge_grace = (8.0 * cached_dpi_scale).round() as i32;
                         match edge {
                             ShelfDockEdge::Top => {
                                 pt.x >= rc.x - margin
                                     && pt.x <= rc.x + rc.width + margin
-                                    && pt.y >= rc.y - 8
+                                    && pt.y >= rc.y - edge_grace
                                     && pt.y <= rc.y + rc.height + margin
                             }
                             ShelfDockEdge::Left => {
-                                pt.x >= rc.x - 8
+                                pt.x >= rc.x - edge_grace
                                     && pt.x <= rc.x + rc.width + margin
                                     && pt.y >= rc.y - margin
                                     && pt.y <= rc.y + rc.height + margin
                             }
                             ShelfDockEdge::Right => {
                                 pt.x >= rc.x - margin
-                                    && pt.x <= rc.x + rc.width + 8
+                                    && pt.x <= rc.x + rc.width + edge_grace
                                     && pt.y >= rc.y - margin
                                     && pt.y <= rc.y + rc.height + margin
                             }
@@ -1213,7 +1684,9 @@ where
 
                     if inside_capsule {
                         outside_since = None;
-                    } else if !any_drag_button_down {
+                    } else if !any_drag_button_down
+                        || upward_vy < ShelfDropGeometry::APPROACH_GRACE_REVERSAL_SPEED_DIP
+                    {
                         let started = outside_since.get_or_insert_with(Instant::now);
                         if started.elapsed() >= Duration::from_millis(320) {
                             outside_since = None;
@@ -1229,11 +1702,27 @@ where
         config,
         on_open,
         on_auto_collapse,
+        on_system_yield,
         on_sync_catcher,
         stop_clone,
     );
 
     TopEdgeDragMonitorHandle { stop }
+}
+
+/// Backward-compatible wrapper starting the top-edge monitor with catcher sync.
+pub fn start_top_edge_monitor_with_catcher<FOpen, FClose, FSyncCatcher>(
+    config: ShelfMonitorConfig,
+    on_open: FOpen,
+    on_auto_collapse: FClose,
+    on_sync_catcher: FSyncCatcher,
+) -> TopEdgeDragMonitorHandle
+where
+    FOpen: Fn() + Send + 'static,
+    FClose: Fn() + Send + 'static,
+    FSyncCatcher: Fn(Option<ClientRect>) + Send + 'static,
+{
+    start_top_edge_monitor_with_yield(config, on_open, on_auto_collapse, || {}, on_sync_catcher)
 }
 
 /// Starts the top-edge monitor without a separate catcher callback.
@@ -2593,5 +3082,235 @@ mod tests {
         let _ = DROPEFFECT(0);
         cleanup_shelf_drop_targets(raw);
         let _ = unsafe { DestroyWindow(HWND(raw as *mut _)) };
+    }
+
+    #[test]
+    fn predictive_top_approach_covers_three_tiers_and_suppresses_false_positives() {
+        // 2560x1440 monitor at 150% DPI -> 1706.67 x 960 DIP
+        let mon_px = MonitorRect {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        let mon = ShelfRectDip::from_monitor_rect(mon_px, 1.5);
+        let cx = mon.mid_x();
+
+        // Tier 1: Direct top-center arrival band (<= 76 DIP, |dx| <= 176 DIP) triggers immediately
+        assert!(ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (cx + 120.0, 64.0),
+            mon,
+            Some((cx + 120.0, 200.0)),
+            &[],
+            1.0,
+        ));
+
+        // Tier 1 false-positive suppression: dragging DOWN away from app titlebar/tab strip (<= -14 DIP)
+        assert!(!ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (cx, 50.0),
+            mon,
+            Some((cx, 20.0)), // moved downward by 30 DIP -> total_upward_travel = -30
+            &[
+                ShelfDragMotionSample {
+                    x: cx,
+                    y: 20.0,
+                    timestamp_secs: 0.90
+                },
+                ShelfDragMotionSample {
+                    x: cx,
+                    y: 50.0,
+                    timestamp_secs: 1.00
+                },
+            ],
+            1.0,
+        ));
+
+        // Tier 2: Low-altitude slow/steady upward drag (<= 136 DIP, |dx| <= 220 DIP, travel >= 24, vy >= 25)
+        let slow_samples = [
+            ShelfDragMotionSample {
+                x: cx + 10.0,
+                y: 150.0,
+                timestamp_secs: 0.90,
+            },
+            ShelfDragMotionSample {
+                x: cx + 12.0,
+                y: 120.0,
+                timestamp_secs: 1.00,
+            }, // vy = 300 DIP/s, vx = 20
+        ];
+        assert!(ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (cx + 12.0, 120.0),
+            mon,
+            Some((cx, 170.0)), // upward travel = 50 DIP
+            &slow_samples,
+            1.0,
+        ));
+
+        // Tier 2 false-positive suppression: mostly horizontal swipe across top area (|vx| dominates)
+        let horiz_samples = [
+            ShelfDragMotionSample {
+                x: cx - 100.0,
+                y: 126.0,
+                timestamp_secs: 0.90,
+            },
+            ShelfDragMotionSample {
+                x: cx + 20.0,
+                y: 120.0,
+                timestamp_secs: 1.00,
+            }, // vx = 1200, vy = 60 (< 0.5*|vx|)
+        ];
+        assert!(!ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (cx + 20.0, 120.0),
+            mon,
+            Some((cx - 100.0, 150.0)),
+            &horiz_samples,
+            1.0,
+        ));
+
+        // Tier 3: Fast upward 260ms ballistic corridor (depth ~307 DIP on 960 DIP height)
+        let fast_samples = [
+            ShelfDragMotionSample {
+                x: cx - 40.0,
+                y: 310.0,
+                timestamp_secs: 0.92,
+            },
+            ShelfDragMotionSample {
+                x: cx - 32.0,
+                y: 230.0,
+                timestamp_secs: 1.00,
+            }, // vy = 1000 DIP/s -> projected dist = -30 <= 76
+        ];
+        assert!(ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (cx - 32.0, 230.0),
+            mon,
+            Some((cx - 40.0, 360.0)), // upward travel = 130 >= 36
+            &fast_samples,
+            1.0,
+        ));
+
+        // Tier 3 false-positive suppression: corner/sidebar drag outside horizontal corridor
+        let corner_samples = [
+            ShelfDragMotionSample {
+                x: 80.0,
+                y: 310.0,
+                timestamp_secs: 0.92,
+            },
+            ShelfDragMotionSample {
+                x: 80.0,
+                y: 230.0,
+                timestamp_secs: 1.00,
+            },
+        ];
+        assert!(!ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (80.0, 230.0),
+            mon,
+            Some((80.0, 360.0)),
+            &corner_samples,
+            1.0,
+        ));
+
+        // Pause decay: stale samples (> 0.14s old) decay velocity to 0 so Tier 2/3 do NOT fire
+        assert!(!ShelfDropGeometry::should_trigger_upward_drag_approach(
+            (cx, 120.0),
+            mon,
+            Some((cx, 200.0)),
+            &slow_samples,
+            1.30, // 0.30s after latest sample -> velocity = 0
+        ));
+    }
+
+    #[test]
+    fn approach_grace_holds_briefly_and_cancels_on_downward_reversal() {
+        let cap = ShelfRectDip {
+            left: 600.0,
+            top: 0.0,
+            width: 668.0,
+            height: 330.0,
+        };
+        assert!(ShelfDropGeometry::should_hold_early_expand_grace(
+            (920.0, 355.0),
+            Some(cap),
+            40.0,
+            0.20,
+        ));
+        // Cancels immediately on sharp downward reversal (< -80 DIP/s)
+        assert!(!ShelfDropGeometry::should_hold_early_expand_grace(
+            (920.0, 355.0),
+            Some(cap),
+            -120.0,
+            0.15,
+        ));
+        // Expires cleanly after 0.45s
+        assert!(!ShelfDropGeometry::should_hold_early_expand_grace(
+            (920.0, 355.0),
+            Some(cap),
+            40.0,
+            0.46,
+        ));
+    }
+
+    #[test]
+    fn system_task_view_and_fullscreen_yield_classifier_is_accurate() {
+        let mon = MonitorRect {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1440,
+        };
+        let normal_rect = MonitorRect {
+            left: 100,
+            top: 100,
+            right: 1400,
+            bottom: 900,
+        };
+
+        assert!(is_system_task_view_class("XamlExplorerHostIslandWindow"));
+        assert!(is_system_task_view_class("MultitaskingViewFrame"));
+        assert!(is_system_task_view_class("xamlexplorerhostislandwindow"));
+        assert!(!is_system_task_view_class("Chrome_WidgetWin_1"));
+
+        // Task View yields immediately
+        assert!(should_yield_for_foreground_window(
+            "XamlExplorerHostIslandWindow",
+            false,
+            true,
+            false,
+            normal_rect,
+            mon,
+        ));
+        // Borderless fullscreen external app covering entire monitor yields
+        assert!(should_yield_for_foreground_window(
+            "Chrome_WidgetWin_1",
+            false,
+            true,
+            false,
+            mon,
+            mon,
+        ));
+        // Desktop wallpaper / taskbar shells NEVER trigger fullscreen yield
+        assert!(!should_yield_for_foreground_window(
+            "WorkerW", false, true, false, mon, mon,
+        ));
+        assert!(!should_yield_for_foreground_window(
+            "Progman", false, true, false, mon, mon,
+        ));
+        // Our own process never blocks itself
+        assert!(!should_yield_for_foreground_window(
+            "Chrome_WidgetWin_1",
+            true,
+            true,
+            false,
+            mon,
+            mon,
+        ));
+        // Ordinary restored window does not yield
+        assert!(!should_yield_for_foreground_window(
+            "Chrome_WidgetWin_1",
+            false,
+            true,
+            false,
+            normal_rect,
+            mon,
+        ));
     }
 }

@@ -9,6 +9,7 @@ pub mod harness;
 pub mod typesafe;
 pub mod usage_tracker;
 pub mod visual_grounding;
+pub mod visual_query;
 
 pub use chatgpt_oauth::{ChatGPTSignInClient, PkceChallengePair, CHATGPT_VAULT_KEY};
 pub use cloud_ai::{
@@ -16,7 +17,11 @@ pub use cloud_ai::{
     AnthropicMessagesProvider, CloudAIProvider, GeminiProvider, OpenAICompatibleProvider,
     OpenAIResponsesProvider, AI_API_KEY_SECRET_KEY,
 };
-pub use contact_sheet::{render_contact_sheet, ContactSheetResult};
+pub use contact_sheet::{
+    render_contact_sheet, render_contact_sheet_with_options, ContactSheetOptions,
+    ContactSheetResult, CONTACT_SHEET_DEFAULT_WIDTH, CONTACT_SHEET_MAX_ASSETS,
+    CONTACT_SHEET_MAX_WIDTH, CONTACT_SHEET_MIN_WIDTH,
+};
 pub use curator::{IntelligenceEngine, LocalIntelligenceEngine, MoodboardCurator};
 pub use harness::MoodboardAgentHarness;
 pub use typesafe::{
@@ -30,3 +35,4 @@ pub use visual_grounding::{
     offline_saliency_box, FolderClassificationResult, FolderOptionInput, TypeSafeImagePreparer,
     VisualGroundingEngine,
 };
+pub use visual_query::{ParsedVisualHints, VisualQueryIntelligence, VisualTone};

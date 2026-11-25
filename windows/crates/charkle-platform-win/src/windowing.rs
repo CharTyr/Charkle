@@ -45,6 +45,30 @@ pub const HIT_BOTTOM: isize = 15; // HTBOTTOM
 pub const HIT_BOTTOMLEFT: isize = 16; // HTBOTTOMLEFT
 pub const HIT_BOTTOMRIGHT: isize = 17; // HTBOTTOMRIGHT
 
+/// Packs signed screen coordinates `(x, y)` into a Win32 `POINTS`-encoded `LPARAM`
+/// (`MAKELPARAM(x as i16 as u16, y as i16 as u16)`), preserving negative multi-monitor coordinates.
+pub const fn pack_screen_point_lparam(x: i32, y: i32) -> isize {
+    let lo = (x as i16 as u16) as u32;
+    let hi = ((y as i16 as u16) as u32) << 16;
+    (hi | lo) as isize
+}
+
+/// Returns `true` when `hit_test` is one of the 8 standard Win32 border resize hit-test codes
+/// (`HTLEFT`..=`HTBOTTOMRIGHT`).
+pub const fn is_resize_hittest(hit_test: isize) -> bool {
+    matches!(
+        hit_test,
+        HIT_LEFT
+            | HIT_RIGHT
+            | HIT_TOP
+            | HIT_TOPLEFT
+            | HIT_TOPRIGHT
+            | HIT_BOTTOM
+            | HIT_BOTTOMLEFT
+            | HIT_BOTTOMRIGHT
+    )
+}
+
 /// Resolves native Win32 borderless resize hit-test codes (`HTTOPLEFT`..=`HTBOTTOMRIGHT` /
 /// `HTLEFT`..=`HTBOTTOM`) in physical client pixels for restored (non-maximized) windows whose
 /// `WM_NCCALCSIZE` returns `0` so `client_rect == window_rect` on all 4 sides.
@@ -318,16 +342,16 @@ mod win32_impl {
         SetWindowThemeAttribute, MARGINS, WTA_NONCLIENT, WTA_OPTIONS,
     };
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_F4;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, VK_F4};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClientRect, GetWindowLongW, GetWindowRect, IsZoomed, PostMessageW, SetWindowLongW,
-        SetWindowPos, ShowWindow, SystemParametersInfoW, GWL_STYLE, HTMAXBUTTON, SC_CLOSE,
-        SPI_GETCLIENTAREAANIMATION, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-        WM_CLOSE, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-        WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT, WM_SIZE, WM_STYLECHANGING,
-        WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_WINDOWPOSCHANGED, WS_VISIBLE,
+        GetClientRect, GetCursorPos, GetWindowLongW, GetWindowRect, IsWindow, IsZoomed,
+        PostMessageW, SetWindowLongW, SetWindowPos, ShowWindow, SystemParametersInfoW, GWL_STYLE,
+        HTMAXBUTTON, SC_CLOSE, SPI_GETCLIENTAREAANIMATION, STYLESTRUCT, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE,
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_CLOSE, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE,
+        WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_SETICON, WM_SETTEXT,
+        WM_SIZE, WM_STYLECHANGING, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_WINDOWPOSCHANGED, WS_VISIBLE,
     };
 
     const SNAP_SUBCLASS_ID: usize = 0x4348_4B31; // "CHK1"
@@ -638,6 +662,30 @@ mod win32_impl {
         unsafe { SetWindowSubclass(hwnd, Some(snap_subclass_proc), SNAP_SUBCLASS_ID, 0).as_bool() }
     }
 
+    /// Initiates a native OS border resize loop (`ReleaseCapture` + `PostMessageW(WM_NCLBUTTONDOWN,
+    /// hit_test, packed_cursor_xy)`) on the owning Win32 UI thread for a restored window.
+    pub fn start_native_window_resize(hwnd_raw: isize, hit_test: isize) -> bool {
+        if hwnd_raw == 0 || !is_resize_hittest(hit_test) {
+            return false;
+        }
+        let hwnd = HWND(hwnd_raw as *mut c_void);
+        unsafe {
+            if !IsWindow(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+                return false;
+            }
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let _ = ReleaseCapture();
+            PostMessageW(
+                hwnd,
+                WM_NCLBUTTONDOWN,
+                WPARAM(hit_test as usize),
+                LPARAM(pack_screen_point_lparam(pt.x, pt.y)),
+            )
+            .is_ok()
+        }
+    }
+
     unsafe extern "system" fn snap_subclass_proc(
         hwnd: HWND,
         msg: u32,
@@ -887,11 +935,16 @@ mod win32_impl {
     pub fn install_snap_layout_subclass(_hwnd_raw: isize) -> bool {
         false
     }
+
+    pub fn start_native_window_resize(_hwnd_raw: isize, _hit_test: isize) -> bool {
+        false
+    }
 }
 
 pub use win32_impl::{
     apply_window_chrome, are_animations_enabled, install_snap_layout_subclass,
     is_transparency_enabled, query_windows_version, read_system_accent_hex,
+    start_native_window_resize,
 };
 
 #[cfg(test)]
@@ -1080,6 +1133,21 @@ mod tests {
             assert_eq!(HIT_BOTTOMLEFT, HTBOTTOMLEFT as isize);
             assert_eq!(HIT_BOTTOMRIGHT, HTBOTTOMRIGHT as isize);
         }
+
+        // Verify packed LPARAM round-trip across positive and negative multi-monitor coordinates
+        let pos = pack_screen_point_lparam(1420, 680);
+        assert_eq!((pos as i32 & 0xFFFF) as i16 as i32, 1420);
+        assert_eq!(((pos as i32 >> 16) & 0xFFFF) as i16 as i32, 680);
+
+        let neg = pack_screen_point_lparam(-320, -48);
+        assert_eq!((neg as i32 & 0xFFFF) as i16 as i32, -320);
+        assert_eq!(((neg as i32 >> 16) & 0xFFFF) as i16 as i32, -48);
+
+        assert!(is_resize_hittest(HIT_LEFT));
+        assert!(is_resize_hittest(HIT_RIGHT));
+        assert!(is_resize_hittest(HIT_BOTTOMRIGHT));
+        assert!(!is_resize_hittest(1)); // HTCLIENT
+        assert!(!start_native_window_resize(0, HIT_RIGHT));
     }
 
     #[test]

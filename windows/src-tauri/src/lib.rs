@@ -26,7 +26,7 @@ use charkle_core::media::MediaPipeline;
 use charkle_core::wire::swift_codec::format_swift_uuid;
 use charkle_platform_win::clipboard::start_clipboard_listener;
 use charkle_platform_win::shelf_win::{
-    start_top_edge_monitor_with_catcher, sync_shelf_drop_catcher, ShelfDockEdge, ShelfMonitorConfig,
+    start_top_edge_monitor_with_yield, sync_shelf_drop_catcher, ShelfDockEdge, ShelfMonitorConfig,
 };
 use charkle_platform_win::wake::start_library_wake_listener;
 use charkle_platform_win::{
@@ -40,9 +40,9 @@ use crate::commands::updater::UpdaterRuntimeState;
 use crate::commands::AppState;
 use crate::desktop::{
     configure_main_window, ensure_shelf_window, handle_deep_link_url, hide_shelf_window,
-    read_initial_clipboard_preview, register_configured_hotkeys, setup_system_tray,
-    show_or_focus_main_window, show_shelf_window_async, CaptureFrameStore, HotkeyConfig,
-    ShelfSettings,
+    hide_shelf_window_immediate, read_initial_clipboard_preview, register_configured_hotkeys,
+    setup_system_tray, show_or_focus_main_window, show_shelf_window_async, CaptureFrameStore,
+    HotkeyConfig, ShelfSettings,
 };
 use crate::web_snapshot::TauriWebViewSnapshotter;
 
@@ -229,12 +229,13 @@ pub fn run() {
                 let _ = app_for_clip.emit("clipboard:changed", preview);
             });
 
-            // Top-edge drag & hover detector + unpinned auto-collapse monitor + Drop Catcher sync
+            // Top-edge predictive drag & hover detector + auto-collapse + Task View/Fullscreen yield + Drop Catcher sync
             let app_for_edge_open = app.handle().clone();
             let app_for_edge_close = app.handle().clone();
+            let app_for_edge_yield = app.handle().clone();
             let app_for_catcher = app.handle().clone();
             let shelf_hwnd_for_catcher = Arc::clone(&shelf_hwnd);
-            let top_edge_monitor = start_top_edge_monitor_with_catcher(
+            let top_edge_monitor = start_top_edge_monitor_with_yield(
                 ShelfMonitorConfig {
                     enabled: Arc::clone(&shelf_enabled),
                     hover_trigger_enabled: Arc::clone(&shelf_hover_trigger),
@@ -258,6 +259,12 @@ pub fn run() {
                     let handle = app_for_edge_close.clone();
                     let _ = app_for_edge_close.run_on_main_thread(move || {
                         hide_shelf_window(&handle);
+                    });
+                },
+                move || {
+                    let handle = app_for_edge_yield.clone();
+                    let _ = app_for_edge_yield.run_on_main_thread(move || {
+                        hide_shelf_window_immediate(&handle);
                     });
                 },
                 move |rect| {
@@ -466,6 +473,7 @@ pub fn run() {
             commands::window::window_toggle_maximize,
             commands::window::window_close,
             commands::window::window_is_maximized,
+            commands::window::window_start_resize,
             // M3 Native Windows Shelf, OLE Drag-Out, Capture, Clipboard, Hotkeys, Autostart & OCR
             commands::native::start_outbound_drag,
             commands::native::set_shelf_hit_rect,

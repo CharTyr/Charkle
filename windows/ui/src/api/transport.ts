@@ -70,6 +70,16 @@ import {
   type WindowSurfaceState,
 } from '../types/domain';
 
+export type WindowResizeDirection =
+  | 'North'
+  | 'South'
+  | 'East'
+  | 'West'
+  | 'NorthEast'
+  | 'NorthWest'
+  | 'SouthEast'
+  | 'SouthWest';
+
 export interface CharkleEventHandlers {
   onLibraryChanged?: () => void;
   onSyncStatus?: (status: SyncStatus) => void;
@@ -183,6 +193,7 @@ export interface CharkleTransport {
   windowToggleMaximize(): Promise<boolean>;
   windowClose(): Promise<void>;
   windowIsMaximized(): Promise<boolean>;
+  windowStartResize(direction: WindowResizeDirection): Promise<void>;
 
   // M3 Native Windows Shelf, OLE Drag-Out, Region Capture, Clipboard, Hotkeys & OCR
   startOutboundDrag(assetIds: string[]): Promise<DragOutOutcome>;
@@ -552,6 +563,10 @@ export class TauriTransport implements CharkleTransport {
 
   windowIsMaximized(): Promise<boolean> {
     return invoke('window_is_maximized');
+  }
+
+  windowStartResize(direction: WindowResizeDirection): Promise<void> {
+    return invoke('window_start_resize', { direction });
   }
 
   startOutboundDrag(assetIds: string[]): Promise<DragOutOutcome> {
@@ -2075,6 +2090,10 @@ export class InMemoryMockTransport implements CharkleTransport {
   async windowIsMaximized(): Promise<boolean> {
     return this.maximized;
   }
+  public lastWindowResizeDirection: WindowResizeDirection | null = null;
+  async windowStartResize(direction: WindowResizeDirection): Promise<void> {
+    this.lastWindowResizeDirection = direction;
+  }
 
   async startOutboundDrag(assetIds: string[]): Promise<DragOutOutcome> {
     this.lastOutboundDragIds = [...assetIds];
@@ -2678,7 +2697,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.2.1',
+      appVersion: '1.2.2',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -2799,7 +2818,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.2.1',
+    currentVersion: '1.2.2',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,

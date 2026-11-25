@@ -13,6 +13,126 @@ pub fn has_han(ch: char) -> bool {
     (0x3400..=0x9FFF).contains(&v) || (0x20000..=0x323AF).contains(&v)
 }
 
+/// Returns true when `text` contains at least one CJK Unified Ideograph.
+pub fn contains_han(text: &str) -> bool {
+    if text.is_ascii() {
+        return false;
+    }
+    text.chars().any(has_han)
+}
+
+const QUERY_STOP_WORDS: &[&str] = &[
+    "的", "了", "和", "与", "或", "在", "是", "有", "之", "中", "上", "下", "把", "给", "被", "将",
+    "让", "等", "the", "and", "for", "with", "from", "that", "this", "into", "of", "in", "on",
+    "at", "to", "a", "an", "or",
+];
+
+/// Segments a natural-language query (including unspaced Chinese phrases such as
+/// `"夏日海边蓝天女孩"`) into deduplicated semantic search terms with stopword filtering
+/// and CJK bigram/trigram fallback so unspaced CJK phrases match tags & FTS cleanly.
+pub fn query_terms(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+    let mut append_term = |raw: &str| {
+        let cleaned = raw.trim();
+        if cleaned.is_empty() {
+            return;
+        }
+        let norm = normalize(cleaned);
+        if norm.is_empty() || QUERY_STOP_WORDS.contains(&norm.as_str()) {
+            return;
+        }
+        if norm.chars().count() == 1 && !contains_han(&norm) {
+            return;
+        }
+        if seen.insert(norm) {
+            results.push(cleaned.to_string());
+        }
+    };
+
+    for chunk in trimmed.split(|c: char| !c.is_alphanumeric() && !has_han(c)) {
+        if chunk.is_empty() {
+            continue;
+        }
+        // Split mixed Latin/digit vs CJK runs cleanly
+        let mut run = String::new();
+        let mut run_is_han: Option<bool> = None;
+        let mut sub_chunks: Vec<(String, bool)> = Vec::new();
+        for ch in chunk.chars() {
+            let is_h = has_han(ch);
+            match run_is_han {
+                Some(prev) if prev == is_h => run.push(ch),
+                Some(prev) => {
+                    if !run.is_empty() {
+                        sub_chunks.push((std::mem::take(&mut run), prev));
+                    }
+                    run.push(ch);
+                    run_is_han = Some(is_h);
+                }
+                None => {
+                    run.push(ch);
+                    run_is_han = Some(is_h);
+                }
+            }
+        }
+        if let Some(prev) = run_is_han {
+            if !run.is_empty() {
+                sub_chunks.push((run, prev));
+            }
+        }
+
+        for (sub, is_han_run) in sub_chunks {
+            if !is_han_run {
+                append_term(&sub);
+                continue;
+            }
+            let chars: Vec<char> = sub.chars().collect();
+            if chars.len() <= 2 {
+                append_term(&sub);
+                continue;
+            }
+            // Keep full short phrase (<= 4 chars), then emit overlapping 2-char & 3-char windows
+            // (bigram + trigram) so unspaced phrases like "夏日海边蓝天女孩" reliably recall
+            // "夏日", "海边", "蓝天", "女孩", "极简风", "蓝色调", etc.
+            if chars.len() <= 4 {
+                append_term(&sub);
+            }
+            let mut idx = 0usize;
+            while idx < chars.len() {
+                if QUERY_STOP_WORDS.contains(&chars[idx].to_string().as_str()) {
+                    idx += 1;
+                    continue;
+                }
+                if idx + 2 <= chars.len() {
+                    let bi: String = chars[idx..idx + 2].iter().collect();
+                    if !bi
+                        .chars()
+                        .any(|c| QUERY_STOP_WORDS.contains(&c.to_string().as_str()))
+                    {
+                        append_term(&bi);
+                    }
+                }
+                if idx + 3 <= chars.len() && chars.len() <= 10 {
+                    let tri: String = chars[idx..idx + 3].iter().collect();
+                    if !tri
+                        .chars()
+                        .any(|c| QUERY_STOP_WORDS.contains(&c.to_string().as_str()))
+                    {
+                        append_term(&tri);
+                    }
+                }
+                idx += 1;
+            }
+        }
+    }
+    results
+}
+
 /// Tokenizes text by separating each Han character individually while preserving
 /// contiguous alphanumeric Latin/digit words and folding full-width ASCII (`FF01..=FF5E`).
 pub fn tokenize(text: &str) -> Vec<String> {

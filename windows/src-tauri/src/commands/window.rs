@@ -1,6 +1,7 @@
 use charkle_platform_win::windowing::{
-    apply_window_chrome, register_surface_change_callback, update_maximize_button_rect,
-    BackdropKind, ClientRect, WindowSurfaceState,
+    apply_window_chrome, register_surface_change_callback, start_native_window_resize,
+    update_maximize_button_rect, BackdropKind, ClientRect, WindowSurfaceState, HIT_BOTTOM,
+    HIT_BOTTOMLEFT, HIT_BOTTOMRIGHT, HIT_LEFT, HIT_RIGHT, HIT_TOP, HIT_TOPLEFT, HIT_TOPRIGHT,
 };
 use tauri::window::Color;
 use tauri::{Emitter, Manager, WebviewWindow};
@@ -112,9 +113,65 @@ pub fn window_is_maximized(window: WebviewWindow) -> bool {
     window.is_maximized().unwrap_or(false)
 }
 
+pub fn parse_resize_hittest(raw: &str) -> Option<isize> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "n" | "north" | "top" => Some(HIT_TOP),
+        "s" | "south" | "bottom" => Some(HIT_BOTTOM),
+        "e" | "east" | "right" => Some(HIT_RIGHT),
+        "w" | "west" | "left" => Some(HIT_LEFT),
+        "ne" | "northeast" | "topright" | "top-right" => Some(HIT_TOPRIGHT),
+        "nw" | "northwest" | "topleft" | "top-left" => Some(HIT_TOPLEFT),
+        "se" | "southeast" | "bottomright" | "bottom-right" => Some(HIT_BOTTOMRIGHT),
+        "sw" | "southwest" | "bottomleft" | "bottom-left" => Some(HIT_BOTTOMLEFT),
+        _ => None,
+    }
+}
+
+/// Starts a native Win32 border resize drag along any of the 8 window edges/corners.
+/// Required for borderless Mica Alt windows (`WM_NCCALCSIZE => 0`) where WebView2 fills
+/// 100% of `client_rect` and otherwise shadows parent `WM_NCHITTEST` on left/right edges.
+#[tauri::command]
+pub fn window_start_resize(window: WebviewWindow, direction: String) -> IpcResult<()> {
+    if window.is_maximized().unwrap_or(false) {
+        return Ok(());
+    }
+    let hit = parse_resize_hittest(&direction).ok_or_else(|| IpcError {
+        code: "INVALID_DIRECTION",
+        message: format!("Invalid resize direction: `{direction}`"),
+    })?;
+    let hwnd = raw_hwnd(&window);
+    if hwnd == 0 {
+        return Ok(());
+    }
+    window
+        .app_handle()
+        .run_on_main_thread(move || {
+            let _ = start_native_window_resize(hwnd, hit);
+        })
+        .map_err(|e| IpcError {
+            code: "WINDOW_ERROR",
+            message: e.to_string(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_resize_hittest_supports_all_eight_directions() {
+        assert_eq!(parse_resize_hittest("North"), Some(HIT_TOP));
+        assert_eq!(parse_resize_hittest("South"), Some(HIT_BOTTOM));
+        assert_eq!(parse_resize_hittest("East"), Some(HIT_RIGHT));
+        assert_eq!(parse_resize_hittest("West"), Some(HIT_LEFT));
+        assert_eq!(parse_resize_hittest("NorthEast"), Some(HIT_TOPRIGHT));
+        assert_eq!(parse_resize_hittest("NorthWest"), Some(HIT_TOPLEFT));
+        assert_eq!(parse_resize_hittest("SouthEast"), Some(HIT_BOTTOMRIGHT));
+        assert_eq!(parse_resize_hittest("SouthWest"), Some(HIT_BOTTOMLEFT));
+        assert_eq!(parse_resize_hittest("left"), Some(HIT_LEFT));
+        assert_eq!(parse_resize_hittest("right"), Some(HIT_RIGHT));
+        assert_eq!(parse_resize_hittest("invalid"), None);
+    }
 
     #[test]
     fn surface_changed_event_name_matches_contract_and_tauri_rules() {

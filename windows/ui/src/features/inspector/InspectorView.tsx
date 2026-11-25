@@ -2542,7 +2542,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
     <aside
       aria-label="属性检查器"
       data-testid={isQuickLookHosted ? 'quicklook-inspector-view' : 'inspector-view'}
-      className="relative w-[300px] shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--win-stroke-divider)] flex flex-col overflow-hidden"
+      className="relative w-full min-w-0 shrink-0 h-full bg-[var(--bg-inspector)] border-l border-[var(--win-stroke-divider)] flex flex-col overflow-hidden"
     >
       {/* Subtle top ambient tint ONLY for single asset */}
       {asset && (

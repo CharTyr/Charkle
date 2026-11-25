@@ -1,15 +1,16 @@
 //! Native Windows `charkle-cli.exe` binary powering BOTH:
 //! - MCP v2 Server over JSON-RPC 2.0 stdio (`charkle-cli.exe mcp`, supporting NDJSON & `Content-Length` framing + batch arrays)
-//! - Grounded CLI subcommands (`status`, `doctor`, `overview`, `inbox`, `search`, `semantic-search`,
-//!   `similar`, `jump`, `suggest-folder`, `asset`, `contact-sheet`, `boards`, `board`, `export-board`,
-//!   `organize`, `create-folder`, `update-folder`, `folder`, `ingest`, `compose-board`, `patch-board`,
-//!   `trash`, `analyze`, `completions`)
+//! - Grounded low-token CLI subcommands (`status`, `doctor`, `overview`, `inbox`, `search`,
+//!   `semantic` / `semantic-search`, `similar`, `jump`, `suggest-folder`, `asset`, `contact-sheet`,
+//!   `boards`, `board`, `export-board`, `organize`, `create-folder`, `update-folder`, `folder`,
+//!   `ingest`, `compose-board`, `patch-board`, `trash`, `analyze`, `completions`)
 //!
 //! Opens `Library.sqlite3` directly in SQLite WAL mode, enforces `ExternalAgentConfig`
-//! (`mcpEnabled`, `cliEnabled`, `readOnly` / `readWriteOrganize`, soft-trash only), and
-//! signals any running `charkle-desktop.exe` via `Local\CharkleLibraryChanged`.
+//! (`mcpEnabled`, `cliEnabled`, `readOnly` / `readWriteOrganize`, soft-trash only), auto-switches
+//! piped stdout to compact single-line JSON, and signals any running `charkle-desktop.exe` via
+//! `Local\CharkleLibraryChanged`.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,7 +22,7 @@ use charkle_core::engine::LiveCharkleEngine;
 use charkle_core::models::agent::ExternalAgentChannel;
 use charkle_platform_win::wake::pulse_library_changed;
 use clap::{Parser, Subcommand};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -38,9 +39,17 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Emit compact single-line JSON output.
+    /// Force compact single-line JSON output (automatic when stdout is piped).
     #[arg(long, global = true)]
     compact: bool,
+
+    /// Force pretty-printed JSON output even when stdout is piped.
+    #[arg(long, global = true)]
+    pretty: bool,
+
+    /// Human-friendly formatted output (alias for `--pretty` on JSON commands).
+    #[arg(long, global = true)]
+    human: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -48,7 +57,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum FolderSubcommand {
-    /// List all folders with paths and counts.
+    /// List all folders with paths, recursive counts, top tags, and palettes.
     List,
     /// [Write] Create a new folder.
     Create {
@@ -101,43 +110,150 @@ enum Commands {
     Doctor,
     /// Run JSON-RPC 2.0 Model Context Protocol (MCP v2) server on stdio.
     Mcp,
-    /// Show library overview (folders, smart folders, top tags, asset & board counts).
-    Overview,
+    /// Show library semantic atlas (folders + recursive counts + topTags + palettes + boards).
+    Overview {
+        /// Return full (non-compact) UUIDs and cache stats.
+        #[arg(long)]
+        full: bool,
+        /// Omit per-folder semantic profiles.
+        #[arg(long)]
+        no_profiles: bool,
+        /// Omit moodboard summaries.
+        #[arg(long)]
+        no_boards: bool,
+        #[arg(long, default_value_t = 30)]
+        top_tags_limit: u64,
+    },
     /// List newest items waiting in Inbox.
     Inbox {
         #[arg(long, default_value_t = 0)]
         offset: u64,
-        #[arg(long, default_value_t = 40)]
+        #[arg(long, default_value_t = 20)]
         limit: u64,
+        /// Also compute folder suggestions for returned Inbox items.
+        #[arg(long)]
+        suggest: bool,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        contact_sheet: bool,
+        #[arg(long = "out", alias = "output")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        max_width: Option<u64>,
     },
-    /// Search visual references by query, tags, color, or folder.
+    /// Search visual references by query, tags, CIELAB tone, shape, color, or folder.
     Search {
         #[arg(default_value = "")]
         query: String,
         #[arg(long = "tag")]
         tags: Vec<String>,
+        #[arg(long = "any-tag")]
+        any_tags: Vec<String>,
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        #[arg(long = "exclude-ids", alias = "exclude-id")]
+        exclude_ids: Vec<String>,
         #[arg(long)]
         color: Option<String>,
         #[arg(long)]
-        folder: Option<String>,
+        tone: Option<String>,
+        #[arg(long = "shape", alias = "aspect-shape")]
+        shape: Option<String>,
         #[arg(long)]
-        include_subfolders: bool,
+        folder: Option<String>,
+        /// Include nested subfolders (default: true).
+        #[arg(long)]
+        subfolders: bool,
+        /// Restrict to direct children of `--folder` only.
+        #[arg(long)]
+        no_subfolders: bool,
+        #[arg(long)]
+        diversify: bool,
+        #[arg(long)]
+        facets: bool,
+        #[arg(long)]
+        no_facets: bool,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        contact_sheet: bool,
+        #[arg(long = "out", alias = "output")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        max_width: Option<u64>,
         #[arg(long, default_value_t = 0)]
         offset: u64,
-        #[arg(long, default_value_t = 30)]
-        limit: u64,
-    },
-    /// Hybrid semantic + keyword search across the library.
-    SemanticSearch {
-        query: String,
-        #[arg(long)]
-        folder: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: u64,
     },
-    /// Find visually similar assets to a reference asset UUID.
+    /// Bilingual EN↔ZH + CIELAB tone + multi-direction `queries[]` + seed/unlike visual search.
+    #[command(visible_alias = "semantic")]
+    SemanticSearch {
+        #[arg(default_value = "")]
+        query: String,
+        /// Multi-direction queries (comma-separated or repeated) merged into 1 Contact Sheet.
+        #[arg(long = "queries", alias = "query")]
+        queries: Vec<String>,
+        #[arg(long = "seed-ids")]
+        seed_ids: Vec<String>,
+        #[arg(long = "unlike-ids")]
+        unlike_ids: Vec<String>,
+        #[arg(long = "exclude-ids")]
+        exclude_ids: Vec<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        subfolders: bool,
+        #[arg(long)]
+        no_subfolders: bool,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long = "any-tag")]
+        any_tags: Vec<String>,
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        #[arg(long)]
+        tone: Option<String>,
+        #[arg(long = "shape", alias = "aspect-shape")]
+        shape: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
+        /// Skip cloud visual rerank for instant local recall.
+        #[arg(long, alias = "no-visual-rerank")]
+        fast: bool,
+        #[arg(long)]
+        diversify: bool,
+        #[arg(long)]
+        facets: bool,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        contact_sheet: bool,
+        #[arg(long = "out", alias = "output")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        max_width: Option<u64>,
+        #[arg(long, default_value_t = 16)]
+        limit: u64,
+    },
+    /// Find visually similar assets to a reference asset UUID or 8+ char prefix.
     Similar {
         asset_id: String,
+        #[arg(long = "unlike-ids")]
+        unlike_ids: Vec<String>,
+        #[arg(long = "exclude-ids")]
+        exclude_ids: Vec<String>,
+        #[arg(long)]
+        diversify: bool,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        contact_sheet: bool,
+        #[arg(long = "out", alias = "output")]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        max_width: Option<u64>,
         #[arg(long, default_value_t = 12)]
         limit: u64,
     },
@@ -147,30 +263,63 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         limit: u64,
     },
-    /// Recommend best folders for one or more asset UUIDs.
+    /// Recommend best folders for one or more asset UUIDs or 8+ char prefixes.
     SuggestFolder {
-        #[arg(long = "id", required = true)]
+        #[arg(long = "id", alias = "ids")]
         asset_ids: Vec<String>,
+        #[arg(value_name = "ASSET_ID")]
+        positional_ids: Vec<String>,
     },
-    /// Inspect full metadata for one asset UUID.
-    Asset { id: String },
-    /// Render up to 16 asset thumbnails into a numbered JPEG contact sheet.
+    /// Inspect full metadata for 1–12 finalist asset UUIDs or 8+ char prefixes.
+    Asset {
+        #[arg(required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        include_image: bool,
+    },
+    /// Render 1–24 asset thumbnails into a numbered JPEG contact sheet (`512..=1920` px wide).
     ContactSheet {
-        #[arg(long = "id")]
+        #[arg(long = "id", alias = "ids")]
         asset_ids: Vec<String>,
         #[arg(long)]
         query: Option<String>,
-        #[arg(long, default_value_t = 4)]
-        columns: u64,
+        #[arg(long = "queries")]
+        queries: Vec<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        inbox: bool,
+        #[arg(long)]
+        tone: Option<String>,
+        #[arg(long = "shape", alias = "aspect-shape")]
+        shape: Option<String>,
+        #[arg(long = "any-tag")]
+        any_tags: Vec<String>,
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        #[arg(long)]
+        diversify: bool,
+        #[arg(long)]
+        detail: Option<String>,
+        #[arg(long)]
+        columns: Option<u64>,
+        #[arg(long, default_value_t = 1024)]
+        max_width: u64,
         #[arg(long, default_value_t = 0)]
         offset: u64,
-        #[arg(long)]
+        #[arg(long, default_value_t = 16)]
+        limit: u64,
+        #[arg(long = "out", alias = "output")]
         output: Option<PathBuf>,
     },
     /// List all moodboards.
     Boards,
-    /// Inspect nodes and palette of a moodboard by UUID or title.
-    Board { id_or_title: String },
+    /// Inspect nodes and palette of a moodboard by UUID/prefix or title.
+    Board {
+        id_or_title: String,
+        #[arg(long)]
+        detail: Option<String>,
+    },
     /// Export a moodboard to PNG or JPEG.
     ExportBoard {
         id_or_title: String,
@@ -179,19 +328,23 @@ enum Commands {
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
         #[arg(long)]
+        width: Option<u64>,
+        #[arg(long)]
+        dark: bool,
+        #[arg(long = "output", alias = "out")]
         output: PathBuf,
     },
-    /// [Write] Move/tag/rate assets.
+    /// [Write] Move/tag/rate assets (supports 8+ char prefixes and `--ids a,b,c`).
     Organize {
-        #[arg(long = "id", required = true)]
+        #[arg(long = "id", alias = "ids", required = true)]
         asset_ids: Vec<String>,
         #[arg(long)]
         folder: Option<String>,
         #[arg(long)]
         inbox: bool,
-        #[arg(long = "add-tag")]
+        #[arg(long = "add-tag", alias = "add-tags")]
         add_tags: Vec<String>,
-        #[arg(long = "remove-tag")]
+        #[arg(long = "remove-tag", alias = "remove-tags")]
         remove_tags: Vec<String>,
         #[arg(long)]
         rating: Option<i64>,
@@ -235,16 +388,16 @@ enum Commands {
         title: Option<String>,
         #[arg(long)]
         folder: Option<String>,
-        #[arg(long = "tag")]
+        #[arg(long = "tag", alias = "tags")]
         tags: Vec<String>,
     },
-    /// [Write] Compose a moodboard from prompt or explicit asset UUIDs.
+    /// [Write] Compose a moodboard from prompt or explicit asset UUIDs/prefixes.
     ComposeBoard {
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
-        #[arg(long = "id")]
+        #[arg(long = "id", alias = "ids")]
         asset_ids: Vec<String>,
         #[arg(long, default_value = "magazine")]
         style: String,
@@ -256,25 +409,25 @@ enum Commands {
         id_or_title: String,
         #[arg(long)]
         new_title: Option<String>,
-        #[arg(long = "add-id")]
+        #[arg(long = "add-id", alias = "add-ids")]
         add_ids: Vec<String>,
-        #[arg(long = "remove-id")]
+        #[arg(long = "remove-id", alias = "remove-ids")]
         remove_ids: Vec<String>,
         #[arg(long)]
         section: Option<String>,
-        #[arg(long)]
+        #[arg(long, alias = "add-note")]
         note: Option<String>,
     },
     /// [Write] Soft-move assets to Trash (or --restore). Permanent delete is never permitted.
     Trash {
-        #[arg(long = "id", required = true)]
+        #[arg(long = "id", alias = "ids", required = true)]
         asset_ids: Vec<String>,
         #[arg(long)]
         restore: bool,
     },
     /// [Write] Hydrate EXIF, AI prompts, OCR, and optional live rich metadata for up to 20 assets.
     Analyze {
-        #[arg(long = "id", required = true)]
+        #[arg(long = "id", alias = "ids", required = true)]
         asset_ids: Vec<String>,
         #[arg(long)]
         refresh_rich: bool,
@@ -286,6 +439,47 @@ enum Commands {
     },
 }
 
+fn expand_csv_list(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in items {
+        for part in item.split([',', '，']) {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn should_pretty_print(cli: &Cli, stdout_is_tty: bool) -> bool {
+    if cli.compact {
+        return false;
+    }
+    cli.pretty || cli.human || stdout_is_tty
+}
+
+fn format_json_output(raw_text: &str, pretty: bool) -> String {
+    match serde_json::from_str::<Value>(raw_text) {
+        Ok(parsed) => {
+            if pretty {
+                serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| raw_text.to_string())
+            } else {
+                serde_json::to_string(&parsed).unwrap_or_else(|_| raw_text.to_string())
+            }
+        }
+        Err(_) => raw_text.to_string(),
+    }
+}
+
+fn is_uuid_or_hex_prefix(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if uuid::Uuid::parse_str(trimmed).is_ok() {
+        return true;
+    }
+    trimmed.len() >= 8 && trimmed.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
 #[tokio::main]
 async fn main() {
     let _ = tracing_subscriber::fmt()
@@ -293,6 +487,8 @@ async fn main() {
         .try_init();
 
     let cli = Cli::parse();
+    let stdout_is_tty = io::stdout().is_terminal();
+    let pretty = should_pretty_print(&cli, stdout_is_tty);
     let data_dir = cli.library_dir.unwrap_or_else(resolve_default_data_dir);
 
     if let Some(Commands::Completions { shell }) = &cli.command {
@@ -321,11 +517,15 @@ async fn main() {
             "resourceCount": 6,
             "promptCount": 4
         });
-        if cli.json || cli.compact || matches!(cli.command, Some(Commands::Doctor)) {
-            let rendered = if cli.compact {
-                serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
-            } else {
+        if cli.json
+            || cli.compact
+            || !stdout_is_tty
+            || matches!(cli.command, Some(Commands::Doctor))
+        {
+            let rendered = if pretty {
                 serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".to_string())
+            } else {
+                serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string())
             };
             println!("{rendered}");
         } else {
@@ -369,77 +569,411 @@ async fn main() {
         return;
     }
 
+    let mut inbox_suggest = false;
     let (tool_name, args) = match cmd {
-        Commands::Overview => ("library_overview", json!({})),
-        Commands::Inbox { offset, limit } => {
-            ("list_inbox", json!({ "offset": offset, "limit": limit }))
+        Commands::Overview {
+            full,
+            no_profiles,
+            no_boards,
+            top_tags_limit,
+        } => (
+            "library_overview",
+            json!({
+                "compact": !full,
+                "include_folder_profiles": !no_profiles,
+                "include_boards": !no_boards,
+                "top_tags_limit": top_tags_limit
+            }),
+        ),
+        Commands::Inbox {
+            offset,
+            limit,
+            suggest,
+            detail,
+            contact_sheet,
+            out,
+            max_width,
+        } => {
+            inbox_suggest = suggest;
+            let want_sheet = contact_sheet || out.is_some();
+            let mut m = Map::new();
+            m.insert("offset".into(), json!(offset));
+            m.insert("limit".into(), json!(limit));
+            if let Some(d) = detail {
+                m.insert("detail".into(), json!(d));
+            }
+            if want_sheet {
+                m.insert("render_contact_sheet".into(), json!(true));
+                m.insert("include_image".into(), json!(false));
+            }
+            if let Some(p) = out {
+                m.insert("output_path".into(), json!(p.display().to_string()));
+            }
+            if let Some(w) = max_width {
+                m.insert("sheet_max_width".into(), json!(w));
+            }
+            ("list_inbox", Value::Object(m))
         }
         Commands::Search {
             query,
             tags,
+            any_tags,
+            exclude_tags,
+            exclude_ids,
             color,
+            tone,
+            shape,
             folder,
-            include_subfolders,
+            subfolders,
+            no_subfolders,
+            diversify,
+            facets,
+            no_facets,
+            detail,
+            contact_sheet,
+            out,
+            max_width,
             offset,
             limit,
-        } => (
-            "search_assets",
-            json!({
-                "query": query,
-                "tags": tags,
-                "color_hex": color,
-                "folder_path": folder,
-                "include_subfolders": include_subfolders,
-                "offset": offset,
-                "limit": limit
-            }),
-        ),
+        } => {
+            let _ = subfolders;
+            let include_subfolders = !no_subfolders;
+            let want_sheet = contact_sheet || out.is_some();
+            let mut m = Map::new();
+            if !query.trim().is_empty() {
+                m.insert("query".into(), json!(query));
+            }
+            let tags = expand_csv_list(tags);
+            if !tags.is_empty() {
+                m.insert("tags".into(), json!(tags));
+            }
+            let any_tags = expand_csv_list(any_tags);
+            if !any_tags.is_empty() {
+                m.insert("any_tags".into(), json!(any_tags));
+            }
+            let exclude_tags = expand_csv_list(exclude_tags);
+            if !exclude_tags.is_empty() {
+                m.insert("exclude_tags".into(), json!(exclude_tags));
+            }
+            let exclude_ids = expand_csv_list(exclude_ids);
+            if !exclude_ids.is_empty() {
+                m.insert("exclude_asset_ids".into(), json!(exclude_ids));
+            }
+            if let Some(c) = color {
+                m.insert("color_hex".into(), json!(c));
+            }
+            if let Some(t) = tone {
+                m.insert("tone".into(), json!(t));
+            }
+            if let Some(s) = shape {
+                m.insert("aspect_shape".into(), json!(s));
+            }
+            if let Some(f) = folder {
+                if is_uuid_or_hex_prefix(&f) {
+                    m.insert("folder_id".into(), json!(f));
+                } else {
+                    m.insert("folder_path".into(), json!(f));
+                }
+            }
+            m.insert("include_subfolders".into(), json!(include_subfolders));
+            if diversify {
+                m.insert("diversify".into(), json!(true));
+            }
+            if facets {
+                m.insert("include_facets".into(), json!(true));
+            } else if no_facets {
+                m.insert("include_facets".into(), json!(false));
+            }
+            if let Some(d) = detail {
+                m.insert("detail".into(), json!(d));
+            }
+            if want_sheet {
+                m.insert("render_contact_sheet".into(), json!(true));
+                m.insert("include_image".into(), json!(false));
+            }
+            if let Some(p) = out {
+                m.insert("output_path".into(), json!(p.display().to_string()));
+            }
+            if let Some(w) = max_width {
+                m.insert("sheet_max_width".into(), json!(w));
+            }
+            m.insert("offset".into(), json!(offset));
+            m.insert("limit".into(), json!(limit));
+            ("search_assets", Value::Object(m))
+        }
         Commands::SemanticSearch {
             query,
+            queries,
+            seed_ids,
+            unlike_ids,
+            exclude_ids,
             folder,
+            subfolders,
+            no_subfolders,
+            tags,
+            any_tags,
+            exclude_tags,
+            tone,
+            shape,
+            color,
+            fast,
+            diversify,
+            facets,
+            detail,
+            contact_sheet,
+            out,
+            max_width,
             limit,
-        } => (
-            "semantic_search",
-            json!({ "query": query, "folder_path": folder, "limit": limit }),
-        ),
-        Commands::Similar { asset_id, limit } => (
-            "find_similar_assets",
-            json!({ "asset_id": asset_id, "limit": limit }),
-        ),
+        } => {
+            let _ = subfolders;
+            let include_subfolders = !no_subfolders;
+            let want_sheet = contact_sheet || out.is_some();
+            let mut m = Map::new();
+            if !query.trim().is_empty() {
+                m.insert("query".into(), json!(query));
+            }
+            let queries = expand_csv_list(queries);
+            if !queries.is_empty() {
+                m.insert("queries".into(), json!(queries));
+            }
+            let seed_ids = expand_csv_list(seed_ids);
+            if !seed_ids.is_empty() {
+                m.insert("seed_asset_ids".into(), json!(seed_ids));
+            }
+            let unlike_ids = expand_csv_list(unlike_ids);
+            if !unlike_ids.is_empty() {
+                m.insert("unlike_asset_ids".into(), json!(unlike_ids));
+            }
+            let exclude_ids = expand_csv_list(exclude_ids);
+            if !exclude_ids.is_empty() {
+                m.insert("exclude_asset_ids".into(), json!(exclude_ids));
+            }
+            if let Some(f) = folder {
+                if is_uuid_or_hex_prefix(&f) {
+                    m.insert("folder_id".into(), json!(f));
+                } else {
+                    m.insert("folder_path".into(), json!(f));
+                }
+            }
+            m.insert("include_subfolders".into(), json!(include_subfolders));
+            let tags = expand_csv_list(tags);
+            if !tags.is_empty() {
+                m.insert("tags".into(), json!(tags));
+            }
+            let any_tags = expand_csv_list(any_tags);
+            if !any_tags.is_empty() {
+                m.insert("any_tags".into(), json!(any_tags));
+            }
+            let exclude_tags = expand_csv_list(exclude_tags);
+            if !exclude_tags.is_empty() {
+                m.insert("exclude_tags".into(), json!(exclude_tags));
+            }
+            if let Some(t) = tone {
+                m.insert("tone".into(), json!(t));
+            }
+            if let Some(s) = shape {
+                m.insert("aspect_shape".into(), json!(s));
+            }
+            if let Some(c) = color {
+                m.insert("color_hex".into(), json!(c));
+            }
+            if fast {
+                m.insert("visual_rerank".into(), json!(false));
+            }
+            if diversify {
+                m.insert("diversify".into(), json!(true));
+            }
+            if facets {
+                m.insert("include_facets".into(), json!(true));
+            }
+            if let Some(d) = detail {
+                m.insert("detail".into(), json!(d));
+            }
+            if want_sheet {
+                m.insert("render_contact_sheet".into(), json!(true));
+                m.insert("include_image".into(), json!(false));
+            }
+            if let Some(p) = out {
+                m.insert("output_path".into(), json!(p.display().to_string()));
+            }
+            if let Some(w) = max_width {
+                m.insert("sheet_max_width".into(), json!(w));
+            }
+            m.insert("limit".into(), json!(limit));
+            ("semantic_search", Value::Object(m))
+        }
+        Commands::Similar {
+            asset_id,
+            unlike_ids,
+            exclude_ids,
+            diversify,
+            detail,
+            contact_sheet,
+            out,
+            max_width,
+            limit,
+        } => {
+            let want_sheet = contact_sheet || out.is_some();
+            let mut m = Map::new();
+            m.insert("asset_id".into(), json!(asset_id));
+            let unlike_ids = expand_csv_list(unlike_ids);
+            if !unlike_ids.is_empty() {
+                m.insert("unlike_asset_ids".into(), json!(unlike_ids));
+            }
+            let exclude_ids = expand_csv_list(exclude_ids);
+            if !exclude_ids.is_empty() {
+                m.insert("exclude_asset_ids".into(), json!(exclude_ids));
+            }
+            if diversify {
+                m.insert("diversify".into(), json!(true));
+            }
+            if let Some(d) = detail {
+                m.insert("detail".into(), json!(d));
+            }
+            if want_sheet {
+                m.insert("render_contact_sheet".into(), json!(true));
+                m.insert("include_image".into(), json!(false));
+            }
+            if let Some(p) = out {
+                m.insert("output_path".into(), json!(p.display().to_string()));
+            }
+            if let Some(w) = max_width {
+                m.insert("sheet_max_width".into(), json!(w));
+            }
+            m.insert("limit".into(), json!(limit));
+            ("find_similar_assets", Value::Object(m))
+        }
         Commands::Jump { query, limit } => {
             ("quick_jump", json!({ "query": query, "limit": limit }))
         }
-        Commands::SuggestFolder { asset_ids } => {
-            ("suggest_folder", json!({ "asset_ids": asset_ids }))
+        Commands::SuggestFolder {
+            asset_ids,
+            positional_ids,
+        } => {
+            let mut combined = expand_csv_list(asset_ids);
+            combined.extend(expand_csv_list(positional_ids));
+            ("suggest_folder", json!({ "asset_ids": combined }))
         }
-        Commands::Asset { id } => ("get_asset", json!({ "asset_id": id })),
+        Commands::Asset { ids, include_image } => {
+            let expanded = expand_csv_list(ids);
+            if expanded.len() <= 1 {
+                (
+                    "get_asset",
+                    json!({
+                        "asset_id": expanded.first().cloned().unwrap_or_default(),
+                        "include_image": include_image
+                    }),
+                )
+            } else {
+                (
+                    "get_asset",
+                    json!({
+                        "asset_ids": expanded,
+                        "include_image": include_image
+                    }),
+                )
+            }
+        }
         Commands::ContactSheet {
             asset_ids,
             query,
+            queries,
+            folder,
+            inbox,
+            tone,
+            shape,
+            any_tags,
+            exclude_tags,
+            diversify,
+            detail,
             columns,
+            max_width,
             offset,
+            limit,
             output,
-        } => (
-            "render_contact_sheet",
-            json!({
-                "asset_ids": asset_ids,
-                "query": query.unwrap_or_default(),
-                "columns": columns,
-                "offset": offset,
-                "output_path": output.map(|p| p.display().to_string())
-            }),
-        ),
+        } => {
+            let mut m = Map::new();
+            let ids = expand_csv_list(asset_ids);
+            if !ids.is_empty() {
+                m.insert("asset_ids".into(), json!(ids));
+            }
+            if let Some(q) = query {
+                m.insert("query".into(), json!(q));
+            }
+            let qs = expand_csv_list(queries);
+            if !qs.is_empty() {
+                m.insert("queries".into(), json!(qs));
+            }
+            if let Some(f) = folder {
+                if is_uuid_or_hex_prefix(&f) {
+                    m.insert("folder_id".into(), json!(f));
+                } else {
+                    m.insert("folder_path".into(), json!(f));
+                }
+            }
+            if inbox {
+                m.insert("only_inbox".into(), json!(true));
+            }
+            if let Some(t) = tone {
+                m.insert("tone".into(), json!(t));
+            }
+            if let Some(s) = shape {
+                m.insert("aspect_shape".into(), json!(s));
+            }
+            let any_tags = expand_csv_list(any_tags);
+            if !any_tags.is_empty() {
+                m.insert("any_tags".into(), json!(any_tags));
+            }
+            let exclude_tags = expand_csv_list(exclude_tags);
+            if !exclude_tags.is_empty() {
+                m.insert("exclude_tags".into(), json!(exclude_tags));
+            }
+            if diversify {
+                m.insert("diversify".into(), json!(true));
+            }
+            if let Some(d) = detail {
+                m.insert("detail".into(), json!(d));
+            }
+            if let Some(cols) = columns {
+                m.insert("columns".into(), json!(cols));
+            }
+            m.insert("max_width".into(), json!(max_width));
+            m.insert("offset".into(), json!(offset));
+            m.insert("limit".into(), json!(limit));
+            m.insert("include_image".into(), json!(false));
+            if let Some(p) = output {
+                m.insert("output_path".into(), json!(p.display().to_string()));
+            }
+            ("render_contact_sheet", Value::Object(m))
+        }
         Commands::Boards => ("list_boards", json!({})),
-        Commands::Board { id_or_title } => ("get_board_context", board_selector(&id_or_title)),
+        Commands::Board {
+            id_or_title,
+            detail,
+        } => {
+            let mut m = board_selector(&id_or_title);
+            if let Some(d) = detail {
+                m["detail"] = json!(d);
+            }
+            ("get_board_context", m)
+        }
         Commands::ExportBoard {
             id_or_title,
             format,
             scale,
+            width,
+            dark,
             output,
         } => {
             let mut m = board_selector(&id_or_title);
             m["format"] = json!(format);
             m["scale"] = json!(scale);
+            if let Some(w) = width {
+                m["width"] = json!(w);
+            }
+            if dark {
+                m["dark_appearance"] = json!(true);
+            }
             m["output_path"] = json!(output.display().to_string());
             m["include_image"] = json!(false);
             ("export_board_image", m)
@@ -452,18 +986,27 @@ async fn main() {
             remove_tags,
             rating,
             ai_description,
-        } => (
-            "organize_assets",
-            json!({
-                "asset_ids": asset_ids,
-                "folder_path": folder,
-                "move_to_inbox": inbox,
-                "add_tags": add_tags,
-                "remove_tags": remove_tags,
-                "rating": rating,
-                "ai_description": ai_description
-            }),
-        ),
+        } => {
+            let mut m = Map::new();
+            m.insert("asset_ids".into(), json!(expand_csv_list(asset_ids)));
+            if let Some(f) = folder {
+                if is_uuid_or_hex_prefix(&f) {
+                    m.insert("folder_id".into(), json!(f));
+                } else {
+                    m.insert("folder_path".into(), json!(f));
+                }
+            }
+            m.insert("move_to_inbox".into(), json!(inbox));
+            m.insert("add_tags".into(), json!(expand_csv_list(add_tags)));
+            m.insert("remove_tags".into(), json!(expand_csv_list(remove_tags)));
+            if let Some(r) = rating {
+                m.insert("rating".into(), json!(r));
+            }
+            if let Some(desc) = ai_description {
+                m.insert("ai_description".into(), json!(desc));
+            }
+            ("organize_assets", Value::Object(m))
+        }
         Commands::CreateFolder { name, parent_id } => (
             "create_folder",
             json!({ "name": name, "parent_id": parent_id }),
@@ -560,7 +1103,7 @@ async fn main() {
                 "text": text,
                 "title": title,
                 "folder_path": folder,
-                "tags": tags
+                "tags": expand_csv_list(tags)
             }),
         ),
         Commands::ComposeBoard {
@@ -574,7 +1117,7 @@ async fn main() {
             json!({
                 "title": title.unwrap_or_default(),
                 "prompt": prompt.unwrap_or_default(),
-                "asset_ids": asset_ids,
+                "asset_ids": expand_csv_list(asset_ids),
                 "layout_style": style,
                 "use_freeform": freeform
             }),
@@ -589,22 +1132,25 @@ async fn main() {
         } => {
             let mut m = board_selector(&id_or_title);
             m["new_title"] = json!(new_title);
-            m["add_asset_ids"] = json!(add_ids);
-            m["remove_asset_ids"] = json!(remove_ids);
+            m["add_asset_ids"] = json!(expand_csv_list(add_ids));
+            m["remove_asset_ids"] = json!(expand_csv_list(remove_ids));
             m["add_section"] = json!(section);
             m["add_note"] = json!(note);
             ("patch_moodboard", m)
         }
         Commands::Trash { asset_ids, restore } => (
             "trash_assets",
-            json!({ "asset_ids": asset_ids, "trashed": !restore }),
+            json!({ "asset_ids": expand_csv_list(asset_ids), "trashed": !restore }),
         ),
         Commands::Analyze {
             asset_ids,
             refresh_rich,
         } => (
             "analyze_assets",
-            json!({ "asset_ids": asset_ids, "refresh_rich_metadata": refresh_rich }),
+            json!({
+                "asset_ids": expand_csv_list(asset_ids),
+                "refresh_rich_metadata": refresh_rich
+            }),
         ),
         Commands::Status | Commands::Doctor | Commands::Mcp | Commands::Completions { .. } => {
             unreachable!()
@@ -614,45 +1160,67 @@ async fn main() {
     let output = service
         .call_tool(tool_name, &args, ExternalAgentChannel::Cli)
         .await;
-    let text = output.first_text();
+    let mut text = output.first_text();
     if output.is_error {
         eprintln!("{text}");
         std::process::exit(1);
     }
-    if cli.compact {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
-            println!("{}", serde_json::to_string(&parsed).unwrap_or(text));
-            return;
+
+    if inbox_suggest {
+        if let Ok(mut parsed) = serde_json::from_str::<Value>(&text) {
+            let ids: Vec<String> = parsed["assets"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item["id"].as_str().map(ToOwned::to_owned))
+                        .take(20)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !ids.is_empty() {
+                let sug = service
+                    .call_tool(
+                        "suggest_folder",
+                        &json!({ "asset_ids": ids }),
+                        ExternalAgentChannel::Cli,
+                    )
+                    .await;
+                if !sug.is_error {
+                    if let Ok(sug_val) = serde_json::from_str::<Value>(&sug.first_text()) {
+                        parsed["folderSuggestions"] = sug_val["recommendations"].clone();
+                        text = serde_json::to_string(&parsed).unwrap_or(text);
+                    }
+                }
+            }
         }
     }
-    println!("{text}");
+
+    println!("{}", format_json_output(&text, pretty));
 }
 
 fn board_selector(raw: &str) -> Value {
-    if uuid::Uuid::parse_str(raw.trim()).is_ok() {
-        json!({ "board_id": raw.trim() })
+    let trimmed = raw.trim();
+    if is_uuid_or_hex_prefix(trimmed) {
+        json!({ "board_id": trimmed })
     } else {
-        json!({ "title": raw.trim() })
+        json!({ "title": trimmed })
     }
 }
 
 fn folder_selector(raw: &str) -> Value {
-    if uuid::Uuid::parse_str(raw.trim()).is_ok() {
-        json!({ "folder_id": raw.trim() })
+    let trimmed = raw.trim();
+    if is_uuid_or_hex_prefix(trimmed) {
+        json!({ "folder_id": trimmed })
     } else {
-        json!({ "folder_path": raw.trim() })
+        json!({ "folder_path": trimmed })
     }
 }
 
 fn print_completions(shell: &str) {
-    let cmds = "status doctor mcp overview inbox search semantic-search similar jump suggest-folder asset contact-sheet boards board export-board organize create-folder update-folder folder ingest compose-board patch-board trash analyze completions";
+    let cmds = "status doctor mcp overview inbox search semantic semantic-search similar jump suggest-folder asset contact-sheet boards board export-board organize create-folder update-folder folder ingest compose-board patch-board trash analyze completions";
     match shell.to_ascii_lowercase().as_str() {
-        "bash" => println!(
-            "complete -W \"{cmds}\" charkle-cli charkle-cli.exe"
-        ),
-        "zsh" => println!(
-            "#compdef charkle-cli\n_arguments '1:command:({cmds})'"
-        ),
+        "bash" => println!("complete -W \"{cmds}\" charkle-cli charkle-cli.exe"),
+        "zsh" => println!("#compdef charkle-cli\n_arguments '1:command:({cmds})'"),
         _ => println!(
             "Register-ArgumentCompleter -Native -CommandName charkle-cli,charkle-cli.exe -ScriptBlock {{\n  param($wordToComplete)\n  '{cmds}'.Split(' ') | Where-Object {{ $_ -like \"$wordToComplete*\" }} | ForEach-Object {{ [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }}\n}}"
         ),
@@ -696,7 +1264,6 @@ async fn run_mcp_stdio(service: &CharkleExternalAgentService) {
         }
 
         if let Some(parsed_len) = parse_mcp_content_length(trimmed) {
-            // Consume remaining header lines until empty line
             loop {
                 line.clear();
                 if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
@@ -760,6 +1327,56 @@ mod tests {
         assert_eq!(
             parse_mcp_content_length("Content-Type: application/json"),
             None
+        );
+    }
+
+    #[test]
+    fn piped_output_defaults_to_compact_single_line_json() {
+        let cli_default = Cli::parse_from(["charkle-cli", "overview"]);
+        assert!(!should_pretty_print(&cli_default, false));
+        assert!(should_pretty_print(&cli_default, true));
+
+        let cli_compact = Cli::parse_from(["charkle-cli", "--compact", "overview"]);
+        assert!(!should_pretty_print(&cli_compact, true));
+
+        let cli_pretty = Cli::parse_from(["charkle-cli", "--pretty", "overview"]);
+        assert!(should_pretty_print(&cli_pretty, false));
+
+        let raw = "{\n  \"a\": 1,\n  \"b\": 2\n}";
+        let compact = format_json_output(raw, false);
+        assert!(!compact.contains('\n'));
+        assert_eq!(compact, r#"{"a":1,"b":2}"#);
+    }
+
+    #[test]
+    fn parses_v122_cli_aliases_and_batch_asset_ids() {
+        let sem = Cli::parse_from([
+            "charkle-cli",
+            "semantic",
+            "--queries",
+            "人物动态,夏日海边晴空,极简白底",
+            "--tone",
+            "cool",
+            "--fast",
+            "--diversify",
+            "--out",
+            "brief.jpg",
+        ]);
+        assert!(matches!(sem.command, Some(Commands::SemanticSearch { .. })));
+
+        let batch = Cli::parse_from(["charkle-cli", "asset", "69ED8DCB", "A1B2C3D4"]);
+        match batch.command {
+            Some(Commands::Asset { ids, .. }) => {
+                assert_eq!(ids, vec!["69ED8DCB".to_string(), "A1B2C3D4".to_string()]);
+            }
+            other => panic!("expected Asset command, got {other:?}"),
+        }
+
+        assert_eq!(board_selector("69ED8DCB")["board_id"], "69ED8DCB");
+        assert_eq!(folder_selector("69ED8DCB")["folder_id"], "69ED8DCB");
+        assert_eq!(
+            folder_selector("插画/ClearLine")["folder_path"],
+            "插画/ClearLine"
         );
     }
 }

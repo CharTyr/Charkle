@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { getTransport, isTauriRuntime } from './api/transport';
 import { Button, ModalShell, ToastHost } from './design-system';
 import { QuickCaptureModal } from './features/capture/QuickCaptureModal';
+import { PaneResizeDivider } from './features/chrome/PaneResizeDivider';
 import { Titlebar } from './features/chrome/Titlebar';
+import { WindowResizeEdges } from './features/chrome/WindowResizeEdges';
 import {
   PointerDragGhostLayer,
   registerPointerDragHandlers,
@@ -19,7 +21,16 @@ import { SettingsOverlay } from './features/settings/SettingsOverlay';
 import { SidebarView } from './features/sidebar/SidebarView';
 import { AppUpdateModal } from './features/updates/AppUpdateModal';
 import {
+  DEFAULT_INSPECTOR_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH,
+  MAX_INSPECTOR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
+  MIN_INSPECTOR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  clampInspectorWidth,
+  clampSidebarWidth,
   isPlainWebBookmark,
+  resolveEffectivePaneWidths,
   type QuickLookOriginRect,
   useAppUpdateStore,
   useCoordinatorStore,
@@ -248,11 +259,26 @@ export const App: React.FC = () => {
   const destination = useCoordinatorStore((s) => s.destination);
   const sidebarOpen = useCoordinatorStore((s) => s.sidebarOpen);
   const sidebarCollapsed = useCoordinatorStore((s) => s.sidebarCollapsed);
+  const sidebarWidth = useCoordinatorStore((s) => s.sidebarWidth);
+  const setSidebarCollapsed = useCoordinatorStore((s) => s.setSidebarCollapsed);
+  const setSidebarWidth = useCoordinatorStore((s) => s.setSidebarWidth);
+  const commitSidebarWidth = useCoordinatorStore((s) => s.commitSidebarWidth);
+  const resetSidebarWidth = useCoordinatorStore((s) => s.resetSidebarWidth);
   const inspectorOpen = useCoordinatorStore((s) => s.inspectorOpen);
+  const inspectorWidth = useCoordinatorStore((s) => s.inspectorWidth);
+  const setInspectorWidth = useCoordinatorStore((s) => s.setInspectorWidth);
+  const commitInspectorWidth = useCoordinatorStore((s) => s.commitInspectorWidth);
+  const resetInspectorWidth = useCoordinatorStore((s) => s.resetInspectorWidth);
+  const isResizingPane = useCoordinatorStore((s) => s.isResizingPane);
+  const setResizingPane = useCoordinatorStore((s) => s.setResizingPane);
   const moodboardGeneratorOpen = useCoordinatorStore((s) => s.moodboardGeneratorOpen);
   const setMoodboardGeneratorOpen = useCoordinatorStore((s) => s.setMoodboardGeneratorOpen);
   const themeMode = useCoordinatorStore((s) => s.themeMode);
   const syncWindowChrome = useCoordinatorStore((s) => s.syncWindowChrome);
+
+  const [windowWidth, setWindowWidth] = useState<number>(() =>
+    typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1360,
+  );
 
   const bootstrap = useLibraryStore((s) => s.bootstrap);
   const refreshAll = useLibraryStore((s) => s.refreshAll);
@@ -646,6 +672,9 @@ export const App: React.FC = () => {
     }
 
     const handleResize = () => {
+      if (window.innerWidth > 0) {
+        setWindowWidth(window.innerWidth);
+      }
       const nowNarrow = isNarrow();
       if (!wasNarrow && nowNarrow) {
         if (!useCoordinatorStore.getState().sidebarCollapsed) {
@@ -1079,15 +1108,24 @@ export const App: React.FC = () => {
 
   const isMoodboardView =
     destination.type === 'moodboardsHome' || destination.type === 'moodboard';
-  const sidebarTargetWidth = sidebarCollapsed ? 64 : 248;
   const showMainInspector = inspectorOpen && !isMoodboardView;
+  const { sidebarEffectiveWidth, inspectorEffectiveWidth } = resolveEffectivePaneWidths({
+    windowWidth,
+    sidebarOpen,
+    sidebarCollapsed,
+    sidebarWidth,
+    inspectorOpen: showMainInspector,
+    inspectorWidth,
+    priority: isResizingPane,
+  });
 
   return (
     <div className="w-screen h-screen min-h-0 min-w-0 flex overflow-hidden bg-transparent text-[var(--text-primary)]">
-      {/* Left Full-Height Mica Alt Navigation Rail (y=0 to bottom; commits width cleanly, GPU inner transform) */}
+      {/* Left Full-Height Mica Alt Navigation Rail (draggable 188–420px / 76px collapsed rail) */}
       <div
         aria-hidden={!sidebarOpen}
-        style={{ width: sidebarOpen ? sidebarTargetWidth : 0 }}
+        data-testid="sidebar-slot"
+        style={{ width: sidebarEffectiveWidth }}
         className={[
           'shrink-0 min-h-0 h-full overflow-hidden flex justify-end',
           sidebarOpen ? '' : 'pointer-events-none',
@@ -1096,14 +1134,64 @@ export const App: React.FC = () => {
         <div
           className="win-drawer-content h-full flex shrink-0"
           style={{
-            width: sidebarTargetWidth,
+            width: sidebarEffectiveWidth,
             transform: sidebarOpen ? 'translateX(0)' : 'translateX(-12px)',
             opacity: sidebarOpen ? 1 : 0,
+            transition: isResizingPane === 'sidebar' ? 'none' : undefined,
           }}
         >
           <SidebarView />
         </div>
       </div>
+
+      {sidebarOpen && (
+        <PaneResizeDivider
+          mode="sidebar"
+          isCollapsed={sidebarCollapsed}
+          currentWidth={sidebarEffectiveWidth}
+          minWidth={MIN_SIDEBAR_WIDTH}
+          maxWidth={MAX_SIDEBAR_WIDTH}
+          defaultWidth={DEFAULT_SIDEBAR_WIDTH}
+          label="调整左侧边栏宽度"
+          testId="sidebar-resize-divider"
+          onResizeStart={() => setResizingPane('sidebar')}
+          onResize={(next) => {
+            const clamped = clampSidebarWidth(
+              next,
+              windowWidth,
+              showMainInspector,
+              inspectorEffectiveWidth,
+            );
+            setSidebarWidth(clamped);
+          }}
+          onExpandFromCollapsed={(initialWidth) => {
+            const clamped = clampSidebarWidth(
+              initialWidth,
+              windowWidth,
+              showMainInspector,
+              inspectorEffectiveWidth,
+            );
+            setSidebarCollapsed(false);
+            setSidebarWidth(clamped);
+          }}
+          onResizeEnd={(finalWidth) => {
+            setResizingPane(null);
+            if (!useCoordinatorStore.getState().sidebarCollapsed) {
+              const clamped = clampSidebarWidth(
+                finalWidth,
+                windowWidth,
+                showMainInspector,
+                inspectorEffectiveWidth,
+              );
+              commitSidebarWidth(clamped);
+            }
+          }}
+          onReset={() => {
+            if (sidebarCollapsed) setSidebarCollapsed(false);
+            resetSidebarWidth();
+          }}
+        />
+      )}
 
       {/* Right Column: Slim 40px Mica Titlebar + Elevated Rounded Content Surface */}
       <div className="charkle-mica-chrome flex-1 min-w-0 min-h-0 h-full flex flex-col overflow-hidden">
@@ -1114,20 +1202,46 @@ export const App: React.FC = () => {
             {isMoodboardView ? <MoodboardsHome /> : <GalleryView />}
           </div>
 
-          {/* Right 300px Inspector Slot (zero per-frame width transition; commits width once, GPU transform) */}
+          {showMainInspector && (
+            <PaneResizeDivider
+              mode="inspector"
+              currentWidth={inspectorEffectiveWidth}
+              minWidth={MIN_INSPECTOR_WIDTH}
+              maxWidth={MAX_INSPECTOR_WIDTH}
+              defaultWidth={DEFAULT_INSPECTOR_WIDTH}
+              label="调整右侧检查器宽度"
+              testId="inspector-resize-divider"
+              onResizeStart={() => setResizingPane('inspector')}
+              onResize={(next) => {
+                const clamped = clampInspectorWidth(next, windowWidth, sidebarEffectiveWidth);
+                setInspectorWidth(clamped);
+              }}
+              onResizeEnd={(finalWidth) => {
+                setResizingPane(null);
+                const clamped = clampInspectorWidth(finalWidth, windowWidth, sidebarEffectiveWidth);
+                commitInspectorWidth(clamped);
+              }}
+              onReset={resetInspectorWidth}
+            />
+          )}
+
+          {/* Right Draggable Inspector Slot (260–480px, default 300px, zero per-frame width transition) */}
           <div
             aria-hidden={!showMainInspector}
-            style={{ width: showMainInspector ? 300 : 0 }}
+            data-testid="main-inspector-slot"
+            style={{ width: showMainInspector ? inspectorEffectiveWidth : 0 }}
             className={[
               'shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
               showMainInspector ? '' : 'pointer-events-none',
             ].join(' ')}
           >
             <div
-              className="win-drawer-content w-[300px] shrink-0 min-h-0 h-full flex"
+              className="win-drawer-content shrink-0 min-h-0 h-full flex"
               style={{
+                width: showMainInspector ? inspectorEffectiveWidth : inspectorWidth,
                 transform: showMainInspector ? 'translateX(0)' : 'translateX(16px)',
                 opacity: showMainInspector ? 1 : 0,
+                transition: isResizingPane === 'inspector' ? 'none' : undefined,
               }}
             >
               <InspectorView />
@@ -1177,6 +1291,7 @@ export const App: React.FC = () => {
       </ModalShell>
       <PointerDragGhostLayer />
       <ToastHost />
+      <WindowResizeEdges />
     </div>
   );
 };

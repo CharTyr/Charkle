@@ -44,12 +44,17 @@ import {
   useResolvedIsDark,
 } from '../../design-system';
 import {
+  DEFAULT_INSPECTOR_WIDTH,
+  MAX_INSPECTOR_WIDTH,
+  MIN_INSPECTOR_WIDTH,
+  clampInspectorWidth,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
   type QuickLookOriginRect,
 } from '../../stores';
 import { mediaKindLabel, type AssetRecord } from '../../types/domain';
+import { PaneResizeDivider } from '../chrome/PaneResizeDivider';
 import { InspectorView } from '../inspector/InspectorView';
 import { AudioStudioViewer } from './AudioStudioViewer';
 import { DocumentMarkdownViewer } from './DocumentMarkdownViewer';
@@ -145,11 +150,12 @@ function computeConnectedFlipDelta(
   cardRect: QuickLookOriginRect | null | undefined,
   asset: Pick<AssetRecord, 'pixelWidth' | 'pixelHeight'>,
   inspectorOpen: boolean,
+  inspectorWidth = DEFAULT_INSPECTOR_WIDTH,
 ): FlipDelta | null {
   if (!isValidRect(cardRect) || typeof window === 'undefined') return null;
   const vw = window.innerWidth || 1280;
   const vh = window.innerHeight || 800;
-  const stageW = inspectorOpen ? Math.max(320, vw - 300) : vw;
+  const stageW = inspectorOpen ? Math.max(320, vw - inspectorWidth) : vw;
   const padX = inspectorOpen ? 56 : 96;
   const headerH = 56;
   const hudH = 72;
@@ -273,9 +279,29 @@ export const QuickLookOverlay: React.FC = () => {
   const setSelection = useCoordinatorStore((s) => s.setSelection);
   const destination = useCoordinatorStore((s) => s.destination);
   const inspectorOpen = useCoordinatorStore((s) => s.inspectorOpen);
+  const inspectorWidth = useCoordinatorStore((s) => s.inspectorWidth);
+  const setInspectorWidth = useCoordinatorStore((s) => s.setInspectorWidth);
+  const commitInspectorWidth = useCoordinatorStore((s) => s.commitInspectorWidth);
+  const resetInspectorWidth = useCoordinatorStore((s) => s.resetInspectorWidth);
+  const isResizingPane = useCoordinatorStore((s) => s.isResizingPane);
+  const setResizingPane = useCoordinatorStore((s) => s.setResizingPane);
   const toggleInspector = useCoordinatorStore((s) => s.toggleInspector);
   const openMoodboardGenerator = useCoordinatorStore((s) => s.openMoodboardGenerator);
   const pushToast = useCoordinatorStore((s) => s.pushToast);
+
+  const [windowWidth, setWindowWidth] = useState<number>(() =>
+    typeof window !== 'undefined' && window.innerWidth > 0 ? window.innerWidth : 1360,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onResize = () => {
+      if (window.innerWidth > 0) setWindowWidth(window.innerWidth);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const effectiveInspectorWidth = clampInspectorWidth(inspectorWidth, windowWidth, 0);
 
   const assets = useLibraryStore((s) => s.assets);
   const allAssets = useLibraryStore((s) => s.allAssets);
@@ -545,8 +571,13 @@ export const QuickLookOverlay: React.FC = () => {
 
   const openFlipDelta = useMemo(() => {
     if (!asset || isMotionReducedNow()) return null;
-    return computeConnectedFlipDelta(quickLookOriginRect, asset, inspectorOpen);
-  }, [asset?.id, quickLookOriginRect, inspectorOpen]);
+    return computeConnectedFlipDelta(
+      quickLookOriginRect,
+      asset,
+      inspectorOpen,
+      effectiveInspectorWidth,
+    );
+  }, [asset?.id, quickLookOriginRect, inspectorOpen, effectiveInspectorWidth]);
 
   if (typeof document === 'undefined') return null;
 
@@ -1327,20 +1358,44 @@ export const QuickLookOverlay: React.FC = () => {
             </Popover>
           </div>
 
-          {/* Synchronized Full-Height 300px Right Inspector (zero per-frame width reflow) */}
+          {/* Synchronized Full-Height Draggable Right Inspector (1:1 synced with Main Workspace) */}
+          {inspectorOpen && (
+            <PaneResizeDivider
+              mode="inspector"
+              currentWidth={effectiveInspectorWidth}
+              minWidth={MIN_INSPECTOR_WIDTH}
+              maxWidth={MAX_INSPECTOR_WIDTH}
+              defaultWidth={DEFAULT_INSPECTOR_WIDTH}
+              label="调整预览检查器宽度"
+              testId="quicklook-inspector-resize-divider"
+              onResizeStart={() => setResizingPane('inspector')}
+              onResize={(next) => {
+                setInspectorWidth(clampInspectorWidth(next, windowWidth, 0));
+              }}
+              onResizeEnd={(finalWidth) => {
+                setResizingPane(null);
+                commitInspectorWidth(clampInspectorWidth(finalWidth, windowWidth, 0));
+              }}
+              onReset={resetInspectorWidth}
+            />
+          )}
+
           <div
             aria-hidden={!inspectorOpen}
-            style={{ width: inspectorOpen ? 300 : 0 }}
+            data-testid="quicklook-inspector-slot"
+            style={{ width: inspectorOpen ? effectiveInspectorWidth : 0 }}
             className={[
               'charkle-drawer-slot shrink-0 min-h-0 h-full overflow-hidden flex justify-start',
               inspectorOpen ? '' : 'pointer-events-none',
             ].join(' ')}
           >
             <div
-              className="win-drawer-content h-full w-[300px] shrink-0"
+              className="win-drawer-content h-full shrink-0"
               style={{
+                width: effectiveInspectorWidth,
                 opacity: inspectorOpen ? 1 : 0,
                 transform: inspectorOpen ? 'translateX(0)' : 'translateX(16px)',
+                transition: isResizingPane === 'inspector' ? 'none' : undefined,
               }}
             >
               <InspectorView

@@ -6,6 +6,14 @@ import {
   resolveEffectiveTheme,
   type ThemeMode,
 } from '../design-system/theme';
+import {
+  DEFAULT_INSPECTOR_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH,
+  INSPECTOR_WIDTH_STORAGE_KEY,
+  SIDEBAR_WIDTH_STORAGE_KEY,
+  clampInspectorWidth,
+  clampSidebarWidth,
+} from './sidebarResize';
 import type {
   AccentSource,
   GalleryLayoutMode,
@@ -187,15 +195,51 @@ function readStoredSidebarCollapsed(): boolean {
   return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
 }
 
+function readStoredSidebarWidth(): number {
+  if (typeof localStorage === 'undefined') return DEFAULT_SIDEBAR_WIDTH;
+  const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY));
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SIDEBAR_WIDTH;
+  return clampSidebarWidth(raw);
+}
+
+function readStoredInspectorWidth(): number {
+  if (typeof localStorage === 'undefined') return DEFAULT_INSPECTOR_WIDTH;
+  const raw = Number(localStorage.getItem(INSPECTOR_WIDTH_STORAGE_KEY));
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_INSPECTOR_WIDTH;
+  return clampInspectorWidth(raw);
+}
+
+function persistSidebarWidth(width: number): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(width)));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+function persistInspectorWidth(width: number): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(INSPECTOR_WIDTH_STORAGE_KEY, String(Math.round(width)));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
 export interface CoordinatorState {
   themeMode: ThemeMode;
   accentSource: AccentSource;
   surfaceState: WindowSurfaceState | null;
+  windowMaximized: boolean;
   sidebarOpen: boolean;
   sidebarCollapsed: boolean;
+  sidebarWidth: number;
   sidebarSearchFocusNonce: number;
   inspectorOpen: boolean;
+  inspectorWidth: number;
   inspectorTab: InspectorTab;
+  isResizingPane: 'sidebar' | 'inspector' | null;
   inspectorCardOrder: InspectorCardId[];
   visualFilterBarOpen: boolean;
   layoutMode: GalleryLayoutMode;
@@ -228,9 +272,17 @@ export interface CoordinatorState {
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapsed: () => void;
+  setSidebarWidth: (width: number) => void;
+  commitSidebarWidth: (width?: number) => void;
+  resetSidebarWidth: () => void;
   requestSidebarSearchFocus: () => void;
   setInspectorOpen: (open: boolean) => void;
   toggleInspector: () => void;
+  setInspectorWidth: (width: number) => void;
+  commitInspectorWidth: (width?: number) => void;
+  resetInspectorWidth: () => void;
+  setResizingPane: (pane: 'sidebar' | 'inspector' | null) => void;
+  setWindowMaximized: (maximized: boolean) => void;
   setInspectorTab: (tab: InspectorTab) => void;
   moveInspectorCard: (dragged: InspectorCardId, target: InspectorCardId) => void;
   moveInspectorCardToTop: (id: InspectorCardId) => void;
@@ -279,11 +331,15 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
   themeMode: readStoredTheme(),
   accentSource: readStoredAccentSource(),
   surfaceState: null,
+  windowMaximized: false,
   sidebarOpen: true,
   sidebarCollapsed: readStoredSidebarCollapsed(),
+  sidebarWidth: readStoredSidebarWidth(),
   sidebarSearchFocusNonce: 0,
   inspectorOpen: true,
+  inspectorWidth: readStoredInspectorWidth(),
   inspectorTab: 'info',
+  isResizingPane: null,
   inspectorCardOrder: readStoredInspectorCardOrder(),
   visualFilterBarOpen: false,
   layoutMode: readStoredLayout(),
@@ -411,6 +467,21 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
     get().setSidebarCollapsed(next);
   },
 
+  setSidebarWidth(width) {
+    set({ sidebarWidth: clampSidebarWidth(width) });
+  },
+
+  commitSidebarWidth(width) {
+    const next = clampSidebarWidth(width ?? get().sidebarWidth);
+    set({ sidebarWidth: next });
+    persistSidebarWidth(next);
+  },
+
+  resetSidebarWidth() {
+    set({ sidebarWidth: DEFAULT_SIDEBAR_WIDTH });
+    persistSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+  },
+
   requestSidebarSearchFocus() {
     const state = get();
     if (!state.sidebarOpen) {
@@ -428,6 +499,29 @@ export const useCoordinatorStore = create<CoordinatorState>((set, get) => ({
 
   toggleInspector() {
     set((s) => ({ inspectorOpen: !s.inspectorOpen }));
+  },
+
+  setInspectorWidth(width) {
+    set({ inspectorWidth: clampInspectorWidth(width) });
+  },
+
+  commitInspectorWidth(width) {
+    const next = clampInspectorWidth(width ?? get().inspectorWidth);
+    set({ inspectorWidth: next });
+    persistInspectorWidth(next);
+  },
+
+  resetInspectorWidth() {
+    set({ inspectorWidth: DEFAULT_INSPECTOR_WIDTH });
+    persistInspectorWidth(DEFAULT_INSPECTOR_WIDTH);
+  },
+
+  setResizingPane(pane) {
+    set({ isResizingPane: pane });
+  },
+
+  setWindowMaximized(maximized) {
+    set({ windowMaximized: maximized });
   },
 
   setInspectorTab(tab) {

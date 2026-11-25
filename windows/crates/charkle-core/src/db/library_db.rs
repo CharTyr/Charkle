@@ -715,6 +715,48 @@ impl LibraryDatabase {
         Ok(out)
     }
 
+    /// Sub-millisecond primary-key B-tree range scan resolving an uppercase UUID prefix
+    /// (`>= 8` hex/hyphen characters) to matching asset UUIDs.
+    pub fn asset_ids_matching_prefix(&self, prefix: &str, limit: usize) -> CoreResult<Vec<Uuid>> {
+        self.ids_matching_prefix_in_table("assets", prefix, limit)
+    }
+
+    /// Primary-key B-tree range scan resolving an 8+ char UUID prefix to matching folder UUIDs.
+    pub fn folder_ids_matching_prefix(&self, prefix: &str, limit: usize) -> CoreResult<Vec<Uuid>> {
+        self.ids_matching_prefix_in_table("folders", prefix, limit)
+    }
+
+    /// Primary-key B-tree range scan resolving an 8+ char UUID prefix to matching board UUIDs.
+    pub fn board_ids_matching_prefix(&self, prefix: &str, limit: usize) -> CoreResult<Vec<Uuid>> {
+        self.ids_matching_prefix_in_table("boards", prefix, limit)
+    }
+
+    fn ids_matching_prefix_in_table(
+        &self,
+        table: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> CoreResult<Vec<Uuid>> {
+        let upper = prefix.trim().to_ascii_uppercase();
+        if upper.len() < 8 || !upper.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            return Ok(Vec::new());
+        }
+        let upper_bound = format!("{upper}\u{FFFF}");
+        let sql = format!("SELECT id FROM {table} WHERE id >= ?1 AND id < ?2 LIMIT ?3");
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![upper, upper_bound, limit.max(1) as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(uuid) = Uuid::parse_str(&row?) {
+                out.push(uuid);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn remove_asset(&self, id: Uuid) -> CoreResult<()> {
         let conn = self.lock_conn()?;
         Self::remove_asset_conn(&conn, id)
