@@ -35,6 +35,7 @@ import {
   isLightHex,
 } from '../../design-system';
 import {
+  getEffectiveSocialAttachments,
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
@@ -131,6 +132,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   const [hoverMediaReady, setHoverMediaReady] = useState(false);
   const [hoverPreviewFailed, setHoverPreviewFailed] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
+  const [socialFallbackMediaFailed, setSocialFallbackMediaFailed] = useState(false);
   const [menuState, setMenuState] = useState<{
     x: number;
     y: number;
@@ -165,6 +167,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
 
   useEffect(() => {
     setImgFailed(false);
+    setSocialFallbackMediaFailed(false);
     setHoverPreviewFailed(false);
     setHoverMediaReady(false);
   }, [asset.id, asset.updatedAt, effectiveThumbRev]);
@@ -256,7 +259,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
   const rendersProceduralHeader =
     isSwatch ||
     Boolean(gh) ||
-    (Boolean(social) && (!isXiaohongshu || imgFailed)) ||
+    (Boolean(social) && imgFailed) ||
     isAudio ||
     isMarkdownDoc ||
     (imgFailed && (asset.mediaKind === 'document' || isPlainWebBookmark));
@@ -618,8 +621,25 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
               {gh.license && <span className="truncate max-w-[110px]">{gh.license}</span>}
             </div>
           </div>
-        ) : isXiaohongshu && social ? (
-          imgFailed ? (
+        ) : social ? (
+          !imgFailed ? (
+            <div
+              className="w-full h-full relative"
+              style={{
+                backgroundColor: primaryHex ? `${primaryHex}40` : 'var(--bg-subtle)',
+              }}
+            >
+              <img
+                src={thumbUrl}
+                alt={asset.title}
+                loading="lazy"
+                decoding="async"
+                draggable={false}
+                onError={() => setImgFailed(true)}
+                className="w-full h-full object-cover charkle-media-zoom"
+              />
+            </div>
+          ) : isXiaohongshu ? (
             (() => {
               const avatarSrc = resolveSocialMediaUrl(social.authorAvatarURL, isTauriRuntime());
               const displayHandle = formatSocialDisplayHandle(social);
@@ -632,6 +652,7 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
                         <img
                           src={avatarSrc}
                           alt=""
+                          referrerPolicy="no-referrer"
                           draggable={false}
                           className="h-5 w-5 rounded-full object-cover shrink-0 bg-[var(--bg-subtle)]"
                         />
@@ -667,60 +688,70 @@ export const AssetCard: React.FC<AssetCardProps> = React.memo(({
               );
             })()
           ) : (
-            <div
-              className="w-full h-full relative"
-              style={{
-                backgroundColor: primaryHex ? `${primaryHex}40` : 'var(--bg-subtle)',
-              }}
-            >
-              <img
-                src={thumbUrl}
-                alt={asset.title}
-                loading="lazy"
-                decoding="async"
-                draggable={false}
-                onError={() => setImgFailed(true)}
-                className="w-full h-full object-cover charkle-media-zoom"
-              />
-            </div>
-          )
-        ) : social ? (
-          (() => {
-            const avatarSrc = resolveSocialMediaUrl(social.authorAvatarURL, isTauriRuntime());
-            const displayHandle = formatSocialDisplayHandle(social);
-            return (
-              <div className="w-full h-full relative p-3.5 flex flex-col justify-between bg-[var(--bg-elevated)]">
-                <div
-                  className="absolute inset-x-0 top-0 h-[3px]"
-                  style={{ backgroundColor: primaryHex ?? 'var(--accent)' }}
-                />
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    {avatarSrc ? (
+            (() => {
+              const inTauri = isTauriRuntime();
+              const avatarSrc = resolveSocialMediaUrl(social.authorAvatarURL, inTauri);
+              const displayHandle = formatSocialDisplayHandle(social);
+              const firstAtt = getEffectiveSocialAttachments(social)[0];
+              const fallbackPreviewRaw = firstAtt
+                ? firstAtt.kind === 'photo'
+                  ? firstAtt.thumbnailURL || firstAtt.url
+                  : firstAtt.thumbnailURL
+                : undefined;
+              const fallbackPreviewSrc = resolveSocialMediaUrl(fallbackPreviewRaw, inTauri);
+              const showFallbackPreview = Boolean(fallbackPreviewSrc && !socialFallbackMediaFailed);
+              return (
+                <div className="w-full h-full relative p-3.5 flex flex-col justify-between gap-2 bg-[var(--bg-elevated)]">
+                  <div
+                    className="absolute inset-x-0 top-0 h-[3px]"
+                    style={{ backgroundColor: primaryHex ?? 'var(--accent)' }}
+                  />
+                  <div className="flex items-center justify-between gap-2 shrink-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {avatarSrc ? (
+                        <img
+                          src={avatarSrc}
+                          alt=""
+                          referrerPolicy="no-referrer"
+                          draggable={false}
+                          className="h-5 w-5 rounded-full object-cover shrink-0 bg-[var(--bg-subtle)]"
+                        />
+                      ) : null}
+                      <span className="text-[12px] font-semibold text-[var(--text-primary)] truncate">
+                        {social.authorName}
+                      </span>
+                    </div>
+                    <Chat16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                  </div>
+                  <p
+                    className={[
+                      'text-[12px] text-[var(--text-secondary)] leading-relaxed charkle-prose',
+                      showFallbackPreview ? 'line-clamp-2 shrink-0' : 'line-clamp-4 my-auto',
+                    ].join(' ')}
+                  >
+                    {social.bodyText}
+                  </p>
+                  {showFallbackPreview && fallbackPreviewSrc && (
+                    <div className="relative flex-1 min-h-[72px] w-full rounded-[var(--radius-card-inner)] overflow-hidden bg-[var(--bg-subtle)]">
                       <img
-                        src={avatarSrc}
+                        src={fallbackPreviewSrc}
                         alt=""
+                        referrerPolicy="no-referrer"
                         draggable={false}
-                        className="h-5 w-5 rounded-full object-cover shrink-0 bg-[var(--bg-subtle)]"
+                        onError={() => setSocialFallbackMediaFailed(true)}
+                        className="w-full h-full object-cover"
                       />
-                    ) : null}
-                    <span className="text-[12px] font-semibold text-[var(--text-primary)] truncate">
-                      {social.authorName}
-                    </span>
-                  </div>
-                  <Chat16Regular className="w-3.5 h-3.5 text-[var(--text-tertiary)] shrink-0" />
+                    </div>
+                  )}
+                  {displayHandle && (
+                    <div className="text-[11px] text-[var(--text-tertiary)] truncate shrink-0">
+                      {displayHandle}
+                    </div>
+                  )}
                 </div>
-                <p className="text-[12px] text-[var(--text-secondary)] line-clamp-4 leading-relaxed my-auto charkle-prose">
-                  {social.bodyText}
-                </p>
-                {displayHandle && (
-                  <div className="text-[11px] text-[var(--text-tertiary)] truncate">
-                    {displayHandle}
-                  </div>
-                )}
-              </div>
-            );
-          })()
+              );
+            })()
+          )
         ) : isAudio ? (
           <div className="w-full h-full p-3.5 flex flex-col justify-between bg-[var(--bg-elevated)]">
             <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)]">

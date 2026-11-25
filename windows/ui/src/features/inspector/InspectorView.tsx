@@ -2084,6 +2084,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                 <img
                   src={avatarSrc}
                   alt={post.authorName}
+                  referrerPolicy="no-referrer"
                   onError={() => setSocialAvatarFailed(true)}
                   className="h-5 w-5 rounded-full object-cover bg-[var(--bg-subtle)] shrink-0"
                 />
@@ -2143,6 +2144,7 @@ export const InspectorView: React.FC<InspectorViewProps> = ({
                     <img
                       src={thumbPreview}
                       alt=""
+                      referrerPolicy="no-referrer"
                       onError={() =>
                         setFailedSocialThumbKeys((prev) => ({ ...prev, [key]: true }))
                       }

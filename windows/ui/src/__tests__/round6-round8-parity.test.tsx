@@ -382,16 +382,143 @@ describe('Round 6 & Round 8 — Titlebar Actions, Manual Moodboard Picker, 3D Ri
       ).toBe('@designfeed');
     });
 
-    it('resolveSocialMediaUrl routes xhscdn/xiaohongshu URLs through proxy-xhs ONLY when isTauri=true', () => {
+    it('resolveSocialMediaUrl routes XHS through proxy-xhs and X/Bluesky through proxy-social ONLY when isTauri=true', () => {
       const xhsUrl = 'https://sns-webpic-qc.xhscdn.com/20261124/note-cover.webp?imageView2/2/w/1080';
-      const xUrl = 'https://pbs.twimg.com/media/sample.jpg';
+      const xUrl = 'https://pbs.twimg.com/media/sample.jpg?format=jpg&name=orig';
+      const bskyUrl = 'https://cdn.bsky.app/img/feed_fullsize/plain/did:plc:abc/cid@jpeg';
+      const otherUrl = 'https://example.com/photo.jpg';
 
       expect(resolveSocialMediaUrl(xhsUrl, true)).toBe(
         `http://charkle-media.localhost/proxy-xhs?url=${encodeURIComponent(xhsUrl)}`,
       );
       expect(resolveSocialMediaUrl(xhsUrl, false)).toBe(xhsUrl);
-      expect(resolveSocialMediaUrl(xUrl, true)).toBe(xUrl);
+      expect(resolveSocialMediaUrl(xUrl, true)).toBe(
+        `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(xUrl)}`,
+      );
       expect(resolveSocialMediaUrl(xUrl, false)).toBe(xUrl);
+      expect(resolveSocialMediaUrl(bskyUrl, true)).toBe(
+        `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(bskyUrl)}`,
+      );
+      expect(resolveSocialMediaUrl(otherUrl, true)).toBe(otherUrl);
+    });
+
+    it('renders AssetCard for an 800x920 X post with X badge and raster poster <img>, falling back to inline preview on thumb error', () => {
+      const xImg = 'https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg';
+      const xAsset = makeAsset('X-CARD-1', '@Hiyameshi_8bit · 平成初期のビデオ映像', {
+        mediaKind: 'webBookmark',
+        pixelWidth: 800,
+        pixelHeight: 920,
+        sourceURL: 'https://x.com/Hiyameshi_8bit/status/2032956200000000001',
+        sourceDomain: 'x.com',
+        richMetadata: {
+          socialPost: {
+            platform: 'x',
+            authorName: 'Hiyameshi',
+            authorHandle: 'Hiyameshi_8bit',
+            bodyText: '平成初期のビデオ映像',
+            originalURL: 'https://x.com/Hiyameshi_8bit/status/2032956200000000001',
+            mediaURLs: [xImg],
+            mediaThumbnailURLs: [xImg],
+            attachments: [{ id: 'x-att-1', kind: 'photo', url: xImg, thumbnailURL: xImg }],
+            hasVideo: false,
+          },
+        },
+      });
+
+      const { container } = render(
+        <AssetCard
+          asset={xAsset}
+          selected={false}
+          orderedIds={[xAsset.id]}
+          width={220}
+          height={253}
+        />,
+      );
+
+      expect(screen.getByText('X')).toBeInTheDocument();
+      const posterImg = screen.getByRole('img', { name: '@Hiyameshi_8bit · 平成初期のビデオ映像' });
+      expect(posterImg).toBeInTheDocument();
+
+      // If the rasterized poster fails to load, fallback card still shows embedded photo preview
+      fireEvent.error(posterImg);
+      expect(screen.getByText('Hiyameshi')).toBeInTheDocument();
+      const fallbackPreview = container.querySelector(`img[src="${xImg}"]`);
+      expect(fallbackPreview).not.toBeNull();
+      expect(fallbackPreview?.getAttribute('referrerpolicy')).toBe('no-referrer');
+    });
+
+    it('renders SocialPostViewer for an X photo post with no-referrer and thumbnailURL fallback, and prefers cached local video', () => {
+      const origPhoto = 'https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg?name=orig';
+      const thumbPhoto = 'https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg?name=large';
+      const xPhotoPost = makeAsset('X-PHOTO-1', '@Hiyameshi_8bit · Retro frame', {
+        mediaKind: 'webBookmark',
+        pixelWidth: 800,
+        pixelHeight: 920,
+        sourceURL: 'https://x.com/Hiyameshi_8bit/status/2032956200000000001',
+        sourceDomain: 'x.com',
+        richMetadata: {
+          socialPost: {
+            platform: 'x',
+            authorName: 'Hiyameshi',
+            authorHandle: 'Hiyameshi_8bit',
+            bodyText: 'Retro frame study',
+            originalURL: 'https://x.com/Hiyameshi_8bit/status/2032956200000000001',
+            mediaURLs: [origPhoto],
+            mediaThumbnailURLs: [thumbPhoto],
+            attachments: [
+              { id: 'x-p1', kind: 'photo', url: origPhoto, thumbnailURL: thumbPhoto },
+            ],
+            hasVideo: false,
+          },
+        },
+      });
+
+      const { container, rerender } = render(<SocialPostViewer asset={xPhotoPost} />);
+      const img = container.querySelector('img[referrerpolicy="no-referrer"]');
+      expect(img).not.toBeNull();
+      expect(img?.getAttribute('src')).toBe(origPhoto);
+
+      // When primary photo fails, SocialPostViewer automatically falls back to thumbnailURL first
+      fireEvent.error(img!);
+      expect(container.querySelector('img[referrerpolicy="no-referrer"]')?.getAttribute('src')).toBe(
+        thumbPhoto,
+      );
+
+      // Cached local video for idx === 0 plays from transport originalUrl instead of remote stream
+      const xVideoPost = makeAsset('X-VID-1', '@dingyi · Video demo', {
+        mediaKind: 'webBookmark',
+        fileName: 'Social-x-demo.mp4',
+        isLocalOriginalCached: true,
+        sourceURL: 'https://x.com/dingyi/status/2034308382199591000',
+        sourceDomain: 'x.com',
+        richMetadata: {
+          socialPost: {
+            platform: 'x',
+            authorName: 'dingyi',
+            authorHandle: 'dingyi',
+            bodyText: 'Video demo',
+            originalURL: 'https://x.com/dingyi/status/2034308382199591000',
+            mediaURLs: ['https://video.twimg.com/amplify_video/1/demo.mp4'],
+            mediaThumbnailURLs: ['https://pbs.twimg.com/amplify_video_thumb/1/img/poster.jpg'],
+            attachments: [
+              {
+                id: 'x-v1',
+                kind: 'video',
+                url: 'https://video.twimg.com/amplify_video/1/demo.mp4',
+                thumbnailURL: 'https://pbs.twimg.com/amplify_video_thumb/1/img/poster.jpg',
+              },
+            ],
+            hasVideo: true,
+            videoURL: 'https://video.twimg.com/amplify_video/1/demo.mp4',
+          },
+        },
+      });
+      rerender(<SocialPostViewer asset={xVideoPost} />);
+      const videoEl = container.querySelector('video');
+      expect(videoEl).not.toBeNull();
+      expect(videoEl?.getAttribute('src')).not.toBe(
+        'https://video.twimg.com/amplify_video/1/demo.mp4',
+      );
     });
 
     it('renders AssetCard for a 900x1440 Xiaohongshu asset with 小红书 badge and cover <img>', () => {

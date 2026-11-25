@@ -470,7 +470,7 @@ impl MediaPipeline {
                             if r.is_short_link
                     );
                     let resolved = SocialPostResolver::resolve(&social_ref).await;
-                    if let Some(post) = resolved {
+                    if let Some(mut post) = resolved {
                         let platform_tag = post.metadata.platform.display_name().to_string();
                         extra_tags.push(platform_tag);
                         for tag in post.extracted_tags.iter().take(12) {
@@ -513,16 +513,41 @@ impl MediaPipeline {
                             }
                         }
                         if cover_img.is_none() {
+                            let mut cover_candidates = Vec::new();
                             if let Some(ref thumb_url) = post.primary_thumbnail_url {
+                                cover_candidates.push(thumb_url.clone());
+                            }
+                            for att in post.metadata.effective_attachments() {
+                                if att.kind == SocialMediaAttachmentKind::Photo
+                                    && !cover_candidates.contains(&att.url)
+                                {
+                                    cover_candidates.push(att.url);
+                                }
+                                if let Some(ref t) = att.thumbnail_url {
+                                    if !cover_candidates.contains(t) {
+                                        cover_candidates.push(t.clone());
+                                    }
+                                }
+                            }
+                            for cand in cover_candidates.iter().take(4) {
                                 if let Some((bytes, _)) = SocialPostResolver::download_media_bytes(
-                                    thumb_url,
+                                    cand,
                                     SocialMediaAttachmentKind::Photo,
                                 )
                                 .await
                                 {
-                                    cover_img = image::load_from_memory(&bytes).ok();
+                                    if let Ok(img) = image::load_from_memory(&bytes) {
+                                        cover_img = Some(img);
+                                        break;
+                                    }
                                 }
                             }
+                        }
+                        if !post.metadata.effective_attachments().is_empty()
+                            && cover_img.is_none()
+                            && downloaded_video.is_none()
+                        {
+                            post.metadata.media_fetch_failed = true;
                         }
 
                         let avatar_img = match post.metadata.author_avatar_url.as_deref() {
@@ -793,6 +818,13 @@ impl MediaPipeline {
                         )
                         .await;
                     }
+                }
+
+                if !meta.effective_attachments().is_empty()
+                    && cover_img.is_none()
+                    && downloaded_video.is_none()
+                {
+                    meta.media_fetch_failed = true;
                 }
 
                 let avatar_img = match meta.author_avatar_url.as_deref() {

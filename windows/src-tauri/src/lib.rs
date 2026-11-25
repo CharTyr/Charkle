@@ -145,6 +145,12 @@ pub fn run() {
                     let response = protocol::handle_xhs_proxy_request(&data_dir, &request).await;
                     responder.respond(response);
                 });
+            } else if protocol::is_social_proxy_route(&request) {
+                let data_dir = app.state::<AppState>().data_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    let response = protocol::handle_social_proxy_request(&data_dir, &request).await;
+                    responder.respond(response);
+                });
             } else if request.method() == "OPTIONS" {
                 let state = app.state::<AppState>();
                 let response = protocol::handle_media_request(

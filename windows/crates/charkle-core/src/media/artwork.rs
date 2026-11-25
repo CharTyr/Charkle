@@ -109,6 +109,8 @@ impl MediaArtwork {
     /// Renders a social post editorial poster card with optional author avatar composited into
     /// the circular header portrait (matching macOS `SocialPostResolver` / `MediaArtwork`).
     /// Xiaohongshu notes automatically render as native `900×1440` 3:4 cover + title/author/likes cards.
+    /// X / Threads / Bluesky render as crisp `800×920` (with cover) or `800×620` (text-only)
+    /// paper-white editorial cards matching macOS `MediaArtwork.swift` 1:1.
     pub fn social_post_card_with_avatar(
         meta: &SocialPostMetadata,
         cover: Option<&DynamicImage>,
@@ -118,68 +120,213 @@ impl MediaArtwork {
             return Self::xiaohongshu_post_card(meta, cover, avatar);
         }
 
-        let (w, h) = if cover.is_some() {
-            (800, 920)
+        const W: u32 = 800;
+        let has_media = cover.is_some();
+        let h: u32 = if has_media { 920 } else { 620 };
+
+        let author_name = meta.display_author_name();
+        let initial = author_name
+            .chars()
+            .next()
+            .or_else(|| {
+                meta.author_handle
+                    .trim()
+                    .trim_start_matches('@')
+                    .chars()
+                    .next()
+            })
+            .unwrap_or('X')
+            .to_uppercase()
+            .to_string();
+        let monogram_bg = match meta.platform {
+            SocialPlatform::X => "#18181B",
+            SocialPlatform::Threads => "#27272A",
+            SocialPlatform::Bluesky => "#0284C7",
+            SocialPlatform::Xiaohongshu => "#FF2442",
+        };
+
+        let mut handle_parts = Vec::new();
+        if let Some(handle_line) = meta.display_handle_line() {
+            handle_parts.push(handle_line);
         } else {
-            (800, 620)
-        };
-        let mut img = RgbaImage::from_pixel(w, h, Rgba([250, 250, 249, 255]));
-        draw_rect_outline(&mut img, 0, 0, w, h, 2, Rgba([228, 228, 231, 255]));
+            handle_parts.push(meta.platform.display_name().to_string());
+        }
+        if let Some(date) = meta
+            .published_at_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            handle_parts.push(date.chars().take(16).collect());
+        }
+        let subtitle = truncate_chars(&handle_parts.join(" · "), 44);
+        let author_short = truncate_chars(&author_name, 28);
 
-        let pill_color = match meta.platform {
-            SocialPlatform::X => Rgba([24, 24, 27, 255]),
-            SocialPlatform::Threads => Rgba([39, 39, 42, 255]),
-            SocialPlatform::Bluesky => Rgba([2, 132, 199, 255]),
-            SocialPlatform::Xiaohongshu => Rgba([255, 36, 66, 255]),
+        let mut cursor_y: u32 = 148;
+        let mut remaining_body_lines: usize = if has_media { 4 } else { 9 };
+        let headline_trimmed = meta
+            .article_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let head_lines = headline_trimmed
+            .map(|hl| wrap_cjk_aware_ellipsis(hl, 44, 2))
+            .unwrap_or_default();
+        let body_source = meta.body_text.trim();
+        let should_draw_body = !body_source.is_empty() && Some(body_source) != headline_trimmed;
+        if !head_lines.is_empty() {
+            remaining_body_lines = remaining_body_lines.saturating_sub(head_lines.len()).max(1);
+        }
+        let body_lines = if should_draw_body {
+            wrap_cjk_aware_ellipsis(body_source, 54, remaining_body_lines)
+        } else {
+            Vec::new()
         };
 
-        // Platform badge pill & circular author avatar (or neutral placeholder)
-        fill_rect(&mut img, 48, 44, 108, 34, pill_color);
-        fill_circle(&mut img, 76, 128, 28, Rgba([228, 228, 231, 255]));
+        let mut metrics = Vec::new();
+        if let Some(r) = meta.reply_count {
+            metrics.push(format!("{} 回复", format_metric_count(r)));
+        }
+        if let Some(rt) = meta.repost_count {
+            metrics.push(format!("{} 转发", format_metric_count(rt)));
+        }
+        if let Some(l) = meta.like_count {
+            metrics.push(format!("{} 赞", format_metric_count(l)));
+        }
+        if let Some(v) = meta.view_count {
+            metrics.push(format!("{} 浏览", format_metric_count(v)));
+        }
+        let open_action = match meta.platform {
+            SocialPlatform::X => "在 X 中查看",
+            SocialPlatform::Threads => "在 Threads 中查看",
+            SocialPlatform::Bluesky => "在 Bluesky 中查看",
+            SocialPlatform::Xiaohongshu => "在小红书中查看",
+        };
+        let footer_text = if metrics.is_empty() {
+            open_action.to_string()
+        } else {
+            metrics.join("   ")
+        };
+
+        let mut svg = String::with_capacity(4096);
+        svg.push_str(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{h}" viewBox="0 0 {W} {h}">
+  <rect x="0" y="0" width="{W}" height="{h}" fill="#FFFFFF"/>
+  <rect x="1" y="1" width="{}" height="{}" fill="none" stroke="#E5E7EB" stroke-width="2"/>
+"##,
+            W - 2,
+            h - 2
+        ));
+
+        // Circular avatar fallback (real avatar composited cleanly below when available)
+        if avatar.is_none() {
+            svg.push_str(&format!(
+                r##"  <circle cx="70" cy="70" r="26" fill="{monogram_bg}"/>
+  <text x="70" y="79" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="22" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+                escape_svg_xml(&initial)
+            ));
+        }
+
+        // Author name & @handle · date (leaving clean top-right clearance for floating gallery badge)
+        svg.push_str(&format!(
+            r##"  <text x="112" y="68" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="24" font-weight="700" fill="#111827">{}</text>
+  <text x="112" y="94" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="17" font-weight="400" fill="#6B7280">{}</text>
+"##,
+            escape_svg_xml(&author_short),
+            escape_svg_xml(&subtitle)
+        ));
+
+        for line in &head_lines {
+            svg.push_str(&format!(
+                r##"  <text x="44" y="{cursor_y}" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="27" font-weight="700" fill="#111827">{}</text>
+"##,
+                escape_svg_xml(line)
+            ));
+            cursor_y += 38;
+        }
+        if !head_lines.is_empty() {
+            cursor_y += 6;
+        }
+        for line in &body_lines {
+            svg.push_str(&format!(
+                r##"  <text x="44" y="{cursor_y}" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="24" font-weight="400" fill="#1F2937">{}</text>
+"##,
+                escape_svg_xml(line)
+            ));
+            cursor_y += 36;
+        }
+
+        // Footer engagement strip
+        let footer_line_y = h - 68;
+        let footer_text_y = h - 30;
+        svg.push_str(&format!(
+            r##"  <rect x="44" y="{footer_line_y}" width="712" height="1.5" fill="#F3F4F6"/>
+  <text x="44" y="{footer_text_y}" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="17" font-weight="400" fill="#6B7280">{}</text>
+</svg>"##,
+            escape_svg_xml(&footer_text)
+        ));
+
+        let max_side = W.max(h);
+        let mut img = Self::render_svg_with_fonts(svg.as_bytes(), max_side)
+            .map(|d| d.to_rgba8())
+            .unwrap_or_else(|| {
+                let mut fb = RgbaImage::from_pixel(W, h, Rgba([255, 255, 255, 255]));
+                draw_rect_outline(&mut fb, 0, 0, W, h, 2, Rgba([229, 231, 235, 255]));
+                fb
+            });
+
         if let Some(av) = avatar {
-            composite_circular_avatar(&mut img, av, 76, 128, 28);
-        }
-        fill_rect(&mut img, 122, 108, 240, 18, Rgba([24, 25, 28, 255]));
-        fill_rect(&mut img, 122, 136, 168, 12, Rgba([138, 143, 153, 255]));
-
-        // Body excerpt lines
-        let lines = (meta.body_text.chars().count() / 36).clamp(2, 5);
-        for i in 0..lines {
-            let y = 186 + (i as u32) * 32;
-            let lw = 680 - ((i as u32 * 53) % 160);
-            fill_rect(&mut img, 48, y, lw, 14, Rgba([63, 63, 70, 255]));
+            composite_circular_avatar(&mut img, av, 70, 70, 26);
         }
 
+        // Embedded cover media (rounded 18px aspect-fill) matching macOS MediaArtwork.swift
         if let Some(cover_img) = cover {
-            let box_x = 48u32;
-            let box_y = 380u32;
-            let box_w = w - 96;
-            let box_h = h - box_y - 48;
-            let fitted =
-                cover_img.resize_to_fill(box_w, box_h, image::imageops::FilterType::Triangle);
-            image::imageops::overlay(
-                &mut img,
-                &fitted.to_rgba8(),
-                i64::from(box_x),
-                i64::from(box_y),
-            );
-            if meta.has_video {
-                fill_circle(
-                    &mut img,
-                    box_x + box_w / 2,
-                    box_y + box_h / 2,
-                    42,
-                    Rgba([15, 17, 21, 210]),
-                );
-                // Simple play triangle highlight
-                fill_rect(
-                    &mut img,
-                    box_x + box_w / 2 - 10,
-                    box_y + box_h / 2 - 14,
-                    24,
-                    28,
-                    Rgba([255, 255, 255, 255]),
-                );
+            let media_top = cursor_y.saturating_add(4).clamp(152, h - 312);
+            let media_bottom = h - 92;
+            let box_x = 44u32;
+            let box_w = W - 88;
+            let box_h = media_bottom.saturating_sub(media_top).max(220);
+            composite_rounded_rect_image(&mut img, cover_img, box_x, media_top, box_w, box_h, 18);
+
+            let media_count = meta.effective_attachments().len();
+            if meta.has_video || media_count > 1 {
+                let mut badge_svg = String::with_capacity(1024);
+                badge_svg.push_str(&format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{h}" viewBox="0 0 {W} {h}">
+"##
+                ));
+                if meta.has_video {
+                    let cx = box_x + box_w / 2;
+                    let cy = media_top + box_h / 2;
+                    badge_svg.push_str(&format!(
+                        r##"  <circle cx="{cx}" cy="{cy}" r="36" fill="#000000" fill-opacity="0.62"/>
+  <polygon points="{},{} {},{} {},{}" fill="#FFFFFF"/>
+"##,
+                        cx - 10,
+                        cy - 16,
+                        cx - 10,
+                        cy + 16,
+                        cx + 18,
+                        cy
+                    ));
+                } else if media_count > 1 {
+                    let pill_x = box_x + box_w - 94;
+                    let pill_y = media_top + box_h - 48;
+                    let label = format!("{media_count} 图");
+                    badge_svg.push_str(&format!(
+                        r##"  <rect x="{pill_x}" y="{pill_y}" width="80" height="34" rx="17" ry="17" fill="#111827" fill-opacity="0.72"/>
+  <text x="{}" y="{}" text-anchor="middle" font-family="Microsoft YaHei UI, Segoe UI, sans-serif" font-size="16" font-weight="700" fill="#FFFFFF">{}</text>
+"##,
+                        pill_x + 40,
+                        pill_y + 23,
+                        escape_svg_xml(&label)
+                    ));
+                }
+                badge_svg.push_str("</svg>");
+                if let Some(overlay) = Self::render_svg_with_fonts(badge_svg.as_bytes(), max_side) {
+                    image::imageops::overlay(&mut img, &overlay.to_rgba8(), 0, 0);
+                }
             }
         }
 
@@ -996,6 +1143,78 @@ fn truncate_chars(raw: &str, max_chars: usize) -> String {
     }
 }
 
+fn composite_rounded_rect_image(
+    img: &mut RgbaImage,
+    src: &DynamicImage,
+    box_x: u32,
+    box_y: u32,
+    box_w: u32,
+    box_h: u32,
+    radius: u32,
+) {
+    if box_w == 0 || box_h == 0 {
+        return;
+    }
+    let (iw, ih) = img.dimensions();
+    let fitted = src
+        .resize_to_fill(box_w, box_h, image::imageops::FilterType::Triangle)
+        .to_rgba8();
+    let r = (radius.min(box_w / 2).min(box_h / 2)) as f32;
+    let w_f = box_w as f32;
+    let h_f = box_h as f32;
+
+    for dy in 0..box_h {
+        let py = box_y + dy;
+        if py >= ih {
+            break;
+        }
+        let fy = dy as f32 + 0.5;
+        for dx in 0..box_w {
+            let px = box_x + dx;
+            if px >= iw {
+                break;
+            }
+            let fx = dx as f32 + 0.5;
+            let cx = if fx < r {
+                r
+            } else if fx > w_f - r {
+                w_f - r
+            } else {
+                fx
+            };
+            let cy = if fy < r {
+                r
+            } else if fy > h_f - r {
+                h_f - r
+            } else {
+                fy
+            };
+            let dist = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+            let coverage = if r <= 0.0 || (cx == fx && cy == fy) || dist <= r - 0.75 {
+                1.0
+            } else if dist >= r + 0.75 {
+                0.0
+            } else {
+                ((r + 0.75 - dist) / 1.5).clamp(0.0, 1.0)
+            };
+            if coverage <= 0.0 {
+                continue;
+            }
+            let mut pixel = *fitted.get_pixel(dx, dy);
+            let on_border = dx == 0
+                || dy == 0
+                || dx + 1 == box_w
+                || dy + 1 == box_h
+                || (r > 0.0 && dist >= r - 1.25 && dist <= r + 0.25);
+            if on_border {
+                blend_pixel(&mut pixel, Rgba([0, 0, 0, 18]));
+            }
+            pixel.0[3] = ((pixel.0[3] as f32) * coverage).round() as u8;
+            blend_pixel(img.get_pixel_mut(px, py), pixel);
+        }
+    }
+}
+
 fn composite_circular_avatar(
     img: &mut RgbaImage,
     avatar: &DynamicImage,
@@ -1184,5 +1403,56 @@ mod tests {
         assert_eq!((text_only.width(), text_only.height()), (900, 1440));
         let fb_rgba = text_only.to_rgba8();
         assert_eq!(fb_rgba.get_pixel(450, 5).0, [255, 36, 66, 255]);
+    }
+
+    #[test]
+    fn renders_paper_white_x_post_cards_with_rounded_cover_and_text_only() {
+        use crate::models::core::{SocialMediaAttachment, SocialMediaAttachmentKind};
+
+        let meta = SocialPostMetadata {
+            platform: SocialPlatform::X,
+            author_name: "Studio Design".to_string(),
+            author_handle: "studio_design".to_string(),
+            author_avatar_url: None,
+            published_at_text: Some("2026-11-25 14:30".to_string()),
+            body_text: "Sharing our latest retro UI study with warm paper tones.".to_string(),
+            quoted_author: None,
+            quoted_text: None,
+            article_title: None,
+            media_urls: vec!["https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg".to_string()],
+            media_thumbnail_urls: vec!["https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg".to_string()],
+            attachments: vec![SocialMediaAttachment::new(
+                SocialMediaAttachmentKind::Photo,
+                "https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg",
+                Some("https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg".to_string()),
+            )],
+            has_video: false,
+            video_url: None,
+            reply_count: Some(12),
+            repost_count: Some(45),
+            like_count: Some(1_250),
+            view_count: Some(48_900),
+            original_url: "https://x.com/studio_design/status/2032956200000000001".to_string(),
+            media_fetch_failed: false,
+        };
+
+        let cover =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(1200, 800, Rgba([220, 80, 60, 255])));
+        let avatar =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(64, 64, Rgba([30, 144, 255, 255])));
+
+        let with_cover =
+            MediaArtwork::social_post_card_with_avatar(&meta, Some(&cover), Some(&avatar));
+        assert_eq!((with_cover.width(), with_cover.height()), (800, 920));
+        let rgba = with_cover.to_rgba8();
+        // Top-right corner stays crisp paper-white for floating gallery badge
+        assert_eq!(rgba.get_pixel(760, 40).0, [255, 255, 255, 255]);
+        // Center of avatar circle shows real avatar color
+        assert_eq!(rgba.get_pixel(70, 70).0, [30, 144, 255, 255]);
+        // Center of embedded media box shows real cover photo color
+        assert_eq!(rgba.get_pixel(400, 600).0, [220, 80, 60, 255]);
+
+        let text_only = MediaArtwork::social_post_card_with_avatar(&meta, None, None);
+        assert_eq!((text_only.width(), text_only.height()), (800, 620));
     }
 }

@@ -81,10 +81,14 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
   const [retrying, setRetrying] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [failedMediaKeys, setFailedMediaKeys] = useState<Record<string, boolean>>({});
+  const [fallbackThumbKeys, setFallbackThumbKeys] = useState<Record<string, boolean>>({});
+  const [localVideoFailedKeys, setLocalVideoFailedKeys] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setAvatarFailed(false);
     setFailedMediaKeys({});
+    setFallbackThumbKeys({});
+    setLocalVideoFailedKeys({});
     setRetrying(false);
     setExtractingKey(null);
   }, [asset.id]);
@@ -157,6 +161,24 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
     }
   };
 
+  const handleRefreshPost = async () => {
+    setRetrying(true);
+    try {
+      await refreshRichAsset(asset.id);
+      setAvatarFailed(false);
+      setFailedMediaKeys({});
+      setFallbackThumbKeys({});
+      setLocalVideoFailedKeys({});
+    } catch (err) {
+      pushToast({
+        message: `重新获取失败：${err instanceof Error ? err.message : String(err)}`,
+        tone: 'error',
+      });
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   return (
     <div
       data-testid="quicklook-social-viewer"
@@ -170,6 +192,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
             <img
               src={avatarSrc}
               alt={post.authorName}
+              referrerPolicy="no-referrer"
               onError={() => setAvatarFailed(true)}
               className="h-10 w-10 rounded-full object-cover bg-[var(--bg-subtle)] shrink-0"
             />
@@ -279,27 +302,53 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                 const mediaFailed = Boolean(failedMediaKeys[key]);
 
                 if (isVideoLike) {
+                  const canUseCachedLocalVideo =
+                    idx === 0 &&
+                    asset.isLocalOriginalCached &&
+                    /\.(mp4|mov|webm|m4v)$/i.test(asset.fileName) &&
+                    !localVideoFailedKeys[key];
+                  const videoSrc = canUseCachedLocalVideo
+                    ? getTransport().originalUrl(asset.id)
+                    : resolvedMediaUrl;
+
                   return (
                     <div key={key} className="flex flex-col gap-1.5">
                       {mediaFailed ? (
                         <div className="w-full h-[200px] rounded-[var(--win-radius-card)] bg-[var(--bg-subtle)] border border-[var(--win-stroke-card)] flex flex-col items-center justify-center gap-2 text-[12px] text-[var(--text-secondary)]">
                           <VideoClip24Regular className="w-6 h-6 text-[var(--text-tertiary)]" />
                           <span>视频暂时无法在线加载</span>
-                          <button
-                            type="button"
-                            onClick={openOriginalPost}
-                            className="text-[var(--accent)] font-medium hover:underline cursor-pointer"
-                          >
-                            {platform.openLabel}
-                          </button>
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              disabled={retrying}
+                              onClick={() => void handleRefreshPost()}
+                              className="inline-flex items-center gap-1 text-[var(--accent)] font-medium hover:underline disabled:opacity-50 cursor-pointer"
+                            >
+                              <ArrowSync16Regular
+                                className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`}
+                              />
+                              <span>重试获取</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={openOriginalPost}
+                              className="text-[var(--accent)] font-medium hover:underline cursor-pointer"
+                            >
+                              {platform.openLabel}
+                            </button>
+                          </div>
                         </div>
                       ) : (
                         <SocialAttachmentVideo
-                          src={resolvedMediaUrl}
+                          src={videoSrc}
                           poster={resolvedThumbUrl}
-                          onError={() =>
-                            setFailedMediaKeys((prev) => ({ ...prev, [key]: true }))
-                          }
+                          onError={() => {
+                            if (canUseCachedLocalVideo && resolvedMediaUrl) {
+                              setLocalVideoFailedKeys((prev) => ({ ...prev, [key]: true }));
+                            } else {
+                              setFailedMediaKeys((prev) => ({ ...prev, [key]: true }));
+                            }
+                          }}
                         />
                       )}
                       <div className="flex items-center justify-between">
@@ -321,8 +370,15 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                   );
                 }
 
-                // Prefer high-res original photo URL (falling back to thumbnailURL)
-                const photoSrc = resolvedMediaUrl || resolvedThumbUrl;
+                // Prefer high-res original photo URL, automatically falling back to thumbnailURL on error
+                const useThumbFallback = Boolean(fallbackThumbKeys[key]);
+                const hasDistinctThumb = Boolean(
+                  resolvedThumbUrl && resolvedThumbUrl !== resolvedMediaUrl,
+                );
+                const photoSrc =
+                  useThumbFallback && hasDistinctThumb
+                    ? resolvedThumbUrl
+                    : resolvedMediaUrl || resolvedThumbUrl;
 
                 return (
                   <div
@@ -333,17 +389,33 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
                     ].join(' ')}
                   >
                     {mediaFailed || !photoSrc ? (
-                      <div className="w-full min-h-[180px] h-full flex flex-col items-center justify-center gap-1.5 p-4 text-center text-[11.5px] text-[var(--text-secondary)]">
+                      <div className="w-full min-h-[180px] h-full flex flex-col items-center justify-center gap-2 p-4 text-center text-[11.5px] text-[var(--text-secondary)]">
                         <ImageOff20Regular className="w-5 h-5 text-[var(--text-tertiary)]" />
                         <span>原图链接已失效或受防盗链限制</span>
+                        <button
+                          type="button"
+                          disabled={retrying}
+                          onClick={() => void handleRefreshPost()}
+                          className="inline-flex items-center gap-1 text-[var(--accent)] font-medium hover:underline disabled:opacity-50 cursor-pointer"
+                        >
+                          <ArrowSync16Regular
+                            className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`}
+                          />
+                          <span>重试获取</span>
+                        </button>
                       </div>
                     ) : (
                       <img
                         src={photoSrc}
                         alt=""
-                        onError={() =>
-                          setFailedMediaKeys((prev) => ({ ...prev, [key]: true }))
-                        }
+                        referrerPolicy="no-referrer"
+                        onError={() => {
+                          if (!useThumbFallback && hasDistinctThumb) {
+                            setFallbackThumbKeys((prev) => ({ ...prev, [key]: true }));
+                          } else {
+                            setFailedMediaKeys((prev) => ({ ...prev, [key]: true }));
+                          }
+                        }}
                         className={
                           isXiaohongshuMultiGrid
                             ? 'w-full h-full object-cover'
@@ -391,20 +463,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
             <button
               type="button"
               disabled={retrying}
-              onClick={async () => {
-                setRetrying(true);
-                try {
-                  await refreshRichAsset(asset.id);
-                  setFailedMediaKeys({});
-                } catch (err) {
-                  pushToast({
-                    message: `重新获取失败：${err instanceof Error ? err.message : String(err)}`,
-                    tone: 'error',
-                  });
-                } finally {
-                  setRetrying(false);
-                }
-              }}
+              onClick={() => void handleRefreshPost()}
               className="charkle-pressable inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[var(--win-radius-control)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-[var(--accent-text)] text-[12px] font-medium disabled:opacity-50 cursor-pointer"
             >
               <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
@@ -415,7 +474,7 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
 
         <div className="h-px bg-[var(--win-stroke-divider)]" />
 
-        {/* Engagement Counts + Open Original */}
+        {/* Engagement Counts + Refresh + Open Original */}
         <div className="flex items-center gap-4 flex-wrap text-[12.5px] charkle-tabular">
           {post.replyCount != null && (
             <span className="inline-flex items-baseline gap-1">
@@ -451,6 +510,17 @@ export const SocialPostViewer: React.FC<SocialPostViewerProps> = ({ asset }) => 
           )}
 
           <span className="flex-1" />
+
+          <button
+            type="button"
+            disabled={retrying}
+            title={`重新解析${platform.noun}正文与图片`}
+            onClick={() => void handleRefreshPost()}
+            className="inline-flex items-center gap-1 text-[12px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+          >
+            <ArrowSync16Regular className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
+            <span>{retrying ? '解析中…' : '刷新解析'}</span>
+          </button>
 
           <button
             type="button"

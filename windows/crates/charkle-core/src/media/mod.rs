@@ -19,7 +19,8 @@ pub use pipeline::{
     MAX_CACHE_BUDGET_BYTES, MIN_CACHE_BUDGET_BYTES,
 };
 pub use resolvers::{
-    canonical_dedup_key, GitHubRepoReference, GitHubRepoResolver, GitHubRepoURLParser,
+    canonical_dedup_key, fetch_or_cache_social_media, social_proxy_cache_key,
+    validate_social_proxy_url, GitHubRepoReference, GitHubRepoResolver, GitHubRepoURLParser,
     ParsedWebHtml, ResolvedSocialPost, ResolvedWebBookmark, SocialPostReference,
     SocialPostResolver, SocialPostURLParser, WebBookmarkResolver, WebURLParser, XPostReference,
     XPostURLParser,

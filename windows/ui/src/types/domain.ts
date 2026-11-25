@@ -144,8 +144,9 @@ export function formatSocialDisplayHandle(
 }
 
 /**
- * Routes Xiaohongshu CDN media/avatar URLs through the local Tauri media proxy
- * so Rust injects `Referer: https://www.xiaohongshu.com/` and prevents HTTP 403.
+ * Routes Xiaohongshu CDN URLs through `/proxy-xhs` (Referer injection) and X/Twitter, Bluesky,
+ * and Threads CDN URLs through `/proxy-social` (Rust retry + Twitter size fallback + on-disk cache)
+ * so WebView2 renders social post images & avatars reliably even after TLS glitches or offline.
  */
 export function resolveSocialMediaUrl(
   rawUrl: string | null | undefined,
@@ -155,7 +156,9 @@ export function resolveSocialMediaUrl(
   if (!trimmed) return undefined;
   if (!isTauri) return trimmed;
   try {
-    const host = new URL(trimmed).hostname.toLowerCase();
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:') return trimmed;
+    const host = parsed.hostname.toLowerCase();
     if (
       host === 'xhscdn.com' ||
       host.endsWith('.xhscdn.com') ||
@@ -163,6 +166,20 @@ export function resolveSocialMediaUrl(
       host.endsWith('.xiaohongshu.com')
     ) {
       return `http://charkle-media.localhost/proxy-xhs?url=${encodeURIComponent(trimmed)}`;
+    }
+    if (
+      host === 'twimg.com' ||
+      host.endsWith('.twimg.com') ||
+      host === 'bsky.app' ||
+      host.endsWith('.bsky.app') ||
+      host === 'bsky.social' ||
+      host.endsWith('.bsky.social') ||
+      host === 'cdninstagram.com' ||
+      host.endsWith('.cdninstagram.com') ||
+      host === 'fbcdn.net' ||
+      host.endsWith('.fbcdn.net')
+    ) {
+      return `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(trimmed)}`;
     }
   } catch {
     // Preserve raw URL if not parseable as absolute URL

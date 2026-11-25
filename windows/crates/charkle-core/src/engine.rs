@@ -1502,7 +1502,7 @@ impl LiveCharkleEngine {
 
         if let Some(social_ref) = SocialPostURLParser::parse(&url) {
             if let Some(resolved) = SocialPostResolver::resolve(&social_ref).await {
-                let merged_meta = match current
+                let mut merged_meta = match current
                     .rich_metadata
                     .as_ref()
                     .and_then(|r| r.social_post.clone())
@@ -1549,6 +1549,8 @@ impl LiveCharkleEngine {
                         }
                     }
                 }
+                merged_meta.media_fetch_failed =
+                    !merged_meta.effective_attachments().is_empty() && cover.is_none();
                 let avatar = match merged_meta.author_avatar_url.as_deref() {
                     Some(av_url) if !av_url.trim().is_empty() => {
                         SocialPostResolver::fetch_avatar_image(av_url).await

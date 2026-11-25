@@ -15,11 +15,14 @@ use image::DynamicImage;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde::Deserialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::media::artwork::MediaArtwork;
 use crate::media::xiaohongshu::{
-    XiaohongshuNoteReference, XiaohongshuPostResolver, XiaohongshuURLParser, XIAOHONGSHU_REFERER,
+    XhsProxyError, XhsProxyResponse, XiaohongshuNoteReference, XiaohongshuPostResolver,
+    XiaohongshuURLParser, MAX_XHS_PROXY_BYTES, XIAOHONGSHU_REFERER,
 };
 use crate::models::core::{
     GitHubRepoMetadata, SocialMediaAttachment, SocialMediaAttachmentKind, SocialPlatform,
@@ -1509,28 +1512,127 @@ impl XPostURLParser {
         })
     }
 
-    /// Rewrites `pbs.twimg.com` photo URLs with query parameter `name=orig`.
-    pub fn upgrade_twitter_image_url(raw: &str) -> String {
-        let Ok(mut url) = Url::parse(raw) else {
-            return raw.to_string();
+    /// Returns `true` when the host belongs to X/Twitter's media CDN (`*.twimg.com`).
+    pub fn is_x_media_host(host: Option<&str>) -> bool {
+        let Some(raw) = host else {
+            return false;
         };
-        if !url
-            .host_str()
-            .is_some_and(|h| h.to_ascii_lowercase().contains("twimg.com"))
-        {
-            return raw.to_string();
+        let h = raw.trim().to_ascii_lowercase();
+        h == "twimg.com" || h.ends_with(".twimg.com")
+    }
+
+    /// Strict HTTPS CDN host allowlist for the local `/proxy-social` image cache proxy.
+    pub fn is_allowed_social_proxy_host(host: Option<&str>) -> bool {
+        if XiaohongshuURLParser::is_xiaohongshu_media_host(host) || Self::is_x_media_host(host) {
+            return true;
+        }
+        let Some(raw) = host else {
+            return false;
+        };
+        let h = raw.trim().to_ascii_lowercase();
+        if h.is_empty() {
+            return false;
+        }
+        h == "bsky.app"
+            || h.ends_with(".bsky.app")
+            || h == "bsky.social"
+            || h.ends_with(".bsky.social")
+            || h == "cdninstagram.com"
+            || h.ends_with(".cdninstagram.com")
+            || h == "fbcdn.net"
+            || h.ends_with(".fbcdn.net")
+    }
+
+    /// Rewrites `pbs.twimg.com/media/...` photo URLs with query parameter `name=orig`.
+    /// Leaves non-`/media/` Twitter CDN paths (`card_img`, `ext_tw_video_thumb`, `profile_images`)
+    /// untouched because those endpoints often return HTTP 404 for `name=orig`.
+    pub fn upgrade_twitter_image_url(raw: &str) -> String {
+        Self::with_twitter_image_name(raw, "orig").unwrap_or_else(|| raw.to_string())
+    }
+
+    /// Builds an ordered, deduplicated download candidate chain for social photo URLs so a
+    /// failing `name=orig` request cleanly falls back to the raw URL and `name=large`/`medium`.
+    pub fn twitter_image_download_candidates(raw: &str) -> Vec<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut push_unique = |cand: String| {
+            if !cand.is_empty() && !out.contains(&cand) {
+                out.push(cand);
+            }
+        };
+        if let Some(orig) = Self::with_twitter_image_name(trimmed, "orig") {
+            push_unique(orig);
+        }
+        push_unique(trimmed.to_string());
+        if let Some(large) = Self::with_twitter_image_name(trimmed, "large") {
+            push_unique(large);
+        }
+        if let Some(medium) = Self::with_twitter_image_name(trimmed, "medium") {
+            push_unique(medium);
+        }
+        out
+    }
+
+    fn with_twitter_image_name(raw: &str, size_name: &str) -> Option<String> {
+        let mut url = Url::parse(raw).ok()?;
+        let host = url.host_str()?.to_ascii_lowercase();
+        if host != "pbs.twimg.com" || !url.path().starts_with("/media/") {
+            return None;
         }
         let mut pairs: Vec<(String, String)> = url
             .query_pairs()
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
         if let Some((_, val)) = pairs.iter_mut().find(|(k, _)| k == "name") {
-            *val = "orig".to_string();
+            *val = size_name.to_string();
         } else {
-            pairs.push(("name".to_string(), "orig".to_string()));
+            pairs.push(("name".to_string(), size_name.to_string()));
         }
         url.query_pairs_mut().clear().extend_pairs(pairs);
-        url.to_string()
+        Some(url.to_string())
+    }
+
+    /// Computes Twitter's public embed syndication token (`((id / 1e15) * PI).toString(36)` stripped
+    /// of `'0'` and `'.'`) used by `cdn.syndication.twimg.com/tweet-result`.
+    pub fn syndication_token(tweet_id: &str) -> Option<String> {
+        let id: u64 = tweet_id.trim().parse().ok()?;
+        let val = (id as f64 / 1e15_f64) * std::f64::consts::PI;
+        if !val.is_finite() || val <= 0.0 {
+            return None;
+        }
+        const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut int_part = val.trunc() as u64;
+        let mut frac = val.fract();
+
+        let mut int_chars = Vec::new();
+        while int_part > 0 {
+            int_chars.push(DIGITS[(int_part % 36) as usize] as char);
+            int_part /= 36;
+        }
+        int_chars.reverse();
+
+        let mut raw_b36 = String::with_capacity(24);
+        for ch in int_chars {
+            raw_b36.push(ch);
+        }
+        for _ in 0..10 {
+            frac *= 36.0;
+            let digit = (frac.trunc() as usize).min(35);
+            raw_b36.push(DIGITS[digit] as char);
+            frac = frac.fract();
+            if frac <= 1e-12 {
+                break;
+            }
+        }
+        let stripped: String = raw_b36.chars().filter(|&c| c != '0' && c != '.').collect();
+        if stripped.is_empty() {
+            Some("1".to_string())
+        } else {
+            Some(stripped)
+        }
     }
 }
 
@@ -1923,43 +2025,64 @@ impl SocialPostResolver {
         } else {
             MAX_SOCIAL_VIDEO_BYTES
         };
-        let candidate = if kind == SocialMediaAttachmentKind::Photo {
-            XPostURLParser::upgrade_twitter_image_url(url_str)
+        let candidates = if kind == SocialMediaAttachmentKind::Photo {
+            XPostURLParser::twitter_image_download_candidates(url_str)
         } else {
-            url_str.to_string()
+            vec![url_str.trim().to_string()]
         };
-        let url = Url::parse(&candidate).ok()?;
-        if !WebBookmarkResolver::is_web_url(&url) {
-            return None;
+
+        let client = browser_http_client(30);
+        for candidate in candidates {
+            let Ok(url) = Url::parse(&candidate) else {
+                continue;
+            };
+            if !WebBookmarkResolver::is_web_url(&url) {
+                continue;
+            }
+            let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
+            for attempt in 0..2 {
+                let mut req = client.get(url.clone()).header(
+                    "Accept",
+                    "image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*;q=0.8",
+                );
+                if is_xhs {
+                    req = req.header("Referer", XIAOHONGSHU_REFERER);
+                }
+                match req.send().await {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            break;
+                        }
+                        let mime = resp
+                            .headers()
+                            .get(reqwest::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(String::from);
+                        match resp.bytes().await {
+                            Ok(bytes) => {
+                                if !bytes.is_empty()
+                                    && bytes.len() <= max_bytes
+                                    && is_acceptable_media_response(mime.as_deref(), &bytes, kind)
+                                {
+                                    let ext = resolve_media_extension(&url, mime.as_deref(), kind);
+                                    return Some((bytes.to_vec(), ext));
+                                }
+                                break;
+                            }
+                            Err(_) if attempt == 0 => {
+                                tokio::time::sleep(Duration::from_millis(180)).await;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Err(_) if attempt == 0 => {
+                        tokio::time::sleep(Duration::from_millis(180)).await;
+                    }
+                    Err(_) => break,
+                }
+            }
         }
-        let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
-        let client = if is_xhs {
-            browser_http_client(30)
-        } else {
-            http_client(30)
-        };
-        let mut req = client.get(url.clone());
-        if is_xhs {
-            req = req.header("Referer", XIAOHONGSHU_REFERER).header(
-                "Accept",
-                "image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*;q=0.8",
-            );
-        }
-        let resp = req.send().await.ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let mime = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        let bytes = resp.bytes().await.ok()?;
-        if bytes.is_empty() || bytes.len() > max_bytes {
-            return None;
-        }
-        let ext = resolve_media_extension(&url, mime.as_deref(), kind);
-        Some((bytes.to_vec(), ext))
+        None
     }
 
     /// Upgrades low-resolution Twitter `_normal` profile avatars to `_400x400` matching macOS.
@@ -1974,43 +2097,114 @@ impl SocialPostResolver {
 
     /// Fetches and decodes a social post author's avatar image (`<= 4 MiB`, best-effort).
     pub async fn fetch_avatar_image(url_str: &str) -> Option<DynamicImage> {
-        let upgraded = Self::upgrade_avatar_url(url_str.trim());
-        let url = Url::parse(&upgraded).ok()?;
-        if !WebBookmarkResolver::is_web_url(&url) {
+        let trimmed = url_str.trim();
+        if trimmed.is_empty() {
             return None;
         }
-        let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
-        let client = if is_xhs {
-            browser_http_client(10)
-        } else {
-            http_client(10)
-        };
-        let mut req = client
-            .get(url)
-            .header("Accept", "image/webp,image/png,image/jpeg,image/*");
-        if is_xhs {
-            req = req.header("Referer", XIAOHONGSHU_REFERER);
+        let upgraded = Self::upgrade_avatar_url(trimmed);
+        let mut candidates = vec![upgraded];
+        if !candidates.iter().any(|c| c == trimmed) {
+            candidates.push(trimmed.to_string());
         }
-        let resp = req.send().await.ok()?;
-        if !resp.status().is_success() {
-            return None;
+        let client = browser_http_client(10);
+        for cand in candidates {
+            let Ok(url) = Url::parse(&cand) else {
+                continue;
+            };
+            if !WebBookmarkResolver::is_web_url(&url) {
+                continue;
+            }
+            let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
+            for attempt in 0..2 {
+                let mut req = client
+                    .get(url.clone())
+                    .header("Accept", "image/webp,image/png,image/jpeg,image/*");
+                if is_xhs {
+                    req = req.header("Referer", XIAOHONGSHU_REFERER);
+                }
+                match req.send().await {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            break;
+                        }
+                        if let Ok(bytes) = resp.bytes().await {
+                            if !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024 {
+                                if let Ok(img) = image::load_from_memory(&bytes) {
+                                    return Some(img);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Err(_) if attempt == 0 => {
+                        tokio::time::sleep(Duration::from_millis(160)).await;
+                    }
+                    Err(_) => break,
+                }
+            }
         }
-        let bytes = resp.bytes().await.ok()?;
-        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
-            return None;
-        }
-        image::load_from_memory(&bytes).ok()
+        None
     }
 
     async fn resolve_x(x_ref: &XPostReference) -> Option<ResolvedSocialPost> {
-        let client = http_client(10);
-        if let Some(post) = Self::fetch_fxtwitter(&client, x_ref).await {
+        let api_client = http_client(10);
+        let web_client = browser_http_client(10);
+
+        let mut primary: Option<ResolvedSocialPost> = None;
+        let mut used_vx = false;
+        let mut used_syndication = false;
+
+        if let Some(post) = Self::fetch_fxtwitter(&api_client, x_ref).await {
+            primary = Some(post);
+        }
+        if primary.is_none() {
+            used_vx = true;
+            if let Some(post) = Self::fetch_vxtwitter(&api_client, x_ref).await {
+                primary = Some(post);
+            }
+        }
+        if primary.is_none() {
+            used_syndication = true;
+            if let Some(post) = Self::fetch_x_syndication(&web_client, x_ref).await {
+                primary = Some(post);
+            }
+        }
+
+        // If the first provider returned metadata with zero attachments, check the remaining
+        // structured endpoints so tweets with photos/videos/quotes never lose media when one
+        // mirror omits an attachment.
+        if let Some(mut post) = primary {
+            if post.metadata.effective_attachments().is_empty() {
+                let mut supplement: Option<ResolvedSocialPost> = None;
+                if !used_syndication {
+                    supplement = Self::fetch_x_syndication(&web_client, x_ref).await;
+                }
+                if supplement
+                    .as_ref()
+                    .is_none_or(|s| s.metadata.effective_attachments().is_empty())
+                    && !used_vx
+                {
+                    if let Some(vx) = Self::fetch_vxtwitter(&api_client, x_ref).await {
+                        if !vx.metadata.effective_attachments().is_empty() {
+                            supplement = Some(vx);
+                        }
+                    }
+                }
+                if let Some(sup) = supplement {
+                    if !sup.metadata.effective_attachments().is_empty() {
+                        post.metadata = Self::merge_metadata(sup.metadata, post.metadata);
+                        let (dl_url, kind, thumb_url) =
+                            primary_media_from_attachments(&post.metadata.effective_attachments());
+                        post.primary_media_download_url = dl_url;
+                        post.primary_media_kind = kind;
+                        post.primary_thumbnail_url = thumb_url;
+                    }
+                }
+            }
             return Some(post);
         }
-        if let Some(post) = Self::fetch_vxtwitter(&client, x_ref).await {
-            return Some(post);
-        }
-        if let Some(post) = Self::fetch_x_oembed(&client, x_ref).await {
+
+        if let Some(post) = Self::fetch_x_oembed(&api_client, x_ref).await {
             return Some(post);
         }
         let canonical = x_ref.canonical_url();
@@ -2096,16 +2290,31 @@ impl SocialPostResolver {
             "https://api.fxtwitter.com/{}/status/{}",
             x_ref.handle, x_ref.tweet_id
         );
-        let resp = client
-            .get(api_url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
+        for attempt in 0..2 {
+            match client
+                .get(&api_url)
+                .header("Accept", "application/json")
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        return None;
+                    }
+                    let text = resp.text().await.ok()?;
+                    return Self::parse_fxtwitter_json(&text, x_ref);
+                }
+                Err(_) if attempt == 0 => {
+                    tokio::time::sleep(Duration::from_millis(160)).await;
+                }
+                Err(_) => return None,
+            }
         }
-        let payload: FxResponse = resp.json().await.ok()?;
+        None
+    }
+
+    pub fn parse_fxtwitter_json(raw: &str, x_ref: &XPostReference) -> Option<ResolvedSocialPost> {
+        let payload: FxResponse = serde_json::from_str(raw).ok()?;
         let tweet = payload.tweet?;
 
         let handle = tweet
@@ -2160,6 +2369,34 @@ impl SocialPostResolver {
             }
         }
         if attachments.is_empty() {
+            if let Some(entities) = tweet
+                .article
+                .as_ref()
+                .and_then(|a| a.media_entities.as_ref())
+            {
+                let mut seen = HashSet::new();
+                for ent in entities {
+                    if let Some(img_url) = ent
+                        .media_info
+                        .as_ref()
+                        .and_then(|m| m.original_img_url.as_deref())
+                    {
+                        if Url::parse(img_url)
+                            .ok()
+                            .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                            && seen.insert(img_url.to_string())
+                        {
+                            attachments.push(SocialMediaAttachment::new(
+                                SocialMediaAttachmentKind::Photo,
+                                img_url.to_string(),
+                                Some(img_url.to_string()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if attachments.is_empty() {
             attachments =
                 extract_fx_attachments(tweet.quote.as_ref().and_then(|q| q.media.as_ref()));
         }
@@ -2195,7 +2432,8 @@ impl SocialPostResolver {
                 )
             })
             .cloned();
-        let primary = video_item.clone().or_else(|| attachments.first().cloned());
+        let (primary_dl, primary_kind, primary_thumb) =
+            primary_media_from_attachments(&attachments);
         let media_urls: Vec<String> = attachments.iter().map(|a| a.url.clone()).collect();
         let thumb_urls: Vec<String> = attachments
             .iter()
@@ -2232,13 +2470,9 @@ impl SocialPostResolver {
 
         Some(ResolvedSocialPost {
             metadata,
-            primary_media_download_url: primary.as_ref().map(|p| p.url.clone()),
-            primary_media_kind: primary.as_ref().map(|p| p.kind),
-            primary_thumbnail_url: primary.as_ref().and_then(|p| {
-                p.thumbnail_url
-                    .clone()
-                    .or_else(|| (p.kind == SocialMediaAttachmentKind::Photo).then(|| p.url.clone()))
-            }),
+            primary_media_download_url: primary_dl,
+            primary_media_kind: primary_kind,
+            primary_thumbnail_url: primary_thumb,
             extracted_tags: Vec::new(),
         })
     }
@@ -2251,66 +2485,77 @@ impl SocialPostResolver {
             "https://api.vxtwitter.com/{}/status/{}",
             x_ref.handle, x_ref.tweet_id
         );
-        let resp = client
-            .get(api_url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
+        for attempt in 0..2 {
+            match client
+                .get(&api_url)
+                .header("Accept", "application/json")
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        return None;
+                    }
+                    let text = resp.text().await.ok()?;
+                    return Self::parse_vxtwitter_json(&text, x_ref);
+                }
+                Err(_) if attempt == 0 => {
+                    tokio::time::sleep(Duration::from_millis(160)).await;
+                }
+                Err(_) => return None,
+            }
         }
-        let decoded: VxResponse = resp.json().await.ok()?;
+        None
+    }
+
+    pub fn parse_vxtwitter_json(raw: &str, x_ref: &XPostReference) -> Option<ResolvedSocialPost> {
+        let decoded: VxResponse = serde_json::from_str(raw).ok()?;
         let handle = decoded
             .user_screen_name
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| x_ref.handle.clone());
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&x_ref.handle)
+            .to_string();
         let author_name = decoded
             .user_name
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| handle.clone());
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&handle)
+            .to_string();
 
-        let mut attachments = Vec::new();
-        let mut seen = HashSet::new();
-        for item in decoded.media_extended.unwrap_or_default() {
-            let Some(url_str) = item.url else { continue };
-            if !Url::parse(&url_str)
-                .ok()
-                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
-                || !seen.insert(url_str.clone())
-            {
-                continue;
-            }
-            let kind = match item
-                .media_type
-                .as_deref()
-                .map(str::to_ascii_lowercase)
-                .as_deref()
-            {
-                Some("video") => SocialMediaAttachmentKind::Video,
-                Some("gif" | "animated_gif") => SocialMediaAttachmentKind::Gif,
-                _ => SocialMediaAttachmentKind::Photo,
-            };
-            attachments.push(SocialMediaAttachment::new(
-                kind,
-                url_str,
-                item.thumbnail_url,
-            ));
-        }
+        let mut attachments = extract_vx_attachments(&decoded);
         if attachments.is_empty() {
-            for url_str in decoded.media_urls.unwrap_or_default() {
-                if !seen.insert(url_str.clone()) {
-                    continue;
-                }
-                let lower = url_str.to_ascii_lowercase();
-                let kind = if lower.ends_with(".mp4") || lower.ends_with(".mov") {
-                    SocialMediaAttachmentKind::Video
-                } else {
-                    SocialMediaAttachmentKind::Photo
-                };
-                attachments.push(SocialMediaAttachment::new(kind, url_str, None));
+            if let Some(ref qrt) = decoded.qrt {
+                attachments = extract_vx_attachments(qrt);
             }
         }
+
+        let quoted_author = decoded.qrt.as_ref().and_then(|q| {
+            match (
+                q.user_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+                q.user_screen_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+            ) {
+                (Some(n), Some(h)) => Some(format!("{n} (@{h})")),
+                (None, Some(h)) => Some(format!("@{h}")),
+                (Some(n), None) => Some(n.to_string()),
+                (None, None) => None,
+            }
+        });
+        let quoted_text = decoded
+            .qrt
+            .as_ref()
+            .and_then(|q| q.text.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
 
         let video_item = attachments
             .iter()
@@ -2321,11 +2566,16 @@ impl SocialPostResolver {
                 )
             })
             .cloned();
-        let primary = video_item.clone().or_else(|| attachments.first().cloned());
+        let (primary_dl, primary_kind, primary_thumb) =
+            primary_media_from_attachments(&attachments);
         let media_urls: Vec<String> = attachments.iter().map(|a| a.url.clone()).collect();
         let thumb_urls: Vec<String> = attachments
             .iter()
-            .filter_map(|a| a.thumbnail_url.clone())
+            .filter_map(|a| {
+                a.thumbnail_url
+                    .clone()
+                    .or_else(|| (a.kind == SocialMediaAttachmentKind::Photo).then(|| a.url.clone()))
+            })
             .collect();
 
         let metadata = SocialPostMetadata {
@@ -2335,9 +2585,9 @@ impl SocialPostResolver {
             author_avatar_url: decoded.user_profile_image_url,
             published_at_text: decoded.date,
             body_text: decoded.text.unwrap_or_default(),
-            quoted_author: None,
-            quoted_text: None,
-            article_title: None,
+            quoted_author,
+            quoted_text,
+            article_title: decoded.article.and_then(|a| a.title),
             media_urls,
             media_thumbnail_urls: thumb_urls,
             attachments,
@@ -2353,9 +2603,185 @@ impl SocialPostResolver {
 
         Some(ResolvedSocialPost {
             metadata,
-            primary_media_download_url: primary.as_ref().map(|p| p.url.clone()),
-            primary_media_kind: primary.as_ref().map(|p| p.kind),
-            primary_thumbnail_url: primary.as_ref().and_then(|p| p.thumbnail_url.clone()),
+            primary_media_download_url: primary_dl,
+            primary_media_kind: primary_kind,
+            primary_thumbnail_url: primary_thumb,
+            extracted_tags: Vec::new(),
+        })
+    }
+
+    async fn fetch_x_syndication(
+        client: &Client,
+        x_ref: &XPostReference,
+    ) -> Option<ResolvedSocialPost> {
+        let token = XPostURLParser::syndication_token(&x_ref.tweet_id)?;
+        let mut endpoint = Url::parse("https://cdn.syndication.twimg.com/tweet-result").ok()?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("id", &x_ref.tweet_id)
+            .append_pair("lang", "en")
+            .append_pair("token", &token);
+        for attempt in 0..2 {
+            match client
+                .get(endpoint.clone())
+                .header("Accept", "application/json")
+                .header("Origin", "https://platform.twitter.com")
+                .header("Referer", "https://platform.twitter.com/")
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        return None;
+                    }
+                    let text = resp.text().await.ok()?;
+                    return Self::parse_x_syndication_json(&text, x_ref);
+                }
+                Err(_) if attempt == 0 => {
+                    tokio::time::sleep(Duration::from_millis(160)).await;
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Pure offline parser for Twitter's public embed Syndication API (`cdn.syndication.twimg.com/tweet-result`).
+    pub fn parse_x_syndication_json(
+        raw: &str,
+        x_ref: &XPostReference,
+    ) -> Option<ResolvedSocialPost> {
+        let root: Value = serde_json::from_str(raw).ok()?;
+        let obj = root.as_object()?;
+        // Tombstones or empty error responses lack both `text` and `user`.
+        if obj.get("text").is_none() && obj.get("user").is_none() {
+            return None;
+        }
+        let user = obj.get("user");
+        let handle = user
+            .and_then(|u| u.get("screen_name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&x_ref.handle)
+            .to_string();
+        let author_name = user
+            .and_then(|u| u.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&handle)
+            .to_string();
+        let avatar_url = user
+            .and_then(|u| u.get("profile_image_url_https"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(Self::upgrade_avatar_url);
+
+        let body_text = obj
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        let published_at_text = obj
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        let mut attachments = extract_syndication_attachments(&root);
+        let quoted = obj.get("quoted_tweet");
+        if attachments.is_empty() {
+            if let Some(q) = quoted {
+                attachments = extract_syndication_attachments(q);
+            }
+        }
+        if attachments.is_empty() {
+            if let Some(card_img) = extract_syndication_card_image(&root) {
+                attachments.push(SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Photo,
+                    card_img.clone(),
+                    Some(card_img),
+                ));
+            }
+        }
+
+        let quoted_author = quoted.and_then(|q| q.get("user")).and_then(|u| {
+            match (
+                u.get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+                u.get("screen_name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty()),
+            ) {
+                (Some(n), Some(h)) => Some(format!("{n} (@{h})")),
+                (None, Some(h)) => Some(format!("@{h}")),
+                (Some(n), None) => Some(n.to_string()),
+                (None, None) => None,
+            }
+        });
+        let quoted_text = quoted
+            .and_then(|q| q.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        let video_item = attachments
+            .iter()
+            .find(|a| {
+                matches!(
+                    a.kind,
+                    SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+                )
+            })
+            .cloned();
+        let (primary_dl, primary_kind, primary_thumb) =
+            primary_media_from_attachments(&attachments);
+        let media_urls: Vec<String> = attachments.iter().map(|a| a.url.clone()).collect();
+        let thumb_urls: Vec<String> = attachments
+            .iter()
+            .filter_map(|a| {
+                a.thumbnail_url
+                    .clone()
+                    .or_else(|| (a.kind == SocialMediaAttachmentKind::Photo).then(|| a.url.clone()))
+            })
+            .collect();
+
+        let metadata = SocialPostMetadata {
+            platform: SocialPlatform::X,
+            author_name,
+            author_handle: handle.clone(),
+            author_avatar_url: avatar_url,
+            published_at_text,
+            body_text,
+            quoted_author,
+            quoted_text,
+            article_title: None,
+            media_urls,
+            media_thumbnail_urls: thumb_urls,
+            attachments,
+            has_video: video_item.is_some(),
+            video_url: video_item.as_ref().map(|v| v.url.clone()),
+            reply_count: obj.get("conversation_count").and_then(Value::as_i64),
+            repost_count: obj.get("retweet_count").and_then(Value::as_i64),
+            like_count: obj.get("favorite_count").and_then(Value::as_i64),
+            view_count: None,
+            original_url: format!("https://x.com/{handle}/status/{}", x_ref.tweet_id),
+            media_fetch_failed: false,
+        };
+
+        Some(ResolvedSocialPost {
+            metadata,
+            primary_media_download_url: primary_dl,
+            primary_media_kind: primary_kind,
+            primary_thumbnail_url: primary_thumb,
             extracted_tags: Vec::new(),
         })
     }
@@ -2593,6 +3019,491 @@ impl SocialPostResolver {
     }
 }
 
+/// Validates that a `/proxy-social` target URL is strictly `https://` on an allowlisted social
+/// media CDN host (`*.twimg.com`, `*.xhscdn.com`, `*.xiaohongshu.com`, `*.bsky.app`, `*.cdninstagram.com`,
+/// `*.fbcdn.net`), preventing SSRF.
+pub fn validate_social_proxy_url(raw_url: &str) -> Result<Url, XhsProxyError> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err(XhsProxyError::BadRequest("Missing url parameter"));
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| XhsProxyError::BadRequest("Invalid url"))?;
+    if parsed.scheme() != "https" {
+        return Err(XhsProxyError::Forbidden(
+            "Only HTTPS social CDN URLs allowed",
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(XhsProxyError::Forbidden(
+            "Credentials not allowed in proxy URL",
+        ));
+    }
+    if !XPostURLParser::is_allowed_social_proxy_host(parsed.host_str()) {
+        return Err(XhsProxyError::Forbidden("Host not in social CDN allowlist"));
+    }
+    Ok(parsed)
+}
+
+/// Computes the deterministic SHA-256 cache filename stem for a normalized social proxy URL.
+pub fn social_proxy_cache_key(normalized_url: &str) -> String {
+    hex::encode(Sha256::digest(normalized_url.as_bytes()))
+}
+
+/// Fetches (with retry + Twitter size fallback) and caches an allowlisted social CDN image/media
+/// under `cache_dir/<sha256>.bin` so WebView2 renders X/Bluesky/Threads/XHS assets reliably even
+/// when direct WebView network calls hit TLS resets or offline mode.
+pub async fn fetch_or_cache_social_media(
+    raw_url: &str,
+    cache_dir: &Path,
+) -> Result<XhsProxyResponse, XhsProxyError> {
+    let url = validate_social_proxy_url(raw_url)?;
+    let hash = social_proxy_cache_key(url.as_str());
+    let bin_path = cache_dir.join(format!("{hash}.bin"));
+    let ct_path = cache_dir.join(format!("{hash}.ct"));
+
+    if let Ok(cached_bytes) = tokio::fs::read(&bin_path).await {
+        if !cached_bytes.is_empty() && cached_bytes.len() <= MAX_XHS_PROXY_BYTES {
+            let content_type = tokio::fs::read_to_string(&ct_path)
+                .await
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    sniff_social_media_content_type(&cached_bytes, url.as_str()).to_string()
+                });
+            return Ok(XhsProxyResponse {
+                bytes: cached_bytes,
+                content_type,
+            });
+        }
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(12))
+        .user_agent(BROWSER_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| XhsProxyError::Upstream(e.to_string()))?;
+
+    let is_xhs = XiaohongshuURLParser::is_xiaohongshu_media_host(url.host_str());
+    let candidates = XPostURLParser::twitter_image_download_candidates(url.as_str());
+    let mut last_err = XhsProxyError::Upstream("Upstream social media fetch failed".to_string());
+
+    for cand in candidates {
+        let Ok(cand_url) = Url::parse(&cand) else {
+            continue;
+        };
+        if cand_url.scheme() != "https"
+            || !XPostURLParser::is_allowed_social_proxy_host(cand_url.host_str())
+        {
+            continue;
+        }
+        for attempt in 0..2 {
+            let mut req = client.get(cand_url.clone()).header(
+                "Accept",
+                "image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*;q=0.8",
+            );
+            if is_xhs {
+                req = req.header("Referer", XIAOHONGSHU_REFERER);
+            }
+            match req.send().await {
+                Ok(resp) => {
+                    if resp.url().scheme() != "https"
+                        || !XPostURLParser::is_allowed_social_proxy_host(resp.url().host_str())
+                    {
+                        return Err(XhsProxyError::Forbidden(
+                            "Redirected host outside social CDN allowlist",
+                        ));
+                    }
+                    if !resp.status().is_success() {
+                        last_err = XhsProxyError::Upstream(format!(
+                            "Upstream status {}",
+                            resp.status().as_u16()
+                        ));
+                        break;
+                    }
+                    if let Some(len) = resp.content_length() {
+                        if len as usize > MAX_XHS_PROXY_BYTES {
+                            return Err(XhsProxyError::TooLarge);
+                        }
+                    }
+                    let header_ct = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    match resp.bytes().await {
+                        Ok(bytes) => {
+                            if bytes.is_empty() {
+                                last_err =
+                                    XhsProxyError::Upstream("Empty upstream body".to_string());
+                                break;
+                            }
+                            if bytes.len() > MAX_XHS_PROXY_BYTES {
+                                return Err(XhsProxyError::TooLarge);
+                            }
+                            if !is_acceptable_media_response(
+                                header_ct.as_deref(),
+                                &bytes,
+                                SocialMediaAttachmentKind::Photo,
+                            ) {
+                                last_err = XhsProxyError::Upstream(
+                                    "Upstream returned non-media error payload".to_string(),
+                                );
+                                break;
+                            }
+                            let content_type = header_ct
+                                .filter(|ct| {
+                                    let l = ct.to_ascii_lowercase();
+                                    l.starts_with("image/") || l.starts_with("video/")
+                                })
+                                .unwrap_or_else(|| {
+                                    sniff_social_media_content_type(&bytes, cand_url.as_str())
+                                        .to_string()
+                                });
+                            let vec_bytes = bytes.to_vec();
+                            if tokio::fs::create_dir_all(cache_dir).await.is_ok() {
+                                let tmp_bin = cache_dir.join(format!("{hash}.bin.tmp"));
+                                if tokio::fs::write(&tmp_bin, &vec_bytes).await.is_ok() {
+                                    let _ = tokio::fs::rename(&tmp_bin, &bin_path).await;
+                                }
+                                let _ = tokio::fs::write(&ct_path, content_type.as_bytes()).await;
+                            }
+                            return Ok(XhsProxyResponse {
+                                bytes: vec_bytes,
+                                content_type,
+                            });
+                        }
+                        Err(err) => {
+                            last_err = XhsProxyError::Upstream(err.to_string());
+                            if attempt == 0 {
+                                tokio::time::sleep(Duration::from_millis(160)).await;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    last_err = XhsProxyError::Upstream(err.to_string());
+                    if attempt == 0 {
+                        tokio::time::sleep(Duration::from_millis(160)).await;
+                    }
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn sniff_social_media_content_type(bytes: &[u8], url_str: &str) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return "image/png";
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "image/jpeg";
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    if bytes.starts_with(b"GIF8") {
+        return "image/gif";
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        let brand = &bytes[8..12];
+        if brand == b"avif" || brand == b"avis" {
+            return "image/avif";
+        }
+        return "video/mp4";
+    }
+    let lower = url_str.to_ascii_lowercase();
+    if lower.contains(".mp4") {
+        "video/mp4"
+    } else if lower.contains(".png") || lower.contains("format=png") {
+        "image/png"
+    } else if lower.contains(".webp") || lower.contains("format=webp") {
+        "image/webp"
+    } else if lower.contains(".gif") || lower.contains("format=gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    }
+}
+
+fn is_acceptable_media_response(
+    mime_type: Option<&str>,
+    bytes: &[u8],
+    kind: SocialMediaAttachmentKind,
+) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    if let Some(mime) = mime_type.map(str::to_ascii_lowercase) {
+        if mime.starts_with("text/")
+            || mime.contains("html")
+            || mime.contains("json")
+            || mime.contains("xml")
+            || mime.contains("mpegurl")
+        {
+            return false;
+        }
+    }
+    let prefix = std::str::from_utf8(&bytes[..bytes.len().min(96)])
+        .unwrap_or("")
+        .trim_start()
+        .to_ascii_lowercase();
+    if prefix.starts_with("<!doctype")
+        || prefix.starts_with("<html")
+        || prefix.starts_with("<xml")
+        || prefix.starts_with("#extm3u")
+        || prefix.starts_with("{\"")
+    {
+        return false;
+    }
+    if kind == SocialMediaAttachmentKind::Photo {
+        // Accept standard raster signatures (JPEG, PNG, GIF, WebP, AVIF/HEIC ftyp) or image/* MIME
+        let looks_raster = bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+            || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+            || bytes.starts_with(b"GIF8")
+            || (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+            || (bytes.len() >= 12 && &bytes[4..8] == b"ftyp");
+        if !looks_raster && mime_type.is_some_and(|m| !m.to_ascii_lowercase().starts_with("image/"))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn primary_media_from_attachments(
+    attachments: &[SocialMediaAttachment],
+) -> (
+    Option<String>,
+    Option<SocialMediaAttachmentKind>,
+    Option<String>,
+) {
+    let video_item = attachments.iter().find(|a| {
+        matches!(
+            a.kind,
+            SocialMediaAttachmentKind::Video | SocialMediaAttachmentKind::Gif
+        )
+    });
+    let primary = video_item.or_else(|| attachments.first());
+    let dl = primary.map(|p| p.url.clone());
+    let kind = primary.map(|p| p.kind);
+    let thumb = primary.and_then(|p| {
+        p.thumbnail_url
+            .clone()
+            .or_else(|| (p.kind == SocialMediaAttachmentKind::Photo).then(|| p.url.clone()))
+    });
+    (dl, kind, thumb)
+}
+
+fn extract_vx_attachments(decoded: &VxResponse) -> Vec<SocialMediaAttachment> {
+    let mut attachments = Vec::new();
+    let mut seen = HashSet::new();
+    for item in decoded.media_extended.as_deref().unwrap_or(&[]) {
+        let Some(ref url_str) = item.url else {
+            continue;
+        };
+        if !Url::parse(url_str)
+            .ok()
+            .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+            || !seen.insert(url_str.clone())
+        {
+            continue;
+        }
+        let kind = match item
+            .media_type
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("video") => SocialMediaAttachmentKind::Video,
+            Some("gif" | "animated_gif") => SocialMediaAttachmentKind::Gif,
+            _ => SocialMediaAttachmentKind::Photo,
+        };
+        let thumb = item
+            .thumbnail_url
+            .clone()
+            .or_else(|| (kind == SocialMediaAttachmentKind::Photo).then(|| url_str.clone()));
+        attachments.push(SocialMediaAttachment::new(kind, url_str.clone(), thumb));
+    }
+    if attachments.is_empty() {
+        for url_str in decoded.media_urls.as_deref().unwrap_or(&[]) {
+            if !Url::parse(url_str)
+                .ok()
+                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                || !seen.insert(url_str.clone())
+            {
+                continue;
+            }
+            let lower = url_str.to_ascii_lowercase();
+            let kind = if lower.contains(".mp4")
+                || lower.contains(".mov")
+                || lower.contains("video.twimg.com")
+            {
+                SocialMediaAttachmentKind::Video
+            } else {
+                SocialMediaAttachmentKind::Photo
+            };
+            let thumb = (kind == SocialMediaAttachmentKind::Photo).then(|| url_str.clone());
+            attachments.push(SocialMediaAttachment::new(kind, url_str.clone(), thumb));
+        }
+    }
+    if attachments.is_empty() {
+        if let Some(img_url) = decoded
+            .article
+            .as_ref()
+            .and_then(|a| a.image.as_ref())
+            .or(decoded.combined_media_url.as_ref())
+        {
+            if Url::parse(img_url)
+                .ok()
+                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+            {
+                attachments.push(SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Photo,
+                    img_url.clone(),
+                    Some(img_url.clone()),
+                ));
+            }
+        }
+    }
+    attachments
+}
+
+fn extract_syndication_attachments(tweet: &Value) -> Vec<SocialMediaAttachment> {
+    let mut attachments = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(details) = tweet.get("mediaDetails").and_then(Value::as_array) {
+        for item in details {
+            let media_type = item
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            let thumb_url = item
+                .get("media_url_https")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            if media_type == "video" || media_type == "animated_gif" {
+                let best_mp4 = item
+                    .get("video_info")
+                    .and_then(|vi| vi.get("variants"))
+                    .and_then(Value::as_array)
+                    .and_then(|variants| {
+                        variants
+                            .iter()
+                            .filter(|v| {
+                                v.get("content_type")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|ct| ct.eq_ignore_ascii_case("video/mp4"))
+                            })
+                            .filter_map(|v| {
+                                let u = v.get("url").and_then(Value::as_str)?.trim();
+                                if u.is_empty() {
+                                    return None;
+                                }
+                                let bitrate = v.get("bitrate").and_then(Value::as_i64).unwrap_or(0);
+                                Some((bitrate, u.to_string()))
+                            })
+                            .max_by_key(|(b, _)| *b)
+                            .map(|(_, u)| u)
+                    });
+                if let Some(video_url) = best_mp4 {
+                    if Url::parse(&video_url)
+                        .ok()
+                        .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                        && seen.insert(video_url.clone())
+                    {
+                        let kind = if media_type == "animated_gif" {
+                            SocialMediaAttachmentKind::Gif
+                        } else {
+                            SocialMediaAttachmentKind::Video
+                        };
+                        attachments.push(SocialMediaAttachment::new(kind, video_url, thumb_url));
+                    }
+                    continue;
+                }
+            }
+
+            if let Some(photo_url) = thumb_url {
+                if Url::parse(&photo_url)
+                    .ok()
+                    .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                    && seen.insert(photo_url.clone())
+                {
+                    attachments.push(SocialMediaAttachment::new(
+                        SocialMediaAttachmentKind::Photo,
+                        photo_url.clone(),
+                        Some(photo_url),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(photos) = tweet.get("photos").and_then(Value::as_array) {
+        for item in photos {
+            let Some(url_str) = item
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            if Url::parse(url_str)
+                .ok()
+                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+                && seen.insert(url_str.to_string())
+            {
+                attachments.push(SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Photo,
+                    url_str.to_string(),
+                    Some(url_str.to_string()),
+                ));
+            }
+        }
+    }
+
+    attachments
+}
+
+fn extract_syndication_card_image(tweet: &Value) -> Option<String> {
+    let bindings = tweet.get("card")?.get("binding_values")?.as_object()?;
+    for key in [
+        "photo_image_full_size_original",
+        "photo_image_full_size_large",
+        "summary_photo_image_large",
+        "summary_photo_image",
+        "thumbnail_image_large",
+        "player_image_large",
+        "photo_image_full_size",
+    ] {
+        if let Some(url) = bindings
+            .get(key)
+            .and_then(|v| v.get("image_value"))
+            .and_then(|iv| iv.get("url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if Url::parse(url)
+                .ok()
+                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+            {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn extract_fx_attachments(block: Option<&FxMediaBlock>) -> Vec<SocialMediaAttachment> {
     let Some(block) = block else {
         return Vec::new();
@@ -2646,6 +3557,25 @@ fn extract_fx_attachments(block: Option<&FxMediaBlock>) -> Vec<SocialMediaAttach
             .or_else(|| (kind == SocialMediaAttachmentKind::Photo).then(|| url_str.clone()));
         out.push(SocialMediaAttachment::new(kind, url_str.clone(), thumb));
     }
+    if out.is_empty() {
+        if let Some(mosaic_url) = block
+            .mosaic
+            .as_ref()
+            .and_then(|m| m.formats.as_ref())
+            .and_then(|f| f.jpeg.as_deref().or(f.webp.as_deref()))
+        {
+            if Url::parse(mosaic_url)
+                .ok()
+                .is_some_and(|u| WebBookmarkResolver::is_web_url(&u))
+            {
+                out.push(SocialMediaAttachment::new(
+                    SocialMediaAttachmentKind::Photo,
+                    mosaic_url.to_string(),
+                    Some(mosaic_url.to_string()),
+                ));
+            }
+        }
+    }
     out
 }
 
@@ -2675,6 +3605,19 @@ fn resolve_media_extension(
         }
         if mime.contains("jpeg") || mime.contains("jpg") {
             return "jpg".to_string();
+        }
+    }
+    if let Some((_, fmt)) = url
+        .query_pairs()
+        .find(|(k, _)| k.eq_ignore_ascii_case("format"))
+    {
+        let lower = fmt.trim().to_ascii_lowercase();
+        if matches!(lower.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif") {
+            return if lower == "jpeg" {
+                "jpg".to_string()
+            } else {
+                lower
+            };
         }
     }
     if let Some(ext) = Path::new(url.path())
@@ -2745,6 +3688,18 @@ struct FxMediaBlock {
     all: Option<Vec<FxMediaItem>>,
     photos: Option<Vec<FxMediaItem>>,
     videos: Option<Vec<FxMediaItem>>,
+    mosaic: Option<FxMosaic>,
+}
+
+#[derive(Deserialize)]
+struct FxMosaic {
+    formats: Option<FxMosaicFormats>,
+}
+
+#[derive(Deserialize)]
+struct FxMosaicFormats {
+    jpeg: Option<String>,
+    webp: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2760,6 +3715,7 @@ struct FxArticle {
     title: Option<String>,
     preview_text: Option<String>,
     cover_media: Option<FxCoverMedia>,
+    media_entities: Option<Vec<FxCoverMedia>>,
 }
 
 #[derive(Deserialize)]
@@ -2782,9 +3738,19 @@ struct VxResponse {
     media_extended: Option<Vec<VxMediaItem>>,
     #[serde(rename = "mediaURLs")]
     media_urls: Option<Vec<String>>,
+    #[serde(rename = "combinedMediaUrl")]
+    combined_media_url: Option<String>,
+    qrt: Option<Box<VxResponse>>,
+    article: Option<VxArticle>,
     replies: Option<i64>,
     retweets: Option<i64>,
     likes: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct VxArticle {
+    title: Option<String>,
+    image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3184,5 +4150,147 @@ mod tests {
             resolved.title.as_deref(),
             Some("unreachable page — 127.0.0.1")
         );
+    }
+
+    #[test]
+    fn parses_x_syndication_and_vxtwitter_quote_media_and_builds_safe_image_candidates() {
+        let x_ref = XPostReference {
+            handle: "artist".to_string(),
+            tweet_id: "2032956200000000001".to_string(),
+        };
+
+        // 1. Syndication token is non-empty alphanumeric base36
+        let token = XPostURLParser::syndication_token(&x_ref.tweet_id).expect("token");
+        assert!(!token.is_empty());
+        assert!(token.bytes().all(|b| b.is_ascii_alphanumeric()));
+
+        // 2. Twitter image candidate chain upgrades /media/ to orig->raw->large but NEVER breaks /card_img/
+        let media_url = "https://pbs.twimg.com/media/HDaC5PMa8AAO123?format=jpg&name=small";
+        let cands = XPostURLParser::twitter_image_download_candidates(media_url);
+        assert_eq!(cands.len(), 4);
+        assert!(cands[0].contains("name=orig"));
+        assert_eq!(cands[1], media_url);
+        assert!(cands[2].contains("name=large"));
+        assert!(cands[3].contains("name=medium"));
+
+        let card_url = "https://pbs.twimg.com/card_img/12345/hero?format=jpg&name=800x419";
+        assert_eq!(
+            XPostURLParser::upgrade_twitter_image_url(card_url),
+            card_url
+        );
+        assert_eq!(
+            XPostURLParser::twitter_image_download_candidates(card_url),
+            vec![card_url.to_string()]
+        );
+
+        // 3. `format=png` query parameter determines extension even without path extension
+        let fmt_url =
+            Url::parse("https://pbs.twimg.com/media/ABC123?format=png&name=orig").unwrap();
+        assert_eq!(
+            resolve_media_extension(&fmt_url, None, SocialMediaAttachmentKind::Photo),
+            "png"
+        );
+
+        // 4. Twitter Syndication JSON with photos + video variant + quoted tweet
+        let syndication_json = r#"{
+            "text": "Retro CRT shader reference",
+            "created_at": "2026-03-10T12:00:00.000Z",
+            "favorite_count": 4200,
+            "conversation_count": 88,
+            "user": {
+                "name": "Hiyameshi",
+                "screen_name": "Hiyameshi_8bit",
+                "profile_image_url_https": "https://pbs.twimg.com/profile_images/1/av_normal.jpg"
+            },
+            "mediaDetails": [
+                {
+                    "type": "photo",
+                    "media_url_https": "https://pbs.twimg.com/media/HDaC5PMa8AAO.jpg"
+                },
+                {
+                    "type": "video",
+                    "media_url_https": "https://pbs.twimg.com/amplify_video_thumb/1/img/p.jpg",
+                    "video_info": {
+                        "variants": [
+                            {"content_type": "application/x-mpegURL", "url": "https://video.twimg.com/a.m3u8"},
+                            {"content_type": "video/mp4", "bitrate": 832000, "url": "https://video.twimg.com/low.mp4"},
+                            {"content_type": "video/mp4", "bitrate": 2176000, "url": "https://video.twimg.com/hi.mp4"}
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        let parsed_syn =
+            SocialPostResolver::parse_x_syndication_json(syndication_json, &x_ref).expect("syn");
+        assert_eq!(parsed_syn.metadata.author_name, "Hiyameshi");
+        assert_eq!(parsed_syn.metadata.author_handle, "Hiyameshi_8bit");
+        assert_eq!(
+            parsed_syn.metadata.author_avatar_url.as_deref(),
+            Some("https://pbs.twimg.com/profile_images/1/av_400x400.jpg")
+        );
+        assert_eq!(parsed_syn.metadata.attachments.len(), 2);
+        assert_eq!(
+            parsed_syn.metadata.attachments[0].kind,
+            SocialMediaAttachmentKind::Photo
+        );
+        assert_eq!(
+            parsed_syn.metadata.attachments[1].kind,
+            SocialMediaAttachmentKind::Video
+        );
+        assert_eq!(
+            parsed_syn.metadata.attachments[1].url,
+            "https://video.twimg.com/hi.mp4"
+        );
+        assert_eq!(
+            parsed_syn.primary_thumbnail_url.as_deref(),
+            Some("https://pbs.twimg.com/amplify_video_thumb/1/img/p.jpg")
+        );
+
+        // 5. VxTwitter JSON with quoted tweet (`qrt`) media fallback
+        let vx_json = r#"{
+            "text": "Look at this lighting study",
+            "user_name": "Curator",
+            "user_screen_name": "curator_x",
+            "media_extended": [],
+            "qrt": {
+                "text": "Original 3D render",
+                "user_name": "Artist",
+                "user_screen_name": "artist_3d",
+                "media_extended": [
+                    {"type": "image", "url": "https://pbs.twimg.com/media/QRT123.jpg"}
+                ]
+            }
+        }"#;
+        let parsed_vx = SocialPostResolver::parse_vxtwitter_json(vx_json, &x_ref).expect("vx");
+        assert_eq!(
+            parsed_vx.metadata.quoted_author.as_deref(),
+            Some("Artist (@artist_3d)")
+        );
+        assert_eq!(
+            parsed_vx.metadata.quoted_text.as_deref(),
+            Some("Original 3D render")
+        );
+        assert_eq!(parsed_vx.metadata.attachments.len(), 1);
+        assert_eq!(
+            parsed_vx.primary_thumbnail_url.as_deref(),
+            Some("https://pbs.twimg.com/media/QRT123.jpg")
+        );
+
+        // 6. Media response validator rejects HTML/JSON error bodies and accepts real JPEG/PNG bytes
+        assert!(!is_acceptable_media_response(
+            Some("text/html; charset=utf-8"),
+            b"<html>404</html>",
+            SocialMediaAttachmentKind::Photo
+        ));
+        assert!(!is_acceptable_media_response(
+            None,
+            b"{\"error\":\"not found\"}",
+            SocialMediaAttachmentKind::Photo
+        ));
+        assert!(is_acceptable_media_response(
+            Some("image/png"),
+            b"\x89PNG\r\n\x1a\nMOCK",
+            SocialMediaAttachmentKind::Photo
+        ));
     }
 }
