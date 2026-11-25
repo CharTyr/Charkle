@@ -1414,6 +1414,48 @@ public final class LibraryStore {
         }
     }
 
+    @discardableResult
+    public func importMaterialPackages(
+        urls: [URL],
+        targetFolderID: UUID? = nil,
+        targetBoardID: UUID? = nil
+    ) async -> [MaterialPackageImportResult] {
+        guard !urls.isEmpty else { return [] }
+        lastError = nil
+        var results: [MaterialPackageImportResult] = []
+        results.reserveCapacity(urls.count)
+        var anyImported = false
+
+        for url in urls {
+            do {
+                let result = try await engine.importMaterialPackage(
+                    at: url,
+                    targetFolderID: targetFolderID,
+                    targetBoardID: targetBoardID
+                )
+                results.append(result)
+                anyImported = anyImported || !result.importedAssets.isEmpty || result.createdFolderCount > 0
+                if !isMinimalCaptureMode {
+                    for item in result.importedAssets {
+                        allAssetsByID[item.id] = item
+                    }
+                }
+            } catch {
+                lastError = error.localizedDescription
+                libraryStoreLogger.error("Material package import failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        if anyImported {
+            if isMinimalCaptureMode {
+                await refreshMinimalMetadataOnly()
+            } else {
+                await refreshAll()
+            }
+        }
+        return results
+    }
+
     // MARK: - Asset Patching & Batch Operations
 
     private func canApplyPatchInMemory(_ patch: AssetBatchPatch) -> Bool {

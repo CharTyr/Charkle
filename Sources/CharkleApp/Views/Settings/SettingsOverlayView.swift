@@ -15,6 +15,7 @@ public struct SettingsOverlayView: View {
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
     public let onEnterMinimalCaptureMode: () -> Void
+    public let onImportMaterialPackage: (() -> Void)?
     public let onClose: () -> Void
 
     public init(
@@ -26,6 +27,7 @@ public struct SettingsOverlayView: View {
         onSyncHotkeysEnabled: @escaping (Bool) -> Void,
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
         onEnterMinimalCaptureMode: @escaping () -> Void = {},
+        onImportMaterialPackage: (() -> Void)? = nil,
         onClose: @escaping () -> Void
     ) {
         self.coordinator = coordinator
@@ -36,6 +38,7 @@ public struct SettingsOverlayView: View {
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
         self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
+        self.onImportMaterialPackage = onImportMaterialPackage
         self.onClose = onClose
     }
 
@@ -59,6 +62,7 @@ public struct SettingsOverlayView: View {
                     onSyncHotkeysEnabled: onSyncHotkeysEnabled,
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
                     onEnterMinimalCaptureMode: onEnterMinimalCaptureMode,
+                    onImportMaterialPackage: onImportMaterialPackage,
                     onClose: onClose
                 )
                 .frame(width: modalWidth, height: modalHeight)
@@ -112,6 +116,7 @@ public struct SettingsContentShell: View {
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
     public let onEnterMinimalCaptureMode: () -> Void
+    public let onImportMaterialPackage: (() -> Void)?
     public let onClose: (() -> Void)?
 
     public init(
@@ -123,6 +128,7 @@ public struct SettingsContentShell: View {
         onSyncHotkeysEnabled: @escaping (Bool) -> Void,
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
         onEnterMinimalCaptureMode: @escaping () -> Void = {},
+        onImportMaterialPackage: (() -> Void)? = nil,
         onClose: (() -> Void)? = nil
     ) {
         self.coordinator = coordinator
@@ -133,6 +139,7 @@ public struct SettingsContentShell: View {
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
         self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
+        self.onImportMaterialPackage = onImportMaterialPackage
         self.onClose = onClose
     }
 
@@ -326,7 +333,11 @@ public struct SettingsContentShell: View {
         case .general:
             GeneralSettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
         case .library:
-            LibrarySettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
+            LibrarySettingsPane(
+                coordinator: coordinator,
+                syncAndAI: syncAndAI,
+                onImportMaterialPackage: onImportMaterialPackage
+            )
         case .sync:
             SyncSettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
         case .notchShelf:

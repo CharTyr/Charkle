@@ -9,6 +9,7 @@ public struct LibrarySettingsPane: View {
 
     public let coordinator: AppCoordinatorStore
     public let syncAndAI: SyncAndAIStore
+    public let onImportMaterialPackage: (() -> Void)?
 
     @State private var cacheBudgetGB: Double = 10.0
     @State private var didSyncInitialBudget: Bool = false
@@ -30,9 +31,14 @@ public struct LibrarySettingsPane: View {
         }
     }
 
-    public init(coordinator: AppCoordinatorStore, syncAndAI: SyncAndAIStore) {
+    public init(
+        coordinator: AppCoordinatorStore,
+        syncAndAI: SyncAndAIStore,
+        onImportMaterialPackage: (() -> Void)? = nil
+    ) {
         self.coordinator = coordinator
         self.syncAndAI = syncAndAI
+        self.onImportMaterialPackage = onImportMaterialPackage
     }
 
     public var body: some View {
@@ -122,6 +128,21 @@ public struct LibrarySettingsPane: View {
                         title: "随时可在 Google Drive、WebDAV 与纯本地之间互迁",
                         detail: "原始文件均按可读文件夹保存，不锁定专有格式，在访达或网盘网页端都能直接查看。"
                     )
+                }
+            }
+
+            if let onImportMaterialPackage {
+                SettingsSection("外部素材包导入") {
+                    SettingsRow(
+                        title: "导入 .eaglepack 素材包 / .library 素材库",
+                        subtitle: "无损保留多级文件夹、配色、标签、星级评分、注释、来源链接与原始时间，也可直接拖入主界面或刘海托盘"
+                    ) {
+                        Button("选择素材包…") {
+                            onImportMaterialPackage()
+                        }
+                        .buttonStyle(SettingsSecondaryButtonStyle())
+                        .fixedSize()
+                    }
                 }
             }
 

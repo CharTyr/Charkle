@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import os
 
 private let engineLogger = Logger(subsystem: "com.charkle.core", category: "LiveCharkleEngine")
@@ -577,16 +578,88 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         }
         guard !inputs.isEmpty else { return [] }
 
-        // 1. Expand any Finder directories recursively, creating mirrored FolderRecords on the fly.
-        let expandedItems = try await expandInputsWithDirectories(inputs, defaultFolderID: targetFolderID)
+        var tempStagingDirectories: [URL] = []
+        defer {
+            for dir in tempStagingDirectories {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        }
+
+        // 1. Expand any `.eaglepack`/`.library` material packages and Finder directories recursively,
+        // creating mirrored FolderRecords on the fly.
+        let expandedItems = try await expandInputsWithDirectories(
+            inputs,
+            defaultFolderID: targetFolderID,
+            tempStagingDirectories: &tempStagingDirectories
+        )
         guard !expandedItems.isEmpty else { return [] }
 
+        return try await ingestExpandedWork(
+            expandedItems,
+            targetFolderID: targetFolderID,
+            targetBoardID: targetBoardID,
+            toleratesItemErrors: false
+        )
+    }
+
+    public func importMaterialPackage(
+        at url: URL,
+        targetFolderID: UUID?,
+        targetBoardID: UUID?
+    ) async throws -> MaterialPackageImportResult {
+        if let targetFolderID, try await database.folder(id: targetFolderID) == nil {
+            throw DriveTransportError.fileNotFound(targetFolderID.uuidString)
+        }
+        if let targetBoardID, try await database.board(id: targetBoardID) == nil {
+            throw DriveTransportError.fileNotFound(targetBoardID.uuidString)
+        }
+
+        var tempStagingDirectories: [URL] = []
+        defer {
+            for dir in tempStagingDirectories {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        }
+
+        let expanded = try await expandMaterialPackage(
+            at: url,
+            defaultFolderID: targetFolderID,
+            allowGenericZip: true,
+            tempStagingDirectories: &tempStagingDirectories
+        )
+        let imported: [AssetRecord]
+        if expanded.works.isEmpty {
+            imported = []
+        } else {
+            imported = try await ingestExpandedWork(
+                expanded.works,
+                targetFolderID: targetFolderID,
+                targetBoardID: targetBoardID,
+                toleratesItemErrors: true
+            )
+        }
+        return MaterialPackageImportResult(
+            packageName: expanded.packageName,
+            importedAssets: imported,
+            createdFolderCount: expanded.createdFolderCount,
+            rootFolderID: expanded.rootFolderID,
+            skippedDeletedCount: expanded.skippedDeletedCount,
+            skippedMissingCount: expanded.skippedMissingCount
+        )
+    }
+
+    private func ingestExpandedWork(
+        _ expandedItems: [ExpandedCaptureWork],
+        targetFolderID: UUID?,
+        targetBoardID: UUID?,
+        toleratesItemErrors: Bool
+    ) async throws -> [AssetRecord] {
         // 2. Prepare items with bounded concurrency (up to 4 workers) without blocking on Vision OCR or Cloud AI.
         var orderedResults = [PreparedAsset?](repeating: nil, count: expandedItems.count)
         let prepared: [PreparedAsset]
         do {
             let maxConcurrent = 4
-            try await withThrowingTaskGroup(of: (Int, PreparedAsset).self) { group in
+            try await withThrowingTaskGroup(of: (Int, PreparedAsset?).self) { group in
                 var nextIndex = 0
                 let initialBatch = min(maxConcurrent, expandedItems.count)
                 for _ in 0..<initialBatch {
@@ -595,12 +668,24 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     let work = expandedItems[index]
                     group.addTask {
                         try Task.checkCancellation()
-                        let item = try await self.prepareExpanded(work.input, folderID: work.folderID)
-                        if Task.isCancelled {
-                            self.media.removeFiles(for: item.asset)
-                            throw CancellationError()
+                        do {
+                            let item = try await self.prepareExpanded(
+                                work.input,
+                                folderID: work.folderID,
+                                metadataOverride: work.metadataOverride
+                            )
+                            if Task.isCancelled {
+                                self.media.removeFiles(for: item.asset)
+                                throw CancellationError()
+                            }
+                            return (index, item)
+                        } catch {
+                            if error is CancellationError || !toleratesItemErrors {
+                                throw error
+                            }
+                            engineLogger.warning("Skipping unreadable item during package import: \(error.localizedDescription, privacy: .public)")
+                            return (index, nil)
                         }
-                        return (index, item)
                     }
                 }
                 while let (index, item) = try await group.next() {
@@ -611,12 +696,24 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                         let work = expandedItems[launchIndex]
                         group.addTask {
                             try Task.checkCancellation()
-                            let item = try await self.prepareExpanded(work.input, folderID: work.folderID)
-                            if Task.isCancelled {
-                                self.media.removeFiles(for: item.asset)
-                                throw CancellationError()
+                            do {
+                                let item = try await self.prepareExpanded(
+                                    work.input,
+                                    folderID: work.folderID,
+                                    metadataOverride: work.metadataOverride
+                                )
+                                if Task.isCancelled {
+                                    self.media.removeFiles(for: item.asset)
+                                    throw CancellationError()
+                                }
+                                return (launchIndex, item)
+                            } catch {
+                                if error is CancellationError || !toleratesItemErrors {
+                                    throw error
+                                }
+                                engineLogger.warning("Skipping unreadable item during package import: \(error.localizedDescription, privacy: .public)")
+                                return (launchIndex, nil)
                             }
-                            return (launchIndex, item)
                         }
                     }
                 }
@@ -628,6 +725,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
             throw error
         }
+
+        guard !prepared.isEmpty else { return [] }
 
         let config = await syncConfig()
         let incoming = prepared
@@ -731,14 +830,47 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return didChange
     }
 
+    private struct ImportedAssetMetadataOverride: Sendable {
+        let title: String?
+        let tags: [String]
+        let rating: Int
+        let notes: String?
+        let sourceURL: String?
+        let sourceDomain: String?
+        let createdAt: Date?
+        let updatedAt: Date?
+        let preRenderedBookmarkThumbnailURL: URL?
+    }
+
     private struct ExpandedCaptureWork: Sendable {
         let input: CaptureInput
         let folderID: UUID?
+        let metadataOverride: ImportedAssetMetadataOverride?
+
+        init(
+            input: CaptureInput,
+            folderID: UUID?,
+            metadataOverride: ImportedAssetMetadataOverride? = nil
+        ) {
+            self.input = input
+            self.folderID = folderID
+            self.metadataOverride = metadataOverride
+        }
+    }
+
+    private struct ExpandedPackageBatch: Sendable {
+        let packageName: String
+        let works: [ExpandedCaptureWork]
+        let createdFolderCount: Int
+        let rootFolderID: UUID?
+        let skippedDeletedCount: Int
+        let skippedMissingCount: Int
     }
 
     private func expandInputsWithDirectories(
         _ inputs: [CaptureInput],
-        defaultFolderID: UUID?
+        defaultFolderID: UUID?,
+        tempStagingDirectories: inout [URL]
     ) async throws -> [ExpandedCaptureWork] {
         var queue: [ExpandedCaptureWork] = []
         for input in inputs {
@@ -750,6 +882,20 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             let accessed = url.startAccessingSecurityScopedResource()
             defer { if accessed { url.stopAccessingSecurityScopedResource() } }
             let resolved = url.resolvingSymlinksInPath()
+
+            // Detect `.eaglepack` archives, extracted pack dirs, and `.library` bundles BEFORE raw directory walking
+            // so internal `<ID>.info/metadata.json` and `_thumbnail.png` files are never imported as junk assets.
+            if EaglePackImporter.isRecognizedMaterialPackage(resolved, allowGenericZip: false) {
+                let batch = try await expandMaterialPackage(
+                    at: resolved,
+                    defaultFolderID: defaultFolderID,
+                    allowGenericZip: false,
+                    tempStagingDirectories: &tempStagingDirectories
+                )
+                queue.append(contentsOf: batch.works)
+                continue
+            }
+
             let values = try? resolved.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
             if values?.isDirectory == true && values?.isPackage != true {
                 let collected = try await collectDirectoryFiles(
@@ -763,6 +909,105 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
         }
         return queue
+    }
+
+    private func expandMaterialPackage(
+        at url: URL,
+        defaultFolderID: UUID?,
+        allowGenericZip: Bool,
+        tempStagingDirectories: inout [URL]
+    ) async throws -> ExpandedPackageBatch {
+        let parsed = try await EaglePackImporter.unpackAndParse(at: url, allowGenericZip: allowGenericZip)
+        if let staging = parsed.stagingDirectoryToCleanup {
+            tempStagingDirectories.append(staging)
+        }
+
+        var folderIDMap: [String: UUID] = [:]
+        var createdFolderCount = 0
+        let rootFolderID: UUID?
+        let fallbackFolderID: UUID?
+
+        func mirrorFolders(_ nodes: [ParsedEagleFolder], parentID: UUID?) async throws {
+            for node in nodes {
+                try Task.checkCancellation()
+                let (folder, didCreate) = try await findOrCreateFolderForImportWithStatus(
+                    named: node.name,
+                    parentID: parentID,
+                    colorHex: node.colorHex
+                )
+                if didCreate { createdFolderCount += 1 }
+                folderIDMap[node.sourceID] = folder.id
+                if !node.children.isEmpty {
+                    try await mirrorFolders(node.children, parentID: folder.id)
+                }
+            }
+        }
+
+        if parsed.rootFolders.count == 1 {
+            // Single root folder tree (typical folder-exported `.eaglepack`): mirror directly without `A/A` nesting.
+            try await mirrorFolders(parsed.rootFolders, parentID: defaultFolderID)
+            let singleRoot = folderIDMap[parsed.rootFolders[0].sourceID]
+            rootFolderID = singleRoot
+            fallbackFolderID = singleRoot
+        } else {
+            // Multiple roots (full `.library` / multi-folder pack) or loose items: group cleanly under `<packageName>`.
+            let (container, didCreate) = try await findOrCreateFolderForImportWithStatus(
+                named: parsed.packageName,
+                parentID: defaultFolderID,
+                colorHex: nil
+            )
+            if didCreate { createdFolderCount += 1 }
+            rootFolderID = container.id
+            fallbackFolderID = container.id
+            if !parsed.rootFolders.isEmpty {
+                try await mirrorFolders(parsed.rootFolders, parentID: container.id)
+            }
+        }
+
+        var works: [ExpandedCaptureWork] = []
+        works.reserveCapacity(parsed.items.count)
+        for item in parsed.items {
+            let mappedFolderID = item.folderIDs.compactMap { folderIDMap[$0] }.first ?? fallbackFolderID
+            let sourceURLString = item.sourceURL?.absoluteString
+            let sourceDomain = item.sourceURL.flatMap { WebURLParser.cleanDomain(for: $0) ?? $0.host() }
+            let override = ImportedAssetMetadataOverride(
+                title: item.title,
+                tags: item.tags,
+                rating: item.rating,
+                notes: item.notes,
+                sourceURL: sourceURLString,
+                sourceDomain: sourceDomain,
+                createdAt: item.createdAt,
+                updatedAt: item.updatedAt,
+                preRenderedBookmarkThumbnailURL: item.isWebBookmark ? item.thumbnailURL : nil
+            )
+            if item.isWebBookmark, let bookmarkURL = item.sourceURL {
+                works.append(
+                    ExpandedCaptureWork(
+                        input: .webURL(bookmarkURL, title: item.title, notes: item.notes),
+                        folderID: mappedFolderID,
+                        metadataOverride: override
+                    )
+                )
+            } else if let fileURL = item.fileURL {
+                works.append(
+                    ExpandedCaptureWork(
+                        input: .fileURL(fileURL),
+                        folderID: mappedFolderID,
+                        metadataOverride: override
+                    )
+                )
+            }
+        }
+
+        return ExpandedPackageBatch(
+            packageName: parsed.packageName,
+            works: works,
+            createdFolderCount: createdFolderCount,
+            rootFolderID: rootFolderID,
+            skippedDeletedCount: parsed.skippedDeletedCount,
+            skippedMissingCount: parsed.skippedMissingCount
+        )
     }
 
     private static let skippedDirectoryNames: Set<String> = [
@@ -816,14 +1061,28 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     private func findOrCreateFolderForImport(named rawName: String, parentID: UUID?) async throws -> FolderRecord {
-        let safeName = (parentID == nil && rawName.caseInsensitiveCompare("Inbox") == .orderedSame) ? "Inbox 导入" : rawName
+        try await findOrCreateFolderForImportWithStatus(named: rawName, parentID: parentID, colorHex: nil).folder
+    }
+
+    private func findOrCreateFolderForImportWithStatus(
+        named rawName: String,
+        parentID: UUID?,
+        colorHex: String?
+    ) async throws -> (folder: FolderRecord, didCreate: Bool) {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanName = trimmed.isEmpty ? "未命名文件夹" : trimmed
+        let safeName = (parentID == nil && cleanName.caseInsensitiveCompare("Inbox") == .orderedSame) ? "Inbox 导入" : cleanName
         let folders = try await database.fetchFolders()
         if let existing = folders.first(where: {
             $0.parentID == parentID && $0.name.caseInsensitiveCompare(safeName) == .orderedSame
         }) {
-            return existing
+            return (existing, false)
         }
-        return try await createFolder(name: safeName, parentID: parentID)
+        var created = try await createFolder(name: safeName, parentID: parentID)
+        if let colorHex, !colorHex.isEmpty {
+            created = (try? await updateFolderAppearance(id: created.id, colorHex: colorHex, customSymbol: nil)) ?? created
+        }
+        return (created, true)
     }
 
     private struct PreparedAsset: Sendable {
@@ -831,25 +1090,104 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var feature: Data?
     }
 
-    private func prepareExpanded(_ input: CaptureInput, folderID: UUID?) async throws -> PreparedAsset {
+    private func prepareExpanded(
+        _ input: CaptureInput,
+        folderID: UUID?,
+        metadataOverride: ImportedAssetMetadataOverride? = nil
+    ) async throws -> PreparedAsset {
+        var prepared: PreparedAsset
         if case .socialBookmark(let suppliedPost, let coverImageData, let extraTags) = input {
-            return try await preparePreExtractedSocialBookmark(
+            prepared = try await preparePreExtractedSocialBookmark(
                 suppliedPost,
                 coverImageData: coverImageData,
                 extraTags: extraTags,
                 folderID: folderID
             )
-        }
-        if case .webURL(let url, let suppliedTitle, let suppliedNotes) = input {
-            if let repoRef = GitHubRepoURLParser.parse(url) {
-                return try await prepareGitHubRepo(repoRef, folderID: folderID)
+        } else if case .webURL(let url, let suppliedTitle, let suppliedNotes) = input {
+            if let thumbURL = metadataOverride?.preRenderedBookmarkThumbnailURL,
+               let poster = Self.loadCGImage(from: thumbURL) {
+                prepared = try await prepareOfflineWebBookmark(
+                    url: url,
+                    title: suppliedTitle ?? WebBookmark.fallbackTitle(for: url),
+                    notes: suppliedNotes ?? "",
+                    poster: poster,
+                    folderID: folderID
+                )
+            } else if let repoRef = GitHubRepoURLParser.parse(url) {
+                prepared = try await prepareGitHubRepo(repoRef, folderID: folderID)
+            } else if let socialRef = SocialPostURLParser.parse(url) {
+                prepared = try await prepareSocialPost(socialRef, fallbackInput: input, folderID: folderID)
+            } else {
+                prepared = try await prepareWebPage(url, suppliedTitle: suppliedTitle, suppliedNotes: suppliedNotes, folderID: folderID)
             }
-            if let socialRef = SocialPostURLParser.parse(url) {
-                return try await prepareSocialPost(socialRef, fallbackInput: input, folderID: folderID)
-            }
-            return try await prepareWebPage(url, suppliedTitle: suppliedTitle, suppliedNotes: suppliedNotes, folderID: folderID)
+        } else {
+            prepared = try await prepare(input, folderID: folderID)
         }
-        return try await prepare(input, folderID: folderID)
+
+        if let metadataOverride {
+            applyMetadataOverride(metadataOverride, to: &prepared.asset)
+        }
+        return prepared
+    }
+
+    private static func loadCGImage(from url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+            return nil
+        }
+        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+    }
+
+    private func prepareOfflineWebBookmark(
+        url: URL,
+        title: String,
+        notes: String,
+        poster: CGImage,
+        folderID: UUID?
+    ) async throws -> PreparedAsset {
+        let domain = WebURLParser.cleanDomain(for: url) ?? url.host() ?? "web.link"
+        let id = UUID()
+        do {
+            let source = try await media.ingestPreResolvedWebPage(
+                url: url,
+                title: title,
+                notes: notes,
+                domain: domain,
+                poster: poster,
+                folderID: folderID,
+                id: id
+            )
+            let feature = await computeFeaturePrint(for: id)
+            return PreparedAsset(asset: source.asset, feature: feature)
+        } catch {
+            media.removeFiles(for: AssetRecord(id: id, title: "", fileName: ""))
+            throw error
+        }
+    }
+
+    private func applyMetadataOverride(_ override: ImportedAssetMetadataOverride, to asset: inout AssetRecord) {
+        if let title = override.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            asset.title = title
+        }
+        if !override.tags.isEmpty {
+            asset.tags = tagMap(asset.tags + override.tags).values.sorted()
+        }
+        if override.rating > 0 {
+            asset.rating = min(5, max(0, override.rating))
+        }
+        if let notes = override.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
+            asset.notes = notes
+        }
+        if let sourceURL = override.sourceURL, !sourceURL.isEmpty,
+           (asset.sourceURL?.isEmpty ?? true) {
+            asset.sourceURL = sourceURL
+            asset.sourceDomain = override.sourceDomain ?? asset.sourceDomain
+        }
+        if let createdAt = override.createdAt {
+            asset.createdAt = createdAt
+        }
+        if let updatedAt = override.updatedAt {
+            asset.updatedAt = max(asset.createdAt, updatedAt)
+        }
     }
 
     private func prepareWebPage(

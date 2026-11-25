@@ -21,6 +21,7 @@ public struct MainWindowView: View {
     public let onSyncHotkeysEnabled: (Bool) -> Void
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
     public let onEnterMinimalCaptureMode: () -> Void
+    public let onImportMaterialPackage: () -> Void
     public let onAppReady: () -> Void
 
     @Namespace private var heroNamespace
@@ -88,6 +89,7 @@ public struct MainWindowView: View {
         onSyncHotkeysEnabled: @escaping (Bool) -> Void = { _ in },
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
         onEnterMinimalCaptureMode: @escaping () -> Void = {},
+        onImportMaterialPackage: @escaping () -> Void = {},
         onAppReady: @escaping () -> Void = {}
     ) {
         self.coordinator = coordinator
@@ -100,6 +102,7 @@ public struct MainWindowView: View {
         self.onSyncHotkeysEnabled = onSyncHotkeysEnabled
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
         self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
+        self.onImportMaterialPackage = onImportMaterialPackage
         self.onAppReady = onAppReady
     }
 
@@ -128,6 +131,7 @@ public struct MainWindowView: View {
                     library: library,
                     moodboards: moodboards,
                     expandedWidth: effectiveExpandedSidebarWidth,
+                    onImportMaterialPackage: onImportMaterialPackage,
                     onSelectDestination: { dest in
                         navigate(to: dest)
                     },
@@ -332,6 +336,7 @@ public struct MainWindowView: View {
                     onSyncHotkeysEnabled: onSyncHotkeysEnabled,
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
                     onEnterMinimalCaptureMode: onEnterMinimalCaptureMode,
+                    onImportMaterialPackage: onImportMaterialPackage,
                     onClose: {
                         withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
                             coordinator.closeSettings()

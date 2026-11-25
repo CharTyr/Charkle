@@ -29,6 +29,11 @@ public protocol CharkleEngineProtocol: Sendable {
         targetFolderID: UUID?,
         targetBoardID: UUID?
     ) async throws -> [AssetRecord]
+    func importMaterialPackage(
+        at url: URL,
+        targetFolderID: UUID?,
+        targetBoardID: UUID?
+    ) async throws -> MaterialPackageImportResult
     func updateAssets(_ patch: AssetBatchPatch) async throws -> [AssetRecord]
     func permanentlyDeleteAssets(ids: [UUID]) async throws
     func markAssetOpened(id: UUID) async
@@ -122,6 +127,20 @@ public protocol CharkleEngineProtocol: Sendable {
 }
 
 public extension CharkleEngineProtocol {
+    func importMaterialPackage(
+        at url: URL,
+        targetFolderID: UUID?,
+        targetBoardID: UUID?
+    ) async throws -> MaterialPackageImportResult {
+        let imported = try await ingest([.fileURL(url)], targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+        return MaterialPackageImportResult(
+            packageName: url.deletingPathExtension().lastPathComponent,
+            importedAssets: imported,
+            createdFolderCount: 0,
+            rootFolderID: imported.first?.folderID ?? targetFolderID
+        )
+    }
+
     nonisolated func cachedThumbnailURL(for assetID: UUID, tier: ThumbnailTier) -> URL? {
         nil
     }

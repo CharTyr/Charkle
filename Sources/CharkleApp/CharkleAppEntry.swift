@@ -2,6 +2,7 @@ import AppKit
 import CharkleCanvas
 import CharkleCore
 import SwiftUI
+import UniformTypeIdentifiers
 import os
 
 private let appLogger = Logger(subsystem: "com.charkle.app", category: "Lifecycle")
@@ -634,6 +635,74 @@ public final class CharkleRuntime {
         }
     }
 
+    public func presentMaterialPackageImportPanel(targetFolderID: UUID? = nil) {
+        activateMainWindow()
+        let panel = NSOpenPanel()
+        panel.title = "导入素材包（.eaglepack / .library）"
+        panel.message = "选择一个或多个 .eaglepack 素材包、.library 素材库目录或导出的 .zip 包，将无损保留文件夹层级、标签、星级、注释与来源链接。"
+        panel.prompt = "导入"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.treatsFilePackagesAsDirectories = false
+        var allowed: [UTType] = [.zip, .folder]
+        if let packType = UTType(filenameExtension: "eaglepack") {
+            allowed.insert(packType, at: 0)
+        }
+        if let libType = UTType(filenameExtension: "library") {
+            allowed.insert(libType, at: 1)
+        }
+        panel.allowedContentTypes = allowed
+
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        let selectedURLs = panel.urls
+        let resolvedFolderID: UUID? = {
+            if let targetFolderID { return targetFolderID }
+            if case .folder(let currentID) = coordinator.selectedDestination {
+                return currentID
+            }
+            return nil
+        }()
+
+        coordinator.showToast(
+            selectedURLs.count == 1
+                ? "正在解析并导入「\(selectedURLs[0].lastPathComponent)」…"
+                : "正在解析并导入 \(selectedURLs.count) 个素材包…",
+            icon: "shippingbox"
+        )
+
+        Task {
+            let results = await library.importMaterialPackages(
+                urls: selectedURLs,
+                targetFolderID: resolvedFolderID
+            )
+            let totalAssets = results.reduce(0) { $0 + $1.importedAssets.count }
+            let totalFolders = results.reduce(0) { $0 + $1.createdFolderCount }
+            guard !results.isEmpty, (totalAssets > 0 || totalFolders > 0) else {
+                let err = library.lastError ?? "未在所选文件中发现可导入的素材包内容"
+                coordinator.showToast(err, icon: "exclamationmark.triangle", tone: .warning)
+                return
+            }
+
+            if results.count == 1, let rootID = results[0].rootFolderID {
+                coordinator.selectedDestination = .folder(rootID)
+                await library.applyDestination(.folder(rootID))
+            }
+            let summary: String
+            if results.count == 1 {
+                let name = results[0].packageName
+                summary = totalFolders > 0
+                    ? "已导入「\(name)」：新建 \(totalFolders) 个文件夹，收入 \(totalAssets) 项素材"
+                    : "已导入「\(name)」：收入 \(totalAssets) 项素材"
+            } else {
+                summary = totalFolders > 0
+                    ? "已导入 \(results.count) 个素材包：新建 \(totalFolders) 个文件夹，收入 \(totalAssets) 项素材"
+                    : "已导入 \(results.count) 个素材包：收入 \(totalAssets) 项素材"
+            }
+            coordinator.showToast(summary, icon: "shippingbox.fill", tone: .success)
+        }
+    }
+
     public func syncNowFromMenuBar() {
         Task {
             if let report = await syncAndAI.syncNow() {
@@ -726,6 +795,7 @@ private struct MainWindowSceneHost: View {
             onSyncHotkeysEnabled: { runtime.syncHotkeys(enabled: $0) },
             onSyncDefaultNotchTarget: { runtime.syncDefaultNotchTarget($0) },
             onEnterMinimalCaptureMode: { runtime.enterMinimalCaptureMode() },
+            onImportMaterialPackage: { runtime.presentMaterialPackageImportPanel() },
             onAppReady: { runtime.startAppKitServicesIfNeeded() }
         )
         .environment(\.charkleAccentSource, accentSource)
@@ -881,6 +951,13 @@ struct CharkleApp: App {
                     }
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("导入素材包（.eaglepack / .library）…") {
+                    runtime.presentMaterialPackageImportPanel()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
             }
 
             CommandGroup(replacing: .undoRedo) {

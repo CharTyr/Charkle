@@ -23,6 +23,7 @@ public struct SidebarView: View {
     public let library: LibraryStore
     public let moodboards: MoodboardStore
     public let expandedWidth: CGFloat
+    public let onImportMaterialPackage: (() -> Void)?
     public let onSelectDestination: (SidebarDestination) -> Void
     public let onDropAssetsOntoFolder: ([UUID], UUID?) -> Void
     public let onDropExternalOntoFolder: ([CaptureInput], UUID?) -> Void
@@ -93,6 +94,7 @@ public struct SidebarView: View {
         library: LibraryStore,
         moodboards: MoodboardStore,
         expandedWidth: CGFloat = AppCoordinatorStore.defaultSidebarWidth,
+        onImportMaterialPackage: (() -> Void)? = nil,
         onSelectDestination: @escaping (SidebarDestination) -> Void,
         onDropAssetsOntoFolder: @escaping ([UUID], UUID?) -> Void,
         onDropExternalOntoFolder: @escaping ([CaptureInput], UUID?) -> Void,
@@ -103,6 +105,7 @@ public struct SidebarView: View {
         self.library = library
         self.moodboards = moodboards
         self.expandedWidth = expandedWidth
+        self.onImportMaterialPackage = onImportMaterialPackage
         self.onSelectDestination = onSelectDestination
         self.onDropAssetsOntoFolder = onDropAssetsOntoFolder
         self.onDropExternalOntoFolder = onDropExternalOntoFolder
@@ -777,6 +780,19 @@ public struct SidebarView: View {
                             .frame(width: 20)
                             .help("排序文件夹")
                         }
+                        if let onImportMaterialPackage {
+                            Button {
+                                onImportMaterialPackage()
+                            } label: {
+                                Image(systemName: "square.and.arrow.down")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 20, height: 22)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("导入 .eaglepack / .library 素材包… (⌘⇧I)")
+                        }
                         Button {
                             toggleFolderCreation(target: .root)
                         } label: {
@@ -787,7 +803,7 @@ public struct SidebarView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("新建文件夹（也可直接从 Finder 拖入文件夹至此）")
+                        .help("新建文件夹（也可直接拖入外部文件夹或 .eaglepack 素材包）")
                     }
                     .padding(.trailing, 10)
                     .padding(.vertical, 2)
@@ -805,7 +821,7 @@ public struct SidebarView: View {
                     }
 
                     if library.folders.isEmpty && creationTarget == nil {
-                        Text("暂无文件夹，点击 + 或直接拖入外部文件夹")
+                        Text("暂无文件夹，点击 + 或拖入文件夹 / .eaglepack 素材包")
                             .font(.system(size: 11.5))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 14)
