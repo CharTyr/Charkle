@@ -241,11 +241,12 @@ public struct ExternalAgentsSettingsPane: View {
                         """
                         charkle doctor
                         charkle overview
-                        charkle search "暖调陶艺" --subfolders --limit 20
-                        charkle semantic "极简陶瓷质感" --limit 12
-                        charkle similar <asset-uuid> --limit 8
+                        charkle search --folder 插画 --tone cool --diversify --out /tmp/sheet.jpg
+                        charkle semantic "夏日海边蓝天女孩" --fast --diversify --limit 12
+                        charkle semantic --queries "人物动态,夏日海边晴空,极简白底" --out /tmp/brief.jpg
+                        charkle similar <asset-id> --unlike-ids <avoid-id> --limit 8
+                        charkle asset <id1> <id2> <id3>
                         charkle inbox --suggest
-                        charkle contact-sheet --inbox --out /tmp/inbox.jpg
                         charkle board patch <board-id> --add-note "配色已定稿"
                         charkle board export <board-id> --out /tmp/board.png --dark
                         charkle completions zsh

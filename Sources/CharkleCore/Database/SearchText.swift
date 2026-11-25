@@ -139,6 +139,68 @@ nonisolated enum SearchText {
         tokenize(text).joined(separator: " ")
     }
 
+    private static let queryStopWords: Set<String> = [
+        "的", "了", "和", "与", "或", "在", "是", "有", "之", "中", "上", "下", "把", "给", "被", "将", "让", "等",
+        "the", "and", "for", "with", "from", "that", "this", "into", "of", "in", "on", "at", "to", "a", "an", "or"
+    ]
+
+    /// Segments a natural-language query (including unspaced Chinese phrases like "夏日海边蓝天女孩")
+    /// into deduplicated semantic search terms using macOS `CFStringTokenizer` word boundaries.
+    static func queryTerms(_ text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var results: [String] = []
+        var seen = Set<String>()
+        func appendTerm(_ raw: String) {
+            let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return }
+            let norm = normalize(cleaned)
+            guard !norm.isEmpty, !queryStopWords.contains(norm) else { return }
+            if norm.count == 1 && !containsHan(norm) { return }
+            if seen.insert(norm).inserted {
+                results.append(cleaned)
+            }
+        }
+
+        // First split on explicit whitespace / punctuation so user-separated chunks stay intact.
+        let chunks = trimmed.split { !$0.isLetter && !$0.isNumber && !hasHan($0) }.map(String.init)
+        for chunk in chunks {
+            guard !chunk.isEmpty else { continue }
+            if !containsHan(chunk) {
+                appendTerm(chunk)
+                continue
+            }
+            // Segment CJK (or mixed CJK+ASCII) chunk via CFStringTokenizer word boundaries.
+            let ns = chunk as NSString
+            let range = CFRange(location: 0, length: ns.length)
+            if let tokenizer = CFStringTokenizerCreate(
+                nil,
+                chunk as CFString,
+                range,
+                kCFStringTokenizerUnitWordBoundary,
+                zhCNLocale as CFLocale
+            ) {
+                var extractedAny = false
+                while CFStringTokenizerAdvanceToNextToken(tokenizer).rawValue != 0 {
+                    let tokenRange = CFStringTokenizerGetCurrentTokenRange(tokenizer)
+                    guard tokenRange.length > 0 else { continue }
+                    let piece = ns.substring(with: NSRange(location: tokenRange.location, length: tokenRange.length))
+                    if piece.contains(where: { $0.isLetter || $0.isNumber || hasHan($0) }) {
+                        appendTerm(piece)
+                        extractedAny = true
+                    }
+                }
+                if !extractedAny {
+                    appendTerm(chunk)
+                }
+            } else {
+                appendTerm(chunk)
+            }
+        }
+        return results
+    }
+
     static func ftsQuery(_ text: String) -> String {
         var clauses: [String] = []
         let chunks = text.split { !$0.isLetter && !$0.isNumber && !hasHan($0) }

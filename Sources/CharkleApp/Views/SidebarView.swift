@@ -22,6 +22,7 @@ public struct SidebarView: View {
     public let coordinator: AppCoordinatorStore
     public let library: LibraryStore
     public let moodboards: MoodboardStore
+    public let expandedWidth: CGFloat
     public let onSelectDestination: (SidebarDestination) -> Void
     public let onDropAssetsOntoFolder: ([UUID], UUID?) -> Void
     public let onDropExternalOntoFolder: ([CaptureInput], UUID?) -> Void
@@ -91,6 +92,7 @@ public struct SidebarView: View {
         coordinator: AppCoordinatorStore,
         library: LibraryStore,
         moodboards: MoodboardStore,
+        expandedWidth: CGFloat = AppCoordinatorStore.defaultSidebarWidth,
         onSelectDestination: @escaping (SidebarDestination) -> Void,
         onDropAssetsOntoFolder: @escaping ([UUID], UUID?) -> Void,
         onDropExternalOntoFolder: @escaping ([CaptureInput], UUID?) -> Void,
@@ -100,6 +102,7 @@ public struct SidebarView: View {
         self.coordinator = coordinator
         self.library = library
         self.moodboards = moodboards
+        self.expandedWidth = expandedWidth
         self.onSelectDestination = onSelectDestination
         self.onDropAssetsOntoFolder = onDropAssetsOntoFolder
         self.onDropExternalOntoFolder = onDropExternalOntoFolder
@@ -166,10 +169,10 @@ public struct SidebarView: View {
         Group {
             if coordinator.isSidebarCollapsed {
                 collapsedRailBody
-                    .frame(width: 76)
+                    .frame(width: AppCoordinatorStore.collapsedSidebarWidth)
             } else {
                 expandedSidebarBody
-                    .frame(width: 232)
+                    .frame(width: expandedWidth)
             }
         }
         .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)

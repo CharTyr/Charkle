@@ -294,6 +294,17 @@ public final actor LibraryDatabase {
         return set
     }
 
+    /// Sub-millisecond primary-key range scan resolving an uppercase UUID prefix (8+ chars) to matching asset UUIDs.
+    public func assetIDs(matchingPrefix prefix: String, limit: Int = 5) throws -> [UUID] {
+        syncExternalDataVersionIfNeeded()
+        let upper = prefix.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard upper.count >= 8 else { return [] }
+        return try connection.query(
+            "SELECT id FROM assets WHERE id >= ? AND id < ? LIMIT ?",
+            [.text(upper), .text(upper + "\u{FFFF}"), .integer(Int64(max(1, limit)))]
+        ) { UUID(uuidString: $0.text(0)) }.compactMap { $0 }
+    }
+
     /// Lightweight SQLite projection returning `(assetID -> created)` without decoding JSON payloads,
     /// enabling thumbnail sync to prioritize newest / first-screen gallery cards first.
     func assetCreatedAtByID() throws -> [UUID: Double] {

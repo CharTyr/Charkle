@@ -60,7 +60,7 @@ public nonisolated enum ContactSheetRenderer {
         let rows = Int(ceil(Double(count) / Double(columns)))
         let margin: CGFloat = 18
         let gap: CGFloat = 14
-        let canvasWidth = CGFloat(max(640, min(2560, maxCanvasWidth)))
+        let canvasWidth = CGFloat(max(512, min(2560, maxCanvasWidth)))
         let cellWidth = floor((canvasWidth - margin * 2 - gap * CGFloat(columns - 1)) / CGFloat(columns))
         let maxHeightBudget: CGFloat = 4096
         let maxCellHeight = floor((maxHeightBudget - margin * 2 - gap * CGFloat(max(0, rows - 1))) / CGFloat(max(1, rows)))

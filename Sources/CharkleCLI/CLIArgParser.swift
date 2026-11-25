@@ -65,13 +65,23 @@ enum CLIArgParser {
         "help",
         "version",
         "json",
+        "pretty",
         "compact",
+        "human",
         "no-color",
         "inbox",
         "untagged",
         "trashed",
         "include-trashed",
         "subfolders",
+        "no-subfolders",
+        "diversify",
+        "facets",
+        "no-facets",
+        "fast",
+        "visual-rerank",
+        "no-visual-rerank",
+        "full",
         "pinned",
         "dark",
         "freeform",
@@ -187,12 +197,13 @@ enum CLIArgParser {
         return ParsedCLIArgs(positionals: positionals, values: values, booleans: flags)
     }
 
-    /// Extracts global options (`--library-dir`, `--json`, `--compact`, `--no-color`) from raw CLI args
+    /// Extracts global options (`--library-dir`, `--json`/`--pretty`, `--compact`, `--human`, `--no-color`) from raw CLI args
     /// while preserving subcommand arguments and positional tokens intact.
     struct GlobalOptions: Sendable {
         var libraryDir: URL?
         var explicitJSON: Bool = false
         var compactJSON: Bool = false
+        var forceHuman: Bool = false
         var noColor: Bool = false
         var remaining: [String] = []
     }
@@ -224,12 +235,15 @@ enum CLIArgParser {
                 let expanded = (val as NSString).expandingTildeInPath
                 opts.libraryDir = URL(fileURLWithPath: expanded, isDirectory: true)
                 i += 1
-            } else if token == "--json" || token == "-j" {
+            } else if token == "--json" || token == "-j" || token == "--pretty" {
                 opts.explicitJSON = true
                 i += 1
             } else if token == "--compact" {
                 opts.explicitJSON = true
                 opts.compactJSON = true
+                i += 1
+            } else if token == "--human" {
+                opts.forceHuman = true
                 i += 1
             } else if token == "--no-color" {
                 opts.noColor = true

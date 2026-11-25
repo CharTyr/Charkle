@@ -107,6 +107,154 @@ struct PerformanceAndNotchTests {
         ))
     }
 
+    @Test("Notch predictive upward drag approach opens early below menu bar while rejecting unrelated desktop drags")
+    func notchPredictiveUpwardApproachAndMissionControlYield() {
+        let screen = NSRect(x: 0, y: 0, width: 1512, height: 982)
+        let notchW: CGFloat = 204
+        let notchH: CGFloat = 37
+
+        // 1) Fast upward flick from center-screen triggers early (~290pt below top bezel, well below menu bar)
+        let fastStart = NSPoint(x: screen.midX, y: screen.maxY - 460)
+        let fastCurrent = NSPoint(x: screen.midX, y: screen.maxY - 290)
+        let fastSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: NSPoint(x: screen.midX, y: screen.maxY - 390), timestamp: 1.00),
+            NotchDragMotionSample(location: NSPoint(x: screen.midX, y: screen.maxY - 340), timestamp: 1.05),
+            NotchDragMotionSample(location: fastCurrent, timestamp: 1.10)
+        ]
+        #expect(NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: fastCurrent,
+            dragStartLocation: fastStart,
+            recentSamples: fastSamples,
+            screenFrame: screen,
+            hasPhysicalNotch: true,
+            notchWidth: notchW,
+            notchHeight: notchH
+        ))
+
+        // 2) Diagonal upward drag from right side heading toward top-center notch triggers early
+        let diagStart = NSPoint(x: screen.midX + 240, y: screen.maxY - 400)
+        let diagCurrent = NSPoint(x: screen.midX + 160, y: screen.maxY - 240)
+        let diagSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: NSPoint(x: screen.midX + 205, y: screen.maxY - 315), timestamp: 2.00),
+            NotchDragMotionSample(location: diagCurrent, timestamp: 2.10)
+        ]
+        #expect(NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: diagCurrent,
+            dragStartLocation: diagStart,
+            recentSamples: diagSamples,
+            screenFrame: screen,
+            hasPhysicalNotch: true,
+            notchWidth: notchW,
+            notchHeight: notchH
+        ))
+
+        // 3) Slow deliberate upward drag triggers in the low-altitude arrival band (~140pt below top)
+        let slowStart = NSPoint(x: screen.midX, y: screen.maxY - 260)
+        let slowCurrent = NSPoint(x: screen.midX, y: screen.maxY - 140)
+        let slowSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: NSPoint(x: screen.midX, y: screen.maxY - 152), timestamp: 3.00),
+            NotchDragMotionSample(location: slowCurrent, timestamp: 3.12)
+        ]
+        #expect(NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: slowCurrent,
+            dragStartLocation: slowStart,
+            recentSamples: slowSamples,
+            screenFrame: screen,
+            hasPhysicalNotch: true,
+            notchWidth: notchW,
+            notchHeight: notchH
+        ))
+
+        // 4) Horizontal drag in upper workspace (reordering files/items sideways) MUST NOT trigger
+        let horizStart = NSPoint(x: screen.midX - 160, y: screen.maxY - 150)
+        let horizCurrent = NSPoint(x: screen.midX + 10, y: screen.maxY - 146)
+        let horizSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: NSPoint(x: screen.midX - 90, y: screen.maxY - 148), timestamp: 4.00),
+            NotchDragMotionSample(location: horizCurrent, timestamp: 4.10)
+        ]
+        #expect(!NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: horizCurrent,
+            dragStartLocation: horizStart,
+            recentSamples: horizSamples,
+            screenFrame: screen,
+            hasPhysicalNotch: true,
+            notchWidth: notchW,
+            notchHeight: notchH
+        ))
+
+        // 5) Dragging a link/item DOWNWARD starting inside the top arrival band MUST NOT trigger
+        let downStart = NSPoint(x: screen.midX, y: screen.maxY - 56)
+        let downCurrent = NSPoint(x: screen.midX, y: screen.maxY - 82)
+        let downSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: downStart, timestamp: 5.00),
+            NotchDragMotionSample(location: downCurrent, timestamp: 5.08)
+        ]
+        #expect(!NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: downCurrent,
+            dragStartLocation: downStart,
+            recentSamples: downSamples,
+            screenFrame: screen,
+            hasPhysicalNotch: true,
+            notchWidth: notchW,
+            notchHeight: notchH
+        ))
+
+        // 6) Fast upward drag aimed at far-right corner (not top-center notch) MUST NOT trigger
+        let cornerStart = NSPoint(x: screen.midX + 520, y: screen.maxY - 420)
+        let cornerCurrent = NSPoint(x: screen.midX + 520, y: screen.maxY - 200)
+        let cornerSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: NSPoint(x: screen.midX + 520, y: screen.maxY - 300), timestamp: 6.00),
+            NotchDragMotionSample(location: cornerCurrent, timestamp: 6.10)
+        ]
+        #expect(!NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: cornerCurrent,
+            dragStartLocation: cornerStart,
+            recentSamples: cornerSamples,
+            screenFrame: screen,
+            hasPhysicalNotch: true,
+            notchWidth: notchW,
+            notchHeight: notchH
+        ))
+
+        // 7) External non-notch display fast upward drag triggers early before menu bar
+        let externalScreen = NSRect(x: 0, y: 0, width: 2560, height: 1440)
+        let extStart = NSPoint(x: externalScreen.midX, y: externalScreen.maxY - 520)
+        let extCurrent = NSPoint(x: externalScreen.midX, y: externalScreen.maxY - 300)
+        let extSamples: [NotchDragMotionSample] = [
+            NotchDragMotionSample(location: NSPoint(x: externalScreen.midX, y: externalScreen.maxY - 410), timestamp: 7.00),
+            NotchDragMotionSample(location: extCurrent, timestamp: 7.10)
+        ]
+        #expect(NotchDropGeometry.shouldTriggerUpwardDragApproach(
+            currentLocation: extCurrent,
+            dragStartLocation: extStart,
+            recentSamples: extSamples,
+            screenFrame: externalScreen,
+            hasPhysicalNotch: false,
+            notchWidth: 204,
+            notchHeight: 0
+        ))
+
+        // 8) Stale paused samples (> 0.35s gap) decay velocity to zero instead of hallucinating speed
+        let staleVelocity = NotchDropGeometry.recentDragVelocity(from: [
+            NotchDragMotionSample(location: NSPoint(x: 500, y: 300), timestamp: 1.00),
+            NotchDragMotionSample(location: NSPoint(x: 500, y: 700), timestamp: 1.80)
+        ])
+        #expect(staleVelocity == .zero)
+
+        // 9) Mission Control detector ignores idle layer-20 Dock window and detects layer-18 overlay
+        let idleDock = [NotchDockWindowSnapshot(layer: 20, sharingState: 0, bounds: CGRect(x: 0, y: 0, width: 1710, height: 1112))]
+        #expect(!NotchDropGeometry.containsMissionControlOverlay(dockWindows: idleDock))
+
+        let tinyLayer18 = [NotchDockWindowSnapshot(layer: 18, sharingState: 0, bounds: CGRect(x: 0, y: 0, width: 120, height: 40))]
+        #expect(!NotchDropGeometry.containsMissionControlOverlay(dockWindows: tinyLayer18))
+
+        let activeMC = [
+            NotchDockWindowSnapshot(layer: 20, sharingState: 0, bounds: CGRect(x: 0, y: 0, width: 1710, height: 1112)),
+            NotchDockWindowSnapshot(layer: 18, sharingState: 0, bounds: CGRect(x: 0, y: 0, width: 1710, height: 1112))
+        ]
+        #expect(NotchDropGeometry.containsMissionControlOverlay(dockWindows: activeMC))
+    }
+
     @Test("Hover muted preview eligibility & local-only cachedOriginalURL never trigger cloud downloads")
     @MainActor
     func hoverMediaPreviewEligibilityAndLocalLookup() async throws {

@@ -94,9 +94,73 @@ public final class AppCoordinatorStore {
         didSet { UserDefaults.standard.set(hasCompletedOnboarding, forKey: Keys.hasCompletedOnboarding) }
     }
 
+    public static let collapsedSidebarWidth: CGFloat = SidebarResizeGeometry.collapsedWidth
+    public static let defaultSidebarWidth: CGFloat = SidebarResizeGeometry.defaultWidth
+    public static let minSidebarWidth: CGFloat = SidebarResizeGeometry.minWidth
+    public static let maxSidebarWidth: CGFloat = SidebarResizeGeometry.maxWidth
+    public static let defaultInspectorWidth: CGFloat = SidebarResizeGeometry.defaultInspectorWidth
+    public static let minInspectorWidth: CGFloat = SidebarResizeGeometry.minInspectorWidth
+    public static let maxInspectorWidth: CGFloat = SidebarResizeGeometry.maxInspectorWidth
+    public static let minCenterWorkspaceWidth: CGFloat = SidebarResizeGeometry.minCenterWorkspaceWidth
+
+    /// Clamps a requested sidebar width to safe visual bounds (`188...420pt`) while guaranteeing
+    /// the center workspace always retains at least `minCenterWorkspaceWidth` when the window narrows.
+    public static func clampedSidebarWidth(
+        _ rawWidth: CGFloat,
+        windowWidth: CGFloat? = nil,
+        isInspectorVisible: Bool = false,
+        inspectorWidth: CGFloat = defaultInspectorWidth
+    ) -> CGFloat {
+        SidebarResizeGeometry.clampedWidth(
+            rawWidth,
+            windowWidth: windowWidth,
+            isInspectorVisible: isInspectorVisible,
+            inspectorWidth: inspectorWidth
+        )
+    }
+
+    /// Clamps a requested right Inspector width to safe visual bounds (`260...480pt`) while preserving
+    /// center workspace / Quick Look stage headroom.
+    public static func clampedInspectorWidth(
+        _ rawWidth: CGFloat,
+        windowWidth: CGFloat? = nil,
+        sidebarOccupiedWidth: CGFloat = 0
+    ) -> CGFloat {
+        SidebarResizeGeometry.clampedInspectorWidth(
+            rawWidth,
+            windowWidth: windowWidth,
+            sidebarOccupiedWidth: sidebarOccupiedWidth
+        )
+    }
+
     /// Collapsible icon-only sidebar rail (⌘\).
     public var isSidebarCollapsed: Bool {
         didSet { UserDefaults.standard.set(isSidebarCollapsed, forKey: Keys.sidebarCollapsed) }
+    }
+
+    /// Persisted user-adjusted expanded sidebar width (`188...420pt`, default `232pt`).
+    public var sidebarWidth: CGFloat {
+        didSet {
+            let clamped = Self.clampedSidebarWidth(sidebarWidth)
+            if abs(clamped - sidebarWidth) > 0.01 {
+                sidebarWidth = clamped
+                return
+            }
+            UserDefaults.standard.set(Double(clamped), forKey: Keys.sidebarWidth)
+        }
+    }
+
+    /// Persisted user-adjusted right Inspector width (`260...480pt`, default `300pt`),
+    /// shared 1:1 between the main workspace and Quick Look overlay.
+    public var inspectorWidth: CGFloat {
+        didSet {
+            let clamped = Self.clampedInspectorWidth(inspectorWidth)
+            if abs(clamped - inspectorWidth) > 0.01 {
+                inspectorWidth = clamped
+                return
+            }
+            UserDefaults.standard.set(Double(clamped), forKey: Keys.inspectorWidth)
+        }
     }
 
     /// Gallery layout mode: vertical masonry vs. horizontal justified rows.
@@ -176,6 +240,8 @@ public final class AppCoordinatorStore {
         static let launchInMinimalCaptureMode = "charkle.launchInMinimalCaptureMode"
         static let enterMinimalModeOnWindowClose = "charkle.enterMinimalModeOnWindowClose"
         static let sidebarCollapsed = "charkle.sidebarCollapsed"
+        static let sidebarWidth = "charkle.sidebarWidth"
+        static let inspectorWidth = "charkle.inspectorWidth"
         static let galleryLayoutMode = "charkle.galleryLayoutMode"
         static let accentSource = "charkle.accentSource"
         static let hasCompletedOnboarding = "charkle.hasCompletedOnboarding"
@@ -194,6 +260,10 @@ public final class AppCoordinatorStore {
         self.enterMinimalModeOnWindowClose = defaults.object(forKey: Keys.enterMinimalModeOnWindowClose) as? Bool ?? false
         self.isMinimalCaptureMode = launchMinimal
         self.isSidebarCollapsed = defaults.object(forKey: Keys.sidebarCollapsed) as? Bool ?? false
+        let storedSidebarWidth = defaults.object(forKey: Keys.sidebarWidth) as? Double
+        self.sidebarWidth = storedSidebarWidth.map { Self.clampedSidebarWidth(CGFloat($0)) } ?? Self.defaultSidebarWidth
+        let storedInspectorWidth = defaults.object(forKey: Keys.inspectorWidth) as? Double
+        self.inspectorWidth = storedInspectorWidth.map { Self.clampedInspectorWidth(CGFloat($0)) } ?? Self.defaultInspectorWidth
         self.galleryLayoutMode = defaults.string(forKey: Keys.galleryLayoutMode)
             .flatMap(GalleryLayoutMode.init(rawValue:)) ?? .verticalMasonry
         self.accentSource = defaults.string(forKey: Keys.accentSource)

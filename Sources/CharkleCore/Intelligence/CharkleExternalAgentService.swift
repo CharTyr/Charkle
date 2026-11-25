@@ -31,7 +31,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
 
         public static func json(_ object: Any, isError: Bool = false) -> ToolOutput {
-            let text = CharkleExternalAgentService.encodePrettyJSON(object)
+            let text = CharkleExternalAgentService.encodeCompactJSON(object)
             return ToolOutput(content: [.text(text)], isError: isError)
         }
 
@@ -219,7 +219,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                     "name": "charkle",
                     "version": Self.serverVersion
                 ],
-                "instructions": "Charkle is a macOS visual reference library and moodboard studio. Start with `library_overview` to inspect folders, smart folders, and tags. Use `search_assets` (with pagination, subfolder recursion, color, media kind, and smart folder filters), `semantic_search`, `find_similar_assets`, `quick_jump`, or `list_inbox` to locate references. Use `render_contact_sheet` to visually inspect up to 16 numbered thumbnails in one image, `get_asset` (with optional `include_image: true`) for full EXIF, AI generation prompts, social post, and GitHub metadata, and `get_board_context` / `export_board_image` to inspect moodboards. Safe write tools (`organize_assets`, `create_folder`, `update_folder`, `ingest_asset`, `compose_moodboard`, `patch_moodboard`, `trash_assets`, `analyze_assets`) are available when write access is enabled in Charkle Settings; permanent deletion is never permitted."
+                "instructions": "Charkle visual reference library & moodboard studio. Low-token workflow: (1) Call `library_overview` first to read compact folder semantic profiles (`recursiveAssetCount`, `topTags`, `palette`), aspect mix, and boards. (2) Recall + inspect visually in 1 call via `semantic_search` (bilingual EN↔ZH, CIELAB `tone`, multi-direction `queries[]`, `seed_asset_ids`, `unlike_asset_ids` repulsion) or `search_assets` with `diversify:true` and `render_contact_sheet:true` (auto ultra-lean `visual` manifest); use `facets` to narrow large result sets. (3) 8-char short ID prefixes work in all tools; batch-call `get_asset(asset_ids:[...])` only on finalists. Permanent deletion is never permitted."
             ]
             return makeResultObject(id: id, result: result)
 
@@ -329,18 +329,27 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         if uri == "charkle://folders" {
             do {
                 let folders = try await engine.fetchFolders()
+                let activeAssets = try await engine.fetchAssets(matching: FilterCriteria(includeTrashed: false))
                 let paths = Self.buildFolderPaths(folders)
+                let profiles = Self.buildFolderProfiles(folders: folders, assets: activeAssets)
                 let items: [[String: Any]] = FolderHierarchyNode.flattened(from: folders).map { node in
-                    [
+                    var entry: [String: Any] = [
                         "id": node.folder.id.uuidString,
                         "name": node.folder.name,
                         "path": paths[node.folder.id] ?? node.folder.name,
-                        "parentID": node.folder.parentID?.uuidString ?? "",
                         "depth": node.depth,
-                        "assetCount": node.folder.assetCount,
-                        "colorHex": node.folder.colorHex ?? "",
-                        "customSymbol": node.folder.customSymbol ?? ""
+                        "assetCount": profiles[node.folder.id]?.directCount ?? node.folder.assetCount
                     ]
+                    if let pid = node.folder.parentID { entry["parentID"] = pid.uuidString }
+                    if let p = profiles[node.folder.id] {
+                        if p.recursiveCount > p.directCount { entry["recursiveAssetCount"] = p.recursiveCount }
+                        if !p.topTags.isEmpty { entry["topTags"] = p.topTags }
+                        if !p.palette.isEmpty { entry["palette"] = p.palette }
+                        if let asp = p.dominantAspect { entry["dominantAspect"] = asp }
+                    }
+                    if let hex = node.folder.colorHex, !hex.isEmpty { entry["colorHex"] = hex }
+                    if let sym = node.folder.customSymbol, !sym.isEmpty { entry["customSymbol"] = sym }
+                    return entry
                 }
                 return textOutput(.json(["count": items.count, "folders": items]))
             } catch {
@@ -420,19 +429,19 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             switch name {
             // Read tools (12)
             case "library_overview":
-                return try await handleLibraryOverview(policy: policy, channel: channel)
+                return try await handleLibraryOverview(args, policy: policy, channel: channel)
             case "search_assets":
-                return try await handleSearchAssets(args)
+                return try await handleSearchAssets(args, policy: policy, channel: channel)
             case "list_inbox":
-                return try await handleListInbox(args)
+                return try await handleListInbox(args, policy: policy, channel: channel)
             case "get_asset":
                 return try await handleGetAsset(args)
             case "render_contact_sheet":
                 return try await handleRenderContactSheet(args, policy: policy, channel: channel)
             case "find_similar_assets":
-                return try await handleFindSimilarAssets(args)
+                return try await handleFindSimilarAssets(args, policy: policy, channel: channel)
             case "semantic_search":
-                return try await handleSemanticSearch(args)
+                return try await handleSemanticSearch(args, policy: policy, channel: channel)
             case "quick_jump":
                 return try await handleQuickJump(args)
             case "suggest_folder":
@@ -472,62 +481,122 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
     // MARK: - Read Tool Handlers
 
-    private func handleLibraryOverview(policy: ExternalAgentConfig, channel: ExternalAgentChannel) async throws -> ToolOutput {
-        let overview = try await tools.libraryOverview()
+    private func handleLibraryOverview(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
+        let compact = Self.boolArg(args["compact"]) ?? true
+        let includeProfiles = Self.boolArg(args["include_folder_profiles"]) ?? true
+        let includeBoards = Self.boolArg(args["include_boards"]) ?? true
+        let topTagsLimit = max(5, min(80, Self.intArg(args["top_tags_limit"]) ?? 30))
+
+        let activeAssets = try await engine.fetchAssets(matching: FilterCriteria(includeTrashed: false))
         let trashedAssets = try await engine.fetchAssets(matching: FilterCriteria(onlyTrashed: true))
-        let smartFolders = try await engine.fetchSmartFolders()
-        let untaggedCount: Int
-        let smartFolderPayloads: [[String: Any]]
-        if smartFolders.isEmpty {
-            untaggedCount = try await engine.fetchAssets(matching: FilterCriteria(onlyUntagged: true)).count
-            smartFolderPayloads = []
-        } else {
-            let activeAssets = try await engine.fetchAssets(matching: FilterCriteria(includeTrashed: false))
-            untaggedCount = activeAssets.filter { $0.tags.isEmpty }.count
-            smartFolderPayloads = smartFolders.map { sf in
-                [
-                    "id": sf.id.uuidString,
-                    "name": sf.name,
-                    "colorHex": sf.colorHex ?? "",
-                    "matchCount": activeAssets.filter { sf.rule.matches($0) }.count
-                ]
-            }
-        }
         let foldersRaw = try await engine.fetchFolders()
-        let folderByID = Dictionary(uniqueKeysWithValues: foldersRaw.map { ($0.id, $0) })
+        let smartFolders = try await engine.fetchSmartFolders()
+        let boards = try await engine.fetchBoards()
         let syncCfg = await engine.syncConfig()
         let aiCfg = await engine.aiConfig()
-        let cache = await engine.cacheStats()
 
-        let payload: [String: Any] = [
-            "totalAssets": overview.totalAssets,
-            "inboxCount": overview.inboxCount,
+        let folderPathByID = Self.buildFolderPaths(foldersRaw)
+        let folderProfiles = Self.buildFolderProfiles(folders: foldersRaw, assets: activeAssets)
+
+        var inboxCount = 0
+        var untaggedCount = 0
+        var ratedCount = 0
+        var aiDescribedCount = 0
+        var mediaKindCounts: [String: Int] = [:]
+        var aspectShapeCounts: [String: Int] = [:]
+        var globalTagCounts: [String: Int] = [:]
+
+        for asset in activeAssets {
+            if asset.folderID == nil { inboxCount += 1 }
+            if asset.tags.isEmpty { untaggedCount += 1 }
+            if asset.rating > 0 { ratedCount += 1 }
+            if let d = asset.aiDescription, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                aiDescribedCount += 1
+            }
+            mediaKindCounts[asset.mediaKind.rawValue, default: 0] += 1
+            aspectShapeCounts[asset.aspectShape.rawValue, default: 0] += 1
+            for tag in asset.tags {
+                globalTagCounts[tag, default: 0] += 1
+            }
+        }
+
+        let sortedFolders = foldersRaw.sorted {
+            (folderPathByID[$0.id] ?? $0.name).localizedStandardCompare(folderPathByID[$1.id] ?? $1.name) == .orderedAscending
+        }
+
+        let folderPayloads: [[String: Any]] = sortedFolders.map { folder in
+            let profile = folderProfiles[folder.id]
+            let fullID = folder.id.uuidString
+            var dict: [String: Any] = [
+                "id": compact ? String(fullID.prefix(8)) : fullID,
+                "path": folderPathByID[folder.id] ?? folder.name,
+                "assetCount": profile?.directCount ?? folder.assetCount
+            ]
+            if !compact {
+                dict["name"] = folder.name
+                if let pid = folder.parentID { dict["parentID"] = pid.uuidString }
+            }
+            if let profile {
+                if profile.recursiveCount > profile.directCount {
+                    dict["recursiveAssetCount"] = profile.recursiveCount
+                }
+                if includeProfiles {
+                    if !profile.topTags.isEmpty { dict["topTags"] = profile.topTags }
+                    if !profile.palette.isEmpty { dict["palette"] = profile.palette }
+                    if let asp = profile.dominantAspect { dict["dominantAspect"] = asp }
+                }
+            }
+            if let hex = folder.colorHex, !hex.isEmpty { dict["colorHex"] = hex }
+            if let sym = folder.customSymbol, !sym.isEmpty { dict["customSymbol"] = sym }
+            return dict
+        }
+
+        let smartFolderPayloads: [[String: Any]] = smartFolders.map { sf in
+            var dict: [String: Any] = [
+                "id": compact ? String(sf.id.uuidString.prefix(8)) : sf.id.uuidString,
+                "name": sf.name,
+                "matchCount": activeAssets.filter { sf.rule.matches($0) }.count
+            ]
+            if let hex = sf.colorHex, !hex.isEmpty { dict["colorHex"] = hex }
+            return dict
+        }
+
+        let topTags = globalTagCounts
+            .sorted { lhs, rhs in
+                if lhs.value != rhs.value { return lhs.value > rhs.value }
+                return lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
+            }
+            .prefix(topTagsLimit)
+            .map { ["name": $0.key, "count": $0.value] as [String: Any] }
+
+        var payload: [String: Any] = [
+            "totalAssets": activeAssets.count,
+            "inboxCount": inboxCount,
             "untaggedCount": untaggedCount,
             "trashedCount": trashedAssets.count,
-            "boardCount": overview.boardCount,
+            "ratedCount": ratedCount,
+            "aiDescribedCount": aiDescribedCount,
+            "boardCount": boards.count,
             "mcpEnabled": policy.mcpEnabled,
             "cliEnabled": policy.cliEnabled,
             "accessLevel": policy.accessLevel.rawValue,
             "canWrite": policy.allowsWrite(for: channel),
             "syncMode": syncCfg.mode.rawValue,
             "aiConfigured": aiCfg.provider != .disabled,
-            "mediaKindCounts": overview.mediaKindCounts,
-            "folders": overview.folders.map { folder -> [String: Any] in
-                [
-                    "id": folder.id.uuidString,
-                    "name": folder.name,
-                    "path": folder.path,
-                    "parentID": folderByID[folder.id]?.parentID?.uuidString ?? "",
-                    "assetCount": folder.assetCount,
-                    "colorHex": folderByID[folder.id]?.colorHex ?? "",
-                    "customSymbol": folderByID[folder.id]?.customSymbol ?? ""
-                ]
-            },
+            "mediaKindCounts": mediaKindCounts,
+            "aspectShapeCounts": aspectShapeCounts,
+            "folders": folderPayloads,
             "smartFolders": smartFolderPayloads,
-            "topTags": overview.topTags.prefix(40).map { tag -> [String: Any] in
-                ["name": tag.name, "count": tag.count]
-            },
-            "cache": [
+            "topTags": topTags
+        ]
+
+        if !compact {
+            let cache = await engine.cacheStats()
+            payload["cache"] = [
                 "thumbnailBytes": cache.thumbnailBytes,
                 "originalCacheBytes": cache.originalCacheBytes,
                 "pinnedOfflineBytes": cache.pinnedOfflineBytes,
@@ -535,46 +604,138 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                 "cachedOriginalCount": cache.cachedOriginalCount,
                 "pinnedAssetCount": cache.pinnedAssetCount
             ]
-        ]
+        }
+
+        if includeBoards && !boards.isEmpty {
+            payload["boards"] = boards.prefix(12).map { b -> [String: Any] in
+                let bid = b.id.uuidString
+                var entry: [String: Any] = [
+                    "id": compact ? String(bid.prefix(8)) : bid,
+                    "title": b.title,
+                    "itemCount": b.itemCount
+                ]
+                if !b.paletteHexes.isEmpty {
+                    entry["paletteHexes"] = Array(b.paletteHexes.prefix(4).map { $0.uppercased() })
+                }
+                return entry
+            }
+        }
         return .json(payload)
     }
 
-    private func handleSearchAssets(_ args: [String: Any]) async throws -> ToolOutput {
+    private func handleSearchAssets(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
+        let wantSheet = Self.boolArg(args["render_contact_sheet"]) ?? false
+        let includeImage = Self.boolArg(args["include_image"]) ?? true
+        var validatedOutURL: URL?
+        if wantSheet, let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
+            switch validateExportOutputPath(outPath, allowedExtensions: ["jpg", "jpeg"], policy: policy, channel: channel) {
+            case .allowed(let resolved):
+                validatedOutURL = resolved
+            case .rejected(let reason):
+                return .error(reason)
+            }
+        }
+
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
         let criteria = try buildFilterCriteria(from: args, folders: folders, folderPathByID: folderPathByID)
         let smartFolder = try await resolveOptionalSmartFolder(from: args)
         let offset = max(0, Self.intArg(args["offset"]) ?? 0)
-        let limit = max(1, min(100, Self.intArg(args["limit"]) ?? 30))
+        let defaultLimit = wantSheet ? 16 : 20
+        let limit = max(1, min(100, Self.intArg(args["limit"]) ?? defaultLimit))
+        let defaultDetail: AssetDetailLevel = (wantSheet && includeImage) ? .visual : .compact
+        let detail = AssetDetailLevel.parse(args["detail"], fallback: defaultDetail)
+        let diversify = Self.boolArg(args["diversify"]) ?? false
 
         var matches = try await engine.fetchAssets(matching: criteria)
         if let smartFolder {
             matches = matches.filter { smartFolder.rule.matches($0) }
         }
-        let sliced = Self.paginate(matches, offset: offset, limit: limit)
-        let hasMore = offset + sliced.count < matches.count
+        matches = try await applyPostFilters(matches, args: args)
+        let totalMatched = matches.count
 
+        let sliced: [AssetRecord]
+        if diversify && offset == 0 {
+            sliced = await diversifyAssets(matches, limit: limit)
+        } else {
+            sliced = Self.paginate(matches, offset: offset, limit: limit)
+        }
+        let hasMore = offset + sliced.count < totalMatched
+
+        var serializedAssets = sliced.map { serializeAssetSummary($0, folderPathByID: folderPathByID, detail: detail) }
         var payload: [String: Any] = [
-            "totalMatched": matches.count,
+            "totalMatched": totalMatched,
             "offset": offset,
-            "returned": sliced.count,
-            "hasMore": hasMore,
-            "assets": sliced.map { serializeAssetSummary($0, folderPathByID: folderPathByID) }
+            "returned": serializedAssets.count,
+            "hasMore": hasMore
         ]
         if hasMore {
-            payload["nextOffset"] = offset + sliced.count
+            payload["nextOffset"] = offset + serializedAssets.count
+        }
+        if diversify {
+            payload["diversified"] = true
         }
         if let smartFolder {
             payload["smartFolder"] = ["id": smartFolder.id.uuidString, "name": smartFolder.name]
         }
+        let includeFacets = Self.boolArg(args["include_facets"]) ?? (totalMatched > limit)
+        if includeFacets && !matches.isEmpty {
+            payload["facets"] = Self.computeResultFacets(matches, folderPathByID: folderPathByID)
+        }
+
+        if wantSheet && !sliced.isEmpty {
+            let maxWidth = max(512, min(1920, Self.intArg(args["sheet_max_width"]) ?? 1024))
+            if let attached = try renderAttachedContactSheet(
+                for: Array(sliced.prefix(24)),
+                maxWidth: maxWidth,
+                outputURL: validatedOutURL
+            ) {
+                for idx in 0..<min(serializedAssets.count, attached.slotCount) {
+                    serializedAssets[idx]["slot"] = idx + 1
+                    serializedAssets[idx]["badge"] = String(format: "#%02d", idx + 1)
+                }
+                payload["contactSheet"] = attached.summary
+                payload["assets"] = serializedAssets
+                var content: [ToolContent] = []
+                if includeImage {
+                    content.append(.image(mimeType: "image/jpeg", data: attached.jpegData))
+                }
+                content.append(.text(Self.encodeCompactJSON(payload)))
+                return ToolOutput(content: content)
+            }
+        }
+
+        payload["assets"] = serializedAssets
         return .json(payload)
     }
 
-    private func handleListInbox(_ args: [String: Any]) async throws -> ToolOutput {
+    private func handleListInbox(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
+        let wantSheet = Self.boolArg(args["render_contact_sheet"]) ?? false
+        let includeImage = Self.boolArg(args["include_image"]) ?? true
+        var validatedOutURL: URL?
+        if wantSheet, let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
+            switch validateExportOutputPath(outPath, allowedExtensions: ["jpg", "jpeg"], policy: policy, channel: channel) {
+            case .allowed(let resolved):
+                validatedOutURL = resolved
+            case .rejected(let reason):
+                return .error(reason)
+            }
+        }
+
         let offset = max(0, Self.intArg(args["offset"]) ?? 0)
-        let limit = max(1, min(100, Self.intArg(args["limit"]) ?? 40))
+        let limit = max(1, min(100, Self.intArg(args["limit"]) ?? (wantSheet ? 16 : 20)))
         let sortBy = Self.parseSortOrder(args["sort_by"], defaultOrder: .newest)
         let kinds = Self.parseMediaKinds(args["media_kinds"])
+        let defaultDetail: AssetDetailLevel = (wantSheet && includeImage) ? .visual : .compact
+        let detail = AssetDetailLevel.parse(args["detail"], fallback: defaultDetail)
 
         let matches = try await engine.fetchAssets(
             matching: FilterCriteria(kinds: kinds, onlyInbox: true, sortBy: sortBy)
@@ -582,25 +743,123 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         let sliced = Self.paginate(matches, offset: offset, limit: limit)
         let hasMore = offset + sliced.count < matches.count
 
+        var serializedAssets = sliced.map { serializeAssetSummary($0, folderPathByID: [:], detail: detail) }
         var payload: [String: Any] = [
             "inboxTotal": matches.count,
             "offset": offset,
-            "returned": sliced.count,
-            "hasMore": hasMore,
-            "assets": sliced.map { serializeAssetSummary($0, folderPathByID: [:]) }
+            "returned": serializedAssets.count,
+            "hasMore": hasMore
         ]
         if hasMore {
-            payload["nextOffset"] = offset + sliced.count
+            payload["nextOffset"] = offset + serializedAssets.count
         }
+
+        if wantSheet && !sliced.isEmpty {
+            let maxWidth = max(512, min(1920, Self.intArg(args["sheet_max_width"]) ?? 1024))
+            if let attached = try renderAttachedContactSheet(
+                for: Array(sliced.prefix(24)),
+                maxWidth: maxWidth,
+                outputURL: validatedOutURL
+            ) {
+                for idx in 0..<min(serializedAssets.count, attached.slotCount) {
+                    serializedAssets[idx]["slot"] = idx + 1
+                    serializedAssets[idx]["badge"] = String(format: "#%02d", idx + 1)
+                }
+                payload["contactSheet"] = attached.summary
+                payload["assets"] = serializedAssets
+                var content: [ToolContent] = []
+                if includeImage {
+                    content.append(.image(mimeType: "image/jpeg", data: attached.jpegData))
+                }
+                content.append(.text(Self.encodeCompactJSON(payload)))
+                return ToolOutput(content: content)
+            }
+        }
+
+        payload["assets"] = serializedAssets
         return .json(payload)
     }
 
     private func handleGetAsset(_ args: [String: Any]) async throws -> ToolOutput {
-        guard let rawID = args["asset_id"] as? String ?? args["id"] as? String,
-              let uuid = UUID(uuidString: rawID.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return .error("Missing or invalid UUID for `asset_id`.")
+        let includeImage = Self.boolArg(args["include_image"]) ?? false
+        let maxSide = max(280, min(1568, Self.intArg(args["image_max_side"]) ?? 768))
+
+        // Batch mode: inspect up to 12 finalists in ONE call when `asset_ids` is passed (supports 8+ char prefixes)
+        if let rawBatch = Self.stringArrayArg(args["asset_ids"]), !rawBatch.isEmpty {
+            let resolvedBatch = try await resolveAssetUUIDList(rawBatch)
+            var uniqueUUIDs: [UUID] = []
+            var seen = Set<UUID>()
+            for uuid in resolvedBatch where seen.insert(uuid).inserted {
+                uniqueUUIDs.append(uuid)
+            }
+            let capped = Array(uniqueUUIDs.prefix(12))
+            guard !capped.isEmpty else {
+                return .error("`asset_ids` contained no valid asset UUIDs or prefixes.")
+            }
+
+            let folders = try await engine.fetchFolders()
+            let folderPathByID = Self.buildFolderPaths(folders)
+            let iso = Self.makeISO8601Formatter()
+            var resolvedAssets: [AssetRecord] = []
+            var serialized: [[String: Any]] = []
+            var missingIDs: [String] = []
+
+            for uuid in capped {
+                _ = try? await engine.hydrateImageMetadataIfNeeded(id: uuid)
+                guard let asset = try await engine.fetchAsset(id: uuid) else {
+                    missingIDs.append(uuid.uuidString)
+                    continue
+                }
+                resolvedAssets.append(asset)
+                serialized.append(await serializeAssetDetail(asset, folderPathByID: folderPathByID, iso: iso))
+            }
+
+            var payload: [String: Any] = [
+                "requestedCount": capped.count,
+                "returned": serialized.count
+            ]
+            if !missingIDs.isEmpty {
+                payload["missingIDs"] = missingIDs
+            }
+
+            if includeImage && !resolvedAssets.isEmpty {
+                if resolvedAssets.count == 1,
+                   let jpegData = tools.preparedTypeSafeJPEG(for: resolvedAssets[0], targetLongSide: maxSide) {
+                    payload["assets"] = serialized
+                    return ToolOutput(content: [
+                        .image(mimeType: "image/jpeg", data: jpegData),
+                        .text(Self.encodeCompactJSON(payload))
+                    ])
+                } else {
+                    let sheetWidth = max(960, min(1600, maxSide))
+                    if let attached = try renderAttachedContactSheet(
+                        for: resolvedAssets,
+                        maxWidth: sheetWidth,
+                        jpegQuality: 0.82,
+                        outputURL: nil
+                    ) {
+                        for idx in 0..<min(serialized.count, attached.slotCount) {
+                            serialized[idx]["slot"] = idx + 1
+                            serialized[idx]["badge"] = String(format: "#%02d", idx + 1)
+                        }
+                        payload["contactSheet"] = attached.summary
+                        payload["assets"] = serialized
+                        return ToolOutput(content: [
+                            .image(mimeType: "image/jpeg", data: attached.jpegData),
+                            .text(Self.encodeCompactJSON(payload))
+                        ])
+                    }
+                }
+            }
+            payload["assets"] = serialized
+            return .json(payload)
         }
-        // Lazily hydrate camera EXIF / AI generation prompt metadata if not yet populated
+
+        // Single asset mode (supports full UUID or unique 8+ char prefix)
+        guard let rawID = args["asset_id"] as? String ?? args["id"] as? String,
+              let uuid = try await resolveAssetUUID(rawID) else {
+            return .error("Missing or invalid UUID / prefix for `asset_id` (or pass `asset_ids` array).")
+        }
         _ = try? await engine.hydrateImageMetadataIfNeeded(id: uuid)
 
         guard let asset = try await engine.fetchAsset(id: uuid) else {
@@ -608,49 +867,14 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
-        let thumbURL = await engine.thumbnailURL(for: uuid, tier: .grid520)
-        let previewURL = await engine.thumbnailURL(for: uuid, tier: .preview1400)
-        let candidateOriginal = engine.media.originalPath(for: asset)
-        let localOriginal = FileManager.default.fileExists(atPath: candidateOriginal.path) ? candidateOriginal.path : nil
-        let iso = Self.makeISO8601Formatter()
+        let dict = await serializeAssetDetail(asset, folderPathByID: folderPathByID, iso: Self.makeISO8601Formatter())
 
-        var dict = serializeAssetSummary(asset, folderPathByID: folderPathByID)
-        dict["mimeType"] = asset.mimeType
-        dict["displayType"] = asset.displayTypeLabel
-        dict["aspectShape"] = asset.aspectShape.rawValue
-        dict["ocrText"] = asset.ocrText ?? ""
-        dict["suggestedTags"] = asset.suggestedTags
-        dict["sourceDomain"] = asset.sourceDomain ?? ""
-        dict["fileSizeBytes"] = asset.fileSizeBytes
-        dict["pixelWidth"] = asset.pixelWidth
-        dict["pixelHeight"] = asset.pixelHeight
-        if let duration = asset.durationSeconds {
-            dict["durationSeconds"] = (duration * 100).rounded() / 100
-        }
-        dict["pinnedOffline"] = asset.pinnedOffline
-        dict["isLocalOriginalCached"] = localOriginal != nil
-        dict["thumbnailPath"] = thumbURL?.path ?? ""
-        dict["previewPath"] = previewURL?.path ?? ""
-        dict["localOriginalPath"] = localOriginal ?? ""
-        dict["isTrashed"] = asset.isTrashed
-        dict["createdAt"] = iso.string(from: asset.createdAt)
-        dict["updatedAt"] = iso.string(from: asset.updatedAt)
-        if let lastOpened = asset.lastOpenedAt {
-            dict["lastOpenedAt"] = iso.string(from: lastOpened)
-        }
-        if let rich = serializeRichMetadata(asset.richMetadata) {
-            dict["richMetadata"] = rich
-        }
-
-        let includeImage = Self.boolArg(args["include_image"]) ?? false
-        if includeImage {
-            let maxSide = max(280, min(1568, Self.intArg(args["image_max_side"]) ?? 800))
-            if let jpegData = tools.preparedTypeSafeJPEG(for: asset, targetLongSide: maxSide) {
-                return ToolOutput(content: [
-                    .image(mimeType: "image/jpeg", data: jpegData),
-                    .text(Self.encodePrettyJSON(dict))
-                ])
-            }
+        if includeImage,
+           let jpegData = tools.preparedTypeSafeJPEG(for: asset, targetLongSide: maxSide) {
+            return ToolOutput(content: [
+                .image(mimeType: "image/jpeg", data: jpegData),
+                .text(Self.encodeCompactJSON(dict))
+            ])
         }
         return .json(dict)
     }
@@ -673,22 +897,53 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
         let offset = max(0, Self.intArg(args["offset"]) ?? 0)
-        let limit = max(1, min(16, Self.intArg(args["limit"]) ?? 16))
-        let maxWidth = max(640, min(1920, Self.intArg(args["max_width"]) ?? 1280))
+        let limit = max(1, min(24, Self.intArg(args["limit"]) ?? 16))
+        let maxWidth = max(512, min(1920, Self.intArg(args["max_width"]) ?? 1024))
         let includeImage = Self.boolArg(args["include_image"]) ?? true
+        let diversify = Self.boolArg(args["diversify"]) ?? false
+        let defaultDetail: AssetDetailLevel = includeImage ? .visual : .compact
+        let detail = AssetDetailLevel.parse(args["detail"], fallback: defaultDetail)
 
         var totalMatched = 0
         var selectedAssets: [AssetRecord] = []
+        var queryGroupByAssetID: [UUID: String] = [:]
+        var multiQueryGroups: [[String: Any]] = []
+
+        let subQueries = (Self.stringArrayArg(args["queries"]) ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
         if let rawIDs = Self.stringArrayArg(args["asset_ids"]), !rawIDs.isEmpty {
+            let resolvedUUIDs = try await resolveAssetUUIDList(rawIDs)
             var resolved: [AssetRecord] = []
-            for raw in rawIDs {
-                if let uuid = UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-                   let asset = try await engine.fetchAsset(id: uuid) {
+            for uuid in resolvedUUIDs {
+                if let asset = try await engine.fetchAsset(id: uuid) {
                     resolved.append(asset)
                 }
             }
+            resolved = try await applyPostFilters(resolved, args: args)
             totalMatched = resolved.count
-            selectedAssets = Self.paginate(resolved, offset: offset, limit: limit)
+            selectedAssets = (diversify && offset == 0)
+                ? await diversifyAssets(resolved, limit: limit)
+                : Self.paginate(resolved, offset: offset, limit: limit)
+        } else if !subQueries.isEmpty {
+            var criteria = try buildFilterCriteria(from: args, folders: folders, folderPathByID: folderPathByID)
+            criteria.searchQuery = ""
+            let multi = try await runMultiQueryRecall(
+                queries: subQueries,
+                criteria: criteria,
+                args: args,
+                seedIDs: [],
+                unlikeIDs: [],
+                limit: limit,
+                diversify: diversify
+            )
+            selectedAssets = multi.hits.map(\.hit.asset)
+            totalMatched = multi.totalUniqueMatched
+            for pair in multi.hits {
+                queryGroupByAssetID[pair.hit.asset.id] = pair.queryGroup
+            }
+            multiQueryGroups = multi.groupsSummary
         } else {
             let criteria = try buildFilterCriteria(from: args, folders: folders, folderPathByID: folderPathByID)
             let smartFolder = try await resolveOptionalSmartFolder(from: args)
@@ -696,8 +951,11 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             if let smartFolder {
                 matches = matches.filter { smartFolder.rule.matches($0) }
             }
+            matches = try await applyPostFilters(matches, args: args)
             totalMatched = matches.count
-            selectedAssets = Self.paginate(matches, offset: offset, limit: limit)
+            selectedAssets = (diversify && offset == 0)
+                ? await diversifyAssets(matches, limit: limit)
+                : Self.paginate(matches, offset: offset, limit: limit)
         }
 
         guard !selectedAssets.isEmpty else {
@@ -716,7 +974,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                 ?? engine.media.thumbnailURL(for: asset.id, tier: .preview1400)
             return ContactSheetRenderer.Entry(slot: idx + 1, asset: asset, thumbnailURL: thumbURL)
         }
-        guard let sheet = ContactSheetRenderer.render(entries: entries, maxCanvasWidth: maxWidth) else {
+        guard let sheet = ContactSheetRenderer.render(entries: entries, maxCanvasWidth: maxWidth, jpegQuality: 0.74) else {
             return .error("Failed to render Contact Sheet image.")
         }
 
@@ -731,18 +989,47 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         let slotEntries: [[String: Any]] = sheet.orderedSlots.compactMap { pair in
             guard let asset = assetsByID[pair.assetID] else { return nil }
             let folderPath = asset.folderID.flatMap { folderPathByID[$0] } ?? "Inbox"
-            return [
+            if detail == .visual {
+                var entry: [String: Any] = [
+                    "slot": pair.slot,
+                    "badge": String(format: "#%02d", pair.slot),
+                    "assetID": String(asset.id.uuidString.prefix(8)),
+                    "title": Self.truncateText(asset.title, maxChars: 42),
+                    "folderPath": folderPath
+                ]
+                if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+                    entry["dimensions"] = "\(asset.pixelWidth)x\(asset.pixelHeight)"
+                } else {
+                    entry["aspectShape"] = asset.aspectShape.rawValue
+                }
+                if asset.mediaKind != .image { entry["mediaKind"] = asset.mediaKind.rawValue }
+                if asset.rating > 0 { entry["rating"] = asset.rating }
+                if let qg = queryGroupByAssetID[asset.id] { entry["queryGroup"] = qg }
+                return entry
+            }
+
+            var entry: [String: Any] = [
                 "slot": pair.slot,
-                "index": offset + pair.slot,
                 "badge": String(format: "#%02d", pair.slot),
                 "assetID": asset.id.uuidString,
                 "title": asset.title,
                 "mediaKind": asset.mediaKind.rawValue,
                 "folderPath": folderPath,
-                "tags": asset.tags,
-                "dominantColors": asset.dominantColors.prefix(4).map { $0.hex.uppercased() },
-                "aiDescription": asset.aiDescription ?? ""
+                "aspectRatio": (asset.aspectRatio * 100).rounded() / 100
             ]
+            if offset > 0 { entry["index"] = offset + pair.slot }
+            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+                entry["dimensions"] = "\(asset.pixelWidth)x\(asset.pixelHeight)"
+            }
+            if asset.rating > 0 { entry["rating"] = asset.rating }
+            if !asset.tags.isEmpty { entry["tags"] = asset.tags }
+            let colors = asset.dominantColors.prefix(3).map { $0.hex.uppercased() }
+            if !colors.isEmpty { entry["dominantColors"] = colors }
+            if let desc = asset.aiDescription?.trimmingCharacters(in: .whitespacesAndNewlines), !desc.isEmpty {
+                entry["aiDescription"] = Self.truncateText(desc, maxChars: 110)
+            }
+            if let qg = queryGroupByAssetID[asset.id] { entry["queryGroup"] = qg }
+            return entry
         }
 
         let hasMore = offset + slotEntries.count < totalMatched
@@ -755,6 +1042,8 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             "hasMore": hasMore,
             "slots": slotEntries
         ]
+        if diversify { metadata["diversified"] = true }
+        if !multiQueryGroups.isEmpty { metadata["queryGroups"] = multiQueryGroups }
         if hasMore {
             metadata["nextOffset"] = offset + slotEntries.count
         }
@@ -766,87 +1055,279 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         if includeImage {
             content.append(.image(mimeType: "image/jpeg", data: sheet.jpegData))
         }
-        content.append(.text(Self.encodePrettyJSON(metadata)))
+        content.append(.text(Self.encodeCompactJSON(metadata)))
         return ToolOutput(content: content)
     }
 
-    private func handleFindSimilarAssets(_ args: [String: Any]) async throws -> ToolOutput {
+    private func handleFindSimilarAssets(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
         guard let rawID = args["asset_id"] as? String ?? args["id"] as? String,
-              let uuid = UUID(uuidString: rawID.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return .error("Missing or invalid UUID for `asset_id`.")
+              let uuid = try await resolveAssetUUID(rawID) else {
+            return .error("Missing or invalid UUID / prefix for `asset_id`.")
         }
         guard (try await engine.fetchAsset(id: uuid)) != nil else {
             return .error("Asset not found: \(uuid.uuidString)")
         }
+        let wantSheet = Self.boolArg(args["render_contact_sheet"]) ?? false
+        let includeImage = Self.boolArg(args["include_image"]) ?? true
+        var validatedOutURL: URL?
+        if wantSheet, let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
+            switch validateExportOutputPath(outPath, allowedExtensions: ["jpg", "jpeg"], policy: policy, channel: channel) {
+            case .allowed(let resolved):
+                validatedOutURL = resolved
+            case .rejected(let reason):
+                return .error(reason)
+            }
+        }
+
         let limit = max(1, min(32, Self.intArg(args["limit"]) ?? 12))
-        let matches = try await engine.similarAssets(to: uuid, limit: limit)
+        let diversify = Self.boolArg(args["diversify"]) ?? false
+        let defaultDetail: AssetDetailLevel = (wantSheet && includeImage) ? .visual : .compact
+        let detail = AssetDetailLevel.parse(args["detail"], fallback: defaultDetail)
+        let excludedIDs = Set(try await resolveAssetUUIDList(args["exclude_asset_ids"]))
+        let unlikeIDs = try await resolveAssetUUIDList(args["unlike_asset_ids"])
+        let unlikeSet = Set(unlikeIDs)
+        let fetchLimit = (diversify || !excludedIDs.isEmpty || !unlikeSet.isEmpty) ? min(64, limit * 3) : limit
+        var matches = try await engine.similarAssets(to: uuid, limit: fetchLimit)
+        if !excludedIDs.isEmpty || !unlikeSet.isEmpty {
+            matches.removeAll { excludedIDs.contains($0.asset.id) || unlikeSet.contains($0.asset.id) }
+        }
+        // Apply negative visual repulsion when `unlike_asset_ids` is provided
+        if !unlikeIDs.isEmpty && !matches.isEmpty {
+            let vectors = (try? await engine.database.vectors()) ?? [:]
+            let unlikePrints = unlikeIDs.compactMap { vectors[$0]?.featurePrint }
+            if !unlikePrints.isEmpty {
+                matches = matches.map { item -> ScoredAsset in
+                    guard let fp = vectors[item.asset.id]?.featurePrint else { return item }
+                    let maxNeg = unlikePrints
+                        .compactMap { VisionAnalyzer.visualDistance(between: fp, and: $0) }
+                        .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
+                        .max() ?? 0.0
+                    guard maxNeg >= 0.42 else { return item }
+                    let penalty = max(0.15, 1.0 - (maxNeg - 0.35) * 1.15)
+                    return ScoredAsset(asset: item.asset, score: item.score * penalty, matchReasons: item.matchReasons)
+                }.sorted { $0.score > $1.score }
+            }
+        }
+        if diversify && matches.count > 1 {
+            let diversifiedAssets = await diversifyAssets(matches.map(\.asset), limit: limit)
+            let scoredByID = Dictionary(uniqueKeysWithValues: matches.map { ($0.asset.id, $0) })
+            matches = diversifiedAssets.compactMap { scoredByID[$0.id] }
+        } else {
+            matches = Array(matches.prefix(limit))
+        }
+
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
 
-        let items: [[String: Any]] = matches.enumerated().map { idx, scored in
-            var dict = serializeAssetSummary(scored.asset, folderPathByID: folderPathByID)
+        var items: [[String: Any]] = matches.enumerated().map { idx, scored in
+            var dict = serializeAssetSummary(scored.asset, folderPathByID: folderPathByID, detail: detail)
             dict["rank"] = idx + 1
             dict["score"] = (scored.score * 1000).rounded() / 1000
-            dict["matchReasons"] = scored.matchReasons
+            if detail != .visual && !scored.matchReasons.isEmpty {
+                dict["matchReasons"] = scored.matchReasons
+            }
             return dict
         }
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "referenceAssetID": uuid.uuidString,
-            "returned": items.count,
-            "matches": items
+            "returned": items.count
         ]
 
-        let wantSheet = Self.boolArg(args["render_contact_sheet"]) ?? false
         if wantSheet && !matches.isEmpty {
-            let entries: [ContactSheetRenderer.Entry] = matches.prefix(16).enumerated().map { idx, scored in
-                let thumbURL = engine.media.thumbnailURL(for: scored.asset.id, tier: .grid520)
-                    ?? engine.media.thumbnailURL(for: scored.asset.id, tier: .preview1400)
-                return ContactSheetRenderer.Entry(slot: idx + 1, asset: scored.asset, thumbnailURL: thumbURL)
-            }
-            if let sheet = ContactSheetRenderer.render(entries: entries) {
-                return ToolOutput(content: [
-                    .image(mimeType: "image/jpeg", data: sheet.jpegData),
-                    .text(Self.encodePrettyJSON(payload))
-                ])
+            let maxWidth = max(512, min(1920, Self.intArg(args["sheet_max_width"]) ?? 1024))
+            if let attached = try renderAttachedContactSheet(
+                for: Array(matches.prefix(24).map(\.asset)),
+                maxWidth: maxWidth,
+                outputURL: validatedOutURL
+            ) {
+                for idx in 0..<min(items.count, attached.slotCount) {
+                    items[idx]["slot"] = idx + 1
+                    items[idx]["badge"] = String(format: "#%02d", idx + 1)
+                }
+                payload["contactSheet"] = attached.summary
+                payload["matches"] = items
+                var content: [ToolContent] = []
+                if includeImage {
+                    content.append(.image(mimeType: "image/jpeg", data: attached.jpegData))
+                }
+                content.append(.text(Self.encodeCompactJSON(payload)))
+                return ToolOutput(content: content)
             }
         }
+        payload["matches"] = items
         return .json(payload)
     }
 
-    private func handleSemanticSearch(_ args: [String: Any]) async throws -> ToolOutput {
+    private func handleSemanticSearch(
+        _ args: [String: Any],
+        policy: ExternalAgentConfig,
+        channel: ExternalAgentChannel
+    ) async throws -> ToolOutput {
         let query = ((args["query"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            return .error("Missing non-empty `query` for semantic_search.")
+        let subQueries = (Self.stringArrayArg(args["queries"]) ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let seedIDs = try await resolveAssetUUIDList(args["seed_asset_ids"])
+        let unlikeIDs = try await resolveAssetUUIDList(args["unlike_asset_ids"])
+        guard !query.isEmpty || !subQueries.isEmpty || !seedIDs.isEmpty else {
+            return .error("Provide `query`, `queries[]`, or `seed_asset_ids` for semantic_search.")
         }
+
+        let wantSheet = Self.boolArg(args["render_contact_sheet"]) ?? false
+        let includeImage = Self.boolArg(args["include_image"]) ?? true
+        var validatedOutURL: URL?
+        if wantSheet, let outPath = (args["output_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !outPath.isEmpty {
+            switch validateExportOutputPath(outPath, allowedExtensions: ["jpg", "jpeg"], policy: policy, channel: channel) {
+            case .allowed(let resolved):
+                validatedOutURL = resolved
+            case .rejected(let reason):
+                return .error(reason)
+            }
+        }
+
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
         var criteria = try buildFilterCriteria(from: args, folders: folders, folderPathByID: folderPathByID)
         criteria.searchQuery = ""
-        let limit = max(1, min(50, Self.intArg(args["limit"]) ?? 20))
+        let limit = max(1, min(50, Self.intArg(args["limit"]) ?? 16))
+        let diversify = Self.boolArg(args["diversify"]) ?? false
+        let defaultDetail: AssetDetailLevel = (wantSheet && includeImage) ? .visual : .compact
+        let detail = AssetDetailLevel.parse(args["detail"], fallback: defaultDetail)
 
-        let report = try await engine.semanticSearch(query: query, criteria: criteria, limit: limit)
-        let hits: [[String: Any]] = report.hits.enumerated().map { idx, hit in
-            var dict = serializeAssetSummary(hit.asset, folderPathByID: folderPathByID)
+        // Multi-intent single-call recall (`queries: [...]`)
+        if subQueries.count >= 2 {
+            let multi = try await runMultiQueryRecall(
+                queries: subQueries,
+                criteria: criteria,
+                args: args,
+                seedIDs: seedIDs,
+                unlikeIDs: unlikeIDs,
+                limit: limit,
+                diversify: diversify
+            )
+            var hits: [[String: Any]] = multi.hits.enumerated().map { idx, item in
+                var dict = serializeAssetSummary(item.hit.asset, folderPathByID: folderPathByID, detail: detail)
+                dict["rank"] = idx + 1
+                dict["score"] = (item.hit.score * 1000).rounded() / 1000
+                dict["queryGroup"] = item.queryGroup
+                if detail != .visual && !item.hit.reason.isEmpty { dict["reason"] = item.hit.reason }
+                return dict
+            }
+            var payload: [String: Any] = [
+                "queries": subQueries,
+                "queryGroups": multi.groupsSummary,
+                "usedCloudEmbedding": false,
+                "usedVisualRerank": false,
+                "evaluatedVisualCount": 0,
+                "returned": hits.count
+            ]
+            if diversify { payload["diversified"] = true }
+            if wantSheet && !multi.hits.isEmpty {
+                let maxWidth = max(512, min(1920, Self.intArg(args["sheet_max_width"]) ?? 1024))
+                if let attached = try renderAttachedContactSheet(
+                    for: Array(multi.hits.prefix(24).map(\.hit.asset)),
+                    maxWidth: maxWidth,
+                    outputURL: validatedOutURL
+                ) {
+                    for idx in 0..<min(hits.count, attached.slotCount) {
+                        hits[idx]["slot"] = idx + 1
+                        hits[idx]["badge"] = String(format: "#%02d", idx + 1)
+                    }
+                    payload["contactSheet"] = attached.summary
+                    payload["hits"] = hits
+                    var content: [ToolContent] = []
+                    if includeImage {
+                        content.append(.image(mimeType: "image/jpeg", data: attached.jpegData))
+                    }
+                    content.append(.text(Self.encodeCompactJSON(payload)))
+                    return ToolOutput(content: content)
+                }
+            }
+            payload["hits"] = hits
+            return .json(payload)
+        }
+
+        let effectiveQuery = !query.isEmpty ? query : (subQueries.first ?? "")
+        // Default to instant local recall when attaching a Contact Sheet (the multimodal agent inspects visually itself)
+        let allowVisualRerank = Self.boolArg(args["visual_rerank"]) ?? !wantSheet
+
+        let fetchLimit = diversify ? min(64, max(limit * 3, 36)) : min(64, max(limit, 24))
+        let report = try await engine.semanticSearch(
+            query: effectiveQuery,
+            criteria: criteria,
+            limit: fetchLimit,
+            allowVisualRerank: allowVisualRerank,
+            seedAssetIDs: seedIDs,
+            unlikeAssetIDs: unlikeIDs
+        )
+
+        let postFilteredIDs = Set((try await applyPostFilters(report.hits.map(\.asset), args: args)).map(\.id))
+        var filteredHits = report.hits.filter { postFilteredIDs.contains($0.asset.id) }
+        let matchedTotal = filteredHits.count
+
+        if diversify && filteredHits.count > 1 {
+            let diversifiedAssets = await diversifyAssets(filteredHits.map(\.asset), limit: limit)
+            let hitByID = Dictionary(uniqueKeysWithValues: filteredHits.map { ($0.asset.id, $0) })
+            filteredHits = diversifiedAssets.compactMap { hitByID[$0.id] }
+        } else {
+            filteredHits = Array(filteredHits.prefix(limit))
+        }
+
+        var hits: [[String: Any]] = filteredHits.enumerated().map { idx, hit in
+            var dict = serializeAssetSummary(hit.asset, folderPathByID: folderPathByID, detail: detail)
             dict["rank"] = idx + 1
             dict["score"] = (hit.score * 1000).rounded() / 1000
             if let conf = hit.confidence {
                 dict["confidence"] = (conf * 1000).rounded() / 1000
             }
-            dict["reason"] = hit.reason
-            dict["source"] = hit.sourceLabel
+            if detail != .visual && !hit.reason.isEmpty { dict["reason"] = hit.reason }
+            if detail != .visual { dict["source"] = hit.sourceLabel }
             return dict
         }
 
-        return .json([
+        var payload: [String: Any] = [
             "query": report.query,
             "summary": report.summary,
             "usedCloudEmbedding": report.usedCloudEmbedding,
             "usedVisualRerank": report.usedTypeSafeJev,
             "evaluatedVisualCount": report.evaluatedVisualCount,
-            "returned": hits.count,
-            "hits": hits
-        ])
+            "returned": hits.count
+        ]
+        if diversify { payload["diversified"] = true }
+        let includeFacets = Self.boolArg(args["include_facets"]) ?? false
+        if includeFacets && matchedTotal > 0 {
+            payload["facets"] = Self.computeResultFacets(report.hits.filter { postFilteredIDs.contains($0.asset.id) }.map(\.asset), folderPathByID: folderPathByID)
+        }
+
+        if wantSheet && !filteredHits.isEmpty {
+            let maxWidth = max(512, min(1920, Self.intArg(args["sheet_max_width"]) ?? 1024))
+            if let attached = try renderAttachedContactSheet(
+                for: Array(filteredHits.prefix(24).map(\.asset)),
+                maxWidth: maxWidth,
+                outputURL: validatedOutURL
+            ) {
+                for idx in 0..<min(hits.count, attached.slotCount) {
+                    hits[idx]["slot"] = idx + 1
+                    hits[idx]["badge"] = String(format: "#%02d", idx + 1)
+                }
+                payload["contactSheet"] = attached.summary
+                payload["hits"] = hits
+                var content: [ToolContent] = []
+                if includeImage {
+                    content.append(.image(mimeType: "image/jpeg", data: attached.jpegData))
+                }
+                content.append(.text(Self.encodeCompactJSON(payload)))
+                return ToolOutput(content: content)
+            }
+        }
+
+        payload["hits"] = hits
+        return .json(payload)
     }
 
     private func handleQuickJump(_ args: [String: Any]) async throws -> ToolOutput {
@@ -879,9 +1360,9 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
     }
 
     private func handleSuggestFolder(_ args: [String: Any]) async throws -> ToolOutput {
-        var ids = parseUUIDList(args["asset_ids"])
-        if let single = (args["asset_id"] as? String ?? args["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let uuid = UUID(uuidString: single),
+        var ids = try await resolveAssetUUIDList(args["asset_ids"])
+        if let single = args["asset_id"] as? String ?? args["id"] as? String,
+           let uuid = try await resolveAssetUUID(single),
            !ids.contains(uuid) {
             ids.insert(uuid, at: 0)
         }
@@ -954,6 +1435,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         guard let doc = try await resolveBoard(from: args) else {
             return .error("Moodboard not found. Pass a valid `board_id` UUID or matching `title`.")
         }
+        let detail = AssetDetailLevel.parse(args["detail"])
         let folders = try await engine.fetchFolders()
         let folderPathByID = Self.buildFolderPaths(folders)
         var assetsByID: [UUID: AssetRecord] = [:]
@@ -979,29 +1461,31 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         for node in doc.nodes.sorted(by: { $0.editorialOrder < $1.editorialOrder }) {
             switch node.kind {
             case .note(let title, let text, let style, _):
-                notes.append([
+                var item: [String: Any] = [
                     "nodeID": node.id.uuidString,
-                    "title": title ?? "",
                     "text": text,
                     "style": style.rawValue,
-                    "isLocked": node.isLocked,
                     "frame": frameDict(node.frame)
-                ])
+                ]
+                if let title, !title.isEmpty { item["title"] = title }
+                if node.isLocked { item["isLocked"] = true }
+                notes.append(item)
             case .groupFrame(let title, let tint):
-                sections.append([
+                var item: [String: Any] = [
                     "nodeID": node.id.uuidString,
                     "title": title,
                     "tint": tint.rawValue,
-                    "isLocked": node.isLocked,
                     "frame": frameDict(node.frame)
-                ])
+                ]
+                if node.isLocked { item["isLocked"] = true }
+                sections.append(item)
             case .assetRef(let assetID, let crop, let weight, _):
                 if let asset = assetsByID[assetID] {
-                    var summary = serializeAssetSummary(asset, folderPathByID: folderPathByID)
+                    var summary = serializeAssetSummary(asset, folderPathByID: folderPathByID, detail: detail)
                     summary["nodeID"] = node.id.uuidString
                     summary["weight"] = weight
-                    summary["isHero"] = weight >= 2
-                    summary["isLocked"] = node.isLocked
+                    if weight >= 2 { summary["isHero"] = true }
+                    if node.isLocked { summary["isLocked"] = true }
                     summary["frame"] = frameDict(node.frame)
                     if let crop, crop.isMeaningfulSubregion {
                         summary["crop"] = [
@@ -1011,9 +1495,11 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                             "height": (crop.height * 1000).rounded() / 1000
                         ]
                     }
-                    let candidateOriginal = engine.media.originalPath(for: asset)
-                    if FileManager.default.fileExists(atPath: candidateOriginal.path) {
-                        summary["localOriginalPath"] = candidateOriginal.path
+                    if detail != .compact {
+                        let candidateOriginal = engine.media.originalPath(for: asset)
+                        if FileManager.default.fileExists(atPath: candidateOriginal.path) {
+                            summary["localOriginalPath"] = candidateOriginal.path
+                        }
                     }
                     cardRefs.append(summary)
                 }
@@ -1023,15 +1509,16 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
 
         let connectors: [[String: Any]] = doc.connectors.map { c in
-            [
+            var item: [String: Any] = [
                 "id": c.id.uuidString,
                 "fromNodeID": c.fromNodeID.uuidString,
                 "toNodeID": c.toNodeID.uuidString,
-                "label": c.label ?? "",
                 "style": c.style.rawValue,
-                "colorHex": c.colorHex.uppercased(),
-                "dashed": c.dashed
+                "colorHex": c.colorHex.uppercased()
             ]
+            if let label = c.label, !label.isEmpty { item["label"] = label }
+            if c.dashed { item["dashed"] = true }
+            return item
         }
 
         let candidates: [[String: Any]] = doc.candidateAssetIDs.compactMap { cid in
@@ -1052,10 +1539,9 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
 
         let iso = Self.makeISO8601Formatter()
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "id": doc.id.uuidString,
             "title": doc.title,
-            "subtitle": doc.subtitle,
             "mode": Self.layoutModeLabel(doc.mode),
             "pinnedOffline": doc.pinnedOffline,
             "updatedAt": iso.string(from: doc.updatedAt),
@@ -1068,6 +1554,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             "assets": cardRefs,
             "candidatePool": candidates
         ]
+        if !doc.subtitle.isEmpty { payload["subtitle"] = doc.subtitle }
         return .json(payload)
     }
 
@@ -1134,16 +1621,16 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         if includeImage {
             content.append(.image(mimeType: "image/png", data: pngData))
         }
-        content.append(.text(Self.encodePrettyJSON(metadata)))
+        content.append(.text(Self.encodeCompactJSON(metadata)))
         return ToolOutput(content: content)
     }
 
     // MARK: - Safe Write / Organize Tool Handlers (Never Permanent Delete)
 
     private func handleOrganizeAssets(_ args: [String: Any]) async throws -> ToolOutput {
-        let ids = parseUUIDList(args["asset_ids"])
+        let ids = try await resolveAssetUUIDList(args["asset_ids"])
         guard !ids.isEmpty else {
-            return .error("`asset_ids` must be a non-empty array of asset UUID strings.")
+            return .error("`asset_ids` must be a non-empty array of asset UUID strings or prefixes.")
         }
 
         let folders = try await engine.fetchFolders()
@@ -1290,10 +1777,13 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
         var targetBoardID: UUID?
         if let rawBoard = (args["target_board_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !rawBoard.isEmpty {
-            guard let uuid = UUID(uuidString: rawBoard) else {
-                return .error("Invalid `target_board_id` UUID: \(rawBoard)")
+            if let uuid = UUID(uuidString: rawBoard) {
+                targetBoardID = uuid
+            } else if let board = try await resolveBoard(from: ["board_id": rawBoard]) {
+                targetBoardID = board.id
+            } else {
+                return .error("Invalid `target_board_id`: \(rawBoard)")
             }
-            targetBoardID = uuid
         }
 
         var inputs: [CaptureInput] = []
@@ -1387,7 +1877,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
         // Mode A: External Agent acts directly as Art Director with explicit sections or asset_ids.
         let explicitSections = args["sections"] as? [[String: Any]]
-        let flatAssetIDs = parseUUIDList(args["asset_ids"])
+        let flatAssetIDs = try await resolveAssetUUIDList(args["asset_ids"])
 
         if (explicitSections != nil && !(explicitSections ?? []).isEmpty) || !flatAssetIDs.isEmpty {
             var orderedAssets: [AssetRecord] = []
@@ -1412,8 +1902,8 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                     let secTitle = (sec["title"] as? String) ?? "精选参考"
                     let tint = GroupTint(rawValue: (sec["tint"] as? String)?.lowercased() ?? "neutral") ?? .neutral
                     let rationale = (sec["rationale"] as? String) ?? ""
-                    let heroSet = Set(parseUUIDList(sec["hero_asset_ids"]))
-                    let secIDs = parseUUIDList(sec["asset_ids"])
+                    let heroSet = Set(try await resolveAssetUUIDList(sec["hero_asset_ids"]))
+                    let secIDs = try await resolveAssetUUIDList(sec["asset_ids"])
                     var picks: [AgentBoardPlan.SlotPick] = []
                     for aid in secIDs {
                         if let slot = try await registerAsset(aid) {
@@ -1434,7 +1924,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
                     }
                 }
             } else {
-                let heroSet = Set(parseUUIDList(args["hero_asset_ids"]))
+                let heroSet = Set(try await resolveAssetUUIDList(args["hero_asset_ids"]))
                 var picks: [AgentBoardPlan.SlotPick] = []
                 for (idx, aid) in flatAssetIDs.enumerated() {
                     if let slot = try await registerAsset(aid) {
@@ -1513,7 +2003,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         let folderPathByID = Self.buildFolderPaths(folders)
         let scopeID = try resolveOptionalFolderID(from: args, folders: folders, folderPathByID: folderPathByID)
         let preferredCount = max(2, min(24, Self.intArg(args["preferred_count"]) ?? 12))
-        let seedIDs = parseUUIDList(args["seed_asset_ids"])
+        let seedIDs = try await resolveAssetUUIDList(args["seed_asset_ids"])
         let requiredTags = Self.stringArrayArg(args["required_tags"]) ?? []
         let targetPalette = (Self.stringArrayArg(args["target_palette"]) ?? []).map { LabColor.fromHex($0) }
 
@@ -1573,8 +2063,8 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
             doc.mode = .autoEditorial(cfg)
         }
 
-        // Remove unlocked nodes by asset UUID or explicit node UUID.
-        let removeAssetSet = Set(parseUUIDList(args["remove_asset_ids"]))
+        // Remove unlocked nodes by asset UUID/prefix or explicit node UUID.
+        let removeAssetSet = Set(try await resolveAssetUUIDList(args["remove_asset_ids"]))
         let removeNodeSet = Set(parseUUIDList(args["remove_node_ids"]))
         var removedCount = 0
         var skippedLockedAssetIDs: [String] = []
@@ -1629,7 +2119,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         }
 
         // Append new asset cards in clean non-overlapping rows.
-        let addIDs = parseUUIDList(args["add_asset_ids"])
+        let addIDs = try await resolveAssetUUIDList(args["add_asset_ids"])
         var addedCount = 0
         var skippedMissingAssetIDs: [String] = []
         if !addIDs.isEmpty {
@@ -1719,9 +2209,9 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
     }
 
     private func handleTrashAssets(_ args: [String: Any]) async throws -> ToolOutput {
-        let ids = parseUUIDList(args["asset_ids"])
+        let ids = try await resolveAssetUUIDList(args["asset_ids"])
         guard !ids.isEmpty else {
-            return .error("`asset_ids` must be a non-empty array of asset UUID strings.")
+            return .error("`asset_ids` must be a non-empty array of asset UUID strings or prefixes.")
         }
         let trashed = Self.boolArg(args["trashed"]) ?? true
         let updated = try await engine.updateAssets(AssetBatchPatch(assetIDs: ids, isTrashed: trashed))
@@ -1747,9 +2237,9 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
     }
 
     private func handleAnalyzeAssets(_ args: [String: Any]) async throws -> ToolOutput {
-        let ids = Array(parseUUIDList(args["asset_ids"]).prefix(20))
+        let ids = Array((try await resolveAssetUUIDList(args["asset_ids"])).prefix(20))
         guard !ids.isEmpty else {
-            return .error("`asset_ids` must be a non-empty array of asset UUID strings (max 20).")
+            return .error("`asset_ids` must be a non-empty array of asset UUID strings or prefixes (max 20).")
         }
         let refreshRich = Self.boolArg(args["refresh_rich_metadata"]) ?? false
         var analyzed = try await engine.analyzeAssetsLocally(ids: ids)
@@ -1865,8 +2355,21 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
     private func resolveBoard(from args: [String: Any]) async throws -> MoodboardDocument? {
         if let rawID = (args["board_id"] as? String ?? args["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let uuid = UUID(uuidString: rawID) {
-            return try await engine.fetchBoard(id: uuid)
+           !rawID.isEmpty {
+            if let uuid = UUID(uuidString: rawID) {
+                return try await engine.fetchBoard(id: uuid)
+            }
+            let upper = rawID.uppercased()
+            if upper.count >= 8 {
+                let boards = try await engine.fetchBoards()
+                let matches = boards.filter { $0.id.uuidString.hasPrefix(upper) }
+                if matches.count == 1 {
+                    return try await engine.fetchBoard(id: matches[0].id)
+                }
+                if matches.count > 1 {
+                    throw LibraryDatabaseError("Ambiguous board_id prefix '\(rawID)' matched \(matches.count) boards; provide more characters.")
+                }
+            }
         }
         if let title = (args["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
             let boards = try await engine.fetchBoards()
@@ -1887,13 +2390,21 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
 
         let all = try await engine.fetchSmartFolders()
         if !rawID.isEmpty {
-            guard let uuid = UUID(uuidString: rawID) else {
-                throw LibraryDatabaseError("Invalid smart_folder_id UUID: \(rawID)")
+            if let uuid = UUID(uuidString: rawID) {
+                guard let found = all.first(where: { $0.id == uuid }) else {
+                    throw LibraryDatabaseError("Smart folder not found: \(rawID)")
+                }
+                return found
             }
-            guard let found = all.first(where: { $0.id == uuid }) else {
-                throw LibraryDatabaseError("Smart folder not found: \(rawID)")
+            let upper = rawID.uppercased()
+            if upper.count >= 8 {
+                let matches = all.filter { $0.id.uuidString.hasPrefix(upper) }
+                if matches.count == 1 { return matches[0] }
+                if matches.count > 1 {
+                    throw LibraryDatabaseError("Ambiguous smart_folder_id prefix '\(rawID)'.")
+                }
             }
-            return found
+            throw LibraryDatabaseError("Invalid smart_folder_id UUID: \(rawID)")
         }
         if let exact = all.first(where: { $0.name.caseInsensitiveCompare(rawName) == .orderedSame }) {
             return exact
@@ -1916,7 +2427,7 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         let minRating = Self.intArg(args["min_rating"]) ?? 0
         let onlyInbox = Self.boolArg(args["only_inbox"]) ?? false
         let onlyUntagged = Self.boolArg(args["only_untagged"]) ?? false
-        let includeSubfolders = Self.boolArg(args["include_subfolders"]) ?? false
+        let includeSubfolders = Self.boolArg(args["include_subfolders"]) ?? true
         let onlyRecentDays = Self.intArg(args["only_recent_days"]).map { max(1, $0) }
         let onlyPinnedOffline = Self.boolArg(args["only_pinned_offline"]) ?? false
         let onlyTrashed = Self.boolArg(args["only_trashed"]) ?? false
@@ -1953,10 +2464,18 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         folderPathByID: [UUID: String]
     ) throws -> UUID? {
         if let rawID = (args["folder_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !rawID.isEmpty {
-            guard let uuid = UUID(uuidString: rawID) else {
-                throw LibraryDatabaseError("Invalid folder_id UUID: \(rawID)")
+            if let uuid = UUID(uuidString: rawID) {
+                return uuid
             }
-            return uuid
+            let upper = rawID.uppercased()
+            if upper.count >= 8 {
+                let matches = folders.filter { $0.id.uuidString.hasPrefix(upper) }
+                if matches.count == 1 { return matches[0].id }
+                if matches.count > 1 {
+                    throw LibraryDatabaseError("Ambiguous folder_id prefix '\(rawID)' matched \(matches.count) folders.")
+                }
+            }
+            throw LibraryDatabaseError("Invalid folder_id UUID or prefix: \(rawID)")
         }
         if let path = (args["folder_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
             if let exact = folderPathByID.first(where: { $0.value.caseInsensitiveCompare(path) == .orderedSame }) {
@@ -1970,22 +2489,608 @@ public nonisolated struct CharkleExternalAgentService: Sendable {
         return nil
     }
 
-    private func serializeAssetSummary(_ asset: AssetRecord, folderPathByID: [UUID: String]) -> [String: Any] {
-        [
+    private enum AssetDetailLevel: String, Sendable {
+        case visual
+        case compact
+        case standard
+        case full
+
+        static func parse(_ raw: Any?, fallback: AssetDetailLevel = .compact) -> AssetDetailLevel {
+            guard let str = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  let parsed = AssetDetailLevel(rawValue: str) else {
+                return fallback
+            }
+            return parsed
+        }
+    }
+
+    /// Resolves either a full 36-char RFC-4122 UUID or a unique 8+ char uppercase hex prefix against SQLite primary key.
+    private func resolveAssetUUID(_ raw: String) async throws -> UUID? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let uuid = UUID(uuidString: trimmed) {
+            return uuid
+        }
+        let upper = trimmed.uppercased()
+        guard upper.count >= 8,
+              upper.allSatisfy({ $0.isHexDigit || $0 == "-" }) else {
+            return nil
+        }
+        let matches = try await engine.database.assetIDs(matchingPrefix: upper, limit: 5)
+        if matches.count == 1 {
+            return matches[0]
+        }
+        if matches.count > 1 {
+            let preview = matches.prefix(3).map { String($0.uuidString.prefix(13)) }.joined(separator: ", ")
+            throw LibraryDatabaseError("Ambiguous asset ID prefix '\(trimmed)' matched multiple assets (\(preview)); pass more characters.")
+        }
+        return nil
+    }
+
+    private func resolveAssetUUIDList(_ raw: Any?) async throws -> [UUID] {
+        guard let list = Self.stringArrayArg(raw), !list.isEmpty else { return [] }
+        var resolved: [UUID] = []
+        resolved.reserveCapacity(list.count)
+        for item in list {
+            if let uuid = try await resolveAssetUUID(item) {
+                resolved.append(uuid)
+            }
+        }
+        return resolved
+    }
+
+    private struct MultiQueryRecallResult {
+        let hits: [(hit: SemanticSearchHit, queryGroup: String)]
+        let groupsSummary: [[String: Any]]
+        let totalUniqueMatched: Int
+    }
+
+    /// Runs fast local multi-signal recall for 2..6 creative sub-queries and merges balanced non-duplicate slots
+    /// so an agent can cover multiple moodboard roles in ONE call and ONE Contact Sheet image.
+    private func runMultiQueryRecall(
+        queries: [String],
+        criteria: FilterCriteria,
+        args: [String: Any],
+        seedIDs: [UUID],
+        unlikeIDs: [UUID],
+        limit: Int,
+        diversify: Bool
+    ) async throws -> MultiQueryRecallResult {
+        let cappedQueries = Array(queries.prefix(6))
+        guard !cappedQueries.isEmpty else {
+            return MultiQueryRecallResult(hits: [], groupsSummary: [], totalUniqueMatched: 0)
+        }
+        let perGroupQuota = max(1, Int(ceil(Double(limit) / Double(cappedQueries.count))))
+        let fetchPerGroup = max(perGroupQuota * 3, 18)
+
+        var seenIDs = Set<UUID>()
+        var allUniqueMatched = Set<UUID>()
+        var merged: [(hit: SemanticSearchHit, queryGroup: String)] = []
+        var groupsSummary: [[String: Any]] = []
+
+        for q in cappedQueries {
+            let report = try await engine.semanticSearch(
+                query: q,
+                criteria: criteria,
+                limit: fetchPerGroup,
+                allowVisualRerank: false,
+                seedAssetIDs: seedIDs,
+                unlikeAssetIDs: unlikeIDs
+            )
+            let postFilteredIDs = Set((try await applyPostFilters(report.hits.map(\.asset), args: args)).map(\.id))
+            var groupHits = report.hits.filter { postFilteredIDs.contains($0.asset.id) }
+            for h in groupHits { allUniqueMatched.insert(h.asset.id) }
+            groupHits.removeAll { seenIDs.contains($0.asset.id) }
+
+            let chosenHits: [SemanticSearchHit]
+            if diversify && groupHits.count > 1 {
+                let divAssets = await diversifyAssets(groupHits.map(\.asset), limit: perGroupQuota)
+                let byID = Dictionary(uniqueKeysWithValues: groupHits.map { ($0.asset.id, $0) })
+                chosenHits = divAssets.compactMap { byID[$0.id] }
+            } else {
+                chosenHits = Array(groupHits.prefix(perGroupQuota))
+            }
+
+            let startSlot = merged.count + 1
+            var badges: [String] = []
+            for h in chosenHits where merged.count < limit {
+                if seenIDs.insert(h.asset.id).inserted {
+                    merged.append((h, q))
+                    badges.append(String(format: "#%02d", merged.count))
+                }
+            }
+            var summary: [String: Any] = [
+                "query": q,
+                "count": badges.count
+            ]
+            if !badges.isEmpty {
+                summary["slotRange"] = badges.count == 1 ? badges[0] : "\(String(format: "#%02d", startSlot))..\(badges.last ?? "")"
+            }
+            groupsSummary.append(summary)
+        }
+
+        return MultiQueryRecallResult(
+            hits: merged,
+            groupsSummary: groupsSummary,
+            totalUniqueMatched: allUniqueMatched.count
+        )
+    }
+
+    private struct FolderProfile: Sendable {
+        let directCount: Int
+        let recursiveCount: Int
+        let topTags: [String]
+        let palette: [String]
+        let dominantAspect: String?
+    }
+
+    private struct AttachedContactSheet: Sendable {
+        let jpegData: Data
+        let width: Int
+        let height: Int
+        let slotCount: Int
+        let bytes: Int
+        let savedPath: String?
+
+        var summary: [String: Any] {
+            var dict: [String: Any] = [
+                "width": width,
+                "height": height,
+                "slotCount": slotCount,
+                "bytes": bytes
+            ]
+            if let savedPath {
+                dict["savedPath"] = savedPath
+            }
+            return dict
+        }
+    }
+
+    private func renderAttachedContactSheet(
+        for assets: [AssetRecord],
+        maxWidth: Int,
+        jpegQuality: Double = 0.74,
+        outputURL: URL?
+    ) throws -> AttachedContactSheet? {
+        guard !assets.isEmpty else { return nil }
+        let entries: [ContactSheetRenderer.Entry] = assets.enumerated().map { idx, asset in
+            let thumbURL = engine.media.thumbnailURL(for: asset.id, tier: .grid520)
+                ?? engine.media.thumbnailURL(for: asset.id, tier: .preview1400)
+            return ContactSheetRenderer.Entry(slot: idx + 1, asset: asset, thumbnailURL: thumbURL)
+        }
+        guard let sheet = ContactSheetRenderer.render(entries: entries, maxCanvasWidth: maxWidth, jpegQuality: jpegQuality) else {
+            return nil
+        }
+        var savedPath: String?
+        if let outputURL {
+            try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try sheet.jpegData.write(to: outputURL, options: .atomic)
+            savedPath = outputURL.path
+        }
+        return AttachedContactSheet(
+            jpegData: sheet.jpegData,
+            width: sheet.width,
+            height: sheet.height,
+            slotCount: sheet.orderedSlots.count,
+            bytes: sheet.jpegData.count,
+            savedPath: savedPath
+        )
+    }
+
+    private func applyPostFilters(_ assets: [AssetRecord], args: [String: Any]) async throws -> [AssetRecord] {
+        let anyTags = Set((Self.stringArrayArg(args["any_tags"]) ?? []).map(SearchText.normalize).filter { !$0.isEmpty })
+        let excludeTags = Set((Self.stringArrayArg(args["exclude_tags"]) ?? []).map(SearchText.normalize).filter { !$0.isEmpty })
+        let excludeIDs = Set(try await resolveAssetUUIDList(args["exclude_asset_ids"]))
+        let tones: [VisualTone] = {
+            if let single = args["tone"] as? String {
+                return single.split(separator: ",").compactMap { VisualTone.parse(String($0)) }
+            }
+            if let arr = Self.stringArrayArg(args["tone"]) {
+                return arr.compactMap { VisualTone.parse($0) }
+            }
+            return []
+        }()
+        guard !anyTags.isEmpty || !excludeTags.isEmpty || !excludeIDs.isEmpty || !tones.isEmpty else {
+            return assets
+        }
+        return assets.filter { asset in
+            if excludeIDs.contains(asset.id) { return false }
+            if !anyTags.isEmpty || !excludeTags.isEmpty {
+                let assetTags = Set((asset.tags + asset.suggestedTags).map(SearchText.normalize))
+                if !anyTags.isEmpty && assetTags.isDisjoint(with: anyTags) { return false }
+                if !excludeTags.isEmpty && !assetTags.isDisjoint(with: excludeTags) { return false }
+            }
+            if !tones.isEmpty && !tones.allSatisfy({ $0.matches(asset) }) {
+                return false
+            }
+            return true
+        }
+    }
+
+    /// Suppresses visual near-duplicates (Apple Vision FeaturePrint distance < 0.22 + identical contentHash)
+    /// and interleaves candidates across folders in round-robin passes (while preserving the #1 top match first)
+    /// so even the top 5–16 tiles cover maximum visual and stylistic variety.
+    private func diversifyAssets(_ assets: [AssetRecord], limit: Int) async -> [AssetRecord] {
+        guard assets.count > 1, limit > 1 else {
+            return Array(assets.prefix(limit))
+        }
+        let vectors = (try? await engine.database.vectors()) ?? [:]
+        let probePool = Array(assets.prefix(max(limit * 6, 96)))
+
+        // 1. First filter visual near-duplicates in relevance order
+        var deduped: [AssetRecord] = []
+        deduped.reserveCapacity(min(probePool.count, limit * 3))
+        var selectedHashes = Set<String>()
+        var selectedPrints: [Data] = []
+        for candidate in probePool {
+            if !candidate.contentHash.isEmpty && selectedHashes.contains(candidate.contentHash) {
+                continue
+            }
+            var duplicate = false
+            if let fp = vectors[candidate.id]?.featurePrint {
+                for chosenPrint in selectedPrints {
+                    if let dist = VisionAnalyzer.visualDistance(between: fp, and: chosenPrint), dist < 0.22 {
+                        duplicate = true
+                        break
+                    }
+                }
+            }
+            if duplicate { continue }
+            deduped.append(candidate)
+            if !candidate.contentHash.isEmpty { selectedHashes.insert(candidate.contentHash) }
+            if let fp = vectors[candidate.id]?.featurePrint { selectedPrints.append(fp) }
+            if deduped.count >= max(limit * 3, 48) { break }
+        }
+
+        // 2. Round-robin interleave across folders (ordered by each folder's best-ranked candidate)
+        var folderOrder: [UUID?] = []
+        var buckets: [UUID?: [AssetRecord]] = [:]
+        for asset in deduped {
+            if buckets[asset.folderID] == nil {
+                folderOrder.append(asset.folderID)
+            }
+            buckets[asset.folderID, default: []].append(asset)
+        }
+        guard folderOrder.count >= 2 else {
+            return Array(deduped.prefix(limit))
+        }
+
+        var selected: [AssetRecord] = []
+        selected.reserveCapacity(min(limit, deduped.count))
+        var cursorByFolder: [UUID?: Int] = [:]
+        // Keep the top-ranked #1 item first, then interleave round-by-round across distinct folders
+        let perFolderPerRound = folderOrder.count >= 4 ? 1 : 2
+        while selected.count < limit {
+            var progressed = false
+            for fid in folderOrder where selected.count < limit {
+                guard let list = buckets[fid] else { continue }
+                var idx = cursorByFolder[fid] ?? 0
+                let end = min(list.count, idx + perFolderPerRound)
+                while idx < end && selected.count < limit {
+                    selected.append(list[idx])
+                    idx += 1
+                    progressed = true
+                }
+                cursorByFolder[fid] = idx
+            }
+            if !progressed { break }
+        }
+        return selected
+    }
+
+    private static func computeResultFacets(
+        _ assets: [AssetRecord],
+        folderPathByID: [UUID: String]
+    ) -> [String: Any] {
+        var folderCounts: [String: Int] = [:]
+        var tagCounts: [String: Int] = [:]
+        var shapeCounts: [String: Int] = [:]
+        var colorWeights: [String: Double] = [:]
+
+        for asset in assets {
+            let folder = asset.folderID.flatMap { folderPathByID[$0] } ?? "Inbox"
+            folderCounts[folder, default: 0] += 1
+            shapeCounts[asset.aspectShape.rawValue, default: 0] += 1
+            for tag in asset.tags {
+                tagCounts[tag, default: 0] += 1
+            }
+            if let primary = asset.dominantColors.first {
+                colorWeights[quantizedHexBucket(primary.hex), default: 0] += max(0.1, primary.proportion)
+            }
+        }
+
+        let topFolders = folderCounts
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(6)
+            .map { ["path": $0.key, "count": $0.value] as [String: Any] }
+        let topTags = tagCounts
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(10)
+            .map { ["name": $0.key, "count": $0.value] as [String: Any] }
+        let topColors = colorWeights
+            .sorted { $0.value > $1.value }
+            .prefix(5)
+            .map(\.key)
+
+        var facets: [String: Any] = [
+            "topFolders": topFolders,
+            "topTags": topTags,
+            "aspectShapes": shapeCounts
+        ]
+        if !topColors.isEmpty {
+            facets["topColors"] = topColors
+        }
+        return facets
+    }
+
+    private static func buildFolderProfiles(
+        folders: [FolderRecord],
+        assets: [AssetRecord]
+    ) -> [UUID: FolderProfile] {
+        let childrenByParent = Dictionary(grouping: folders) { $0.parentID }
+        var directAssetsByFolder: [UUID: [AssetRecord]] = [:]
+        for asset in assets {
+            if let fid = asset.folderID {
+                directAssetsByFolder[fid, default: []].append(asset)
+            }
+        }
+
+        // Memoized subtree IDs per folder
+        var subtreeCache: [UUID: [UUID]] = [:]
+        func subtreeIDs(for root: UUID) -> [UUID] {
+            if let cached = subtreeCache[root] { return cached }
+            var result: [UUID] = [root]
+            var seen: Set<UUID> = [root]
+            var queue: [UUID] = [root]
+            var idx = 0
+            while idx < queue.count {
+                let cur = queue[idx]
+                idx += 1
+                for child in childrenByParent[cur, default: []] where seen.insert(child.id).inserted {
+                    result.append(child.id)
+                    queue.append(child.id)
+                }
+            }
+            subtreeCache[root] = result
+            return result
+        }
+
+        var profiles: [UUID: FolderProfile] = [:]
+        for folder in folders {
+            let direct = directAssetsByFolder[folder.id] ?? []
+            let subtree = subtreeIDs(for: folder.id)
+            var recursiveCount = 0
+            var tagCounts: [String: Int] = [:]
+            var shapeCounts: [String: Int] = [:]
+            var colorBuckets: [String: Double] = [:]
+            var representativeHexByBucket: [String: String] = [:]
+
+            for fid in subtree {
+                guard let bucketAssets = directAssetsByFolder[fid] else { continue }
+                recursiveCount += bucketAssets.count
+                for asset in bucketAssets {
+                    shapeCounts[asset.aspectShape.rawValue, default: 0] += 1
+                    for tag in asset.tags {
+                        tagCounts[tag, default: 0] += 1
+                    }
+                    if let c = asset.dominantColors.first {
+                        let key = quantizedHexBucket(c.hex)
+                        colorBuckets[key, default: 0] += max(0.15, c.proportion)
+                        if representativeHexByBucket[key] == nil {
+                            representativeHexByBucket[key] = c.hex.uppercased()
+                        }
+                    }
+                }
+            }
+
+            let topTags = tagCounts
+                .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+                .prefix(5)
+                .map(\.key)
+            let palette = colorBuckets
+                .sorted { $0.value > $1.value }
+                .prefix(3)
+                .compactMap { representativeHexByBucket[$0.key] ?? $0.key }
+            var dominantAspect: String?
+            if recursiveCount >= 3, let topShape = shapeCounts.max(by: { $0.value < $1.value }) {
+                if Double(topShape.value) / Double(recursiveCount) >= 0.60 {
+                    dominantAspect = topShape.key
+                }
+            }
+
+            profiles[folder.id] = FolderProfile(
+                directCount: direct.count,
+                recursiveCount: recursiveCount,
+                topTags: topTags,
+                palette: palette,
+                dominantAspect: dominantAspect
+            )
+        }
+        return profiles
+    }
+
+    /// Quantizes a 6-char hex color to a coarse 4-bit-per-channel bucket so similar hues aggregate cleanly.
+    private static func quantizedHexBucket(_ hex: String) -> String {
+        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
+        guard cleaned.count == 6, let val = UInt32(cleaned, radix: 16) else { return hex.uppercased() }
+        let r = ((val >> 16) & 0xFF) & 0xE0
+        let g = ((val >> 8) & 0xFF) & 0xE0
+        let b = (val & 0xFF) & 0xE0
+        return String(format: "#%02X%02X%02X", r + 16, g + 16, b + 16)
+    }
+
+    private func serializeAssetSummary(
+        _ asset: AssetRecord,
+        folderPathByID: [UUID: String],
+        detail: AssetDetailLevel = .compact
+    ) -> [String: Any] {
+        let folderPath = asset.folderID.flatMap { folderPathByID[$0] } ?? "Inbox"
+
+        if detail == .visual {
+            var dict: [String: Any] = [
+                "id": String(asset.id.uuidString.prefix(8)),
+                "title": Self.truncateText(asset.title, maxChars: 42),
+                "folderPath": folderPath
+            ]
+            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+                dict["dimensions"] = "\(asset.pixelWidth)x\(asset.pixelHeight)"
+            } else {
+                dict["aspectShape"] = asset.aspectShape.rawValue
+            }
+            if asset.mediaKind != .image {
+                dict["mediaKind"] = asset.mediaKind.rawValue
+            }
+            if asset.rating > 0 {
+                dict["rating"] = asset.rating
+            }
+            return dict
+        }
+
+        let roundedRatio = (asset.aspectRatio * 100).rounded() / 100
+
+        if detail == .full {
+            var dict: [String: Any] = [
+                "id": asset.id.uuidString,
+                "title": asset.title,
+                "fileName": asset.fileName,
+                "mediaKind": asset.mediaKind.rawValue,
+                "folderID": asset.folderID?.uuidString ?? "",
+                "folderPath": folderPath,
+                "tags": asset.tags,
+                "rating": asset.rating,
+                "aspectRatio": roundedRatio,
+                "aspectShape": asset.aspectShape.rawValue,
+                "dominantColors": asset.dominantColors.prefix(5).map { $0.hex.uppercased() },
+                "aiDescription": asset.aiDescription ?? "",
+                "notes": asset.notes,
+                "sourceURL": asset.sourceURL ?? ""
+            ]
+            if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+                dict["dimensions"] = "\(asset.pixelWidth)x\(asset.pixelHeight)"
+            }
+            return dict
+        }
+
+        var dict: [String: Any] = [
             "id": asset.id.uuidString,
             "title": asset.title,
-            "fileName": asset.fileName,
             "mediaKind": asset.mediaKind.rawValue,
-            "folderID": asset.folderID?.uuidString ?? "",
-            "folderPath": asset.folderID.flatMap { folderPathByID[$0] } ?? "Inbox",
-            "tags": asset.tags,
-            "rating": asset.rating,
-            "aspectRatio": (asset.aspectRatio * 100).rounded() / 100,
-            "dominantColors": asset.dominantColors.prefix(5).map { $0.hex.uppercased() },
-            "aiDescription": asset.aiDescription ?? "",
-            "notes": asset.notes,
-            "sourceURL": asset.sourceURL ?? ""
+            "folderPath": folderPath,
+            "aspectRatio": roundedRatio,
+            "aspectShape": asset.aspectShape.rawValue
         ]
+        if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+            dict["dimensions"] = "\(asset.pixelWidth)x\(asset.pixelHeight)"
+        }
+        if asset.rating > 0 {
+            dict["rating"] = asset.rating
+        }
+        if !asset.tags.isEmpty {
+            dict["tags"] = asset.tags
+        }
+        let colorCap = detail == .compact ? 3 : 5
+        let colors = asset.dominantColors.prefix(colorCap).map { $0.hex.uppercased() }
+        if !colors.isEmpty {
+            dict["dominantColors"] = colors
+        }
+        let desc = (asset.aiDescription ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !desc.isEmpty {
+            dict["aiDescription"] = detail == .compact ? Self.truncateText(desc, maxChars: 160) : desc
+        }
+
+        if detail == .standard {
+            if let fid = asset.folderID { dict["folderID"] = fid.uuidString }
+            dict["fileName"] = asset.fileName
+            let notesClean = Self.cleanNotesExcerpt(asset.notes, maxChars: 400)
+            if !notesClean.isEmpty { dict["notes"] = notesClean }
+            if let url = asset.sourceURL, !url.isEmpty { dict["sourceURL"] = url }
+        } else {
+            // Compact: omit redundant fileName, emit trimmed notesExcerpt only when it adds new signal
+            let baseFileName = URL(fileURLWithPath: asset.fileName).deletingPathExtension().lastPathComponent
+            if !asset.fileName.isEmpty && baseFileName.caseInsensitiveCompare(asset.title) != .orderedSame && !asset.title.hasPrefix(baseFileName) {
+                dict["fileName"] = asset.fileName
+            }
+            let notesExcerpt = Self.cleanNotesExcerpt(asset.notes, maxChars: 100)
+            if !notesExcerpt.isEmpty && (desc.isEmpty || !desc.contains(notesExcerpt.prefix(24))) {
+                dict["notesExcerpt"] = notesExcerpt
+            }
+            if asset.mediaKind == .webBookmark, let url = asset.sourceURL, !url.isEmpty {
+                dict["sourceURL"] = Self.cleanSummaryURL(url)
+            }
+        }
+        return dict
+    }
+
+    private func serializeAssetDetail(
+        _ asset: AssetRecord,
+        folderPathByID: [UUID: String],
+        iso: ISO8601DateFormatter
+    ) async -> [String: Any] {
+        let thumbURL = await engine.thumbnailURL(for: asset.id, tier: .grid520)
+        let previewURL = await engine.thumbnailURL(for: asset.id, tier: .preview1400)
+        let candidateOriginal = engine.media.originalPath(for: asset)
+        let localOriginal = FileManager.default.fileExists(atPath: candidateOriginal.path) ? candidateOriginal.path : nil
+
+        var dict = serializeAssetSummary(asset, folderPathByID: folderPathByID, detail: .standard)
+        dict["mimeType"] = asset.mimeType
+        dict["displayType"] = asset.displayTypeLabel
+        dict["fileSizeBytes"] = asset.fileSizeBytes
+        dict["pixelWidth"] = asset.pixelWidth
+        dict["pixelHeight"] = asset.pixelHeight
+        if let duration = asset.durationSeconds {
+            dict["durationSeconds"] = (duration * 100).rounded() / 100
+        }
+        if !asset.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dict["notes"] = asset.notes
+        }
+        // Deduplicate OCR when byte-identical to notes or socialPost.bodyText
+        let ocr = (asset.ocrText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let socialBody = asset.richMetadata?.socialPost?.bodyText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !ocr.isEmpty && ocr != asset.notes.trimmingCharacters(in: .whitespacesAndNewlines) && ocr != socialBody {
+            dict["ocrText"] = ocr
+        }
+        if !asset.suggestedTags.isEmpty { dict["suggestedTags"] = asset.suggestedTags }
+        if let domain = asset.sourceDomain, !domain.isEmpty { dict["sourceDomain"] = domain }
+        dict["pinnedOffline"] = asset.pinnedOffline
+        dict["isLocalOriginalCached"] = localOriginal != nil
+        if let thumbPath = thumbURL?.path, !thumbPath.isEmpty { dict["thumbnailPath"] = thumbPath }
+        if let previewPath = previewURL?.path, !previewPath.isEmpty { dict["previewPath"] = previewPath }
+        if let localOriginal, !localOriginal.isEmpty { dict["localOriginalPath"] = localOriginal }
+        if asset.isTrashed { dict["isTrashed"] = true }
+        dict["createdAt"] = iso.string(from: asset.createdAt)
+        dict["updatedAt"] = iso.string(from: asset.updatedAt)
+        if let lastOpened = asset.lastOpenedAt {
+            dict["lastOpenedAt"] = iso.string(from: lastOpened)
+        }
+        if let rich = serializeRichMetadata(asset.richMetadata) {
+            dict["richMetadata"] = rich
+        }
+        return dict
+    }
+
+    private static func truncateText(_ text: String, maxChars: Int) -> String {
+        guard text.count > maxChars else { return text }
+        return String(text.prefix(max(1, maxChars - 1))) + "…"
+    }
+
+    private static func cleanNotesExcerpt(_ raw: String, maxChars: Int) -> String {
+        let stripped = raw
+            .replacingOccurrences(of: #"charkle-inspector-card:\S+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"https?://t\.co/\S+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stripped.isEmpty else { return "" }
+        return truncateText(stripped, maxChars: maxChars)
+    }
+
+    private static func cleanSummaryURL(_ raw: String) -> String {
+        guard var comps = URLComponents(string: raw), let items = comps.queryItems, !items.isEmpty else {
+            return raw
+        }
+        let noisyParams: Set<String> = ["xsec_token", "xsec_source", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid", "s", "t"]
+        let filtered = items.filter { !noisyParams.contains($0.name.lowercased()) }
+        comps.queryItems = filtered.isEmpty ? nil : filtered
+        return comps.string ?? raw
     }
 
     private func serializeRichMetadata(_ rich: AssetRichMetadata?) -> [String: Any]? {

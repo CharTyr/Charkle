@@ -297,6 +297,7 @@ public final class NotchShelfController {
     private var panel: NotchPanel?
     private var sensorWindows: [NotchPanel] = []
     private var pollTimer: Timer?
+    private var pollTimerInterval: TimeInterval = 0
     private var hideWorkItem: DispatchWorkItem?
     private var hoverExpandWorkItem: DispatchWorkItem?
     private var panelOrderOutWorkItem: DispatchWorkItem?
@@ -312,10 +313,22 @@ public final class NotchShelfController {
     private var wasMouseButtonDown: Bool = false
     private var cachedDragPBIsInternal: Bool = false
     private var cachedDragPBHasDroppable: Bool = false
+    private var cachedDragPBItemCount: Int = 1
+    private var dragStartLocation: NSPoint?
+    private var dragStartScreenFrame: NSRect?
+    private var dragMotionSamples: [NotchDragMotionSample] = []
+    private var lastImmediateDragEvalTime: CFAbsoluteTime = 0
+    private var lastPredictiveDragExpandTime: CFAbsoluteTime = 0
+    private var cachedDockPIDs: Set<pid_t> = []
+    private var lastDockPIDRefreshTime: CFAbsoluteTime = 0
+    private var lastMissionControlCheckTime: CFAbsoluteTime = 0
+    private var isMissionControlActiveCached: Bool = false
+    private var isHiddenForMissionControl: Bool = false
     private var lastAnchoredScreenFrame: NSRect = .zero
     private var lastSensorScreenFrames: [NSRect] = []
     private var lastObservedNotchEnabled: Bool = true
     private var screenObserver: (any NSObjectProtocol)?
+    private var activeSpaceObserver: (any NSObjectProtocol)?
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
@@ -370,6 +383,16 @@ public final class NotchShelfController {
             }
         }
 
+        activeSpaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleActiveSpaceDidChange()
+            }
+        }
+
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.shelfState.isExpanded else {
                 return event
@@ -421,12 +444,12 @@ public final class NotchShelfController {
     }
 
     public func expand(forDrag: Bool = false, pinOpen: Bool = false) {
-        guard coordinator.notchShelfEnabled else { return }
+        guard coordinator.notchShelfEnabled, !isHiddenForMissionControl else { return }
         cancelAutoCollapse()
         cancelHoverExpand()
         cancelPanelOrderOut()
         anchorFixedPanelIfScreenChanged()
-        refreshClipboardHint(force: true)
+        refreshClipboardHint(force: !forDrag)
         guard let panel else { return }
 
         panel.ignoresMouseEvents = false
@@ -440,7 +463,7 @@ public final class NotchShelfController {
             shelfState.isPinnedOpen = true
         }
         shelfState.isExpanded = true
-        ensurePollTimerRunning()
+        ensurePollTimerRunning(fastForDrag: forDrag || NSEvent.pressedMouseButtons != 0)
     }
 
     public func collapse(force: Bool = false) {
@@ -458,7 +481,7 @@ public final class NotchShelfController {
         // once the closing spring settles, orderOut releases the oversized CoreAnimation backing store.
         panel?.ignoresMouseEvents = true
         schedulePanelOrderOut()
-        if NSEvent.pressedMouseButtons == 0 {
+        if NSEvent.pressedMouseButtons == 0 && !isHiddenForMissionControl {
             stopPollTimer()
         }
     }
@@ -663,7 +686,8 @@ public final class NotchShelfController {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = Self.shelfWindowLevel
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.worksWhenModal = true
         panel.isMovableByWindowBackground = false
@@ -772,7 +796,7 @@ public final class NotchShelfController {
         sensor.backgroundColor = NSColor.black.withAlphaComponent(0.002)
         sensor.hasShadow = false
         sensor.level = Self.sensorWindowLevel
-        sensor.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        sensor.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         sensor.hidesOnDeactivate = false
         sensor.worksWhenModal = true
         sensor.ignoresMouseEvents = false
@@ -782,7 +806,7 @@ public final class NotchShelfController {
     /// Maintains one lightweight top-bezel sensor panel per connected `NSScreen` so hover & drag
     /// detection works across multi-display setups with zero `.mouseMoved` global event monitoring.
     private func repositionSensorWindows() {
-        let enabled = coordinator.notchShelfEnabled
+        let enabled = coordinator.notchShelfEnabled && !isHiddenForMissionControl
         guard enabled else {
             if lastObservedNotchEnabled || sensorWindows.contains(where: \.isVisible) {
                 lastObservedNotchEnabled = false
@@ -862,6 +886,8 @@ public final class NotchShelfController {
             collapse(force: true)
             cancelPanelOrderOut()
             panel?.orderOut(nil)
+            isHiddenForMissionControl = false
+            resetDragMotionTracking()
             stopPollTimer()
             removeEventDrivenWatchers()
         } else {
@@ -897,42 +923,189 @@ public final class NotchShelfController {
         }
     }
 
+    private func resetDragMotionTracking() {
+        dragStartLocation = nil
+        dragStartScreenFrame = nil
+        dragMotionSamples.removeAll(keepingCapacity: true)
+        lastImmediateDragEvalTime = 0
+    }
+
+    private func recordDragMotionSample(location: NSPoint, screenFrame: NSRect, now: CFAbsoluteTime) {
+        if dragStartLocation == nil || dragStartScreenFrame != screenFrame {
+            dragStartLocation = location
+            dragStartScreenFrame = screenFrame
+            dragMotionSamples.removeAll(keepingCapacity: true)
+        }
+        if let last = dragMotionSamples.last,
+           abs(last.location.x - location.x) < 0.5,
+           abs(last.location.y - location.y) < 0.5,
+           now - last.timestamp < 0.012 {
+            return
+        }
+        dragMotionSamples.append(NotchDragMotionSample(location: location, timestamp: now))
+        let cutoff = now - 0.24
+        if dragMotionSamples.count > 24 || (dragMotionSamples.first?.timestamp ?? now) < cutoff {
+            dragMotionSamples.removeAll { $0.timestamp < cutoff }
+            if dragMotionSamples.count > 24 {
+                dragMotionSamples.removeFirst(dragMotionSamples.count - 24)
+            }
+        }
+    }
+
+    private func refreshDockPIDsIfNeeded(now: CFAbsoluteTime, force: Bool = false) {
+        if !force && !cachedDockPIDs.isEmpty && (now - lastDockPIDRefreshTime) < 5.0 {
+            return
+        }
+        cachedDockPIDs = Set(
+            NSRunningApplication
+                .runningApplications(withBundleIdentifier: "com.apple.dock")
+                .map(\.processIdentifier)
+        )
+        lastDockPIDRefreshTime = now
+    }
+
+    private func isMissionControlActive(now: CFAbsoluteTime, force: Bool = false) -> Bool {
+        if !force && (now - lastMissionControlCheckTime) < 0.16 {
+            return isMissionControlActiveCached
+        }
+        lastMissionControlCheckTime = now
+        refreshDockPIDsIfNeeded(now: now, force: force)
+        guard !cachedDockPIDs.isEmpty else {
+            isMissionControlActiveCached = false
+            return false
+        }
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            isMissionControlActiveCached = false
+            return false
+        }
+        var dockWindows: [NotchDockWindowSnapshot] = []
+        dockWindows.reserveCapacity(4)
+        for info in windowList {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  cachedDockPIDs.contains(pid),
+                  let layer = info[kCGWindowLayer as String] as? Int else {
+                continue
+            }
+            let sharing = (info[kCGWindowSharingState as String] as? Int) ?? 0
+            let boundsDict = info[kCGWindowBounds as String] as? NSDictionary
+            let bounds = boundsDict.flatMap { CGRect(dictionaryRepresentation: $0) } ?? .zero
+            dockWindows.append(NotchDockWindowSnapshot(layer: layer, sharingState: sharing, bounds: bounds))
+        }
+        let active = NotchDropGeometry.containsMissionControlOverlay(dockWindows: dockWindows)
+        isMissionControlActiveCached = active
+        return active
+    }
+
+    private func updateMissionControlYieldState(now: CFAbsoluteTime, forceCheck: Bool = false) -> Bool {
+        let active = isMissionControlActive(now: now, force: forceCheck)
+        if active {
+            if !isHiddenForMissionControl {
+                isHiddenForMissionControl = true
+                cancelHoverExpand()
+                cancelAutoCollapse()
+                if shelfState.isExpanded {
+                    collapse(force: true)
+                }
+                cancelPanelOrderOut()
+                panel?.orderOut(nil)
+                repositionSensorWindows()
+            }
+            ensurePollTimerRunning(fastForDrag: false)
+            return true
+        }
+        if isHiddenForMissionControl {
+            isHiddenForMissionControl = false
+            repositionSensorWindows()
+        }
+        return false
+    }
+
+    private func handleActiveSpaceDidChange() {
+        let now = CFAbsoluteTimeGetCurrent()
+        if shelfState.isExpanded && !shelfState.isPinnedOpen && shelfState.processingMessage == nil {
+            collapse(force: true)
+        }
+        _ = updateMissionControlYieldState(now: now, forceCheck: true)
+        if !isHiddenForMissionControl {
+            anchorFixedPanelIfScreenChanged()
+            repositionSensorWindows()
+        }
+    }
+
     private func handleObservedMouseEvent(_ event: NSEvent) {
         guard coordinator.notchShelfEnabled else { return }
+        let now = CFAbsoluteTimeGetCurrent()
         switch event.type {
         case .leftMouseDown:
-            // Record pre-drag pasteboard baseline without starting the 10Hz poll timer on ordinary clicks.
+            // Record pre-drag pasteboard baseline and start coordinates without waking any idle timer on clicks.
+            let loc = NSEvent.mouseLocation
+            resetDragMotionTracking()
+            if let screen = screenUnderCursor(at: loc) {
+                dragStartLocation = loc
+                dragStartScreenFrame = screen.frame
+                dragMotionSamples.append(NotchDragMotionSample(location: loc, timestamp: now))
+            }
             if !shelfState.isExpanded && pollTimer == nil {
                 baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
-                lastBaselineSyncTime = CFAbsoluteTimeGetCurrent()
+                lastBaselineSyncTime = now
             }
         case .leftMouseDragged:
-            ensurePollTimerRunning()
+            ensurePollTimerRunning(fastForDrag: true)
+            // Zero-latency direct evaluation (throttled to ~60Hz) so upward drags open the shelf well below
+            // the menu bar instead of waiting for a slow timer tick and colliding with macOS Mission Control.
+            if now - lastImmediateDragEvalTime >= 0.016 {
+                lastImmediateDragEvalTime = now
+                pollCursorAndDragState()
+            }
         case .leftMouseUp:
+            resetDragMotionTracking()
             if !shelfState.isExpanded {
                 baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
-                lastBaselineSyncTime = CFAbsoluteTimeGetCurrent()
-                stopPollTimer()
+                lastBaselineSyncTime = now
+                if !isHiddenForMissionControl {
+                    stopPollTimer()
+                }
+            } else {
+                pollCursorAndDragState()
             }
         default:
             break
         }
     }
 
-    private func ensurePollTimerRunning() {
-        guard pollTimer == nil, coordinator.notchShelfEnabled else { return }
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
+    private func ensurePollTimerRunning(fastForDrag: Bool = false) {
+        guard coordinator.notchShelfEnabled else { return }
+        let desiredInterval: TimeInterval
+        let desiredTolerance: TimeInterval
+        if fastForDrag {
+            desiredInterval = 0.033
+            desiredTolerance = 0.01
+        } else if isHiddenForMissionControl {
+            desiredInterval = 0.25
+            desiredTolerance = 0.08
+        } else {
+            desiredInterval = 0.10
+            desiredTolerance = 0.04
+        }
+
+        if pollTimer != nil, abs(pollTimerInterval - desiredInterval) <= 0.005 {
+            return
+        }
+        pollTimer?.invalidate()
+        pollTimerInterval = desiredInterval
+        let timer = Timer.scheduledTimer(withTimeInterval: desiredInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.pollCursorAndDragState()
             }
         }
-        timer.tolerance = 0.04
+        timer.tolerance = desiredTolerance
         pollTimer = timer
     }
 
     private func stopPollTimer() {
         pollTimer?.invalidate()
         pollTimer = nil
+        pollTimerInterval = 0
     }
 
     private func syncDropTargetedState() {
@@ -968,7 +1141,7 @@ public final class NotchShelfController {
         return false
     }
 
-    private func inspectSystemDragPasteboard() -> (changeCount: Int, isInternal: Bool, hasDroppable: Bool) {
+    private func inspectSystemDragPasteboard() -> (changeCount: Int, isInternal: Bool, hasDroppable: Bool, itemCount: Int) {
         let dragPB = NSPasteboard(name: .drag)
         let cc = dragPB.changeCount
         if cc != lastObservedDragPasteboardChangeCount {
@@ -976,8 +1149,9 @@ public final class NotchShelfController {
             let rawString = dragPB.string(forType: .string) ?? ""
             cachedDragPBIsInternal = CharkleDragIdentifiers.isInternalDrag(rawString)
             cachedDragPBHasDroppable = !cachedDragPBIsInternal && dragPasteboardHasDroppablePayload(dragPB)
+            cachedDragPBItemCount = cachedDragPBIsInternal ? 0 : max(1, dragPB.pasteboardItems?.count ?? 1)
         }
-        return (cc, cachedDragPBIsInternal, cachedDragPBHasDroppable)
+        return (cc, cachedDragPBIsInternal, cachedDragPBHasDroppable, cachedDragPBItemCount)
     }
 
     private func pollCursorAndDragState() {
@@ -988,8 +1162,14 @@ public final class NotchShelfController {
         guard enabled else {
             cancelHoverExpand()
             if shelfState.isExpanded { collapse(force: true) }
+            isHiddenForMissionControl = false
+            resetDragMotionTracking()
             repositionSensorWindows()
             stopPollTimer()
+            return
+        }
+
+        if updateMissionControlYieldState(now: now) {
             return
         }
 
@@ -1000,6 +1180,7 @@ public final class NotchShelfController {
                 baselineDragChangeCount = NSPasteboard(name: .drag).changeCount
                 lastBaselineSyncTime = now
             }
+            resetDragMotionTracking()
         }
         wasMouseButtonDown = isMouseButtonDown
 
@@ -1010,20 +1191,20 @@ public final class NotchShelfController {
             return
         }
 
+        // Relax fast drag cadence back to 10Hz once the button is released while the shelf stays open.
+        if shelfState.isExpanded && !isMouseButtonDown {
+            ensurePollTimerRunning(fastForDrag: false)
+        }
+
         let loc = NSEvent.mouseLocation
         guard let cursorScreen = screenUnderCursor(at: loc) else { return }
 
+        if isMouseButtonDown {
+            recordDragMotionSample(location: loc, screenFrame: cursorScreen.frame, now: now)
+        }
+
         if !shelfState.isExpanded {
-            let metrics = notchMetrics(for: cursorScreen)
-            let inDragTrigger = NotchDropGeometry.isPointInDragTriggerZone(
-                loc,
-                screenFrame: cursorScreen.frame,
-                hasPhysicalNotch: metrics.hasPhysicalNotch,
-                notchWidth: metrics.notchWidth,
-                notchHeight: metrics.notchHeight
-            )
-            if isMouseButtonDown && inDragTrigger {
-                cancelHoverExpand()
+            if isMouseButtonDown {
                 let state = inspectSystemDragPasteboard()
                 if NotchDropGeometry.shouldTriggerProactiveDragExpand(
                     currentDragChangeCount: state.changeCount,
@@ -1031,7 +1212,22 @@ public final class NotchShelfController {
                     isInternalDrag: state.isInternal,
                     hasDroppablePayload: state.hasDroppable
                 ) {
-                    expand(forDrag: true)
+                    let metrics = notchMetrics(for: cursorScreen)
+                    let startLocation = dragStartLocation ?? loc
+                    if NotchDropGeometry.shouldTriggerUpwardDragApproach(
+                        currentLocation: loc,
+                        dragStartLocation: startLocation,
+                        recentSamples: dragMotionSamples,
+                        screenFrame: cursorScreen.frame,
+                        hasPhysicalNotch: metrics.hasPhysicalNotch,
+                        notchWidth: metrics.notchWidth,
+                        notchHeight: metrics.notchHeight
+                    ) {
+                        cancelHoverExpand()
+                        shelfState.dragItemCount = max(1, state.itemCount)
+                        lastPredictiveDragExpandTime = now
+                        expand(forDrag: true)
+                    }
                 }
             }
             return
@@ -1066,7 +1262,16 @@ public final class NotchShelfController {
             bodyWidth: shelfState.expandedBodyWidth,
             cardHeight: shelfState.expandedCardHeight
         )
-        let insideActiveArea = strictCardRect.contains(loc) || (isMouseButtonDown ? inDragTrigger : inHoverTrigger)
+        let inPredictiveApproachGrace: Bool = {
+            guard isMouseButtonDown, (now - lastPredictiveDragExpandTime) < 0.45 else { return false }
+            let approachRect = strictCardRect.insetBy(dx: -48, dy: -48)
+            guard approachRect.contains(loc) else { return false }
+            let velocity = NotchDropGeometry.recentDragVelocity(from: dragMotionSamples)
+            return velocity.dy >= -80
+        }()
+        let insideActiveArea = strictCardRect.contains(loc)
+            || inPredictiveApproachGrace
+            || (isMouseButtonDown ? inDragTrigger : inHoverTrigger)
 
         if (!insideActiveArea || !isMouseButtonDown) && (isPanelDragging || isSensorDragging) {
             if !isMouseButtonDown {
@@ -1253,6 +1458,9 @@ public final class NotchShelfController {
     isolated deinit {
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
+        }
+        if let activeSpaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activeSpaceObserver)
         }
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)

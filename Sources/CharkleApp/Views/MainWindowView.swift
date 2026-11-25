@@ -37,10 +37,44 @@ public struct MainWindowView: View {
     @State private var showInboxBatchTriageSheet: Bool = false
     @State private var selectedTriageIDs: Set<UUID> = []
     @State private var galleryViewportWidth: CGFloat = 960
+    @State private var windowContentWidth: CGFloat = 1280
+    @State private var liveDraggedSidebarWidth: CGFloat? = nil
+    @State private var sidebarDragStartWidth: CGFloat = AppCoordinatorStore.defaultSidebarWidth
+    @State private var sidebarDragStartedCollapsed: Bool = false
+    @State private var isSidebarDividerHovered: Bool = false
+    @State private var isDraggingSidebarDivider: Bool = false
+    @State private var liveDraggedInspectorWidth: CGFloat? = nil
+    @State private var inspectorDragStartWidth: CGFloat = AppCoordinatorStore.defaultInspectorWidth
+    @State private var isInspectorDividerHovered: Bool = false
+    @State private var isDraggingInspectorDivider: Bool = false
     @FocusState private var isSubfolderFieldFocused: Bool
 
     private var activeAccent: Color {
         CharkleTheme.accent(for: colorScheme, source: coordinator.accentSource)
+    }
+
+    private var effectiveExpandedSidebarWidth: CGFloat {
+        AppCoordinatorStore.clampedSidebarWidth(
+            liveDraggedSidebarWidth ?? coordinator.sidebarWidth,
+            windowWidth: windowContentWidth,
+            isInspectorVisible: coordinator.isInspectorVisible,
+            inspectorWidth: liveDraggedInspectorWidth ?? coordinator.inspectorWidth
+        )
+    }
+
+    private var effectiveSidebarTargetWidth: CGFloat {
+        coordinator.isSidebarCollapsed
+            ? AppCoordinatorStore.collapsedSidebarWidth
+            : effectiveExpandedSidebarWidth
+    }
+
+    private var effectiveInspectorWidth: CGFloat {
+        let sidebarOccupied: CGFloat = isSidebarVisible ? (effectiveSidebarTargetWidth + 1) : 0
+        return AppCoordinatorStore.clampedInspectorWidth(
+            liveDraggedInspectorWidth ?? coordinator.inspectorWidth,
+            windowWidth: windowContentWidth,
+            sidebarOccupiedWidth: sidebarOccupied
+        )
     }
 
     public init(
@@ -88,72 +122,74 @@ public struct MainWindowView: View {
             // Sidebar and Inspector keep deterministic fixed internal widths inside animated width slots
             // so rapid collapse/expand cycles never get stuck half-open or overflow past window bounds.
             HStack(spacing: 0) {
-                let sidebarTargetWidth: CGFloat = coordinator.isSidebarCollapsed ? 76 : 232
-                HStack(spacing: 0) {
-                    SidebarView(
-                        coordinator: coordinator,
-                        library: library,
-                        moodboards: moodboards,
-                        onSelectDestination: { dest in
-                            navigate(to: dest)
-                        },
-                        onDropAssetsOntoFolder: { ids, folderID in
-                            Task {
-                                await library.moveAssets(ids, toFolderID: folderID)
-                                let targetName = folderID.flatMap { library.folder(byID: $0)?.name } ?? "收件箱"
-                                coordinator.showToast("已移动 \(ids.count) 项到「\(targetName)」", icon: "folder")
-                            }
-                        },
-                        onDropExternalOntoFolder: { inputs, folderID in
-                            Task {
-                                let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
-                                if created.isEmpty {
-                                    coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
-                                } else {
-                                    coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
-                                }
-                            }
-                        },
-                        onDropAssetsOntoBoard: { ids, boardID in
-                            let resolved = ids.compactMap { library.allAssetsByID[$0] }
-                            Task {
-                                await moodboards.addAssetsToSpecificBoard(boardID: boardID, assets: resolved)
-                                let title = moodboards.boards.first(where: { $0.id == boardID })?.title ?? "情绪板"
-                                coordinator.showToast("已加入情绪板「\(title)」(\(resolved.count) 项)", icon: "rectangle.3.group")
-                            }
-                        },
-                        onDropExternalOntoBoard: { inputs, boardID in
-                            Task {
-                                let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: boardID)
-                                if created.isEmpty {
-                                    coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
-                                } else {
-                                    await moodboards.reloadActiveBoardIfNeeded(id: boardID)
-                                    await moodboards.refreshBoards()
-                                    coordinator.showToast("已收入并上板 (\(created.count) 项)", icon: "sparkles.rectangle.stack", tone: .success)
-                                }
+                let sidebarTargetWidth: CGFloat = effectiveSidebarTargetWidth
+                SidebarView(
+                    coordinator: coordinator,
+                    library: library,
+                    moodboards: moodboards,
+                    expandedWidth: effectiveExpandedSidebarWidth,
+                    onSelectDestination: { dest in
+                        navigate(to: dest)
+                    },
+                    onDropAssetsOntoFolder: { ids, folderID in
+                        Task {
+                            await library.moveAssets(ids, toFolderID: folderID)
+                            let targetName = folderID.flatMap { library.folder(byID: $0)?.name } ?? "收件箱"
+                            coordinator.showToast("已移动 \(ids.count) 项到「\(targetName)」", icon: "folder")
+                        }
+                    },
+                    onDropExternalOntoFolder: { inputs, folderID in
+                        Task {
+                            let created = await library.ingest(inputs, targetFolderID: folderID, targetBoardID: nil)
+                            if created.isEmpty {
+                                coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+                            } else {
+                                coordinator.showToast("已导入 \(created.count) 项素材", icon: "arrow.down.circle.fill", tone: .success)
                             }
                         }
-                    )
-                    .frame(width: sidebarTargetWidth, alignment: .leading)
-                    .clipped()
-                    .background {
-                        CharkleSidebarMaterialBackground()
+                    },
+                    onDropAssetsOntoBoard: { ids, boardID in
+                        let resolved = ids.compactMap { library.allAssetsByID[$0] }
+                        Task {
+                            await moodboards.addAssetsToSpecificBoard(boardID: boardID, assets: resolved)
+                            let title = moodboards.boards.first(where: { $0.id == boardID })?.title ?? "情绪板"
+                            coordinator.showToast("已加入情绪板「\(title)」(\(resolved.count) 项)", icon: "rectangle.3.group")
+                        }
+                    },
+                    onDropExternalOntoBoard: { inputs, boardID in
+                        Task {
+                            let created = await library.ingest(inputs, targetFolderID: nil, targetBoardID: boardID)
+                            if created.isEmpty {
+                                coordinator.showToast(library.lastError ?? "导入失败或素材已存在", icon: "exclamationmark.triangle", tone: .warning)
+                            } else {
+                                await moodboards.reloadActiveBoardIfNeeded(id: boardID)
+                                await moodboards.refreshBoards()
+                                coordinator.showToast("已收入并上板 (\(created.count) 项)", icon: "sparkles.rectangle.stack", tone: .success)
+                            }
+                        }
                     }
-
-                    Rectangle()
-                        .fill(CharkleTheme.hairline(for: colorScheme))
-                        .frame(width: 1)
+                )
+                .frame(width: sidebarTargetWidth, alignment: .leading)
+                .clipped()
+                .background {
+                    CharkleSidebarMaterialBackground()
                 }
                 .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(isSidebarVisible ? 1 : 0)
                 .allowsHitTesting(isSidebarVisible)
                 .disabled(!isSidebarVisible)
                 .accessibilityHidden(!isSidebarVisible)
-                .frame(width: isSidebarVisible ? (sidebarTargetWidth + 1) : 0, alignment: .trailing)
+                .frame(width: isSidebarVisible ? sidebarTargetWidth : 0, alignment: .trailing)
                 .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
+
+                if isSidebarVisible {
+                    sidebarResizeDivider
+                        .ignoresSafeArea(.container, edges: .top)
+                        .zIndex(20)
+                        .layoutPriority(1)
+                }
 
                 centerWorkspace
                     .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
@@ -171,10 +207,18 @@ public struct MainWindowView: View {
                     .clipped()
                     .layoutPriority(0)
 
+                if coordinator.isInspectorVisible {
+                    inspectorResizeDivider
+                        .ignoresSafeArea(.container, edges: .top)
+                        .zIndex(20)
+                        .layoutPriority(1)
+                }
+
                 InspectorView(
                     coordinator: coordinator,
                     library: library,
                     moodboards: moodboards,
+                    panelWidth: effectiveInspectorWidth,
                     onCopyHex: { copyColorHex($0) },
                     onFilterByColor: { hex in
                         Task {
@@ -202,20 +246,30 @@ public struct MainWindowView: View {
                         }
                     }
                 )
-                .frame(width: 300)
+                .frame(width: effectiveInspectorWidth)
                 .frame(minHeight: 0, maxHeight: .infinity)
                 .opacity(coordinator.isInspectorVisible ? 1 : 0)
                 .allowsHitTesting(coordinator.isInspectorVisible)
                 .disabled(!coordinator.isInspectorVisible)
                 .accessibilityHidden(!coordinator.isInspectorVisible)
-                .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
+                .frame(width: coordinator.isInspectorVisible ? effectiveInspectorWidth : 0, alignment: .leading)
                 .ignoresSafeArea(.container, edges: .top)
                 .clipped()
                 .layoutPriority(1)
             }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                floor(max(640, proxy.size.width))
+            } action: { _, newWidth in
+                if abs(newWidth - windowContentWidth) >= 2 {
+                    windowContentWidth = newWidth
+                }
+            }
             .ignoresSafeArea(.container, edges: .top)
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: isSidebarVisible)
-            .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isSidebarCollapsed)
+            .animation(
+                isDraggingSidebarDivider ? nil : CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion),
+                value: coordinator.isSidebarCollapsed
+            )
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
 
             // Full-Media Quick Look Hero Continuity Overlay
@@ -722,8 +776,8 @@ public struct MainWindowView: View {
                 )
             } else {
                 let sideChromeWidth: CGFloat =
-                    (isSidebarVisible ? ((coordinator.isSidebarCollapsed ? 76 : 232) + 1) : 0)
-                    + (coordinator.isInspectorVisible ? 300 : 0)
+                    (isSidebarVisible ? (effectiveSidebarTargetWidth + 1) : 0)
+                    + (coordinator.isInspectorVisible ? (effectiveInspectorWidth + 1) : 0)
                 VirtualizedMasonryView(
                     assets: library.assets,
                     assetsRevision: library.assetsRevision,
@@ -739,6 +793,7 @@ public struct MainWindowView: View {
                     topContentInset: topInset,
                     bottomContentInset: library.selectedAssetIDs.count >= 2 ? 104 : 44,
                     sideChromeWidth: sideChromeWidth,
+                    isLivePaneResizing: isDraggingSidebarDivider || isDraggingInspectorDivider,
                     heroNamespace: heroNamespace,
                     activeQuickLookID: coordinator.quickLookAssetID,
                     revealRequest: coordinator.pendingGalleryReveal,
@@ -3922,5 +3977,272 @@ private struct InboxZeroCelebrationView: View {
         .onAppear {
             appeared = true
         }
+    }
+}
+
+private extension MainWindowView {
+    var sidebarResizeDivider: some View {
+        ZStack {
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(width: 1)
+
+            if isDraggingSidebarDivider || isSidebarDividerHovered {
+                Rectangle()
+                    .fill(
+                        isDraggingSidebarDivider
+                            ? activeAccent.opacity(0.75)
+                            : Color.primary.opacity(colorScheme == .dark ? 0.24 : 0.16)
+                    )
+                    .frame(width: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(width: 1)
+        .frame(minHeight: 0, maxHeight: .infinity)
+        .overlay {
+            PaneResizeHandleView(
+                isCollapsed: coordinator.isSidebarCollapsed,
+                onHoverChanged: { hovering in
+                    if isSidebarDividerHovered != hovering {
+                        isSidebarDividerHovered = hovering
+                    }
+                },
+                onDragBegan: {
+                    isDraggingSidebarDivider = true
+                    sidebarDragStartedCollapsed = coordinator.isSidebarCollapsed
+                    sidebarDragStartWidth = coordinator.isSidebarCollapsed
+                        ? AppCoordinatorStore.collapsedSidebarWidth
+                        : effectiveExpandedSidebarWidth
+                },
+                onDragChanged: { deltaX in
+                    if sidebarDragStartedCollapsed {
+                        if deltaX >= 40 {
+                            if coordinator.isSidebarCollapsed {
+                                coordinator.isSidebarCollapsed = false
+                            }
+                            let raw = AppCoordinatorStore.collapsedSidebarWidth + deltaX
+                            liveDraggedSidebarWidth = AppCoordinatorStore.clampedSidebarWidth(
+                                raw,
+                                windowWidth: windowContentWidth,
+                                isInspectorVisible: coordinator.isInspectorVisible,
+                                inspectorWidth: effectiveInspectorWidth
+                            )
+                        }
+                        return
+                    }
+                    let raw = sidebarDragStartWidth + deltaX
+                    liveDraggedSidebarWidth = AppCoordinatorStore.clampedSidebarWidth(
+                        raw,
+                        windowWidth: windowContentWidth,
+                        isInspectorVisible: coordinator.isInspectorVisible,
+                        inspectorWidth: effectiveInspectorWidth
+                    )
+                },
+                onDragEnded: {
+                    if let finalWidth = liveDraggedSidebarWidth {
+                        coordinator.sidebarWidth = finalWidth
+                    }
+                    liveDraggedSidebarWidth = nil
+                    sidebarDragStartedCollapsed = false
+                    isDraggingSidebarDivider = false
+                },
+                onDoubleClick: {
+                    guard !coordinator.isSidebarCollapsed else { return }
+                    let target = AppCoordinatorStore.clampedSidebarWidth(
+                        AppCoordinatorStore.defaultSidebarWidth,
+                        windowWidth: windowContentWidth,
+                        isInspectorVisible: coordinator.isInspectorVisible,
+                        inspectorWidth: effectiveInspectorWidth
+                    )
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
+                        liveDraggedSidebarWidth = nil
+                        coordinator.sidebarWidth = target
+                    }
+                }
+            )
+            .frame(width: 9)
+        }
+        .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: isSidebarDividerHovered)
+        .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: isDraggingSidebarDivider)
+    }
+
+    var inspectorResizeDivider: some View {
+        ZStack {
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(width: 1)
+
+            if isDraggingInspectorDivider || isInspectorDividerHovered {
+                Rectangle()
+                    .fill(
+                        isDraggingInspectorDivider
+                            ? activeAccent.opacity(0.75)
+                            : Color.primary.opacity(colorScheme == .dark ? 0.24 : 0.16)
+                    )
+                    .frame(width: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(width: 1)
+        .frame(minHeight: 0, maxHeight: .infinity)
+        .overlay {
+            PaneResizeHandleView(
+                onHoverChanged: { hovering in
+                    if isInspectorDividerHovered != hovering {
+                        isInspectorDividerHovered = hovering
+                    }
+                },
+                onDragBegan: {
+                    isDraggingInspectorDivider = true
+                    inspectorDragStartWidth = effectiveInspectorWidth
+                },
+                onDragChanged: { deltaX in
+                    let sidebarOccupied: CGFloat = isSidebarVisible ? (effectiveSidebarTargetWidth + 1) : 0
+                    let raw = inspectorDragStartWidth - deltaX
+                    liveDraggedInspectorWidth = AppCoordinatorStore.clampedInspectorWidth(
+                        raw,
+                        windowWidth: windowContentWidth,
+                        sidebarOccupiedWidth: sidebarOccupied
+                    )
+                },
+                onDragEnded: {
+                    if let finalWidth = liveDraggedInspectorWidth {
+                        coordinator.inspectorWidth = finalWidth
+                    }
+                    liveDraggedInspectorWidth = nil
+                    isDraggingInspectorDivider = false
+                },
+                onDoubleClick: {
+                    let sidebarOccupied: CGFloat = isSidebarVisible ? (effectiveSidebarTargetWidth + 1) : 0
+                    let target = AppCoordinatorStore.clampedInspectorWidth(
+                        AppCoordinatorStore.defaultInspectorWidth,
+                        windowWidth: windowContentWidth,
+                        sidebarOccupiedWidth: sidebarOccupied
+                    )
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
+                        liveDraggedInspectorWidth = nil
+                        coordinator.inspectorWidth = target
+                    }
+                }
+            )
+            .frame(width: 9)
+        }
+        .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: isInspectorDividerHovered)
+        .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: isDraggingInspectorDivider)
+    }
+}
+
+/// Native AppKit split-divider handle providing rock-steady `resizeLeftRight` / `resizeRight` cursor rects,
+/// screen-space delta tracking (zero SwiftUI layout-feedback jitter), double-click default reset,
+/// and optional drag-right-to-expand from a collapsed icon rail.
+struct PaneResizeHandleView: NSViewRepresentable {
+    var isCollapsed: Bool = false
+    let onHoverChanged: (Bool) -> Void
+    let onDragBegan: () -> Void
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: () -> Void
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> PaneResizeHandleNSView {
+        let view = PaneResizeHandleNSView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ nsView: PaneResizeHandleNSView, context: Context) {
+        let collapsedChanged = nsView.isCollapsed != isCollapsed
+        nsView.isCollapsed = isCollapsed
+        nsView.onHoverChanged = onHoverChanged
+        nsView.onDragBegan = onDragBegan
+        nsView.onDragChanged = onDragChanged
+        nsView.onDragEnded = onDragEnded
+        nsView.onDoubleClick = onDoubleClick
+        if collapsedChanged {
+            nsView.window?.invalidateCursorRects(for: nsView)
+        }
+    }
+}
+
+final class PaneResizeHandleNSView: NSView {
+    var isCollapsed: Bool = false
+    var onHoverChanged: ((Bool) -> Void)?
+    var onDragBegan: (() -> Void)?
+    var onDragChanged: ((CGFloat) -> Void)?
+    var onDragEnded: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    private var trackingAreaRef: NSTrackingArea?
+    private var isDragging = false
+    private var dragStartScreenX: CGFloat = 0
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: isCollapsed ? .resizeRight : .resizeLeftRight)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingAreaRef {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingAreaRef = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChanged?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if !isDragging {
+            onHoverChanged?(false)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if !isCollapsed && event.clickCount == 2 {
+            onDoubleClick?()
+            return
+        }
+        isDragging = true
+        dragStartScreenX = NSEvent.mouseLocation.x
+        NSCursor.resizeLeftRight.push()
+        onDragBegan?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        let deltaX = NSEvent.mouseLocation.x - dragStartScreenX
+        onDragChanged?(deltaX)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isDragging else { return }
+        isDragging = false
+        NSCursor.pop()
+        onDragEnded?()
+        let local = convert(event.locationInWindow, from: nil)
+        onHoverChanged?(bounds.contains(local))
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil && isDragging {
+            isDragging = false
+            NSCursor.pop()
+            onDragEnded?()
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 }

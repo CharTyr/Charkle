@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Module metadata for CharkleCanvas.
 public struct CharkleCanvasModuleInfo: Sendable {
-    public static let version = "1.2.1"
+    public static let version = "1.2.2"
 }
 
 /// Canonical pasteboard/drag prefixes so NotchShelfController can distinguish
@@ -69,6 +69,84 @@ public enum CharkleDragIdentifiers {
     }
 }
 
+/// Pure, testable geometry bounds for the main workspace's resizable sidebar and right inspector drawers.
+public nonisolated enum SidebarResizeGeometry {
+    public static let collapsedWidth: CGFloat = 76
+    public static let defaultWidth: CGFloat = 232
+    public static let minWidth: CGFloat = 188
+    public static let maxWidth: CGFloat = 420
+    public static let defaultInspectorWidth: CGFloat = 300
+    public static let minInspectorWidth: CGFloat = 260
+    public static let maxInspectorWidth: CGFloat = 480
+    public static let minCenterWorkspaceWidth: CGFloat = 360
+
+    /// Clamps a requested expanded sidebar width to safe visual bounds (`188...420pt`) while guaranteeing
+    /// the center workspace retains at least `minCenterWorkspaceWidth` when the window narrows.
+    public static func clampedWidth(
+        _ rawWidth: CGFloat,
+        windowWidth: CGFloat? = nil,
+        isInspectorVisible: Bool = false,
+        inspectorWidth: CGFloat = defaultInspectorWidth
+    ) -> CGFloat {
+        guard rawWidth.isFinite else { return defaultWidth }
+        let upperBound: CGFloat
+        if let windowWidth, windowWidth.isFinite, windowWidth > 0 {
+            let safeInspector = inspectorWidth.isFinite ? min(maxInspectorWidth, max(minInspectorWidth, inspectorWidth)) : defaultInspectorWidth
+            let inspectorReserve: CGFloat = isInspectorVisible ? (safeInspector + 1) : 0
+            let availableForSidebar = windowWidth - inspectorReserve - minCenterWorkspaceWidth - 1
+            upperBound = max(minWidth, min(maxWidth, availableForSidebar))
+        } else {
+            upperBound = maxWidth
+        }
+        return round(min(upperBound, max(minWidth, rawWidth)))
+    }
+
+    /// Clamps a requested right Inspector width to safe visual bounds (`260...480pt`) while guaranteeing
+    /// the center workspace or Quick Look stage retains at least `minCenterWorkspaceWidth`.
+    public static func clampedInspectorWidth(
+        _ rawWidth: CGFloat,
+        windowWidth: CGFloat? = nil,
+        sidebarOccupiedWidth: CGFloat = 0
+    ) -> CGFloat {
+        guard rawWidth.isFinite else { return defaultInspectorWidth }
+        let upperBound: CGFloat
+        if let windowWidth, windowWidth.isFinite, windowWidth > 0 {
+            let safeSidebar = sidebarOccupiedWidth.isFinite ? max(0, sidebarOccupiedWidth) : 0
+            let availableForInspector = windowWidth - safeSidebar - minCenterWorkspaceWidth - 1
+            upperBound = max(minInspectorWidth, min(maxInspectorWidth, availableForInspector))
+        } else {
+            upperBound = maxInspectorWidth
+        }
+        return round(min(upperBound, max(minInspectorWidth, rawWidth)))
+    }
+}
+
+/// Timestamped global pointer sample recorded during an active drag session
+/// to estimate upward approach velocity toward the top-center Notch Shelf.
+public nonisolated struct NotchDragMotionSample: Equatable, Sendable {
+    public let location: NSPoint
+    public let timestamp: TimeInterval
+
+    public init(location: NSPoint, timestamp: TimeInterval) {
+        self.location = location
+        self.timestamp = timestamp
+    }
+}
+
+/// Minimal window-server descriptor used to detect active macOS Mission Control overlays
+/// independently of system UI localization.
+public nonisolated struct NotchDockWindowSnapshot: Equatable, Sendable {
+    public let layer: Int
+    public let sharingState: Int
+    public let bounds: CGRect
+
+    public init(layer: Int, sharingState: Int, bounds: CGRect) {
+        self.layer = layer
+        self.sharingState = sharingState
+        self.bounds = bounds
+    }
+}
+
 /// Pure, testable geometry & drag-gating rules for the Notch Shelf's drag-expand trigger strip
 /// and strict drop acceptance bounds (zero transparent shadow-margin bleed, zero stale-pasteboard false triggers).
 public nonisolated enum NotchDropGeometry {
@@ -123,7 +201,7 @@ public nonisolated enum NotchDropGeometry {
     }
 
     /// Comfortable top-center arrival band below the menu bar / physical notch for opening the Notch Shelf
-    /// while dragging an external payload. Stops well below `screenFrame.maxY` so users never collide with
+    /// while dragging an external payload. Extends comfortably below the menu bar so users never collide with
     /// macOS Mission Control / Spaces top-edge triggers, while actual drop acceptance stays strictly inside
     /// `strictCardRect` (never leaking into underlying apps).
     public static func isPointInDragTriggerZone(
@@ -133,11 +211,125 @@ public nonisolated enum NotchDropGeometry {
         notchWidth: CGFloat,
         notchHeight: CGFloat
     ) -> Bool {
-        let triggerHeight: CGFloat = hasPhysicalNotch ? (max(notchHeight, 34) + 32) : 48
-        let halfSpan: CGFloat = hasPhysicalNotch ? (notchWidth / 2.0 + 64) : 164
+        let triggerHeight: CGFloat = hasPhysicalNotch ? (max(notchHeight, 34) + 52) : 76
+        let halfSpan: CGFloat = hasPhysicalNotch ? (notchWidth / 2.0 + 76) : 176
         return screenPoint.y >= screenFrame.maxY - triggerHeight
             && screenPoint.y <= screenFrame.maxY
             && abs(screenPoint.x - screenFrame.midX) <= halfSpan
+    }
+
+    /// Estimates recent `(vx, vy)` pointer velocity in points/second from recent drag motion samples.
+    /// Returns `.zero` when fewer than two valid samples exist or after a pause.
+    public static func recentDragVelocity(from samples: [NotchDragMotionSample]) -> CGVector {
+        guard let latest = samples.last, samples.count >= 2 else { return .zero }
+        let targetLookback = latest.timestamp - 0.14
+        let minDeltaT: TimeInterval = 0.008
+        let maxDeltaT: TimeInterval = 0.35
+
+        var anchor: NotchDragMotionSample?
+        for sample in samples.dropLast().reversed() {
+            let dt = latest.timestamp - sample.timestamp
+            if dt < minDeltaT { continue }
+            if dt > maxDeltaT { break }
+            anchor = sample
+            if sample.timestamp <= targetLookback {
+                break
+            }
+        }
+        guard let anchor else { return .zero }
+        let dt = latest.timestamp - anchor.timestamp
+        guard dt >= minDeltaT else { return .zero }
+        return CGVector(
+            dx: (latest.location.x - anchor.location.x) / dt,
+            dy: (latest.location.y - anchor.location.y) / dt
+        )
+    }
+
+    /// Predicts whether an active external drag is intentionally heading upward toward the top-center
+    /// Notch Shelf so the shelf unfurls early well below the menu bar — giving natural visual braking
+    /// room and preventing the pointer from colliding with macOS top-edge Mission Control triggers.
+    ///
+    /// Three layered tiers ensure zero false opens during normal Finder/browser/canvas work:
+    /// 1. Direct top-center arrival band (`~89pt` notch / `76pt` non-notch), suppressed if dragging steeply downward from start.
+    /// 2. Slow upward arrival band (`~151pt` notch / `136pt` non-notch) once the pointer climbs deliberately upward from below.
+    /// 3. Fast upward ballistic intercept (`~314-350pt` upper corridor) when sustained upward velocity projects directly
+    ///    into the top-center notch zone within human reaction + spring unfurl lead time (`~260ms`).
+    public static func shouldTriggerUpwardDragApproach(
+        currentLocation: NSPoint,
+        dragStartLocation: NSPoint,
+        recentSamples: [NotchDragMotionSample],
+        screenFrame: NSRect,
+        hasPhysicalNotch: Bool,
+        notchWidth: CGFloat,
+        notchHeight: CGFloat
+    ) -> Bool {
+        guard screenFrame.width > 0, screenFrame.height > 0 else { return false }
+        guard currentLocation.y <= screenFrame.maxY else { return false }
+
+        let staticTriggerHeight: CGFloat = hasPhysicalNotch ? (max(notchHeight, 34) + 52) : 76
+        let staticHalfSpan: CGFloat = hasPhysicalNotch ? (notchWidth / 2.0 + 76) : 176
+        let totalUpwardTravel = currentLocation.y - dragStartLocation.y
+
+        // Tier 1: Direct top-center arrival band (suppressed if clearly dragging downward away from the top bar).
+        if isPointInDragTriggerZone(
+            currentLocation,
+            screenFrame: screenFrame,
+            hasPhysicalNotch: hasPhysicalNotch,
+            notchWidth: notchWidth,
+            notchHeight: notchHeight
+        ) {
+            return totalUpwardTravel > -14
+        }
+
+        // Remaining tiers strictly require genuine upward travel from where the drag started.
+        guard totalUpwardTravel >= 24 else { return false }
+
+        let fastCorridorHeight = min(max(screenFrame.height * 0.32, 260), 350)
+        let fastCorridorHalfSpan = min(max(notchWidth / 2.0 + 220, 320), screenFrame.width * 0.34)
+        guard currentLocation.y >= screenFrame.maxY - fastCorridorHeight,
+              abs(currentLocation.x - screenFrame.midX) <= fastCorridorHalfSpan else {
+            return false
+        }
+
+        let velocity = recentDragVelocity(from: recentSamples)
+        guard velocity.dy > 0 else { return false }
+
+        // Tier 2: Deliberate slow-to-medium upward approach well below the menu bar (~110pt clearance).
+        let slowUpwardHeight: CGFloat = hasPhysicalNotch ? (max(notchHeight, 34) + 114) : 136
+        let slowUpwardHalfSpan: CGFloat = max(staticHalfSpan + 42, 220)
+        if currentLocation.y >= screenFrame.maxY - slowUpwardHeight,
+           abs(currentLocation.x - screenFrame.midX) <= slowUpwardHalfSpan,
+           velocity.dy >= 25,
+           velocity.dy >= abs(velocity.dx) * 0.50 {
+            return true
+        }
+
+        // Tier 3: Brisk/fast upward trajectory projecting into the notch zone within reaction + spring lead time.
+        guard totalUpwardTravel >= 36,
+              velocity.dy >= 240,
+              velocity.dy >= abs(velocity.dx) * 0.65 else {
+            return false
+        }
+
+        let leadTime: CGFloat = 0.26
+        let projectedY = currentLocation.y + velocity.dy * leadTime
+        let projectedX = currentLocation.x + velocity.dx * leadTime
+        let projectedHalfSpan = max(staticHalfSpan + 110, 290)
+        return projectedY >= screenFrame.maxY - staticTriggerHeight
+            && abs(projectedX - screenFrame.midX) <= projectedHalfSpan
+    }
+
+    /// Detects whether any on-screen `com.apple.dock` window matches the macOS Mission Control overlay
+    /// (`layer == 18`, non-shared, substantial screen-sized bounds; normal idle Dock windows live on `layer == 20`).
+    public static func containsMissionControlOverlay(
+        dockWindows: [NotchDockWindowSnapshot]
+    ) -> Bool {
+        dockWindows.contains { window in
+            window.layer == 18
+                && window.sharingState == 0
+                && window.bounds.width >= 200
+                && window.bounds.height >= 200
+        }
     }
 
     /// Tight top-center trigger strip for hover-to-open (when hover trigger is enabled).

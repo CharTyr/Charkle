@@ -100,7 +100,8 @@ struct NativeRedesignRegressionTests {
         #expect(inspector.contains("CharkleSegmentedControl("))
         #expect(inspector.contains("CharkleSpecRow("))
         #expect(inspector.contains("CharkleDisclosureGroup("))
-        #expect(inspector.contains(".frame(width: 300)"))
+        #expect(inspector.contains(".frame(width: panelWidth)"))
+        #expect(SidebarResizeGeometry.defaultInspectorWidth == 300)
         #expect(inspector.contains("resolvedImageMetadata(for:"))
         #expect(inspector.contains("moveInspectorSection("))
         #expect(!inspector.contains("inspectorCard("))
@@ -182,6 +183,16 @@ struct NativeRedesignRegressionTests {
         let masonry = try readSource("Sources/CharkleCanvas/VirtualizedMasonryView.swift")
         #expect(masonry.contains("class MasonryClipView"))
         #expect(masonry.contains("paneTransitionTargetWidth"))
+        #expect(masonry.contains("isLivePaneResizing"))
+
+        let mainWindow = try readSource("Sources/CharkleApp/Views/MainWindowView.swift")
+        #expect(mainWindow.contains("PaneResizeHandleView"))
+        #expect(mainWindow.contains("inspectorResizeDivider"))
+        #expect(mainWindow.contains("isLivePaneResizing: isDraggingSidebarDivider || isDraggingInspectorDivider"))
+
+        let quickLookView = try readSource("Sources/CharkleApp/Views/QuickLookOverlayView.swift")
+        #expect(quickLookView.contains("quickLookInspectorResizeDivider"))
+        #expect(quickLookView.contains("panelWidth: effectiveInspectorWidth"))
 
         let colorFiles = [
             "Sources/CharkleApp/DesignSystem/CharkleTheme.swift",
@@ -201,5 +212,54 @@ struct NativeRedesignRegressionTests {
             let range = NSRange(location: 0, length: (src as NSString).length)
             #expect(forbiddenColorAPI.firstMatch(in: src, range: range) == nil, "Found forbidden violet/purple/indigo color in \(path)")
         }
+    }
+
+    @Test("Draggable sidebar and inspector widths clamp safely across narrow/wide windows and preserve center workspace headroom")
+    func resizableSidebarWidthClampingAndPersistence() {
+        #expect(SidebarResizeGeometry.clampedWidth(120) == SidebarResizeGeometry.minWidth)
+        #expect(SidebarResizeGeometry.clampedWidth(285.4) == 285)
+        #expect(SidebarResizeGeometry.clampedWidth(900) == SidebarResizeGeometry.maxWidth)
+        #expect(SidebarResizeGeometry.clampedWidth(.nan) == SidebarResizeGeometry.defaultWidth)
+
+        // Narrow window with Inspector open (300pt + 1pt divider) preserves >= 360pt center workspace
+        let narrowWithInspector = SidebarResizeGeometry.clampedWidth(
+            380,
+            windowWidth: 900,
+            isInspectorVisible: true
+        )
+        #expect(narrowWithInspector == 238)
+
+        // Custom wider Inspector (380pt) further tightens sidebar ceiling on moderate window widths
+        let withWideInspector = SidebarResizeGeometry.clampedWidth(
+            380,
+            windowWidth: 1000,
+            isInspectorVisible: true,
+            inspectorWidth: 380
+        )
+        #expect(withWideInspector == 258)
+
+        // Wide window allows full 420pt expansion
+        let wide = SidebarResizeGeometry.clampedWidth(
+            420,
+            windowWidth: 1600,
+            isInspectorVisible: true
+        )
+        #expect(wide == SidebarResizeGeometry.maxWidth)
+
+        // Very tight window still honors minWidth floor
+        let veryNarrow = SidebarResizeGeometry.clampedWidth(
+            300,
+            windowWidth: 700,
+            isInspectorVisible: true
+        )
+        #expect(veryNarrow == SidebarResizeGeometry.minWidth)
+
+        // Right Inspector clamping (260...480pt, default 300pt)
+        #expect(SidebarResizeGeometry.clampedInspectorWidth(180) == SidebarResizeGeometry.minInspectorWidth)
+        #expect(SidebarResizeGeometry.clampedInspectorWidth(342.6) == 343)
+        #expect(SidebarResizeGeometry.clampedInspectorWidth(720) == SidebarResizeGeometry.maxInspectorWidth)
+        #expect(SidebarResizeGeometry.clampedInspectorWidth(.nan) == SidebarResizeGeometry.defaultInspectorWidth)
+        #expect(SidebarResizeGeometry.clampedInspectorWidth(480, windowWidth: 1000, sidebarOccupiedWidth: 233) == 406)
+        #expect(SidebarResizeGeometry.clampedInspectorWidth(480, windowWidth: 1440, sidebarOccupiedWidth: 0) == SidebarResizeGeometry.maxInspectorWidth)
     }
 }

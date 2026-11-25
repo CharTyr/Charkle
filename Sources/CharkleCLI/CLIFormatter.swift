@@ -15,12 +15,16 @@ struct CLIFormatter: Sendable {
     let mode: Mode
     let useColor: Bool
 
-    init(explicitJSON: Bool, compactJSON: Bool, noColor: Bool) {
+    init(explicitJSON: Bool, compactJSON: Bool, forceHuman: Bool = false, noColor: Bool) {
         let isTTY = isatty(STDOUT_FILENO) != 0
         if compactJSON {
             self.mode = .compactJSON
-        } else if explicitJSON || !isTTY {
+        } else if explicitJSON {
             self.mode = .prettyJSON
+        } else if forceHuman {
+            self.mode = .human
+        } else if !isTTY {
+            self.mode = .compactJSON
         } else {
             self.mode = .human
         }
@@ -85,14 +89,14 @@ struct CLIFormatter: Sendable {
 
         switch mode {
         case .prettyJSON:
-            print(rawText)
-        case .compactJSON:
             if let data = rawText.data(using: .utf8),
                let parsed = try? JSONSerialization.jsonObject(with: data) {
-                print(CharkleExternalAgentService.encodeCompactJSON(parsed))
+                print(CharkleExternalAgentService.encodePrettyJSON(parsed))
             } else {
                 print(rawText)
             }
+        case .compactJSON:
+            print(rawText)
         case .human:
             if let data = rawText.data(using: .utf8),
                let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -206,6 +210,10 @@ struct CLIFormatter: Sendable {
             let summary = kinds.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: "  ")
             lines.append("  Media:  \(dim(summary))")
         }
+        if let shapes = d["aspectShapeCounts"] as? [String: Int], !shapes.isEmpty {
+            let summary = shapes.sorted { $0.value > $1.value }.map { "\($0.key)=\($0.value)" }.joined(separator: "  ")
+            lines.append("  Shapes: \(dim(summary))")
+        }
 
         if let folders = d["folders"] as? [[String: Any]], !folders.isEmpty {
             lines.append("")
@@ -213,8 +221,12 @@ struct CLIFormatter: Sendable {
             for f in folders.prefix(25) {
                 let path = (f["path"] as? String) ?? ""
                 let count = (f["assetCount"] as? Int) ?? 0
+                let rec = (f["recursiveAssetCount"] as? Int) ?? count
+                let countLabel = rec > count ? "(\(count)/\(rec) total)" : "(\(count))"
                 let id = String(((f["id"] as? String) ?? "").prefix(8))
-                lines.append("  \(cyan(id))  \(path) \(dim("(\(count))"))")
+                let tags = ((f["topTags"] as? [String]) ?? []).prefix(4).map { "#\($0)" }.joined(separator: " ")
+                let tagSuffix = tags.isEmpty ? "" : "  \(dim(tags))"
+                lines.append("  \(cyan(id))  \(path) \(dim(countLabel))\(tagSuffix)")
             }
             if folders.count > 25 {
                 lines.append("  \(dim("… and \(folders.count - 25) more (pass --json for full list)"))")
@@ -257,9 +269,33 @@ struct CLIFormatter: Sendable {
             lines.append("  \(dim("(no matching assets)"))")
             return lines.joined(separator: "\n")
         }
+        if let cs = d["contactSheet"] as? [String: Any], let saved = cs["savedPath"] as? String, !saved.isEmpty {
+            lines.append("  \(green("✓")) Contact Sheet: \(saved)")
+        }
         lines.append("")
         for a in assets {
             lines.append(formatAssetRow(a))
+        }
+        if let facets = d["facets"] as? [String: Any] {
+            var hintParts: [String] = []
+            if let fList = facets["topFolders"] as? [[String: Any]], !fList.isEmpty {
+                let fStr = fList.prefix(4).compactMap { f -> String? in
+                    guard let p = f["path"] as? String, let c = f["count"] as? Int else { return nil }
+                    return "\(p)(\(c))"
+                }.joined(separator: ", ")
+                if !fStr.isEmpty { hintParts.append("Folders: \(fStr)") }
+            }
+            if let tList = facets["topTags"] as? [[String: Any]], !tList.isEmpty {
+                let tStr = tList.prefix(5).compactMap { t -> String? in
+                    guard let n = t["name"] as? String, let c = t["count"] as? Int else { return nil }
+                    return "#\(n)(\(c))"
+                }.joined(separator: " ")
+                if !tStr.isEmpty { hintParts.append("Tags: \(tStr)") }
+            }
+            if !hintParts.isEmpty {
+                lines.append("")
+                lines.append(dim("Facets · " + hintParts.joined(separator: " | ")))
+            }
         }
         if hasMore, let nextOffset = d["nextOffset"] as? Int {
             lines.append("")
@@ -275,6 +311,9 @@ struct CLIFormatter: Sendable {
         if let summary = d["summary"] as? String, !summary.isEmpty {
             lines.append("  \(dim(summary))")
         }
+        if let cs = d["contactSheet"] as? [String: Any], let saved = cs["savedPath"] as? String, !saved.isEmpty {
+            lines.append("  \(green("✓")) Contact Sheet: \(saved)")
+        }
         if items.isEmpty {
             lines.append("  \(dim("(no matches)"))")
             return lines.joined(separator: "\n")
@@ -289,6 +328,7 @@ struct CLIFormatter: Sendable {
     }
 
     private func formatAssetRow(_ a: [String: Any]) -> String {
+        let badge = (a["badge"] as? String).map { "\(yellow($0)) " } ?? ""
         let id = (a["id"] as? String) ?? ""
         let shortID = String(id.prefix(8))
         let title = (a["title"] as? String) ?? "(untitled)"
@@ -298,10 +338,17 @@ struct CLIFormatter: Sendable {
         let stars = rating > 0 ? " " + yellow(String(repeating: "★", count: rating)) : ""
         let tags = ((a["tags"] as? [String]) ?? []).prefix(4).map { "#\($0)" }.joined(separator: " ")
         let tagStr = tags.isEmpty ? "" : "  \(dim(tags))"
-        return "  \(cyan(shortID))  \(bold(title))\(stars)  \(dim("[\(kind) · \(folder)]"))\(tagStr)"
+        return "  \(badge)\(cyan(shortID))  \(bold(title))\(stars)  \(dim("[\(kind) · \(folder)]"))\(tagStr)"
     }
 
     private func renderAssetDetail(_ d: [String: Any]) -> String {
+        if let batch = d["assets"] as? [[String: Any]] {
+            return batch.map { renderSingleAssetDetail($0) }.joined(separator: "\n\n")
+        }
+        return renderSingleAssetDetail(d)
+    }
+
+    private func renderSingleAssetDetail(_ d: [String: Any]) -> String {
         var lines: [String] = []
         let title = (d["title"] as? String) ?? "(untitled)"
         let id = (d["id"] as? String) ?? ""

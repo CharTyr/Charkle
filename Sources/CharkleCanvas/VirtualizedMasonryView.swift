@@ -687,6 +687,7 @@ public struct VirtualizedMasonryView: View {
     public let topContentInset: CGFloat
     public let bottomContentInset: CGFloat
     public let sideChromeWidth: CGFloat?
+    public let isLivePaneResizing: Bool
     public let heroNamespace: Namespace.ID
     public let activeQuickLookID: UUID?
     public let revealRequest: MasonryRevealRequest?
@@ -707,6 +708,7 @@ public struct VirtualizedMasonryView: View {
         topContentInset: CGFloat = 76,
         bottomContentInset: CGFloat = 96,
         sideChromeWidth: CGFloat? = nil,
+        isLivePaneResizing: Bool = false,
         heroNamespace: Namespace.ID,
         activeQuickLookID: UUID? = nil,
         revealRequest: MasonryRevealRequest? = nil,
@@ -724,6 +726,7 @@ public struct VirtualizedMasonryView: View {
         self.topContentInset = topContentInset
         self.bottomContentInset = bottomContentInset
         self.sideChromeWidth = sideChromeWidth
+        self.isLivePaneResizing = isLivePaneResizing
         self.heroNamespace = heroNamespace
         self.activeQuickLookID = activeQuickLookID
         self.revealRequest = revealRequest
@@ -755,6 +758,7 @@ public struct VirtualizedMasonryView: View {
                 topContentInset: topContentInset,
                 bottomContentInset: bottomContentInset,
                 sideChromeWidth: sideChromeWidth,
+                isLivePaneResizing: isLivePaneResizing,
                 activeQuickLookID: activeQuickLookID,
                 revealRequest: revealRequest,
                 isDarkMode: colorScheme == .dark,
@@ -787,6 +791,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
     let topContentInset: CGFloat
     let bottomContentInset: CGFloat
     let sideChromeWidth: CGFloat?
+    let isLivePaneResizing: Bool
     let activeQuickLookID: UUID?
     let revealRequest: MasonryRevealRequest?
     let isDarkMode: Bool
@@ -816,6 +821,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             topInset: topContentInset,
             bottomInset: bottomContentInset,
             sideChromeWidth: sideChromeWidth,
+            isLivePaneResizing: isLivePaneResizing,
             activeQuickLookID: activeQuickLookID,
             revealRequest: revealRequest,
             isDarkMode: isDarkMode,
@@ -846,6 +852,7 @@ private struct AppKitMasonryRepresentable: NSViewRepresentable {
             topInset: topContentInset,
             bottomInset: bottomContentInset,
             sideChromeWidth: sideChromeWidth,
+            isLivePaneResizing: isLivePaneResizing,
             activeQuickLookID: activeQuickLookID,
             revealRequest: revealRequest,
             isDarkMode: isDarkMode,
@@ -2315,6 +2322,7 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
         topInset: CGFloat,
         bottomInset: CGFloat,
         sideChromeWidth: CGFloat?,
+        isLivePaneResizing: Bool = false,
         activeQuickLookID: UUID?,
         revealRequest: MasonryRevealRequest?,
         isDarkMode: Bool,
@@ -2386,10 +2394,21 @@ internal final class MasonryDocumentView: NSView, NSDraggingSource {
             pendingRevealRequest = revealRequest
         }
 
+        // During live pointer-driven sidebar resizing or live window resize, cancel any active
+        // fixed-target drawer lock and let `handleViewportFrameChanged()` track the live edge smoothly.
+        if isLivePaneResizing || window?.inLiveResize == true {
+            paneTransitionSettleWorkItem?.cancel()
+            paneTransitionSettleWorkItem = nil
+            paneTransitionTargetWidth = nil
+            paneTransitionWindowWidth = nil
+        }
+
         // Single-shot GPU-synchronized reflow when Sidebar collapses/expands or Inspector toggles:
         // computes the exact post-drawer layout ONCE at t=0 and glides cards in lockstep with
         // `drawerEase` (0.30s) instead of thrashing layout 40+ times during the SwiftUI HStack animation.
         if sideChromeChanged,
+           !isLivePaneResizing,
+           window?.inLiveResize != true,
            let prevChrome = previousSideChrome,
            let nextChrome = sideChromeWidth,
            let clipView = enclosingScrollView?.contentView,

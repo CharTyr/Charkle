@@ -508,4 +508,233 @@ struct ExternalAgentMCPTests {
         #expect(reloaded.cliEnabled == false)
         #expect(reloaded.enabled == true)
     }
+
+    @Test("Token-efficient compact JSON, folder semantic atlas, default subfolder recursion, CJK semantic recall, diversify, facets, one-shot Contact Sheet, and batch get_asset")
+    func agentDiscoveryAccuracyAndTokenOptimizations() async throws {
+        let (dir, engine, service, assets) = try await makeTestService()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try ExternalAgentConfigStore.save(ExternalAgentConfig(enabled: true, accessLevel: .readWriteOrganize), in: service.configDirectory)
+
+        let a1 = try #require(assets.first)
+        let a2 = try #require(assets.last)
+        let png3 = try BackendFixture.artwork("#2A6F97") // duplicate visual color/content of a2
+        let extra = try await engine.ingest([
+            .imageData(png3, suggestedName: "Ocean Copy.png", sourceURL: nil),
+            .textSnippet(title: "夏日海边参考", text: "海风与晴空下的角色配色笔记", sourceURL: nil)
+        ], targetFolderID: nil, targetBoardID: nil)
+        let a3 = try #require(extra.first)
+        let a4 = try #require(extra.last)
+
+        // Create container parent folder with 0 direct assets and 2 child folders
+        let parent = try await engine.createFolder(name: "插画", parentID: nil)
+        let childWarm = try await engine.createFolder(name: "暖调海报", parentID: parent.id)
+        let childSummer = try await engine.createFolder(name: "夏日海边", parentID: parent.id)
+
+        _ = try await engine.updateAssets(AssetBatchPatch(
+            assetIDs: [a1.id],
+            notes: "Terracotta studio editorial poster with warm shadows",
+            rating: 5,
+            addTags: ["暖色", "海报", "复古"],
+            folderAssignment: .folder(childWarm.id)
+        ))
+        _ = try await engine.updateAssets(AssetBatchPatch(
+            assetIDs: [a2.id, a3.id],
+            rating: 3,
+            addTags: ["海洋", "蓝天", "夏日"],
+            folderAssignment: .folder(childSummer.id)
+        ))
+        _ = try await engine.updateAssets(AssetBatchPatch(
+            assetIDs: [a4.id],
+            rating: 4,
+            addTags: ["女孩", "夏日", "晴空"],
+            folderAssignment: .folder(childSummer.id)
+        ))
+        _ = try await engine.saveBoard(MoodboardDocument(title: "夏日视觉板", nodes: MoodboardCurator.editorialNodes([a1, a2])))
+
+        // 1. Lean tools/list schema (< 17_000 chars) + compact JSON output (no pretty-print newlines)
+        let toolsResp = try #require(await sendRPC(service, ["jsonrpc": "2.0", "id": 1, "method": "tools/list"]) as? [String: Any])
+        let toolsData = try JSONSerialization.data(withJSONObject: toolsResp)
+        #expect(toolsData.count < 17_000)
+
+        let ovOut = await service.callTool(name: "library_overview", arguments: [:])
+        #expect(ovOut.isError == false)
+        let ovRaw = ovOut.content.compactMap { if case .text(let t) = $0 { return t } else { return nil } }.joined()
+        #expect(!ovRaw.contains("\n  "))
+        let ov = try decodeToolJSON(ovOut)
+        #expect(ov["ratedCount"] as? Int == 4)
+        #expect((ov["aspectShapeCounts"] as? [String: Int]) != nil)
+        #expect((ov["boards"] as? [[String: Any]])?.count == 1)
+        let ovFolders = try #require(ov["folders"] as? [[String: Any]])
+        let parentEntry = try #require(ovFolders.first { ($0["path"] as? String) == "插画" })
+        #expect(parentEntry["assetCount"] as? Int == 0)
+        #expect(parentEntry["recursiveAssetCount"] as? Int == 4)
+        #expect(((parentEntry["topTags"] as? [String]) ?? []).contains("夏日"))
+        #expect(!((parentEntry["palette"] as? [String]) ?? []).isEmpty)
+
+        // 2. Parent folder defaults to include_subfolders=true; explicit false returns 0 direct
+        let parentSearch = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: ["folder_path": "插画"]))
+        #expect(parentSearch["totalMatched"] as? Int == 4)
+        let directOnly = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: ["folder_path": "插画", "include_subfolders": false]))
+        #expect(directOnly["totalMatched"] as? Int == 0)
+
+        // 3. any_tags (OR), exclude_tags, exclude_asset_ids, auto facets when totalMatched > limit, and compact omission
+        let anySearch = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: [
+            "any_tags": ["复古", "女孩"],
+            "exclude_tags": ["海洋"],
+            "limit": 1
+        ]))
+        #expect(anySearch["totalMatched"] as? Int == 2)
+        #expect(anySearch["facets"] != nil)
+        let firstHit = try #require((anySearch["assets"] as? [[String: Any]])?.first)
+        #expect(firstHit["folderID"] == nil) // omitted in compact detail
+        #expect(firstHit["aspectShape"] as? String != nil)
+
+        let exclSearch = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "插画",
+            "exclude_asset_ids": [a1.id.uuidString, a4.id.uuidString]
+        ]))
+        #expect(exclSearch["totalMatched"] as? Int == 2)
+
+        // 4. Diversify suppresses exact contentHash near-duplicate (a2 vs a3)
+        let divSearch = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "插画/夏日海边",
+            "diversify": true,
+            "limit": 10
+        ]))
+        #expect(divSearch["diversified"] as? Bool == true)
+        #expect((divSearch["returned"] as? Int) == 2) // a2/a3 deduplicated + a4
+
+        // 5. One-shot search_assets with render_contact_sheet=true returns inline JPEG + slot/badge annotations
+        let oneShotOut = await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "插画",
+            "diversify": true,
+            "render_contact_sheet": true,
+            "sheet_max_width": 640,
+            "limit": 4
+        ])
+        #expect(oneShotOut.isError == false)
+        #expect(oneShotOut.content.contains { if case .image(let mime, _) = $0 { return mime == "image/jpeg" } else { return false } })
+        let oneShotJSON = try decodeToolJSON(oneShotOut)
+        let csMeta = try #require(oneShotJSON["contactSheet"] as? [String: Any])
+        #expect((csMeta["slotCount"] as? Int ?? 0) >= 2)
+        let oneShotAssets = try #require(oneShotJSON["assets"] as? [[String: Any]])
+        #expect(oneShotAssets.first?["badge"] as? String == "#01")
+
+        // Security check: output_path on search_assets(render_contact_sheet=true) still respects readOnly policy
+        try ExternalAgentConfigStore.save(ExternalAgentConfig(enabled: true, accessLevel: .readOnly), in: service.configDirectory)
+        let roBlocked = await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "插画",
+            "render_contact_sheet": true,
+            "output_path": dir.appending(path: "blocked.jpg").path
+        ])
+        #expect(roBlocked.isError == true)
+        try ExternalAgentConfigStore.save(ExternalAgentConfig(enabled: true, accessLevel: .readWriteOrganize), in: service.configDirectory)
+
+        // 6. Unspaced Chinese natural-language semantic_search + one-shot Contact Sheet (fast local recall)
+        let cjkSemOut = await service.callTool(name: "semantic_search", arguments: [
+            "query": "夏日海边蓝天女孩",
+            "visual_rerank": false,
+            "render_contact_sheet": true,
+            "limit": 5
+        ])
+        #expect(cjkSemOut.isError == false)
+        let cjkSemJSON = try decodeToolJSON(cjkSemOut)
+        #expect((cjkSemJSON["returned"] as? Int ?? 0) >= 2)
+        #expect(cjkSemJSON["usedVisualRerank"] as? Bool == false)
+        #expect(cjkSemJSON["contactSheet"] != nil)
+
+        // 7. Batch get_asset with asset_ids + include_image returns both assets + zoomed Contact Sheet in 1 call
+        let batchOut = await service.callTool(name: "get_asset", arguments: [
+            "asset_ids": [a1.id.uuidString, a2.id.uuidString],
+            "include_image": true
+        ])
+        #expect(batchOut.isError == false)
+        #expect(batchOut.content.contains { if case .image(let mime, _) = $0 { return mime == "image/jpeg" } else { return false } })
+        let batchJSON = try decodeToolJSON(batchOut)
+        #expect(batchJSON["returned"] as? Int == 2)
+        let batchAssets = try #require(batchJSON["assets"] as? [[String: Any]])
+        #expect(batchAssets[0]["badge"] as? String == "#01")
+        #expect(batchAssets[1]["badge"] as? String == "#02")
+
+        // 8. Compact overview omits redundant name/parentID/cache and uses 8-char folder IDs; compact=false restores full fields
+        #expect((parentEntry["id"] as? String)?.count == 8)
+        #expect(parentEntry["name"] == nil)
+        #expect(ov["cache"] == nil)
+        let fullOv = try decodeToolJSON(await service.callTool(name: "library_overview", arguments: ["compact": false]))
+        #expect(fullOv["cache"] != nil)
+        let fullFolders = try #require(fullOv["folders"] as? [[String: Any]])
+        let fullParent = try #require(fullFolders.first { ($0["path"] as? String) == "插画" })
+        #expect((fullParent["id"] as? String)?.count == 36)
+        #expect(fullParent["name"] as? String == "插画")
+
+        // 9. 8-char short UUID prefix resolution works across get_asset, organize_assets, find_similar_assets, and dynamic resources
+        let shortA1 = String(a1.id.uuidString.prefix(8))
+        let shortA2 = String(a2.id.uuidString.prefix(8))
+        let shortGet = try decodeToolJSON(await service.callTool(name: "get_asset", arguments: ["asset_id": shortA1]))
+        #expect(shortGet["id"] as? String == a1.id.uuidString)
+        let shortOrg = await service.callTool(name: "organize_assets", arguments: ["asset_ids": [shortA1], "add_tags": ["短码测试"]])
+        #expect(shortOrg.isError == false)
+        let shortRes = try #require(await sendRPC(service, [
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "resources/read",
+            "params": ["uri": "charkle://assets/\(shortA1)"]
+        ]) as? [String: Any])
+        #expect((shortRes["result"] as? [String: Any])?["contents"] != nil)
+
+        // 10. Ultra-lean `detail: "visual"` auto-activates on inline Contact Sheets (8-char IDs, no tags/aiDescription bloat)
+        #expect((oneShotAssets.first?["id"] as? String)?.count == 8)
+        #expect(oneShotAssets.first?["aiDescription"] == nil)
+        #expect(oneShotAssets.first?["tags"] == nil)
+
+        // 11. Cross-lingual EN -> ZH semantic recall & CIELAB VisualTone filter (`warm` vs `cool`)
+        let enRecall = try decodeToolJSON(await service.callTool(name: "semantic_search", arguments: [
+            "query": "summer beach sky girl",
+            "visual_rerank": false,
+            "limit": 5
+        ]))
+        #expect((enRecall["returned"] as? Int ?? 0) >= 2)
+
+        let warmSearch = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "插画",
+            "tone": "warm"
+        ]))
+        let warmIDs = Set(((warmSearch["assets"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String })
+        #expect(warmIDs.contains(a1.id.uuidString))
+        #expect(!warmIDs.contains(a2.id.uuidString))
+
+        let coolSearch = try decodeToolJSON(await service.callTool(name: "search_assets", arguments: [
+            "folder_path": "插画",
+            "tone": "cool"
+        ]))
+        let coolIDs = Set(((coolSearch["assets"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String })
+        #expect(coolIDs.contains(a2.id.uuidString))
+        #expect(!coolIDs.contains(a1.id.uuidString))
+
+        // 12. Negative visual repulsion (`unlike_asset_ids`) excludes & repels negative examples
+        let unlikeSem = try decodeToolJSON(await service.callTool(name: "semantic_search", arguments: [
+            "query": "夏日 海洋 暖色",
+            "unlike_asset_ids": [shortA2],
+            "visual_rerank": false,
+            "limit": 5
+        ]))
+        let unlikeHitIDs = Set(((unlikeSem["hits"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String })
+        #expect(!unlikeHitIDs.contains(a2.id.uuidString))
+
+        // 13. Multi-intent single-call `queries[]` merges multiple creative directions into ONE Contact Sheet
+        let multiOut = await service.callTool(name: "semantic_search", arguments: [
+            "queries": ["暖色复古海报", "夏日海洋蓝天"],
+            "diversify": true,
+            "render_contact_sheet": true,
+            "limit": 4
+        ])
+        #expect(multiOut.isError == false)
+        #expect(multiOut.content.contains { if case .image(let mime, _) = $0 { return mime == "image/jpeg" } else { return false } })
+        let multiJSON = try decodeToolJSON(multiOut)
+        let groups = try #require(multiJSON["queryGroups"] as? [[String: Any]])
+        #expect(groups.count == 2)
+        let multiHits = try #require(multiJSON["hits"] as? [[String: Any]])
+        #expect(multiHits.contains { ($0["queryGroup"] as? String) == "暖色复古海报" })
+        #expect(multiHits.contains { ($0["queryGroup"] as? String) == "夏日海洋蓝天" })
+    }
 }

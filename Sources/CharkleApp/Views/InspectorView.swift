@@ -21,6 +21,7 @@ public struct InspectorView: View {
     public let moodboards: MoodboardStore
     public let pinnedAsset: AssetRecord?
     public let isQuickLookHosted: Bool
+    public let panelWidth: CGFloat
     public let onCopyHex: (String) -> Void
     public let onFilterByColor: (String) -> Void
     public let onOpenQuickLook: (AssetRecord) -> Void
@@ -77,6 +78,7 @@ public struct InspectorView: View {
         moodboards: MoodboardStore,
         pinnedAsset: AssetRecord? = nil,
         isQuickLookHosted: Bool = false,
+        panelWidth: CGFloat = AppCoordinatorStore.defaultInspectorWidth,
         onCopyHex: @escaping (String) -> Void,
         onFilterByColor: @escaping (String) -> Void,
         onOpenQuickLook: @escaping (AssetRecord) -> Void,
@@ -91,6 +93,7 @@ public struct InspectorView: View {
         self.moodboards = moodboards
         self.pinnedAsset = pinnedAsset
         self.isQuickLookHosted = isQuickLookHosted
+        self.panelWidth = panelWidth
         self.onCopyHex = onCopyHex
         self.onFilterByColor = onFilterByColor
         self.onOpenQuickLook = onOpenQuickLook
@@ -133,14 +136,8 @@ public struct InspectorView: View {
                 emptyInspectorPlaceholder
             }
         }
-        .frame(width: 300)
+        .frame(width: panelWidth)
         .frame(maxHeight: .infinity)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(CharkleTheme.hairline(for: colorScheme))
-                .frame(width: CharkleTheme.hairlineWidth)
-                .ignoresSafeArea(.container, edges: .top)
-        }
         .alert(
             "彻底删除 \(pendingPermanentDeleteIDs.count) 项素材？",
             isPresented: Binding(

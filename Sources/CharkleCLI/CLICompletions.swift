@@ -102,7 +102,10 @@ enum CLICompletions {
           fi
           ;;
         search)
-          COMPREPLY=( $(compgen -W "--folder --subfolders --tag --kind --shape --color --min-rating --sort --smart-folder --inbox --untagged --trashed --recent-days --offset --limit --json --compact --help" -- "$cur") )
+          COMPREPLY=( $(compgen -W "--folder --no-subfolders --tag --any-tag --exclude-tag --exclude-ids --kind --shape --color --tone --min-rating --sort --detail --diversify --facets --no-facets --out --width --smart-folder --inbox --untagged --trashed --recent-days --offset --limit --json --compact --human --help" -- "$cur") )
+          ;;
+        semantic)
+          COMPREPLY=( $(compgen -W "--queries --folder --no-subfolders --seed-ids --unlike-ids --tag --any-tag --exclude-tag --exclude-ids --kind --shape --color --tone --min-rating --diversify --fast --detail --out --width --limit --json --compact --human --help" -- "$cur") )
           ;;
       esac
     }

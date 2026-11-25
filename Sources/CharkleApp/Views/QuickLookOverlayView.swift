@@ -44,6 +44,23 @@ public struct QuickLookOverlayView: View {
     @State private var stageCenterInWindow: CGPoint = .zero
     @State private var showSecondaryControls: Bool = false
     @State private var confirmPermanentDelete: Bool = false
+    @State private var overlayWidth: CGFloat = 1280
+    @State private var liveDraggedInspectorWidth: CGFloat? = nil
+    @State private var inspectorDragStartWidth: CGFloat = AppCoordinatorStore.defaultInspectorWidth
+    @State private var isInspectorDividerHovered: Bool = false
+    @State private var isDraggingInspectorDivider: Bool = false
+
+    private var activeAccent: Color {
+        CharkleTheme.accent(for: colorScheme, source: accentSource)
+    }
+
+    private var effectiveInspectorWidth: CGFloat {
+        AppCoordinatorStore.clampedInspectorWidth(
+            liveDraggedInspectorWidth ?? coordinator.inspectorWidth,
+            windowWidth: overlayWidth,
+            sidebarOccupiedWidth: 0
+        )
+    }
 
     private var supportsVisualTransform: Bool {
         !asset.isGitHubRepo && !asset.isSocialPost
@@ -125,6 +142,69 @@ public struct QuickLookOverlayView: View {
         )
     }
 
+    private var quickLookInspectorResizeDivider: some View {
+        ZStack {
+            Rectangle()
+                .fill(CharkleTheme.hairline(for: colorScheme))
+                .frame(width: 1)
+
+            if isDraggingInspectorDivider || isInspectorDividerHovered {
+                Rectangle()
+                    .fill(
+                        isDraggingInspectorDivider
+                            ? activeAccent.opacity(0.75)
+                            : Color.primary.opacity(colorScheme == .dark ? 0.24 : 0.16)
+                    )
+                    .frame(width: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(width: 1)
+        .frame(minHeight: 0, maxHeight: .infinity)
+        .overlay {
+            PaneResizeHandleView(
+                onHoverChanged: { hovering in
+                    if isInspectorDividerHovered != hovering {
+                        isInspectorDividerHovered = hovering
+                    }
+                },
+                onDragBegan: {
+                    isDraggingInspectorDivider = true
+                    inspectorDragStartWidth = effectiveInspectorWidth
+                },
+                onDragChanged: { deltaX in
+                    let raw = inspectorDragStartWidth - deltaX
+                    liveDraggedInspectorWidth = AppCoordinatorStore.clampedInspectorWidth(
+                        raw,
+                        windowWidth: overlayWidth,
+                        sidebarOccupiedWidth: 0
+                    )
+                },
+                onDragEnded: {
+                    if let finalWidth = liveDraggedInspectorWidth {
+                        coordinator.inspectorWidth = finalWidth
+                    }
+                    liveDraggedInspectorWidth = nil
+                    isDraggingInspectorDivider = false
+                },
+                onDoubleClick: {
+                    let target = AppCoordinatorStore.clampedInspectorWidth(
+                        AppCoordinatorStore.defaultInspectorWidth,
+                        windowWidth: overlayWidth,
+                        sidebarOccupiedWidth: 0
+                    )
+                    withAnimation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion)) {
+                        liveDraggedInspectorWidth = nil
+                        coordinator.inspectorWidth = target
+                    }
+                }
+            )
+            .frame(width: 9)
+        }
+        .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: isInspectorDividerHovered)
+        .animation(CharkleMotion.accessible(CharkleMotion.hoverPress, reduced: reduceMotion), value: isDraggingInspectorDivider)
+    }
+
     private var activeConnectedRect: CGRect? {
         isDismissing ? dismissTargetRect : connectedSourceRect
     }
@@ -148,7 +228,7 @@ public struct QuickLookOverlayView: View {
             return stageCenterInWindow
         }
         if let bounds = NSApp.keyWindow?.contentView?.bounds, bounds.width > 0, bounds.height > 0 {
-            let stageWidth = max(200, bounds.width - (coordinator.isInspectorVisible ? 300 : 0))
+            let stageWidth = max(200, bounds.width - (coordinator.isInspectorVisible ? (effectiveInspectorWidth + 1) : 0))
             return CGPoint(x: stageWidth * 0.5, y: bounds.height * 0.5)
         }
         return CGPoint(x: stageViewportSize.width * 0.5, y: stageViewportSize.height * 0.5)
@@ -347,13 +427,21 @@ public struct QuickLookOverlayView: View {
             .clipped()
             .layoutPriority(0)
 
-            // Full-Height 300pt Inspector (1:1 parity in size, top alignment, cards, editing, and Similar tab with main window InspectorView)
+            if coordinator.isInspectorVisible {
+                quickLookInspectorResizeDivider
+                    .ignoresSafeArea(.container, edges: .top)
+                    .zIndex(20)
+                    .layoutPriority(1)
+            }
+
+            // Full-Height Resizable Inspector (1:1 parity in width, top alignment, cards, editing, and Similar tab with main window InspectorView)
             InspectorView(
                 coordinator: coordinator,
                 library: library,
                 moodboards: moodboards,
                 pinnedAsset: asset,
                 isQuickLookHosted: true,
+                panelWidth: effectiveInspectorWidth,
                 onCopyHex: onCopyHex,
                 onFilterByColor: { hex in
                     onClose()
@@ -368,16 +456,23 @@ public struct QuickLookOverlayView: View {
                 },
                 onRequestCloseQuickLook: performDismiss
             )
-            .frame(width: 300)
+            .frame(width: effectiveInspectorWidth)
             .frame(maxHeight: .infinity)
             .opacity(coordinator.isInspectorVisible ? 1 : 0)
             .allowsHitTesting(coordinator.isInspectorVisible)
             .disabled(!coordinator.isInspectorVisible)
             .accessibilityHidden(!coordinator.isInspectorVisible)
-            .frame(width: coordinator.isInspectorVisible ? 300 : 0, alignment: .leading)
+            .frame(width: coordinator.isInspectorVisible ? effectiveInspectorWidth : 0, alignment: .leading)
             .ignoresSafeArea(.container, edges: .top)
             .clipped()
             .layoutPriority(1)
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            floor(max(640, proxy.size.width))
+        } action: { _, newWidth in
+            if abs(newWidth - overlayWidth) >= 2 {
+                overlayWidth = newWidth
+            }
         }
         .ignoresSafeArea(.container, edges: .top)
         .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)

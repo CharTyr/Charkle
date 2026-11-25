@@ -24,6 +24,7 @@ struct CharkleCLI {
         let formatter = CLIFormatter(
             explicitJSON: global.explicitJSON,
             compactJSON: global.compactJSON,
+            forceHuman: global.forceHuman,
             noColor: global.noColor
         )
 
@@ -122,7 +123,11 @@ struct CharkleCLI {
                 }
 
             case "overview":
-                let out = await service.callTool(name: "library_overview", arguments: [:], channel: .cli)
+                let parsed = CLIArgParser.parse(subArgs)
+                var params: [String: Any] = [:]
+                if parsed.flag("full") { params["compact"] = false }
+                if let limit = parsed.int("top-tags") { params["top_tags_limit"] = limit }
+                let out = await service.callTool(name: "library_overview", arguments: params, channel: .cli)
                 formatter.emitToolOutput(out, command: "library_overview")
 
             case "inbox":
@@ -142,12 +147,17 @@ struct CharkleCLI {
 
             case "asset":
                 let parsed = CLIArgParser.parse(subArgs)
-                guard let id = parsed.first("id") ?? parsed.positionals.first, !id.isEmpty else {
-                    formatter.emitError("Missing asset UUID. Usage: charkle asset <uuid> [--json]")
+                let batchIDs = parsed.csvValues("ids") + parsed.positionals
+                if batchIDs.count > 1 || !parsed.csvValues("ids").isEmpty {
+                    let out = await service.callTool(name: "get_asset", arguments: ["asset_ids": batchIDs], channel: .cli)
+                    formatter.emitToolOutput(out, command: "get_asset")
+                } else if let id = parsed.first("id") ?? batchIDs.first, !id.isEmpty {
+                    let out = await service.callTool(name: "get_asset", arguments: ["asset_id": id], channel: .cli)
+                    formatter.emitToolOutput(out, command: "get_asset")
+                } else {
+                    formatter.emitError("Missing asset UUID. Usage: charkle asset <uuid>... | --ids A,B [--json]")
                     exit(2)
                 }
-                let out = await service.callTool(name: "get_asset", arguments: ["asset_id": id], channel: .cli)
-                formatter.emitToolOutput(out, command: "get_asset")
 
             case "contact-sheet":
                 await handleContactSheetCommand(subArgs, service: service, formatter: formatter)
@@ -192,8 +202,15 @@ struct CharkleCLI {
         if let limit = parsed.int("limit") { params["limit"] = limit }
         if let offset = parsed.int("offset") { params["offset"] = offset }
         if let sort = parsed.first("sort") { params["sort_by"] = sort }
+        if let detail = parsed.first("detail") { params["detail"] = detail }
         let kinds = parsed.csvValues("kind") + parsed.csvValues("kinds")
         if !kinds.isEmpty { params["media_kinds"] = kinds }
+        if parsed.flag("contact-sheet") || parsed.first("out") != nil || parsed.first("output") != nil {
+            params["render_contact_sheet"] = true
+            params["include_image"] = false
+            if let w = parsed.int("width") { params["sheet_max_width"] = w }
+            if let outPath = parsed.first("out") ?? parsed.first("output") { params["output_path"] = outPath }
+        }
 
         let inboxOut = await service.callTool(name: "list_inbox", arguments: params, channel: .cli)
         guard parsed.flag("suggest"), !inboxOut.isError else {
@@ -228,21 +245,39 @@ struct CharkleCLI {
             params["query"] = q
         }
         if let f = parsed.first("folder") {
-            if UUID(uuidString: f) != nil { params["folder_id"] = f } else { params["folder_path"] = f }
+            if Self.looksLikeIDOrPrefix(f) { params["folder_id"] = f } else { params["folder_path"] = f }
         }
-        if parsed.flag("subfolders") { params["include_subfolders"] = true }
+        if parsed.flag("no-subfolders") {
+            params["include_subfolders"] = false
+        } else if parsed.flag("subfolders") {
+            params["include_subfolders"] = true
+        }
         if let sf = parsed.first("smart-folder") {
             if UUID(uuidString: sf) != nil { params["smart_folder_id"] = sf } else { params["smart_folder_name"] = sf }
         }
         let tags = parsed.csvValues("tag") + parsed.csvValues("tags")
         if !tags.isEmpty { params["tags"] = tags }
+        let anyTags = parsed.csvValues("any-tag") + parsed.csvValues("any-tags")
+        if !anyTags.isEmpty { params["any_tags"] = anyTags }
+        let excludeTags = parsed.csvValues("exclude-tag") + parsed.csvValues("exclude-tags")
+        if !excludeTags.isEmpty { params["exclude_tags"] = excludeTags }
+        let excludeIDs = parsed.csvValues("exclude-ids")
+        if !excludeIDs.isEmpty { params["exclude_asset_ids"] = excludeIDs }
         let kinds = parsed.csvValues("kind") + parsed.csvValues("kinds")
         if !kinds.isEmpty { params["media_kinds"] = kinds }
         if let shape = parsed.first("shape") { params["aspect_shape"] = shape }
         if let color = parsed.first("color") { params["color_hex"] = color }
         if let tol = parsed.double("color-tolerance") { params["color_tolerance"] = tol }
+        if let tone = parsed.first("tone") { params["tone"] = tone }
         if let rating = parsed.int("min-rating") { params["min_rating"] = rating }
         if let sort = parsed.first("sort") { params["sort_by"] = sort }
+        if let detail = parsed.first("detail") { params["detail"] = detail }
+        if parsed.flag("diversify") { params["diversify"] = true }
+        if parsed.flag("no-facets") {
+            params["include_facets"] = false
+        } else if parsed.flag("facets") {
+            params["include_facets"] = true
+        }
         if let days = parsed.int("recent-days") { params["only_recent_days"] = days }
         if let offset = parsed.int("offset") { params["offset"] = offset }
         if let limit = parsed.int("limit") { params["limit"] = limit }
@@ -251,6 +286,12 @@ struct CharkleCLI {
         if parsed.flag("pinned") { params["only_pinned_offline"] = true }
         if parsed.flag("trashed") { params["only_trashed"] = true }
         if parsed.flag("include-trashed") { params["include_trashed"] = true }
+        if parsed.flag("contact-sheet") || parsed.first("out") != nil || parsed.first("output") != nil {
+            params["render_contact_sheet"] = true
+            params["include_image"] = false
+            if let w = parsed.int("width") { params["sheet_max_width"] = w }
+            if let outPath = parsed.first("out") ?? parsed.first("output") { params["output_path"] = outPath }
+        }
 
         let out = await service.callTool(name: "search_assets", arguments: params, channel: .cli)
         formatter.emitToolOutput(out, command: "search_assets")
@@ -263,22 +304,55 @@ struct CharkleCLI {
     ) async {
         let parsed = CLIArgParser.parse(subArgs)
         let query = parsed.first("query") ?? parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            formatter.emitError("Missing query. Usage: charkle semantic <query> [--folder P] [--limit N]")
+        let queries = parsed.csvValues("queries")
+        let seedIDs = parsed.csvValues("seed-ids")
+        let unlikeIDs = parsed.csvValues("unlike-ids")
+        guard !query.isEmpty || !queries.isEmpty || !seedIDs.isEmpty else {
+            formatter.emitError("Missing query. Usage: charkle semantic <query> | --queries q1,q2 [--folder P] [--tone dark|warm|cool] [--seed-ids A,B] [--unlike-ids C] [--fast] [--diversify] [--limit N]")
             exit(2)
         }
-        var params: [String: Any] = ["query": query]
+        var params: [String: Any] = [:]
+        if !query.isEmpty { params["query"] = query }
+        if !queries.isEmpty { params["queries"] = queries }
+        if !seedIDs.isEmpty { params["seed_asset_ids"] = seedIDs }
+        if !unlikeIDs.isEmpty { params["unlike_asset_ids"] = unlikeIDs }
         if let f = parsed.first("folder") {
-            if UUID(uuidString: f) != nil { params["folder_id"] = f } else { params["folder_path"] = f }
+            if Self.looksLikeIDOrPrefix(f) { params["folder_id"] = f } else { params["folder_path"] = f }
         }
-        if parsed.flag("subfolders") { params["include_subfolders"] = true }
+        if parsed.flag("no-subfolders") {
+            params["include_subfolders"] = false
+        } else if parsed.flag("subfolders") {
+            params["include_subfolders"] = true
+        }
         let tags = parsed.csvValues("tag") + parsed.csvValues("tags")
         if !tags.isEmpty { params["tags"] = tags }
+        let anyTags = parsed.csvValues("any-tag") + parsed.csvValues("any-tags")
+        if !anyTags.isEmpty { params["any_tags"] = anyTags }
+        let excludeTags = parsed.csvValues("exclude-tag") + parsed.csvValues("exclude-tags")
+        if !excludeTags.isEmpty { params["exclude_tags"] = excludeTags }
+        let excludeIDs = parsed.csvValues("exclude-ids")
+        if !excludeIDs.isEmpty { params["exclude_asset_ids"] = excludeIDs }
         let kinds = parsed.csvValues("kind") + parsed.csvValues("kinds")
         if !kinds.isEmpty { params["media_kinds"] = kinds }
+        if let shape = parsed.first("shape") { params["aspect_shape"] = shape }
         if let color = parsed.first("color") { params["color_hex"] = color }
+        if let tone = parsed.first("tone") { params["tone"] = tone }
         if let rating = parsed.int("min-rating") { params["min_rating"] = rating }
+        if let detail = parsed.first("detail") { params["detail"] = detail }
+        if parsed.flag("diversify") { params["diversify"] = true }
+        if parsed.flag("facets") { params["include_facets"] = true }
+        if parsed.flag("fast") || parsed.flag("no-visual-rerank") {
+            params["visual_rerank"] = false
+        } else if parsed.flag("visual-rerank") {
+            params["visual_rerank"] = true
+        }
         if let limit = parsed.int("limit") { params["limit"] = limit }
+        if parsed.flag("contact-sheet") || parsed.first("out") != nil || parsed.first("output") != nil {
+            params["render_contact_sheet"] = true
+            params["include_image"] = false
+            if let w = parsed.int("width") { params["sheet_max_width"] = w }
+            if let outPath = parsed.first("out") ?? parsed.first("output") { params["output_path"] = outPath }
+        }
 
         let out = await service.callTool(name: "semantic_search", arguments: params, channel: .cli)
         formatter.emitToolOutput(out, command: "semantic_search")
@@ -291,12 +365,23 @@ struct CharkleCLI {
     ) async {
         let parsed = CLIArgParser.parse(subArgs)
         guard let id = parsed.first("id") ?? parsed.positionals.first, !id.isEmpty else {
-            formatter.emitError("Missing asset UUID. Usage: charkle similar <asset-uuid> [--limit N]")
+            formatter.emitError("Missing asset UUID or 8-char prefix. Usage: charkle similar <asset-id> [--limit N] [--unlike-ids X,Y] [--diversify] [--out sheet.jpg]")
             exit(2)
         }
         var params: [String: Any] = ["asset_id": id]
         if let limit = parsed.int("limit") { params["limit"] = limit }
-        if parsed.flag("contact-sheet") { params["render_contact_sheet"] = true }
+        if let detail = parsed.first("detail") { params["detail"] = detail }
+        if parsed.flag("diversify") { params["diversify"] = true }
+        let excludeIDs = parsed.csvValues("exclude-ids")
+        if !excludeIDs.isEmpty { params["exclude_asset_ids"] = excludeIDs }
+        let unlikeIDs = parsed.csvValues("unlike-ids")
+        if !unlikeIDs.isEmpty { params["unlike_asset_ids"] = unlikeIDs }
+        if parsed.flag("contact-sheet") || parsed.first("out") != nil || parsed.first("output") != nil {
+            params["render_contact_sheet"] = true
+            params["include_image"] = false
+            if let w = parsed.int("width") { params["sheet_max_width"] = w }
+            if let outPath = parsed.first("out") ?? parsed.first("output") { params["output_path"] = outPath }
+        }
         let out = await service.callTool(name: "find_similar_assets", arguments: params, channel: .cli)
         formatter.emitToolOutput(out, command: "find_similar_assets")
     }
@@ -327,21 +412,37 @@ struct CharkleCLI {
         var params: [String: Any] = ["include_image": false]
         let queryFromPos = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         if let q = parsed.first("query") ?? (queryFromPos.isEmpty ? nil : queryFromPos) { params["query"] = q }
+        let queries = parsed.csvValues("queries")
+        if !queries.isEmpty { params["queries"] = queries }
         if let f = parsed.first("folder") {
-            if UUID(uuidString: f) != nil { params["folder_id"] = f } else { params["folder_path"] = f }
+            if Self.looksLikeIDOrPrefix(f) { params["folder_id"] = f } else { params["folder_path"] = f }
         }
-        if parsed.flag("subfolders") { params["include_subfolders"] = true }
+        if parsed.flag("no-subfolders") {
+            params["include_subfolders"] = false
+        } else if parsed.flag("subfolders") {
+            params["include_subfolders"] = true
+        }
         let ids = parsed.csvValues("ids")
         if !ids.isEmpty { params["asset_ids"] = ids }
         let tags = parsed.csvValues("tag") + parsed.csvValues("tags")
         if !tags.isEmpty { params["tags"] = tags }
+        let anyTags = parsed.csvValues("any-tag") + parsed.csvValues("any-tags")
+        if !anyTags.isEmpty { params["any_tags"] = anyTags }
+        let excludeTags = parsed.csvValues("exclude-tag") + parsed.csvValues("exclude-tags")
+        if !excludeTags.isEmpty { params["exclude_tags"] = excludeTags }
+        let excludeIDs = parsed.csvValues("exclude-ids")
+        if !excludeIDs.isEmpty { params["exclude_asset_ids"] = excludeIDs }
         let kinds = parsed.csvValues("kind") + parsed.csvValues("kinds")
         if !kinds.isEmpty { params["media_kinds"] = kinds }
         if let shape = parsed.first("shape") { params["aspect_shape"] = shape }
         if parsed.flag("inbox") { params["only_inbox"] = true }
         if parsed.flag("untagged") { params["only_untagged"] = true }
         if parsed.flag("trashed") { params["only_trashed"] = true }
+        if parsed.flag("diversify") { params["diversify"] = true }
         if let color = parsed.first("color") { params["color_hex"] = color }
+        if let tone = parsed.first("tone") { params["tone"] = tone }
+        if let detail = parsed.first("detail") { params["detail"] = detail }
+        if let rating = parsed.int("min-rating") { params["min_rating"] = rating }
         if let sort = parsed.first("sort") { params["sort_by"] = sort }
         if let offset = parsed.int("offset") { params["offset"] = offset }
         if let limit = parsed.int("limit") { params["limit"] = limit }
@@ -377,8 +478,9 @@ struct CharkleCLI {
             var params: [String: Any] = [:]
             let positionalRef = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             if let ref = parsed.first("id") ?? (positionalRef.isEmpty ? nil : positionalRef) {
-                if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
+                if Self.looksLikeIDOrPrefix(ref) { params["board_id"] = ref } else { params["title"] = ref }
             }
+            if let detail = parsed.first("detail") { params["detail"] = detail }
             let out = await service.callTool(name: "get_board_context", arguments: params, channel: .cli)
             formatter.emitToolOutput(out, command: "get_board_context")
 
@@ -386,7 +488,7 @@ struct CharkleCLI {
             var params: [String: Any] = ["include_image": false]
             let positionalRef = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             if let ref = parsed.first("id") ?? (positionalRef.isEmpty ? nil : positionalRef) {
-                if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
+                if Self.looksLikeIDOrPrefix(ref) { params["board_id"] = ref } else { params["title"] = ref }
             }
             if let outPath = parsed.first("out") ?? parsed.first("output") { params["output_path"] = outPath }
             if let w = parsed.int("width") { params["width"] = w }
@@ -426,7 +528,7 @@ struct CharkleCLI {
             var params: [String: Any] = [:]
             let positionalRef = parsed.positionals.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             if let ref = parsed.first("id") ?? (positionalRef.isEmpty ? nil : positionalRef) {
-                if UUID(uuidString: ref) != nil { params["board_id"] = ref } else { params["title"] = ref }
+                if Self.looksLikeIDOrPrefix(ref) { params["board_id"] = ref } else { params["title"] = ref }
             }
             if let newTitle = parsed.first("new-title") { params["new_title"] = newTitle }
             if let subtitle = parsed.first("subtitle") { params["subtitle"] = subtitle }
@@ -487,7 +589,11 @@ struct CharkleCLI {
                         let id = String(((f["id"] as? String) ?? "").prefix(8))
                         let path = (f["path"] as? String) ?? ""
                         let cnt = (f["assetCount"] as? Int) ?? 0
-                        lines.append("  \(id)  \(path) (\(cnt))")
+                        let rec = (f["recursiveAssetCount"] as? Int) ?? cnt
+                        let countStr = rec > cnt ? "(\(cnt)/\(rec) total)" : "(\(cnt))"
+                        let tags = ((f["topTags"] as? [String]) ?? []).prefix(4).map { "#\($0)" }.joined(separator: " ")
+                        let tagPart = tags.isEmpty ? "" : "  [\(tags)]"
+                        lines.append("  \(id)  \(path) \(countStr)\(tagPart)")
                     }
                     return lines.joined(separator: "\n")
                 }
@@ -555,7 +661,7 @@ struct CharkleCLI {
         let ids = parsed.csvValues("ids") + parsed.positionals
         if !ids.isEmpty { params["asset_ids"] = ids }
         if let f = parsed.first("folder") {
-            if UUID(uuidString: f) != nil { params["folder_id"] = f } else { params["folder_path"] = f }
+            if Self.looksLikeIDOrPrefix(f) { params["folder_id"] = f } else { params["folder_path"] = f }
         }
         if parsed.flag("inbox") { params["move_to_inbox"] = true }
         let addTags = parsed.csvValues("add-tags")
@@ -744,6 +850,14 @@ struct CharkleCLI {
         FileHandle.standardError.write(Data(message.utf8))
     }
 
+    private static func looksLikeIDOrPrefix(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if UUID(uuidString: trimmed) != nil { return true }
+        guard trimmed.count >= 8 && trimmed.count <= 36 else { return false }
+        let hexCount = trimmed.filter(\.isHexDigit).count
+        return hexCount >= 8 && trimmed.allSatisfy { $0.isHexDigit || $0 == "-" }
+    }
+
     private static func inspectLocalBinSymlink() -> [String: Any] {
         let linkURL = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".local/bin/charkle")
         let fm = FileManager.default
@@ -813,8 +927,9 @@ struct CharkleCLI {
 
         GLOBAL OPTIONS:
           --library-dir <dir> Override Charkle Application Support directory
-          -j, --json          Force pretty JSON output (auto-enabled when piped)
-          --compact           Force compact single-line JSON output (ideal for jq)
+          -j, --json          Force pretty-printed JSON output
+          --compact           Force single-line compact JSON (auto-enabled when piped)
+          --human             Force human-readable output even when piped
           --no-color          Disable ANSI colors (also honors NO_COLOR)
           -h, --help          Show help (run `charkle <command> --help` for subcommand details)
           -v, --version       Print version
@@ -844,28 +959,29 @@ struct CharkleCLI {
             USAGE:
               charkle status [--json]
 
-            Shows active external agent permissions and, when CLI access is enabled, the full library overview.
+            Shows active external agent permissions and, when CLI access is enabled, the full library overview atlas.
             """
         case "overview":
             """
             USAGE:
-              charkle overview [--json]
+              charkle overview [--full] [--top-tags N] [--json]
 
-            Displays folder hierarchy, smart folders, top tags, asset counts, and local cache statistics.
+            Displays compact folder semantic profiles (8-char IDs, recursive counts, top tags, palettes), smart folders, top tags, aspect/media mix, and boards. Pass --full for 36-char UUIDs and cache stats.
             """
         case "semantic":
             """
             USAGE:
-              charkle semantic <query> [--folder <path|id>] [--subfolders] [--tag <t1,t2>] [--kind <k1,k2>] [--color <#HEX>] [--min-rating <0-5>] [-n, --limit <1-50>]
+              charkle semantic <query> | --queries "q1,q2,q3" [--folder <path|id>] [--no-subfolders] [--tone dark|light|warm|cool|vivid|muted|high_contrast] [--seed-ids <A,B>] [--unlike-ids <C,D>] [--tag <t1,t2>] [--any-tag <t1,t2>] [--exclude-tag <t>] [--exclude-ids <A,B>] [--kind <k>] [--shape <s1>] [--color <#HEX>] [--min-rating <0-5>] [--diversify] [--fast] [--detail visual|compact|standard|full] [--out <sheet.jpg>] [-n, --limit <1-50>]
 
-            Runs hybrid semantic + visual + keyword search across the library.
+            Runs bilingual EN↔ZH + CJK word-segmented + CIELAB tone/aspect + folder/tag + Vision seed/unlike hybrid search.
+            Pass --queries "a,b,c" to pack multiple creative directions into ONE Contact Sheet, --unlike-ids to steer away from unwanted styles, and --fast for instant local recall.
             """
         case "similar":
             """
             USAGE:
-              charkle similar <asset-uuid> [-n, --limit <1-32>] [--contact-sheet]
+              charkle similar <asset-id> [-n, --limit <1-32>] [--unlike-ids <C,D>] [--exclude-ids <A,B>] [--diversify] [--detail visual|compact|standard|full] [--out <sheet.jpg>]
 
-            Finds visually similar assets using Vision FeaturePrint, CIELAB palette proximity, and shared tags.
+            Finds visually similar assets using Vision FeaturePrint, CIELAB palette proximity, and shared tags (8-char short IDs supported).
             """
         case "jump":
             """
@@ -877,16 +993,16 @@ struct CharkleCLI {
         case "inbox":
             """
             USAGE:
-              charkle inbox [--kind <k1,k2>] [--sort <order>] [--offset <N>] [-n, --limit <1-100>] [--suggest]
+              charkle inbox [--kind <k1,k2>] [--sort <order>] [--detail compact|standard|full] [--offset <N>] [-n, --limit <1-100>] [--suggest] [--out <sheet.jpg>]
 
-            Lists untriaged Inbox assets. Pass --suggest to chain folder recommendations onto the fetched batch.
+            Lists untriaged Inbox assets. Pass --suggest for folder recommendations or --out <sheet.jpg> for a Contact Sheet.
             """
         case "asset":
             """
             USAGE:
-              charkle asset <asset-uuid> [--json]
+              charkle asset <asset-uuid>... [--ids <A,B>] [--json]
 
-            Inspects full asset metadata including EXIF, AI generation prompts, social/GitHub details, and local file paths.
+            Inspects full asset metadata (EXIF, AI prompts, social/GitHub details, local paths) for 1 UUID or up to 12 finalists in one batch.
             """
         case "analyze":
             """
@@ -901,16 +1017,24 @@ struct CharkleCLI {
               charkle search [query] [options]
 
             OPTIONS:
-              -f, --folder <path|id>    Filter by folder path or UUID
-              --subfolders              Include nested descendant folders
+              -f, --folder <path|id>    Filter by folder path or UUID (includes subfolders by default)
+              --no-subfolders           Only match assets directly inside the specified folder
               --smart-folder <name|id>  Evaluate a saved Smart Folder rule
-              -t, --tag <t1,t2>         Require tags (repeatable or comma-separated)
+              -t, --tag <t1,t2>         Require ALL tags (repeatable or comma-separated)
+              --any-tag <t1,t2>         Match ANY tag (OR)
+              --exclude-tag <t1,t2>     Exclude assets having any of these tags
+              --exclude-ids <A,B>       Exclude specific asset UUIDs (already-seen / rejected)
               --kind <k1,k2>            Media kinds: image,animatedImage,video,webBookmark,document,designFile,audio,model3D
               --shape <shape>           Aspect shape: landscape, portrait, square, ultrawide
               --color <#HEX>            Dominant CIELAB color filter
               --color-tolerance <N>     DeltaE tolerance (default 28)
               --min-rating <0-5>        Minimum star rating
               --sort <order>            newest, oldest, name_asc, rating_desc, file_size_desc, relevance
+              --detail <level>          Payload verbosity: compact (default), standard, full
+              --diversify               Suppress Vision near-duplicates & spread across folders
+              --facets / --no-facets    Toggle matched-set facet summary (auto when totalMatched > limit)
+              --out <sheet.jpg>         Also render numbered Contact Sheet JPEG in the same call
+              --width <512-1920>        Contact Sheet width px (default 1024)
               --inbox                   Only Inbox assets
               --untagged                Only untagged assets
               --pinned                  Only offline-pinned assets
@@ -918,7 +1042,7 @@ struct CharkleCLI {
               --include-trashed         Include trashed assets
               --recent-days <N>         Added in the last N days
               --offset <N>              Pagination offset (default 0)
-              -n, --limit <1-100>       Max results (default 30)
+              -n, --limit <1-100>       Max results (default 20)
             """
         case "board":
             """

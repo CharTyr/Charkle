@@ -1964,8 +1964,26 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         criteria: FilterCriteria,
         limit: Int = 48
     ) async throws -> SemanticSearchReport {
+        try await semanticSearch(
+            query: query,
+            criteria: criteria,
+            limit: limit,
+            allowVisualRerank: true,
+            seedAssetIDs: [],
+            unlikeAssetIDs: []
+        )
+    }
+
+    public func semanticSearch(
+        query: String,
+        criteria: FilterCriteria,
+        limit: Int = 48,
+        allowVisualRerank: Bool,
+        seedAssetIDs: [UUID] = [],
+        unlikeAssetIDs: [UUID] = []
+    ) async throws -> SemanticSearchReport {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        guard !trimmed.isEmpty || !seedAssetIDs.isEmpty else {
             return SemanticSearchReport(query: "", hits: [], summary: "请输入检索描述")
         }
 
@@ -1977,13 +1995,152 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             return SemanticSearchReport(query: trimmed, hits: [], summary: "当前筛选范围内没有可检索素材")
         }
 
-        // 2. Signal A: Local FTS5 + Pinyin text ranks
-        var textRanks = try await database.searchRanks(trimmed)
-        let tokens = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
-        if tokens.count > 1 {
-            for token in tokens.prefix(8) {
-                for (id, rank) in try await database.searchRanks(token) {
-                    textRanks[id] = min(1.0, (textRanks[id] ?? 0) + rank / Double(tokens.count))
+        // 2. Signal A: Local FTS5 + CJK word-boundary segmentation + EN↔ZH visual expansion + Folder/Tag affinity
+        var textRanks: [UUID: Double] = [:]
+        var termMatchCounts: [UUID: Int] = [:]
+        let queryTerms = trimmed.isEmpty ? [] : Array(SearchText.queryTerms(trimmed).prefix(10))
+        let visualHints = VisualQueryIntelligence.parseVisualHints(from: trimmed, baseTerms: queryTerms)
+        let expandedTerms = visualHints.expandedTerms
+
+        if !trimmed.isEmpty {
+            textRanks = try await database.searchRanks(trimmed)
+            if queryTerms.count > 1 || (queryTerms.count == 1 && SearchText.normalize(queryTerms[0]) != SearchText.normalize(trimmed)) {
+                var perTermSum: [UUID: Double] = [:]
+                for term in queryTerms {
+                    let ranks = try await database.searchRanks(term)
+                    for (id, rank) in ranks {
+                        perTermSum[id, default: 0] += rank
+                        termMatchCounts[id, default: 0] += 1
+                    }
+                }
+                let denom = Double(max(1, queryTerms.count))
+                for (id, sum) in perTermSum {
+                    let coverage = Double(termMatchCounts[id, default: 0]) / denom
+                    let avgRank = sum / Double(max(1, termMatchCounts[id, default: 0]))
+                    let segmentedScore = min(0.96, avgRank * (0.45 + 0.55 * coverage))
+                    textRanks[id] = max(textRanks[id] ?? 0, segmentedScore)
+                }
+            }
+            // Bilingual / visual-domain synonym expansion (weighted slightly below literal terms)
+            if !expandedTerms.isEmpty {
+                var expSum: [UUID: Double] = [:]
+                var expHits: [UUID: Int] = [:]
+                for term in expandedTerms {
+                    let ranks = try await database.searchRanks(term)
+                    for (id, rank) in ranks {
+                        expSum[id, default: 0] += rank
+                        expHits[id, default: 0] += 1
+                    }
+                }
+                let expDenom = Double(max(1, min(4, expandedTerms.count)))
+                for (id, sum) in expSum {
+                    let hitCount = expHits[id, default: 0]
+                    let coverage = min(1.0, Double(hitCount) / expDenom)
+                    let avgRank = sum / Double(max(1, hitCount))
+                    let expScore = min(0.84, avgRank * (0.42 + 0.48 * coverage))
+                    textRanks[id] = max(textRanks[id] ?? 0, expScore)
+                }
+            }
+        }
+
+        // Direct folder-path and tag affinity (both primary & cross-lingual expanded terms)
+        let normalizedPrimary = queryTerms.map(SearchText.normalize).filter { !$0.isEmpty }
+        let normalizedExpanded = expandedTerms.map(SearchText.normalize).filter { !$0.isEmpty }
+        let allNormalizedTerms = normalizedPrimary + normalizedExpanded
+        var folderTagBoost: [UUID: Double] = [:]
+        if !allNormalizedTerms.isEmpty {
+            let folders = try await database.fetchFolders()
+            let folderPaths = CharkleAgentTools.buildFolderPaths(folders)
+            var folderScoreByID: [UUID: Double] = [:]
+            for folder in folders {
+                let pathNorm = SearchText.normalize(folderPaths[folder.id] ?? folder.name)
+                let primaryMatched = normalizedPrimary.filter { pathNorm.contains($0) }.count
+                let expMatched = normalizedExpanded.filter { pathNorm.contains($0) }.count
+                if primaryMatched > 0 || expMatched > 0 {
+                    let denom = Double(max(1, normalizedPrimary.count))
+                    let score = min(1.0, 0.50 + 0.45 * (Double(primaryMatched) / denom) + 0.25 * min(1.0, Double(expMatched) / 2.0))
+                    folderScoreByID[folder.id] = score
+                }
+            }
+            for asset in scopedAssets {
+                var boost = asset.folderID.flatMap { folderScoreByID[$0] }.map { $0 * 0.48 } ?? 0
+                if !asset.tags.isEmpty {
+                    let normTags = asset.tags.map(SearchText.normalize)
+                    let matchedPrimary = normalizedPrimary.filter { term in
+                        normTags.contains { $0 == term || $0.contains(term) || (term.count >= 2 && term.contains($0) && $0.count >= 2) }
+                    }.count
+                    let matchedExp = normalizedExpanded.filter { term in
+                        normTags.contains { $0 == term || $0.contains(term) || (term.count >= 2 && term.contains($0) && $0.count >= 2) }
+                    }.count
+                    let totalHit = Double(matchedPrimary) + Double(matchedExp) * 0.85
+                    if totalHit > 0 {
+                        let denom = Double(max(1, min(4, normalizedPrimary.count)))
+                        boost = max(boost, min(0.90, 0.34 + 0.50 * min(1.0, totalHit / denom)))
+                    }
+                }
+                if boost > 0 {
+                    folderTagBoost[asset.id] = min(0.92, boost)
+                }
+            }
+        }
+
+        // 2b. Signal D: Local positive seed similarity & negative visual repulsion (Apple Vision FeaturePrint + CIELAB)
+        var visualSeedScores: [UUID: Double] = [:]
+        var unlikePenalties: [UUID: Double] = [:]
+        var usedSeedVisual = false
+        let unlikeSet = Set(unlikeAssetIDs)
+        if !seedAssetIDs.isEmpty || !unlikeAssetIDs.isEmpty {
+            let vectors = try await database.vectors()
+            let seedSet = Set(seedAssetIDs)
+            if !seedAssetIDs.isEmpty {
+                var seedAssets: [AssetRecord] = []
+                for sid in seedAssetIDs {
+                    if let a = try await database.asset(id: sid) {
+                        seedAssets.append(a)
+                    }
+                }
+                let seedPrints = seedAssetIDs.compactMap { vectors[$0]?.featurePrint }
+                let seedColors = seedAssets.flatMap { $0.dominantColors.prefix(3) }
+                if !seedPrints.isEmpty || !seedColors.isEmpty {
+                    usedSeedVisual = true
+                    for asset in scopedAssets where !seedSet.contains(asset.id) && !unlikeSet.contains(asset.id) {
+                        var bestVis = 0.0
+                        if let fp = vectors[asset.id]?.featurePrint, !seedPrints.isEmpty {
+                            bestVis = seedPrints
+                                .compactMap { VisionAnalyzer.visualDistance(between: fp, and: $0) }
+                                .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
+                                .max() ?? 0.0
+                        }
+                        var colorSim = 0.0
+                        if !seedColors.isEmpty, !asset.dominantColors.isEmpty {
+                            let minDE = asset.dominantColors.prefix(4).flatMap { c in
+                                seedColors.map { c.deltaE2000(to: $0) }
+                            }.filter(\.isFinite).min()
+                            if let de = minDE, de < 28.0 {
+                                colorSim = max(0, 1.0 - de / 28.0)
+                            }
+                        }
+                        let combinedSeed = seedPrints.isEmpty ? colorSim : (bestVis * 0.78 + colorSim * 0.22)
+                        if combinedSeed > 0.15 {
+                            visualSeedScores[asset.id] = min(1.0, combinedSeed)
+                        }
+                    }
+                }
+            }
+            if !unlikeAssetIDs.isEmpty {
+                let unlikePrints = unlikeAssetIDs.compactMap { vectors[$0]?.featurePrint }
+                if !unlikePrints.isEmpty {
+                    for asset in scopedAssets where !unlikeSet.contains(asset.id) {
+                        if let fp = vectors[asset.id]?.featurePrint {
+                            let maxNegSim = unlikePrints
+                                .compactMap { VisionAnalyzer.visualDistance(between: fp, and: $0) }
+                                .map { VisionAnalyzer.visualSimilarity(forDistance: $0) }
+                                .max() ?? 0.0
+                            if maxNegSim >= 0.42 {
+                                unlikePenalties[asset.id] = max(0.15, 1.0 - (maxNegSim - 0.35) * 1.15)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1992,7 +2149,7 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var embeddingScores: [UUID: Double] = [:]
         var usedEmbedding = false
         let cloudCfg = await aiConfig()
-        if let provider = try? intelligence.provider(for: cloudCfg) {
+        if !trimmed.isEmpty, let provider = try? intelligence.provider(for: cloudCfg) {
             let embeddings = try await database.embeddings(forModel: provider.embeddingIdentity)
             if !embeddings.isEmpty, let queryVec = try? await provider.embed(trimmed) {
                 usedEmbedding = true
@@ -2012,20 +2169,22 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var usedJev = false
         var evaluatedVisualCount = 0
         let tsConfig = await typeSafeConfig()
-        if tsConfig.enabled, tsConfig.enableSemanticSearch,
+        if allowVisualRerank, !trimmed.isEmpty, tsConfig.enabled, tsConfig.enableSemanticSearch,
            let tsKey = intelligence.storedTypeSafeAPIKey() {
-            // Prioritize FTS/embedding shortlist + untagged/recent visual assets so zero-tag photos are discovered!
+            // Prioritize FTS/tag/seed/embedding shortlist + untagged/recent visual assets so zero-tag photos are discovered!
             let maxVisualCandidates = 24
-            let prioritized = scopedAssets.sorted { lhs, rhs in
-                let ls = (textRanks[lhs.id] ?? 0) * 0.5 + (embeddingScores[lhs.id] ?? 0) * 0.5
-                let rs = (textRanks[rhs.id] ?? 0) * 0.5 + (embeddingScores[rhs.id] ?? 0) * 0.5
+            let prioritized = scopedAssets.filter { !unlikeSet.contains($0.id) }.sorted { lhs, rhs in
+                let ls = max(textRanks[lhs.id] ?? 0, folderTagBoost[lhs.id] ?? 0) * 0.5
+                    + max(embeddingScores[lhs.id] ?? 0, visualSeedScores[lhs.id] ?? 0) * 0.5
+                let rs = max(textRanks[rhs.id] ?? 0, folderTagBoost[rhs.id] ?? 0) * 0.5
+                    + max(embeddingScores[rhs.id] ?? 0, visualSeedScores[rhs.id] ?? 0) * 0.5
                 if abs(ls - rs) > 0.01 { return ls > rs }
                 return lhs.updatedAt > rhs.updatedAt
             }
             var shortlist: [AssetRecord] = Array(prioritized.prefix(16))
             var seen = Set(shortlist.map(\.id))
             // Also include newest untagged/uncaptioned visual items in case FTS/embeddings missed them
-            for asset in scopedAssets where shortlist.count < maxVisualCandidates && seen.insert(asset.id).inserted {
+            for asset in scopedAssets where shortlist.count < maxVisualCandidates && !unlikeSet.contains(asset.id) && seen.insert(asset.id).inserted {
                 if asset.tags.isEmpty || asset.aiDescription == nil {
                     shortlist.append(asset)
                 }
@@ -2063,47 +2222,91 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
         }
 
-        // 5. Fuse signals into calibrated ranked hits
+        // 5. Fuse signals into calibrated ranked hits (incorporating perceptual CIELAB tone/aspect & negative repulsion)
+        let hasVisualHints = !visualHints.tones.isEmpty || !visualHints.aspectShapes.isEmpty || !visualHints.targetColors.isEmpty
         var hits: [SemanticSearchHit] = []
         for asset in scopedAssets {
-            let tScore = textRanks[asset.id] ?? 0
+            if unlikeSet.contains(asset.id) { continue }
+            let rawText = textRanks[asset.id] ?? 0
+            let ftBoost = folderTagBoost[asset.id] ?? 0
+            let tScore = max(rawText, ftBoost, rawText > 0 && ftBoost > 0 ? min(1.0, rawText * 0.65 + ftBoost * 0.45) : 0)
             let eScore = embeddingScores[asset.id] ?? 0
+            let sScore = visualSeedScores[asset.id] ?? 0
             let jResult = jevScores[asset.id]
             let jScore = jResult?.score ?? 0
+            let hintMatch = hasVisualHints ? VisualQueryIntelligence.visualHintScore(for: asset, hints: visualHints) : nil
+            let hScore = hintMatch?.score ?? 0
 
-            let combined: Double
+            var combined: Double
             var reasons: [String] = []
             var sourceLabel = "全文匹配"
 
             if jResult != nil {
-                // Jev actually inspected the visual asset
                 if jScore >= 0.30 {
                     reasons.append("Jev 视觉语义 \(Int((jScore * 100).rounded()))%")
                 }
                 if eScore >= 0.30 {
                     reasons.append("向量相似度 \(Int((eScore * 100).rounded()))%")
                 }
+                if sScore >= 0.30 {
+                    reasons.append("种子视觉相似 \(Int((sScore * 100).rounded()))%")
+                }
                 if tScore > 0.05 {
                     reasons.append("标题/标签/OCR 命中")
                 }
-                let nonVisual = max(tScore, eScore)
+                if let hm = hintMatch, hm.score >= 0.48 { reasons.append(hm.reason) }
+                let nonVisual = max(tScore, eScore, sScore)
                 combined = max(jScore, jScore * 0.72 + nonVisual * 0.28)
                 sourceLabel = eScore >= 0.30 ? "Jev 视觉 + 向量" : "Jev 视觉语义"
             } else if eScore >= 0.28 {
                 reasons.append("语义向量 \(Int((eScore * 100).rounded()))%")
-                if tScore > 0.05 { reasons.append("关键词命中") }
-                combined = max(eScore, eScore * 0.75 + tScore * 0.25)
+                if sScore >= 0.30 { reasons.append("种子视觉相似 \(Int((sScore * 100).rounded()))%") }
+                if tScore > 0.05 { reasons.append("关键词/标签命中") }
+                if let hm = hintMatch, hm.score >= 0.48 { reasons.append(hm.reason) }
+                combined = max(eScore, eScore * 0.65 + max(tScore, sScore) * 0.35)
                 sourceLabel = "语义向量"
+            } else if sScore >= 0.22 && tScore > 0.05 {
+                reasons.append("种子视觉相似 \(Int((sScore * 100).rounded()))%")
+                reasons.append("语义分词/标签命中")
+                if let hm = hintMatch, hm.score >= 0.48 { reasons.append(hm.reason) }
+                combined = min(1.0, sScore * 0.50 + tScore * 0.52 + hScore * 0.14)
+                sourceLabel = "本地多信号(视觉+全文)"
+            } else if sScore >= 0.28 && trimmed.isEmpty {
+                reasons.append("种子视觉相似 \(Int((sScore * 100).rounded()))%")
+                combined = sScore
+                sourceLabel = "种子视觉相似"
             } else if tScore > 0.05 {
-                reasons.append("全文/标签/拼音匹配")
-                combined = tScore * 0.85
-                sourceLabel = "本机全文"
+                if ftBoost > 0 && rawText > 0 {
+                    reasons.append("双语分词 + 标签/目录命中")
+                } else if ftBoost > 0 {
+                    reasons.append("标签/目录命中")
+                } else {
+                    reasons.append("分词/标签/拼音匹配")
+                }
+                if let hm = hintMatch, hm.score >= 0.45 {
+                    reasons.append(hm.reason)
+                    combined = min(1.0, tScore * 0.78 + hm.score * 0.26)
+                } else {
+                    // Gently demote candidates violating an explicit aspect-shape intent (e.g. "竖屏")
+                    let aspectPenalty: Double = (!visualHints.aspectShapes.isEmpty && !visualHints.aspectShapes.contains(asset.aspectShape)) ? 0.78 : 1.0
+                    combined = tScore * 0.88 * aspectPenalty
+                }
+                sourceLabel = "本机多信号"
+            } else if let hm = hintMatch, hm.score >= 0.62, !visualHints.tones.isEmpty {
+                // Pure visual tone query (e.g., "暗调冷色" / "高饱和撞色") with no literal text hit
+                reasons.append(hm.reason)
+                combined = hm.score * 0.72
+                sourceLabel = "CIELAB 视觉氛围"
             } else {
                 continue
             }
 
+            if let penalty = unlikePenalties[asset.id] {
+                combined *= penalty
+            }
+
             // Strict threshold so irrelevant items don't pollute semantic results
-            let cutoff: Double = (usedJev || usedEmbedding) ? 0.32 : 0.05
+            let cutoff: Double = (usedJev || usedEmbedding) ? 0.32 : 0.08
             guard combined >= cutoff else { continue }
 
             hits.append(SemanticSearchHit(
@@ -2124,7 +2327,10 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         var engines: [String] = []
         if usedJev { engines.append("Jev 视觉语义(\(evaluatedVisualCount)图)") }
         if usedEmbedding { engines.append("语义向量") }
-        if engines.isEmpty { engines.append("本机全文/拼音") }
+        if usedSeedVisual { engines.append("本地种子视觉") }
+        if !unlikeAssetIDs.isEmpty { engines.append("负向视觉排斥") }
+        if hasVisualHints { engines.append("CIELAB氛围/画幅") }
+        if engines.isEmpty { engines.append("本机双语分词/标签/拼音") }
 
         let summary = limited.isEmpty
             ? "语义检索「\(trimmed)」未命中高度相关素材（\(engines.joined(separator: " + "))）"

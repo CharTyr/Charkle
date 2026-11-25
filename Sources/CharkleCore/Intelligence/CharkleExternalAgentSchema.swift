@@ -1,7 +1,7 @@
 import Foundation
 
 extension CharkleExternalAgentService {
-    public static let serverVersion = "1.2.1"
+    public static let serverVersion = "1.2.2"
     public static let supportedProtocolVersions: [String] = [
         "2025-11-25",
         "2025-06-18",
@@ -23,26 +23,26 @@ extension CharkleExternalAgentService {
         [
             [
                 "uri": "charkle://library/overview",
-                "name": "Charkle Library Overview",
-                "description": "Folders, smart folders, top tags, media distribution, counts, and active external agent permission policy.",
+                "name": "Library Overview Atlas",
+                "description": "Counts, compact folder semantic profiles (recursive counts, topTags, palettes), smart folders, top tags, aspect/media mix, boards, and permissions.",
                 "mimeType": "application/json"
             ],
             [
                 "uri": "charkle://boards",
-                "name": "Charkle Moodboards",
-                "description": "Summary list of all moodboards in Charkle with palettes and layout modes.",
+                "name": "Moodboards",
+                "description": "All moodboards with IDs, titles, layout modes, counts, and palettes.",
                 "mimeType": "application/json"
             ],
             [
                 "uri": "charkle://folders",
-                "name": "Charkle Folder Tree",
-                "description": "Full hierarchical folder tree with UUIDs, paths, parent IDs, colors, and asset counts.",
+                "name": "Folder Tree & Profiles",
+                "description": "Hierarchical folder tree with UUIDs, paths, recursive counts, top tags, and palettes.",
                 "mimeType": "application/json"
             ],
             [
                 "uri": "charkle://smart-folders",
-                "name": "Charkle Smart Folders",
-                "description": "Saved rule-based smart folders with current match counts.",
+                "name": "Smart Folders",
+                "description": "Saved rule-based smart folders with match counts.",
                 "mimeType": "application/json"
             ]
         ]
@@ -52,90 +52,54 @@ extension CharkleExternalAgentService {
         [
             [
                 "uriTemplate": "charkle://assets/{asset_id}",
-                "name": "Charkle Asset Details",
-                "description": "Complete metadata for a single asset UUID including EXIF, AI generation prompts, social/GitHub metadata, palette, OCR, and local paths.",
+                "name": "Asset Details",
+                "description": "Full metadata for an asset UUID or 8+ char prefix (EXIF, AI prompts, social/GitHub, palette, OCR, local paths).",
                 "mimeType": "application/json"
             ],
             [
                 "uriTemplate": "charkle://boards/{board_id}",
-                "name": "Charkle Moodboard Context",
-                "description": "Full structured design context for a Moodboard UUID including notes, sections, connectors, harmonized palette, and referenced assets.",
+                "name": "Moodboard Context",
+                "description": "Structured context for a Moodboard UUID or 8+ char prefix (notes, sections, connectors, palette, referenced assets).",
                 "mimeType": "application/json"
             ]
         ]
     }
 
-    // MARK: - MCP Prompts (Curated Studio Workflows)
+    // MARK: - MCP Prompts (Low-Token Visual Workflows)
 
     public static func mcpPromptDefinitions() -> [[String: Any]] {
         [
             [
                 "name": "triage_inbox",
-                "description": "Inspect untriaged Charkle Inbox assets visually with Contact Sheets and folder recommendations, then propose or apply clean folder & tag organization.",
+                "description": "Visually inspect untriaged Inbox assets in 1 Contact Sheet + folder suggestions, then propose or apply clean organization.",
                 "arguments": [
-                    [
-                        "name": "limit",
-                        "description": "Maximum number of Inbox items to review in this batch (default 16).",
-                        "required": false
-                    ],
-                    [
-                        "name": "apply_changes",
-                        "description": "Set to 'true' to apply changes immediately when write access is enabled; otherwise propose a reviewable plan first.",
-                        "required": false
-                    ]
+                    ["name": "limit", "description": "Inbox items per batch (default 16).", "required": false],
+                    ["name": "apply_changes", "description": "'true' to apply via organize_assets; otherwise propose plan first.", "required": false]
                 ]
             ],
             [
                 "name": "curate_moodboard",
-                "description": "End-to-end grounded visual curation workflow: inspect the library, recall candidates, inspect Contact Sheets visually, and compose a structured Moodboard.",
+                "description": "Token-efficient grounded curation: orient via overview atlas, recall diversified multi-direction Contact Sheet in 1 call, compose structured Moodboard.",
                 "arguments": [
-                    [
-                        "name": "brief",
-                        "description": "Creative direction, style, mood, or color brief for the moodboard.",
-                        "required": true
-                    ],
-                    [
-                        "name": "folder_path",
-                        "description": "Optional folder path to restrict candidate assets.",
-                        "required": false
-                    ],
-                    [
-                        "name": "count",
-                        "description": "Target number of visual references (default 10).",
-                        "required": false
-                    ]
+                    ["name": "brief", "description": "Creative direction, style, mood, or color brief.", "required": true],
+                    ["name": "folder_path", "description": "Optional folder path scope.", "required": false],
+                    ["name": "count", "description": "Target references (default 10).", "required": false]
                 ]
             ],
             [
                 "name": "extract_design_tokens",
-                "description": "Read a Charkle Moodboard's harmonized palette, curator notes, section themes, and exported visual snapshot to generate structured design tokens (CSS / Tailwind / SwiftUI).",
+                "description": "Read a Moodboard's palette, notes, sections, and visual snapshot to generate structured design tokens.",
                 "arguments": [
-                    [
-                        "name": "board",
-                        "description": "Moodboard title or UUID.",
-                        "required": true
-                    ],
-                    [
-                        "name": "format",
-                        "description": "Target output format such as 'css', 'tailwind', 'swiftui', or 'json' (default 'css').",
-                        "required": false
-                    ]
+                    ["name": "board", "description": "Moodboard title or UUID.", "required": true],
+                    ["name": "format", "description": "'css', 'tailwind', 'swiftui', or 'json' (default 'css').", "required": false]
                 ]
             ],
             [
                 "name": "inspect_ai_prompts",
-                "description": "Search AI-generated reference images in Charkle and extract their embedded generation prompts, models, samplers, seeds, and LoRA recipes.",
+                "description": "Find AI-generated references and batch-inspect their embedded prompts, models, samplers, seeds, and LoRAs.",
                 "arguments": [
-                    [
-                        "name": "query",
-                        "description": "Optional keyword, model name, or style filter.",
-                        "required": false
-                    ],
-                    [
-                        "name": "limit",
-                        "description": "Maximum number of assets to inspect (default 12).",
-                        "required": false
-                    ]
+                    ["name": "query", "description": "Optional keyword, model, or style filter.", "required": false],
+                    ["name": "limit", "description": "Max assets to inspect (default 12).", "required": false]
                 ]
             ]
         ]
@@ -151,8 +115,8 @@ extension CharkleExternalAgentService {
             let limit = strArg("limit").isEmpty ? "16" : strArg("limit")
             let apply = strArg("apply_changes").lowercased() == "true"
             let actionLine = apply
-                ? "After confirming folder fit and normalized tags, call `organize_assets` to apply the plan (only if write access is enabled; never delete anything permanently)."
-                : "Present a concise table of recommended folder, tags, and notes per item for user approval before calling `organize_assets`."
+                ? "Apply via `organize_assets` (8-char short IDs supported; reuse existing folders/tags; never permanently delete)."
+                : "Present a concise table of recommended folder, tags, and notes for user approval first."
             return [
                 "description": "Triage untriaged Inbox assets in Charkle",
                 "messages": [[
@@ -160,11 +124,11 @@ extension CharkleExternalAgentService {
                     "content": [
                         "type": "text",
                         "text": """
-                        Please triage up to \(limit) untriaged assets in my Charkle Inbox:
-                        1. Call `library_overview` to understand my existing folder hierarchy and canonical tag vocabulary.
-                        2. Call `render_contact_sheet` with `only_inbox: true, limit: \(limit)` so you can visually inspect the items.
-                        3. Call `suggest_folder` on those Inbox `asset_ids` to get grounded folder recommendations.
-                        4. Reuse existing folder paths and tag naming conventions wherever possible instead of inventing duplicate tags.
+                        Triage up to \(limit) Inbox assets in Charkle (low-token workflow):
+                        1. Call `library_overview` to inspect folder semantic profiles (`topTags`, `palette`) and canonical tags.
+                        2. Call `list_inbox` with `limit: \(limit), render_contact_sheet: true` (auto `visual` manifest) to see all thumbnails + short IDs in 1 call.
+                        3. Call `suggest_folder` on those `asset_ids` for grounded folder recommendations.
+                        4. Reuse existing folder paths and tag vocabulary rather than inventing duplicates.
                         5. \(actionLine)
                         """
                     ]
@@ -177,8 +141,8 @@ extension CharkleExternalAgentService {
             let folder = strArg("folder_path")
             let count = strArg("count").isEmpty ? "10" : strArg("count")
             let scopeHint = folder.isEmpty
-                ? "Search across the full library."
-                : "Focus primarily on folder `\(folder)` (with `include_subfolders: true`)."
+                ? "Pick best matching folder(s) from `library_overview` folder profiles."
+                : "Scope to folder `\(folder)` (subfolders included by default)."
             return [
                 "description": "Curate a grounded Charkle Moodboard",
                 "messages": [[
@@ -186,11 +150,11 @@ extension CharkleExternalAgentService {
                     "content": [
                         "type": "text",
                         "text": """
-                        Curate a Charkle Moodboard for this brief: "\(effectiveBrief)" (target ~\(count) references).
-                        1. Call `library_overview` to discover folders, tags, and media kinds.
-                        2. \(scopeHint) Combine `search_assets` / `semantic_search` and `find_similar_assets` around strong anchors to gather ~16–24 candidates.
-                        3. Call `render_contact_sheet` on the candidate `asset_ids` to visually inspect composition, lighting, color harmony, and avoid near-duplicates.
-                        4. Select the strongest ~\(count) assets grouped into 2–3 purposeful sections with hero picks, then call `compose_moodboard` with explicit `sections`, `hero_asset_ids`, and a concise `curator_note`.
+                        Curate a Charkle Moodboard for: "\(effectiveBrief)" (target ~\(count) assets, minimal token budget):
+                        1. Call `library_overview` to read folder semantic profiles (`topTags`, `palette`, `recursiveAssetCount`).
+                        2. \(scopeHint) Run `semantic_search` (supports multi-direction `queries:[...]`, bilingual EN/ZH terms, CIELAB `tone`, `diversify:true`, `render_contact_sheet:true`) or `search_assets` to inspect distinct candidates in ONE Contact Sheet.
+                        3. If refining, pass `seed_asset_ids` (more like these), `unlike_asset_ids` (steer away from these styles), or `exclude_asset_ids` using 8-char short IDs.
+                        4. Batch-call `get_asset(asset_ids:[...])` only if finalist details are needed, then call `compose_moodboard` with 2–3 `sections`, `hero_asset_ids`, and a concise `curator_note`.
                         """
                     ]
                 ]]
@@ -200,7 +164,7 @@ extension CharkleExternalAgentService {
             let board = strArg("board")
             let format = strArg("format").isEmpty ? "css" : strArg("format")
             let boardHint = board.isEmpty
-                ? "First call `list_boards` to locate the target moodboard, then inspect it."
+                ? "Call `list_boards` to locate the target moodboard."
                 : "Target moodboard: `\(board)`."
             return [
                 "description": "Extract design tokens from a Charkle Moodboard",
@@ -209,11 +173,11 @@ extension CharkleExternalAgentService {
                     "content": [
                         "type": "text",
                         "text": """
-                        Extract production-ready `\(format)` design tokens from my Charkle Moodboard.
+                        Extract production-ready `\(format)` design tokens from my Charkle Moodboard:
                         1. \(boardHint)
-                        2. Call `get_board_context` to read the harmonized HEX/CIELAB palette, curator notes, section groupings, connectors, and referenced assets.
-                        3. Call `export_board_image` to inspect the actual visual mood, contrast, and hierarchy.
-                        4. Output clean semantic tokens (surface, ink, accent, muted, borders, typography/spacing cues) in `\(format)` format grounded directly in the board's palette and notes.
+                        2. Call `get_board_context` to read the harmonized HEX/CIELAB palette, notes, sections, and connectors.
+                        3. Call `export_board_image` (use `width: 1200`) to inspect visual mood, contrast, and hierarchy.
+                        4. Output semantic tokens (surface, ink, accent, muted, borders, typography/spacing cues) in `\(format)`.
                         """
                     ]
                 ]]
@@ -223,8 +187,8 @@ extension CharkleExternalAgentService {
             let query = strArg("query")
             let limit = strArg("limit").isEmpty ? "12" : strArg("limit")
             let searchStep = query.isEmpty
-                ? "Call `search_assets` with `media_kinds: [\"image\"]` and `limit: \(limit)`."
-                : "Call `search_assets` with `query: \"\(query)\"`, `media_kinds: [\"image\"]`, and `limit: \(limit)`."
+                ? "Call `search_assets` with `media_kinds: [\"image\"], limit: \(limit)`."
+                : "Call `search_assets` with `query: \"\(query)\", media_kinds: [\"image\"], limit: \(limit)`."
             return [
                 "description": "Inspect embedded AI generation prompts and parameters",
                 "messages": [[
@@ -232,10 +196,10 @@ extension CharkleExternalAgentService {
                     "content": [
                         "type": "text",
                         "text": """
-                        Inspect AI-generated visual references in my Charkle library:
+                        Inspect AI-generated references in Charkle:
                         1. \(searchStep)
-                        2. Call `get_asset` on relevant candidates to read their hydrated `richMetadata.aiGeneration` fields (`generator`, `modelName`, `prompt`, `negativePrompt`, `sampler`, `steps`, `cfgScale`, `seed`, `loras`).
-                        3. Summarize recurring prompt patterns, model/LoRA combinations, and notable parameter differences.
+                        2. Batch-call `get_asset` with `asset_ids: [...]` (up to 12 at once) to read `richMetadata.aiGeneration` (`generator`, `modelName`, `prompt`, `negativePrompt`, `sampler`, `steps`, `cfgScale`, `seed`, `loras`).
+                        3. Summarize recurring prompt patterns, model/LoRA recipes, and parameter differences.
                         """
                     ]
                 ]]
@@ -246,7 +210,7 @@ extension CharkleExternalAgentService {
         }
     }
 
-    // MARK: - MCP Tool Schema Registry (20 Safe Tools — Never Permanent Delete)
+    // MARK: - MCP Tool Schema Registry (20 Safe Tools — Lean, Token-Efficient, Never Permanent Delete)
 
     public static func mcpToolDefinitions() -> [[String: Any]] {
         func tool(
@@ -283,107 +247,139 @@ extension CharkleExternalAgentService {
         let mediaKindEnum = MediaKind.allCases.map(\.rawValue)
         let aspectShapeEnum = AspectShape.allCases.map(\.rawValue)
         let sortByEnum = ["newest", "oldest", "name_asc", "rating_desc", "file_size_desc", "relevance"]
+        let detailEnum = ["visual", "compact", "standard", "full"]
+        let strArray: [String: Any] = ["type": "array", "items": ["type": "string"]]
 
         return [
             // MARK: Read Tools (12)
             tool(
                 name: "library_overview",
                 title: "Library Overview",
-                description: "Get a complete overview of the Charkle visual reference library: total/inbox/untagged/trashed counts, hierarchical folder tree, smart folders, top tags, media distribution, board count, cache stats, and active external agent permissions.",
-                properties: [:],
+                description: "Semantic atlas: counts, compact folders (8-char id, path, recursiveAssetCount, topTags, palette), smartFolders, topTags, aspect/media mix, boards, policy. Call first.",
+                properties: [
+                    "compact": ["type": "boolean"],
+                    "include_folder_profiles": ["type": "boolean"],
+                    "include_boards": ["type": "boolean"],
+                    "top_tags_limit": ["type": "integer", "minimum": 5, "maximum": 80]
+                ],
                 readOnly: true
             ),
             tool(
                 name: "search_assets",
                 title: "Search Assets",
-                description: "Search and paginate assets in Charkle by full-text query (Chinese, Pinyin, tags, OCR, AI descriptions, EXIF, AI prompts), folder (with optional subfolder recursion), smart folder, tags, CIELAB dominant color, media kinds, aspect shape, rating, recency, or Trash state.",
+                description: "Filter & paginate assets (FTS/Pinyin, folder incl. subfolders, tags=AND, any_tags=OR, exclude_tags/ids, color, tone=dark|light|warm|cool|vivid|muted|high_contrast, kind, shape, rating, smart folder). Supports diversify=true, auto facets, detail=visual|compact|standard|full, and one-shot render_contact_sheet=true (auto visual manifest, 8-char IDs accepted everywhere).",
                 properties: [
-                    "query": ["type": "string", "description": "Full-text search query across titles, notes, tags, OCR, AI descriptions, EXIF, and AI generation prompts."],
-                    "folder_id": ["type": "string", "description": "Optional folder UUID."],
-                    "folder_path": ["type": "string", "description": "Optional folder path or name, e.g. 'UI Inspiration' or '插画/常夏'."],
-                    "include_subfolders": ["type": "boolean", "description": "When filtering by folder_id or folder_path, include all nested descendant folders (default false)."],
-                    "smart_folder_id": ["type": "string", "description": "Optional Smart Folder UUID to evaluate."],
-                    "smart_folder_name": ["type": "string", "description": "Optional Smart Folder name lookup."],
-                    "tags": ["type": "array", "items": ["type": "string"], "description": "Filter assets having all given tags."],
-                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum], "description": "Filter by media kinds (image, animatedImage, video, webBookmark, document, designFile, audio, model3D)."],
-                    "aspect_shape": ["type": "string", "enum": aspectShapeEnum, "description": "Filter by aspect ratio shape (landscape, portrait, square, ultrawide)."],
-                    "color_hex": ["type": "string", "description": "Dominant color hex filter such as '#C86D51'."],
-                    "color_tolerance": ["type": "number", "description": "CIELAB DeltaE tolerance (default 28)."],
-                    "min_rating": ["type": "integer", "minimum": 0, "maximum": 5, "description": "Minimum star rating (0-5)."],
-                    "only_inbox": ["type": "boolean", "description": "Only return untriaged Inbox assets."],
-                    "only_untagged": ["type": "boolean", "description": "Only return assets with no tags."],
-                    "only_recent_days": ["type": "integer", "minimum": 1, "description": "Only return assets added within the last N days."],
-                    "only_pinned_offline": ["type": "boolean", "description": "Only return offline-pinned assets."],
-                    "only_trashed": ["type": "boolean", "description": "Only return assets currently in Trash (useful for inspection or restore)."],
-                    "include_trashed": ["type": "boolean", "description": "Include trashed assets alongside active assets (default false)."],
-                    "sort_by": ["type": "string", "enum": sortByEnum, "description": "Sort order (default 'relevance' when query is provided, otherwise 'newest')."],
-                    "offset": ["type": "integer", "minimum": 0, "description": "Pagination offset (default 0)."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": 100, "description": "Max items to return (1-100, default 30)."]
+                    "query": ["type": "string"],
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "include_subfolders": ["type": "boolean"],
+                    "smart_folder_id": ["type": "string"],
+                    "smart_folder_name": ["type": "string"],
+                    "tags": strArray,
+                    "any_tags": strArray,
+                    "exclude_tags": strArray,
+                    "exclude_asset_ids": strArray,
+                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum]],
+                    "aspect_shape": ["type": "string", "enum": aspectShapeEnum],
+                    "color_hex": ["type": "string"],
+                    "color_tolerance": ["type": "number"],
+                    "tone": ["type": "string"],
+                    "min_rating": ["type": "integer", "minimum": 0, "maximum": 5],
+                    "only_inbox": ["type": "boolean"],
+                    "only_untagged": ["type": "boolean"],
+                    "only_recent_days": ["type": "integer", "minimum": 1],
+                    "only_pinned_offline": ["type": "boolean"],
+                    "only_trashed": ["type": "boolean"],
+                    "include_trashed": ["type": "boolean"],
+                    "sort_by": ["type": "string", "enum": sortByEnum],
+                    "detail": ["type": "string", "enum": detailEnum],
+                    "diversify": ["type": "boolean"],
+                    "include_facets": ["type": "boolean"],
+                    "render_contact_sheet": ["type": "boolean"],
+                    "sheet_max_width": ["type": "integer", "minimum": 512, "maximum": 1920],
+                    "output_path": ["type": "string"],
+                    "offset": ["type": "integer", "minimum": 0],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 100]
                 ],
                 readOnly: true
             ),
             tool(
                 name: "list_inbox",
                 title: "List Inbox",
-                description: "List untriaged assets currently in Charkle's Inbox with optional pagination, media-kind filtering, and sorting.",
+                description: "List untriaged Inbox assets (default limit=20). Pass render_contact_sheet=true for inline numbered thumbnails.",
                 properties: [
-                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum], "description": "Optional media kind filter."],
-                    "sort_by": ["type": "string", "enum": sortByEnum, "description": "Sort order (default 'newest')."],
-                    "offset": ["type": "integer", "minimum": 0, "description": "Pagination offset (default 0)."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": 100, "description": "Max items to return (1-100, default 40)."]
+                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum]],
+                    "sort_by": ["type": "string", "enum": sortByEnum],
+                    "detail": ["type": "string", "enum": detailEnum],
+                    "render_contact_sheet": ["type": "boolean"],
+                    "sheet_max_width": ["type": "integer", "minimum": 512, "maximum": 1920],
+                    "offset": ["type": "integer", "minimum": 0],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 100]
                 ],
                 readOnly: true
             ),
             tool(
                 name: "get_asset",
                 title: "Get Asset Details",
-                description: "Get complete metadata for a single asset UUID: dimensions, palette, OCR text, tags, notes, camera EXIF, AI generation prompts/models/LoRAs, social post or GitHub repository metadata, local paths, and optional inline preview JPEG.",
+                description: "Full metadata (EXIF, AI prompts, social/GitHub, OCR, local paths) for 1 UUID/8-char prefix (`asset_id`) or 1–12 finalists (`asset_ids`). include_image=true attaches preview JPEG (or zoomed sheet for batch).",
                 properties: [
-                    "asset_id": ["type": "string", "description": "Asset UUID."],
-                    "include_image": ["type": "boolean", "description": "When true, also return an upright JPEG preview image block for direct visual inspection (default false)."],
-                    "image_max_side": ["type": "integer", "minimum": 280, "maximum": 1568, "description": "Long-side pixel cap when include_image is true (default 800)."]
+                    "asset_id": ["type": "string"],
+                    "asset_ids": strArray,
+                    "include_image": ["type": "boolean"],
+                    "image_max_side": ["type": "integer", "minimum": 280, "maximum": 1568]
                 ],
-                required: ["asset_id"],
                 readOnly: true
             ),
             tool(
                 name: "render_contact_sheet",
                 title: "Render Visual Contact Sheet",
-                description: "Render up to 16 candidate assets into a numbered Visual Contact Sheet JPEG (#01..#16) returned as an image plus grounded slot-to-assetID JSON manifest. Supports pagination (`offset`), subfolder recursion, and all gallery filters.",
+                description: "Render 1–24 assets (default 16, max_width=1024, auto visual manifest) into a numbered Contact Sheet JPEG (#01..#24). Accepts asset_ids, multi-intent queries[], or filters + tone + diversify.",
                 properties: [
-                    "asset_ids": ["type": "array", "items": ["type": "string"], "description": "Explicit asset UUIDs to render (up to 16)."],
-                    "query": ["type": "string", "description": "Search query when asset_ids is omitted."],
-                    "folder_id": ["type": "string", "description": "Optional folder UUID filter."],
-                    "folder_path": ["type": "string", "description": "Optional folder path filter."],
-                    "include_subfolders": ["type": "boolean", "description": "Include nested descendant folders when filtering by folder (default false)."],
-                    "smart_folder_id": ["type": "string", "description": "Optional Smart Folder UUID."],
-                    "smart_folder_name": ["type": "string", "description": "Optional Smart Folder name."],
-                    "tags": ["type": "array", "items": ["type": "string"], "description": "Optional required tag filter."],
-                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum], "description": "Optional media kind filter."],
-                    "aspect_shape": ["type": "string", "enum": aspectShapeEnum, "description": "Optional aspect shape filter."],
-                    "min_rating": ["type": "integer", "minimum": 0, "maximum": 5, "description": "Optional minimum star rating."],
-                    "only_inbox": ["type": "boolean", "description": "Render current Inbox assets."],
-                    "only_untagged": ["type": "boolean", "description": "Render untagged assets."],
-                    "only_trashed": ["type": "boolean", "description": "Render trashed assets."],
-                    "color_hex": ["type": "string", "description": "Optional color hex filter."],
-                    "color_tolerance": ["type": "number", "description": "Optional CIELAB DeltaE tolerance (default 28)."],
-                    "sort_by": ["type": "string", "enum": sortByEnum, "description": "Sort order when filtering."],
-                    "offset": ["type": "integer", "minimum": 0, "description": "Pagination offset for browsing beyond 16 items (default 0)."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": 16, "description": "Number of tiles (1-16, default 16)."],
-                    "max_width": ["type": "integer", "minimum": 640, "maximum": 1920, "description": "Output canvas width in pixels (default 1280)."],
-                    "include_image": ["type": "boolean", "description": "Include inline base64 JPEG in response (default true; set false when only saving output_path)."],
-                    "output_path": ["type": "string", "description": "Optional local path to also write the JPEG file."]
+                    "asset_ids": strArray,
+                    "query": ["type": "string"],
+                    "queries": strArray,
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "include_subfolders": ["type": "boolean"],
+                    "smart_folder_id": ["type": "string"],
+                    "smart_folder_name": ["type": "string"],
+                    "tags": strArray,
+                    "any_tags": strArray,
+                    "exclude_tags": strArray,
+                    "exclude_asset_ids": strArray,
+                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum]],
+                    "aspect_shape": ["type": "string", "enum": aspectShapeEnum],
+                    "min_rating": ["type": "integer", "minimum": 0, "maximum": 5],
+                    "only_inbox": ["type": "boolean"],
+                    "only_untagged": ["type": "boolean"],
+                    "only_trashed": ["type": "boolean"],
+                    "color_hex": ["type": "string"],
+                    "color_tolerance": ["type": "number"],
+                    "tone": ["type": "string"],
+                    "sort_by": ["type": "string", "enum": sortByEnum],
+                    "detail": ["type": "string", "enum": ["visual", "compact"]],
+                    "diversify": ["type": "boolean"],
+                    "offset": ["type": "integer", "minimum": 0],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 24],
+                    "max_width": ["type": "integer", "minimum": 512, "maximum": 1920],
+                    "include_image": ["type": "boolean"],
+                    "output_path": ["type": "string"]
                 ],
                 readOnly: true
             ),
             tool(
                 name: "find_similar_assets",
                 title: "Find Visually Similar Assets",
-                description: "Find visually and stylistically similar assets to a reference asset UUID using Apple Vision FeaturePrint, CIELAB palette proximity, and shared tags. Optionally renders a Contact Sheet of the matches.",
+                description: "Find visually similar assets (Vision FeaturePrint + CIELAB palette + tags, default limit=12). Supports unlike_asset_ids repulsion, diversify, and inline render_contact_sheet.",
                 properties: [
-                    "asset_id": ["type": "string", "description": "Reference asset UUID."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": 32, "description": "Max similar assets to return (default 12)."],
-                    "render_contact_sheet": ["type": "boolean", "description": "When true, also return a numbered Contact Sheet JPEG of the top similar matches (up to 16)."]
+                    "asset_id": ["type": "string"],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 32],
+                    "exclude_asset_ids": strArray,
+                    "unlike_asset_ids": strArray,
+                    "detail": ["type": "string", "enum": detailEnum],
+                    "diversify": ["type": "boolean"],
+                    "render_contact_sheet": ["type": "boolean"],
+                    "sheet_max_width": ["type": "integer", "minimum": 512, "maximum": 1920]
                 ],
                 required: ["asset_id"],
                 readOnly: true
@@ -391,29 +387,43 @@ extension CharkleExternalAgentService {
             tool(
                 name: "semantic_search",
                 title: "Semantic Search",
-                description: "Run hybrid semantic + keyword + visual search across the Charkle library (automatically leverages configured cloud embeddings / visual reranking when available, falling back cleanly to local FTS5 + metadata ranking).",
+                description: "Bilingual EN↔ZH + CIELAB tone/aspect + folder/tag + Vision seed/unlike hybrid search. Pass `query` or multi-direction `queries[]` (2–6 intents in 1 Contact Sheet!), `seed_asset_ids` (more like), `unlike_asset_ids` (less like), `tone` (dark|light|warm|cool|vivid|muted|high_contrast), `diversify`, `render_contact_sheet`.",
                 properties: [
-                    "query": ["type": "string", "description": "Natural-language search description, mood, visual concept, or keywords."],
-                    "folder_id": ["type": "string", "description": "Optional folder UUID filter."],
-                    "folder_path": ["type": "string", "description": "Optional folder path filter."],
-                    "include_subfolders": ["type": "boolean", "description": "Include nested descendant folders (default false)."],
-                    "tags": ["type": "array", "items": ["type": "string"], "description": "Optional tag filter."],
-                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum], "description": "Optional media kind filter."],
-                    "color_hex": ["type": "string", "description": "Optional dominant color hex filter."],
-                    "min_rating": ["type": "integer", "minimum": 0, "maximum": 5, "description": "Optional minimum star rating."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": 50, "description": "Max ranked hits to return (default 20)."]
+                    "query": ["type": "string"],
+                    "queries": strArray,
+                    "seed_asset_ids": strArray,
+                    "unlike_asset_ids": strArray,
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "include_subfolders": ["type": "boolean"],
+                    "tags": strArray,
+                    "any_tags": strArray,
+                    "exclude_tags": strArray,
+                    "exclude_asset_ids": strArray,
+                    "media_kinds": ["type": "array", "items": ["type": "string", "enum": mediaKindEnum]],
+                    "aspect_shape": ["type": "string", "enum": aspectShapeEnum],
+                    "color_hex": ["type": "string"],
+                    "tone": ["type": "string"],
+                    "min_rating": ["type": "integer", "minimum": 0, "maximum": 5],
+                    "visual_rerank": ["type": "boolean"],
+                    "diversify": ["type": "boolean"],
+                    "include_facets": ["type": "boolean"],
+                    "detail": ["type": "string", "enum": detailEnum],
+                    "render_contact_sheet": ["type": "boolean"],
+                    "sheet_max_width": ["type": "integer", "minimum": 512, "maximum": 1920],
+                    "output_path": ["type": "string"],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 50]
                 ],
-                required: ["query"],
                 readOnly: true,
                 openWorld: true
             ),
             tool(
                 name: "quick_jump",
                 title: "Quick Jump",
-                description: "Unified fast fuzzy search across folders, moodboards, tags, and assets — mirrors Charkle's Command-J Quick Jump palette.",
+                description: "Fast fuzzy lookup across folders, moodboards, tags, and assets (Chinese & Pinyin, default limit=20).",
                 properties: [
-                    "query": ["type": "string", "description": "Keyword, Chinese text, or Pinyin initials."],
-                    "limit": ["type": "integer", "minimum": 1, "maximum": 50, "description": "Max matches to return (default 20)."]
+                    "query": ["type": "string"],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 50]
                 ],
                 required: ["query"],
                 readOnly: true
@@ -421,41 +431,42 @@ extension CharkleExternalAgentService {
             tool(
                 name: "suggest_folder",
                 title: "Suggest Folder for Assets",
-                description: "Recommend the best existing Charkle folder for one or more assets (up to 20 per call) using visual similarity, palette/tag affinity, and smart triage rules.",
+                description: "Recommend best existing folder for 1–20 assets via visual similarity and tag/palette affinity.",
                 properties: [
-                    "asset_id": ["type": "string", "description": "Single asset UUID."],
-                    "asset_ids": ["type": "array", "items": ["type": "string"], "description": "Batch of asset UUIDs (up to 20)."]
+                    "asset_id": ["type": "string"],
+                    "asset_ids": strArray
                 ],
                 readOnly: true
             ),
             tool(
                 name: "list_boards",
                 title: "List Moodboards",
-                description: "List all Moodboards in Charkle with ID, title, subtitle, layout mode, item count, extracted palette HEX codes, offline pin status, and update timestamp.",
+                description: "List all Moodboards (ID, title, subtitle, layout mode, item count, palette, updatedAt).",
                 properties: [:],
                 readOnly: true
             ),
             tool(
                 name: "get_board_context",
                 title: "Get Moodboard Context",
-                description: "Read full structured design context of a Moodboard: title, subtitle, curator notes, section groups, node frames, crops, connectors, ink count, harmonized HEX/CIELAB palette, candidate pool, and referenced assets with paths.",
+                description: "Read Moodboard context: notes, sections, frames, crops, connectors, palette, candidates, assets (by board_id/prefix or title).",
                 properties: [
-                    "board_id": ["type": "string", "description": "Moodboard UUID."],
-                    "title": ["type": "string", "description": "Moodboard title lookup when board_id is omitted."]
+                    "board_id": ["type": "string"],
+                    "title": ["type": "string"],
+                    "detail": ["type": "string", "enum": detailEnum]
                 ],
                 readOnly: true
             ),
             tool(
                 name: "export_board_image",
                 title: "Export Moodboard PNG",
-                description: "Render a Moodboard headlessly to high-resolution PNG and return the image directly (optionally saving to output_path).",
+                description: "Headlessly render Moodboard to PNG (default width=1440, include_image=true, optional output_path).",
                 properties: [
-                    "board_id": ["type": "string", "description": "Moodboard UUID."],
-                    "title": ["type": "string", "description": "Moodboard title lookup when board_id is omitted."],
-                    "width": ["type": "integer", "minimum": 840, "maximum": 2800, "description": "Canvas width in pixels (default 1440)."],
-                    "dark_appearance": ["type": "boolean", "description": "Render in dark studio theme (default false)."],
-                    "include_image": ["type": "boolean", "description": "Include inline base64 PNG in response (default true; set false when only saving output_path)."],
-                    "output_path": ["type": "string", "description": "Optional path to write the PNG file."]
+                    "board_id": ["type": "string"],
+                    "title": ["type": "string"],
+                    "width": ["type": "integer", "minimum": 840, "maximum": 2800],
+                    "dark_appearance": ["type": "boolean"],
+                    "include_image": ["type": "boolean"],
+                    "output_path": ["type": "string"]
                 ],
                 readOnly: true
             ),
@@ -464,21 +475,21 @@ extension CharkleExternalAgentService {
             tool(
                 name: "organize_assets",
                 title: "Organize Assets",
-                description: "Batch-organize assets: move to a folder or Inbox, add/remove tags, accept/dismiss suggested tags, set rating, notes, title, offline pin, or overwrite AI visual description. Requires write permission in Charkle Settings.",
+                description: "Batch-update assets (8-char IDs ok): folder/Inbox, add/remove/suggested tags, rating, title, notes, ai_description, offline pin. Requires write permission.",
                 properties: [
-                    "asset_ids": ["type": "array", "items": ["type": "string"], "description": "Asset UUIDs to update."],
-                    "folder_id": ["type": "string", "description": "Move assets to this folder UUID."],
-                    "folder_path": ["type": "string", "description": "Move assets to this folder path/name."],
-                    "move_to_inbox": ["type": "boolean", "description": "Move assets back to Inbox."],
-                    "add_tags": ["type": "array", "items": ["type": "string"], "description": "Tags to add."],
-                    "remove_tags": ["type": "array", "items": ["type": "string"], "description": "Tags to remove."],
-                    "dismiss_suggested_tags": ["type": "array", "items": ["type": "string"], "description": "AI suggested tags to dismiss."],
-                    "accept_suggested_tags": ["type": "boolean", "description": "Accept all AI suggested tags into regular tags."],
-                    "rating": ["type": "integer", "minimum": 0, "maximum": 5, "description": "Star rating 0-5."],
-                    "title": ["type": "string", "description": "Set title."],
-                    "notes": ["type": "string", "description": "Set notes."],
-                    "ai_description": ["type": "string", "description": "Set or overwrite the visual AI description for these assets."],
-                    "pinned_offline": ["type": "boolean", "description": "Pin or unpin originals for offline caching."]
+                    "asset_ids": strArray,
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "move_to_inbox": ["type": "boolean"],
+                    "add_tags": strArray,
+                    "remove_tags": strArray,
+                    "dismiss_suggested_tags": strArray,
+                    "accept_suggested_tags": ["type": "boolean"],
+                    "rating": ["type": "integer", "minimum": 0, "maximum": 5],
+                    "title": ["type": "string"],
+                    "notes": ["type": "string"],
+                    "ai_description": ["type": "string"],
+                    "pinned_offline": ["type": "boolean"]
                 ],
                 required: ["asset_ids"],
                 readOnly: false,
@@ -487,13 +498,13 @@ extension CharkleExternalAgentService {
             tool(
                 name: "create_folder",
                 title: "Create Folder",
-                description: "Create a new folder in Charkle (optionally nested under parent_id or parent_path, with optional color/symbol). Requires write permission.",
+                description: "Create a folder (optional parent, color, SF Symbol). Requires write permission.",
                 properties: [
-                    "name": ["type": "string", "description": "New folder name."],
-                    "parent_id": ["type": "string", "description": "Optional parent folder UUID."],
-                    "parent_path": ["type": "string", "description": "Optional parent folder path."],
-                    "color_hex": ["type": "string", "description": "Optional accent color hex such as '#2A60E0'."],
-                    "custom_symbol": ["type": "string", "description": "Optional SF Symbol name for folder icon."]
+                    "name": ["type": "string"],
+                    "parent_id": ["type": "string"],
+                    "parent_path": ["type": "string"],
+                    "color_hex": ["type": "string"],
+                    "custom_symbol": ["type": "string"]
                 ],
                 required: ["name"],
                 readOnly: false,
@@ -502,16 +513,16 @@ extension CharkleExternalAgentService {
             tool(
                 name: "update_folder",
                 title: "Update Folder",
-                description: "Rename a folder, move it under a new parent (or to root), or update its color/symbol. Deleting folders is intentionally disabled for safety. Requires write permission.",
+                description: "Rename, move, or style a folder (deleting folders is disabled). Requires write permission.",
                 properties: [
-                    "folder_id": ["type": "string", "description": "Target folder UUID."],
-                    "folder_path": ["type": "string", "description": "Target folder path or name when folder_id is omitted."],
-                    "new_name": ["type": "string", "description": "Optional new folder name."],
-                    "parent_id": ["type": "string", "description": "Move folder under this parent UUID."],
-                    "parent_path": ["type": "string", "description": "Move folder under this parent path."],
-                    "move_to_root": ["type": "boolean", "description": "Move folder to top-level root."],
-                    "color_hex": ["type": "string", "description": "Set folder accent color hex (empty string clears)."],
-                    "custom_symbol": ["type": "string", "description": "Set custom SF Symbol (empty string clears)."]
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "new_name": ["type": "string"],
+                    "parent_id": ["type": "string"],
+                    "parent_path": ["type": "string"],
+                    "move_to_root": ["type": "boolean"],
+                    "color_hex": ["type": "string"],
+                    "custom_symbol": ["type": "string"]
                 ],
                 readOnly: false,
                 idempotent: true
@@ -519,20 +530,20 @@ extension CharkleExternalAgentService {
             tool(
                 name: "ingest_asset",
                 title: "Ingest Asset",
-                description: "Import one or more local files/directories, a web URL (including X/Threads/Bluesky posts and GitHub repos), or a text snippet into Charkle with optional folder, board, tags, notes, and rating. Requires write permission.",
+                description: "Import local files/dirs, web/social/GitHub URLs, or text snippet with optional folder, board, tags, notes, rating. Requires write permission.",
                 properties: [
-                    "file_path": ["type": "string", "description": "Single local file or directory path to import."],
-                    "file_paths": ["type": "array", "items": ["type": "string"], "description": "Batch of local file or directory paths to import."],
-                    "web_url": ["type": "string", "description": "Web, GitHub repo, or X/Threads/Bluesky URL to bookmark/capture."],
-                    "web_urls": ["type": "array", "items": ["type": "string"], "description": "Batch of web, GitHub repo, or X/Threads/Bluesky URLs to bookmark/capture."],
-                    "text": ["type": "string", "description": "Text snippet to save as a reference card."],
-                    "title": ["type": "string", "description": "Optional title for web_url or text."],
-                    "notes": ["type": "string", "description": "Optional initial notes."],
-                    "rating": ["type": "integer", "minimum": 0, "maximum": 5, "description": "Optional initial star rating (0-5)."],
-                    "folder_id": ["type": "string", "description": "Optional destination folder UUID."],
-                    "folder_path": ["type": "string", "description": "Optional destination folder path (defaults to Inbox)."],
-                    "target_board_id": ["type": "string", "description": "Optional Moodboard UUID to also place imported assets onto."],
-                    "tags": ["type": "array", "items": ["type": "string"], "description": "Optional initial tags."]
+                    "file_path": ["type": "string"],
+                    "file_paths": strArray,
+                    "web_url": ["type": "string"],
+                    "web_urls": strArray,
+                    "text": ["type": "string"],
+                    "title": ["type": "string"],
+                    "notes": ["type": "string"],
+                    "rating": ["type": "integer", "minimum": 0, "maximum": 5],
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "target_board_id": ["type": "string"],
+                    "tags": strArray
                 ],
                 readOnly: false,
                 idempotent: false,
@@ -541,37 +552,36 @@ extension CharkleExternalAgentService {
             tool(
                 name: "compose_moodboard",
                 title: "Compose Moodboard",
-                description: "Create and save a new Moodboard in Charkle. Either pass explicit `sections` / `asset_ids` (after inspecting contact sheets) for direct art direction, or pass `prompt` to invoke Charkle's built-in Moodboard Agent Harness. Requires write permission.",
+                description: "Create a Moodboard via explicit `sections`/`asset_ids` (8-char IDs ok) or `prompt` harness mode. Requires write permission.",
                 properties: [
-                    "title": ["type": "string", "description": "Moodboard title."],
-                    "subtitle": ["type": "string", "description": "Short subtitle."],
-                    "curator_note": ["type": "string", "description": "Art direction note card shown on the moodboard."],
-                    "layout_style": ["type": "string", "enum": ["magazine", "balanced", "compact"], "description": "Editorial layout rhythm."],
-                    "use_freeform": ["type": "boolean", "description": "Use freeform spatial canvas instead of Auto Editorial."],
+                    "title": ["type": "string"],
+                    "subtitle": ["type": "string"],
+                    "curator_note": ["type": "string"],
+                    "layout_style": ["type": "string", "enum": ["magazine", "balanced", "compact"]],
+                    "use_freeform": ["type": "boolean"],
                     "sections": [
                         "type": "array",
-                        "description": "Explicit curated sections with asset_ids and optional hero_asset_ids.",
                         "items": [
                             "type": "object",
                             "properties": [
                                 "title": ["type": "string"],
                                 "tint": ["type": "string", "enum": ["neutral", "sand", "sage", "slate", "terracotta", "ocean"]],
                                 "rationale": ["type": "string"],
-                                "asset_ids": ["type": "array", "items": ["type": "string"]],
-                                "hero_asset_ids": ["type": "array", "items": ["type": "string"]]
+                                "asset_ids": strArray,
+                                "hero_asset_ids": strArray
                             ],
                             "required": ["title", "asset_ids"]
                         ]
                     ],
-                    "asset_ids": ["type": "array", "items": ["type": "string"], "description": "Flat list of asset UUIDs if not specifying sections."],
-                    "hero_asset_ids": ["type": "array", "items": ["type": "string"], "description": "Optional hero asset UUIDs (weight=2)."],
-                    "prompt": ["type": "string", "description": "Natural-language brief when delegating curation to Charkle's built-in harness."],
-                    "seed_asset_ids": ["type": "array", "items": ["type": "string"], "description": "Optional visual anchor seed asset UUIDs when using prompt mode."],
-                    "required_tags": ["type": "array", "items": ["type": "string"], "description": "Optional required tags when using prompt mode."],
-                    "target_palette": ["type": "array", "items": ["type": "string"], "description": "Optional target color hexes (e.g. ['#C86D51', '#2A6F97']) when using prompt mode."],
-                    "folder_id": ["type": "string", "description": "Optional scope folder UUID when using prompt mode."],
-                    "folder_path": ["type": "string", "description": "Optional scope folder path when using prompt mode."],
-                    "preferred_count": ["type": "integer", "minimum": 2, "maximum": 24, "description": "Max assets when using prompt mode (default 12)."]
+                    "asset_ids": strArray,
+                    "hero_asset_ids": strArray,
+                    "prompt": ["type": "string"],
+                    "seed_asset_ids": strArray,
+                    "required_tags": strArray,
+                    "target_palette": strArray,
+                    "folder_id": ["type": "string"],
+                    "folder_path": ["type": "string"],
+                    "preferred_count": ["type": "integer", "minimum": 2, "maximum": 24]
                 ],
                 readOnly: false,
                 idempotent: false
@@ -579,22 +589,22 @@ extension CharkleExternalAgentService {
             tool(
                 name: "patch_moodboard",
                 title: "Patch Moodboard",
-                description: "Modify an existing Moodboard non-destructively: rename, update subtitle, switch layout mode, append asset cards without overlapping existing nodes, remove unlocked cards or specific nodes, add section headers, or append a styled curator note. Requires write permission.",
+                description: "Non-destructively update a Moodboard: rename, layout, append cards/sections/notes without overlap, remove unlocked nodes. Requires write permission.",
                 properties: [
-                    "board_id": ["type": "string", "description": "Target Moodboard UUID."],
-                    "title": ["type": "string", "description": "Existing board title lookup if board_id is omitted."],
-                    "new_title": ["type": "string", "description": "Optional new title."],
-                    "subtitle": ["type": "string", "description": "Optional updated subtitle."],
-                    "use_freeform": ["type": "boolean", "description": "Optional switch between freeform and autoEditorial layout mode."],
-                    "layout_style": ["type": "string", "enum": ["magazine", "balanced", "compact"], "description": "Optional editorial style when using autoEditorial mode."],
-                    "add_asset_ids": ["type": "array", "items": ["type": "string"], "description": "Asset UUIDs to append cleanly below existing content."],
-                    "remove_asset_ids": ["type": "array", "items": ["type": "string"], "description": "Unlocked asset UUIDs to remove."],
-                    "remove_node_ids": ["type": "array", "items": ["type": "string"], "description": "Unlocked node UUIDs (notes, sections, or cards) to remove."],
-                    "add_section": ["type": "string", "description": "Optional section header title to append."],
-                    "section_tint": ["type": "string", "enum": ["neutral", "sand", "sage", "slate", "terracotta", "ocean"], "description": "Optional tint for add_section (default 'neutral')."],
-                    "add_note": ["type": "string", "description": "Append a note card to the board."],
-                    "note_title": ["type": "string", "description": "Title for the appended note card."],
-                    "note_style": ["type": "string", "enum": ["paper", "ink", "warm", "sage", "slate"], "description": "Visual style for the appended note card (default 'paper')."]
+                    "board_id": ["type": "string"],
+                    "title": ["type": "string"],
+                    "new_title": ["type": "string"],
+                    "subtitle": ["type": "string"],
+                    "use_freeform": ["type": "boolean"],
+                    "layout_style": ["type": "string", "enum": ["magazine", "balanced", "compact"]],
+                    "add_asset_ids": strArray,
+                    "remove_asset_ids": strArray,
+                    "remove_node_ids": strArray,
+                    "add_section": ["type": "string"],
+                    "section_tint": ["type": "string", "enum": ["neutral", "sand", "sage", "slate", "terracotta", "ocean"]],
+                    "add_note": ["type": "string"],
+                    "note_title": ["type": "string"],
+                    "note_style": ["type": "string", "enum": ["paper", "ink", "warm", "sage", "slate"]]
                 ],
                 readOnly: false,
                 idempotent: false
@@ -602,10 +612,10 @@ extension CharkleExternalAgentService {
             tool(
                 name: "trash_assets",
                 title: "Move Assets to/from Trash",
-                description: "Soft-move assets to Trash (or restore with trashed=false). External agents are NEVER allowed to permanently delete user assets. Requires write permission.",
+                description: "Soft-move assets to Trash (`trashed:true`, default) or restore (`trashed:false`). Permanent deletion is forbidden.",
                 properties: [
-                    "asset_ids": ["type": "array", "items": ["type": "string"], "description": "Asset UUIDs to move to or restore from Trash."],
-                    "trashed": ["type": "boolean", "description": "true to move to Trash (default), false to restore."]
+                    "asset_ids": strArray,
+                    "trashed": ["type": "boolean"]
                 ],
                 required: ["asset_ids"],
                 readOnly: false,
@@ -614,10 +624,10 @@ extension CharkleExternalAgentService {
             tool(
                 name: "analyze_assets",
                 title: "Analyze & Hydrate Assets",
-                description: "Run local Apple Vision analysis (dominant CIELAB colors, OCR text, FeaturePrint vector) and EXIF/AI prompt extraction on up to 20 assets; optionally refresh live GitHub/Social rich metadata for web bookmarks. Requires write permission.",
+                description: "Run local Apple Vision (colors/OCR/FeaturePrint) + EXIF/AI prompt extraction on 1–20 assets; optionally refresh live web metadata.",
                 properties: [
-                    "asset_ids": ["type": "array", "items": ["type": "string"], "description": "Asset UUIDs to analyze (1-20)."],
-                    "refresh_rich_metadata": ["type": "boolean", "description": "Also re-fetch live GitHub repo or X/Threads/Bluesky post metadata when applicable (default false)."]
+                    "asset_ids": strArray,
+                    "refresh_rich_metadata": ["type": "boolean"]
                 ],
                 required: ["asset_ids"],
                 readOnly: false,
