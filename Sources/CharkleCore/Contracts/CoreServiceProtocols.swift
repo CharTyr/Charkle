@@ -36,6 +36,17 @@ public protocol CharkleEngineProtocol: Sendable {
     ) async throws -> MaterialPackageImportResult
     func updateAssets(_ patch: AssetBatchPatch) async throws -> [AssetRecord]
     func permanentlyDeleteAssets(ids: [UUID]) async throws
+    func scanDuplicateImages(
+        scope: DeduplicationScanScope,
+        sensitivity: DeduplicationSensitivity,
+        mediaKinds: Set<MediaKind>?,
+        onProgress: (@Sendable (DeduplicationScanProgress) async -> Void)?
+    ) async throws -> DeduplicationScanReport
+    func resolveDuplicateGroups(
+        _ plans: [DeduplicationResolutionPlan],
+        disposal: DuplicateDisposalMode,
+        mergeMetadata: Bool
+    ) async throws -> DeduplicationCleanupResult
     func markAssetOpened(id: UUID) async
     func refreshRichAsset(id: UUID) async throws -> AssetRecord
     func upgradeLegacyXiaohongshuCoversIfNeeded() async -> [UUID]
@@ -147,6 +158,36 @@ public extension CharkleEngineProtocol {
 
     nonisolated func cachedOriginalURL(for asset: AssetRecord) -> URL? {
         nil
+    }
+
+    func scanDuplicateImages(
+        scope: DeduplicationScanScope,
+        sensitivity: DeduplicationSensitivity,
+        mediaKinds: Set<MediaKind>?,
+        onProgress: (@Sendable (DeduplicationScanProgress) async -> Void)?
+    ) async throws -> DeduplicationScanReport {
+        DeduplicationScanReport(
+            scannedAssetCount: 0,
+            skippedNonVisualCount: 0,
+            groups: [],
+            totalDuplicateItems: 0,
+            totalReclaimableBytes: 0,
+            durationSeconds: 0
+        )
+    }
+
+    func resolveDuplicateGroups(
+        _ plans: [DeduplicationResolutionPlan],
+        disposal: DuplicateDisposalMode,
+        mergeMetadata: Bool
+    ) async throws -> DeduplicationCleanupResult {
+        DeduplicationCleanupResult(
+            resolvedGroupCount: 0,
+            removedAssetCount: 0,
+            reclaimedBytes: 0,
+            mergedMetadataCount: 0,
+            updatedBoardCount: 0
+        )
     }
 
     func markAssetOpened(id: UUID) async {}

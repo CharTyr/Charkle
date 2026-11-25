@@ -603,6 +603,8 @@ struct QuickLookSocialPostCard: View {
         case .threads: Color(charkleHex: "#27272A")
         case .bluesky: Color(charkleHex: "#0284C7")
         case .xiaohongshu: Color(charkleHex: "#FF2442")
+        case .pixiv: Color(charkleHex: "#0096FA")
+        case .instagram: Color(charkleHex: "#D93B58")
         }
     }
 

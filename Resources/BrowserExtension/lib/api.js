@@ -316,10 +316,11 @@ export async function fetchExistingSources(config, opts = {}) {
       supported: true,
       sources: Array.isArray(res.sources) ? res.sources : [],
       canonicalKeys: Array.isArray(res.canonicalKeys) ? res.canonicalKeys : [],
+      mediaCanonicalKeys: Array.isArray(res.mediaCanonicalKeys) ? res.mediaCanonicalKeys : null,
     };
   } catch (err) {
     if (err instanceof CharkleApiError && (err.status === 404 || err.status === 405)) {
-      return { supported: false, sources: [], canonicalKeys: [] };
+      return { supported: false, sources: [], canonicalKeys: [], mediaCanonicalKeys: null };
     }
     throw err;
   }
@@ -427,6 +428,147 @@ export async function ingestSocialBookmarksChunk(
     }
     throw err;
   }
+}
+
+async function ingestCreatorMediaChunkInternal(
+  inputType,
+  config,
+  posts,
+  targetFolderId = null,
+  targetBoardId = null,
+  opts = {},
+) {
+  const list = Array.isArray(posts) ? posts.filter((t) => t && t.originalURL) : [];
+  if (list.length === 0) {
+    return { assets: [], created: 0, postsImported: 0, tweetsImported: 0, skipped: 0, createdFolders: 0 };
+  }
+
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const skipDuplicates = opts.skipDuplicates !== false;
+
+  try {
+    const res = await requestJson(config, '/api/v1/assets/ingest', {
+      method: 'POST',
+      body: {
+        inputs: list.map((item) => ({
+          ...item,
+          type: inputType,
+        })),
+        targetFolderID: targetFolderId || null,
+        targetBoardID: targetBoardId || null,
+        skipDuplicates,
+      },
+      timeoutMs: 120_000,
+      fetchImpl,
+    });
+    const assets = Array.isArray(res.assets) ? res.assets : [];
+    const importedCount =
+      typeof res.postsImported === 'number'
+        ? res.postsImported
+        : typeof res.tweetsImported === 'number'
+          ? res.tweetsImported
+          : assets.length > 0
+            ? list.length
+            : 0;
+    return {
+      assets,
+      created: typeof res.created === 'number' ? res.created : assets.length,
+      postsImported: importedCount,
+      tweetsImported: importedCount,
+      skipped: typeof res.skipped === 'number' ? res.skipped : 0,
+      createdFolders: typeof res.createdFolders === 'number' ? res.createdFolders : 0,
+    };
+  } catch (err) {
+    // Graceful fallback when connected to an older Charkle Web server that does not yet handle `socialMedia`/`tweetMedia`.
+    if (err instanceof CharkleApiError && err.status === 400) {
+      const assets = [];
+      let postsImported = 0;
+      let createdFolders = 0;
+      for (const post of list) {
+        let destFolderId = targetFolderId || null;
+        if (post.subfolderName) {
+          try {
+            const folderRes = await createOrReuseFolder(config, post.subfolderName, targetFolderId || null, {
+              reuseExisting: true,
+              fetchImpl,
+            });
+            if (folderRes?.folder?.id) {
+              destFolderId = folderRes.folder.id;
+              if (!folderRes.reused) createdFolders += 1;
+            }
+          } catch {
+            // Fall back to parent folder if folder creation fails
+          }
+        }
+        const mediaList = Array.isArray(post.media) ? post.media : [];
+        let postHadSuccess = false;
+        const postKey = post.postID || post.tweetID || 'media';
+        const authorTag = post.authorHandle || post.platform || 'social';
+        for (let i = 0; i < mediaList.length; i += 1) {
+          const mediaItem = mediaList[i];
+          if (!mediaItem?.url) continue;
+          const label =
+            mediaList.length > 1
+              ? `${authorTag}_${postKey}_${String(i + 1).padStart(2, '0')}`
+              : `${authorTag}_${postKey}`;
+          try {
+            const uploaded = await ingestImageUrl(
+              config,
+              mediaItem.url,
+              post.originalURL,
+              label,
+              destFolderId,
+              targetBoardId,
+              { fetchImpl },
+            );
+            if (Array.isArray(uploaded?.assets) && uploaded.assets.length > 0) {
+              assets.push(...uploaded.assets);
+              postHadSuccess = true;
+            }
+          } catch {
+            // Continue uploading remaining items in post
+          }
+        }
+        if (postHadSuccess) postsImported += 1;
+      }
+      return {
+        assets,
+        created: assets.length,
+        postsImported,
+        tweetsImported: postsImported,
+        skipped: 0,
+        createdFolders,
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Ingests a batch of X author media tweets organized by tweet (backward-compatible entrypoint).
+ */
+export async function ingestTweetMediaChunk(
+  config,
+  tweets,
+  targetFolderId = null,
+  targetBoardId = null,
+  opts = {},
+) {
+  return ingestCreatorMediaChunkInternal('tweetMedia', config, tweets, targetFolderId, targetBoardId, opts);
+}
+
+/**
+ * Ingests a batch of creator media posts across X, Bluesky, Pixiv, Threads, Instagram, and Xiaohongshu
+ * organized by post subfolder on desktop, with graceful HTTP 400 fallback for older servers.
+ */
+export async function ingestSocialMediaChunk(
+  config,
+  posts,
+  targetFolderId = null,
+  targetBoardId = null,
+  opts = {},
+) {
+  return ingestCreatorMediaChunkInternal('socialMedia', config, posts, targetFolderId, targetBoardId, opts);
 }
 
 export async function ingestImageDataUrl(
@@ -768,6 +910,8 @@ export function createCharkleClient(config, opts = {}) {
       ingestUrl(config, url, title, notes, targetFolderId, targetBoardId, { ...opts, ...extraOpts }),
     ingestSocialBookmarksChunk: (bookmarks, targetFolderId, targetBoardId, extraOpts) =>
       ingestSocialBookmarksChunk(config, bookmarks, targetFolderId, targetBoardId, { ...opts, ...extraOpts }),
+    ingestTweetMediaChunk: (tweets, targetFolderId, targetBoardId, extraOpts) =>
+      ingestTweetMediaChunk(config, tweets, targetFolderId, targetBoardId, { ...opts, ...extraOpts }),
     ingestImageUrl: (imageUrl, sourcePageUrl, title, targetFolderId, targetBoardId) =>
       ingestImageUrl(config, imageUrl, sourcePageUrl, title, targetFolderId, targetBoardId, opts),
     ingestImageDataUrl: (dataUrl, fileName, sourceUrl, targetFolderId, targetBoardId) =>

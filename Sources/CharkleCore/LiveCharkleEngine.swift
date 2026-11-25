@@ -1387,6 +1387,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         case .bluesky: "bsky.app"
         case .threads: "threads.net"
         case .xiaohongshu: "xiaohongshu.com"
+        case .pixiv: "pixiv.net"
+        case .instagram: "instagram.com"
         }
     }
 
@@ -1693,6 +1695,400 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             }
         }
         try await database.removeDeletedMedia(using: media)
+    }
+
+    private struct CachedDedupFingerprintEntry: Codable, Sendable {
+        let contentHash: String
+        let fingerprint: ClassicalImageFingerprint
+    }
+
+    private var dedupFingerprintCacheLoaded = false
+    private var dedupFingerprintCache: [UUID: CachedDedupFingerprintEntry] = [:]
+
+    private var dedupFingerprintCacheURL: URL {
+        media.directory.appending(path: "dedup-fingerprints-v1.json")
+    }
+
+    private func loadDedupFingerprintCacheIfNeeded() {
+        guard !dedupFingerprintCacheLoaded else { return }
+        dedupFingerprintCacheLoaded = true
+        guard let data = try? Data(contentsOf: dedupFingerprintCacheURL),
+              let decoded = try? JSONDecoder().decode([String: CachedDedupFingerprintEntry].self, from: data) else {
+            return
+        }
+        var mapped: [UUID: CachedDedupFingerprintEntry] = [:]
+        mapped.reserveCapacity(decoded.count)
+        for (key, value) in decoded {
+            if let uuid = UUID(uuidString: key) {
+                mapped[uuid] = value
+            }
+        }
+        dedupFingerprintCache = mapped
+    }
+
+    private func persistDedupFingerprintCache() {
+        var encodedMap: [String: CachedDedupFingerprintEntry] = [:]
+        encodedMap.reserveCapacity(dedupFingerprintCache.count)
+        for (id, entry) in dedupFingerprintCache {
+            encodedMap[id.uuidString] = entry
+        }
+        guard let data = try? JSONEncoder().encode(encodedMap) else { return }
+        try? data.write(to: dedupFingerprintCacheURL, options: .atomic)
+    }
+
+    public func scanDuplicateImages(
+        scope: DeduplicationScanScope = .allActive,
+        sensitivity: DeduplicationSensitivity = .balanced,
+        mediaKinds: Set<MediaKind>? = nil,
+        onProgress: (@Sendable (DeduplicationScanProgress) async -> Void)? = nil
+    ) async throws -> DeduplicationScanReport {
+        let startedAt = Date()
+        loadDedupFingerprintCacheIfNeeded()
+
+        var criteria = FilterCriteria(includeTrashed: false, sortBy: .newest)
+        if let mediaKinds, !mediaKinds.isEmpty {
+            criteria.kinds = mediaKinds
+        }
+        switch scope {
+        case .allActive:
+            break
+        case .folder(let folderID, let includeSubfolders):
+            criteria.folderID = folderID
+            criteria.includeSubfolders = includeSubfolders
+        case .inbox:
+            criteria.onlyInbox = true
+        }
+
+        await onProgress?(DeduplicationScanProgress(completed: 0, total: 1, phase: "正在读取素材列表…"))
+        let scopedAssets = try await database.fetchAssets(matching: criteria)
+
+        guard scopedAssets.count >= 2 else {
+            return DeduplicationScanReport(
+                scannedAssetCount: scopedAssets.count,
+                skippedNonVisualCount: 0,
+                groups: [],
+                totalDuplicateItems: 0,
+                totalReclaimableBytes: 0,
+                durationSeconds: Date().timeIntervalSince(startedAt)
+            )
+        }
+
+        let boards = try await database.fetchBoards()
+        var boardReferencedAssetIDs = Set<UUID>()
+        for board in boards {
+            boardReferencedAssetIDs.formUnion(board.referencedAssetIDs)
+        }
+
+        let totalCount = scopedAssets.count
+        var cachedFingerprints: [UUID: ClassicalImageFingerprint] = [:]
+        var toComputeVisual: [(asset: AssetRecord, fileURL: URL)] = []
+        var bookmarkKeys: [UUID: String] = [:]
+        var docTextHashes: [UUID: String] = [:]
+        var toHashDocuments: [(asset: AssetRecord, fileURL: URL?)] = []
+        cachedFingerprints.reserveCapacity(totalCount)
+
+        for asset in scopedAssets {
+            if SmartDeduplicator.needsVisualFingerprint(for: asset.mediaKind) {
+                if !asset.contentHash.isEmpty,
+                   let cached = dedupFingerprintCache[asset.id],
+                   cached.contentHash == asset.contentHash {
+                    cachedFingerprints[asset.id] = cached.fingerprint
+                } else if let candidateURL = media.thumbnailURL(for: asset.id, tier: .grid520)
+                    ?? media.cachedOriginal(for: asset) {
+                    toComputeVisual.append((asset, candidateURL))
+                }
+            } else if asset.mediaKind == .webBookmark {
+                if let key = SmartDeduplicator.canonicalBookmarkKey(for: asset) {
+                    bookmarkKeys[asset.id] = key
+                }
+            } else if asset.mediaKind == .document {
+                toHashDocuments.append((asset, media.cachedOriginal(for: asset)))
+            }
+        }
+
+        let workTotal = max(1, toComputeVisual.count + toHashDocuments.count)
+        var completedWork = 0
+        await onProgress?(DeduplicationScanProgress(
+            completed: 0,
+            total: workTotal,
+            phase: toComputeVisual.isEmpty && toHashDocuments.isEmpty
+                ? "正在比对全媒体指纹与规范化索引…"
+                : "正在计算媒体指纹（0/\(workTotal)）…"
+        ))
+
+        if !toComputeVisual.isEmpty {
+            let maxConcurrency = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+            var nextIdx = 0
+            var cacheMutated = false
+
+            await withTaskGroup(of: (UUID, String, ClassicalImageFingerprint?).self) { group in
+                func enqueueNext() {
+                    guard nextIdx < toComputeVisual.count else { return }
+                    let work = toComputeVisual[nextIdx]
+                    nextIdx += 1
+                    let assetID = work.asset.id
+                    let contentHash = work.asset.contentHash
+                    let declaredAspect = work.asset.aspectRatio
+                    let url = work.fileURL
+                    group.addTask {
+                        let fp = SmartDeduplicator.computeFingerprint(from: url, declaredAspectRatio: declaredAspect)
+                        return (assetID, contentHash, fp)
+                    }
+                }
+
+                for _ in 0..<min(maxConcurrency, toComputeVisual.count) {
+                    enqueueNext()
+                }
+
+                var lastReported = 0
+                for await (assetID, contentHash, fp) in group {
+                    completedWork += 1
+                    if let fp {
+                        cachedFingerprints[assetID] = fp
+                        if !contentHash.isEmpty {
+                            dedupFingerprintCache[assetID] = CachedDedupFingerprintEntry(
+                                contentHash: contentHash,
+                                fingerprint: fp
+                            )
+                            cacheMutated = true
+                        }
+                    }
+                    if completedWork == workTotal || completedWork - lastReported >= 16 {
+                        lastReported = completedWork
+                        await onProgress?(DeduplicationScanProgress(
+                            completed: completedWork,
+                            total: workTotal,
+                            phase: "正在计算视觉感知指纹（\(completedWork)/\(workTotal)）…"
+                        ))
+                    }
+                    enqueueNext()
+                }
+            }
+
+            if cacheMutated {
+                let activeIDs = Set(scopedAssets.map(\.id))
+                if dedupFingerprintCache.count > max(5_000, activeIDs.count * 2) {
+                    dedupFingerprintCache = dedupFingerprintCache.filter { activeIDs.contains($0.key) }
+                }
+                persistDedupFingerprintCache()
+            }
+        }
+
+        if !toHashDocuments.isEmpty {
+            for (asset, url) in toHashDocuments {
+                completedWork += 1
+                if let textHash = SmartDeduplicator.normalizedDocumentTextHash(for: asset, cachedFileURL: url) {
+                    docTextHashes[asset.id] = textHash
+                }
+            }
+            await onProgress?(DeduplicationScanProgress(
+                completed: completedWork,
+                total: workTotal,
+                phase: "正在校验文档文本与音频波形指纹…"
+            ))
+        }
+
+        await onProgress?(DeduplicationScanProgress(
+            completed: workTotal,
+            total: workTotal,
+            phase: "正在聚类相似版本并评选最高质量…"
+        ))
+
+        let indexed: [SmartDeduplicator.IndexedMediaAsset] = scopedAssets.map { asset in
+            SmartDeduplicator.IndexedMediaAsset(
+                asset: asset,
+                fingerprint: cachedFingerprints[asset.id],
+                canonicalBookmarkKey: bookmarkKeys[asset.id],
+                normalizedTextHash: docTextHashes[asset.id]
+            )
+        }
+
+        let groups = SmartDeduplicator.clusterDuplicates(
+            items: indexed,
+            sensitivity: sensitivity,
+            boardReferencedAssetIDs: boardReferencedAssetIDs
+        )
+        let totalDuplicates = groups.reduce(0) { $0 + max(0, $1.candidates.count - 1) }
+        let totalBytes = groups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
+
+        return DeduplicationScanReport(
+            scannedAssetCount: scopedAssets.count,
+            skippedNonVisualCount: 0,
+            groups: groups,
+            totalDuplicateItems: totalDuplicates,
+            totalReclaimableBytes: totalBytes,
+            durationSeconds: Date().timeIntervalSince(startedAt)
+        )
+    }
+
+    public func resolveDuplicateGroups(
+        _ plans: [DeduplicationResolutionPlan],
+        disposal: DuplicateDisposalMode = .moveToTrash,
+        mergeMetadata: Bool = true
+    ) async throws -> DeduplicationCleanupResult {
+        guard !plans.isEmpty else {
+            return DeduplicationCleanupResult(
+                resolvedGroupCount: 0,
+                removedAssetCount: 0,
+                reclaimedBytes: 0,
+                mergedMetadataCount: 0,
+                updatedBoardCount: 0
+            )
+        }
+
+        let txOutcome = try await database.transaction { store -> (
+            resolvedGroups: Int,
+            removedIDs: [UUID],
+            reclaimedBytes: Int64,
+            mergedMetadataCount: Int,
+            updatedBoardCount: Int
+        ) in
+            var replacementMap: [UUID: UUID] = [:]
+            var allRemoveIDs: [UUID] = []
+            var seenRemoveIDs = Set<UUID>()
+            var resolvedGroups = 0
+            var reclaimedBytes: Int64 = 0
+            var mergedCount = 0
+
+            for plan in plans {
+                guard var keeper = try store.asset(id: plan.keepAssetID) else { continue }
+                var groupRemovedAssets: [AssetRecord] = []
+                for rid in plan.removeAssetIDs where rid != plan.keepAssetID && seenRemoveIDs.insert(rid).inserted {
+                    if let candidate = try store.asset(id: rid) {
+                        groupRemovedAssets.append(candidate)
+                        replacementMap[rid] = plan.keepAssetID
+                        allRemoveIDs.append(rid)
+                        reclaimedBytes += max(Int64(0), candidate.fileSizeBytes)
+                    }
+                }
+                guard !groupRemovedAssets.isEmpty else { continue }
+                resolvedGroups += 1
+
+                if mergeMetadata {
+                    var didMutateKeeper = false
+                    var tagLookup = tagMap(keeper.tags)
+                    let originalTagCount = tagLookup.count
+
+                    for dup in groupRemovedAssets {
+                        for t in dup.tags where !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            let norm = SearchText.normalize(t)
+                            if tagLookup[norm] == nil {
+                                tagLookup[norm] = t
+                            }
+                        }
+                        if dup.rating > keeper.rating {
+                            keeper.rating = min(5, dup.rating)
+                            didMutateKeeper = true
+                        }
+                        if keeper.folderID == nil, let dupFolder = dup.folderID, (try? store.folder(id: dupFolder)) != nil {
+                            keeper.folderID = dupFolder
+                            didMutateKeeper = true
+                        }
+                        if (keeper.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true),
+                           let dupSource = dup.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !dupSource.isEmpty {
+                            keeper.sourceURL = dupSource
+                            keeper.sourceDomain = dup.sourceDomain ?? URL(string: dupSource)?.host()
+                            didMutateKeeper = true
+                        }
+                        let dupNotes = dup.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let keeperNotes = keeper.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !dupNotes.isEmpty {
+                            if keeperNotes.isEmpty {
+                                keeper.notes = dupNotes
+                                didMutateKeeper = true
+                            } else if !keeperNotes.localizedCaseInsensitiveContains(dupNotes) {
+                                keeper.notes = keeperNotes + "\n\n" + dupNotes
+                                didMutateKeeper = true
+                            }
+                        }
+                        if dup.pinnedOffline && !keeper.pinnedOffline {
+                            keeper.pinnedOffline = true
+                            didMutateKeeper = true
+                        }
+                        if let dupExif = dup.richMetadata?.photoExif, dupExif.hasMeaningfulCameraExif,
+                           keeper.richMetadata?.photoExif?.hasMeaningfulCameraExif != true {
+                            var rich = keeper.richMetadata ?? AssetRichMetadata()
+                            rich.photoExif = dupExif
+                            keeper.richMetadata = rich
+                            didMutateKeeper = true
+                        }
+                        if let dupAI = dup.richMetadata?.aiGeneration, !dupAI.isEmpty,
+                           keeper.richMetadata?.aiGeneration?.isEmpty != false {
+                            var rich = keeper.richMetadata ?? AssetRichMetadata()
+                            rich.aiGeneration = dupAI
+                            keeper.richMetadata = rich
+                            didMutateKeeper = true
+                        }
+                    }
+
+                    if tagLookup.count != originalTagCount {
+                        keeper.tags = tagLookup.values.sorted()
+                        didMutateKeeper = true
+                    }
+
+                    if didMutateKeeper {
+                        _ = try store.saveAssetLocally(keeper)
+                        mergedCount += 1
+                    }
+                }
+            }
+
+            // Seamlessly re-point any Moodboard references pointing to removed duplicates onto the kept master asset
+            var updatedBoards = 0
+            if !replacementMap.isEmpty {
+                let allBoards = try store.fetchBoards()
+                for var board in allBoards {
+                    var boardChanged = false
+                    for idx in board.nodes.indices {
+                        if case .assetRef(let oldAssetID, let crop, let weight, let autoplay) = board.nodes[idx].kind,
+                           let newAssetID = replacementMap[oldAssetID],
+                           newAssetID != oldAssetID {
+                            board.nodes[idx].kind = .assetRef(
+                                assetID: newAssetID,
+                                crop: crop,
+                                weight: weight,
+                                autoplayLoop: autoplay
+                            )
+                            board.nodes[idx].updatedAt = Date()
+                            boardChanged = true
+                        }
+                    }
+                    if boardChanged {
+                        board.updatedAt = Date()
+                        _ = try store.saveBoardLocally(board)
+                        updatedBoards += 1
+                    }
+                }
+            }
+
+            if disposal == .moveToTrash {
+                for rid in allRemoveIDs {
+                    if var dup = try store.asset(id: rid), !dup.isTrashed {
+                        dup.isTrashed = true
+                        _ = try store.saveAssetLocally(dup)
+                    }
+                }
+            }
+
+            return (resolvedGroups, allRemoveIDs, reclaimedBytes, mergedCount, updatedBoards)
+        }
+
+        if disposal == .permanentlyDelete && !txOutcome.removedIDs.isEmpty {
+            try await permanentlyDeleteAssets(ids: txOutcome.removedIDs)
+            for rid in txOutcome.removedIDs {
+                dedupFingerprintCache.removeValue(forKey: rid)
+            }
+            persistDedupFingerprintCache()
+        }
+
+        return DeduplicationCleanupResult(
+            resolvedGroupCount: txOutcome.resolvedGroups,
+            removedAssetCount: txOutcome.removedIDs.count,
+            reclaimedBytes: txOutcome.reclaimedBytes,
+            mergedMetadataCount: txOutcome.mergedMetadataCount,
+            updatedBoardCount: txOutcome.updatedBoardCount
+        )
     }
 
     public func quickJump(query: String, limit: Int) async throws -> [QuickJumpMatch] {

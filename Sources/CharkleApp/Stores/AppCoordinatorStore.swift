@@ -78,6 +78,8 @@ public final class AppCoordinatorStore {
     public var generatorInitialEntry: MoodboardGeneratorEntry = .prompt
     public var isSmartFolderEditorPresented: Bool = false
     public var editingSmartFolder: SmartFolderRecord?
+    public var isSmartDeduplicationPresented: Bool = false
+    public var deduplicationInitialFolderID: UUID? = nil
 
     /// Centered Settings overlay state & deep-link tab routing.
     public var isSettingsPresented: Bool = false
@@ -314,6 +316,23 @@ public final class AppCoordinatorStore {
             || isOnboardingPresented
             || isMoodboardGeneratorPresented
             || isSmartFolderEditorPresented
+            || isSmartDeduplicationPresented
+    }
+
+    public func presentSmartDeduplication(folderID: UUID? = nil) {
+        deduplicationInitialFolderID = folderID
+        closeQuickLook()
+        closeSettings()
+        if isJumpAnywherePresented { isJumpAnywherePresented = false }
+        if isOnboardingPresented { isOnboardingPresented = false }
+        isSmartDeduplicationPresented = true
+    }
+
+    public func closeSmartDeduplication() {
+        if isSmartDeduplicationPresented {
+            isSmartDeduplicationPresented = false
+        }
+        deduplicationInitialFolderID = nil
     }
 
     public func openSettings(tab: CharkleSettingsTab? = nil) {

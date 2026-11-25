@@ -16,10 +16,36 @@ import {
   ingestImageUrl,
   ingestImageUrlsBatch,
   ingestSocialBookmarksChunk,
+  ingestSocialMediaChunk,
+  ingestTextSnippet,
+  ingestTweetMediaChunk,
   ingestUrl,
   probeLocalDesktop,
   testConnection,
 } from '../lib/api.js';
+import {
+  buildCreatorRootFolderName,
+  buildPostSubfolderName,
+  detectBlueskyProfileUrl,
+  detectInstagramProfileUrl,
+  detectPixivCollectionUrl,
+  detectThreadsProfileUrl,
+  extractArtworkFromPixivPayloads,
+  extractPostsFromBlueskyFeedPayload,
+  extractPostsFromInstagramPayload,
+  extractPostsFromThreadsGraphQLPayload,
+  filterCreatorMediaPost,
+} from '../lib/social-collectors.js';
+import {
+  buildAuthorRootFolderName,
+  buildTweetSubfolderName,
+  detectXAuthorProfileUrl,
+  extractTweetsFromXGraphQLPayload,
+  filterAuthorMediaTweet,
+  pickBestTwitterVideoVariant,
+  resolveTweetOrganizationFolderName,
+  upgradeTwitterMediaUrl,
+} from '../lib/x-author-media.js';
 import {
   filterAndSortImages,
   isLargeImageCandidate,
@@ -918,4 +944,488 @@ test('content.js enrichXhsNoteInBrowser preserves cardItem.tags on likes pages i
   };
   const enrichedFallback = await ctx.__testExports.enrichXhsNoteInBrowser(fallbackCard);
   assert.ok(enrichedFallback.tags.includes('小红书收藏'));
+});
+
+// MARK: - 10. X Author All-Media Collector (Profile Detection, GraphQL Parser, Tweet Organization & API)
+
+test('detectXAuthorProfileUrl and detectBookmarkCollectionPage recognize X artist profiles and reject reserved routes', () => {
+  const mediaPage = detectXAuthorProfileUrl('https://x.com/wlopwangling/media');
+  assert.ok(mediaPage);
+  assert.equal(mediaPage.handle, 'wlopwangling');
+  assert.equal(mediaPage.isMediaTab, true);
+
+  const rootPage = detectXAuthorProfileUrl('https://twitter.com/artist_01');
+  assert.ok(rootPage);
+  assert.equal(rootPage.handle, 'artist_01');
+  assert.equal(rootPage.isMediaTab, false);
+
+  const highlightsPage = detectXAuthorProfileUrl('https://x.com/artist_01/highlights');
+  assert.ok(highlightsPage);
+  assert.equal(highlightsPage.tab, 'highlights');
+
+  // Reserved routes & single tweets must NOT be treated as author profiles
+  assert.equal(detectXAuthorProfileUrl('https://x.com/home'), null);
+  assert.equal(detectXAuthorProfileUrl('https://x.com/explore'), null);
+  assert.equal(detectXAuthorProfileUrl('https://x.com/i/bookmarks'), null);
+  assert.equal(detectXAuthorProfileUrl('https://x.com/artist_01/status/1899999999'), null);
+  assert.equal(detectXAuthorProfileUrl('https://x.com/artist_01/likes'), null);
+
+  // Unified collection page detector bridges author profiles cleanly
+  const detected = detectBookmarkCollectionPage('https://x.com/artist_01/media');
+  assert.equal(detected.supported, true);
+  assert.equal(detected.platform, 'x');
+  assert.equal(detected.pageKind, 'author_media');
+  assert.equal(detected.authorHandle, 'artist_01');
+  assert.equal(detected.suggestedFolderName, '@artist_01');
+});
+
+test('upgradeTwitterMediaUrl, pickBestTwitterVideoVariant, and extractTweetsFromXGraphQLPayload preserve all multi-photo origs and MP4s', () => {
+  assert.equal(
+    upgradeTwitterMediaUrl('https://pbs.twimg.com/media/AbCdEfG?format=png&name=360x360'),
+    'https://pbs.twimg.com/media/AbCdEfG?format=png&name=orig',
+  );
+  assert.equal(
+    upgradeTwitterMediaUrl('https://pbs.twimg.com/media/AbCdEfG.jpg:small'),
+    'https://pbs.twimg.com/media/AbCdEfG?format=jpg&name=orig',
+  );
+
+  const bestMp4 = pickBestTwitterVideoVariant({
+    variants: [
+      { content_type: 'application/x-mpegURL', url: 'https://video.twimg.com/clip.m3u8' },
+      { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.com/clip-480p.mp4' },
+      { content_type: 'video/mp4', bitrate: 2176000, url: 'https://video.twimg.com/clip-1080p.mp4' },
+    ],
+  });
+  assert.equal(bestMp4, 'https://video.twimg.com/clip-1080p.mp4');
+
+  // Realistic UserMedia GraphQL payload with 3-photo original tweet, 1 video tweet, 1 retweet, and 1 quoted tweet
+  const graphqlPayload = {
+    data: {
+      user: {
+        result: {
+          timeline_v2: {
+            timeline: {
+              instructions: [
+                {
+                  entries: [
+                    {
+                      content: {
+                        itemContent: {
+                          tweet_results: {
+                            result: {
+                              __typename: 'TweetWithVisibilityResults',
+                              tweet: {
+                                rest_id: '1900000000000000001',
+                                core: {
+                                  user_results: {
+                                    result: {
+                                      legacy: { screen_name: 'pix_artist', name: '画师小星', profile_image_url_https: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg' },
+                                    },
+                                  },
+                                },
+                                legacy: {
+                                  id_str: '1900000000000000001',
+                                  created_at: 'Fri Nov 20 12:30:00 +0000 2026',
+                                  full_text: '角色立绘三视图 https://t.co/xyz123',
+                                  favorite_count: 4200,
+                                  extended_entities: {
+                                    media: [
+                                      { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/IMG1.png', original_info: { width: 2400, height: 3200 } },
+                                      { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/IMG2.jpg', original_info: { width: 2400, height: 3200 } },
+                                      { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/IMG3.jpg', original_info: { width: 2400, height: 3200 } },
+                                    ],
+                                  },
+                                },
+                                quoted_status_result: {
+                                  result: {
+                                    rest_id: '9999999999999999999',
+                                    legacy: {
+                                      id_str: '9999999999999999999',
+                                      full_text: 'Should be ignored',
+                                      extended_entities: {
+                                        media: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/QUOTED.jpg' }],
+                                      },
+                                    },
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    {
+                      content: {
+                        itemContent: {
+                          tweet_results: {
+                            result: {
+                              rest_id: '1900000000000000002',
+                              core: { user_results: { result: { legacy: { screen_name: 'pix_artist', name: '画师小星' } } } },
+                              legacy: {
+                                id_str: '1900000000000000002',
+                                created_at: 'Thu Nov 19 08:00:00 +0000 2026',
+                                full_text: '绘画过程延时',
+                                extended_entities: {
+                                  media: [
+                                    {
+                                      type: 'video',
+                                      media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/1/img.jpg',
+                                      video_info: {
+                                        variants: [
+                                          { content_type: 'video/mp4', bitrate: 500000, url: 'https://video.twimg.com/low.mp4' },
+                                          { content_type: 'video/mp4', bitrate: 2000000, url: 'https://video.twimg.com/hd.mp4' },
+                                        ],
+                                      },
+                                    },
+                                  ],
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    {
+                      content: {
+                        itemContent: {
+                          tweet_results: {
+                            result: {
+                              rest_id: '1900000000000000003',
+                              core: { user_results: { result: { legacy: { screen_name: 'pix_artist', name: '画师小星' } } } },
+                              legacy: {
+                                id_str: '1900000000000000003',
+                                retweeted_status_result: {
+                                  result: {
+                                    rest_id: '1888888888888888888',
+                                    core: { user_results: { result: { legacy: { screen_name: 'other_artist', name: '别人' } } } },
+                                    legacy: {
+                                      id_str: '1888888888888888888',
+                                      full_text: 'Retweeted art',
+                                      extended_entities: {
+                                        media: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/RT1.jpg' }],
+                                      },
+                                    },
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const tweets = extractTweetsFromXGraphQLPayload(graphqlPayload);
+  assert.equal(tweets.length, 3, 'Quoted tweet must be ignored while original/video/RT tweets are parsed');
+
+  const multi = tweets.find((t) => t.tweetID === '1900000000000000001');
+  assert.ok(multi);
+  assert.equal(multi.media.length, 3);
+  assert.equal(multi.media[0].url, 'https://pbs.twimg.com/media/IMG1?format=png&name=orig');
+  assert.equal(multi.isRetweet, false);
+  assert.equal(multi.authorAvatarURL, 'https://pbs.twimg.com/profile_images/1/a_400x400.jpg');
+
+  const vid = tweets.find((t) => t.tweetID === '1900000000000000002');
+  assert.ok(vid);
+  assert.equal(vid.media[0].kind, 'video');
+  assert.equal(vid.media[0].url, 'https://video.twimg.com/hd.mp4');
+
+  const rt = tweets.find((t) => t.tweetID === '1888888888888888888');
+  assert.ok(rt);
+  assert.equal(rt.isRetweet, true);
+  assert.equal(filterAuthorMediaTweet(rt, { targetHandle: 'pix_artist', skipRetweets: true }), null);
+  assert.equal(filterAuthorMediaTweet(vid, { targetHandle: 'pix_artist', includeVideos: false }), null);
+
+  // Deterministic folder naming & organization modes
+  assert.equal(buildAuthorRootFolderName('pix_artist', '画师小星'), '画师小星 (@pix_artist)');
+  assert.equal(buildAuthorRootFolderName('pix_artist', 'pix_artist'), '@pix_artist');
+
+  const folderName = buildTweetSubfolderName(multi);
+  assert.ok(folderName.includes('角色立绘三视图'));
+  assert.ok(folderName.includes('[000001]'));
+  assert.equal(folderName.includes('t.co'), false);
+
+  assert.ok(resolveTweetOrganizationFolderName(multi, 'per_tweet'));
+  assert.ok(resolveTweetOrganizationFolderName(multi, 'multi_only'));
+  assert.equal(resolveTweetOrganizationFolderName(vid, 'multi_only'), null);
+  assert.equal(resolveTweetOrganizationFolderName(multi, 'flat'), null);
+});
+
+test('ingestTweetMediaChunk posts tweetMedia batches and falls back cleanly on older servers returning HTTP 400', async () => {
+  const calls = [];
+  const modernFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body ? JSON.parse(init.body) : null });
+    return createJsonResponse({
+      assets: [{ id: 'a1', title: 'Art 1' }, { id: 'a2', title: 'Art 2' }],
+      created: 2,
+      tweetsImported: 1,
+      skipped: 0,
+      createdFolders: 1,
+    }, 201);
+  };
+
+  const config = { serverUrl: 'http://127.0.0.1:41937', apiToken: 'tok-test' };
+  const sampleTweet = {
+    tweetID: '1900000000000000001',
+    originalURL: 'https://x.com/pix_artist/status/1900000000000000001',
+    authorHandle: 'pix_artist',
+    authorName: '画师小星',
+    subfolderName: '2026-11-20 · 立绘 [000001]',
+    media: [
+      { kind: 'photo', url: 'https://pbs.twimg.com/media/IMG1?format=png&name=orig' },
+      { kind: 'photo', url: 'https://pbs.twimg.com/media/IMG2?format=jpg&name=orig' },
+    ],
+  };
+
+  const res = await ingestTweetMediaChunk(config, [sampleTweet], 'folder-root-1', null, {
+    fetchImpl: modernFetch,
+  });
+  assert.equal(res.created, 2);
+  assert.equal(res.tweetsImported, 1);
+  assert.equal(res.createdFolders, 1);
+  assert.equal(calls[0].body.inputs[0].type, 'tweetMedia');
+  assert.equal(calls[0].body.targetFolderID, 'folder-root-1');
+
+  // Older server fallback: returns 400 for `tweetMedia`, then accepts POST /folders + imageData ingest
+  const fallbackCalls = [];
+  const legacyFetch = async (url, init) => {
+    fallbackCalls.push(url);
+    if (url.endsWith('/api/v1/assets/ingest')) {
+      const parsed = JSON.parse(init.body);
+      if (parsed.inputs[0].type === 'tweetMedia') {
+        return createJsonResponse({ error: 'unsupported' }, 400);
+      }
+      return createJsonResponse({ assets: [{ id: 'legacy-1', title: 'Art' }] }, 201);
+    }
+    if (url.endsWith('/api/v1/folders')) {
+      return createJsonResponse({ folder: { id: 'sub-1', name: '2026-11-20 · 立绘 [000001]' }, reused: false }, 201);
+    }
+    // Simulated CDN image fetch
+    return new Response(new Uint8Array([137, 80, 78, 71]), {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    });
+  };
+
+  const fb = await ingestTweetMediaChunk(config, [sampleTweet], 'folder-root-1', null, {
+    fetchImpl: legacyFetch,
+  });
+  assert.equal(fb.created, 2);
+  assert.equal(fb.tweetsImported, 1);
+  assert.equal(fb.createdFolders, 1);
+  assert.ok(fallbackCalls.some((u) => u.endsWith('/api/v1/folders')));
+});
+
+// MARK: - 11. Multi-Platform Social Batch Collectors (Bluesky, Pixiv, Threads, Instagram) & Redesigned Popup Hygiene
+
+test('multi-platform detectors & canonicalDedupKey cover Bluesky, Pixiv, Threads, and Instagram cleanly', () => {
+  // Single-post special sources & dedup keys
+  assert.equal(detectSpecialSource('https://www.pixiv.net/artworks/123456789').kind, 'pixiv');
+  assert.equal(detectSpecialSource('https://www.pixiv.net/en/artworks/123456789').postID, '123456789');
+  assert.equal(detectSpecialSource('https://www.pixiv.net/member_illust.php?mode=medium&illust_id=98765').postID, '98765');
+  assert.equal(canonicalDedupKey('https://www.pixiv.net/en/artworks/123456789'), 'pixiv:123456789');
+
+  assert.equal(detectSpecialSource('https://www.instagram.com/p/C9AbCdEf123/').kind, 'instagram');
+  assert.equal(detectSpecialSource('https://www.instagram.com/artist_name/reel/D1XyZ_99/').postID, 'D1XyZ_99');
+  assert.equal(canonicalDedupKey('https://www.instagram.com/p/C9AbCdEf123/?igsh=xyz'), 'ig:C9AbCdEf123');
+
+  // Bluesky profiles & likes
+  const bskyMedia = detectBlueskyProfileUrl('https://bsky.app/profile/artist.bsky.social/media');
+  assert.ok(bskyMedia);
+  assert.equal(bskyMedia.handle, 'artist.bsky.social');
+  assert.equal(bskyMedia.pageKind, 'author_media');
+  assert.equal(detectBlueskyProfileUrl('https://bsky.app/profile/artist.bsky.social/post/3k2abc'), null);
+  assert.equal(detectBookmarkCollectionPage('https://bsky.app/profile/artist.bsky.social/likes').pageKind, 'likes');
+
+  // Pixiv artist works, filtered manga, locale prefix & bookmarks
+  const pixivAuthor = detectPixivCollectionUrl('https://www.pixiv.net/en/users/543210/illustrations');
+  assert.ok(pixivAuthor);
+  assert.equal(pixivAuthor.userId, '543210');
+  assert.equal(pixivAuthor.workFilter, 'illusts');
+  assert.equal(pixivAuthor.pageKind, 'author_media');
+
+  const pixivBm = detectPixivCollectionUrl('https://www.pixiv.net/users/543210/bookmarks/artworks/风景?rest=hide');
+  assert.ok(pixivBm);
+  assert.equal(pixivBm.pageKind, 'bookmarks');
+  assert.equal(pixivBm.bookmarkTag, '风景');
+  assert.equal(pixivBm.rest, 'hide');
+  assert.equal(detectBookmarkCollectionPage('https://www.pixiv.net/users/543210/artworks').platform, 'pixiv');
+
+  // Threads profiles on both threads.net & threads.com + saved
+  const threadsProfile = detectThreadsProfileUrl('https://www.threads.com/@painter_studio/media');
+  assert.ok(threadsProfile);
+  assert.equal(threadsProfile.handle, 'painter_studio');
+  assert.equal(threadsProfile.pageKind, 'author_media');
+  assert.equal(detectThreadsProfileUrl('https://www.threads.net/@painter_studio/post/ABC123'), null);
+  assert.equal(detectBookmarkCollectionPage('https://www.threads.net/saved').pageKind, 'bookmarks');
+
+  // Instagram profiles, reels & saved while rejecting reserved paths & single posts
+  const igProfile = detectInstagramProfileUrl('https://www.instagram.com/studio.ink/');
+  assert.ok(igProfile);
+  assert.equal(igProfile.handle, 'studio.ink');
+  assert.equal(igProfile.pageKind, 'author_media');
+  assert.equal(detectInstagramProfileUrl('https://www.instagram.com/explore/'), null);
+  assert.equal(detectInstagramProfileUrl('https://www.instagram.com/p/C9AbCdEf123/'), null);
+  assert.equal(detectBookmarkCollectionPage('https://www.instagram.com/studio.ink/saved/all-posts/').pageKind, 'bookmarks');
+});
+
+test('multi-platform payload extractors normalize Bluesky, Pixiv multi-page, Threads, and Instagram media accurately', async () => {
+  // 1. Bluesky ATProto feed with original 2-photo post + 1 repost
+  const bskyPosts = extractPostsFromBlueskyFeedPayload({
+    feed: [
+      {
+        post: {
+          uri: 'at://did:plc:abc/app.bsky.feed.post/3l9abc123',
+          author: { handle: 'mori.bsky.social', displayName: '森画师', avatar: 'https://cdn.bsky.app/img/avatar/a.jpg' },
+          record: { text: '水彩练习', createdAt: '2026-11-22T09:15:00Z' },
+          embed: {
+            images: [
+              { fullsize: 'https://cdn.bsky.app/img/feed_fullsize/1.jpeg', thumb: 'https://cdn.bsky.app/img/feed_thumbnail/1.jpeg' },
+              { fullsize: 'https://cdn.bsky.app/img/feed_fullsize/2.jpeg', thumb: 'https://cdn.bsky.app/img/feed_thumbnail/2.jpeg' },
+            ],
+          },
+        },
+      },
+      {
+        reason: { $type: 'app.bsky.feed.defs#reasonRepost' },
+        post: {
+          uri: 'at://did:plc:xyz/app.bsky.feed.post/3l9rep999',
+          author: { handle: 'other.bsky.social', displayName: 'Other' },
+          record: { text: 'Reposted' },
+          embed: { images: [{ fullsize: 'https://cdn.bsky.app/img/feed_fullsize/rt.jpeg' }] },
+        },
+      },
+    ],
+  });
+  assert.equal(bskyPosts.length, 2);
+  assert.equal(bskyPosts[0].media.length, 2);
+  assert.equal(bskyPosts[0].dedupKey, 'bsky:mori.bsky.social:3l9abc123');
+  assert.equal(filterCreatorMediaPost(bskyPosts[1], { targetHandle: 'mori.bsky.social', skipRetweets: true }), null);
+
+  // 2. Pixiv multi-page artwork
+  const pixivArt = extractArtworkFromPixivPayloads(
+    {
+      illustId: '12556677',
+      illustTitle: '星夜水彩合集',
+      illustComment: '第一张练习<br/>欢迎收藏',
+      userId: '543210',
+      userName: '青岚',
+      createDate: '2026-11-20T12:00:00+09:00',
+      tags: { tags: [{ tag: 'オリジナル' }, { tag: '水彩' }] },
+    },
+    [
+      { urls: { original: 'https://i.pximg.net/img-original/img/p0.png', regular: 'https://i.pximg.net/img-master/p0.jpg' }, width: 2400, height: 3200 },
+      { urls: { original: 'https://i.pximg.net/img-original/img/p1.png', regular: 'https://i.pximg.net/img-master/p1.jpg' }, width: 2400, height: 3200 },
+    ],
+  );
+  assert.ok(pixivArt);
+  assert.equal(pixivArt.platform, 'pixiv');
+  assert.equal(pixivArt.dedupKey, 'pixiv:12556677');
+  assert.equal(pixivArt.referer, 'https://www.pixiv.net/');
+  assert.equal(pixivArt.media.length, 2);
+  assert.equal(pixivArt.media[0].url, 'https://i.pximg.net/img-original/img/p0.png');
+  assert.ok(buildPostSubfolderName(pixivArt).includes('星夜水彩合集'));
+  assert.equal(buildCreatorRootFolderName('pixiv', '543210', '青岚'), '青岚 (Pixiv)');
+
+  // 3. Threads GraphQL carousel picking highest-res candidate
+  const threadsPosts = extractPostsFromThreadsGraphQLPayload({
+    data: {
+      mediaData: {
+        edges: [
+          {
+            node: {
+              thread_items: [
+                {
+                  post: {
+                    code: 'C9ThrPost1',
+                    taken_at: 1763625600,
+                    user: { username: 'painter_studio', full_name: 'Painter Studio' },
+                    caption: { text: '线稿过程' },
+                    carousel_media: [
+                      {
+                        image_versions2: {
+                          candidates: [
+                            { url: 'https://scontent.cdninstagram.com/small.jpg', width: 320, height: 320 },
+                            { url: 'https://scontent.cdninstagram.com/orig1.jpg', width: 1440, height: 1800 },
+                          ],
+                        },
+                      },
+                      {
+                        video_versions: [
+                          { url: 'https://scontent.cdninstagram.com/clip_hd.mp4', width: 1080, height: 1920 },
+                        ],
+                        image_versions2: { candidates: [{ url: 'https://scontent.cdninstagram.com/poster.jpg', width: 1080, height: 1920 }] },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(threadsPosts.length, 1);
+  assert.equal(threadsPosts[0].dedupKey, 'threads:C9ThrPost1');
+  assert.equal(threadsPosts[0].media.length, 2);
+  assert.equal(threadsPosts[0].media[0].url, 'https://scontent.cdninstagram.com/orig1.jpg');
+  assert.equal(threadsPosts[0].media[1].kind, 'video');
+
+  // 4. Instagram classic edge_owner_to_timeline_media sidecar + modern API
+  const igPosts = extractPostsFromInstagramPayload({
+    data: {
+      user: {
+        edge_owner_to_timeline_media: {
+          edges: [
+            {
+              node: {
+                shortcode: 'IgArt001',
+                taken_at_timestamp: 1763625600,
+                owner: { username: 'studio.ink' },
+                edge_media_to_caption: { edges: [{ node: { text: 'Poster design series' } }] },
+                edge_sidecar_to_children: {
+                  edges: [
+                    { node: { display_url: 'https://scontent.cdninstagram.com/slide1.jpg', dimensions: { width: 1080, height: 1350 } } },
+                    { node: { display_url: 'https://scontent.cdninstagram.com/slide2.jpg', dimensions: { width: 1080, height: 1350 } } },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+  assert.equal(igPosts.length, 1);
+  assert.equal(igPosts[0].dedupKey, 'ig:IgArt001');
+  assert.equal(igPosts[0].media.length, 2);
+
+  // 5. ingestSocialMediaChunk posts `socialMedia` type cleanly
+  const posted = [];
+  const res = await ingestSocialMediaChunk(
+    { serverUrl: 'http://127.0.0.1:41937', apiToken: 'tok-test' },
+    [pixivArt],
+    'folder-pixiv',
+    null,
+    {
+      fetchImpl: async (_url, init) => {
+        posted.push(JSON.parse(init.body));
+        return createJsonResponse({ assets: [{ id: 'p1' }, { id: 'p2' }], created: 2, postsImported: 1, skipped: 0, createdFolders: 1 }, 201);
+      },
+    },
+  );
+  assert.equal(res.created, 2);
+  assert.equal(res.postsImported, 1);
+  assert.equal(posted[0].inputs[0].type, 'socialMedia');
+  assert.equal(posted[0].inputs[0].platform, 'pixiv');
+  assert.equal(posted[0].inputs[0].referer, 'https://www.pixiv.net/');
 });

@@ -245,7 +245,8 @@ public nonisolated enum XPostResolver {
     public static func downloadMedia(
         _ item: XPostMedia,
         to directory: URL,
-        baseName: String
+        baseName: String,
+        referer: URL? = nil
     ) async -> URL? {
         let candidateURLs: [URL] = {
             var list: [URL] = []
@@ -262,7 +263,14 @@ public nonisolated enum XPostResolver {
         let maxBytes: Int64 = item.kind == .photo ? 35_000_000 : 160_000_000
 
         for url in candidateURLs {
-            if let saved = await downloadSingle(url: url, kind: item.kind, to: directory, baseName: baseName, maxBytes: maxBytes) {
+            if let saved = await downloadSingle(
+                url: url,
+                kind: item.kind,
+                to: directory,
+                baseName: baseName,
+                maxBytes: maxBytes,
+                referer: referer
+            ) {
                 return saved
             }
         }
@@ -549,7 +557,8 @@ public nonisolated enum XPostResolver {
         kind: XPostMedia.Kind,
         to directory: URL,
         baseName: String,
-        maxBytes: Int64
+        maxBytes: Int64,
+        referer: URL? = nil
     ) async -> URL? {
         guard WebBookmark.isSafeRemoteFetchURL(url),
               isAcceptableMediaResponse(mimeType: nil, url: url) else { return nil }
@@ -561,15 +570,25 @@ public nonisolated enum XPostResolver {
         defer { session.invalidateAndCancel() }
 
         var request = URLRequest(url: url, timeoutInterval: 15)
-        if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
-            request.setValue(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
-                forHTTPHeaderField: "User-Agent"
-            )
+        let hostLower = url.host()?.lowercased() ?? ""
+        let browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15"
+        if hostLower == "i.pximg.net" || hostLower.hasSuffix(".pximg.net") || hostLower == "pximg.net" {
+            request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
+            request.setValue("https://www.pixiv.net/", forHTTPHeaderField: "Referer")
+            request.setValue("image/avif,image/webp,image/png,image/jpeg,*/*", forHTTPHeaderField: "Accept")
+        } else if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
+            request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
             request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
             request.setValue("image/webp,image/avif,image/png,image/jpeg,*/*", forHTTPHeaderField: "Accept")
+        } else if hostLower.contains("cdninstagram.com") || hostLower.contains("fbcdn.net") {
+            request.setValue(browserUA, forHTTPHeaderField: "User-Agent")
+            request.setValue(referer?.absoluteString ?? "https://www.instagram.com/", forHTTPHeaderField: "Referer")
+            request.setValue("image/avif,image/webp,image/png,image/jpeg,video/mp4,*/*", forHTTPHeaderField: "Accept")
         } else {
             request.setValue("Charkle/1.0", forHTTPHeaderField: "User-Agent")
+            if let referer, WebBookmark.isWebURL(referer) {
+                request.setValue(referer.absoluteString, forHTTPHeaderField: "Referer")
+            }
         }
 
         guard let (tempURL, response) = try? await session.download(for: request),

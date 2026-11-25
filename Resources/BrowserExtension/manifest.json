@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Charkle",
   "short_name": "Charkle",
-  "version": "1.1.2",
-  "description": "一键收藏网页、图片、小红书笔记、X 推文、GitHub 仓库，并支持一键批量导入小红书与 X 收藏书签到 Charkle。",
+  "version": "1.3.0",
+  "description": "一键收藏网页、图片与灵感卡片，支持 X、Pixiv、Bluesky、Threads、Instagram 与小红书作者画作与收藏的批量整理采集。",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -43,6 +43,29 @@
   "content_scripts": [
     {
       "matches": [
+        "https://x.com/*",
+        "https://www.x.com/*",
+        "https://mobile.x.com/*",
+        "https://twitter.com/*",
+        "https://www.twitter.com/*",
+        "https://mobile.twitter.com/*",
+        "https://bsky.app/*",
+        "https://www.bsky.app/*",
+        "https://threads.net/*",
+        "https://www.threads.net/*",
+        "https://threads.com/*",
+        "https://www.threads.com/*",
+        "https://instagram.com/*",
+        "https://www.instagram.com/*",
+        "https://m.instagram.com/*"
+      ],
+      "js": [
+        "x-bridge-loader.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
         "http://*/*",
         "https://*/*"
       ],
@@ -78,6 +101,28 @@
       "matches": [
         "http://*/*",
         "https://*/*"
+      ]
+    },
+    {
+      "resources": [
+        "page-bridge.js"
+      ],
+      "matches": [
+        "https://x.com/*",
+        "https://www.x.com/*",
+        "https://mobile.x.com/*",
+        "https://twitter.com/*",
+        "https://www.twitter.com/*",
+        "https://mobile.twitter.com/*",
+        "https://bsky.app/*",
+        "https://www.bsky.app/*",
+        "https://threads.net/*",
+        "https://www.threads.net/*",
+        "https://threads.com/*",
+        "https://www.threads.com/*",
+        "https://instagram.com/*",
+        "https://www.instagram.com/*",
+        "https://m.instagram.com/*"
       ]
     }
   ]

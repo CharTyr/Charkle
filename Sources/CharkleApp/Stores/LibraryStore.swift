@@ -2070,4 +2070,57 @@ public final class LibraryStore {
         filter.selectedColorHex = hex.uppercased()
         await refreshAssets()
     }
+
+    // MARK: - Non-AI Multi-Media Smart Deduplication
+
+    public func scanDuplicateAssets(
+        scope: DeduplicationScanScope = .allActive,
+        sensitivity: DeduplicationSensitivity = .balanced,
+        mediaKinds: Set<MediaKind>? = nil,
+        onProgress: (@Sendable (DeduplicationScanProgress) async -> Void)? = nil
+    ) async -> DeduplicationScanReport? {
+        lastError = nil
+        do {
+            return try await engine.scanDuplicateImages(
+                scope: scope,
+                sensitivity: sensitivity,
+                mediaKinds: mediaKinds,
+                onProgress: onProgress
+            )
+        } catch {
+            lastError = error.localizedDescription
+            libraryStoreLogger.error("Smart deduplication scan failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    public func resolveDuplicateGroups(
+        _ plans: [DeduplicationResolutionPlan],
+        disposal: DuplicateDisposalMode = .moveToTrash,
+        mergeMetadata: Bool = true
+    ) async -> DeduplicationCleanupResult? {
+        guard !plans.isEmpty else { return nil }
+        lastError = nil
+        do {
+            let result = try await engine.resolveDuplicateGroups(
+                plans,
+                disposal: disposal,
+                mergeMetadata: mergeMetadata
+            )
+            let removedIDs = Set(plans.flatMap(\.removeAssetIDs))
+            selectedAssetIDs.subtract(removedIDs)
+            cutAssetIDs.subtract(removedIDs)
+            if disposal == .permanentlyDelete {
+                for id in removedIDs {
+                    thumbnailLoader.invalidate(assetID: id)
+                }
+            }
+            await refreshAll()
+            return result
+        } catch {
+            lastError = error.localizedDescription
+            libraryStoreLogger.error("Smart deduplication cleanup failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
 }

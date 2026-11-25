@@ -17,6 +17,7 @@ public struct JumpAnywhereView: View {
     public enum QuickCommand: String, CaseIterable, Identifiable, Sendable {
         case newMoodboard
         case openInbox
+        case smartDeduplicate
         case toggleNotch
         case captureArea
 
@@ -26,6 +27,7 @@ public struct JumpAnywhereView: View {
             switch self {
             case .newMoodboard: "快速生成情绪板…"
             case .openInbox: "前往收件箱清理台"
+            case .smartDeduplicate: "智能去重（全媒体，保留最高质量）… (⌘⇧D)"
             case .toggleNotch: "展开 / 收起刘海浮窗 (⌥⇧S)"
             case .captureArea: "交互式区域截图 (⌥⇧A)"
             }
@@ -35,6 +37,7 @@ public struct JumpAnywhereView: View {
             switch self {
             case .newMoodboard: "sparkle-board"
             case .openInbox: "inbox"
+            case .smartDeduplicate: "library"
             case .toggleNotch: "notch"
             case .captureArea: "screenshot"
             }

@@ -19,7 +19,9 @@ import {
   ingestImageUrl,
   ingestImageUrlsBatch,
   ingestSocialBookmarksChunk,
+  ingestSocialMediaChunk,
   ingestTextSnippet,
+  ingestTweetMediaChunk,
   ingestUrl,
   probeLocalDesktop,
   testConnection,
@@ -871,6 +873,10 @@ export async function handleMessage(msg, sender) {
         'bookmarkStopOnKnownStreak',
         'bookmarkEnrichXhsDetails',
         'bookmarkMaxCount',
+        'authorMediaOrganizeMode',
+        'authorMediaIncludeVideos',
+        'authorMediaSkipRetweets',
+        'xhsProfileCollectMode',
       ];
       for (const key of allowedKeys) {
         if (key in msg) patch[key] = msg[key];
@@ -887,6 +893,97 @@ export async function handleMessage(msg, sender) {
     case 'FETCH_EXISTING_SOURCES': {
       const res = await withDesktopAutoHeal((cfg) => fetchExistingSources(cfg));
       return { ok: true, ...res };
+    }
+
+    case 'ENSURE_AUTHOR_ROOT_FOLDER': {
+      const folderName = String(msg.name || '').trim();
+      if (!folderName) {
+        return { ok: false, error: '缺少作者文件夹名称。' };
+      }
+      const { created, refreshed, parentLabel } = await withDesktopAutoHeal(async (cfg) => {
+        const active = resolveActiveTarget(cfg);
+        const parentId =
+          'parentId' in msg
+            ? msg.parentId || null
+            : active.mode === 'folder'
+              ? active.targetFolderId
+              : null;
+        // If user already selected a folder with the same name as the author folder, reuse it directly instead of nesting `@a/@a`.
+        if (
+          parentId &&
+          active.label &&
+          active.label.trim().toLowerCase() === folderName.toLowerCase()
+        ) {
+          return {
+            created: { folder: { id: parentId, name: active.label }, reused: true },
+            refreshed: null,
+            parentLabel: active.label,
+          };
+        }
+        const c = await createOrReuseFolder(cfg, folderName, parentId, { reuseExisting: true });
+        const r = c.reused ? null : await testConnection(cfg).catch(() => null);
+        return { created: c, refreshed: r, parentLabel: active.mode === 'folder' ? active.label : '' };
+      });
+      if (refreshed) {
+        await saveConfig({
+          cachedFolders: refreshed.folders,
+          cachedBoards: refreshed.boards,
+        });
+      }
+      const folder = created.folder;
+      const displayLabel =
+        parentLabel && parentLabel.toLowerCase() !== (folder?.name || folderName).toLowerCase()
+          ? `${parentLabel} / ${folder?.name || folderName}`
+          : folder?.name || folderName;
+      return {
+        ok: true,
+        folder,
+        reused: Boolean(created.reused),
+        targetLabel: displayLabel,
+      };
+    }
+
+    case 'INGEST_SOCIAL_MEDIA_CHUNK':
+    case 'INGEST_TWEET_MEDIA_CHUNK': {
+      const posts = Array.isArray(msg.posts) ? msg.posts : Array.isArray(msg.tweets) ? msg.tweets : [];
+      if (posts.length === 0) {
+        const cfg = await getConfig();
+        return {
+          ok: true,
+          assets: [],
+          created: 0,
+          postsImported: 0,
+          tweetsImported: 0,
+          skipped: 0,
+          createdFolders: 0,
+          targetLabel: resolveMessageTarget(cfg, msg).label,
+        };
+      }
+      flashBusyBadge(msg.badgeText || '…');
+      try {
+        const useUnified = msg.type === 'INGEST_SOCIAL_MEDIA_CHUNK';
+        const { res, target } = await withDesktopAutoHeal(async (cfg) => {
+          const t = resolveMessageTarget(cfg, msg);
+          const ingestFn = useUnified ? ingestSocialMediaChunk : ingestTweetMediaChunk;
+          const r = await ingestFn(
+            cfg,
+            posts,
+            t.targetFolderId,
+            t.targetBoardId,
+            { skipDuplicates: msg.skipDuplicates !== false },
+          );
+          return { res: r, target: t };
+        });
+        if (msg.isFinalChunk) {
+          flashSuccessBadge();
+        }
+        return { ok: true, ...res, targetLabel: target.label };
+      } catch (err) {
+        if (msg.isFinalChunk) {
+          flashErrorBadge();
+        }
+        throw err;
+      }
     }
 
     case 'INGEST_SOCIAL_BOOKMARKS_CHUNK': {
@@ -931,7 +1028,8 @@ export async function handleMessage(msg, sender) {
       const job = msg.job;
       if (job) {
         if (job.status === 'running') {
-          const badge = job.imported > 0 ? String(Math.min(999, job.imported)) : '…';
+          const count = job.mode === 'author_media' ? (job.mediaImported || job.imported || 0) : (job.imported || 0);
+          const badge = count > 0 ? String(Math.min(999, count)) : '…';
           flashBusyBadge(badge);
         } else if (job.status === 'done') {
           flashSuccessBadge();

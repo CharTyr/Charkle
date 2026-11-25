@@ -10,6 +10,7 @@ public struct LibrarySettingsPane: View {
     public let coordinator: AppCoordinatorStore
     public let syncAndAI: SyncAndAIStore
     public let onImportMaterialPackage: (() -> Void)?
+    public let onOpenSmartDeduplication: (() -> Void)?
 
     @State private var cacheBudgetGB: Double = 10.0
     @State private var didSyncInitialBudget: Bool = false
@@ -34,11 +35,13 @@ public struct LibrarySettingsPane: View {
     public init(
         coordinator: AppCoordinatorStore,
         syncAndAI: SyncAndAIStore,
-        onImportMaterialPackage: (() -> Void)? = nil
+        onImportMaterialPackage: (() -> Void)? = nil,
+        onOpenSmartDeduplication: (() -> Void)? = nil
     ) {
         self.coordinator = coordinator
         self.syncAndAI = syncAndAI
         self.onImportMaterialPackage = onImportMaterialPackage
+        self.onOpenSmartDeduplication = onOpenSmartDeduplication
     }
 
     public var body: some View {
@@ -131,17 +134,36 @@ public struct LibrarySettingsPane: View {
                 }
             }
 
-            if let onImportMaterialPackage {
-                SettingsSection("外部素材包导入") {
-                    SettingsRow(
-                        title: "导入 .eaglepack 素材包 / .library 素材库",
-                        subtitle: "无损保留多级文件夹、配色、标签、星级评分、注释、来源链接与原始时间，也可直接拖入主界面或刘海托盘"
-                    ) {
-                        Button("选择素材包…") {
-                            onImportMaterialPackage()
+            if onImportMaterialPackage != nil || onOpenSmartDeduplication != nil {
+                SettingsSection("导入与智能整理") {
+                    if let onImportMaterialPackage {
+                        SettingsRow(
+                            title: "导入 .eaglepack 素材包 / .library 素材库",
+                            subtitle: "无损保留多级文件夹、配色、标签、星级评分、注释、来源链接与原始时间，也可直接拖入主界面或刘海托盘"
+                        ) {
+                            Button("选择素材包…") {
+                                onImportMaterialPackage()
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                            .fixedSize()
                         }
-                        .buttonStyle(SettingsSecondaryButtonStyle())
-                        .fixedSize()
+                    }
+
+                    if onImportMaterialPackage != nil && onOpenSmartDeduplication != nil {
+                        SettingsCardDivider()
+                    }
+
+                    if let onOpenSmartDeduplication {
+                        SettingsRow(
+                            title: "全媒体智能去重（纯本地算法 · 无需 AI）",
+                            subtitle: "基于 SHA-256、经典感知指纹、音频波形与规范化链接检出图片/动图/视频/音频/设计稿/书签/文档/3D 重复项，自动保留最高质量版本并合并标签与情绪板引用"
+                        ) {
+                            Button("扫描重复素材…") {
+                                onOpenSmartDeduplication()
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                            .fixedSize()
+                        }
                     }
                 }
             }

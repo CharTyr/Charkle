@@ -62,6 +62,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
     case threads
     case bluesky
     case xiaohongshu
+    case pixiv
+    case instagram
 
     public var displayName: String {
         switch self {
@@ -69,6 +71,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .threads: "Threads"
         case .bluesky: "Bluesky"
         case .xiaohongshu: "小红书"
+        case .pixiv: "Pixiv"
+        case .instagram: "Instagram"
         }
     }
 
@@ -76,7 +80,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         switch self {
         case .x: "推文"
         case .xiaohongshu: "笔记"
-        case .threads, .bluesky: "贴文"
+        case .pixiv: "作品"
+        case .threads, .bluesky, .instagram: "贴文"
         }
     }
 
@@ -90,6 +95,8 @@ public enum SocialPlatform: String, Codable, CaseIterable, Hashable, Sendable {
         case .threads: "在 Threads 打开"
         case .bluesky: "在 Bluesky 打开"
         case .xiaohongshu: "在小红书打开"
+        case .pixiv: "在 Pixiv 打开"
+        case .instagram: "在 Instagram 打开"
         }
     }
 }

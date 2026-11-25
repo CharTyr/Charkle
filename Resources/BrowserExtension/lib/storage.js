@@ -22,6 +22,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   bookmarkStopOnKnownStreak: true,
   bookmarkEnrichXhsDetails: true,
   bookmarkMaxCount: 0, // 0 = unlimited
+  authorMediaOrganizeMode: 'per_tweet', // 'per_tweet' | 'per_post' | 'multi_only' | 'flat'
+  authorMediaIncludeVideos: true,
+  authorMediaSkipRetweets: true,
+  xhsProfileCollectMode: 'media', // 'media' | 'bookmarks'
   cachedFolders: [],
   cachedBoards: [],
   lastConnectedUser: null,
@@ -67,6 +71,12 @@ export async function saveConfig(patch, storageOverride) {
   }
   const maxCount = Number(next.bookmarkMaxCount);
   next.bookmarkMaxCount = Number.isFinite(maxCount) && maxCount > 0 ? Math.round(maxCount) : 0;
+  if (!['per_tweet', 'per_post', 'multi_only', 'flat'].includes(next.authorMediaOrganizeMode)) {
+    next.authorMediaOrganizeMode = 'per_tweet';
+  }
+  if (next.xhsProfileCollectMode !== 'media' && next.xhsProfileCollectMode !== 'bookmarks') {
+    next.xhsProfileCollectMode = 'media';
+  }
 
   const area = getStorageArea(storageOverride);
   if (area) {

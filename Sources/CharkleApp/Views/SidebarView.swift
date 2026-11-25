@@ -24,6 +24,7 @@ public struct SidebarView: View {
     public let moodboards: MoodboardStore
     public let expandedWidth: CGFloat
     public let onImportMaterialPackage: (() -> Void)?
+    public let onOpenSmartDeduplication: ((UUID?) -> Void)?
     public let onSelectDestination: (SidebarDestination) -> Void
     public let onDropAssetsOntoFolder: ([UUID], UUID?) -> Void
     public let onDropExternalOntoFolder: ([CaptureInput], UUID?) -> Void
@@ -95,6 +96,7 @@ public struct SidebarView: View {
         moodboards: MoodboardStore,
         expandedWidth: CGFloat = AppCoordinatorStore.defaultSidebarWidth,
         onImportMaterialPackage: (() -> Void)? = nil,
+        onOpenSmartDeduplication: ((UUID?) -> Void)? = nil,
         onSelectDestination: @escaping (SidebarDestination) -> Void,
         onDropAssetsOntoFolder: @escaping ([UUID], UUID?) -> Void,
         onDropExternalOntoFolder: @escaping ([CaptureInput], UUID?) -> Void,
@@ -106,6 +108,7 @@ public struct SidebarView: View {
         self.moodboards = moodboards
         self.expandedWidth = expandedWidth
         self.onImportMaterialPackage = onImportMaterialPackage
+        self.onOpenSmartDeduplication = onOpenSmartDeduplication
         self.onSelectDestination = onSelectDestination
         self.onDropAssetsOntoFolder = onDropAssetsOntoFolder
         self.onDropExternalOntoFolder = onDropExternalOntoFolder
@@ -553,7 +556,24 @@ public struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 14) {
                 // Section 1: Library
                 VStack(alignment: .leading, spacing: 2) {
-                    sectionHeader("素材库")
+                    HStack(spacing: 4) {
+                        sectionHeader("素材库")
+                        Spacer()
+                        if let onOpenSmartDeduplication {
+                            Button {
+                                onOpenSmartDeduplication(nil)
+                            } label: {
+                                Image(systemName: "square.on.square.dashed")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 22, height: 22)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("全媒体智能去重（纯本地算法，保留最高质量 · ⌘⇧D）")
+                        }
+                    }
+                    .padding(.trailing, 10)
                     sidebarRow(
                         destination: .allItems,
                         symbolName: "square.grid.2x2",
@@ -1432,6 +1452,13 @@ public struct SidebarView: View {
                     renamingFolderID = folder.id
                     DispatchQueue.main.async {
                         isRenameFieldFocused = true
+                    }
+                }
+                if let onOpenSmartDeduplication {
+                    Button {
+                        onOpenSmartDeduplication(folder.id)
+                    } label: {
+                        Label("在此文件夹中智能去重…", systemImage: "square.on.square.dashed")
                     }
                 }
             }

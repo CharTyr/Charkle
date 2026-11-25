@@ -1,12 +1,14 @@
 import Foundation
 import ImageIO
 
-/// Parsed identity of a supported social media post URL (X/Twitter, Threads, Bluesky, Xiaohongshu).
+/// Parsed identity of a supported social media post URL (X/Twitter, Threads, Bluesky, Xiaohongshu, Pixiv, Instagram).
 public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
     case x(XPostReference)
     case threads(handle: String, postID: String, canonicalURL: URL)
     case bluesky(handle: String, rkey: String, canonicalURL: URL)
     case xiaohongshu(XiaohongshuNoteReference)
+    case pixiv(illustID: String, canonicalURL: URL)
+    case instagram(shortcode: String, canonicalURL: URL)
 
     public var platform: SocialPlatform {
         switch self {
@@ -14,6 +16,8 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .threads: .threads
         case .bluesky: .bluesky
         case .xiaohongshu: .xiaohongshu
+        case .pixiv: .pixiv
+        case .instagram: .instagram
         }
     }
 
@@ -23,6 +27,8 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .threads(_, _, let url): url
         case .bluesky(_, _, let url): url
         case .xiaohongshu(let ref): ref.canonicalURL
+        case .pixiv(_, let url): url
+        case .instagram(_, let url): url
         }
     }
 
@@ -33,11 +39,13 @@ public nonisolated enum SocialPostReference: Equatable, Hashable, Sendable {
         case .threads(_, let postID, _): "threads:\(postID)"
         case .bluesky(let handle, let rkey, _): "bsky:\(handle.lowercased()):\(rkey)"
         case .xiaohongshu(let ref): ref.dedupKey
+        case .pixiv(let illustID, _): "pixiv:\(illustID)"
+        case .instagram(let shortcode, _): "ig:\(shortcode)"
         }
     }
 }
 
-/// Detects social post URLs across X/Twitter, Threads, Bluesky, and Xiaohongshu.
+/// Detects social post URLs across X/Twitter, Threads, Bluesky, Xiaohongshu, Pixiv, and Instagram.
 public nonisolated enum SocialPostURLParser {
     private static let threadsHosts: Set<String> = [
         "threads.net", "www.threads.net",
@@ -46,6 +54,14 @@ public nonisolated enum SocialPostURLParser {
 
     private static let blueskyHosts: Set<String> = [
         "bsky.app", "www.bsky.app"
+    ]
+
+    private static let pixivHosts: Set<String> = [
+        "pixiv.net", "www.pixiv.net", "touch.pixiv.net"
+    ]
+
+    private static let instagramHosts: Set<String> = [
+        "instagram.com", "www.instagram.com", "m.instagram.com"
     ]
 
     public static func parse(_ url: URL) -> SocialPostReference? {
@@ -90,6 +106,42 @@ public nonisolated enum SocialPostURLParser {
                 guard !handle.isEmpty, !rkey.isEmpty else { return nil }
                 let canonical = URL(string: "https://bsky.app/profile/\(handle)/post/\(rkey)") ?? url
                 return .bluesky(handle: handle, rkey: rkey, canonicalURL: canonical)
+            }
+        }
+
+        if pixivHosts.contains(host) {
+            // /artworks/<id>  or  /<locale>/artworks/<id>
+            if let artIdx = segments.firstIndex(where: { $0.lowercased() == "artworks" }),
+               artIdx + 1 < segments.count {
+                let id = segments[artIdx + 1]
+                if !id.isEmpty, id.count <= 20, id.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                    let canonical = URL(string: "https://www.pixiv.net/artworks/\(id)") ?? url
+                    return .pixiv(illustID: id, canonicalURL: canonical)
+                }
+            }
+            // Legacy: /member_illust.php?illust_id=<id>
+            if segments.first?.lowercased() == "member_illust.php",
+               let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+               let id = comps.queryItems?.first(where: { $0.name == "illust_id" })?.value,
+               !id.isEmpty, id.count <= 20, id.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                let canonical = URL(string: "https://www.pixiv.net/artworks/\(id)") ?? url
+                return .pixiv(illustID: id, canonicalURL: canonical)
+            }
+        }
+
+        if instagramHosts.contains(host) {
+            // /p/<shortcode>, /reel/<shortcode>, /tv/<shortcode>, or /<user>/p/<shortcode>, /<user>/reel/<shortcode>
+            if let idx = segments.firstIndex(where: {
+                let lower = $0.lowercased()
+                return lower == "p" || lower == "reel" || lower == "reels" || lower == "tv"
+            }), idx + 1 < segments.count {
+                let code = segments[idx + 1]
+                if !code.isEmpty, code.count <= 40,
+                   code.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }) {
+                    let kindSegment = segments[idx].lowercased() == "reel" || segments[idx].lowercased() == "reels" ? "reel" : "p"
+                    let canonical = URL(string: "https://www.instagram.com/\(kindSegment)/\(code)/") ?? url
+                    return .instagram(shortcode: code, canonicalURL: canonical)
+                }
             }
         }
 
@@ -189,6 +241,10 @@ public nonisolated enum SocialPostResolver {
             return await resolveThreads(handle: handle, canonicalURL: canonicalURL)
         case .xiaohongshu(let xhsRef):
             return await XiaohongshuPostResolver.resolve(xhsRef)
+        case .pixiv(let illustID, let canonicalURL):
+            return await resolveOpenGraphFallback(platform: .pixiv, handle: illustID, canonicalURL: canonicalURL)
+        case .instagram(let shortcode, let canonicalURL):
+            return await resolveOpenGraphFallback(platform: .instagram, handle: shortcode, canonicalURL: canonicalURL)
         }
     }
 

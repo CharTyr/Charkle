@@ -132,6 +132,11 @@ public struct MainWindowView: View {
                     moodboards: moodboards,
                     expandedWidth: effectiveExpandedSidebarWidth,
                     onImportMaterialPackage: onImportMaterialPackage,
+                    onOpenSmartDeduplication: { folderID in
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                            coordinator.presentSmartDeduplication(folderID: folderID)
+                        }
+                    },
                     onSelectDestination: { dest in
                         navigate(to: dest)
                     },
@@ -276,6 +281,27 @@ public struct MainWindowView: View {
             )
             .animation(CharkleMotion.accessible(CharkleMotion.drawerEase, reduced: reduceMotion), value: coordinator.isInspectorVisible)
 
+            // Centered Non-AI Multi-Media Smart Deduplication Studio (zIndex 190 so Quick Look at 200 opens cleanly on top)
+            if coordinator.isSmartDeduplicationPresented {
+                SmartDeduplicationView(
+                    coordinator: coordinator,
+                    library: library,
+                    moodboards: moodboards,
+                    initialFolderID: coordinator.deduplicationInitialFolderID,
+                    onOpenQuickLook: { asset in
+                        openQuickLook(asset)
+                    },
+                    onClose: {
+                        withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
+                            coordinator.closeSmartDeduplication()
+                        }
+                    }
+                )
+                .ignoresSafeArea(.all)
+                .zIndex(190)
+                .transition(.opacity)
+            }
+
             // Full-Media Quick Look Hero Continuity Overlay
             if let qlID = coordinator.quickLookAssetID,
                let qlAsset = library.allAssetsByID[qlID] ?? library.assets.first(where: { $0.id == qlID }) {
@@ -337,6 +363,11 @@ public struct MainWindowView: View {
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
                     onEnterMinimalCaptureMode: onEnterMinimalCaptureMode,
                     onImportMaterialPackage: onImportMaterialPackage,
+                    onOpenSmartDeduplication: {
+                        withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                            coordinator.presentSmartDeduplication()
+                        }
+                    },
                     onClose: {
                         withAnimation(CharkleMotion.enterExit(false, enter: CharkleMotion.enterMd, exit: CharkleMotion.exitMd, reduced: reduceMotion)) {
                             coordinator.closeSettings()
@@ -392,6 +423,15 @@ public struct MainWindowView: View {
                 reduced: reduceMotion
             ),
             value: coordinator.isOnboardingPresented
+        )
+        .animation(
+            CharkleMotion.enterExit(
+                coordinator.isSmartDeduplicationPresented,
+                enter: CharkleMotion.enterMd,
+                exit: CharkleMotion.exitMd,
+                reduced: reduceMotion
+            ),
+            value: coordinator.isSmartDeduplicationPresented
         )
         .animation(
             CharkleMotion.enterExit(
@@ -3632,6 +3672,10 @@ public struct MainWindowView: View {
         switch cmd {
         case .newMoodboard: coordinator.presentMoodboardGenerator(entry: .prompt)
         case .openInbox: navigate(to: .inbox)
+        case .smartDeduplicate:
+            withAnimation(CharkleMotion.accessible(CharkleMotion.enterMd, reduced: reduceMotion)) {
+                coordinator.presentSmartDeduplication()
+            }
         case .toggleNotch: onToggleNotch()
         case .captureArea: onCaptureArea()
         }

@@ -213,6 +213,7 @@ public final class CharkleRuntime {
         coordinator.isJumpAnywherePresented = false
         coordinator.isMoodboardGeneratorPresented = false
         coordinator.isSmartFolderEditorPresented = false
+        coordinator.closeSmartDeduplication()
 
         notchController?.setMinimalCaptureMode(true)
         library.enterMinimalCaptureMode()
@@ -958,6 +959,12 @@ struct CharkleApp: App {
                     runtime.presentMaterialPackageImportPanel()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
+
+                Button("智能去重（全媒体，保留最高质量）…") {
+                    runtime.activateMainWindow()
+                    runtime.coordinator.presentSmartDeduplication()
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
             }
 
             CommandGroup(replacing: .undoRedo) {

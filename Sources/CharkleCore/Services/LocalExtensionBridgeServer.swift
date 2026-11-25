@@ -422,14 +422,15 @@ public actor LocalExtensionBridgeServer {
     }
 
     private func handleGetExistingSources(corsHeaders: [String: String]) async throws -> HTTPResponse {
-        let (sources, keys) = try await fetchExistingSourceKeys()
+        let (sources, keys, mediaKeys) = try await fetchExistingSourceKeys()
         return HTTPResponse.json(
             status: 200,
             extraHeaders: corsHeaders,
             body: [
                 "count": keys.count,
                 "sources": Array(sources),
-                "canonicalKeys": Array(keys)
+                "canonicalKeys": Array(keys),
+                "mediaCanonicalKeys": Array(mediaKeys)
             ]
         )
     }
@@ -459,11 +460,14 @@ public actor LocalExtensionBridgeServer {
         let skipDuplicates = (body["skipDuplicates"] as? Bool) ?? false
 
         var knownKeys: Set<String> = []
-        if skipDuplicates {
-            knownKeys = (try? await fetchExistingSourceKeys().keys) ?? []
+        var knownMediaKeys: Set<String> = []
+        if skipDuplicates, let existing = try? await fetchExistingSourceKeys() {
+            knownKeys = existing.keys
+            knownMediaKeys = existing.mediaKeys
         }
 
         var parsedInputs: [CaptureInput] = []
+        var tweetMediaJobs: [TweetMediaBatchJob] = []
         var skipped = 0
 
         for item in rawInputs {
@@ -532,24 +536,37 @@ public actor LocalExtensionBridgeServer {
                 }
                 parsedInputs.append(.socialBookmark(meta, coverImageData: coverData, tags: tags))
 
+            case "socialMedia", "tweetMedia":
+                guard let job = Self.parseSocialMediaJob(item) else { continue }
+                if skipDuplicates {
+                    if !knownMediaKeys.insert(job.dedupKey).inserted {
+                        skipped += 1
+                        continue
+                    }
+                }
+                tweetMediaJobs.append(job)
+
             default:
                 continue
             }
         }
 
-        if parsedInputs.isEmpty && skipped > 0 {
+        if parsedInputs.isEmpty && tweetMediaJobs.isEmpty && skipped > 0 {
             return HTTPResponse.json(
                 status: 200,
                 extraHeaders: corsHeaders,
                 body: [
                     "assets": [],
                     "created": 0,
+                    "postsImported": 0,
+                    "tweetsImported": 0,
+                    "createdFolders": 0,
                     "skipped": skipped
                 ]
             )
         }
 
-        guard !parsedInputs.isEmpty else {
+        guard !parsedInputs.isEmpty || !tweetMediaJobs.isEmpty else {
             return HTTPResponse.json(
                 status: 400,
                 extraHeaders: corsHeaders,
@@ -557,7 +574,29 @@ public actor LocalExtensionBridgeServer {
             )
         }
 
-        let created = try await engine.ingest(parsedInputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+        var created: [AssetRecord] = []
+        var tweetsImported = 0
+        var createdFolders = 0
+
+        if !parsedInputs.isEmpty {
+            let batchCreated = try await engine.ingest(parsedInputs, targetFolderID: targetFolderID, targetBoardID: targetBoardID)
+            created.append(contentsOf: batchCreated)
+        }
+
+        if !tweetMediaJobs.isEmpty {
+            let mediaResult = try await ingestTweetMediaJobs(
+                tweetMediaJobs,
+                rootFolderID: targetFolderID,
+                targetBoardID: targetBoardID
+            )
+            created.append(contentsOf: mediaResult.assets)
+            tweetsImported += mediaResult.tweetsImported
+            createdFolders += mediaResult.createdFolders
+        }
+
+        if createdFolders > 0 {
+            onLibraryMutated?(.folderCreate, createdFolders, targetFolderID, nil)
+        }
         if !created.isEmpty {
             onLibraryMutated?(.ingest, created.count, targetFolderID, targetBoardID)
         }
@@ -579,6 +618,9 @@ public actor LocalExtensionBridgeServer {
             body: [
                 "assets": serializedAssets,
                 "created": created.count,
+                "postsImported": tweetsImported,
+                "tweetsImported": tweetsImported,
+                "createdFolders": createdFolders,
                 "skipped": skipped
             ]
         )
@@ -651,15 +693,456 @@ public actor LocalExtensionBridgeServer {
 
     // MARK: - Helpers
 
-    private func fetchExistingSourceKeys() async throws -> (sources: Set<String>, keys: Set<String>) {
+    private struct TweetMediaBatchJob: Sendable {
+        let platform: SocialPlatform
+        let postID: String
+        let dedupKey: String
+        let originalURL: String
+        let authorName: String
+        let authorHandle: String
+        let publishedAtText: String?
+        let title: String
+        let bodyText: String
+        let subfolderName: String?
+        let organizeMode: String
+        let includeVideos: Bool
+        let hasVideo: Bool
+        let needsEnrich: Bool
+        let refererURL: URL?
+        let tags: [String]
+        let media: [XPostMedia]
+    }
+
+    private static func parseSocialMediaJob(_ item: [String: Any]) -> TweetMediaBatchJob? {
+        guard let rawURL = (item["originalURL"] as? String ?? item["url"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: rawURL),
+              WebBookmark.isWebURL(url) else {
+            return nil
+        }
+
+        let parsedSocialRef = SocialPostURLParser.parse(url)
+        let rawPlatform = (item["platform"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let platform: SocialPlatform = {
+            if let explicit = SocialPlatform(rawValue: rawPlatform) { return explicit }
+            if let parsed = parsedSocialRef?.platform { return parsed }
+            return .x
+        }()
+
+        let rawID = (
+            (item["postID"] as? String)
+            ?? (item["tweetID"] as? String)
+            ?? ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let derivedID: String = {
+            if !rawID.isEmpty { return rawID }
+            if let ref = parsedSocialRef {
+                switch ref {
+                case .x(let xRef): return xRef.tweetID
+                case .threads(_, let pid, _): return pid
+                case .bluesky(_, let rkey, _): return rkey
+                case .xiaohongshu(let xhsRef): return xhsRef.noteID ?? ""
+                case .pixiv(let illustID, _): return illustID
+                case .instagram(let code, _): return code
+                }
+            }
+            return ""
+        }()
+
+        let safePostID = derivedID
+            .filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
+        guard !safePostID.isEmpty, safePostID.count <= 64 else {
+            return nil
+        }
+
+        let rawHandle: String = {
+            if let explicit = (item["authorHandle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !explicit.isEmpty {
+                return explicit.trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+            }
+            if let ref = parsedSocialRef {
+                switch ref {
+                case .x(let xRef): return xRef.handle
+                case .threads(let h, _, _): return h
+                case .bluesky(let h, _, _): return h
+                case .xiaohongshu, .pixiv, .instagram: return platform.rawValue
+                }
+            }
+            return platform == .x ? "i" : platform.rawValue
+        }()
+        let authorHandle = rawHandle.isEmpty ? platform.rawValue : rawHandle
+        let rawName = ((item["authorName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let authorName = rawName.isEmpty ? authorHandle : rawName
+        let title = ((item["title"] as? String ?? item["articleTitle"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyText = ((item["bodyText"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let publishedAtText = (item["publishedAtText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subfolderName = (item["subfolderName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawOrg = ((item["organizeMode"] as? String) ?? "per_post").lowercased()
+        let organizeMode = rawOrg == "per_tweet" ? "per_post" : rawOrg
+        let includeVideos = (item["includeVideos"] as? Bool) ?? true
+        let hasVideo = (item["hasVideo"] as? Bool) ?? false
+        let needsEnrich = (item["needsEnrich"] as? Bool) ?? false
+        let tags = (item["tags"] as? [String] ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let refererURL: URL? = {
+            if let rawRef = (item["referer"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let parsed = URL(string: rawRef),
+               WebBookmark.isWebURL(parsed) {
+                return parsed
+            }
+            switch platform {
+            case .pixiv: return URL(string: "https://www.pixiv.net/")
+            case .xiaohongshu: return URL(string: "https://www.xiaohongshu.com/")
+            case .instagram: return URL(string: "https://www.instagram.com/")
+            case .threads: return URL(string: "https://www.threads.net/")
+            case .x, .bluesky: return nil
+            }
+        }()
+
+        let explicitDedupKey = (item["dedupKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dedupKey: String = {
+            if let explicitDedupKey, !explicitDedupKey.isEmpty { return explicitDedupKey }
+            if let ref = parsedSocialRef { return ref.dedupKey }
+            switch platform {
+            case .x: return "x:\(safePostID)"
+            case .pixiv: return "pixiv:\(safePostID)"
+            case .instagram: return "ig:\(safePostID)"
+            case .threads: return "threads:\(safePostID)"
+            case .bluesky: return "bsky:\(authorHandle.lowercased()):\(safePostID)"
+            case .xiaohongshu: return "xhs:\(safePostID.lowercased())"
+            }
+        }()
+
+        var mediaItems: [XPostMedia] = []
+        var seenURLs = Set<String>()
+        if let rawMedia = item["media"] as? [[String: Any]] {
+            for entry in rawMedia {
+                guard let urlStr = (entry["url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      let mediaURL = URL(string: urlStr),
+                      WebBookmark.isWebURL(mediaURL),
+                      seenURLs.insert(urlStr).inserted else {
+                    continue
+                }
+                let kindStr = (entry["kind"] as? String ?? "photo").lowercased()
+                let kind: XPostMedia.Kind = switch kindStr {
+                case "video": .video
+                case "gif", "animated_gif": .gif
+                default: .photo
+                }
+                let thumb = (entry["thumbnailURL"] as? String)
+                    .flatMap { URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    .flatMap { WebBookmark.isWebURL($0) ? $0 : nil }
+                mediaItems.append(XPostMedia(kind: kind, url: mediaURL, thumbnailURL: thumb))
+            }
+        }
+
+        return TweetMediaBatchJob(
+            platform: platform,
+            postID: safePostID,
+            dedupKey: dedupKey,
+            originalURL: parsedSocialRef?.canonicalURL.absoluteString ?? rawURL,
+            authorName: authorName,
+            authorHandle: authorHandle,
+            publishedAtText: (publishedAtText?.isEmpty == false) ? publishedAtText : nil,
+            title: title,
+            bodyText: bodyText,
+            subfolderName: (subfolderName?.isEmpty == false) ? subfolderName : nil,
+            organizeMode: organizeMode,
+            includeVideos: includeVideos,
+            hasVideo: hasVideo,
+            needsEnrich: needsEnrich,
+            refererURL: refererURL,
+            tags: tags,
+            media: mediaItems
+        )
+    }
+
+    private func ingestTweetMediaJobs(
+        _ jobs: [TweetMediaBatchJob],
+        rootFolderID: UUID?,
+        targetBoardID: UUID?
+    ) async throws -> (assets: [AssetRecord], tweetsImported: Int, createdFolders: Int) {
+        var existingFolders = try await engine.fetchFolders()
+        var createdAssets: [AssetRecord] = []
+        var tweetsImported = 0
+        var createdFoldersCount = 0
+
+        let stagingRoot = FileManager.default.temporaryDirectory
+            .appending(path: "charkle-social-author-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingRoot) }
+
+        for job in jobs {
+            var resolvedMedia = job.media
+            let resolvedTitle = job.title
+            var resolvedBody = job.bodyText
+            var resolvedAuthorName = job.authorName
+            var resolvedHandle = job.authorHandle
+            var resolvedPublishedAt = job.publishedAtText
+
+            let hasDirectVideoFile = resolvedMedia.contains {
+                ($0.kind == .video || $0.kind == .gif) && $0.url.absoluteString.lowercased().contains(".mp4")
+            }
+            let shouldResolveOnline = job.needsEnrich
+                || resolvedMedia.isEmpty
+                || (job.platform == .x && job.includeVideos && job.hasVideo && !hasDirectVideoFile)
+
+            if shouldResolveOnline {
+                if job.platform == .x {
+                    let ref = XPostReference(handle: job.authorHandle, tweetID: job.postID)
+                    if let resolved = await XPostResolver.resolve(ref) {
+                        if !resolved.media.isEmpty {
+                            resolvedMedia = resolved.media
+                        }
+                        if resolvedBody.isEmpty && !resolved.text.isEmpty {
+                            resolvedBody = resolved.text
+                        }
+                        if !resolved.authorName.isEmpty {
+                            resolvedAuthorName = resolved.authorName
+                        }
+                        if !resolved.authorHandle.isEmpty {
+                            resolvedHandle = resolved.authorHandle
+                        }
+                        if resolvedPublishedAt == nil, let createdAt = resolved.createdAt {
+                            resolvedPublishedAt = createdAt
+                        }
+                    }
+                } else if job.platform == .bluesky, let url = URL(string: job.originalURL),
+                          let ref = SocialPostURLParser.parse(url),
+                          let resolved = await SocialPostResolver.resolve(ref) {
+                    let enrichedMedia: [XPostMedia] = resolved.metadata.attachments.compactMap { att in
+                        guard let mediaURL = URL(string: att.url), WebBookmark.isWebURL(mediaURL) else { return nil }
+                        let kind: XPostMedia.Kind = switch att.kind {
+                        case .photo: .photo
+                        case .video: .video
+                        case .gif: .gif
+                        }
+                        let thumb = att.thumbnailURL.flatMap(URL.init(string:))
+                        return XPostMedia(kind: kind, url: mediaURL, thumbnailURL: thumb)
+                    }
+                    if !enrichedMedia.isEmpty {
+                        resolvedMedia = enrichedMedia
+                    }
+                    if resolvedBody.isEmpty && !resolved.metadata.bodyText.isEmpty {
+                        resolvedBody = resolved.metadata.bodyText
+                    }
+                    if !resolved.metadata.authorName.isEmpty {
+                        resolvedAuthorName = resolved.metadata.authorName
+                    }
+                    if !resolved.metadata.authorHandle.isEmpty {
+                        resolvedHandle = resolved.metadata.authorHandle
+                    }
+                    if resolvedPublishedAt == nil, let published = resolved.metadata.publishedAtText {
+                        resolvedPublishedAt = published
+                    }
+                }
+            }
+
+            if !job.includeVideos {
+                resolvedMedia = resolvedMedia.filter { $0.kind == .photo }
+            }
+            guard !resolvedMedia.isEmpty else { continue }
+
+            let tweetFolderID: UUID?
+            if job.organizeMode == "flat" {
+                tweetFolderID = rootFolderID
+            } else if job.organizeMode == "multi_only" && resolvedMedia.count < 2 {
+                tweetFolderID = rootFolderID
+            } else {
+                let headlineSource = resolvedTitle.isEmpty ? resolvedBody : resolvedTitle
+                let folderName = (job.subfolderName
+                    ?? Self.synthesizePostSubfolderName(
+                        platform: job.platform,
+                        postID: job.postID,
+                        publishedAtText: resolvedPublishedAt,
+                        headlineSource: headlineSource
+                    )).trimmingCharacters(in: .whitespacesAndNewlines)
+                if let existing = existingFolders.first(where: {
+                    $0.parentID == rootFolderID && $0.name.caseInsensitiveCompare(folderName) == .orderedSame
+                }) {
+                    tweetFolderID = existing.id
+                } else {
+                    let created = try await engine.createFolder(name: folderName, parentID: rootFolderID)
+                    existingFolders.append(created)
+                    createdFoldersCount += 1
+                    tweetFolderID = created.id
+                }
+            }
+
+            let postDir = stagingRoot.appending(path: "\(job.platform.rawValue)_\(job.postID)", directoryHint: .isDirectory)
+            try? FileManager.default.createDirectory(at: postDir, withIntermediateDirectories: true)
+
+            let dateCompact = Self.compactDatePrefix(from: resolvedPublishedAt)
+            let mediaToDownload = resolvedMedia
+            let handleForFile = resolvedHandle
+            let postID = job.postID
+            let refererForDownload = job.refererURL
+
+            let downloaded: [(index: Int, url: URL)] = await withTaskGroup(of: (Int, URL?).self) { group in
+                for (idx, item) in mediaToDownload.enumerated() {
+                    let orderStr = String(format: "%02d", idx + 1)
+                    let baseName = dateCompact.isEmpty
+                        ? "\(handleForFile)_\(postID)_\(orderStr)"
+                        : "\(dateCompact)_\(handleForFile)_\(postID)_\(orderStr)"
+                    group.addTask {
+                        let saved = await XPostResolver.downloadMedia(
+                            item,
+                            to: postDir,
+                            baseName: baseName,
+                            referer: refererForDownload
+                        )
+                        return (idx, saved)
+                    }
+                }
+                var results: [(Int, URL)] = []
+                for await (idx, saved) in group {
+                    if let saved { results.append((idx, saved)) }
+                }
+                return results.sorted { $0.0 < $1.0 }
+            }
+
+            guard !downloaded.isEmpty else { continue }
+
+            let inputs = downloaded.map { CaptureInput.fileURL($0.url) }
+            let ingested = try await engine.ingest(inputs, targetFolderID: tweetFolderID, targetBoardID: targetBoardID)
+            guard !ingested.isEmpty else { continue }
+
+            let cleanSnippet = Self.cleanTweetHeadline(resolvedTitle.isEmpty ? resolvedBody : resolvedTitle)
+            var noteSections: [String] = []
+            let authorLine: String = {
+                if job.platform == .pixiv || job.platform == .xiaohongshu {
+                    return resolvedAuthorName
+                }
+                return resolvedAuthorName.caseInsensitiveCompare(resolvedHandle) == .orderedSame
+                    ? "@\(resolvedHandle)"
+                    : "\(resolvedAuthorName) (@\(resolvedHandle))"
+            }()
+            noteSections.append(authorLine)
+            if !resolvedTitle.isEmpty {
+                noteSections.append(resolvedTitle)
+            }
+            if let published = resolvedPublishedAt, !published.isEmpty {
+                noteSections.append("发布时间：\(published)")
+            }
+            if !resolvedBody.isEmpty && resolvedBody != resolvedTitle {
+                noteSections.append(resolvedBody)
+            }
+            let sourcePrefix: String = switch job.platform {
+            case .x: "原推文："
+            case .pixiv: "原作品："
+            case .xiaohongshu: "原笔记："
+            case .bluesky, .threads, .instagram: "原贴文："
+            }
+            noteSections.append("\(sourcePrefix)\(job.originalURL)")
+            let formattedNotes = noteSections.joined(separator: "\n\n")
+
+            var mergedTags = Set(job.tags)
+            mergedTags.insert(job.platform.displayName)
+            if job.platform == .pixiv || job.platform == .xiaohongshu {
+                if !resolvedAuthorName.isEmpty { mergedTags.insert(resolvedAuthorName) }
+            } else {
+                mergedTags.insert("@\(resolvedHandle)")
+                if !resolvedAuthorName.isEmpty && resolvedAuthorName.caseInsensitiveCompare(resolvedHandle) != .orderedSame {
+                    mergedTags.insert(resolvedAuthorName)
+                }
+            }
+            let sortedTags = mergedTags.sorted()
+
+            let totalCount = ingested.count
+            let authorPrefix: String = (job.platform == .pixiv || job.platform == .xiaohongshu)
+                ? resolvedAuthorName
+                : "@\(resolvedHandle)"
+            for (idx, asset) in ingested.enumerated() {
+                let baseTitle: String = {
+                    if !cleanSnippet.isEmpty {
+                        return "\(authorPrefix) · \(cleanSnippet)"
+                    }
+                    return "\(authorPrefix) · \(job.postID)"
+                }()
+                let finalTitle = totalCount > 1 ? "\(baseTitle) (\(idx + 1)/\(totalCount))" : baseTitle
+                let patch = AssetBatchPatch(
+                    assetIDs: [asset.id],
+                    title: finalTitle,
+                    notes: formattedNotes,
+                    sourceURL: job.originalURL,
+                    addTags: sortedTags
+                )
+                if let updated = try? await engine.updateAssets(patch).first {
+                    createdAssets.append(updated)
+                } else {
+                    createdAssets.append(asset)
+                }
+            }
+            tweetsImported += 1
+        }
+
+        return (createdAssets, tweetsImported, createdFoldersCount)
+    }
+
+    private static func compactDatePrefix(from publishedAtText: String?) -> String {
+        guard let raw = publishedAtText else { return "" }
+        let digits = raw.prefix(10).filter(\.isNumber)
+        if digits.count == 8 { return String(digits) }
+        return ""
+    }
+
+    private static func cleanTweetHeadline(_ body: String, maxLength: Int = 36) -> String {
+        let noLinks = body.replacingOccurrences(
+            of: #"https?://t\.co/\S+"#,
+            with: "",
+            options: .regularExpression
+        )
+        let disallowed = CharacterSet(charactersIn: "/:\\*?\"<>|").union(.controlCharacters)
+        let collapsed = noLinks
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .components(separatedBy: disallowed)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(collapsed.prefix(maxLength)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func synthesizePostSubfolderName(
+        platform: SocialPlatform,
+        postID: String,
+        publishedAtText: String?,
+        headlineSource: String
+    ) -> String {
+        let suffix = postID.count > 6 ? String(postID.suffix(6)) : postID
+        let datePart: String = {
+            guard let raw = publishedAtText?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  raw.count >= 10 else { return "" }
+            let prefix = String(raw.prefix(10))
+            return prefix.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil ? prefix : ""
+        }()
+        let snippet = cleanTweetHeadline(headlineSource, maxLength: 28)
+        var parts: [String] = []
+        if !datePart.isEmpty { parts.append(datePart) }
+        if !snippet.isEmpty {
+            parts.append("\(snippet) [\(suffix)]")
+        } else {
+            parts.append("\(platform.postNoun) \(postID)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func fetchExistingSourceKeys() async throws -> (sources: Set<String>, keys: Set<String>, mediaKeys: Set<String>) {
         let assets = try await engine.fetchAssets(matching: FilterCriteria())
         var sources = Set<String>()
         var keys = Set<String>()
+        var mediaKeys = Set<String>()
         for asset in assets {
+            let isRealMedia = asset.mediaKind == .image || asset.mediaKind == .animatedImage || asset.mediaKind == .video
             if let src = asset.sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines), !src.isEmpty {
                 sources.insert(src)
                 if let key = SocialPostResolver.canonicalDedupKey(for: src) {
                     keys.insert(key)
+                    if isRealMedia { mediaKeys.insert(key) }
                 }
             }
             if let orig = asset.richMetadata?.socialPost?.originalURL.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -667,10 +1150,11 @@ public actor LocalExtensionBridgeServer {
                 sources.insert(orig)
                 if let key = SocialPostResolver.canonicalDedupKey(for: orig) {
                     keys.insert(key)
+                    if isRealMedia { mediaKeys.insert(key) }
                 }
             }
         }
-        return (sources, keys)
+        return (sources, keys, mediaKeys)
     }
 
     private func validateBearerToken(header: String?) -> Bool {

@@ -16,6 +16,7 @@ public struct SettingsOverlayView: View {
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
     public let onEnterMinimalCaptureMode: () -> Void
     public let onImportMaterialPackage: (() -> Void)?
+    public let onOpenSmartDeduplication: (() -> Void)?
     public let onClose: () -> Void
 
     public init(
@@ -28,6 +29,7 @@ public struct SettingsOverlayView: View {
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
         onEnterMinimalCaptureMode: @escaping () -> Void = {},
         onImportMaterialPackage: (() -> Void)? = nil,
+        onOpenSmartDeduplication: (() -> Void)? = nil,
         onClose: @escaping () -> Void
     ) {
         self.coordinator = coordinator
@@ -39,6 +41,7 @@ public struct SettingsOverlayView: View {
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
         self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
         self.onImportMaterialPackage = onImportMaterialPackage
+        self.onOpenSmartDeduplication = onOpenSmartDeduplication
         self.onClose = onClose
     }
 
@@ -63,6 +66,7 @@ public struct SettingsOverlayView: View {
                     onSyncDefaultNotchTarget: onSyncDefaultNotchTarget,
                     onEnterMinimalCaptureMode: onEnterMinimalCaptureMode,
                     onImportMaterialPackage: onImportMaterialPackage,
+                    onOpenSmartDeduplication: onOpenSmartDeduplication,
                     onClose: onClose
                 )
                 .frame(width: modalWidth, height: modalHeight)
@@ -117,6 +121,7 @@ public struct SettingsContentShell: View {
     public let onSyncDefaultNotchTarget: (NotchTargetMode) -> Void
     public let onEnterMinimalCaptureMode: () -> Void
     public let onImportMaterialPackage: (() -> Void)?
+    public let onOpenSmartDeduplication: (() -> Void)?
     public let onClose: (() -> Void)?
 
     public init(
@@ -129,6 +134,7 @@ public struct SettingsContentShell: View {
         onSyncDefaultNotchTarget: @escaping (NotchTargetMode) -> Void = { _ in },
         onEnterMinimalCaptureMode: @escaping () -> Void = {},
         onImportMaterialPackage: (() -> Void)? = nil,
+        onOpenSmartDeduplication: (() -> Void)? = nil,
         onClose: (() -> Void)? = nil
     ) {
         self.coordinator = coordinator
@@ -140,6 +146,7 @@ public struct SettingsContentShell: View {
         self.onSyncDefaultNotchTarget = onSyncDefaultNotchTarget
         self.onEnterMinimalCaptureMode = onEnterMinimalCaptureMode
         self.onImportMaterialPackage = onImportMaterialPackage
+        self.onOpenSmartDeduplication = onOpenSmartDeduplication
         self.onClose = onClose
     }
 
@@ -336,7 +343,8 @@ public struct SettingsContentShell: View {
             LibrarySettingsPane(
                 coordinator: coordinator,
                 syncAndAI: syncAndAI,
-                onImportMaterialPackage: onImportMaterialPackage
+                onImportMaterialPackage: onImportMaterialPackage,
+                onOpenSmartDeduplication: onOpenSmartDeduplication
             )
         case .sync:
             SyncSettingsPane(coordinator: coordinator, syncAndAI: syncAndAI)
