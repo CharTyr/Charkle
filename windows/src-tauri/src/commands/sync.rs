@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use charkle_core::models::sync::{DriveSyncConfig, SyncReport, SyncStatus};
+use charkle_core::models::sync::{
+    DriveAccountInfo, DriveSyncConfig, DriveTransportMode, ICloudDriveAvailability,
+    SyncBackendProfile, SyncReport, SyncStatus,
+};
 use charkle_core::sync::{
     DirectAPITransport, DriveTransport, GoogleOAuthClientConfig, WebDAVTransport,
 };
@@ -8,7 +11,7 @@ use serde::Serialize;
 use tauri::State;
 
 use super::media::open_validated_http_url;
-use super::{AppState, IpcError, IpcResult};
+use super::{parse_uuid, AppState, IpcError, IpcResult};
 
 const WEBDAV_PASSWORD_VAULT_KEY: &str = "sync.webdav.password";
 
@@ -24,6 +27,14 @@ pub struct SyncAuthStateDto {
 pub struct WebdavTestResultDto {
     pub ok: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendTestResultDto {
+    pub ok: bool,
+    pub message: String,
+    pub account: Option<DriveAccountInfo>,
 }
 
 #[tauri::command]
@@ -118,7 +129,10 @@ pub async fn sign_in_google_drive(state: State<'_, AppState>) -> IpcResult<SyncS
             message: "请先配置 Google OAuth Client ID 或导入凭证文件。".to_string(),
         })?;
     let sync_cfg = state.engine.sync_config();
-    let full_drive_scope = !sync_cfg.shared_folder_url_or_id.trim().is_empty();
+    let full_drive_scope = sync_cfg.resolved_backends().iter().any(|b| {
+        b.mode == DriveTransportMode::DirectApiWithGDirect
+            && !b.shared_folder_url_or_id.trim().is_empty()
+    });
 
     state
         .engine
@@ -131,6 +145,10 @@ pub async fn sign_in_google_drive(state: State<'_, AppState>) -> IpcResult<SyncS
 
     let transport = DirectAPITransport::new(Arc::clone(state.engine.oauth()), &[]);
     if let Ok(info) = transport.account_info().await {
+        let _ = state
+            .engine
+            .database()
+            .set_state("googleDirectAccount", Some(&info));
         state
             .engine
             .sync_engine()
@@ -148,6 +166,10 @@ pub async fn sign_out_google_drive(state: State<'_, AppState>) -> IpcResult<Sync
         .sign_out()
         .await
         .map_err(IpcError::from)?;
+    let _ = state
+        .engine
+        .database()
+        .set_state::<DriveAccountInfo>("googleDirectAccount", None);
     let sync_cfg = state.engine.sync_config();
     state
         .engine
@@ -214,4 +236,73 @@ pub async fn test_webdav_connection(
             message: err.to_string(),
         }),
     }
+}
+
+#[tauri::command]
+pub fn probe_icloud_drive_availability(state: State<'_, AppState>) -> ICloudDriveAvailability {
+    state.engine.probe_icloud_drive_availability()
+}
+
+#[tauri::command]
+pub async fn save_backend_webdav_password(
+    state: State<'_, AppState>,
+    backend_id: String,
+    password: String,
+) -> IpcResult<()> {
+    let id = parse_uuid(&backend_id)?;
+    state
+        .engine
+        .save_backend_webdav_password(id, &password)
+        .await
+        .map_err(IpcError::from)
+}
+
+#[tauri::command]
+pub async fn has_backend_webdav_password(
+    state: State<'_, AppState>,
+    backend_id: String,
+) -> IpcResult<bool> {
+    let id = parse_uuid(&backend_id)?;
+    Ok(state.engine.has_backend_webdav_password(id).await)
+}
+
+#[tauri::command]
+pub async fn test_backend_connection(
+    state: State<'_, AppState>,
+    profile: SyncBackendProfile,
+    webdav_password: Option<String>,
+) -> IpcResult<BackendTestResultDto> {
+    let trimmed_pwd = webdav_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match state
+        .engine
+        .test_backend_connection(&profile, trimmed_pwd)
+        .await
+    {
+        Ok(account) => {
+            let target = account
+                .display_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(account.email.as_str());
+            Ok(BackendTestResultDto {
+                ok: true,
+                message: format!("连接成功：{target}（{}）", account.source),
+                account: Some(account),
+            })
+        }
+        Err(err) => Ok(BackendTestResultDto {
+            ok: false,
+            message: err.to_string(),
+            account: None,
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_backend(state: State<'_, AppState>, backend_id: String) -> IpcResult<SyncReport> {
+    let id = parse_uuid(&backend_id)?;
+    state.engine.sync_backend(id).await.map_err(IpcError::from)
 }

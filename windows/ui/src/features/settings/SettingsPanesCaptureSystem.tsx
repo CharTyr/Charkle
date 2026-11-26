@@ -1063,7 +1063,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
   const copyDiagnostics = async () => {
     const payload = JSON.stringify(
       {
-        appVersion: diagnostics?.appVersion ?? '1.3.0',
+        appVersion: diagnostics?.appVersion ?? '1.4.0',
         schemaVersion: diagnostics?.schemaVersion ?? 2,
         dataDir: diagnostics?.dataDir,
         databasePath: diagnostics?.databasePath,
@@ -1273,7 +1273,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
           <SettingsRow
             title="检查软件更新"
             subtitle={(() => {
-              const displayVer = diagnostics?.appVersion ?? updateCurrentVersion ?? '1.3.0';
+              const displayVer = diagnostics?.appVersion ?? updateCurrentVersion ?? '1.4.0';
               switch (updateState.status) {
                 case 'checking':
                   return '正在连接 GitHub Releases 检查最新版本…';
@@ -1388,7 +1388,7 @@ export const AdvancedAboutSettingsPane: React.FC = () => {
             <div className="flex items-center gap-2">
               <span className="text-[14px] font-semibold text-[var(--text-primary)]">Charkle</span>
               <span className="text-[11px] font-medium charkle-mono text-[var(--text-secondary)] charkle-tabular">
-                v{diagnostics?.appVersion ?? updateCurrentVersion ?? '1.3.0'}
+                v{diagnostics?.appVersion ?? updateCurrentVersion ?? '1.4.0'}
               </span>
             </div>
             <span className="text-[12px] text-[var(--text-secondary)]">

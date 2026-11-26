@@ -223,6 +223,14 @@ impl DriveTransport for LocalFolderTransport {
         &self.core.display_name
     }
 
+    fn is_path_based_transport(&self) -> bool {
+        true
+    }
+
+    fn accepts_remote_id(&self, id: &str) -> bool {
+        !id.is_empty() && !id.starts_with("mounted-") && !id.starts_with("icloud-path:")
+    }
+
     async fn account_info(&self) -> CoreResult<DriveAccountInfo> {
         self.core.ensure_available()?;
         let label = self.core.root_dir.to_string_lossy().into_owned();
@@ -418,6 +426,10 @@ impl DriveTransport for MountedVolumeTransport {
     }
 
     fn is_mounted_volume(&self) -> bool {
+        true
+    }
+
+    fn is_path_based_transport(&self) -> bool {
         true
     }
 

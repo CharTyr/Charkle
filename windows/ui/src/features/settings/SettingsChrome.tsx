@@ -14,8 +14,14 @@ import {
   type FluentButtonVariant,
   type ModalWidth,
 } from '../../design-system';
-import type { DriveSyncConfig, DriveTransportMode, WireDate } from '../../types/domain';
-import { wireDateToMs } from '../../types/domain';
+import {
+  backendLocationSummary,
+  enabledBackends,
+  wireDateToMs,
+  type DriveSyncConfig,
+  type DriveTransportMode,
+  type WireDate,
+} from '../../types/domain';
 
 /**
  * Fluent 2 Desktop Settings Chrome (fluent2-design-system.md §4 & §5):
@@ -96,6 +102,8 @@ export function storageModeHeadline(mode: DriveTransportMode): string {
       return '纯本地文件夹';
     case 'directAPIWithGDirect':
       return 'Google Drive 云端直连';
+    case 'iCloudDrive':
+      return 'iCloud Drive 云同步';
     case 'gdirectMount':
       return 'Google Drive（本地挂载盘）';
     case 'webDAV':
@@ -108,9 +116,26 @@ export function activeStorageLocationSummary(
   fallbackDataDir?: string | null,
 ): string {
   if (!cfg) return fallbackDataDir || '默认本机素材库目录';
+  const enabled = enabledBackends(cfg);
+  if (enabled.length > 1) {
+    const names = enabled
+      .map((b) => (b.name?.trim() ? b.name.trim() : storageModeHeadline(b.mode)))
+      .join(' + ');
+    return `${enabled.length} 个同步后端：${names}`;
+  }
   switch (cfg.mode) {
     case 'localOnly':
       return cfg.localLibraryPath.trim() || fallbackDataDir || '默认本机素材库目录';
+    case 'iCloudDrive': {
+      const custom = (cfg.iCloudCustomFolderPath ?? '').trim();
+      if (custom) {
+        const parts = custom.replace(/[\\/]+$/, '').split(/[\\/]/);
+        const leaf = parts[parts.length - 1] || 'Charkle';
+        return `iCloud Drive / ${leaf}`;
+      }
+      const folder = (cfg.iCloudFolderName ?? '').trim().replace(/^[/\\]+|[/\\]+$/g, '') || 'Charkle';
+      return `iCloud Drive / ${folder}`;
+    }
     case 'webDAV': {
       const urlStr = cfg.webDAVServerURL.trim();
       let host = urlStr;
@@ -136,6 +161,8 @@ export function activeStorageLocationSummary(
     }
   }
 }
+
+export { backendLocationSummary };
 
 export const SettingsCard: React.FC<{
   className?: string;

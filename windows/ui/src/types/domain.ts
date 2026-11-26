@@ -638,9 +638,39 @@ export interface EditorialLayoutResult {
 
 export type DriveTransportMode =
   | 'directAPIWithGDirect'
+  | 'iCloudDrive'
   | 'webDAV'
   | 'gdirectMount'
   | 'localOnly';
+
+export const LEGACY_PRIMARY_BACKEND_ID = '00000000-0000-0000-0000-000000000001';
+
+export interface ICloudDriveAvailability {
+  isUbiquityContainerAvailable: boolean;
+  ubiquityDocumentsPath?: string | null;
+  systemCloudDocsPath?: string | null;
+  defaultDisplayLocation: string;
+}
+
+export interface SyncBackendProfile {
+  id: string;
+  name: string;
+  mode: DriveTransportMode;
+  isEnabled: boolean;
+  isPrimary: boolean;
+  rootFolderName: string;
+  sharedFolderURLOrID: string;
+  mountPath: string;
+  selectedGDirectAccount?: string | null;
+  useGDirectIPAcceleration: boolean;
+  iCloudFolderName: string;
+  iCloudCustomFolderPath: string;
+  iCloudContainerIdentifier: string;
+  webDAVServerURL: string;
+  webDAVUsername: string;
+  webDAVRemotePath: string;
+  localLibraryPath: string;
+}
 
 export interface DriveSyncConfig {
   mode: DriveTransportMode;
@@ -649,6 +679,8 @@ export interface DriveSyncConfig {
   mountPath: string;
   selectedGDirectAccount?: string | null;
   useGDirectIPAcceleration: boolean;
+  iCloudFolderName?: string;
+  iCloudCustomFolderPath?: string;
   webDAVServerURL: string;
   webDAVUsername: string;
   webDAVRemotePath: string;
@@ -656,6 +688,7 @@ export interface DriveSyncConfig {
   autoSyncIntervalSeconds: number;
   syncThumbnails: boolean;
   syncEmbeddings: boolean;
+  backends?: SyncBackendProfile[];
 }
 
 export interface DriveAccountInfo {
@@ -674,6 +707,21 @@ export type SyncPhase =
   | { downloading: { completed: number; total: number } }
   | { error: string };
 
+export interface SyncBackendStatus {
+  backendID: string;
+  name: string;
+  mode: DriveTransportMode;
+  isEnabled: boolean;
+  isPrimary: boolean;
+  locationSummary: string;
+  phase: SyncPhase;
+  lastSyncedAt?: WireDate | null;
+  lastError?: string | null;
+  currentDetail?: string | null;
+  progressFraction?: number | null;
+  account?: DriveAccountInfo | null;
+}
+
 export interface SyncStatus {
   phase: SyncPhase;
   lastSyncedAt?: WireDate | null;
@@ -683,6 +731,173 @@ export interface SyncStatus {
   lastError?: string | null;
   currentDetail?: string | null;
   progressFraction?: number | null;
+  backendStatuses?: SyncBackendStatus[];
+}
+
+export interface BackendTestResultDto {
+  ok: boolean;
+  message: string;
+  account?: DriveAccountInfo | null;
+}
+
+export function backendModeLabel(mode: DriveTransportMode): string {
+  switch (mode) {
+    case 'directAPIWithGDirect':
+      return 'Google Drive';
+    case 'iCloudDrive':
+      return 'iCloud Drive';
+    case 'webDAV':
+      return 'WebDAV 云盘';
+    case 'gdirectMount':
+      return 'Google Drive 挂载盘';
+    case 'localOnly':
+      return '纯本地文件夹';
+  }
+}
+
+export function createDefaultBackendProfile(
+  mode: DriveTransportMode,
+  overrides: Partial<SyncBackendProfile> = {},
+): SyncBackendProfile {
+  const randomId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID().toUpperCase()
+      : `${Date.now().toString(16).padStart(8, '0')}-0000-4000-8000-${Math.floor(Math.random() * 1e12)
+          .toString(16)
+          .padStart(12, '0')}`.toUpperCase();
+  return {
+    id: randomId,
+    name: backendModeLabel(mode),
+    mode,
+    isEnabled: true,
+    isPrimary: false,
+    rootFolderName: 'Charkle',
+    sharedFolderURLOrID: '',
+    mountPath: 'G:\\',
+    selectedGDirectAccount: null,
+    useGDirectIPAcceleration: true,
+    iCloudFolderName: 'Charkle',
+    iCloudCustomFolderPath: '',
+    iCloudContainerIdentifier: '',
+    webDAVServerURL: '',
+    webDAVUsername: '',
+    webDAVRemotePath: '/Charkle',
+    localLibraryPath: '',
+    ...overrides,
+  };
+}
+
+export function resolveBackends(cfg: DriveSyncConfig | null | undefined): SyncBackendProfile[] {
+  if (!cfg) return [];
+  if (cfg.backends && cfg.backends.length > 0) {
+    const list = cfg.backends.map((b) => ({ ...b }));
+    if (!list.some((b) => b.isPrimary)) {
+      list[0].isPrimary = true;
+    }
+    return list;
+  }
+  return [
+    {
+      id: LEGACY_PRIMARY_BACKEND_ID,
+      name: backendModeLabel(cfg.mode),
+      mode: cfg.mode,
+      isEnabled: true,
+      isPrimary: true,
+      rootFolderName: cfg.rootFolderName || 'Charkle',
+      sharedFolderURLOrID: cfg.sharedFolderURLOrID || '',
+      mountPath: cfg.mountPath || 'G:\\',
+      selectedGDirectAccount: cfg.selectedGDirectAccount ?? null,
+      useGDirectIPAcceleration: cfg.useGDirectIPAcceleration ?? true,
+      iCloudFolderName: cfg.iCloudFolderName || 'Charkle',
+      iCloudCustomFolderPath: cfg.iCloudCustomFolderPath || '',
+      iCloudContainerIdentifier: '',
+      webDAVServerURL: cfg.webDAVServerURL || '',
+      webDAVUsername: cfg.webDAVUsername || '',
+      webDAVRemotePath: cfg.webDAVRemotePath || '/Charkle',
+      localLibraryPath: cfg.localLibraryPath || '',
+    },
+  ];
+}
+
+export function enabledBackends(cfg: DriveSyncConfig | null | undefined): SyncBackendProfile[] {
+  return resolveBackends(cfg).filter((b) => b.isEnabled);
+}
+
+export function enabledCloudBackends(cfg: DriveSyncConfig | null | undefined): SyncBackendProfile[] {
+  return enabledBackends(cfg).filter((b) => b.mode !== 'localOnly');
+}
+
+export function synchronizePrimaryFields(cfg: DriveSyncConfig): DriveSyncConfig {
+  if (!cfg.backends || cfg.backends.length === 0) {
+    return { ...cfg };
+  }
+  const list = cfg.backends.map((b) => ({ ...b }));
+  let primaryIdx = list.findIndex((b) => b.isPrimary && b.isEnabled);
+  if (primaryIdx < 0) primaryIdx = list.findIndex((b) => b.isPrimary);
+  if (primaryIdx < 0) primaryIdx = 0;
+  for (let i = 0; i < list.length; i += 1) {
+    list[i].isPrimary = i === primaryIdx;
+  }
+  const p = list[primaryIdx];
+  return {
+    ...cfg,
+    backends: list,
+    mode: p.mode,
+    rootFolderName: p.rootFolderName,
+    sharedFolderURLOrID: p.sharedFolderURLOrID,
+    mountPath: p.mountPath,
+    selectedGDirectAccount: p.selectedGDirectAccount ?? null,
+    useGDirectIPAcceleration: p.useGDirectIPAcceleration,
+    iCloudFolderName: p.iCloudFolderName,
+    iCloudCustomFolderPath: p.iCloudCustomFolderPath,
+    webDAVServerURL: p.webDAVServerURL,
+    webDAVUsername: p.webDAVUsername,
+    webDAVRemotePath: p.webDAVRemotePath,
+    localLibraryPath: p.localLibraryPath,
+  };
+}
+
+export function backendLocationSummary(profile: SyncBackendProfile): string {
+  switch (profile.mode) {
+    case 'localOnly':
+      return profile.localLibraryPath.trim() || '默认本机素材库目录';
+    case 'iCloudDrive': {
+      const custom = (profile.iCloudCustomFolderPath ?? '').trim();
+      if (custom) {
+        const parts = custom.replace(/[\\/]+$/, '').split(/[\\/]/);
+        const leaf = parts[parts.length - 1] || 'Charkle';
+        return `iCloud Drive / ${leaf}`;
+      }
+      const folder = (profile.iCloudFolderName ?? '').trim().replace(/^[/\\]+|[/\\]+$/g, '') || 'Charkle';
+      return `iCloud Drive / ${folder}`;
+    }
+    case 'webDAV': {
+      const urlStr = profile.webDAVServerURL.trim();
+      let host = urlStr;
+      try {
+        host = new URL(urlStr).host || urlStr;
+      } catch {
+        // keep raw host
+      }
+      const remote = profile.webDAVRemotePath.trim() || '/Charkle';
+      return host
+        ? `WebDAV (${host}) / ${remote.replace(/^\/+/, '') || 'Charkle'}`
+        : '尚未配置 WebDAV 服务器';
+    }
+    case 'gdirectMount':
+      return `${profile.mountPath.trim() || 'G:\\'}/${profile.rootFolderName.trim() || 'Charkle'}`;
+    case 'directAPIWithGDirect': {
+      const shared = (profile.sharedFolderURLOrID ?? '').trim();
+      if (shared) {
+        const match =
+          shared.match(/\/folders\/([a-zA-Z0-9_-]{10,})/) ??
+          shared.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+        const id = match ? match[1] : shared;
+        return `Google Drive 共享目录（${id.slice(0, 10)}…）`;
+      }
+      return `Google Drive / ${profile.rootFolderName.trim() || 'Charkle'}`;
+    }
+  }
 }
 
 export interface SyncReport {
@@ -1167,6 +1382,8 @@ export function isDirectGoogleDriveAccount(
   const source = (account.source ?? '').trim().toLowerCase();
   if (
     source === 'webdav' ||
+    source === 'icloud drive' ||
+    source === 'icloud' ||
     source === 'local folder' ||
     source === '本地文件夹' ||
     source === 'mounted drive' ||

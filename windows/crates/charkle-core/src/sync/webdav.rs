@@ -361,6 +361,18 @@ impl DriveTransport for WebDAVTransport {
         "WebDAV"
     }
 
+    fn is_path_based_transport(&self) -> bool {
+        true
+    }
+
+    fn concurrency_limit(&self, direct_default: usize) -> usize {
+        direct_default.clamp(1, 3)
+    }
+
+    fn accepts_remote_id(&self, id: &str) -> bool {
+        !id.is_empty() && !id.starts_with("mounted-") && !id.starts_with("icloud-path:")
+    }
+
     async fn account_info(&self) -> CoreResult<DriveAccountInfo> {
         let method = Method::from_bytes(b"PROPFIND")
             .map_err(|e| CoreError::InvalidPayload(e.to_string()))?;

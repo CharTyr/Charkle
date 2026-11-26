@@ -1,26 +1,31 @@
 import { create } from 'zustand';
 import { getTransport } from '../api/transport';
-import type {
-  AIConnectionTestResult,
-  AIProviderConfig,
-  AIProviderStateDto,
-  CacheStats,
-  CloudAIUsageCategory,
-  DriveSyncConfig,
-  ExternalAgentConfig,
-  ExternalAgentSelfCheckDto,
-  ExternalAgentStateDto,
-  GDirectInstallProgress,
-  GDirectInstallResult,
-  StorageMigrationReport,
-  SyncReport,
-  SyncStatus,
-  SystemDiagnosticsDto,
-  TypeSafeExperimentalConfig,
-  TypeSafeModelInfo,
-  TypeSafeStateDto,
-  TypeSafeTestResultDto,
-  WebdavTestResultDto,
+import {
+  resolveBackends,
+  synchronizePrimaryFields,
+  type AIConnectionTestResult,
+  type AIProviderConfig,
+  type AIProviderStateDto,
+  type BackendTestResultDto,
+  type CacheStats,
+  type CloudAIUsageCategory,
+  type DriveSyncConfig,
+  type ExternalAgentConfig,
+  type ExternalAgentSelfCheckDto,
+  type ExternalAgentStateDto,
+  type GDirectInstallProgress,
+  type GDirectInstallResult,
+  type ICloudDriveAvailability,
+  type StorageMigrationReport,
+  type SyncBackendProfile,
+  type SyncReport,
+  type SyncStatus,
+  type SystemDiagnosticsDto,
+  type TypeSafeExperimentalConfig,
+  type TypeSafeModelInfo,
+  type TypeSafeStateDto,
+  type TypeSafeTestResultDto,
+  type WebdavTestResultDto,
 } from '../types/domain';
 import { useCoordinatorStore } from './coordinatorStore';
 
@@ -31,12 +36,15 @@ function accessLevelTitle(level: ExternalAgentConfig['accessLevel']): string {
 export interface SyncAIState {
   syncConfig: DriveSyncConfig | null;
   syncStatus: SyncStatus | null;
+  iCloudAvailability: ICloudDriveAvailability | null;
   lastSyncReport: SyncReport | null;
   lastMigrationReport: StorageMigrationReport | null;
   cacheStats: CacheStats | null;
   syncing: boolean;
+  syncingBackendId: string | null;
   migrating: boolean;
   testingWebdav: boolean;
+  testingBackend: boolean;
   signingInGoogle: boolean;
   hasGoogleOAuthClient: boolean;
   hasWebdavPassword: boolean;
@@ -71,6 +79,18 @@ export interface SyncAIState {
     webdavPassword?: string,
     opts?: { quiet?: boolean },
   ) => Promise<boolean>;
+  upsertBackend: (
+    profile: SyncBackendProfile,
+    webdavPassword?: string | null,
+  ) => Promise<boolean>;
+  removeBackend: (backendId: string) => Promise<boolean>;
+  setBackendEnabled: (backendId: string, enabled: boolean) => Promise<boolean>;
+  setPrimaryBackend: (backendId: string) => Promise<boolean>;
+  testBackendConnection: (
+    profile: SyncBackendProfile,
+    webdavPassword?: string | null,
+  ) => Promise<BackendTestResultDto>;
+  syncBackend: (backendId: string) => Promise<SyncReport | null>;
   testWebdavConnection: (
     config: DriveSyncConfig,
     password?: string | null,
@@ -117,12 +137,15 @@ export interface SyncAIState {
 export const useSyncAIStore = create<SyncAIState>((set, get) => ({
   syncConfig: null,
   syncStatus: null,
+  iCloudAvailability: null,
   lastSyncReport: null,
   lastMigrationReport: null,
   cacheStats: null,
   syncing: false,
+  syncingBackendId: null,
   migrating: false,
   testingWebdav: false,
+  testingBackend: false,
   signingInGoogle: false,
   hasGoogleOAuthClient: false,
   hasWebdavPassword: false,
@@ -160,16 +183,20 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
 
   async refreshSyncAndCache() {
     const transport = getTransport();
-    const [syncConfigRes, syncStatusRes, cacheStatsRes, authStateRes] = await Promise.allSettled([
-      transport.syncConfig(),
-      transport.syncStatus(),
-      transport.cacheStats(),
-      transport.getSyncAuthState(),
-    ]);
+    const [syncConfigRes, syncStatusRes, cacheStatsRes, authStateRes, icloudRes] =
+      await Promise.allSettled([
+        transport.syncConfig(),
+        transport.syncStatus(),
+        transport.cacheStats(),
+        transport.getSyncAuthState(),
+        transport.probeICloudDriveAvailability(),
+      ]);
     set((s) => ({
       syncConfig: syncConfigRes.status === 'fulfilled' ? syncConfigRes.value : s.syncConfig,
       syncStatus: syncStatusRes.status === 'fulfilled' ? syncStatusRes.value : s.syncStatus,
       cacheStats: cacheStatsRes.status === 'fulfilled' ? cacheStatsRes.value : s.cacheStats,
+      iCloudAvailability:
+        icloudRes.status === 'fulfilled' ? icloudRes.value : s.iCloudAvailability,
       hasGoogleOAuthClient:
         authStateRes.status === 'fulfilled'
           ? authStateRes.value.hasGoogleOAuthClient
@@ -192,6 +219,7 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
       agentStateRes,
       diagnosticsRes,
       authStateRes,
+      icloudRes,
     ] = await Promise.allSettled([
       transport.syncConfig(),
       transport.syncStatus(),
@@ -201,11 +229,14 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
       transport.getExternalAgentState(),
       transport.getSystemDiagnostics(),
       transport.getSyncAuthState(),
+      transport.probeICloudDriveAvailability(),
     ]);
     set((s) => ({
       syncConfig: syncConfigRes.status === 'fulfilled' ? syncConfigRes.value : s.syncConfig,
       syncStatus: syncStatusRes.status === 'fulfilled' ? syncStatusRes.value : s.syncStatus,
       cacheStats: cacheStatsRes.status === 'fulfilled' ? cacheStatsRes.value : s.cacheStats,
+      iCloudAvailability:
+        icloudRes.status === 'fulfilled' ? icloudRes.value : s.iCloudAvailability,
       aiState: aiStateRes.status === 'fulfilled' ? aiStateRes.value : s.aiState,
       typesafeState:
         typesafeStateRes.status === 'fulfilled' ? typesafeStateRes.value : s.typesafeState,
@@ -226,7 +257,8 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
     const transport = getTransport();
     set({ errorMessage: null });
     try {
-      await transport.saveSyncConfig(config);
+      const normalized = synchronizePrimaryFields(config);
+      await transport.saveSyncConfig(normalized);
       let savedPwd = get().hasWebdavPassword;
       if (webdavPassword && webdavPassword.trim()) {
         await transport.saveWebdavPassword(webdavPassword.trim());
@@ -234,7 +266,7 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
       }
       const syncStatus = await transport.syncStatus();
       set({
-        syncConfig: config,
+        syncConfig: normalized,
         syncStatus,
         hasWebdavPassword: savedPwd,
         statusMessage: opts?.quiet ? get().statusMessage : '已更新云同步设置',
@@ -254,6 +286,185 @@ export const useSyncAIStore = create<SyncAIState>((set, get) => ({
         tone: 'error',
       });
       return false;
+    }
+  },
+
+  async upsertBackend(profile, webdavPassword) {
+    const transport = getTransport();
+    set({ errorMessage: null });
+    try {
+      const base: DriveSyncConfig = get().syncConfig ?? (await transport.syncConfig());
+      const existing = resolveBackends(base);
+      const idx = existing.findIndex((b) => b.id === profile.id);
+      let updated: SyncBackendProfile[];
+      if (idx >= 0) {
+        updated = existing.map((b, i) => (i === idx ? { ...profile } : b));
+      } else {
+        updated = [...existing, { ...profile }];
+      }
+      if (profile.isPrimary) {
+        updated = updated.map((b) => ({ ...b, isPrimary: b.id === profile.id }));
+      }
+      const nextCfg = synchronizePrimaryFields({ ...base, backends: updated });
+      await transport.saveSyncConfig(nextCfg);
+      if (profile.mode === 'webDAV' && webdavPassword && webdavPassword.trim()) {
+        await transport.saveBackendWebdavPassword(profile.id, webdavPassword.trim());
+      }
+      const [syncStatus, authState] = await Promise.all([
+        transport.syncStatus(),
+        transport.getSyncAuthState().catch(() => null),
+      ]);
+      set((s) => ({
+        syncConfig: nextCfg,
+        syncStatus,
+        hasWebdavPassword: authState?.hasWebdavPassword ?? s.hasWebdavPassword,
+        statusMessage: `已保存同步后端「${profile.name || profile.mode}」`,
+      }));
+      useCoordinatorStore.getState().pushToast({
+        message: `已保存同步后端「${profile.name || profile.mode}」`,
+        tone: 'success',
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: msg });
+      useCoordinatorStore.getState().pushToast({
+        message: `保存同步后端失败：${msg}`,
+        tone: 'error',
+      });
+      return false;
+    }
+  },
+
+  async removeBackend(backendId) {
+    const transport = getTransport();
+    set({ errorMessage: null });
+    try {
+      const base: DriveSyncConfig = get().syncConfig ?? (await transport.syncConfig());
+      const existing = resolveBackends(base);
+      const remaining = existing.filter((b) => b.id !== backendId);
+      if (remaining.length === 0) {
+        const msg = '至少保留一个存储后端。';
+        set({ errorMessage: msg });
+        return false;
+      }
+      if (!remaining.some((b) => b.isPrimary)) {
+        remaining[0] = { ...remaining[0], isPrimary: true, isEnabled: true };
+      }
+      const nextCfg = synchronizePrimaryFields({ ...base, backends: remaining });
+      await transport.saveSyncConfig(nextCfg);
+      const syncStatus = await transport.syncStatus();
+      set({
+        syncConfig: nextCfg,
+        syncStatus,
+        statusMessage: '已移除同步后端',
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      set({ errorMessage: msg });
+      return false;
+    }
+  },
+
+  async setBackendEnabled(backendId, enabled) {
+    const transport = getTransport();
+    set({ errorMessage: null });
+    try {
+      const base: DriveSyncConfig = get().syncConfig ?? (await transport.syncConfig());
+      const existing = resolveBackends(base).map((b) =>
+        b.id === backendId ? { ...b, isEnabled: enabled } : b,
+      );
+      const nextCfg = synchronizePrimaryFields({ ...base, backends: existing });
+      await transport.saveSyncConfig(nextCfg);
+      const syncStatus = await transport.syncStatus();
+      set({ syncConfig: nextCfg, syncStatus });
+      return true;
+    } catch (err) {
+      set({ errorMessage: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
+  async setPrimaryBackend(backendId) {
+    const transport = getTransport();
+    set({ errorMessage: null });
+    try {
+      const base: DriveSyncConfig = get().syncConfig ?? (await transport.syncConfig());
+      const existing = resolveBackends(base).map((b) =>
+        b.id === backendId ? { ...b, isPrimary: true, isEnabled: true } : { ...b, isPrimary: false },
+      );
+      const nextCfg = synchronizePrimaryFields({ ...base, backends: existing });
+      await transport.saveSyncConfig(nextCfg);
+      const syncStatus = await transport.syncStatus();
+      set({
+        syncConfig: nextCfg,
+        syncStatus,
+        statusMessage: '已切换主同步后端',
+      });
+      return true;
+    } catch (err) {
+      set({ errorMessage: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
+  async testBackendConnection(profile, webdavPassword) {
+    const transport = getTransport();
+    set({ testingBackend: true, errorMessage: null });
+    try {
+      const trimmedPwd = webdavPassword?.trim() ? webdavPassword.trim() : null;
+      const res = await transport.testBackendConnection(profile, trimmedPwd);
+      set({
+        testingBackend: false,
+        statusMessage: res.ok ? res.message : null,
+        errorMessage: res.ok ? null : res.message,
+      });
+      return res;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      set({ testingBackend: false, errorMessage: message });
+      return { ok: false, message, account: null };
+    }
+  },
+
+  async syncBackend(backendId) {
+    const transport = getTransport();
+    set({ syncing: true, syncingBackendId: backendId, errorMessage: null });
+    try {
+      const report = await transport.syncBackend(backendId);
+      const [syncStatus, cacheStats] = await Promise.all([
+        transport.syncStatus(),
+        transport.cacheStats(),
+      ]);
+      const msg = `单后端同步完成 · 上传 ${report.uploadedOps} / 拉取 ${report.downloadedOps} / 新发现 ${report.discoveredRemoteAssets} 项`;
+      set({
+        syncStatus,
+        cacheStats,
+        lastSyncReport: report,
+        syncing: false,
+        syncingBackendId: null,
+        statusMessage: msg,
+      });
+      useCoordinatorStore.getState().pushToast({
+        message: msg,
+        tone: 'success',
+      });
+      return report;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const syncStatus = await transport.syncStatus().catch(() => get().syncStatus);
+      set({
+        syncing: false,
+        syncingBackendId: null,
+        syncStatus,
+        errorMessage: `同步失败：${msg}`,
+      });
+      useCoordinatorStore.getState().pushToast({
+        message: `同步失败：${msg}`,
+        tone: 'error',
+      });
+      return null;
     }
   },
 

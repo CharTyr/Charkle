@@ -1,21 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Add16Regular,
   ArrowCircleUp16Regular,
   ArrowSwap16Regular,
   ArrowSync16Regular,
   BookOpen16Regular,
   CheckmarkCircle16Filled,
   Clock16Regular,
+  Cloud16Regular,
   Color20Regular,
+  Delete16Regular,
   Desktop16Regular,
   DocumentCode16Regular,
+  Edit16Regular,
   FolderOpen16Regular,
   Info16Regular,
   Key16Regular,
+  MoreHorizontal16Regular,
   Open16Regular,
   PersonAvailable16Regular,
   PersonCircle16Regular,
   Sparkle16Regular,
+  Star16Regular,
   WeatherMoon16Regular,
   WeatherSunny16Regular,
 } from '@fluentui/react-icons';
@@ -23,6 +29,9 @@ import { getTransport } from '../../api/transport';
 import { runMaterialPackageImport } from '../import/materialPackageImport';
 import {
   CharkleSlider,
+  DropdownMenu,
+  MenuItem,
+  MenuSeparator,
   SegmentedControl,
   Switch,
   useResolvedIsDark,
@@ -30,11 +39,20 @@ import {
 } from '../../design-system';
 import { useCoordinatorStore, useSyncAIStore } from '../../stores';
 import {
+  backendLocationSummary,
+  backendModeLabel,
+  createDefaultBackendProfile,
+  enabledBackends,
+  enabledCloudBackends,
   isDirectGoogleDriveAccount,
+  resolveBackends,
+  synchronizePrimaryFields,
   type DriveSyncConfig,
   type DriveTransportMode,
   type GalleryLayoutMode,
   type StorageMigrationReport,
+  type SyncBackendProfile,
+  type SyncBackendStatus,
   type SyncStatus,
 } from '../../types/domain';
 import {
@@ -64,6 +82,8 @@ const DEFAULT_SYNC_CONFIG: DriveSyncConfig = {
   mountPath: 'G:\\',
   selectedGDirectAccount: null,
   useGDirectIPAcceleration: true,
+  iCloudFolderName: 'Charkle',
+  iCloudCustomFolderPath: '',
   webDAVServerURL: '',
   webDAVUsername: '',
   webDAVRemotePath: '/Charkle',
@@ -71,6 +91,7 @@ const DEFAULT_SYNC_CONFIG: DriveSyncConfig = {
   autoSyncIntervalSeconds: 120,
   syncThumbnails: true,
   syncEmbeddings: true,
+  backends: [],
 };
 
 function isSyncPhaseBusy(status: SyncStatus | null): boolean {
@@ -438,6 +459,340 @@ export const WebDAVEditorModal: React.FC<{
 };
 
 // =========================================================================
+// Shared Sheet 2.5: Multi-Backend Profile Editor Modal (mirrors BackendEditorSheet)
+// =========================================================================
+
+export const BackendProfileEditorModal: React.FC<{
+  open: boolean;
+  onClose: () => void;
+  initialProfile: SyncBackendProfile | null;
+  isNew: boolean;
+}> = ({ open, onClose, initialProfile, isNew }) => {
+  const iCloudAvailability = useSyncAIStore((s) => s.iCloudAvailability);
+  const testingBackend = useSyncAIStore((s) => s.testingBackend);
+  const testBackendConnection = useSyncAIStore((s) => s.testBackendConnection);
+  const upsertBackend = useSyncAIStore((s) => s.upsertBackend);
+
+  const [draft, setDraft] = useState<SyncBackendProfile>(
+    initialProfile ?? createDefaultBackendProfile('iCloudDrive'),
+  );
+  const [webdavPassword, setWebdavPassword] = useState('');
+  const [hasSavedPwd, setHasSavedPwd] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [inlineMsg, setInlineMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const wasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (open && !wasOpenRef.current && initialProfile) {
+      setDraft({ ...initialProfile });
+      setWebdavPassword('');
+      setInlineMsg(null);
+      if (initialProfile.mode === 'webDAV') {
+        void getTransport()
+          .hasBackendWebdavPassword(initialProfile.id)
+          .then(setHasSavedPwd)
+          .catch(() => setHasSavedPwd(false));
+      } else {
+        setHasSavedPwd(false);
+      }
+    }
+    wasOpenRef.current = open;
+  }, [open, initialProfile]);
+
+  const trimmedWebdavUrl = draft.webDAVServerURL.trim();
+  const isWebdavValid = isValidHttpUrl(trimmedWebdavUrl);
+  const showWebdavError =
+    draft.mode === 'webDAV' && trimmedWebdavUrl.length > 0 && !isWebdavValid;
+
+  const canSave =
+    draft.mode === 'webDAV'
+      ? isWebdavValid
+      : draft.mode === 'localOnly'
+        ? draft.localLibraryPath.trim().length > 0
+        : draft.mode === 'iCloudDrive'
+          ? draft.iCloudFolderName.trim().length > 0 ||
+            draft.iCloudCustomFolderPath.trim().length > 0
+          : draft.rootFolderName.trim().length > 0 || draft.sharedFolderURLOrID.trim().length > 0;
+
+  const buildNormalized = (): SyncBackendProfile => ({
+    ...draft,
+    name: draft.name.trim() || backendModeLabel(draft.mode),
+    rootFolderName: draft.rootFolderName.trim() || 'Charkle',
+    sharedFolderURLOrID: draft.sharedFolderURLOrID.trim(),
+    iCloudFolderName: draft.iCloudFolderName.trim() || 'Charkle',
+    iCloudCustomFolderPath: draft.iCloudCustomFolderPath.trim(),
+    webDAVServerURL: trimmedWebdavUrl,
+    webDAVUsername: draft.webDAVUsername.trim(),
+    webDAVRemotePath: draft.webDAVRemotePath.trim() || '/Charkle',
+    localLibraryPath: draft.localLibraryPath.trim(),
+  });
+
+  const handleTest = async () => {
+    const profile = buildNormalized();
+    const res = await testBackendConnection(profile, webdavPassword || null);
+    setInlineMsg({ ok: res.ok, text: res.message });
+  };
+
+  const handleSave = async () => {
+    if (!canSave || saving) return;
+    setSaving(true);
+    try {
+      const ok = await upsertBackend(buildNormalized(), webdavPassword || null);
+      if (ok) {
+        setWebdavPassword('');
+        onClose();
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <SettingsSubModal
+      open={open}
+      onClose={onClose}
+      title={isNew ? `添加${backendModeLabel(draft.mode)}后端` : `编辑同步后端 · ${draft.name || backendModeLabel(draft.mode)}`}
+      subtitle="多个同步后端可同时开启，主后端与并行镜像后端独立维护远端映射，互不覆盖。"
+      width="md"
+      footer={
+        <>
+          <SettingsButton variant="standard" disabled={saving || testingBackend} onClick={onClose}>
+            取消
+          </SettingsButton>
+          <SettingsButton
+            variant="standard"
+            loading={testingBackend}
+            disabled={!canSave || saving}
+            onClick={() => void handleTest()}
+          >
+            {testingBackend ? '测试中…' : '测试连接'}
+          </SettingsButton>
+          <SettingsButton
+            variant="accent"
+            loading={saving}
+            disabled={!canSave || testingBackend}
+            onClick={() => void handleSave()}
+          >
+            {isNew ? '添加并保存' : '保存修改'}
+          </SettingsButton>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">后端显示名称</span>
+          <SettingsInput
+            type="text"
+            value={draft.name}
+            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            placeholder={backendModeLabel(draft.mode)}
+          />
+        </label>
+
+        <div className="flex items-center justify-between gap-3 rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] px-3 py-2">
+          <div className="min-w-0">
+            <div className="text-[12px] font-medium text-[var(--text-primary)]">启用此同步后端</div>
+            <div className="text-[11px] text-[var(--text-secondary)]">
+              关闭后保留配置但不参与自动与手动同步
+            </div>
+          </div>
+          <SettingsSwitch
+            checked={draft.isEnabled}
+            ariaLabel="启用此同步后端"
+            onChange={(isEnabled) => setDraft({ ...draft, isEnabled })}
+          />
+        </div>
+
+        {draft.mode === 'iCloudDrive' && (
+          <div className="flex flex-col gap-2.5">
+            <div className="rounded-[var(--win-radius-control)] bg-[var(--settings-subtle)] border border-[var(--win-stroke-divider)] px-3 py-2 text-[11.5px] text-[var(--text-secondary)] flex items-start gap-2">
+              <Cloud16Regular className="w-4 h-4 text-[var(--accent)] shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                {iCloudAvailability?.systemCloudDocsPath ? (
+                  <>
+                    <div className="font-medium text-[var(--text-primary)]">
+                      已检测到本机 Windows 版 iCloud Drive
+                    </div>
+                    <div className="charkle-mono text-[11px] truncate">
+                      {iCloudAvailability.systemCloudDocsPath}
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    未自动检测到标准 Windows iCloud Drive 路径；如已安装 Windows 版 iCloud，可点击下方「选择文件夹…」手动指定 iCloud Drive 目录。
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                iCloud Drive 子目录名称
+              </span>
+              <SettingsInput
+                type="text"
+                value={draft.iCloudFolderName}
+                onChange={(e) => setDraft({ ...draft, iCloudFolderName: e.target.value })}
+                placeholder="Charkle"
+              />
+            </label>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                自定义 iCloud Drive 文件夹（可选，优先于默认路径）
+              </span>
+              <div className="flex gap-2">
+                <SettingsInput
+                  type="text"
+                  value={draft.iCloudCustomFolderPath}
+                  onChange={(e) => setDraft({ ...draft, iCloudCustomFolderPath: e.target.value })}
+                  placeholder="留空自动使用 %USERPROFILE%\\iCloudDrive\\Charkle"
+                  className="flex-1"
+                />
+                <SettingsButton
+                  variant="standard"
+                  onClick={async () => {
+                    const picked = await getTransport().pickDirectoryDialog(
+                      '选择 Windows iCloud Drive 同步目录',
+                    );
+                    if (picked) setDraft({ ...draft, iCloudCustomFolderPath: picked });
+                  }}
+                >
+                  选择文件夹…
+                </SettingsButton>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {draft.mode === 'directAPIWithGDirect' && (
+          <div className="flex flex-col gap-2.5">
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                Google Drive 保存路径
+              </span>
+              <SettingsInput
+                type="text"
+                value={draft.rootFolderName}
+                onChange={(e) => setDraft({ ...draft, rootFolderName: e.target.value })}
+                placeholder="Charkle 或 Design/Charkle"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                团队共享协作目录链接或 ID（可选）
+              </span>
+              <SettingsInput
+                type="text"
+                value={draft.sharedFolderURLOrID}
+                onChange={(e) => setDraft({ ...draft, sharedFolderURLOrID: e.target.value })}
+                placeholder="https://drive.google.com/drive/folders/…"
+              />
+            </label>
+          </div>
+        )}
+
+        {draft.mode === 'webDAV' && (
+          <div className="flex flex-col gap-2.5">
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                WebDAV 服务器地址
+              </span>
+              <SettingsInput
+                type="text"
+                value={draft.webDAVServerURL}
+                onChange={(e) => setDraft({ ...draft, webDAVServerURL: e.target.value })}
+                placeholder="https://dav.jianguoyun.com/dav/"
+              />
+              {showWebdavError && (
+                <span className="text-[11px] text-[var(--settings-warning)]">
+                  请输入以 https:// 或 http:// 开头的有效服务器地址
+                </span>
+              )}
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="flex flex-col gap-1">
+                <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                  账号 / 用户名
+                </span>
+                <SettingsInput
+                  type="text"
+                  value={draft.webDAVUsername}
+                  onChange={(e) => setDraft({ ...draft, webDAVUsername: e.target.value })}
+                  placeholder="邮箱或用户名"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                  应用密码
+                </span>
+                <SettingsInput
+                  type="password"
+                  value={webdavPassword}
+                  onChange={(e) => setWebdavPassword(e.target.value)}
+                  placeholder={hasSavedPwd ? '••••••••（留空保持不变）' : '输入专用应用密码'}
+                />
+              </label>
+            </div>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+                远端保存路径
+              </span>
+              <SettingsInput
+                type="text"
+                value={draft.webDAVRemotePath}
+                onChange={(e) => setDraft({ ...draft, webDAVRemotePath: e.target.value })}
+                placeholder="/Charkle"
+              />
+            </label>
+          </div>
+        )}
+
+        {draft.mode === 'localOnly' && (
+          <div className="flex flex-col gap-1">
+            <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+              本地镜像文件夹路径
+            </span>
+            <div className="flex gap-2">
+              <SettingsInput
+                type="text"
+                value={draft.localLibraryPath}
+                onChange={(e) => setDraft({ ...draft, localLibraryPath: e.target.value })}
+                placeholder="例如：D:\\Backups\\Charkle"
+                className="flex-1"
+              />
+              <SettingsButton
+                variant="standard"
+                onClick={async () => {
+                  const picked = await getTransport().pickDirectoryDialog('选择本地镜像文件夹');
+                  if (picked) setDraft({ ...draft, localLibraryPath: picked });
+                }}
+              >
+                选择文件夹…
+              </SettingsButton>
+            </div>
+          </div>
+        )}
+
+        {inlineMsg && (
+          <div
+            data-testid="backend-editor-test-feedback"
+            className={[
+              'rounded-[var(--win-radius-control)] px-3 py-2 text-[12px] border',
+              inlineMsg.ok
+                ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
+                : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
+            ].join(' ')}
+          >
+            {inlineMsg.text}
+          </div>
+        )}
+      </div>
+    </SettingsSubModal>
+  );
+};
+
+// =========================================================================
 // Shared Sheet 3: Unified Storage Location Migration / Switch Wizard
 // (mirrors LibrarySettingsPane.storageLocationWizardSheet)
 // =========================================================================
@@ -453,6 +808,7 @@ export const StorageLocationWizardModal: React.FC<{
   const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
+  const iCloudAvailability = useSyncAIStore((s) => s.iCloudAvailability);
   const diagnostics = useSyncAIStore((s) => s.diagnostics);
   const hasWebdavPassword = useSyncAIStore((s) => s.hasWebdavPassword);
   const migrating = useSyncAIStore((s) => s.migrating);
@@ -470,7 +826,12 @@ export const StorageLocationWizardModal: React.FC<{
       const base = syncConfig ?? DEFAULT_SYNC_CONFIG;
       const mode: DriveTransportMode =
         initialMode ?? (base.mode === 'gdirectMount' ? 'directAPIWithGDirect' : base.mode);
-      setDraft({ ...base, mode });
+      setDraft({
+        ...base,
+        mode,
+        iCloudFolderName: base.iCloudFolderName || 'Charkle',
+        iCloudCustomFolderPath: base.iCloudCustomFolderPath || '',
+      });
       setAction('migrate');
       setWebdavPassword('');
     }
@@ -495,24 +856,30 @@ export const StorageLocationWizardModal: React.FC<{
       ? draft.localLibraryPath.trim().length > 0
       : targetMode === 'webDAV'
         ? isWebdavUrlValid
-        : draft.rootFolderName.trim().length > 0;
+        : targetMode === 'iCloudDrive'
+          ? (draft.iCloudFolderName?.trim().length ?? 0) > 0 ||
+            (draft.iCloudCustomFolderPath?.trim().length ?? 0) > 0
+          : draft.rootFolderName.trim().length > 0;
 
   const busy = migrating || savingSwitch;
 
   const handleConfirm = async () => {
     if (!canConfirm || busy) return;
-    const target: DriveSyncConfig = {
+    const baseTarget: DriveSyncConfig = {
       ...draft,
       mode: targetMode,
+      iCloudFolderName: draft.iCloudFolderName?.trim() || 'Charkle',
+      iCloudCustomFolderPath: draft.iCloudCustomFolderPath?.trim() || '',
       webDAVServerURL: trimmedWebdavUrl,
       webDAVUsername: draft.webDAVUsername.trim(),
       webDAVRemotePath: draft.webDAVRemotePath.trim() || '/Charkle',
       localLibraryPath: draft.localLibraryPath.trim(),
       rootFolderName: draft.rootFolderName.trim() || 'Charkle',
+      backends: [],
     };
     const pwd = webdavPassword.trim() || undefined;
     if (action === 'migrate') {
-      const report = await runStorageMigration(target, pwd);
+      const report = await runStorageMigration(baseTarget, pwd);
       if (report) {
         onMigrated?.(report);
         onClose();
@@ -520,7 +887,7 @@ export const StorageLocationWizardModal: React.FC<{
     } else {
       setSavingSwitch(true);
       try {
-        const ok = await saveSyncConfig(target, pwd);
+        const ok = await saveSyncConfig(baseTarget, pwd);
         if (ok) onClose();
       } finally {
         setSavingSwitch(false);
@@ -583,6 +950,7 @@ export const StorageLocationWizardModal: React.FC<{
           ariaLabel="目标存储方式"
           options={[
             { value: 'directAPIWithGDirect', label: 'Google Drive' },
+            { value: 'iCloudDrive', label: 'iCloud Drive' },
             { value: 'webDAV', label: 'WebDAV 云盘' },
             { value: 'localOnly', label: '纯本地文件夹' },
           ]}
@@ -620,6 +988,49 @@ export const StorageLocationWizardModal: React.FC<{
               </SettingsButton>
             </div>
           )}
+        </div>
+      )}
+
+      {targetMode === 'iCloudDrive' && (
+        <div className="flex flex-col gap-2.5">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+              iCloud Drive 目录名
+            </span>
+            <SettingsInput
+              type="text"
+              value={draft.iCloudFolderName ?? 'Charkle'}
+              onChange={(e) => setDraft({ ...draft, iCloudFolderName: e.target.value })}
+              placeholder="Charkle"
+            />
+          </label>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11.5px] font-medium text-[var(--text-secondary)]">
+              自定义 iCloud Drive 路径（可选）
+            </span>
+            <div className="flex gap-2">
+              <SettingsInput
+                type="text"
+                value={draft.iCloudCustomFolderPath ?? ''}
+                onChange={(e) => setDraft({ ...draft, iCloudCustomFolderPath: e.target.value })}
+                placeholder={
+                  iCloudAvailability?.systemCloudDocsPath
+                    ? `自动检测：${iCloudAvailability.systemCloudDocsPath}`
+                    : '选择本机 Windows 版 iCloud Drive 目录'
+                }
+                className="flex-1"
+              />
+              <SettingsButton
+                variant="standard"
+                onClick={async () => {
+                  const picked = await getTransport().pickDirectoryDialog('选择 iCloud Drive 目录');
+                  if (picked) setDraft({ ...draft, iCloudCustomFolderPath: picked });
+                }}
+              >
+                选择文件夹…
+              </SettingsButton>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1000,15 +1411,22 @@ export const LibrarySettingsPane: React.FC = () => {
   const origPct = origBytes > 0 ? Math.min(45, Math.max(2, (origBytes / barScale) * 100)) : 0;
   const pinPct = pinnedBytes > 0 ? Math.min(45, Math.max(2, (pinnedBytes / barScale) * 100)) : 0;
 
+  const enabledBackendList = enabledBackends(cfg);
+  const isMultiBackend = enabledBackendList.length > 1;
+  const storageHeadline = isMultiBackend
+    ? `多后端同时同步（${enabledBackendList.length} 个）`
+    : storageModeHeadline(cfg.mode);
+  const isSingleLocal = !isMultiBackend && cfg.mode === 'localOnly';
+
   return (
     <div data-testid="settings-pane-library" className="flex flex-col gap-5">
       <SettingsSection title="当前存储位置">
         <SettingsRow
-          title={storageModeHeadline(cfg.mode)}
+          title={storageHeadline}
           subtitle={activeStorageLocationSummary(cfg, diagnostics?.dataDir)}
-          subtitleTone={cfg.mode === 'localOnly' ? 'default' : 'positive'}
+          subtitleTone={isSingleLocal ? 'default' : 'positive'}
         >
-          {cfg.mode === 'localOnly' ? (
+          {isSingleLocal ? (
             <SettingsButton
               variant="standard"
               onClick={() =>
@@ -1033,7 +1451,7 @@ export const LibrarySettingsPane: React.FC = () => {
           </SettingsButton>
         </SettingsRow>
 
-        {cfg.mode === 'localOnly' && (
+        {isSingleLocal && (
           <>
             <SettingsCardDivider />
             <SettingsRow
@@ -1081,8 +1499,8 @@ export const LibrarySettingsPane: React.FC = () => {
           />
           <SettingsGuideStep
             number="3"
-            title="随时可在 Google Drive、WebDAV 与纯本地之间互迁"
-            detail="原始文件均按可读文件夹保存，不锁定专有格式，在文件资源管理器或网盘网页端都能直接查看。"
+            title="随时可在 Google Drive、iCloud Drive、WebDAV 与纯本地之间互迁"
+            detail="原始文件均按可读文件夹保存，不锁定专有格式，在文件资源管理器或网盘网页端都能直接查看；也支持在「云同步」同时连接多个后端。"
           />
         </InlineGuideDisclosure>
       </SettingsSection>
@@ -1272,15 +1690,23 @@ export const SyncSettingsPane: React.FC = () => {
   const setSettingsTab = useCoordinatorStore((s) => s.setSettingsTab);
   const syncConfig = useSyncAIStore((s) => s.syncConfig);
   const syncStatus = useSyncAIStore((s) => s.syncStatus);
+  const iCloudAvailability = useSyncAIStore((s) => s.iCloudAvailability);
   const lastSyncReport = useSyncAIStore((s) => s.lastSyncReport);
   const lastMigrationReport = useSyncAIStore((s) => s.lastMigrationReport);
   const diagnostics = useSyncAIStore((s) => s.diagnostics);
   const syncing = useSyncAIStore((s) => s.syncing);
+  const syncingBackendId = useSyncAIStore((s) => s.syncingBackendId);
   const signingInGoogle = useSyncAIStore((s) => s.signingInGoogle);
   const testingWebdav = useSyncAIStore((s) => s.testingWebdav);
+  const testingBackend = useSyncAIStore((s) => s.testingBackend);
   const hasGoogleOAuthClient = useSyncAIStore((s) => s.hasGoogleOAuthClient);
   const saveSyncConfig = useSyncAIStore((s) => s.saveSyncConfig);
   const testWebdavConnection = useSyncAIStore((s) => s.testWebdavConnection);
+  const testBackendConnection = useSyncAIStore((s) => s.testBackendConnection);
+  const setBackendEnabled = useSyncAIStore((s) => s.setBackendEnabled);
+  const setPrimaryBackend = useSyncAIStore((s) => s.setPrimaryBackend);
+  const removeBackend = useSyncAIStore((s) => s.removeBackend);
+  const syncBackend = useSyncAIStore((s) => s.syncBackend);
   const signInGoogleDrive = useSyncAIStore((s) => s.signInGoogleDrive);
   const signOutGoogleDrive = useSyncAIStore((s) => s.signOutGoogleDrive);
   const syncNow = useSyncAIStore((s) => s.syncNow);
@@ -1289,19 +1715,44 @@ export const SyncSettingsPane: React.FC = () => {
   const [showOAuthModal, setShowOAuthModal] = useState(false);
   const [showWebDAVModal, setShowWebDAVModal] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
+  const [editingBackend, setEditingBackend] = useState<{
+    profile: SyncBackendProfile;
+    isNew: boolean;
+  } | null>(null);
+  const [iCloudTestResult, setICloudTestResult] = useState<{ ok: boolean; text: string } | null>(
+    null,
+  );
 
   useEffect(() => {
-    if (syncConfig && !showWebDAVModal && !showWizard) setDraft(syncConfig);
-  }, [syncConfig, showWebDAVModal, showWizard]);
+    if (syncConfig && !showWebDAVModal && !showWizard && !editingBackend) {
+      setDraft(syncConfig);
+    }
+  }, [syncConfig, showWebDAVModal, showWizard, editingBackend]);
 
   const persistQuiet = (next: DriveSyncConfig) => {
-    setDraft(next);
-    void saveSyncConfig(next, undefined, { quiet: true });
+    const normalized = synchronizePrimaryFields(next);
+    setDraft(normalized);
+    void saveSyncConfig(normalized, undefined, { quiet: true });
   };
 
-  const isBusy = syncing || signingInGoogle || testingWebdav || isSyncPhaseBusy(syncStatus);
+  const isBusy =
+    syncing || signingInGoogle || testingWebdav || testingBackend || isSyncPhaseBusy(syncStatus);
   const isSyncingNow = syncing || isSyncPhaseBusy(syncStatus);
   const hasGDirect = Boolean(diagnostics?.gdirect.cliPath);
+
+  const resolvedBackendsList = resolveBackends(draft);
+  const activeCloudBackends = enabledCloudBackends(draft);
+  const hasAnyGoogleBackend = resolvedBackendsList.some(
+    (b) => b.mode === 'directAPIWithGDirect' || b.mode === 'gdirectMount',
+  );
+  const hasAnyICloudBackend = resolvedBackendsList.some((b) => b.mode === 'iCloudDrive');
+  const hasAnyWebDAVBackend = resolvedBackendsList.some((b) => b.mode === 'webDAV');
+  const primaryICloudBackend =
+    resolvedBackendsList.find((b) => b.mode === 'iCloudDrive') ?? null;
+
+  const statusByBackendId = new Map<string, SyncBackendStatus>(
+    (syncStatus?.backendStatuses ?? []).map((st) => [st.backendID, st]),
+  );
 
   const directAccount = isDirectGoogleDriveAccount(syncStatus?.account)
     ? syncStatus.account
@@ -1334,8 +1785,16 @@ export const SyncSettingsPane: React.FC = () => {
     }
   };
 
-  // State A: Local-only guidance
-  if (draft.mode === 'localOnly') {
+  const openAddBackend = (mode: DriveTransportMode) => {
+    const defaultName = mode === 'localOnly' ? '本地镜像文件夹' : backendModeLabel(mode);
+    setEditingBackend({
+      profile: createDefaultBackendProfile(mode, { name: defaultName }),
+      isNew: true,
+    });
+  };
+
+  // State A: Local-only guidance (no cloud backends configured)
+  if (draft.mode === 'localOnly' && activeCloudBackends.length === 0) {
     return (
       <div data-testid="settings-pane-sync" className="flex flex-col gap-5">
         <SettingsSection title="云端同步服务">
@@ -1356,7 +1815,7 @@ export const SyncSettingsPane: React.FC = () => {
           >
             <SettingsButton
               variant="accent"
-              onClick={() => persistQuiet({ ...draft, mode: 'directAPIWithGDirect' })}
+              onClick={() => persistQuiet({ ...draft, mode: 'directAPIWithGDirect', backends: [] })}
             >
               启用 Google 同步
             </SettingsButton>
@@ -1383,6 +1842,31 @@ export const SyncSettingsPane: React.FC = () => {
           <SettingsCardDivider />
 
           <SettingsRow
+            title="iCloud Drive 云同步"
+            subtitle={
+              iCloudAvailability?.systemCloudDocsPath
+                ? `已检测到本机 iCloud Drive（${iCloudAvailability.systemCloudDocsPath}），可与 macOS / iOS 无缝互通`
+                : '通过 Windows 版 iCloud Drive 自动同步素材原件与情绪板，并与 macOS / iOS 无缝互通'
+            }
+          >
+            <SettingsButton
+              variant="standard"
+              onClick={() =>
+                persistQuiet({
+                  ...draft,
+                  mode: 'iCloudDrive',
+                  iCloudFolderName: draft.iCloudFolderName || 'Charkle',
+                  backends: [],
+                })
+              }
+            >
+              启用 iCloud Drive
+            </SettingsButton>
+          </SettingsRow>
+
+          <SettingsCardDivider />
+
+          <SettingsRow
             title="WebDAV 云盘"
             subtitle="兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务"
           >
@@ -1395,7 +1879,7 @@ export const SyncSettingsPane: React.FC = () => {
 
           <SettingsRow
             title="无损迁移现有素材至云盘"
-            subtitle="将当前本机素材、文件夹与情绪板完整搬迁至 Google Drive 或 WebDAV"
+            subtitle="将当前本机素材、文件夹与情绪板完整搬迁至 Google Drive、iCloud Drive 或 WebDAV"
           >
             <SettingsButton variant="standard" onClick={() => setShowWizard(true)}>
               <ArrowSwap16Regular className="w-3.5 h-3.5 shrink-0" />
@@ -1409,12 +1893,18 @@ export const SyncSettingsPane: React.FC = () => {
           onClose={() => setShowWebDAVModal(false)}
           initialConfig={draft}
         />
+        <BackendProfileEditorModal
+          open={editingBackend != null}
+          onClose={() => setEditingBackend(null)}
+          initialProfile={editingBackend?.profile ?? null}
+          isNew={editingBackend?.isNew ?? false}
+        />
         <StorageLocationWizardModal open={showWizard} onClose={() => setShowWizard(false)} />
       </div>
     );
   }
 
-  // State B: Active Cloud Sync (Google Drive / gdirectMount / WebDAV)
+  // State B: Active Cloud Sync / Multi-Backend (Google Drive / iCloud Drive / gdirectMount / WebDAV)
   const sharedID = resolveSharedFolderID(draft.sharedFolderURLOrID);
   const trimmedShared = draft.sharedFolderURLOrID.trim();
   const isWebDAVConnected = syncStatus?.account?.source === 'WebDAV';
@@ -1424,6 +1914,17 @@ export const SyncSettingsPane: React.FC = () => {
   } catch {
     // keep raw url
   }
+
+  const iCloudEffectivePath =
+    primaryICloudBackend?.iCloudCustomFolderPath.trim() ||
+    (iCloudAvailability?.systemCloudDocsPath
+      ? `${iCloudAvailability.systemCloudDocsPath}\\${primaryICloudBackend?.iCloudFolderName.trim() || 'Charkle'}`
+      : null);
+  const isICloudReady = Boolean(
+    primaryICloudBackend?.iCloudCustomFolderPath.trim() ||
+      iCloudAvailability?.systemCloudDocsPath ||
+      iCloudAvailability?.isUbiquityContainerAvailable,
+  );
 
   return (
     <div data-testid="settings-pane-sync" className="flex flex-col gap-5">
@@ -1517,8 +2018,249 @@ export const SyncSettingsPane: React.FC = () => {
         </div>
       </SettingsSection>
 
-      {/* 2A. Google Drive Account & Shared Collaboration */}
-      {(draft.mode === 'directAPIWithGDirect' || draft.mode === 'gdirectMount') && (
+      {/* 1.5 Connected Multi-Backend Management Section */}
+      <SettingsSection
+        title="已连接的同步后端（支持同时连接多个）"
+        data-testid="sync-backends-section"
+      >
+        {resolvedBackendsList.map((profile, idx) => {
+          const st = statusByBackendId.get(profile.id);
+          const isThisSyncing = syncingBackendId === profile.id;
+          const displayName = profile.name?.trim() || backendModeLabel(profile.mode);
+          const dotColor = st?.lastError
+            ? 'var(--settings-destructive)'
+            : isThisSyncing
+              ? 'var(--settings-warning)'
+              : st?.lastSyncedAt
+                ? 'var(--settings-positive)'
+                : 'var(--text-tertiary)';
+
+          return (
+            <React.Fragment key={profile.id}>
+              {idx > 0 && <SettingsCardDivider />}
+              <div
+                data-testid="sync-backend-row"
+                className="px-4 py-3 flex items-center justify-between gap-3"
+              >
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <span
+                    style={{ backgroundColor: dotColor }}
+                    className="h-2 w-2 rounded-full shrink-0"
+                  />
+                  <div className="min-w-0 flex flex-col gap-0.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
+                        {displayName}
+                      </span>
+                      <SettingsStatusBadge
+                        text={profile.isPrimary ? '主后端' : '并行镜像'}
+                        tone={profile.isPrimary ? 'positive' : 'neutral'}
+                      />
+                      {!profile.isEnabled && (
+                        <SettingsStatusBadge text="已暂停" tone="warning" />
+                      )}
+                    </div>
+                    <span
+                      className={[
+                        'text-[11.5px] leading-snug truncate',
+                        st?.lastError
+                          ? 'text-[var(--settings-destructive)]'
+                          : 'text-[var(--text-secondary)]',
+                      ].join(' ')}
+                    >
+                      {st?.lastError
+                        ? st.lastError
+                        : `${backendLocationSummary(profile)}${
+                            st?.lastSyncedAt
+                              ? ` · 上次同步 ${relativeTimeText(st.lastSyncedAt)}`
+                              : ''
+                          }`}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <SettingsSwitch
+                    checked={profile.isEnabled}
+                    ariaLabel={`启用 ${displayName}`}
+                    onChange={(enabled) => void setBackendEnabled(profile.id, enabled)}
+                  />
+                  <SettingsButton
+                    variant="standard"
+                    size="xs"
+                    disabled={isBusy}
+                    onClick={() => setEditingBackend({ profile, isNew: false })}
+                  >
+                    <Edit16Regular className="w-3.5 h-3.5 shrink-0" />
+                    编辑
+                  </SettingsButton>
+                  <DropdownMenu
+                    align="end"
+                    trigger={
+                      <button
+                        type="button"
+                        aria-label={`更多操作 ${displayName}`}
+                        disabled={isBusy}
+                        className="h-7 w-7 inline-flex items-center justify-center rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-[var(--win-fill-control)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-45 cursor-pointer"
+                      >
+                        <MoreHorizontal16Regular className="w-4 h-4" />
+                      </button>
+                    }
+                  >
+                    <MenuItem
+                      icon={<ArrowSync16Regular className="w-4 h-4" />}
+                      onSelect={() => void syncBackend(profile.id)}
+                    >
+                      立即同步此后端
+                    </MenuItem>
+                    {!profile.isPrimary && (
+                      <MenuItem
+                        icon={<Star16Regular className="w-4 h-4" />}
+                        onSelect={() => void setPrimaryBackend(profile.id)}
+                      >
+                        设为主后端
+                      </MenuItem>
+                    )}
+                    {resolvedBackendsList.length > 1 && (
+                      <>
+                        <MenuSeparator />
+                        <MenuItem
+                          danger
+                          icon={<Delete16Regular className="w-4 h-4" />}
+                          onSelect={() => void removeBackend(profile.id)}
+                        >
+                          移除此后端
+                        </MenuItem>
+                      </>
+                    )}
+                  </DropdownMenu>
+                </div>
+              </div>
+            </React.Fragment>
+          );
+        })}
+
+        <SettingsCardDivider />
+
+        <SettingsRow
+          title="添加并行同步后端"
+          subtitle="同时镜像到 iCloud Drive、Google Drive、WebDAV 或本地目录，主/从后端独立追踪远端映射，互不覆盖"
+        >
+          <DropdownMenu
+            align="end"
+            trigger={
+              <button
+                type="button"
+                data-testid="add-sync-backend-btn"
+                disabled={isBusy}
+                className="h-8 px-3 inline-flex items-center gap-1.5 rounded-[var(--win-radius-control)] border border-[var(--win-stroke-control)] bg-[var(--win-fill-control)] text-[12.5px] font-medium text-[var(--text-primary)] hover:bg-[var(--win-subtle-hover)] disabled:opacity-45 cursor-pointer"
+              >
+                <Add16Regular className="w-3.5 h-3.5 shrink-0" />
+                <span>添加同步后端…</span>
+              </button>
+            }
+          >
+            <MenuItem
+              icon={<Cloud16Regular className="w-4 h-4" />}
+              onSelect={() => openAddBackend('iCloudDrive')}
+            >
+              iCloud Drive
+            </MenuItem>
+            <MenuItem
+              icon={<Cloud16Regular className="w-4 h-4" />}
+              onSelect={() => openAddBackend('directAPIWithGDirect')}
+            >
+              Google Drive
+            </MenuItem>
+            <MenuItem
+              icon={<Cloud16Regular className="w-4 h-4" />}
+              onSelect={() => openAddBackend('webDAV')}
+            >
+              WebDAV 云盘
+            </MenuItem>
+            <MenuItem
+              icon={<FolderOpen16Regular className="w-4 h-4" />}
+              onSelect={() => openAddBackend('localOnly')}
+            >
+              本地镜像文件夹
+            </MenuItem>
+          </DropdownMenu>
+        </SettingsRow>
+      </SettingsSection>
+
+      {/* 2A-iCloud. iCloud Drive Status Card */}
+      {hasAnyICloudBackend && primaryICloudBackend && (
+        <SettingsSection title="iCloud Drive 状态" data-testid="sync-icloud-status-section">
+          <SettingsRow
+            icon={<Cloud16Regular className="w-[18px] h-[18px] text-[var(--accent)]" />}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <span>{backendLocationSummary(primaryICloudBackend)}</span>
+                <SettingsStatusBadge
+                  text={isICloudReady ? '已就绪' : '待选择目录'}
+                  tone={isICloudReady ? 'positive' : 'warning'}
+                />
+              </span>
+            }
+            subtitle={
+              iCloudEffectivePath
+                ? `同步路径：${iCloudEffectivePath}`
+                : '请先安装并登录 Windows 版 iCloud，或点击右侧「编辑路径…」手动指定 iCloud Drive 目录'
+            }
+            subtitleTone={isICloudReady ? 'default' : 'warning'}
+          >
+            <SettingsButton
+              variant="standard"
+              loading={testingBackend}
+              disabled={isBusy}
+              onClick={async () => {
+                const res = await testBackendConnection(primaryICloudBackend, null);
+                setICloudTestResult({ ok: res.ok, text: res.message });
+              }}
+            >
+              测试 iCloud
+            </SettingsButton>
+            <SettingsButton
+              variant="standard"
+              disabled={isBusy}
+              onClick={() =>
+                setEditingBackend({ profile: primaryICloudBackend, isNew: false })
+              }
+            >
+              编辑路径…
+            </SettingsButton>
+          </SettingsRow>
+
+          {iCloudTestResult && (
+            <div
+              className={[
+                'mx-4 mb-3 rounded-[var(--win-radius-control)] px-3 py-2 text-[12px] border',
+                iCloudTestResult.ok
+                  ? 'bg-[var(--settings-positive)]/10 border-[var(--settings-positive)]/25 text-[var(--text-primary)]'
+                  : 'bg-[var(--settings-destructive)]/10 border-[var(--settings-destructive)]/25 text-[var(--settings-destructive)]',
+              ].join(' ')}
+            >
+              {iCloudTestResult.text}
+            </div>
+          )}
+
+          <InlineGuideDisclosure title="Windows 版 iCloud Drive 如何与 macOS / iOS 互通？">
+            <SettingsGuideStep
+              number="1"
+              title="从 Microsoft Store 安装并登录「iCloud（Windows 版）」并开启 iCloud 云盘"
+              detail="Charkle 会自动检测 %USERPROFILE%\\iCloudDrive 目录；如果你将 iCloud Drive 移至其他盘符，可点击「编辑路径…」手动指定。"
+            />
+            <SettingsGuideStep
+              number="2"
+              title="与 macOS / iOS 共享完全一致的可读目录与 .charkle 增量日志"
+              detail="也可与 Google Drive 或 WebDAV 同时启用，在多台苹果与 Windows 设备间保持零冲突双向同步。"
+            />
+          </InlineGuideDisclosure>
+        </SettingsSection>
+      )}
+
+      {/* 2B. Google Drive Account & Shared Collaboration */}
+      {hasAnyGoogleBackend && (
         <>
           <SettingsSection title="Google Drive 账号">
             {draft.mode === 'gdirectMount' ? (
@@ -1747,8 +2489,8 @@ export const SyncSettingsPane: React.FC = () => {
         </>
       )}
 
-      {/* 2B. WebDAV Account Section */}
-      {draft.mode === 'webDAV' && (
+      {/* 2C. WebDAV Account Section */}
+      {hasAnyWebDAVBackend && (
         <SettingsSection title="WebDAV 服务">
           <SettingsRow
             title={webdavHost || '尚未配置 WebDAV 服务器'}
@@ -1817,7 +2559,7 @@ export const SyncSettingsPane: React.FC = () => {
 
         <SettingsRow
           title="切换或无损迁移存储位置"
-          subtitle="随时在 Google Drive、WebDAV 与纯本地文件夹之间安全搬家"
+          subtitle="随时在 Google Drive、iCloud Drive、WebDAV 与纯本地文件夹之间安全搬家"
         >
           <SettingsButton variant="standard" onClick={() => setShowWizard(true)}>
             <ArrowSwap16Regular className="w-3.5 h-3.5 shrink-0" />
@@ -1849,6 +2591,12 @@ export const SyncSettingsPane: React.FC = () => {
         open={showWebDAVModal}
         onClose={() => setShowWebDAVModal(false)}
         initialConfig={draft}
+      />
+      <BackendProfileEditorModal
+        open={editingBackend != null}
+        onClose={() => setEditingBackend(null)}
+        initialProfile={editingBackend?.profile ?? null}
+        isNew={editingBackend?.isNew ?? false}
       />
       <StorageLocationWizardModal open={showWizard} onClose={() => setShowWizard(false)} />
     </div>

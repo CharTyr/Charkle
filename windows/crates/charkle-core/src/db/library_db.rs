@@ -24,8 +24,8 @@ use crate::models::core::{
 use crate::models::media::{cosine_similarity, AssetVector, EmbeddingPrecision};
 use crate::models::moodboard::{BoardNodeKind, MoodboardDocument};
 use crate::models::sync::{
-    tag_map, AssetChanges, BoardChanges, DeletedAssetFingerprint, SyncClocks, SyncOperation,
-    SyncOperationChange, SyncStamp,
+    tag_map, AssetChanges, BoardChanges, DeletedAssetFingerprint, DeletedFolderFingerprint,
+    SyncClocks, SyncOperation, SyncOperationChange, SyncStamp,
 };
 use crate::sync::MOUNTED_PATH_ID_PREFIX;
 use crate::wire::swift_codec::{canonical_json_bytes, format_swift_uuid, SyncFields};
@@ -550,27 +550,54 @@ impl LibraryDatabase {
         Ok(out)
     }
 
-    /// Reconciles all remote folders inside ONE SQLite transaction (instead of one transaction
-    /// per folder), dramatically reducing fsync overhead during fresh Drive bootstrap.
+    /// Result of reconciling remote folders in a single SQLite transaction.
+    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_remote_folders_batch<F>(
         &self,
         ordered_folders: &[crate::models::sync::RemoteDriveFile],
         previous: &BTreeMap<String, crate::models::sync::RemoteDriveFile>,
         inbox_id: &str,
         pending_folders: &HashSet<Uuid>,
+        pending_deleted_folder_drive_ids: &HashSet<String>,
+        deleted_folder_drive_ids: &HashSet<String>,
+        deleted_folder_paths: &HashMap<String, DeletedFolderFingerprint>,
         stable_folder_uuid: F,
-    ) -> CoreResult<HashMap<String, Uuid>>
+    ) -> CoreResult<FolderReconcileBatchResult>
     where
         F: Fn(&str) -> Uuid,
     {
         self.with_transaction(|conn| {
             let mut map: HashMap<String, Uuid> = HashMap::with_capacity(ordered_folders.len());
+            let mut remote_path_by_id: HashMap<String, String> =
+                HashMap::with_capacity(ordered_folders.len());
+            let mut skipped_pending: Vec<String> = Vec::new();
+            let mut skipped_deleted: Vec<(String, bool)> = Vec::new();
             let mut folders = Self::fetch_folders_conn(conn)?;
             for file in ordered_folders {
                 if file.id == inbox_id {
                     continue;
                 }
-                let parent = file.parents.first().and_then(|pid| map.get(pid).copied());
+                let parent_remote_id = file.parents.first();
+                let normalized_name = file.name.trim().to_lowercase();
+                let remote_norm_path = match parent_remote_id
+                    .and_then(|pid| remote_path_by_id.get(pid))
+                    .filter(|p| !p.is_empty())
+                {
+                    Some(parent_path) => format!("{parent_path}/{normalized_name}"),
+                    None => normalized_name,
+                };
+                remote_path_by_id.insert(file.id.clone(), remote_norm_path.clone());
+
+                if pending_deleted_folder_drive_ids.contains(&file.id) {
+                    skipped_pending.push(file.id.clone());
+                    continue;
+                }
+                if deleted_folder_drive_ids.contains(&file.id) {
+                    skipped_deleted.push((file.id.clone(), false));
+                    continue;
+                }
+
+                let parent = parent_remote_id.and_then(|pid| map.get(pid).copied());
                 let found_idx = folders
                     .iter()
                     .position(|f| f.drive_folder_id.as_deref() == Some(file.id.as_str()))
@@ -579,11 +606,22 @@ impl LibraryDatabase {
                             .iter()
                             .position(|f| f.parent_id == parent && f.name == file.name)
                     });
+                if found_idx.is_none() {
+                    if let Some(deleted_path_fp) = deleted_folder_paths.get(&remote_norm_path) {
+                        let remote_mod = file.modified_time.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+                        if deleted_path_fp.deleted_at >= remote_mod - chrono::Duration::seconds(5) {
+                            skipped_deleted.push((file.id.clone(), true));
+                            continue;
+                        }
+                    }
+                }
+
                 let id = found_idx
                     .map(|i| folders[i].id)
                     .unwrap_or_else(|| stable_folder_uuid(&file.id));
 
                 if Self::is_tombstoned_conn(conn, "folder", id)? {
+                    skipped_deleted.push((file.id.clone(), true));
                     continue;
                 }
                 let mut folder = Self::folder_by_id_conn(conn, id)?.unwrap_or_else(|| {
@@ -628,7 +666,11 @@ impl LibraryDatabase {
                     folders.push(folder);
                 }
             }
-            Ok(map)
+            Ok(FolderReconcileBatchResult {
+                map,
+                skipped_pending,
+                skipped_deleted,
+            })
         })
     }
 
@@ -701,6 +743,46 @@ impl LibraryDatabase {
             }
             Ok(())
         })
+    }
+
+    /// Persists multiple `deleted.folder.drive.<id> = true` markers in a single SQLite transaction.
+    pub fn mark_deleted_folder_drive_markers_batch(&self, folder_ids: &[String]) -> CoreResult<()> {
+        if folder_ids.is_empty() {
+            return Ok(());
+        }
+        self.with_transaction(|conn| {
+            for fid in folder_ids {
+                Self::set_state_conn(conn, &format!("deleted.folder.drive.{fid}"), Some(&true))?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Deletes a batch of `sync_state` keys atomically in one transaction.
+    pub fn clear_state_keys_batch(&self, keys: &[String]) -> CoreResult<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.with_transaction(|conn| {
+            for key in keys {
+                Self::set_state_conn::<bool>(conn, key, None)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Returns all currently existing asset UUIDs (both active and trashed).
+    pub fn existing_asset_ids(&self) -> CoreResult<HashSet<Uuid>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM assets")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = HashSet::new();
+        for row in rows {
+            if let Ok(uuid) = Uuid::parse_str(&row?) {
+                out.insert(uuid);
+            }
+        }
+        Ok(out)
     }
 
     pub fn assets_by_content_hash(&self, content_hash: &str) -> CoreResult<Vec<AssetRecord>> {
@@ -1166,18 +1248,32 @@ impl LibraryDatabase {
     ///   sibling deduplication, moves direct assets to Inbox, and deletes only `id`.
     /// - When `trash_contents == true`: trashes all assets in the subtree and deletes subtree post-order.
     pub fn delete_folder(&self, id: Uuid, trash_contents: bool) -> CoreResult<()> {
+        self.delete_folder_with_root_prefix(id, trash_contents, "Charkle")
+    }
+
+    pub fn delete_folder_with_root_prefix(
+        &self,
+        id: Uuid,
+        trash_contents: bool,
+        root_prefix: &str,
+    ) -> CoreResult<()> {
         self.with_transaction(|conn| {
             let Some(root) = Self::folder_by_id_conn(conn, id)? else {
                 return Ok(());
             };
+            let all_folders_snapshot = Self::fetch_folders_conn(conn)?;
+            let folder_by_id: HashMap<Uuid, FolderRecord> = all_folders_snapshot
+                .iter()
+                .map(|f| (f.id, f.clone()))
+                .collect();
+
             if !trash_contents {
-                let all_folders = Self::fetch_folders_conn(conn)?;
-                let mut siblings: Vec<FolderRecord> = all_folders
+                let mut siblings: Vec<FolderRecord> = all_folders_snapshot
                     .iter()
                     .filter(|f| f.parent_id == root.parent_id && f.id != id)
                     .cloned()
                     .collect();
-                let children: Vec<FolderRecord> = all_folders
+                let children: Vec<FolderRecord> = all_folders_snapshot
                     .into_iter()
                     .filter(|f| f.parent_id == Some(id))
                     .collect();
@@ -1213,11 +1309,17 @@ impl LibraryDatabase {
                     asset.folder_id = None;
                     Self::save_asset_locally_conn(conn, &asset, true)?;
                 }
+                let op_drive_id = Self::record_deleted_folder_markers_conn(
+                    conn,
+                    &root,
+                    &folder_by_id,
+                    root_prefix,
+                )?;
                 Self::record_conn(
                     conn,
                     SyncOperationChange::DeleteFolder {
                         id,
-                        drive_id: root.drive_folder_id,
+                        drive_id: op_drive_id,
                     },
                     true,
                 )?;
@@ -1242,15 +1344,79 @@ impl LibraryDatabase {
             }
             // Delete children before parent (reverse BFS order is valid post-order)
             for fid in subtree_ids.into_iter().rev() {
-                let drive_id = Self::folder_by_id_conn(conn, fid)?.and_then(|f| f.drive_folder_id);
+                let op_drive_id = if let Some(folder) = Self::folder_by_id_conn(conn, fid)? {
+                    Self::record_deleted_folder_markers_conn(
+                        conn,
+                        &folder,
+                        &folder_by_id,
+                        root_prefix,
+                    )?
+                } else {
+                    None
+                };
                 Self::record_conn(
                     conn,
-                    SyncOperationChange::DeleteFolder { id: fid, drive_id },
+                    SyncOperationChange::DeleteFolder {
+                        id: fid,
+                        drive_id: op_drive_id,
+                    },
                     true,
                 )?;
             }
             Ok(())
         })
+    }
+
+    fn record_deleted_folder_markers_conn(
+        conn: &Connection,
+        folder: &FolderRecord,
+        folder_by_id: &HashMap<Uuid, FolderRecord>,
+        root_prefix: &str,
+    ) -> CoreResult<Option<String>> {
+        let mounted = folder
+            .drive_folder_id
+            .as_deref()
+            .is_some_and(|s| s.starts_with("mounted-"));
+        if mounted {
+            if let Some(ref remote) = folder.drive_folder_id {
+                let resolved_remote = if remote.starts_with(MOUNTED_PATH_ID_PREFIX) {
+                    remote.clone()
+                } else {
+                    let rel_folder_path =
+                        mounted_relative_folder_path(Some(folder.id), folder_by_id);
+                    format!("{MOUNTED_PATH_ID_PREFIX}{root_prefix}/{rel_folder_path}")
+                };
+                Self::set_state_conn(
+                    conn,
+                    &format!("local.delete.folder.{}", format_swift_uuid(&folder.id)),
+                    Some(&resolved_remote),
+                )?;
+                Self::set_state_conn(
+                    conn,
+                    &format!("deleted.folder.drive.{resolved_remote}"),
+                    Some(&true),
+                )?;
+                if resolved_remote != *remote {
+                    Self::set_state_conn(
+                        conn,
+                        &format!("deleted.folder.drive.{remote}"),
+                        Some(&true),
+                    )?;
+                }
+            }
+            Ok(None)
+        } else {
+            if let Some(ref remote) = folder.drive_folder_id {
+                if !remote.is_empty() {
+                    Self::set_state_conn(
+                        conn,
+                        &format!("deleted.folder.drive.{remote}"),
+                        Some(&true),
+                    )?;
+                }
+            }
+            Ok(folder.drive_folder_id.clone())
+        }
     }
 
     pub fn fetch_smart_folders(&self) -> CoreResult<Vec<SmartFolderRecord>> {
@@ -1635,6 +1801,25 @@ impl LibraryDatabase {
         Ok(out)
     }
 
+    pub fn pending_ops_after<T: DeserializeOwned>(
+        &self,
+        after_seq: i64,
+        limit: usize,
+    ) -> CoreResult<Vec<(i64, T)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt =
+            conn.prepare("SELECT seq, payload FROM sync_ops WHERE seq>?1 ORDER BY seq LIMIT ?2")?;
+        let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, bytes) = row?;
+            out.push((seq, serde_json::from_slice(&bytes)?));
+        }
+        Ok(out)
+    }
+
     pub fn acknowledge_ops(&self, through_seq: i64) -> CoreResult<()> {
         let conn = self.lock_conn()?;
         conn.execute("DELETE FROM sync_ops WHERE seq<=?1", params![through_seq])?;
@@ -1645,6 +1830,25 @@ impl LibraryDatabase {
         let conn = self.lock_conn()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM sync_ops", [], |r| r.get(0))?;
         Ok(count.max(0) as usize)
+    }
+
+    pub fn pending_op_count_after(&self, after_seq: i64) -> CoreResult<usize> {
+        let conn = self.lock_conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_ops WHERE seq>?1",
+            params![after_seq],
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn max_pending_op_seq(&self) -> CoreResult<i64> {
+        let conn = self.lock_conn()?;
+        let max_seq: i64 =
+            conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM sync_ops", [], |r| {
+                r.get(0)
+            })?;
+        Ok(max_seq)
     }
 
     pub fn clear_migration_sync_state(&self) -> CoreResult<()> {
@@ -1659,6 +1863,7 @@ impl LibraryDatabase {
              WHERE key LIKE 'remote.%'
                 OR key LIKE 'local.delete.%'
                 OR key LIKE 'deleted.drive.%'
+                OR key LIKE 'deleted.folder.%'
                 OR key LIKE 'clock.%'
                 OR key LIKE 'projection.%'",
             [],
@@ -2630,6 +2835,37 @@ impl LibraryDatabase {
                 let key = format!("clock.asset.{id_str}");
                 let mut clocks: SyncClocks = Self::state_conn(conn, &key)?.unwrap_or_default();
                 if clocks.deleted() {
+                    // Even when a delete op arrived before an older create/bind op from another device,
+                    // harvest its driveFileID and contentHash so reconciliation never resurrects a deleted file.
+                    if let Some(drive_id) =
+                        Self::decode_non_empty_string_field(delta.fields.get("driveFileID"))
+                    {
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.drive.{drive_id}"),
+                            Some(&true),
+                        )?;
+                    }
+                    if let Some(hash) =
+                        Self::decode_non_empty_string_field(delta.fields.get("contentHash"))
+                    {
+                        let content_key = format!("deleted.content.{hash}");
+                        if Self::state_conn::<DeletedAssetFingerprint>(conn, &content_key)?
+                            .is_none()
+                        {
+                            let deleted_name =
+                                Self::decode_non_empty_string_field(delta.fields.get("fileName"))
+                                    .unwrap_or_default();
+                            let fp = DeletedAssetFingerprint {
+                                asset_id: delta.id,
+                                sha256: hash,
+                                md5: None,
+                                file_name: deleted_name,
+                                deleted_at: date,
+                            };
+                            Self::set_state_conn(conn, &content_key, Some(&fp))?;
+                        }
+                    }
                     return Ok(());
                 }
                 let current = Self::asset_by_id_conn(conn, delta.id)?.unwrap_or_else(|| {
@@ -2763,7 +2999,35 @@ impl LibraryDatabase {
                 let id_str = format_swift_uuid(&folder.id);
                 let key = format!("clock.folder.{id_str}");
                 let mut clocks: SyncClocks = Self::state_conn(conn, &key)?.unwrap_or_default();
-                if clocks.deleted() || !clocks.accept(stamp, "value") {
+                if clocks.deleted() {
+                    // Harvest remote folder ID & normalized path even if `.deleteFolder` replayed before `.folder`.
+                    if let Some(ref drive_id) = folder.drive_folder_id {
+                        if !drive_id.is_empty() {
+                            Self::set_state_conn(
+                                conn,
+                                &format!("deleted.folder.drive.{drive_id}"),
+                                Some(&true),
+                            )?;
+                        }
+                    }
+                    if let Ok(norm_path) = Self::normalized_folder_path_conn(conn, &folder) {
+                        if !norm_path.is_empty() {
+                            let path_key = format!("deleted.folder.path.{norm_path}");
+                            if Self::state_conn::<DeletedFolderFingerprint>(conn, &path_key)?
+                                .is_none()
+                            {
+                                let fp = DeletedFolderFingerprint {
+                                    folder_id: folder.id,
+                                    normalized_path: norm_path,
+                                    deleted_at: date,
+                                };
+                                Self::set_state_conn(conn, &path_key, Some(&fp))?;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                if !clocks.accept(stamp, "value") {
                     return Ok(());
                 }
                 let current = Self::folder_by_id_conn(conn, folder.id)?;
@@ -2778,15 +3042,42 @@ impl LibraryDatabase {
                 folder.asset_count = 0;
                 Self::put_folder_conn(conn, &folder)?;
                 Self::set_state_conn(conn, &key, Some(&clocks))?;
+                if let Ok(norm_path) = Self::normalized_folder_path_conn(conn, &folder) {
+                    if !norm_path.is_empty() {
+                        let path_key = format!("deleted.folder.path.{norm_path}");
+                        if let Some(prior_deleted) =
+                            Self::state_conn::<DeletedFolderFingerprint>(conn, &path_key)?
+                        {
+                            if prior_deleted.deleted_at <= date {
+                                Self::set_state_conn::<DeletedFolderFingerprint>(
+                                    conn, &path_key, None,
+                                )?;
+                            }
+                        }
+                    }
+                }
             }
             SyncOperationChange::DeleteAsset { id, drive_id } => {
                 let existing = Self::asset_by_id_conn(conn, *id)?;
-                let known_id = existing
-                    .as_ref()
-                    .and_then(|a| a.drive_file_id.clone())
-                    .or_else(|| drive_id.clone());
-                if let Some(ref did) = known_id {
-                    Self::set_state_conn(conn, &format!("deleted.drive.{did}"), Some(&true))?;
+                if let Some(ref existing_remote) =
+                    existing.as_ref().and_then(|a| a.drive_file_id.clone())
+                {
+                    if !existing_remote.is_empty() {
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.drive.{existing_remote}"),
+                            Some(&true),
+                        )?;
+                    }
+                }
+                if let Some(ref op_drive_id) = drive_id {
+                    if !op_drive_id.is_empty() {
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.drive.{op_drive_id}"),
+                            Some(&true),
+                        )?;
+                    }
                 }
                 if let Some(ref ex) = existing {
                     if !ex.content_hash.is_empty() {
@@ -2795,7 +3086,7 @@ impl LibraryDatabase {
                             sha256: ex.content_hash.clone(),
                             md5: None,
                             file_name: ex.file_name.clone(),
-                            deleted_at: Utc::now(),
+                            deleted_at: date,
                         };
                         Self::set_state_conn(
                             conn,
@@ -2821,7 +3112,46 @@ impl LibraryDatabase {
                 Self::remove_board_conn(conn, *id)?;
                 Self::mark_projection_conn(conn, "boards", *id)?;
             }
-            SyncOperationChange::DeleteFolder { id, .. } => {
+            SyncOperationChange::DeleteFolder { id, drive_id } => {
+                let existing_folder = Self::folder_by_id_conn(conn, *id)?;
+                if let Some(ref existing_remote) = existing_folder
+                    .as_ref()
+                    .and_then(|f| f.drive_folder_id.clone())
+                {
+                    if !existing_remote.is_empty() {
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.folder.drive.{existing_remote}"),
+                            Some(&true),
+                        )?;
+                    }
+                }
+                if let Some(ref op_drive_id) = drive_id {
+                    if !op_drive_id.is_empty() {
+                        Self::set_state_conn(
+                            conn,
+                            &format!("deleted.folder.drive.{op_drive_id}"),
+                            Some(&true),
+                        )?;
+                    }
+                }
+                if let Some(ref existing_folder) = existing_folder {
+                    if let Ok(norm_path) = Self::normalized_folder_path_conn(conn, existing_folder)
+                    {
+                        if !norm_path.is_empty() {
+                            let fp = DeletedFolderFingerprint {
+                                folder_id: *id,
+                                normalized_path: norm_path.clone(),
+                                deleted_at: date,
+                            };
+                            Self::set_state_conn(
+                                conn,
+                                &format!("deleted.folder.path.{norm_path}"),
+                                Some(&fp),
+                            )?;
+                        }
+                    }
+                }
                 Self::tombstone_conn(conn, "folder", *id, stamp)?;
                 Self::remove_folder_conn(conn, *id)?;
             }
@@ -2858,6 +3188,34 @@ impl LibraryDatabase {
         }
 
         Ok(())
+    }
+
+    fn decode_non_empty_string_field(data: Option<&Vec<u8>>) -> Option<String> {
+        let bytes = data?;
+        let val: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let text = val.as_str()?;
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
+    fn normalized_folder_path_conn(conn: &Connection, folder: &FolderRecord) -> CoreResult<String> {
+        let mut parts = Vec::new();
+        let mut cursor = Some(folder.clone());
+        let mut visited = HashSet::new();
+        while let Some(current) = cursor {
+            if !visited.insert(current.id) {
+                break;
+            }
+            let trimmed = current.name.trim().to_lowercase();
+            if !trimmed.is_empty() {
+                parts.push(trimmed);
+            }
+            cursor = match current.parent_id {
+                Some(pid) => Self::folder_by_id_conn(conn, pid)?,
+                None => None,
+            };
+        }
+        parts.reverse();
+        Ok(parts.join("/"))
     }
 
     fn store_deferred_vector_conn(
@@ -3021,6 +3379,14 @@ impl LibraryDatabase {
             Ok(())
         })
     }
+}
+
+/// Result of batched remote folder reconciliation with anti-resurrection skipping.
+#[derive(Debug, Clone, Default)]
+pub struct FolderReconcileBatchResult {
+    pub map: HashMap<String, Uuid>,
+    pub skipped_pending: Vec<String>,
+    pub skipped_deleted: Vec<(String, bool)>,
 }
 
 fn mounted_relative_folder_path(

@@ -710,11 +710,13 @@ export const OnboardingStudio: React.FC = () => {
   const storageSummary =
     draftSync.mode === 'localOnly'
       ? '纯本地文件夹'
-      : draftSync.mode === 'webDAV'
-        ? draftSync.webDAVServerURL.trim()
-          ? 'WebDAV 云盘'
-          : 'WebDAV（待填写）'
-        : directAccount?.email ?? 'Google Drive（待登录）';
+      : draftSync.mode === 'iCloudDrive'
+        ? 'iCloud Drive'
+        : draftSync.mode === 'webDAV'
+          ? draftSync.webDAVServerURL.trim()
+            ? 'WebDAV 云盘'
+            : 'WebDAV（待填写）'
+          : directAccount?.email ?? 'Google Drive（待登录）';
 
   const captureSummary = `${
     shelfSettings.enabled

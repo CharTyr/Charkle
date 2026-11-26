@@ -23,6 +23,8 @@ use crate::wire::swift_codec::{
 pub enum DriveTransportMode {
     #[serde(rename = "directAPIWithGDirect")]
     DirectApiWithGDirect,
+    #[serde(rename = "iCloudDrive")]
+    ICloudDrive,
     #[serde(rename = "webDAV")]
     WebDav,
     #[serde(rename = "gdirectMount")]
@@ -35,10 +37,312 @@ impl DriveTransportMode {
     pub fn localized_label(self) -> &'static str {
         match self {
             Self::DirectApiWithGDirect => "Google Drive",
+            Self::ICloudDrive => "iCloud Drive",
             Self::WebDav => "WebDAV 云盘",
             Self::GDirectMount => "gdirect 本地挂载",
             Self::LocalOnly => "纯本地文件夹",
         }
+    }
+
+    pub fn is_cloud_backed(self) -> bool {
+        !matches!(self, Self::LocalOnly)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ICloudDriveAvailability {
+    pub is_ubiquity_container_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ubiquity_documents_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_cloud_docs_path: Option<String>,
+    pub default_display_location: String,
+}
+
+impl Default for ICloudDriveAvailability {
+    fn default() -> Self {
+        Self {
+            is_ubiquity_container_available: false,
+            ubiquity_documents_path: None,
+            system_cloud_docs_path: None,
+            default_display_location: "iCloud Drive / Charkle".to_string(),
+        }
+    }
+}
+
+impl ICloudDriveAvailability {
+    pub fn has_automatic_path(&self) -> bool {
+        self.ubiquity_documents_path.is_some() || self.system_cloud_docs_path.is_some()
+    }
+}
+
+fn default_backend_mode() -> DriveTransportMode {
+    DriveTransportMode::DirectApiWithGDirect
+}
+
+/// Independent sync backend profile enabling simultaneous multi-backend sync
+/// (e.g. Google Drive + iCloud Drive + WebDAV connected at the same time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBackendProfile {
+    #[serde(default = "Uuid::new_v4", with = "upper_uuid")]
+    pub id: Uuid,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_backend_mode")]
+    pub mode: DriveTransportMode,
+    #[serde(default = "default_true")]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+
+    // Google Drive / gdirect
+    #[serde(default = "default_root_folder_name")]
+    pub root_folder_name: String,
+    #[serde(rename = "sharedFolderURLOrID", default)]
+    pub shared_folder_url_or_id: String,
+    #[serde(default = "default_mount_path")]
+    pub mount_path: String,
+    #[serde(
+        rename = "selectedGDirectAccount",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub selected_gdirect_account: Option<String>,
+    #[serde(rename = "useGDirectIPAcceleration", default = "default_true")]
+    pub use_gdirect_ip_acceleration: bool,
+
+    // iCloud Drive
+    #[serde(rename = "iCloudFolderName", default = "default_root_folder_name")]
+    pub icloud_folder_name: String,
+    #[serde(rename = "iCloudCustomFolderPath", default)]
+    pub icloud_custom_folder_path: String,
+    #[serde(rename = "iCloudContainerIdentifier", default)]
+    pub icloud_container_identifier: String,
+
+    // WebDAV
+    #[serde(rename = "webDAVServerURL", default)]
+    pub webdav_server_url: String,
+    #[serde(rename = "webDAVUsername", default)]
+    pub webdav_username: String,
+    #[serde(rename = "webDAVRemotePath", default = "default_webdav_path")]
+    pub webdav_remote_path: String,
+
+    // Local Folder
+    #[serde(default = "default_local_library_path")]
+    pub local_library_path: String,
+}
+
+impl Default for SyncBackendProfile {
+    fn default() -> Self {
+        Self::new(DriveTransportMode::DirectApiWithGDirect)
+    }
+}
+
+impl SyncBackendProfile {
+    pub const LEGACY_PRIMARY_ID: Uuid = Uuid::from_u128(1);
+
+    pub fn new(mode: DriveTransportMode) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: mode.localized_label().to_string(),
+            mode,
+            is_enabled: true,
+            is_primary: false,
+            root_folder_name: default_root_folder_name(),
+            shared_folder_url_or_id: String::new(),
+            mount_path: default_mount_path(),
+            selected_gdirect_account: None,
+            use_gdirect_ip_acceleration: true,
+            icloud_folder_name: default_root_folder_name(),
+            icloud_custom_folder_path: String::new(),
+            icloud_container_identifier: String::new(),
+            webdav_server_url: String::new(),
+            webdav_username: String::new(),
+            webdav_remote_path: default_webdav_path(),
+            local_library_path: default_local_library_path(),
+        }
+    }
+
+    pub fn from_legacy_config(config: &DriveSyncConfig) -> Self {
+        Self {
+            id: Self::LEGACY_PRIMARY_ID,
+            name: config.mode.localized_label().to_string(),
+            mode: config.mode,
+            is_enabled: true,
+            is_primary: true,
+            root_folder_name: config.root_folder_name.clone(),
+            shared_folder_url_or_id: config.shared_folder_url_or_id.clone(),
+            mount_path: config.mount_path.clone(),
+            selected_gdirect_account: config.selected_gdirect_account.clone(),
+            use_gdirect_ip_acceleration: config.use_gdirect_ip_acceleration,
+            icloud_folder_name: config.icloud_folder_name.clone(),
+            icloud_custom_folder_path: config.icloud_custom_folder_path.clone(),
+            icloud_container_identifier: String::new(),
+            webdav_server_url: config.webdav_server_url.clone(),
+            webdav_username: config.webdav_username.clone(),
+            webdav_remote_path: config.webdav_remote_path.clone(),
+            local_library_path: config.local_library_path.clone(),
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() {
+            self.mode.localized_label().to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    pub fn resolved_shared_folder_id(&self) -> Option<String> {
+        DriveSyncConfig::extract_google_drive_folder_id(&self.shared_folder_url_or_id)
+    }
+
+    pub fn location_summary(&self) -> String {
+        match self.mode {
+            DriveTransportMode::DirectApiWithGDirect => {
+                if let Some(shared_id) = self.resolved_shared_folder_id() {
+                    let short_id: String = shared_id.chars().take(10).collect();
+                    return format!("Google Drive 共享目录 ({short_id}…)");
+                }
+                let cleaned = self.root_folder_name.trim_matches(|c| c == '/' || c == ' ');
+                let name = if cleaned.is_empty() {
+                    "Charkle"
+                } else {
+                    cleaned
+                };
+                format!("Google Drive / {name}")
+            }
+            DriveTransportMode::ICloudDrive => {
+                let custom = self.icloud_custom_folder_path.trim();
+                if !custom.is_empty() {
+                    let leaf = std::path::Path::new(custom)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Charkle");
+                    return format!("iCloud Drive / {leaf}");
+                }
+                let cleaned = self
+                    .icloud_folder_name
+                    .trim_matches(|c| c == '/' || c == '\\' || c == ' ');
+                let name = if cleaned.is_empty() {
+                    "Charkle"
+                } else {
+                    cleaned
+                };
+                format!("iCloud Drive / {name}")
+            }
+            DriveTransportMode::WebDav => {
+                let host = Url::parse(&self.webdav_server_url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(String::from))
+                    .unwrap_or_else(|| self.webdav_server_url.clone());
+                let host_label = if host.is_empty() { "未配置" } else { &host };
+                let cleaned = self
+                    .webdav_remote_path
+                    .trim_matches(|c| c == '/' || c == ' ');
+                let path = if cleaned.is_empty() {
+                    "Charkle"
+                } else {
+                    cleaned
+                };
+                format!("WebDAV ({host_label}) / {path}")
+            }
+            DriveTransportMode::GDirectMount => {
+                let cleaned = self.root_folder_name.trim_matches(|c| c == '/' || c == ' ');
+                let name = if cleaned.is_empty() {
+                    "Charkle"
+                } else {
+                    cleaned
+                };
+                format!("{}/{name}", self.mount_path)
+            }
+            DriveTransportMode::LocalOnly => self.local_library_path.clone(),
+        }
+    }
+
+    pub fn to_single_backend_config(&self, base: &DriveSyncConfig) -> DriveSyncConfig {
+        DriveSyncConfig {
+            mode: self.mode,
+            root_folder_name: self.root_folder_name.clone(),
+            shared_folder_url_or_id: self.shared_folder_url_or_id.clone(),
+            mount_path: self.mount_path.clone(),
+            selected_gdirect_account: self.selected_gdirect_account.clone(),
+            use_gdirect_ip_acceleration: self.use_gdirect_ip_acceleration,
+            icloud_folder_name: self.icloud_folder_name.clone(),
+            icloud_custom_folder_path: self.icloud_custom_folder_path.clone(),
+            webdav_server_url: self.webdav_server_url.clone(),
+            webdav_username: self.webdav_username.clone(),
+            webdav_remote_path: self.webdav_remote_path.clone(),
+            local_library_path: self.local_library_path.clone(),
+            auto_sync_interval_seconds: base.auto_sync_interval_seconds,
+            sync_thumbnails: base.sync_thumbnails,
+            sync_embeddings: base.sync_embeddings,
+            backends: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncBackendStatus {
+    #[serde(rename = "backendID", with = "upper_uuid")]
+    pub backend_id: Uuid,
+    pub name: String,
+    pub mode: DriveTransportMode,
+    #[serde(default = "default_true")]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+    #[serde(default)]
+    pub phase: SyncPhase,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "cocoa_date_opt"
+    )]
+    pub last_synced_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<DriveAccountInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_fraction: Option<f64>,
+    #[serde(default)]
+    pub location_summary: String,
+}
+
+impl SyncBackendStatus {
+    pub fn from_profile(profile: &SyncBackendProfile) -> Self {
+        Self {
+            backend_id: profile.id,
+            name: profile.display_name(),
+            mode: profile.mode,
+            is_enabled: profile.is_enabled,
+            is_primary: profile.is_primary,
+            phase: SyncPhase::Idle,
+            last_synced_at: None,
+            last_error: None,
+            account: None,
+            current_detail: None,
+            progress_fraction: None,
+            location_summary: profile.location_summary(),
+        }
+    }
+
+    pub fn is_syncing(&self) -> bool {
+        matches!(
+            self.phase,
+            SyncPhase::Scanning
+                | SyncPhase::Uploading { .. }
+                | SyncPhase::Downloading { .. }
+                | SyncPhase::Merging
+        )
     }
 }
 
@@ -88,6 +392,8 @@ impl DriveAccountInfo {
         if matches!(
             source.as_str(),
             "webdav"
+                | "icloud drive"
+                | "icloud"
                 | "local folder"
                 | "本地文件夹"
                 | "mounted drive"
@@ -107,6 +413,9 @@ impl DriveAccountInfo {
         let source = self.source.trim().to_ascii_lowercase();
         match mode {
             DriveTransportMode::DirectApiWithGDirect => self.is_google_direct_api(),
+            DriveTransportMode::ICloudDrive => {
+                source == "icloud drive" || source.contains("icloud")
+            }
             DriveTransportMode::WebDav => {
                 source == "webdav" || source.contains("webdav") || source == "in-memory drive"
             }
@@ -218,6 +527,10 @@ pub struct DriveSyncConfig {
     pub selected_gdirect_account: Option<String>,
     #[serde(rename = "useGDirectIPAcceleration", default = "default_true")]
     pub use_gdirect_ip_acceleration: bool,
+    #[serde(rename = "iCloudFolderName", default = "default_root_folder_name")]
+    pub icloud_folder_name: String,
+    #[serde(rename = "iCloudCustomFolderPath", default)]
+    pub icloud_custom_folder_path: String,
     #[serde(rename = "webDAVServerURL", default)]
     pub webdav_server_url: String,
     #[serde(rename = "webDAVUsername", default)]
@@ -232,6 +545,8 @@ pub struct DriveSyncConfig {
     pub sync_thumbnails: bool,
     #[serde(default = "default_true")]
     pub sync_embeddings: bool,
+    #[serde(default)]
+    pub backends: Vec<SyncBackendProfile>,
 }
 
 fn default_root_folder_name() -> String {
@@ -253,6 +568,8 @@ impl Default for DriveSyncConfig {
             mount_path: default_mount_path(),
             selected_gdirect_account: None,
             use_gdirect_ip_acceleration: true,
+            icloud_folder_name: default_root_folder_name(),
+            icloud_custom_folder_path: String::new(),
             webdav_server_url: String::new(),
             webdav_username: String::new(),
             webdav_remote_path: default_webdav_path(),
@@ -260,6 +577,7 @@ impl Default for DriveSyncConfig {
             auto_sync_interval_seconds: default_sync_interval(),
             sync_thumbnails: true,
             sync_embeddings: true,
+            backends: Vec::new(),
         }
     }
 }
@@ -312,48 +630,115 @@ impl DriveSyncConfig {
         Self::extract_google_drive_folder_id(&self.shared_folder_url_or_id)
     }
 
-    pub fn active_storage_location_summary(&self) -> String {
-        match self.mode {
-            DriveTransportMode::DirectApiWithGDirect => {
-                if let Some(shared_id) = self.resolved_shared_folder_id() {
-                    let short_id: String = shared_id.chars().take(10).collect();
-                    return format!("Google Drive 共享目录 ({short_id}…)");
-                }
-                let cleaned = self.root_folder_name.trim_matches(|c| c == '/' || c == ' ');
-                let name = if cleaned.is_empty() {
-                    "Charkle"
-                } else {
-                    cleaned
-                };
-                format!("Google Drive / {name}")
+    /// Synthesizes a normalized list of backend profiles, keeping legacy single-backend configs 100% seamless.
+    pub fn resolved_backends(&self) -> Vec<SyncBackendProfile> {
+        if !self.backends.is_empty() {
+            let mut list: Vec<SyncBackendProfile> = self
+                .backends
+                .iter()
+                .cloned()
+                .map(|mut b| {
+                    if b.name.trim().is_empty() {
+                        b.name = b.mode.localized_label().to_string();
+                    }
+                    b
+                })
+                .collect();
+            if !list.iter().any(|b| b.is_primary) {
+                list[0].is_primary = true;
             }
-            DriveTransportMode::WebDav => {
-                let host = Url::parse(&self.webdav_server_url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(String::from))
-                    .unwrap_or_else(|| self.webdav_server_url.clone());
-                let host_label = if host.is_empty() { "未配置" } else { &host };
-                let cleaned = self
-                    .webdav_remote_path
-                    .trim_matches(|c| c == '/' || c == ' ');
-                let path = if cleaned.is_empty() {
-                    "Charkle"
-                } else {
-                    cleaned
-                };
-                format!("WebDAV ({host_label}) / {path}")
-            }
-            DriveTransportMode::GDirectMount => {
-                let cleaned = self.root_folder_name.trim_matches(|c| c == '/' || c == ' ');
-                let name = if cleaned.is_empty() {
-                    "Charkle"
-                } else {
-                    cleaned
-                };
-                format!("{}/{name}", self.mount_path)
-            }
-            DriveTransportMode::LocalOnly => self.local_library_path.clone(),
+            return list;
         }
+        vec![SyncBackendProfile {
+            id: SyncBackendProfile::LEGACY_PRIMARY_ID,
+            name: self.mode.localized_label().to_string(),
+            mode: self.mode,
+            is_enabled: true,
+            is_primary: true,
+            root_folder_name: self.root_folder_name.clone(),
+            shared_folder_url_or_id: self.shared_folder_url_or_id.clone(),
+            mount_path: self.mount_path.clone(),
+            selected_gdirect_account: self.selected_gdirect_account.clone(),
+            use_gdirect_ip_acceleration: self.use_gdirect_ip_acceleration,
+            icloud_folder_name: self.icloud_folder_name.clone(),
+            icloud_custom_folder_path: self.icloud_custom_folder_path.clone(),
+            icloud_container_identifier: String::new(),
+            webdav_server_url: self.webdav_server_url.clone(),
+            webdav_username: self.webdav_username.clone(),
+            webdav_remote_path: self.webdav_remote_path.clone(),
+            local_library_path: self.local_library_path.clone(),
+        }]
+    }
+
+    pub fn enabled_backends(&self) -> Vec<SyncBackendProfile> {
+        self.resolved_backends()
+            .into_iter()
+            .filter(|b| b.is_enabled)
+            .collect()
+    }
+
+    pub fn enabled_cloud_backends(&self) -> Vec<SyncBackendProfile> {
+        self.enabled_backends()
+            .into_iter()
+            .filter(|b| b.mode.is_cloud_backed())
+            .collect()
+    }
+
+    pub fn primary_backend(&self) -> SyncBackendProfile {
+        let resolved = self.resolved_backends();
+        resolved
+            .iter()
+            .find(|b| b.is_primary)
+            .cloned()
+            .unwrap_or_else(|| resolved[0].clone())
+    }
+
+    /// Mirrors the primary backend inside `backends` back to top-level fields so legacy readers remain consistent.
+    pub fn synchronize_primary_fields(&mut self) {
+        if self.backends.is_empty() {
+            return;
+        }
+        let primary_idx = self
+            .backends
+            .iter()
+            .position(|b| b.is_primary && b.is_enabled)
+            .or_else(|| self.backends.iter().position(|b| b.is_primary))
+            .or_else(|| self.backends.iter().position(|b| b.is_enabled))
+            .unwrap_or(0);
+        for (idx, backend) in self.backends.iter_mut().enumerate() {
+            backend.is_primary = idx == primary_idx;
+            if backend.name.trim().is_empty() {
+                backend.name = backend.mode.localized_label().to_string();
+            }
+        }
+        let primary = self.backends[primary_idx].clone();
+        self.mode = primary.mode;
+        self.root_folder_name = primary.root_folder_name;
+        self.shared_folder_url_or_id = primary.shared_folder_url_or_id;
+        self.mount_path = primary.mount_path;
+        self.selected_gdirect_account = primary.selected_gdirect_account;
+        self.use_gdirect_ip_acceleration = primary.use_gdirect_ip_acceleration;
+        self.icloud_folder_name = primary.icloud_folder_name;
+        self.icloud_custom_folder_path = primary.icloud_custom_folder_path;
+        self.webdav_server_url = primary.webdav_server_url;
+        self.webdav_username = primary.webdav_username;
+        self.webdav_remote_path = primary.webdav_remote_path;
+        self.local_library_path = primary.local_library_path;
+    }
+
+    pub fn active_storage_location_summary(&self) -> String {
+        let active = self.enabled_backends();
+        if active.len() > 1 {
+            let names: Vec<String> = active
+                .iter()
+                .map(SyncBackendProfile::display_name)
+                .collect();
+            return format!("{}（{} 个同步后端）", names.join(" + "), active.len());
+        }
+        if let Some(single) = active.first() {
+            return single.location_summary();
+        }
+        "未启用同步后端".to_string()
     }
 }
 
@@ -411,6 +796,8 @@ pub struct SyncStatus {
     pub current_detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_fraction: Option<f64>,
+    #[serde(default)]
+    pub backend_statuses: Vec<SyncBackendStatus>,
 }
 
 impl Default for SyncStatus {
@@ -424,6 +811,7 @@ impl Default for SyncStatus {
             last_error: None,
             current_detail: None,
             progress_fraction: None,
+            backend_statuses: Vec::new(),
         }
     }
 }
@@ -436,7 +824,10 @@ impl SyncStatus {
                 | SyncPhase::Uploading { .. }
                 | SyncPhase::Downloading { .. }
                 | SyncPhase::Merging
-        )
+        ) || self
+            .backend_statuses
+            .iter()
+            .any(SyncBackendStatus::is_syncing)
     }
 }
 
@@ -789,6 +1180,16 @@ pub struct DeletedAssetFingerprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md5: Option<String>,
     pub file_name: String,
+    #[serde(with = "cocoa_date")]
+    pub deleted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedFolderFingerprint {
+    #[serde(rename = "folderID", with = "upper_uuid")]
+    pub folder_id: Uuid,
+    pub normalized_path: String,
     #[serde(with = "cocoa_date")]
     pub deleted_at: DateTime<Utc>,
 }

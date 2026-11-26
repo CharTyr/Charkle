@@ -475,6 +475,11 @@ pub fn run() {
             commands::sync::sign_in_google_drive,
             commands::sync::sign_out_google_drive,
             commands::sync::test_webdav_connection,
+            commands::sync::probe_icloud_drive_availability,
+            commands::sync::save_backend_webdav_password,
+            commands::sync::has_backend_webdav_password,
+            commands::sync::test_backend_connection,
+            commands::sync::sync_backend,
             // Window Chrome & Snap Layouts
             commands::window::set_window_theme,
             commands::window::set_maximize_button_rect,

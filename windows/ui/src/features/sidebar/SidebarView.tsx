@@ -86,6 +86,8 @@ function syncModeLabel(mode: DriveTransportMode | undefined): string {
   switch (mode) {
     case 'directAPIWithGDirect':
       return 'Google Drive';
+    case 'iCloudDrive':
+      return 'iCloud Drive';
     case 'webDAV':
       return 'WebDAV';
     case 'gdirectMount':
@@ -101,6 +103,8 @@ function syncPhaseLabel(
   mode?: DriveTransportMode,
 ): string {
   const resolvedMode = mode ?? status?.activeMode ?? 'localOnly';
+  const enabledBackendCount =
+    status?.backendStatuses?.filter((b) => b.isEnabled).length ?? 0;
   if (!status) {
     if (syncing) return '同步中…';
     return resolvedMode === 'localOnly'
@@ -123,8 +127,11 @@ function syncPhaseLabel(
     if ('error' in status.phase) return '同步异常';
   }
   if (syncing) return '同步中…';
-  const base = syncModeLabel(resolvedMode);
-  if (resolvedMode === 'localOnly') return base;
+  const base =
+    enabledBackendCount > 1
+      ? `多后端同步（${enabledBackendCount}）`
+      : syncModeLabel(resolvedMode);
+  if (enabledBackendCount <= 1 && resolvedMode === 'localOnly') return base;
   return status.pendingOpCount > 0 ? `${base} · 待传 ${status.pendingOpCount}` : `${base} · 已同步`;
 }
 

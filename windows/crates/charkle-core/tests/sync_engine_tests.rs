@@ -693,3 +693,548 @@ async fn fast_initial_sync_emits_progressive_metadata_then_thumbnails_newest_fir
     assert_eq!(events[0], "metadata");
     assert!(events.iter().any(|e| e.starts_with("thumbnails:")));
 }
+
+#[tokio::test]
+async fn fresh_install_never_resurrects_deleted_items() {
+    use charkle_core::models::core::FilterCriteria;
+
+    let tmp = tempdir().unwrap();
+    let cloud = Arc::new(InMemoryDriveTransport::default());
+
+    // Force Creator deviceID ("ffff...") > Deleter deviceID ("0000...") to test out-of-order cross-device replay!
+    let creator_dir = tmp.path().join("creator");
+    let deleter_dir = tmp.path().join("deleter");
+    let creator = make_device_engine(&creator_dir, cloud.clone());
+    let deleter = make_device_engine(&deleter_dir, cloud.clone());
+    creator
+        .database()
+        .set_state(
+            "deviceID",
+            Some(&"ffffffffffffffffffffffffffffffff".to_string()),
+        )
+        .unwrap();
+    deleter
+        .database()
+        .set_state(
+            "deviceID",
+            Some(&"00000000000000000000000000000000".to_string()),
+        )
+        .unwrap();
+
+    // 1. Creator creates nested folders Parent/Child, GhostFolder, and 4 distinct assets
+    let parent = creator.create_folder("Parent", None).unwrap();
+    let child = creator.create_folder("Child", Some(parent.id)).unwrap();
+    let orphan_folder = creator.create_folder("GhostFolder", None).unwrap();
+
+    let keep = creator
+        .ingest(
+            vec![CaptureInput::ImageData {
+                data: sample_png([46, 111, 149, 255]),
+                suggested_name: "keep.png".to_string(),
+                source_url: None,
+            }],
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    let perm_del = creator
+        .ingest(
+            vec![CaptureInput::ImageData {
+                data: sample_png([184, 74, 57, 255]),
+                suggested_name: "perm-del.png".to_string(),
+                source_url: None,
+            }],
+            Some(child.id),
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    let soft_trash = creator
+        .ingest(
+            vec![CaptureInput::ImageData {
+                data: sample_png([77, 124, 91, 255]),
+                suggested_name: "soft-trash.png".to_string(),
+                source_url: None,
+            }],
+            Some(child.id),
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    let leftover_payload = sample_png([158, 119, 64, 255]);
+    let leftover_asset = creator
+        .ingest(
+            vec![CaptureInput::ImageData {
+                data: leftover_payload.clone(),
+                suggested_name: "leftover-del.png".to_string(),
+                source_url: None,
+            }],
+            Some(orphan_folder.id),
+            None,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+    creator.sync_now().await.unwrap();
+
+    let leftover_remote_file_id = creator
+        .fetch_asset(leftover_asset.id)
+        .unwrap()
+        .unwrap()
+        .drive_file_id
+        .expect("leftover bound driveFileID");
+    let orphan_remote_folder_id = creator
+        .fetch_folders()
+        .unwrap()
+        .into_iter()
+        .find(|f| f.id == orphan_folder.id)
+        .unwrap()
+        .drive_folder_id
+        .expect("orphan bound driveFolderID");
+    assert!(!leftover_remote_file_id.is_empty());
+    assert!(!orphan_remote_folder_id.is_empty());
+
+    // 2. Deleter pulls everything, then deletes nested folders, permanently deletes perm_del + leftover_asset,
+    //    and soft-trashes soft_trash (moving it to Inbox).
+    deleter.sync_now().await.unwrap();
+    deleter
+        .update_assets(&AssetBatchPatch {
+            asset_ids: vec![soft_trash.id],
+            folder_assignment: FolderAssignment::Inbox,
+            is_trashed: Some(true),
+            ..AssetBatchPatch::default()
+        })
+        .unwrap();
+    deleter
+        .permanently_delete_assets(&[perm_del.id, leftover_asset.id])
+        .unwrap();
+    deleter.delete_folder(child.id, false).unwrap();
+    deleter.delete_folder(parent.id, false).unwrap();
+    deleter.delete_folder(orphan_folder.id, false).unwrap();
+    deleter.sync_now().await.unwrap();
+
+    // Verify deepest-first physical deletion removed Parent, Child, and GhostFolder from Drive!
+    let root = cloud
+        .find_or_create_folder("Charkle", "root")
+        .await
+        .unwrap();
+    let root_children_after_delete = cloud.list_files(&root.id).await.unwrap();
+    assert!(!root_children_after_delete
+        .iter()
+        .any(|f| f.name == "Parent"));
+    assert!(!root_children_after_delete
+        .iter()
+        .any(|f| f.name == "GhostFolder"));
+
+    // 3. Simulate a legacy/403/network-glitch leftover deleted folder & deleted file STILL sitting on Drive
+    let ghost_dir_still_on_drive = cloud
+        .find_or_create_folder("GhostFolder", &root.id)
+        .await
+        .unwrap();
+    cloud
+        .upload_data(
+            &leftover_payload,
+            "leftover-del.png",
+            "image/png",
+            &ghost_dir_still_on_drive.id,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // 4. Fresh Install (Device C) connects to Drive and syncs!
+    let fresh = make_device_engine(&tmp.path().join("fresh_install"), cloud.clone());
+    let fresh_report = fresh.sync_now().await.unwrap();
+
+    // Verify ZERO deleted folders resurrected and ZERO permanently deleted assets resurrected!
+    assert!(fresh.fetch_folders().unwrap().is_empty());
+
+    let fresh_live = fresh
+        .fetch_assets(&FilterCriteria {
+            include_trashed: false,
+            ..FilterCriteria::default()
+        })
+        .unwrap();
+    assert_eq!(
+        fresh_live.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![keep.id]
+    );
+
+    let fresh_trashed = fresh
+        .fetch_assets(&FilterCriteria {
+            only_trashed: true,
+            ..FilterCriteria::default()
+        })
+        .unwrap();
+    assert_eq!(
+        fresh_trashed.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![soft_trash.id]
+    );
+
+    // Verify self-healing cleaned up leftover file & empty GhostFolder on Drive and pushed zero resurrection ops
+    let root_children_after_fresh = cloud.list_files(&root.id).await.unwrap();
+    assert!(!root_children_after_fresh
+        .iter()
+        .any(|f| f.name == "GhostFolder"));
+    assert_eq!(fresh_report.discovered_remote_assets, 0);
+    assert_eq!(fresh_report.uploaded_ops, 0);
+
+    // A second sync stays completely steady (idempotent)
+    let second_report = fresh.sync_now().await.unwrap();
+    assert_eq!(second_report.discovered_remote_assets, 0);
+    assert_eq!(second_report.uploaded_ops, 0);
+}
+
+#[tokio::test]
+async fn fresh_install_handles_nil_drive_id_deletions_and_unbound_trashed() {
+    use charkle_core::models::core::FilterCriteria;
+    use charkle_core::models::sync::{SyncLogLine, SyncOperation};
+    use charkle_core::wire::swift_codec::{canonical_json_bytes, format_ops_shard_file_name};
+
+    let tmp = tempdir().unwrap();
+    let cloud = Arc::new(InMemoryDriveTransport::default());
+
+    let root = cloud
+        .find_or_create_folder("Charkle", "root")
+        .await
+        .unwrap();
+    let inbox = cloud
+        .find_or_create_folder("Inbox", &root.id)
+        .await
+        .unwrap();
+    let stale_folder = cloud
+        .find_or_create_folder("MountedDeleted", &root.id)
+        .await
+        .unwrap();
+    assert!(!inbox.id.is_empty());
+
+    // Pre-place two physical files on Drive (as if uploaded via gdirectMount where ops lack Google Drive IDs)
+    let deleted_png = sample_png([170, 51, 68, 255]);
+    let trashed_png = sample_png([51, 102, 153, 255]);
+    cloud
+        .upload_data(
+            &deleted_png,
+            "mounted-del.png",
+            "image/png",
+            &stale_folder.id,
+            None,
+        )
+        .await
+        .unwrap();
+    cloud
+        .upload_data(
+            &trashed_png,
+            "mounted-trash.png",
+            "image/png",
+            &stale_folder.id,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Device A writes ops with driveFileID == None & driveFolderID == None, permanently deletes
+    // mounted-del.png, soft-trashes mounted-trash.png (moving to Inbox), and deletes MountedDeleted.
+    let dev_a = make_device_engine(&tmp.path().join("dev_a"), cloud.clone());
+    let folder_a = dev_a.create_folder("MountedDeleted", None).unwrap();
+    let imported = dev_a
+        .ingest(
+            vec![
+                CaptureInput::ImageData {
+                    data: deleted_png,
+                    suggested_name: "mounted-del.png".to_string(),
+                    source_url: None,
+                },
+                CaptureInput::ImageData {
+                    data: trashed_png,
+                    suggested_name: "mounted-trash.png".to_string(),
+                    source_url: None,
+                },
+            ],
+            Some(folder_a.id),
+            None,
+        )
+        .await
+        .unwrap();
+    let del_asset = &imported[0];
+    let trash_asset = &imported[1];
+    dev_a
+        .update_assets(&AssetBatchPatch {
+            asset_ids: vec![trash_asset.id],
+            folder_assignment: FolderAssignment::Inbox,
+            is_trashed: Some(true),
+            ..AssetBatchPatch::default()
+        })
+        .unwrap();
+    dev_a.permanently_delete_assets(&[del_asset.id]).unwrap();
+    dev_a.delete_folder(folder_a.id, false).unwrap();
+
+    // Push ONLY the ops shard directly (simulating a mount device whose remote delete didn't run on Drive)
+    let meta = cloud
+        .find_or_create_folder(".charkle", &root.id)
+        .await
+        .unwrap();
+    let ops_dir = cloud.find_or_create_folder("ops", &meta.id).await.unwrap();
+    let dev_id = dev_a.database().device_id().unwrap();
+    let pending_ops = dev_a.database().pending_ops::<SyncOperation>(500).unwrap();
+    let mut bytes = Vec::new();
+    for (seq, op) in &pending_ops {
+        bytes.extend_from_slice(
+            &canonical_json_bytes(&SyncLogLine {
+                seq: *seq,
+                operation: op.clone(),
+            })
+            .unwrap(),
+        );
+        bytes.push(b'\n');
+    }
+    let last_seq = pending_ops.last().unwrap().0;
+    let shard_name = format_ops_shard_file_name(&dev_id, last_seq);
+    cloud
+        .upload_data(
+            &bytes,
+            &shard_name,
+            "application/x-ndjson",
+            &ops_dir.id,
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Fresh install (Device B) connects via Direct API
+    let dev_b = make_device_engine(&tmp.path().join("dev_b"), cloud.clone());
+    dev_b.sync_now().await.unwrap();
+
+    // 1. Deleted folder must NOT be resurrected
+    assert!(dev_b.fetch_folders().unwrap().is_empty());
+    // 2. Permanently deleted asset must NOT be resurrected AND soft-trashed asset must NOT duplicate into live gallery
+    let live_b = dev_b
+        .fetch_assets(&FilterCriteria {
+            include_trashed: false,
+            ..FilterCriteria::default()
+        })
+        .unwrap();
+    assert!(live_b.is_empty());
+    let trashed_b = dev_b
+        .fetch_assets(&FilterCriteria {
+            only_trashed: true,
+            ..FilterCriteria::default()
+        })
+        .unwrap();
+    assert_eq!(trashed_b.len(), 1);
+    assert_eq!(trashed_b[0].id, trash_asset.id);
+    assert!(trashed_b[0].is_trashed);
+}
+
+#[tokio::test]
+async fn icloud_drive_transport_roundtrip_and_path_id_prefix() {
+    use charkle_core::sync::{ICloudDriveTransport, ICLOUD_PATH_ID_PREFIX};
+
+    let tmp = tempdir().unwrap();
+    let transport = ICloudDriveTransport::new(tmp.path(), "Charkle", None);
+    let account = transport.account_info().await.unwrap();
+    assert_eq!(account.source, "iCloud Drive");
+    assert!(transport.is_icloud_drive());
+    assert!(transport.is_path_based_transport());
+
+    let root = transport
+        .find_or_create_folder("Charkle", "root")
+        .await
+        .unwrap();
+    let sub = transport
+        .find_or_create_folder("References", &root.id)
+        .await
+        .unwrap();
+    assert!(sub.is_folder());
+    assert!(sub.id.starts_with(ICLOUD_PATH_ID_PREFIX));
+
+    let payload = b"hello-icloud-charkle".to_vec();
+    let uploaded = transport
+        .upload_data(&payload, "note.txt", "text/plain", &sub.id, None)
+        .await
+        .unwrap();
+    assert!(uploaded.id.starts_with(ICLOUD_PATH_ID_PREFIX));
+    assert!(transport.accepts_remote_id(&uploaded.id));
+    assert!(!transport.accepts_remote_id("mounted-path:Charkle/note.txt"));
+
+    let downloaded = transport.download_data(&uploaded.id).await.unwrap();
+    assert_eq!(downloaded, payload);
+
+    let listed = transport.list_files(&sub.id).await.unwrap();
+    assert!(listed.iter().any(|f| f.name == "note.txt"));
+
+    let moved = transport
+        .move_file(&uploaded.id, Some(&sub.id), &root.id, Some("renamed.txt"))
+        .await
+        .unwrap();
+    assert_eq!(moved.name, "renamed.txt");
+    assert_eq!(transport.download_data(&moved.id).await.unwrap(), payload);
+
+    transport.trash_file(&moved.id).await.unwrap();
+    let after_trash = transport.list_files(&root.id).await.unwrap();
+    assert!(!after_trash.iter().any(|f| f.name == "renamed.txt"));
+}
+
+#[test]
+fn drive_sync_config_backwards_compatible_decode_and_sync_primary() {
+    use charkle_core::models::sync::SyncBackendProfile;
+
+    let legacy_json = r#"{"mode":"directAPIWithGDirect","rootFolderName":"StudioLib"}"#;
+    let decoded: DriveSyncConfig = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(decoded.mode, DriveTransportMode::DirectApiWithGDirect);
+    let resolved = decoded.resolved_backends();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, SyncBackendProfile::LEGACY_PRIMARY_ID);
+    assert!(resolved[0].is_primary);
+
+    let mut icloud_profile = SyncBackendProfile::new(DriveTransportMode::ICloudDrive);
+    icloud_profile.name = "iCloud Drive".to_string();
+    icloud_profile.is_enabled = true;
+    icloud_profile.is_primary = false;
+    icloud_profile.icloud_folder_name = "Charkle".to_string();
+
+    let mut multi = decoded;
+    multi.backends = vec![resolved[0].clone(), icloud_profile];
+    multi.synchronize_primary_fields();
+    assert_eq!(multi.enabled_backends().len(), 2);
+    assert_eq!(multi.enabled_cloud_backends().len(), 2);
+    assert!(multi
+        .active_storage_location_summary()
+        .contains("2 个同步后端"));
+
+    let encoded = serde_json::to_string(&multi).unwrap();
+    let roundtripped: DriveSyncConfig = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(roundtripped.backends.len(), 2);
+    assert!(roundtripped
+        .backends
+        .iter()
+        .any(|b| b.mode == DriveTransportMode::ICloudDrive));
+}
+
+#[tokio::test]
+async fn simultaneous_multi_backend_sync_local_primary_and_icloud_secondary() {
+    use charkle_core::models::sync::SyncBackendProfile;
+    use charkle_core::sync::ICLOUD_PATH_ID_PREFIX;
+
+    let tmp = tempdir().unwrap();
+    let app_dir = tmp.path().join("app_support");
+    let primary_dir = tmp.path().join("primary_local");
+    let icloud_dir = tmp.path().join("secondary_icloud");
+    let sample_dir = tmp.path().join("sample_input");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    std::fs::create_dir_all(&primary_dir).unwrap();
+    std::fs::create_dir_all(&icloud_dir).unwrap();
+    std::fs::create_dir_all(&sample_dir).unwrap();
+
+    let engine = LiveCharkleEngine::open(&app_dir).unwrap();
+
+    let mut primary_profile = SyncBackendProfile::new(DriveTransportMode::LocalOnly);
+    primary_profile.id = SyncBackendProfile::LEGACY_PRIMARY_ID;
+    primary_profile.name = "本地主库".to_string();
+    primary_profile.is_enabled = true;
+    primary_profile.is_primary = true;
+    primary_profile.local_library_path = primary_dir
+        .join("CharklePrimary")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut icloud_profile = SyncBackendProfile::new(DriveTransportMode::ICloudDrive);
+    icloud_profile.name = "iCloud Drive".to_string();
+    icloud_profile.is_enabled = true;
+    icloud_profile.is_primary = false;
+    icloud_profile.icloud_folder_name = "CharkleICloud".to_string();
+    icloud_profile.icloud_custom_folder_path = icloud_dir
+        .join("CharkleICloud")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut config = DriveSyncConfig {
+        auto_sync_interval_seconds: 0,
+        sync_thumbnails: true,
+        sync_embeddings: false,
+        backends: vec![primary_profile, icloud_profile],
+        ..DriveSyncConfig::default()
+    };
+    config.synchronize_primary_fields();
+    engine.save_sync_config(config).unwrap();
+
+    let folder = engine.create_folder("Editorial", None).unwrap();
+    let png_path = sample_dir.join("poster.png");
+    std::fs::write(&png_path, sample_png([48, 92, 180, 255])).unwrap();
+    let imported = engine
+        .ingest(
+            vec![CaptureInput::FilePath(png_path)],
+            Some(folder.id),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(imported.len(), 1);
+
+    let report = engine.sync_now().await.unwrap();
+    assert!(report.uploaded_ops > 0);
+
+    let status = engine.sync_status().await;
+    assert_eq!(status.backend_statuses.len(), 2);
+    assert!(status
+        .backend_statuses
+        .iter()
+        .all(|s| s.last_synced_at.is_some() && s.last_error.is_none()));
+
+    // Verify BOTH primary local folder AND secondary iCloud folder received folder + original + .charkle ops!
+    let primary_asset_file = primary_dir
+        .join("CharklePrimary")
+        .join("Editorial")
+        .join("poster.png");
+    let icloud_asset_file = icloud_dir
+        .join("CharkleICloud")
+        .join("Editorial")
+        .join("poster.png");
+    let icloud_ops_dir = icloud_dir
+        .join("CharkleICloud")
+        .join(".charkle")
+        .join("ops");
+    assert!(
+        primary_asset_file.exists(),
+        "primary local asset file should exist"
+    );
+    assert!(
+        icloud_asset_file.exists(),
+        "secondary iCloud asset file should exist"
+    );
+    let ops_count = std::fs::read_dir(&icloud_ops_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .count();
+    assert!(
+        ops_count > 0,
+        "secondary iCloud .charkle/ops should contain shards"
+    );
+
+    // Verify primary asset's drive_file_id remained bound to primary (not clobbered by secondary iCloud path)
+    let reloaded = engine.fetch_asset(imported[0].id).unwrap().unwrap();
+    assert!(
+        !reloaded
+            .drive_file_id
+            .as_deref()
+            .unwrap_or("")
+            .starts_with(ICLOUD_PATH_ID_PREFIX),
+        "primary drive_file_id must not be clobbered by secondary iCloud path"
+    );
+
+    // Permanently delete asset & folder and sync again: verify BOTH primary AND secondary remove them cleanly!
+    engine.permanently_delete_assets(&[imported[0].id]).unwrap();
+    engine.delete_folder(folder.id, false).unwrap();
+    engine.sync_now().await.unwrap();
+
+    assert!(!primary_asset_file.exists());
+    assert!(!icloud_asset_file.exists());
+    assert!(!primary_dir
+        .join("CharklePrimary")
+        .join("Editorial")
+        .exists());
+    assert!(!icloud_dir.join("CharkleICloud").join("Editorial").exists());
+}

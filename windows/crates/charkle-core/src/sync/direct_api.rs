@@ -292,6 +292,7 @@ impl DriveTransport for DirectAPITransport {
     fn accepts_remote_id(&self, id: &str) -> bool {
         !id.is_empty()
             && !id.starts_with("mounted-")
+            && !id.starts_with("icloud-path:")
             && !id.contains('/')
             && !id.contains('\\')
             && !id.contains("..")

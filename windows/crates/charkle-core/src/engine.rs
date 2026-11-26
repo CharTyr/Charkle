@@ -47,13 +47,15 @@ use crate::models::moodboard::{
     MoodboardCurationRequest, MoodboardDocument, MoodboardProposal, MoodboardSummary,
 };
 use crate::models::sync::{
-    DriveSyncConfig, DriveTransportMode, StorageMigrationReport, SyncOperationChange, SyncReport,
-    SyncStatus,
+    DriveAccountInfo, DriveSyncConfig, DriveTransportMode, ICloudDriveAvailability,
+    StorageMigrationReport, SyncBackendProfile, SyncBackendStatus, SyncOperationChange, SyncPhase,
+    SyncReport, SyncStatus,
 };
 use crate::sync::{
-    validate_drive_name, validate_path_segments, DirectAPITransport, DriveSyncEngine,
-    DriveTransport, GoogleOAuthClient, LocalFolderTransport, MountedVolumeTransport,
-    StorageMigration, WebDAVTransport,
+    probe_icloud_drive_availability, validate_drive_name, validate_path_segments,
+    DirectAPITransport, DriveSyncEngine, DriveTransport, GoogleOAuthClient, ICloudDriveTransport,
+    LocalFolderTransport, MountedVolumeTransport, StorageMigration, SyncExecutionOptions,
+    WebDAVTransport,
 };
 use crate::traits::{
     BasicVolumeMountInspector, InMemorySecretVault, NativeOcrProvider, NoopOcrProvider,
@@ -81,6 +83,7 @@ pub struct LocalSemanticSearchReport {
 }
 
 /// Broadcast events pushed to Tauri WebView or CLI listeners.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum EngineEvent {
@@ -1729,7 +1732,20 @@ impl LiveCharkleEngine {
     }
 
     pub fn delete_folder(&self, id: Uuid, trash_contents: bool) -> CoreResult<()> {
-        self.db.delete_folder(id, trash_contents)?;
+        let config = self.sync_config();
+        let root_segments: Vec<&str> = config
+            .root_folder_name
+            .split('/')
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+            .collect();
+        let root_prefix = if root_segments.is_empty() {
+            "Charkle".to_string()
+        } else {
+            root_segments.join("/")
+        };
+        self.db
+            .delete_folder_with_root_prefix(id, trash_contents, &root_prefix)?;
         self.emit(EngineEvent::LibraryChanged);
         Ok(())
     }
@@ -2604,17 +2620,53 @@ impl LiveCharkleEngine {
             }
         }
         let config = self.sync_config();
-        let transport = self.build_transport(&config, false).await?;
-        let downloaded = self
-            .sync
-            .download_original(asset_id, transport.as_ref())
-            .await?;
-        let mut keep = HashSet::new();
-        keep.insert(asset_id);
-        let _ = self
-            .media
-            .cache_stats_and_evict(&self.db, true, &keep, None)?;
-        Ok(downloaded)
+        let mut ordered = config.enabled_backends();
+        ordered.sort_by_key(|p| i32::from(!p.is_primary));
+        let asset_id_str = format_swift_uuid(&asset_id);
+        let mut last_err: Option<CoreError> = None;
+
+        for profile in ordered {
+            let allow_local = profile.mode == DriveTransportMode::LocalOnly
+                && !profile.local_library_path.trim().is_empty();
+            let remote_override = if profile.is_primary {
+                None
+            } else {
+                let key = format!("backend.remoteAssets.{}", format_swift_uuid(&profile.id));
+                let map: HashMap<String, String> = self.db.state(&key)?.unwrap_or_default();
+                let Some(mapped_id) = map.get(&asset_id_str).cloned() else {
+                    continue;
+                };
+                Some(mapped_id)
+            };
+            match self
+                .build_transport_for_profile(&profile, &config, allow_local, None)
+                .await
+            {
+                Ok(transport) => {
+                    match self
+                        .sync
+                        .download_original_with_override(
+                            asset_id,
+                            transport.as_ref(),
+                            remote_override.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(downloaded) => {
+                            let mut keep = HashSet::new();
+                            keep.insert(asset_id);
+                            let _ = self
+                                .media
+                                .cache_stats_and_evict(&self.db, true, &keep, None)?;
+                            return Ok(downloaded);
+                        }
+                        Err(err) => last_err = Some(err),
+                    }
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| CoreError::NotFound(asset_id_str)))
     }
 
     pub fn cache_stats(&self) -> CoreResult<CacheStats> {
@@ -2656,19 +2708,28 @@ impl LiveCharkleEngine {
     }
 
     pub fn save_sync_config(&self, mut config: DriveSyncConfig) -> CoreResult<()> {
-        validate_path_segments(&config.root_folder_name)?;
-        if !config.webdav_remote_path.trim().is_empty() {
-            validate_path_segments(&config.webdav_remote_path)?;
+        if !config.backends.is_empty() {
+            config.synchronize_primary_fields();
+        }
+        for profile in config.resolved_backends() {
+            validate_path_segments(&profile.root_folder_name)?;
+            if !profile.icloud_folder_name.trim().is_empty() {
+                validate_path_segments(&profile.icloud_folder_name)?;
+            }
+            if !profile.webdav_remote_path.trim().is_empty() {
+                validate_path_segments(&profile.webdav_remote_path)?;
+            }
+            let trimmed_shared = profile.shared_folder_url_or_id.trim();
+            if !trimmed_shared.is_empty()
+                && DriveSyncConfig::extract_google_drive_folder_id(trimmed_shared).is_none()
+            {
+                return Err(CoreError::InvalidPayload(
+                    "共享目录格式无效，请粘贴完整的 Google Drive 文件夹链接（含 /folders/…）或目录 ID。"
+                        .to_string(),
+                ));
+            }
         }
         config.shared_folder_url_or_id = config.shared_folder_url_or_id.trim().to_string();
-        if !config.shared_folder_url_or_id.is_empty()
-            && config.resolved_shared_folder_id().is_none()
-        {
-            return Err(CoreError::InvalidPayload(
-                "共享目录格式无效，请粘贴完整的 Google Drive 文件夹链接（含 /folders/…）或目录 ID。"
-                    .to_string(),
-            ));
-        }
         config.auto_sync_interval_seconds = config.auto_sync_interval_seconds.max(0);
         let previous_mode = self.sync_config().mode;
         self.db.set_state("driveConfig", Some(&config))?;
@@ -2686,38 +2747,107 @@ impl LiveCharkleEngine {
                 {
                     persisted.account = None;
                 }
+                persisted.backend_statuses =
+                    self.merged_backend_statuses(&config, &persisted.backend_statuses);
                 let _ = self.db.set_state("lastSyncStatus", Some(&persisted));
             }
         }
         Ok(())
     }
 
+    fn merged_backend_statuses(
+        &self,
+        config: &DriveSyncConfig,
+        live_statuses: &[SyncBackendStatus],
+    ) -> Vec<SyncBackendStatus> {
+        let persisted: Vec<SyncBackendStatus> = self
+            .db
+            .state("backendSyncStatuses")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let mut by_id: HashMap<Uuid, SyncBackendStatus> = HashMap::new();
+        for st in persisted {
+            by_id.insert(st.backend_id, st);
+        }
+        for st in live_statuses {
+            by_id.insert(st.backend_id, st.clone());
+        }
+        config
+            .resolved_backends()
+            .into_iter()
+            .map(|profile| {
+                let mut entry = by_id
+                    .remove(&profile.id)
+                    .unwrap_or_else(|| SyncBackendStatus::from_profile(&profile));
+                entry.name = profile.display_name();
+                entry.mode = profile.mode;
+                entry.is_enabled = profile.is_enabled;
+                entry.is_primary = profile.is_primary;
+                entry.location_summary = profile.location_summary();
+                entry
+            })
+            .collect()
+    }
+
     pub async fn sync_status(&self) -> SyncStatus {
         let mut status = self.sync.status().await;
-        if status.last_synced_at.is_none()
-            && matches!(status.phase, crate::models::sync::SyncPhase::Idle)
-        {
+        if status.last_synced_at.is_none() && matches!(status.phase, SyncPhase::Idle) {
             if let Ok(Some(persisted)) = self.db.state::<SyncStatus>("lastSyncStatus") {
                 self.sync.restore_status(persisted).await;
                 status = self.sync.status().await;
             }
         }
         let config = self.sync_config();
-        if matches!(status.phase, crate::models::sync::SyncPhase::Idle) {
+        if matches!(status.phase, SyncPhase::Idle) {
             status.active_mode = config.mode;
         }
-        if status
+        if config.mode == DriveTransportMode::ICloudDrive {
+            let primary = config.primary_backend();
+            let avail = probe_icloud_drive_availability(Some(&primary.icloud_container_identifier));
+            if !config.icloud_custom_folder_path.trim().is_empty() || avail.has_automatic_path() {
+                status.account = Some(DriveAccountInfo {
+                    email: primary.location_summary(),
+                    display_name: Some("iCloud Drive".to_string()),
+                    storage_used_bytes: None,
+                    storage_limit_bytes: None,
+                    source: "iCloud Drive".to_string(),
+                });
+            } else if status
+                .account
+                .as_ref()
+                .is_some_and(|a| a.source == "iCloud Drive")
+            {
+                status.account = None;
+            }
+        } else if status
             .account
             .as_ref()
             .is_some_and(|acc| !acc.matches_mode(config.mode))
         {
             status.account = None;
-            if matches!(status.phase, crate::models::sync::SyncPhase::Idle) {
+            if matches!(status.phase, SyncPhase::Idle) {
                 self.sync.restore_status(status.clone()).await;
                 let _ = self.db.set_state("lastSyncStatus", Some(&status));
             }
         }
+        status.backend_statuses = self.merged_backend_statuses(&config, &status.backend_statuses);
         status
+    }
+
+    pub fn probe_icloud_drive_availability(&self) -> ICloudDriveAvailability {
+        probe_icloud_drive_availability(None)
+    }
+
+    fn backend_webdav_password_key(backend_id: Uuid) -> String {
+        if backend_id == SyncBackendProfile::LEGACY_PRIMARY_ID {
+            WEBDAV_PASSWORD_VAULT_KEY.to_string()
+        } else {
+            format!(
+                "{WEBDAV_PASSWORD_VAULT_KEY}.{}",
+                format_swift_uuid(&backend_id)
+            )
+        }
     }
 
     pub async fn has_webdav_password(&self) -> bool {
@@ -2730,15 +2860,103 @@ impl LiveCharkleEngine {
     }
 
     pub async fn save_webdav_password(&self, password: &str) -> CoreResult<()> {
+        self.save_backend_webdav_password(SyncBackendProfile::LEGACY_PRIMARY_ID, password)
+            .await
+    }
+
+    pub async fn save_backend_webdav_password(
+        &self,
+        backend_id: Uuid,
+        password: &str,
+    ) -> CoreResult<()> {
+        let key = Self::backend_webdav_password_key(backend_id);
         let trimmed = password.trim();
         let res = if trimmed.is_empty() {
-            self.vault.delete_secret(WEBDAV_PASSWORD_VAULT_KEY).await
+            self.vault.delete_secret(&key).await
         } else {
-            self.vault
-                .set_secret(WEBDAV_PASSWORD_VAULT_KEY, trimmed)
-                .await
+            self.vault.set_secret(&key, trimmed).await
         };
         res.map_err(CoreError::InvalidOperation)
+    }
+
+    pub async fn has_backend_webdav_password(&self, backend_id: Uuid) -> bool {
+        let key = Self::backend_webdav_password_key(backend_id);
+        if self
+            .vault
+            .get_secret(&key)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|s| !s.is_empty())
+        {
+            return true;
+        }
+        if backend_id != SyncBackendProfile::LEGACY_PRIMARY_ID {
+            return false;
+        }
+        self.has_webdav_password().await
+    }
+
+    async fn read_backend_webdav_password(&self, backend_id: Uuid) -> String {
+        let key = Self::backend_webdav_password_key(backend_id);
+        if let Some(pwd) = self
+            .vault
+            .get_secret(&key)
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+        {
+            return pwd;
+        }
+        self.vault
+            .get_secret(WEBDAV_PASSWORD_VAULT_KEY)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    pub async fn build_transport_for_profile(
+        &self,
+        profile: &SyncBackendProfile,
+        base_config: &DriveSyncConfig,
+        allow_local_folder: bool,
+        webdav_password_override: Option<&str>,
+    ) -> CoreResult<Arc<dyn DriveTransport>> {
+        if let Some(ref injected) = self.injected_transport {
+            if profile.is_primary {
+                return Ok(Arc::clone(injected));
+            }
+        }
+        match profile.mode {
+            DriveTransportMode::ICloudDrive => {
+                let transport = ICloudDriveTransport::from_config(
+                    &profile.icloud_folder_name,
+                    &profile.icloud_custom_folder_path,
+                    &profile.icloud_container_identifier,
+                )?;
+                Ok(Arc::new(transport))
+            }
+            DriveTransportMode::WebDav => {
+                let password = match webdav_password_override.map(str::trim) {
+                    Some(pw) if !pw.is_empty() => pw.to_string(),
+                    _ => self.read_backend_webdav_password(profile.id).await,
+                };
+                let transport = WebDAVTransport::new(
+                    &profile.webdav_server_url,
+                    &profile.webdav_username,
+                    &password,
+                    &profile.webdav_remote_path,
+                )?;
+                Ok(Arc::new(transport))
+            }
+            _ => {
+                let single = profile.to_single_backend_config(base_config);
+                self.build_transport_uncached(&single, allow_local_folder)
+                    .await
+            }
+        }
     }
 
     pub async fn build_transport(
@@ -2749,7 +2967,25 @@ impl LiveCharkleEngine {
         if let Some(ref injected) = self.injected_transport {
             return Ok(Arc::clone(injected));
         }
+        self.build_transport_uncached(config, allow_local_folder)
+            .await
+    }
+
+    async fn build_transport_uncached(
+        &self,
+        config: &DriveSyncConfig,
+        allow_local_folder: bool,
+    ) -> CoreResult<Arc<dyn DriveTransport>> {
         match config.mode {
+            DriveTransportMode::ICloudDrive => {
+                let primary = config.primary_backend();
+                let transport = ICloudDriveTransport::from_config(
+                    &config.icloud_folder_name,
+                    &config.icloud_custom_folder_path,
+                    &primary.icloud_container_identifier,
+                )?;
+                Ok(Arc::new(transport))
+            }
             DriveTransportMode::LocalOnly => {
                 if !allow_local_folder {
                     return Err(CoreError::NotConfigured(
@@ -2797,32 +3033,297 @@ impl LiveCharkleEngine {
         }
     }
 
-    /// Runs a full bidirectional sync cycle using the configured or injected transport.
+    pub async fn test_backend_connection(
+        &self,
+        profile: &SyncBackendProfile,
+        webdav_password: Option<&str>,
+    ) -> CoreResult<DriveAccountInfo> {
+        let base = self.sync_config();
+        let transport = self
+            .build_transport_for_profile(profile, &base, true, webdav_password)
+            .await?;
+        transport.account_info().await
+    }
+
+    async fn run_single_backend_sync(
+        &self,
+        profile: &SyncBackendProfile,
+        base_config: &DriveSyncConfig,
+        defer_op_pruning: bool,
+        progress_prefix: Option<String>,
+    ) -> CoreResult<SyncReport> {
+        let single_config = profile.to_single_backend_config(base_config);
+        let backend_transport = self
+            .build_transport_for_profile(profile, base_config, true, None)
+            .await?;
+        self.sync
+            .sync_with_options(
+                backend_transport.as_ref(),
+                &single_config,
+                profile.mode == DriveTransportMode::LocalOnly,
+                SyncExecutionOptions {
+                    backend_id: Some(profile.id),
+                    is_primary_backend: profile.is_primary,
+                    defer_op_pruning,
+                    progress_prefix,
+                },
+            )
+            .await
+    }
+
+    /// Runs a single named backend profile's sync cycle.
+    pub async fn sync_backend(&self, id: Uuid) -> CoreResult<SyncReport> {
+        let config = self.sync_config();
+        let profile = config
+            .resolved_backends()
+            .into_iter()
+            .find(|b| b.id == id)
+            .ok_or_else(|| CoreError::NotConfigured("未找到指定的同步后端。".to_string()))?;
+        let multi_count = config.enabled_backends().len();
+        let mut statuses = self.merged_backend_statuses(&config, &[]);
+        if let Some(st) = statuses.iter_mut().find(|s| s.backend_id == id) {
+            st.phase = SyncPhase::Scanning;
+            st.last_error = None;
+            st.current_detail = Some("正在同步…".to_string());
+        }
+        let outcome = self
+            .run_single_backend_sync(
+                &profile,
+                &config,
+                multi_count > 1,
+                Some(format!("[{}]", profile.display_name())),
+            )
+            .await;
+        match outcome {
+            Ok(report) => {
+                let latest = self.sync.status().await;
+                if let Some(st) = statuses.iter_mut().find(|s| s.backend_id == id) {
+                    st.phase = SyncPhase::Idle;
+                    st.last_synced_at = Some(Utc::now());
+                    st.last_error = None;
+                    st.current_detail = None;
+                    st.progress_fraction = None;
+                    if profile.is_primary && latest.account.is_some() {
+                        st.account = latest.account;
+                    }
+                }
+                let _ = self.db.set_state("backendSyncStatuses", Some(&statuses));
+                self.sync
+                    .update_backend_statuses(
+                        statuses,
+                        Some(config.primary_backend().mode),
+                        Some(SyncPhase::Idle),
+                        Some(None),
+                        Some(None),
+                        Some(None),
+                        true,
+                    )
+                    .await;
+                if report.has_visible_library_changes() {
+                    self.emit(EngineEvent::LibraryChanged);
+                }
+                Ok(report)
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                if let Some(st) = statuses.iter_mut().find(|s| s.backend_id == id) {
+                    st.phase = SyncPhase::Error(msg.clone());
+                    st.last_error = Some(msg.clone());
+                    st.current_detail = Some(msg.clone());
+                    st.progress_fraction = None;
+                }
+                let _ = self.db.set_state("backendSyncStatuses", Some(&statuses));
+                self.sync
+                    .update_backend_statuses(
+                        statuses,
+                        None,
+                        Some(SyncPhase::Error(msg.clone())),
+                        Some(Some(msg.clone())),
+                        Some(None),
+                        Some(Some(msg)),
+                        false,
+                    )
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Runs a full bidirectional sync cycle across all enabled backend profiles (primary first,
+    /// then secondary mirrors), pruning `sync_ops` only through the minimum op cursor safely
+    /// uploaded by every enabled backend.
     pub async fn sync_now(&self) -> CoreResult<SyncReport> {
         let config = self.sync_config();
-        if config.mode == DriveTransportMode::LocalOnly
-            && config.local_library_path.trim().is_empty()
+        let mut enabled = config.enabled_backends();
+        enabled.sort_by_key(|p| i32::from(!p.is_primary));
+        if enabled.is_empty() {
+            return Ok(SyncReport::default());
+        }
+        if enabled.len() == 1
+            && enabled[0].mode == DriveTransportMode::LocalOnly
+            && enabled[0].local_library_path.trim().is_empty()
         {
             return Ok(SyncReport::default());
         }
-        let transport = self.build_transport(&config, true).await?;
-        let report = self
-            .sync
-            .sync(
-                transport.as_ref(),
-                &config,
-                config.mode == DriveTransportMode::LocalOnly,
+
+        let is_multi = enabled.len() > 1;
+        let mut statuses = self.merged_backend_statuses(&config, &[]);
+        let mut aggregated = SyncReport::default();
+        let mut discovered_id_set = HashSet::new();
+        let mut first_error: Option<CoreError> = None;
+        let mut succeeded_count = 0usize;
+        let started = std::time::Instant::now();
+
+        for (index, profile) in enabled.iter().enumerate() {
+            let prefix = is_multi.then(|| {
+                format!(
+                    "[{}/{} {}]",
+                    index + 1,
+                    enabled.len(),
+                    profile.display_name()
+                )
+            });
+            if let Some(st) = statuses.iter_mut().find(|s| s.backend_id == profile.id) {
+                st.phase = SyncPhase::Scanning;
+                st.last_error = None;
+                st.current_detail = Some("正在同步…".to_string());
+            }
+            if is_multi {
+                self.sync
+                    .update_backend_statuses(
+                        statuses.clone(),
+                        Some(profile.mode),
+                        Some(SyncPhase::Scanning),
+                        Some(Some(format!(
+                            "{} 正在连接…",
+                            prefix.as_deref().unwrap_or("")
+                        ))),
+                        None,
+                        None,
+                        false,
+                    )
+                    .await;
+            }
+
+            match self
+                .run_single_backend_sync(profile, &config, is_multi, prefix)
+                .await
+            {
+                Ok(report) => {
+                    succeeded_count += 1;
+                    aggregated.uploaded_ops += report.uploaded_ops;
+                    aggregated.downloaded_ops += report.downloaded_ops;
+                    aggregated.discovered_remote_assets += report.discovered_remote_assets;
+                    for id in report.discovered_asset_ids {
+                        if discovered_id_set.insert(id) {
+                            aggregated.discovered_asset_ids.push(id);
+                        }
+                    }
+                    aggregated.updated_boards += report.updated_boards;
+                    aggregated.reconciled_renames += report.reconciled_renames;
+                    aggregated.downloaded_thumbnails += report.downloaded_thumbnails;
+
+                    let latest_status = self.sync.status().await;
+                    if let Some(st) = statuses.iter_mut().find(|s| s.backend_id == profile.id) {
+                        st.phase = SyncPhase::Idle;
+                        st.last_synced_at = Some(Utc::now());
+                        st.last_error = None;
+                        st.current_detail = None;
+                        st.progress_fraction = None;
+                        if profile.is_primary && latest_status.account.is_some() {
+                            st.account = latest_status.account;
+                        }
+                    }
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    if let Some(st) = statuses.iter_mut().find(|s| s.backend_id == profile.id) {
+                        st.phase = SyncPhase::Error(msg.clone());
+                        st.last_error = Some(msg.clone());
+                        st.current_detail = Some(msg.clone());
+                        st.progress_fraction = None;
+                    }
+                    if !is_multi {
+                        let _ = self.db.set_state("backendSyncStatuses", Some(&statuses));
+                        self.sync
+                            .update_backend_statuses(
+                                statuses,
+                                None,
+                                Some(SyncPhase::Error(msg.clone())),
+                                Some(Some(msg.clone())),
+                                Some(None),
+                                Some(Some(msg)),
+                                false,
+                            )
+                            .await;
+                        return Err(first_error.unwrap());
+                    }
+                }
+            }
+        }
+
+        // In multi-backend mode, prune `sync_ops` only through the minimum op cursor safely uploaded by ALL enabled backends.
+        if is_multi && succeeded_count == enabled.len() {
+            let mut cursors = Vec::with_capacity(enabled.len());
+            for profile in &enabled {
+                let key = format!("backend.opCursor.{}", format_swift_uuid(&profile.id));
+                let cursor: i64 = self.db.state(&key).ok().flatten().unwrap_or(0);
+                cursors.push(cursor);
+            }
+            if let Some(&safe_min) = cursors.iter().min() {
+                if safe_min > 0 {
+                    let _ = self.db.acknowledge_ops(safe_min);
+                }
+            }
+        }
+
+        let _ = self.db.set_state("backendSyncStatuses", Some(&statuses));
+
+        if succeeded_count == 0 {
+            if let Some(err) = first_error {
+                let msg = err.to_string();
+                self.sync
+                    .update_backend_statuses(
+                        statuses,
+                        None,
+                        Some(SyncPhase::Error(msg.clone())),
+                        Some(Some(msg.clone())),
+                        Some(None),
+                        Some(Some(msg)),
+                        false,
+                    )
+                    .await;
+                return Err(err);
+            }
+        }
+
+        let partial_err = first_error.as_ref().map(ToString::to_string);
+        self.sync
+            .update_backend_statuses(
+                statuses,
+                Some(config.primary_backend().mode),
+                Some(SyncPhase::Idle),
+                Some(None),
+                Some(None),
+                Some(partial_err),
+                true,
             )
-            .await?;
-        if config.mode != DriveTransportMode::LocalOnly {
+            .await;
+
+        if !config.enabled_cloud_backends().is_empty() {
             let _ = self
                 .media
                 .cache_stats_and_evict(&self.db, true, &HashSet::new(), None)?;
         }
-        if report.has_visible_library_changes() {
+
+        aggregated.duration_seconds = started.elapsed().as_secs_f64();
+        if aggregated.has_visible_library_changes() {
             self.emit(EngineEvent::LibraryChanged);
         }
-        Ok(report)
+        Ok(aggregated)
     }
 
     /// Runs a full bidirectional sync cycle against an explicitly supplied `transport`.
@@ -2842,14 +3343,26 @@ impl LiveCharkleEngine {
         Ok(report)
     }
 
-    /// Performs lossless two-way storage backend migration (Pure Local <-> Drive <-> WebDAV).
+    /// Performs lossless two-way storage backend migration (Pure Local <-> iCloud Drive <-> Drive <-> WebDAV).
     pub async fn migrate_storage(
         &self,
-        target_config: DriveSyncConfig,
+        mut target_config: DriveSyncConfig,
         webdav_password: Option<&str>,
         source_transport_override: Option<&dyn DriveTransport>,
         target_transport_override: Option<&dyn DriveTransport>,
     ) -> CoreResult<StorageMigrationReport> {
+        if !target_config.backends.is_empty() {
+            let mut primary = SyncBackendProfile::from_legacy_config(&target_config);
+            if let Some(existing_primary) = target_config.backends.iter().find(|b| b.is_primary) {
+                primary.id = existing_primary.id;
+            }
+            let mut next_backends = vec![primary];
+            for b in target_config.backends.into_iter().filter(|b| !b.is_primary) {
+                next_backends.push(b);
+            }
+            target_config.backends = next_backends;
+            target_config.synchronize_primary_fields();
+        }
         if let Some(pw) = webdav_password {
             if !pw.trim().is_empty() {
                 self.save_webdav_password(pw).await?;

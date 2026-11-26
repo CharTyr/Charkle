@@ -106,11 +106,31 @@ pub trait DriveTransport: Send + Sync {
         false
     }
 
+    /// True for iCloud Drive filesystem-coordinated transports using `icloud-path:` IDs.
+    fn is_icloud_drive(&self) -> bool {
+        false
+    }
+
+    /// True for path-addressed transports (WebDAV, MountedVolume, LocalFolder, iCloudDrive)
+    /// where renaming a folder changes descendant path IDs.
+    fn is_path_based_transport(&self) -> bool {
+        false
+    }
+
+    /// Maximum safe parallel I/O concurrency for this transport.
+    fn concurrency_limit(&self, direct_default: usize) -> usize {
+        if self.is_mounted_volume() || self.is_icloud_drive() {
+            2
+        } else {
+            direct_default.max(1)
+        }
+    }
+
     /// Returns true if `id` is syntactically compatible with this transport's remote ID space.
-    /// Prevents path-based IDs from `LocalFolderTransport` / `WebDAVTransport` (containing `/`)
-    /// or `mounted-path:` IDs from being sent to opaque-ID APIs such as Google Drive v3.
+    /// Prevents path-based IDs from `LocalFolderTransport` / `WebDAVTransport` (containing `/`),
+    /// `icloud-path:` IDs, or `mounted-path:` IDs from being sent to opaque-ID APIs such as Google Drive v3.
     fn accepts_remote_id(&self, id: &str) -> bool {
-        !id.is_empty() && !id.starts_with("mounted-")
+        !id.is_empty() && !id.starts_with("mounted-") && !id.starts_with("icloud-path:")
     }
 
     async fn account_info(&self) -> CoreResult<DriveAccountInfo>;

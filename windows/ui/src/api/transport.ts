@@ -5,8 +5,11 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import {
+  backendLocationSummary,
   matchesSmartFolderRule,
   msToCocoaSeconds,
+  resolveBackends,
+  synchronizePrimaryFields,
   wireDateToMs,
   type AIConnectionTestResult,
   type AIProviderConfig,
@@ -14,6 +17,7 @@ import {
   type AppReleaseUpdate,
   type AssetBatchPatch,
   type AssetRecord,
+  type BackendTestResultDto,
   type CacheStats,
   type CaptureSessionInfo,
   type ChatGPTAccountSession,
@@ -43,6 +47,7 @@ import {
   type GDirectInstallProgress,
   type GDirectInstallResult,
   type HotkeyConfig,
+  type ICloudDriveAvailability,
   type InboxTriageRecommendation,
   type MaterialPackageImportResult,
   type MediaKind,
@@ -62,6 +67,8 @@ import {
   type SmartFolderRecord,
   type StorageMigrationReport,
   type SyncAuthStateDto,
+  type SyncBackendProfile,
+  type SyncBackendStatus,
   type SyncReport,
   type SyncStatus,
   type SystemDiagnosticsDto,
@@ -209,6 +216,14 @@ export interface CharkleTransport {
     config: DriveSyncConfig,
     password?: string | null,
   ): Promise<WebdavTestResultDto>;
+  probeICloudDriveAvailability(): Promise<ICloudDriveAvailability>;
+  saveBackendWebdavPassword(backendId: string, password: string): Promise<void>;
+  hasBackendWebdavPassword(backendId: string): Promise<boolean>;
+  testBackendConnection(
+    profile: SyncBackendProfile,
+    webdavPassword?: string | null,
+  ): Promise<BackendTestResultDto>;
+  syncBackend(backendId: string): Promise<SyncReport>;
 
   // Window Chrome & Snap Layouts
   setWindowTheme(isDark: boolean): Promise<WindowSurfaceState>;
@@ -610,6 +625,32 @@ export class TauriTransport implements CharkleTransport {
     password?: string | null,
   ): Promise<WebdavTestResultDto> {
     return invoke('test_webdav_connection', { config, password: password ?? null });
+  }
+
+  probeICloudDriveAvailability(): Promise<ICloudDriveAvailability> {
+    return invoke('probe_icloud_drive_availability');
+  }
+
+  saveBackendWebdavPassword(backendId: string, password: string): Promise<void> {
+    return invoke('save_backend_webdav_password', { backendId, password });
+  }
+
+  hasBackendWebdavPassword(backendId: string): Promise<boolean> {
+    return invoke('has_backend_webdav_password', { backendId });
+  }
+
+  testBackendConnection(
+    profile: SyncBackendProfile,
+    webdavPassword?: string | null,
+  ): Promise<BackendTestResultDto> {
+    return invoke('test_backend_connection', {
+      profile,
+      webdavPassword: webdavPassword ?? null,
+    });
+  }
+
+  syncBackend(backendId: string): Promise<SyncReport> {
+    return invoke('sync_backend', { backendId });
   }
 
   setWindowTheme(isDark: boolean): Promise<WindowSurfaceState> {
@@ -2058,30 +2099,90 @@ export class InMemoryMockTransport implements CharkleTransport {
     return 'mock-exports/client_secret.json';
   }
 
+  public mockICloudAvailability: ICloudDriveAvailability = {
+    isUbiquityContainerAvailable: false,
+    ubiquityDocumentsPath: null,
+    systemCloudDocsPath: '%USERPROFILE%\\iCloudDrive',
+    defaultDisplayLocation: 'iCloud Drive / Charkle',
+  };
+  private mockBackendWebdavPasswords = new Map<string, string>();
+  private mockBackendLastSynced = new Map<string, number>();
+
   async syncConfig(): Promise<DriveSyncConfig> {
-    return { ...this.syncCfg };
+    return {
+      ...this.syncCfg,
+      backends: this.syncCfg.backends ? this.syncCfg.backends.map((b) => ({ ...b })) : undefined,
+    };
   }
 
   async saveSyncConfig(config: DriveSyncConfig): Promise<void> {
-    this.syncCfg = { ...config };
+    this.syncCfg = synchronizePrimaryFields({ ...config });
   }
 
   async syncStatus(): Promise<SyncStatus> {
+    const resolved = resolveBackends(this.syncCfg);
+    const backendStatuses: SyncBackendStatus[] = resolved.map((profile) => {
+      const lastSyncedAt = this.mockBackendLastSynced.get(profile.id) ?? null;
+      return {
+        backendID: profile.id,
+        name: profile.name?.trim() || profile.mode,
+        mode: profile.mode,
+        isEnabled: profile.isEnabled,
+        isPrimary: profile.isPrimary,
+        locationSummary: backendLocationSummary(profile),
+        phase: 'idle',
+        lastSyncedAt,
+        lastError: null,
+        currentDetail: null,
+        progressFraction: null,
+        account:
+          profile.mode === 'iCloudDrive'
+            ? {
+                email: backendLocationSummary(profile),
+                displayName: 'iCloud Drive',
+                source: 'iCloud Drive',
+              }
+            : profile.mode === 'directAPIWithGDirect' && this.mockGoogleAccountEmail
+              ? {
+                  email: this.mockGoogleAccountEmail,
+                  displayName: 'Charkle Designer',
+                  source: 'Google Drive API',
+                }
+              : null,
+      };
+    });
+
+    const primaryAccount =
+      this.syncCfg.mode === 'iCloudDrive'
+        ? {
+            email: backendLocationSummary(resolved[0]),
+            displayName: 'iCloud Drive',
+            source: 'iCloud Drive',
+          }
+        : this.syncCfg.mode === 'directAPIWithGDirect' && this.mockGoogleAccountEmail
+          ? {
+              email: this.mockGoogleAccountEmail,
+              displayName: 'Charkle Designer',
+              source: 'Google Drive API',
+            }
+          : null;
+
     return {
       phase: 'idle',
       pendingOpCount: 0,
       activeMode: this.syncCfg.mode,
-      account: this.mockGoogleAccountEmail
-        ? {
-            email: this.mockGoogleAccountEmail,
-            displayName: 'Charkle Designer',
-            source: 'Google Drive API',
-          }
-        : null,
+      account: primaryAccount,
+      backendStatuses,
     };
   }
 
   async syncNow(): Promise<SyncReport> {
+    const now = msToCocoaSeconds(Date.now());
+    for (const b of resolveBackends(this.syncCfg)) {
+      if (b.isEnabled) {
+        this.mockBackendLastSynced.set(b.id, now);
+      }
+    }
     return {
       uploadedOps: 0,
       downloadedOps: 0,
@@ -2134,6 +2235,93 @@ export class InMemoryMockTransport implements CharkleTransport {
       return { ok: false, message: '请输入有效的 WebDAV 服务器地址。' };
     }
     return { ok: true, message: '连接成功，远程目录可正常访问。' };
+  }
+
+  async probeICloudDriveAvailability(): Promise<ICloudDriveAvailability> {
+    return { ...this.mockICloudAvailability };
+  }
+
+  async saveBackendWebdavPassword(backendId: string, password: string): Promise<void> {
+    const trimmed = password.trim();
+    if (trimmed) {
+      this.mockBackendWebdavPasswords.set(backendId, trimmed);
+      this.mockHasWebdavPassword = true;
+    } else {
+      this.mockBackendWebdavPasswords.delete(backendId);
+    }
+  }
+
+  async hasBackendWebdavPassword(backendId: string): Promise<boolean> {
+    return this.mockBackendWebdavPasswords.has(backendId) || this.mockHasWebdavPassword;
+  }
+
+  async testBackendConnection(
+    profile: SyncBackendProfile,
+    webdavPassword?: string | null,
+  ): Promise<BackendTestResultDto> {
+    if (profile.mode === 'webDAV') {
+      if (webdavPassword && webdavPassword.trim()) {
+        this.mockBackendWebdavPasswords.set(profile.id, webdavPassword.trim());
+      }
+      if (!profile.webDAVServerURL.trim()) {
+        return { ok: false, message: '请输入有效的 WebDAV 服务器地址。', account: null };
+      }
+      const account = {
+        email: profile.webDAVUsername || profile.webDAVServerURL,
+        displayName: profile.name || 'WebDAV',
+        source: 'WebDAV',
+      };
+      return { ok: true, message: `连接成功：${account.displayName}（WebDAV）`, account };
+    }
+    if (profile.mode === 'iCloudDrive') {
+      const hasPath =
+        Boolean(profile.iCloudCustomFolderPath.trim()) ||
+        Boolean(this.mockICloudAvailability.systemCloudDocsPath) ||
+        this.mockICloudAvailability.isUbiquityContainerAvailable;
+      if (!hasPath) {
+        return {
+          ok: false,
+          message: '未检测到本机 iCloud Drive 目录，请先安装 Windows 版 iCloud 或手动选择目录。',
+          account: null,
+        };
+      }
+      const account = {
+        email: backendLocationSummary(profile),
+        displayName: 'iCloud Drive',
+        source: 'iCloud Drive',
+      };
+      return { ok: true, message: `连接成功：${account.email}（iCloud Drive）`, account };
+    }
+    if (profile.mode === 'localOnly') {
+      if (!profile.localLibraryPath.trim()) {
+        return { ok: false, message: '请选择有效的本机目录路径。', account: null };
+      }
+      const account = {
+        email: profile.localLibraryPath,
+        displayName: profile.name || '本地文件夹',
+        source: 'Local Folder',
+      };
+      return { ok: true, message: `连接成功：${profile.localLibraryPath}`, account };
+    }
+    const account = {
+      email: this.mockGoogleAccountEmail ?? 'designer@example.com',
+      displayName: 'Charkle Designer',
+      source: 'Google Drive API',
+    };
+    return { ok: true, message: `连接成功：${account.email}（Google Drive）`, account };
+  }
+
+  async syncBackend(backendId: string): Promise<SyncReport> {
+    this.mockBackendLastSynced.set(backendId, msToCocoaSeconds(Date.now()));
+    return {
+      uploadedOps: 1,
+      downloadedOps: 0,
+      discoveredRemoteAssets: 0,
+      discoveredAssetIDs: [],
+      updatedBoards: 0,
+      reconciledRenames: 0,
+      durationSeconds: 0.02,
+    };
   }
 
   public mockSystemAccentHex: string | null = '#0078D4';
@@ -2749,11 +2937,14 @@ export class InMemoryMockTransport implements CharkleTransport {
     const targetLocation =
       targetConfig.mode === 'webDAV'
         ? targetConfig.webDAVServerURL.trim() || targetConfig.webDAVRemotePath || '/Charkle'
-        : targetConfig.mode === 'localOnly'
-          ? targetConfig.localLibraryPath.trim() || '%LOCALAPPDATA%\\Charkle'
-          : targetConfig.mode === 'gdirectMount'
-            ? targetConfig.mountPath.trim() || 'G:\\'
-            : targetConfig.rootFolderName.trim() || 'Charkle';
+        : targetConfig.mode === 'iCloudDrive'
+          ? targetConfig.iCloudCustomFolderPath?.trim() ||
+            `iCloud Drive / ${targetConfig.iCloudFolderName?.trim() || 'Charkle'}`
+          : targetConfig.mode === 'localOnly'
+            ? targetConfig.localLibraryPath.trim() || '%LOCALAPPDATA%\\Charkle'
+            : targetConfig.mode === 'gdirectMount'
+              ? targetConfig.mountPath.trim() || 'G:\\'
+              : targetConfig.rootFolderName.trim() || 'Charkle';
     return {
       sourceMode,
       targetMode: targetConfig.mode,
@@ -2768,7 +2959,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.3.0',
+      appVersion: '1.4.0',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -2889,7 +3080,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.3.0',
+    currentVersion: '1.4.0',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,
