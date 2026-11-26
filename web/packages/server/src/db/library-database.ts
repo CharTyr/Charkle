@@ -50,9 +50,21 @@ import {
   type SyncOperationStore,
 } from './sync-operations.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const SCHEMA_VERSION_STATE_KEY = 'schema.version';
 const SMART_FOLDERS_STATE_KEY = 'smart_folders.v1';
+const BLOB_INDEX_HYDRATED_STATE_KEY = 'blob_index.hydrated.v1';
+
+export type BlobIndexSlot = 'original' | 'grid520' | 'preview1400';
+
+export interface BlobIndexEntry {
+  assetID: UUID;
+  slot: BlobIndexSlot;
+  blobKey: string;
+  contentType: string | null;
+  sizeBytes: number;
+  updatedAt: number;
+}
 
 export class LibraryDatabaseError extends Error {
   public readonly status: 400 | 404 | 409;
@@ -348,6 +360,16 @@ const INITIAL_SCHEMA_STATEMENTS: readonly string[] = [
     expires_at TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS auth_tokens_user ON auth_tokens(user_id)`,
+  `CREATE TABLE IF NOT EXISTS blob_index (
+    asset_id TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    blob_key TEXT NOT NULL,
+    content_type TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY(asset_id, slot)
+  )`,
+  `CREATE INDEX IF NOT EXISTS blob_index_slot ON blob_index(slot)`,
 ];
 
 export class LibraryDatabase implements SyncOperationStore {
@@ -370,14 +392,12 @@ export class LibraryDatabase implements SyncOperationStore {
     let version = typeof storedVersion === 'number' && Number.isFinite(storedVersion) ? storedVersion : 0;
 
     if (version === 0) {
-      // Detect existing pre-refactor Node SQLite databases that already have all tables created
+      // Detect existing pre-refactor Node SQLite databases that already have all pre-v4 tables created
       const existingAssetsTable = this.sql.get<{ name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'assets'",
       );
       if (existingAssetsTable) {
-        version = SCHEMA_VERSION;
-        this.setState(SCHEMA_VERSION_STATE_KEY, SCHEMA_VERSION);
-        return;
+        version = 3;
       }
     }
 
@@ -390,6 +410,23 @@ export class LibraryDatabase implements SyncOperationStore {
       if (version === 0) {
         for (const stmt of INITIAL_SCHEMA_STATEMENTS) {
           this.sql.exec(stmt);
+        }
+        // Brand-new empty library starts with an accurate blob index (zero initial R2 list calls needed).
+        this.setState(BLOB_INDEX_HYDRATED_STATE_KEY, true);
+      } else if (version < 4) {
+        this.sql.exec(`CREATE TABLE IF NOT EXISTS blob_index (
+          asset_id TEXT NOT NULL,
+          slot TEXT NOT NULL,
+          blob_key TEXT NOT NULL,
+          content_type TEXT,
+          size_bytes INTEGER NOT NULL DEFAULT 0,
+          updated_at REAL NOT NULL,
+          PRIMARY KEY(asset_id, slot)
+        )`);
+        this.sql.exec('CREATE INDEX IF NOT EXISTS blob_index_slot ON blob_index(slot)');
+        const assetCountRow = this.sql.get<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM assets');
+        if (Number(assetCountRow?.cnt ?? 0) === 0) {
+          this.setState(BLOB_INDEX_HYDRATED_STATE_KEY, true);
         }
       }
       this.setState(SCHEMA_VERSION_STATE_KEY, SCHEMA_VERSION);
@@ -2081,6 +2118,146 @@ export class LibraryDatabase implements SyncOperationStore {
         boards: allBoards.length,
       };
     });
+  }
+
+  // MARK: - Blob Key & Size Index (Zero-Amplification R2/FS Tracking)
+
+  isBlobIndexHydrated(): boolean {
+    return this.getState<boolean>(BLOB_INDEX_HYDRATED_STATE_KEY) === true;
+  }
+
+  setBlobIndexHydrated(hydrated: boolean): void {
+    this.setState(BLOB_INDEX_HYDRATED_STATE_KEY, hydrated ? true : null);
+  }
+
+  setBlobIndexEntry(
+    assetID: UUID,
+    slot: BlobIndexSlot,
+    blobKey: string,
+    sizeBytes: number,
+    contentType?: string | null,
+    updatedAtMs: number = Date.now(),
+  ): void {
+    this.sql.run(
+      `INSERT OR REPLACE INTO blob_index (asset_id, slot, blob_key, content_type, size_bytes, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        toSwiftUUID(assetID),
+        slot,
+        blobKey,
+        contentType ?? null,
+        Math.max(0, Math.trunc(sizeBytes)),
+        updatedAtMs / 1000,
+      ],
+    );
+  }
+
+  getBlobIndexEntry(assetID: UUID, slot: BlobIndexSlot): BlobIndexEntry | null {
+    const row = this.sql.get<{
+      asset_id: string;
+      slot: string;
+      blob_key: string;
+      content_type: string | null;
+      size_bytes: number;
+      updated_at: number;
+    }>(
+      'SELECT asset_id, slot, blob_key, content_type, size_bytes, updated_at FROM blob_index WHERE asset_id = ? AND slot = ?',
+      [toSwiftUUID(assetID), slot],
+    );
+    if (!row) return null;
+    return {
+      assetID: row.asset_id,
+      slot: row.slot as BlobIndexSlot,
+      blobKey: row.blob_key,
+      contentType: row.content_type ?? null,
+      sizeBytes: Number(row.size_bytes ?? 0),
+      updatedAt: Number(row.updated_at ?? 0),
+    };
+  }
+
+  getBlobIndexEntriesForAsset(assetID: UUID): BlobIndexEntry[] {
+    const rows = this.sql.all<{
+      asset_id: string;
+      slot: string;
+      blob_key: string;
+      content_type: string | null;
+      size_bytes: number;
+      updated_at: number;
+    }>(
+      'SELECT asset_id, slot, blob_key, content_type, size_bytes, updated_at FROM blob_index WHERE asset_id = ?',
+      [toSwiftUUID(assetID)],
+    );
+    return rows.map((row) => ({
+      assetID: row.asset_id,
+      slot: row.slot as BlobIndexSlot,
+      blobKey: row.blob_key,
+      contentType: row.content_type ?? null,
+      sizeBytes: Number(row.size_bytes ?? 0),
+      updatedAt: Number(row.updated_at ?? 0),
+    }));
+  }
+
+  deleteBlobIndexEntry(assetID: UUID, slot: BlobIndexSlot): void {
+    this.sql.run('DELETE FROM blob_index WHERE asset_id = ? AND slot = ?', [
+      toSwiftUUID(assetID),
+      slot,
+    ]);
+  }
+
+  deleteBlobIndexForAssets(assetIDs: Iterable<UUID>): void {
+    const ids = Array.from(new Set(Array.from(assetIDs, toSwiftUUID)));
+    if (ids.length === 0) return;
+    this.transaction(() => {
+      for (const id of ids) {
+        this.sql.run('DELETE FROM blob_index WHERE asset_id = ?', [id]);
+      }
+    });
+  }
+
+  listBlobIndexBySlot(slot: BlobIndexSlot): BlobIndexEntry[] {
+    const rows = this.sql.all<{
+      asset_id: string;
+      slot: string;
+      blob_key: string;
+      content_type: string | null;
+      size_bytes: number;
+      updated_at: number;
+    }>(
+      'SELECT asset_id, slot, blob_key, content_type, size_bytes, updated_at FROM blob_index WHERE slot = ?',
+      [slot],
+    );
+    return rows.map((row) => ({
+      assetID: row.asset_id,
+      slot: row.slot as BlobIndexSlot,
+      blobKey: row.blob_key,
+      contentType: row.content_type ?? null,
+      sizeBytes: Number(row.size_bytes ?? 0),
+      updatedAt: Number(row.updated_at ?? 0),
+    }));
+  }
+
+  getBlobIndexSlotTotals(): {
+    originalBytes: number;
+    originalCount: number;
+    thumbnailBytes: number;
+  } {
+    const rows = this.sql.all<{ slot: string; total_bytes: number; cnt: number }>(
+      'SELECT slot, COALESCE(SUM(size_bytes), 0) AS total_bytes, COUNT(*) AS cnt FROM blob_index GROUP BY slot',
+    );
+    let originalBytes = 0;
+    let originalCount = 0;
+    let thumbnailBytes = 0;
+    for (const r of rows) {
+      const bytes = Number(r.total_bytes ?? 0);
+      const cnt = Number(r.cnt ?? 0);
+      if (r.slot === 'original') {
+        originalBytes = bytes;
+        originalCount = cnt;
+      } else if (r.slot === 'grid520' || r.slot === 'preview1400') {
+        thumbnailBytes += bytes;
+      }
+    }
+    return { originalBytes, originalCount, thumbnailBytes };
   }
 
   // MARK: - Original Cache LRU Access Timestamps

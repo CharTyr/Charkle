@@ -60,6 +60,7 @@ export function createServerContext(options: CreateServerContextOptions = {}): S
   const media = new MediaPipeline({
     blobs,
     images,
+    db,
     cacheBudgetBytes: configStore.getCacheBudgetBytes(),
     readLocalFile: async (filePath: string) => new Uint8Array(await fsp.readFile(filePath)),
   });

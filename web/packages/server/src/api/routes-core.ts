@@ -3,6 +3,7 @@ import { deleteCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
 import {
   activeStorageLocationSummary,
+  createDefaultAssetRecord,
   createDefaultAutoLayoutConfig,
   createDefaultMoodboardDocument,
   createDefaultSmartFolderRule,
@@ -25,6 +26,8 @@ import {
   type LabColor,
   type MigrateStorageRequest,
   type MoveFolderRequest,
+  type MultipartUploadCompleteRequest,
+  type MultipartUploadInitRequest,
   type RenameFolderRequest,
   type SaveBoardRequest,
   type SaveGoogleOAuthConfigRequest,
@@ -43,11 +46,21 @@ import { LoginRateLimiter } from '../auth/rate-limiter.js';
 import type { AuthenticatedPrincipal, ServerContext } from '../context.js';
 import { LibraryDatabaseError } from '../db/library-database.js';
 import { MoodboardCurator } from '../intelligence/moodboard-curator.js';
+import { guessMimeType, sanitizeFileName } from '../media/media-pipeline.js';
 import { seedSampleLibrary } from '../media/sample-seeder.js';
 import { randomUUID, readEnv, toArrayBuffer } from '../runtime/web-crypto-utils.js';
 import { SECRET_KEYS } from '../storage/secret-vault.js';
 import { DriveTransportError } from '../sync/drive-transport.js';
 import type { DriveSyncEngine } from '../sync/drive-sync-engine.js';
+import {
+  MULTIPART_UPLOAD_MAX_FILE_BYTES,
+  MULTIPART_UPLOAD_MAX_PARTS,
+  MULTIPART_UPLOAD_PART_SIZE_BYTES,
+  MULTIPART_UPLOAD_STATE_PREFIX,
+  buildMediaStreamResponse,
+  parseHttpRangeHeader,
+  type PersistedMultipartUploadSession,
+} from './media-http.js';
 import {
   getClientIP,
   isSecureRequest,
@@ -281,7 +294,9 @@ function scheduleAutoEvict(
   ctx: ServerContext,
   keepingIDs: ReadonlySet<UUID> = new Set(),
 ): void {
-  void ctx.media.evictCacheNow(ctx.db, keepingIDs).catch(() => undefined);
+  void ctx.media
+    .evictCacheNow(ctx.db, keepingIDs, { skipStats: true })
+    .catch(() => undefined);
 }
 
 function warmPinnedAssetsInBackground(
@@ -731,6 +746,267 @@ export function registerCoreRoutes(
     }
   });
 
+  // MARK: - Chunked Multipart Upload (Breaks 100 MB Worker Request Limit & 128 MiB Isolate RAM)
+
+  app.post('/api/v1/uploads/multipart/init', async (c) => {
+    try {
+      if (
+        typeof ctx.blobs.createMultipartUpload !== 'function' ||
+        typeof ctx.blobs.completeMultipartUpload !== 'function'
+      ) {
+        return c.json(
+          { error: '当前存储后端不支持分片上传。', code: 'MULTIPART_UNSUPPORTED' },
+          501,
+        );
+      }
+
+      const body = (await c.req.json()) as Partial<MultipartUploadInitRequest>;
+      const rawFileName = String(body.fileName ?? '').trim();
+      if (!rawFileName) {
+        return c.json({ error: '缺少有效的文件名。', code: 'INVALID_INPUT' }, 400);
+      }
+      const fileSizeBytes = Number(body.fileSizeBytes ?? 0);
+      if (
+        !Number.isFinite(fileSizeBytes) ||
+        fileSizeBytes <= 0 ||
+        fileSizeBytes > MULTIPART_UPLOAD_MAX_FILE_BYTES
+      ) {
+        return c.json(
+          { error: '文件大小无效或超出单文件上限。', code: 'INVALID_FILE_SIZE' },
+          400,
+        );
+      }
+
+      const targetFolderID = body.targetFolderID ? toSwiftUUID(body.targetFolderID) : null;
+      const targetBoardID = body.targetBoardID ? toSwiftUUID(body.targetBoardID) : null;
+      if (targetFolderID && !ctx.db.getFolder(targetFolderID)) {
+        return c.json({ error: '目标文件夹不存在。', code: 'FOLDER_NOT_FOUND' }, 404);
+      }
+      if (targetBoardID && !ctx.db.getBoard(targetBoardID)) {
+        return c.json({ error: '目标情绪板不存在。', code: 'BOARD_NOT_FOUND' }, 404);
+      }
+
+      // Opportunistically prune abandoned upload sessions older than 24 hours
+      const staleCutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+      for (const entry of ctx.db.getStatesWithPrefix<PersistedMultipartUploadSession>(
+        MULTIPART_UPLOAD_STATE_PREFIX,
+      )) {
+        if (entry.value && entry.value.createdAtMs < staleCutoffMs) {
+          await ctx.blobs
+            .abortMultipartUpload?.(entry.value.blobKey, entry.value.uploadId)
+            .catch(() => undefined);
+          ctx.db.setState(entry.key, null);
+        }
+      }
+
+      const fileName = sanitizeFileName(rawFileName);
+      const mimeType =
+        body.mimeType && body.mimeType !== 'application/octet-stream'
+          ? body.mimeType
+          : guessMimeType(fileName);
+      const assetID = toSwiftUUID(randomUUID());
+      const sessionID = toSwiftUUID(randomUUID());
+      const blobKey = ctx.media.originalBlobKey(
+        createDefaultAssetRecord({ id: assetID, title: fileName, fileName }),
+      );
+
+      const handle = await ctx.blobs.createMultipartUpload(blobKey, { contentType: mimeType });
+      const session: PersistedMultipartUploadSession = {
+        sessionID,
+        assetID,
+        blobKey: handle.key,
+        uploadId: handle.uploadId,
+        fileName,
+        mimeType,
+        fileSizeBytes: Math.trunc(fileSizeBytes),
+        targetFolderID,
+        targetBoardID,
+        preprocessed: body.preprocessed ?? null,
+        parts: {},
+        createdAtMs: Date.now(),
+      };
+      ctx.db.setState(`${MULTIPART_UPLOAD_STATE_PREFIX}${sessionID}`, session);
+
+      return c.json(
+        {
+          sessionID,
+          assetID,
+          partSizeBytes: MULTIPART_UPLOAD_PART_SIZE_BYTES,
+          maxPartCount: MULTIPART_UPLOAD_MAX_PARTS,
+        },
+        201,
+      );
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
+  app.put('/api/v1/uploads/multipart/:sessionID/part/:partNumber', async (c) => {
+    try {
+      if (typeof ctx.blobs.uploadMultipartPart !== 'function') {
+        return c.json(
+          { error: '当前存储后端不支持分片上传。', code: 'MULTIPART_UNSUPPORTED' },
+          501,
+        );
+      }
+
+      const sessionID = toSwiftUUID(c.req.param('sessionID'));
+      const partNumber = Number.parseInt(c.req.param('partNumber'), 10);
+      if (
+        !Number.isFinite(partNumber) ||
+        partNumber < 1 ||
+        partNumber > MULTIPART_UPLOAD_MAX_PARTS
+      ) {
+        return c.json(
+          { error: '分片编号无效（有效范围 1–10000）。', code: 'INVALID_PART_NUMBER' },
+          400,
+        );
+      }
+
+      const stateKey = `${MULTIPART_UPLOAD_STATE_PREFIX}${sessionID}`;
+      const session = ctx.db.getState<PersistedMultipartUploadSession>(stateKey);
+      if (!session) {
+        return c.json(
+          { error: '分片上传会话不存在或已过期。', code: 'UPLOAD_SESSION_NOT_FOUND' },
+          404,
+        );
+      }
+
+      const rawBody = c.req.raw.body;
+      if (!rawBody) {
+        return c.json({ error: '上传分片内容为空。', code: 'EMPTY_PART' }, 400);
+      }
+
+      const contentLengthHeader = c.req.header('content-length');
+      const parsedSize = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : NaN;
+      const knownSize = Number.isFinite(parsedSize) && parsedSize >= 0 ? parsedSize : undefined;
+
+      const uploaded = await ctx.blobs.uploadMultipartPart(
+        session.blobKey,
+        session.uploadId,
+        partNumber,
+        rawBody as ReadableStream<Uint8Array>,
+        { size: knownSize },
+      );
+
+      session.parts[String(uploaded.partNumber)] = uploaded;
+      ctx.db.setState(stateKey, session);
+      return c.json(uploaded, 200);
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
+  app.post('/api/v1/uploads/multipart/:sessionID/complete', async (c) => {
+    try {
+      if (typeof ctx.blobs.completeMultipartUpload !== 'function') {
+        return c.json(
+          { error: '当前存储后端不支持分片上传。', code: 'MULTIPART_UNSUPPORTED' },
+          501,
+        );
+      }
+
+      const sessionID = toSwiftUUID(c.req.param('sessionID'));
+      const stateKey = `${MULTIPART_UPLOAD_STATE_PREFIX}${sessionID}`;
+      const session = ctx.db.getState<PersistedMultipartUploadSession>(stateKey);
+      if (!session) {
+        return c.json(
+          { error: '分片上传会话不存在或已过期。', code: 'UPLOAD_SESSION_NOT_FOUND' },
+          404,
+        );
+      }
+
+      const body = (await c.req.json().catch(() => ({}))) as MultipartUploadCompleteRequest;
+      const mergedParts = new Map<number, { partNumber: number; etag: string; size: number }>();
+      for (const p of Object.values(session.parts)) {
+        mergedParts.set(p.partNumber, p);
+      }
+      if (Array.isArray(body.parts)) {
+        for (const p of body.parts) {
+          const pn = Math.trunc(Number(p.partNumber));
+          if (Number.isFinite(pn) && pn >= 1 && typeof p.etag === 'string' && p.etag.trim()) {
+            const existing = mergedParts.get(pn);
+            mergedParts.set(pn, {
+              partNumber: pn,
+              etag: p.etag.trim(),
+              size: existing?.size ?? Math.max(0, Math.trunc(Number(p.size ?? 0))),
+            });
+          }
+        }
+      }
+
+      const sortedParts = Array.from(mergedParts.values()).sort(
+        (a, b) => a.partNumber - b.partNumber,
+      );
+      if (sortedParts.length === 0) {
+        return c.json(
+          { error: '尚未上传任何有效分片，无法合并文件。', code: 'NO_PARTS' },
+          400,
+        );
+      }
+
+      const completed = await ctx.blobs.completeMultipartUpload(
+        session.blobKey,
+        session.uploadId,
+        sortedParts,
+      );
+
+      const finalSize =
+        completed.size > 0
+          ? completed.size
+          : sortedParts.reduce((sum, p) => sum + p.size, 0) || session.fileSizeBytes;
+
+      const res = await ctx.media.finalizePrestoredOriginal({
+        assetID: session.assetID,
+        blobKey: session.blobKey,
+        fileName: session.fileName,
+        mimeType: session.mimeType,
+        fileSizeBytes: finalSize,
+        folderID: session.targetFolderID,
+        contentHash: body.contentHash ?? null,
+        preprocessed: body.preprocessed ?? session.preprocessed,
+      });
+
+      if (res.asset.contentHash) {
+        ctx.db.setState(`deleted.content.${res.asset.contentHash}`, null);
+      }
+      const saved = ctx.db.saveAssetLocally(res.asset);
+      if (res.vector) {
+        persistAssetVector(ctx, saved.id, res.vector);
+      }
+      ctx.db.touchOriginal(saved.id);
+      ctx.db.markProjection('thumbnails', saved.id);
+      ctx.db.setState(stateKey, null);
+
+      if (session.targetBoardID) {
+        appendAssetsToBoard(ctx, session.targetBoardID, [saved]);
+      }
+      ctx.events.emitLibraryChanged('upload', [saved.id]);
+      scheduleAutoAnalyzeIfEnabled(ctx, aiRuntime, [saved.id]);
+      scheduleAutoEvict(ctx, new Set([saved.id]));
+      return c.json({ asset: saved }, 201);
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
+  app.delete('/api/v1/uploads/multipart/:sessionID', async (c) => {
+    try {
+      const sessionID = toSwiftUUID(c.req.param('sessionID'));
+      const stateKey = `${MULTIPART_UPLOAD_STATE_PREFIX}${sessionID}`;
+      const session = ctx.db.getState<PersistedMultipartUploadSession>(stateKey);
+      if (session) {
+        await ctx.blobs
+          .abortMultipartUpload?.(session.blobKey, session.uploadId)
+          .catch(() => undefined);
+        ctx.db.setState(stateKey, null);
+      }
+      return c.json({ ok: true as const });
+    } catch (err) {
+      return handleRouteError(c, err);
+    }
+  });
+
   app.patch('/api/v1/assets/batch', async (c) => {
     try {
       const patch = (await c.req.json()) as AssetBatchPatch;
@@ -901,26 +1177,17 @@ export function registerCoreRoutes(
     const id = c.req.param('id');
     const rawTier = c.req.param('tier');
     const tier: ThumbnailTier = rawTier === 'preview1400' ? 'preview1400' : 'grid520';
-    const head = await ctx.media.getThumbnailHead(id, tier);
-    if (!head) {
+    const result = await ctx.media.getThumbnailConditionalStream(
+      id,
+      tier,
+      c.req.header('if-none-match'),
+    );
+    if (!result) {
       return c.json({ error: '缩略图不存在。', code: 'NOT_FOUND' }, 404);
     }
-    const etag = head.etag ?? `"${head.size}-${Math.trunc(head.lastModifiedMs ?? 0)}"`;
-    if (c.req.header('if-none-match') === etag) {
-      return new Response(null, { status: 304, headers: { ETag: etag } });
-    }
-    const streamRes = await ctx.media.getThumbnailStream(id, tier);
-    if (!streamRes) {
-      return c.json({ error: '缩略图不存在。', code: 'NOT_FOUND' }, 404);
-    }
-    return new Response(streamRes.stream, {
-      status: 200,
-      headers: {
-        'Content-Type': streamRes.contentType || 'image/jpeg',
-        'Content-Length': String(streamRes.size),
-        'Cache-Control': 'private, max-age=3600',
-        ETag: etag,
-      },
+    return buildMediaStreamResponse(result, {
+      contentType: result.contentType || 'image/jpeg',
+      cacheControl: 'private, max-age=3600',
     });
   });
 
@@ -933,15 +1200,39 @@ export function registerCoreRoutes(
       }
       const cachedOnlyQuery = (c.req.query('cachedOnly') ?? '').trim().toLowerCase();
       const cachedOnly = cachedOnlyQuery === '1' || cachedOnlyQuery === 'true';
-      let head = await ctx.media.getOriginalHead(asset);
-      if (!head && !cachedOnly) {
+
+      const parsedRange = parseHttpRangeHeader(c.req.header('range'));
+      if (parsedRange.kind === 'invalid') {
+        const head = await ctx.media.getOriginalHead(asset);
+        if (!head) {
+          return c.json(
+            {
+              error: '原始文件暂未缓存到本地。',
+              code: cachedOnly ? 'NOT_CACHED' : 'NOT_FOUND',
+            },
+            404,
+          );
+        }
+        return new Response(null, {
+          status: 416,
+          headers: { 'Content-Range': `bytes */${head.size}` },
+        });
+      }
+
+      const conditionalOpts = {
+        range: parsedRange.kind === 'valid' ? parsedRange.range : undefined,
+        ifNoneMatch: c.req.header('if-none-match'),
+      };
+
+      let result = await ctx.media.getOriginalConditionalStream(asset, conditionalOpts);
+      if (!result && !cachedOnly) {
         await ctx.sync.downloadOriginal(asset);
-        head = await ctx.media.getOriginalHead(asset);
-        if (head) {
+        result = await ctx.media.getOriginalConditionalStream(asset, conditionalOpts);
+        if (result) {
           scheduleAutoEvict(ctx, new Set([asset.id]));
         }
       }
-      if (!head) {
+      if (!result) {
         return c.json(
           {
             error: '原始文件暂未缓存到本地。',
@@ -954,80 +1245,15 @@ export function registerCoreRoutes(
       if (!cachedOnly) {
         ctx.db.touchOriginal(asset.id);
       }
-      const totalSize = head.size;
-      const mimeType = asset.mimeType || head.contentType || 'application/octet-stream';
+      const mimeType = asset.mimeType || result.contentType || 'application/octet-stream';
       const download = c.req.query('download') === '1';
 
-      const headers: Record<string, string> = {
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'private, max-age=600',
-      };
-      if (mimeType === 'application/pdf') {
-        headers['X-Frame-Options'] = 'SAMEORIGIN';
-      }
-      if (download) {
-        headers['Content-Disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`;
-      } else {
-        headers['Content-Disposition'] = `inline; filename*=UTF-8''${encodeURIComponent(asset.fileName)}`;
-      }
-
-      const rangeHeader = c.req.header('range');
-      if (rangeHeader && rangeHeader.startsWith('bytes=')) {
-        const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
-        if (!match) {
-          return new Response(null, {
-            status: 416,
-            headers: { 'Content-Range': `bytes */${totalSize}` },
-          });
-        }
-        let start = match[1] ? Number.parseInt(match[1], 10) : 0;
-        let end = match[2] ? Number.parseInt(match[2], 10) : totalSize - 1;
-        if (!match[1] && match[2]) {
-          const suffixLen = Number.parseInt(match[2], 10);
-          start = Math.max(0, totalSize - suffixLen);
-          end = totalSize - 1;
-        }
-        if (start >= totalSize || start > end || start < 0) {
-          return new Response(null, {
-            status: 416,
-            headers: { 'Content-Range': `bytes */${totalSize}` },
-          });
-        }
-        end = Math.min(end, totalSize - 1);
-        const chunkLen = end - start + 1;
-        const partial = await ctx.media.getOriginalStream(asset, {
-          offset: start,
-          length: chunkLen,
-        });
-        if (!partial) {
-          return new Response(null, {
-            status: 416,
-            headers: { 'Content-Range': `bytes */${totalSize}` },
-          });
-        }
-        const rangeEnd = partial.range?.end ?? start + partial.size - 1;
-        const rangeTotal = partial.range?.total ?? totalSize;
-        return new Response(partial.stream, {
-          status: 206,
-          headers: {
-            ...headers,
-            'Content-Range': `bytes ${start}-${rangeEnd}/${rangeTotal}`,
-            'Content-Length': String(partial.size),
-          },
-        });
-      }
-
-      const fullStream = await ctx.media.getOriginalStream(asset);
-      if (!fullStream) {
-        return c.json({ error: '原始文件不存在。', code: 'NOT_FOUND' }, 404);
-      }
-      return new Response(fullStream.stream, {
-        status: 200,
-        headers: {
-          ...headers,
-          'Content-Length': String(fullStream.size),
-        },
+      return buildMediaStreamResponse(result, {
+        contentType: mimeType,
+        cacheControl: 'private, max-age=600',
+        fileName: asset.fileName,
+        download,
+        acceptRanges: true,
       });
     } catch (err) {
       return handleRouteError(c, err);

@@ -89,6 +89,7 @@ export function defaultRuntimeFeatures(runtimeMode: RuntimeMode): RuntimeFeature
     clientExportPreferred: runtimeMode === 'cloudflare',
     googleDrive: true,
     webdav: true,
+    multipartUpload: true,
   };
 }
 
@@ -105,6 +106,7 @@ export async function createRuntimeContext(
   const runtimeMode = options.runtimeMode;
   const features: RuntimeFeatures = {
     ...defaultRuntimeFeatures(runtimeMode),
+    multipartUpload: typeof options.blobs.createMultipartUpload === 'function',
     ...(options.features ?? {}),
   };
 
@@ -124,6 +126,7 @@ export async function createRuntimeContext(
   const media = new MediaPipeline({
     blobs: options.blobs,
     images,
+    db,
     cacheBudgetBytes: configStore.getCacheBudgetBytes(),
     readLocalFile: options.readLocalFile,
   });

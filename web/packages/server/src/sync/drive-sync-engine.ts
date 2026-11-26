@@ -1417,7 +1417,13 @@ export class DriveSyncEngine implements IDriveSyncEngine {
     }
     if (typeof transport.downloadFileStream === 'function') {
       const dl = await transport.downloadFileStream(asset.driveFileID);
-      return this.media.installOriginal(dl.stream, asset);
+      const knownSize =
+        typeof dl.size === 'number' && Number.isFinite(dl.size) && dl.size >= 0
+          ? dl.size
+          : asset.fileSizeBytes > 0
+            ? asset.fileSizeBytes
+            : undefined;
+      return this.media.installOriginal(dl.stream, asset, false, knownSize);
     }
     const bytes = await transport.downloadFile(asset.driveFileID);
     return this.media.installOriginal(bytes, asset);

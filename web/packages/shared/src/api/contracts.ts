@@ -84,6 +84,7 @@ export interface RuntimeFeatures {
   clientExportPreferred: boolean;
   googleDrive: boolean;
   webdav: boolean;
+  multipartUpload?: boolean;
 }
 
 export interface HealthResponse {
@@ -174,6 +175,38 @@ export interface IngestRequest {
 
 export interface IngestResponse {
   assets: AssetRecord[];
+}
+
+export interface MultipartUploadInitRequest {
+  fileName: string;
+  mimeType?: string | null;
+  fileSizeBytes: number;
+  targetFolderID?: UUID | null;
+  targetBoardID?: UUID | null;
+  preprocessed?: ClientPreprocessedMedia | null;
+}
+
+export interface MultipartUploadInitResponse {
+  sessionID: UUID;
+  assetID: UUID;
+  partSizeBytes: number;
+  maxPartCount: number;
+}
+
+export interface MultipartUploadPartResponse {
+  partNumber: number;
+  etag: string;
+  size: number;
+}
+
+export interface MultipartUploadCompleteRequest {
+  parts?: Array<{ partNumber: number; etag: string; size?: number }>;
+  contentHash?: string | null;
+  preprocessed?: ClientPreprocessedMedia | null;
+}
+
+export interface MultipartUploadCompleteResponse {
+  asset: AssetRecord;
 }
 
 export type BatchPatchAssetsRequest = AssetBatchPatch;

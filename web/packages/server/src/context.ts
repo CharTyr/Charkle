@@ -25,6 +25,8 @@ import type {
 import type { EventBus } from './api/events.js';
 import type { LibraryDatabase } from './db/library-database.js';
 import type {
+  BlobConditionalGetOptions,
+  BlobConditionalStreamResult,
   BlobHeadResult,
   BlobRangeRequest,
   BlobStreamResult,
@@ -33,6 +35,7 @@ import type {
   IImageProcessor,
   RuntimeEnv,
 } from './runtime/types.js';
+import type { BlobIndexSlot } from './db/library-database.js';
 import type { ConfigStore } from './storage/config-store.js';
 import type { SecretVault } from './storage/secret-vault.js';
 
@@ -75,8 +78,30 @@ export interface IMediaPipeline {
     id: UUID,
     tier?: ThumbnailTier,
   ): Promise<(BlobStreamResult & { key: string; contentType: string }) | null>;
+  getThumbnailConditionalStream(
+    id: UUID,
+    tier?: ThumbnailTier,
+    ifNoneMatch?: string,
+  ): Promise<(BlobConditionalStreamResult & { key: string; contentType: string }) | null>;
   getOriginalHead(asset: AssetRecord): Promise<(BlobHeadResult & { key: string }) | null>;
   getOriginalStream(asset: AssetRecord, range?: BlobRangeRequest): Promise<BlobStreamResult | null>;
+  getOriginalConditionalStream(
+    asset: AssetRecord,
+    options?: BlobConditionalGetOptions,
+  ): Promise<(BlobConditionalStreamResult & { key: string }) | null>;
+  resolveThumbnailKeyHint(
+    id: UUID,
+    tier?: ThumbnailTier,
+  ): { key: string; contentType: string | null; fallbackKeys: string[] };
+  resolveOriginalKeyHint(asset: AssetRecord): { key: string; indexed: boolean };
+  recordBlobKey(
+    assetID: UUID,
+    slot: BlobIndexSlot,
+    key: string,
+    sizeBytes: number,
+    contentType?: string | null,
+  ): void;
+  invalidateBlobKey(assetID: UUID, slot: BlobIndexSlot): void;
 
   readThumbnailBuffer(id: UUID, tier?: ThumbnailTier): Promise<Buffer | null>;
   readOriginalBuffer(asset: AssetRecord): Promise<Buffer | null>;
@@ -84,6 +109,7 @@ export interface IMediaPipeline {
     data: Uint8Array | ReadableStream<Uint8Array> | string,
     asset: AssetRecord,
     moveSource?: boolean,
+    knownSize?: number,
   ): Promise<string>;
   writeThumbnail(
     id: UUID,
@@ -101,6 +127,16 @@ export interface IMediaPipeline {
     id?: UUID,
     preprocessed?: ClientPreprocessedMedia | null,
   ): Promise<MediaIngestResult>;
+  finalizePrestoredOriginal(opts: {
+    assetID: UUID;
+    blobKey: string;
+    fileName: string;
+    mimeType: string | null;
+    fileSizeBytes: number;
+    folderID?: UUID | null;
+    contentHash?: string | null;
+    preprocessed?: ClientPreprocessedMedia | null;
+  }): Promise<MediaIngestResult>;
   refreshRichAsset(asset: AssetRecord): Promise<MediaIngestResult>;
   hydrateImageMetadata(asset: AssetRecord): Promise<AssetRecord | null>;
   extractSocialMedia(
@@ -122,7 +158,11 @@ export interface IMediaPipeline {
   getCacheStats(db: LibraryDatabase): Promise<CacheStats>;
   setCacheBudgetBytes(bytes: number): void;
   getCacheBudgetBytes(): number;
-  evictCacheNow(db: LibraryDatabase, keepingIDs?: ReadonlySet<UUID>): Promise<CacheStats>;
+  evictCacheNow(
+    db: LibraryDatabase,
+    keepingIDs?: ReadonlySet<UUID>,
+    options?: { skipStats?: boolean },
+  ): Promise<CacheStats>;
 }
 
 /**

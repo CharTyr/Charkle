@@ -32,10 +32,14 @@ export type { AIRouteOptions } from './api/routes-ai.js';
 // Runtime abstraction seams & Workers-safe implementations
 export type {
   ArtworkRenderRequest,
+  BlobConditionalGetOptions,
+  BlobConditionalStreamResult,
   BlobHeadResult,
   BlobListItem,
+  BlobMultipartHandle,
   BlobRangeRequest,
   BlobStreamResult,
+  BlobUploadedPart,
   CloudflareImagesBinding,
   CloudflareImagesTransformResult,
   ContactSheetItemInput,
@@ -93,6 +97,20 @@ export {
   utf8Encode,
 } from './runtime/web-crypto-utils.js';
 
+export {
+  MULTIPART_UPLOAD_MAX_FILE_BYTES,
+  MULTIPART_UPLOAD_MAX_PARTS,
+  MULTIPART_UPLOAD_PART_SIZE_BYTES,
+  MULTIPART_UPLOAD_STATE_PREFIX,
+  buildMediaDisposition,
+  buildMediaStreamResponse,
+  parseHttpRangeHeader,
+  type BuildMediaStreamResponseOptions,
+  type ParsedRangeHeader,
+  type PersistedMultipartUploadSession,
+} from './api/media-http.js';
+export { isAllowedExtensionOrigin } from './api/middleware-auth.js';
+
 // Database & vector helpers
 export {
   LibraryDatabase,
@@ -101,6 +119,8 @@ export {
   decodeFeaturePrintFloat32,
   encodeEmbeddingBlob,
   encodeFeaturePrintFloat32,
+  type BlobIndexEntry,
+  type BlobIndexSlot,
 } from './db/library-database.js';
 
 // Authentication & rate limiting

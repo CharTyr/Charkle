@@ -53,6 +53,11 @@ import type {
   LocateVisualRegionResponse,
   MigrateStorageRequest,
   MigrateStorageResponse,
+  MultipartUploadCompleteRequest,
+  MultipartUploadCompleteResponse,
+  MultipartUploadInitRequest,
+  MultipartUploadInitResponse,
+  MultipartUploadPartResponse,
   MoodboardAgentStep,
   MoodboardDocument,
   MoodboardExportOptions,
@@ -343,33 +348,162 @@ export const apiClient = {
     });
   },
 
+  initMultipartUpload: (req: MultipartUploadInitRequest) =>
+    requestJson<MultipartUploadInitResponse>('/uploads/multipart/init', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  uploadMultipartPart: async (
+    sessionID: UUID,
+    partNumber: number,
+    chunk: Blob,
+  ): Promise<MultipartUploadPartResponse> => {
+    const res = await fetch(
+      `${API_BASE}/uploads/multipart/${encodeURIComponent(sessionID)}/part/${partNumber}`,
+      {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: chunk,
+      },
+    );
+    if (res.status === 401) {
+      unauthorizedHandler?.();
+    }
+    if (!res.ok) {
+      throw await parseErrorResponse(res);
+    }
+    return (await res.json()) as MultipartUploadPartResponse;
+  },
+
+  completeMultipartUpload: (sessionID: UUID, req: MultipartUploadCompleteRequest = {}) =>
+    requestJson<MultipartUploadCompleteResponse>(
+      `/uploads/multipart/${encodeURIComponent(sessionID)}/complete`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      },
+    ),
+
+  abortMultipartUpload: (sessionID: UUID) =>
+    requestJson<OkResponse>(`/uploads/multipart/${encodeURIComponent(sessionID)}`, {
+      method: 'DELETE',
+    }),
+
   uploadFiles: async (
     files: File[],
     opts?: { targetFolderID?: UUID | null; targetBoardID?: UUID | null },
-  ) => {
+  ): Promise<IngestResponse> => {
+    const MULTIPART_SINGLE_FILE_THRESHOLD_BYTES = 16 * 1024 * 1024;
+    const SMALL_BATCH_MAX_BYTES = 24 * 1024 * 1024;
+    const PART_UPLOAD_CONCURRENCY = 3;
+
     const preprocessedList = await mapWithConcurrency<File, ClientPreprocessedMedia | null>(
       files,
       3,
       async (file) => (await preprocessFileForUpload(file).catch(() => undefined)) ?? null,
     );
 
-    const form = new FormData();
-    for (const file of files) {
-      form.append('files', file, file.name);
+    const smallIndices: number[] = [];
+    const largeIndices: number[] = [];
+    let smallBatchBytes = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      if (
+        f.size > MULTIPART_SINGLE_FILE_THRESHOLD_BYTES ||
+        smallBatchBytes + f.size > SMALL_BATCH_MAX_BYTES
+      ) {
+        largeIndices.push(i);
+      } else {
+        smallIndices.push(i);
+        smallBatchBytes += f.size;
+      }
     }
-    if (preprocessedList.some((entry) => entry !== null)) {
-      form.append('preprocessed', JSON.stringify(preprocessedList));
+
+    const orderedAssets = new Array<IngestResponse['assets'][number] | undefined>(files.length);
+
+    if (smallIndices.length > 0) {
+      const form = new FormData();
+      const smallPreprocessed: Array<ClientPreprocessedMedia | null> = [];
+      for (const idx of smallIndices) {
+        const file = files[idx];
+        form.append('files', file, file.name);
+        smallPreprocessed.push(preprocessedList[idx] ?? null);
+      }
+      if (smallPreprocessed.some((entry) => entry !== null)) {
+        form.append('preprocessed', JSON.stringify(smallPreprocessed));
+      }
+      if (opts?.targetFolderID) {
+        form.append('targetFolderID', opts.targetFolderID);
+      }
+      if (opts?.targetBoardID) {
+        form.append('targetBoardID', opts.targetBoardID);
+      }
+      const res = await requestJson<IngestResponse>('/assets/upload', {
+        method: 'POST',
+        body: form,
+      });
+      for (let k = 0; k < smallIndices.length; k++) {
+        orderedAssets[smallIndices[k]] = res.assets[k];
+      }
     }
-    if (opts?.targetFolderID) {
-      form.append('targetFolderID', opts.targetFolderID);
+
+    for (const idx of largeIndices) {
+      const file = files[idx];
+      const preprocessed = preprocessedList[idx] ?? null;
+      const init = await apiClient.initMultipartUpload({
+        fileName: file.name || 'upload',
+        mimeType: file.type || null,
+        fileSizeBytes: file.size,
+        targetFolderID: opts?.targetFolderID ?? null,
+        targetBoardID: opts?.targetBoardID ?? null,
+        preprocessed,
+      });
+
+      const partSize = Math.max(5 * 1024 * 1024, init.partSizeBytes);
+      const totalParts = Math.max(1, Math.ceil(file.size / partSize));
+      const partNumbers = Array.from({ length: totalParts }, (_, p) => p + 1);
+
+      try {
+        const uploadedParts = await mapWithConcurrency(
+          partNumbers,
+          PART_UPLOAD_CONCURRENCY,
+          async (partNumber) => {
+            const start = (partNumber - 1) * partSize;
+            const end = Math.min(file.size, start + partSize);
+            const slice = file.slice(start, end);
+
+            let lastErr: unknown;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                return await apiClient.uploadMultipartPart(init.sessionID, partNumber, slice);
+              } catch (err) {
+                lastErr = err;
+                const retryable =
+                  !(err instanceof ApiError) || err.status >= 500 || err.status === 429;
+                if (!retryable || attempt === 2) throw err;
+                await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+              }
+            }
+            throw lastErr;
+          },
+        );
+
+        const completed = await apiClient.completeMultipartUpload(init.sessionID, {
+          parts: uploadedParts,
+        });
+        orderedAssets[idx] = completed.asset;
+      } catch (err) {
+        await apiClient.abortMultipartUpload(init.sessionID).catch(() => undefined);
+        throw err;
+      }
     }
-    if (opts?.targetBoardID) {
-      form.append('targetBoardID', opts.targetBoardID);
-    }
-    return requestJson<IngestResponse>('/assets/upload', {
-      method: 'POST',
-      body: form,
-    });
+
+    return {
+      assets: orderedAssets.filter((a): a is NonNullable<typeof a> => Boolean(a)),
+    };
   },
 
   batchPatchAssets: (patch: BatchPatchAssetsRequest) =>

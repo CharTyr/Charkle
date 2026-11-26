@@ -595,6 +595,7 @@ describe('Cloudflare Workers Runtime Seams, Dual-Runtime Parity & Import Audit',
         clientExportPreferred: true,
         googleDrive: true,
         webdav: true,
+        multipartUpload: false,
       });
 
       // 2. Setup admin using Web Crypto PBKDF2-SHA256 & authenticate
@@ -832,6 +833,133 @@ describe('Cloudflare Workers Runtime Seams, Dual-Runtime Parity & Import Audit',
       expect(receivedImagesCount).toBe(0);
       expect(workersProposal.usedCloudAI).toBe(true);
       expect(workersProposal.primaryMatches.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      sql.close();
+    }
+  });
+
+  it('supports NodeBlobStore multipart chunked upload end-to-end (init -> parts -> complete -> 206/304 & abort)', async () => {
+    const dir = makeTempDir('charkle-node-mp-');
+    const sql = new NodeSqlDatabase(path.join(dir, 'node-mp.sqlite'));
+    const blobs = new NodeBlobStore(path.join(dir, 'blobs'));
+    const ctx = await createRuntimeContext({
+      runtimeMode: 'node',
+      sql,
+      blobs,
+      vaultSecret: 'node-mp-secret',
+    });
+    const app = createCoreApp(ctx);
+
+    try {
+      const healthRes = await app.request('/api/v1/health');
+      const health = (await healthRes.json()) as HealthResponse;
+      expect(health.features.multipartUpload).toBe(true);
+
+      const setupRes = await app.request('/api/v1/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'mpadmin', password: 'mp-strong-password' }),
+      });
+      const cookie = (setupRes.headers.get('set-cookie') ?? '').split(';')[0];
+      const authHeaders = { Cookie: cookie };
+
+      const part1 = new TextEncoder().encode('CHARKLE-PART-1-HEADER-');
+      const part2 = new TextEncoder().encode('CHARKLE-PART-2-PAYLOAD-END');
+      const fullBytes = new Uint8Array(part1.byteLength + part2.byteLength);
+      fullBytes.set(part1, 0);
+      fullBytes.set(part2, part1.byteLength);
+      const expectedSha256 = crypto.createHash('sha256').update(fullBytes).digest('hex');
+
+      const initRes = await app.request('/api/v1/uploads/multipart/init', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: 'studio-reel.mp4',
+          mimeType: 'video/mp4',
+          fileSizeBytes: fullBytes.byteLength,
+        }),
+      });
+      expect(initRes.status).toBe(201);
+      const init = (await initRes.json()) as {
+        sessionID: string;
+        assetID: string;
+        partSizeBytes: number;
+      };
+      expect(init.partSizeBytes).toBe(8 * 1024 * 1024);
+
+      const p1Res = await app.request(`/api/v1/uploads/multipart/${init.sessionID}/part/1`, {
+        method: 'PUT',
+        headers: { ...authHeaders, 'Content-Type': 'application/octet-stream' },
+        body: part1,
+      });
+      expect(p1Res.status).toBe(200);
+      const p1 = (await p1Res.json()) as { partNumber: number; etag: string; size: number };
+      expect(p1.size).toBe(part1.byteLength);
+
+      const p2Res = await app.request(`/api/v1/uploads/multipart/${init.sessionID}/part/2`, {
+        method: 'PUT',
+        headers: { ...authHeaders, 'Content-Type': 'application/octet-stream' },
+        body: part2,
+      });
+      expect(p2Res.status).toBe(200);
+      const p2 = (await p2Res.json()) as { partNumber: number; etag: string; size: number };
+      expect(p2.size).toBe(part2.byteLength);
+
+      const completeRes = await app.request(`/api/v1/uploads/multipart/${init.sessionID}/complete`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parts: [p2, p1], contentHash: expectedSha256 }),
+      });
+      expect(completeRes.status).toBe(201);
+      const { asset } = (await completeRes.json()) as {
+        asset: { id: string; fileSizeBytes: number; contentHash: string; mediaKind: string };
+      };
+      expect(asset.id).toBe(init.assetID);
+      expect(asset.fileSizeBytes).toBe(fullBytes.byteLength);
+      expect(asset.contentHash).toBe(expectedSha256);
+      expect(asset.mediaKind).toBe('video');
+
+      // Full GET + ETag 304 + Suffix Range 206 all work cleanly
+      const getRes = await app.request(`/api/v1/media/${asset.id}/original`, {
+        headers: authHeaders,
+      });
+      expect(getRes.status).toBe(200);
+      const etag = getRes.headers.get('etag');
+      expect(etag).toBeTruthy();
+      expect(new Uint8Array(await getRes.arrayBuffer())).toEqual(fullBytes);
+
+      const res304 = await app.request(`/api/v1/media/${asset.id}/original`, {
+        headers: { ...authHeaders, 'If-None-Match': etag! },
+      });
+      expect(res304.status).toBe(304);
+
+      const suffixRes = await app.request(`/api/v1/media/${asset.id}/original`, {
+        headers: { ...authHeaders, Range: 'bytes=-11' },
+      });
+      expect(suffixRes.status).toBe(206);
+      expect(suffixRes.headers.get('content-range')).toBe(
+        `bytes ${fullBytes.byteLength - 11}-${fullBytes.byteLength - 1}/${fullBytes.byteLength}`,
+      );
+      expect(await suffixRes.text()).toBe('PAYLOAD-END');
+
+      // Abort flow cleans up session cleanly
+      const abortInit = await app.request('/api/v1/uploads/multipart/init', {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: 'cancelled.bin', fileSizeBytes: 1024 }),
+      });
+      const { sessionID: abortID } = (await abortInit.json()) as { sessionID: string };
+      const abortRes = await app.request(`/api/v1/uploads/multipart/${abortID}`, {
+        method: 'DELETE',
+        headers: authHeaders,
+      });
+      expect(abortRes.status).toBe(200);
+      const afterAbort = await app.request(`/api/v1/uploads/multipart/${abortID}/complete`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(afterAbort.status).toBe(404);
     } finally {
       sql.close();
     }

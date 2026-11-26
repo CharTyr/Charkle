@@ -30,9 +30,21 @@ export interface ISqlDatabase {
 
 // MARK: - 2. Async Streaming Object Storage Seam (Local FS + Cloudflare R2)
 
-export interface BlobRangeRequest {
-  offset: number;
-  length?: number;
+export type BlobRangeRequest =
+  | {
+      offset: number;
+      length?: number;
+      suffix?: never;
+    }
+  | {
+      suffix: number;
+      offset?: never;
+      length?: never;
+    };
+
+export interface BlobConditionalGetOptions {
+  range?: BlobRangeRequest;
+  ifNoneMatch?: string;
 }
 
 export interface BlobStreamResult {
@@ -43,6 +55,25 @@ export interface BlobStreamResult {
   lastModifiedMs?: number;
   range?: { start: number; end: number; total: number };
 }
+
+export type BlobConditionalStreamResult =
+  | {
+      status: 'not_modified';
+      etag: string;
+      contentType?: string;
+      lastModifiedMs?: number;
+      size: number;
+    }
+  | {
+      status: 'range_not_satisfiable';
+      total: number;
+      etag?: string;
+      contentType?: string;
+      lastModifiedMs?: number;
+    }
+  | ({
+      status: 'ok';
+    } & BlobStreamResult);
 
 export interface BlobHeadResult {
   size: number;
@@ -57,6 +88,17 @@ export interface BlobListItem {
   lastModifiedMs?: number;
 }
 
+export interface BlobMultipartHandle {
+  key: string;
+  uploadId: string;
+}
+
+export interface BlobUploadedPart {
+  partNumber: number;
+  etag: string;
+  size: number;
+}
+
 export interface IBlobStore {
   put(
     key: string,
@@ -65,9 +107,37 @@ export interface IBlobStore {
   ): Promise<{ size: number }>;
   getBytes(key: string): Promise<Uint8Array | null>;
   getStream(key: string, range?: BlobRangeRequest): Promise<BlobStreamResult | null>;
+  /**
+   * Optional single-roundtrip conditional + range stream read (R2 `bucket.get(key, { onlyIf, range })`
+   * or local FS stat + stream) handling 200, 206, 304, and 416 in one storage operation.
+   */
+  getConditionalStream?(
+    key: string,
+    options?: BlobConditionalGetOptions,
+  ): Promise<BlobConditionalStreamResult | null>;
   head(key: string): Promise<BlobHeadResult | null>;
   delete(key: string): Promise<void>;
+  /** Optional batch delete (uses native `R2Bucket.delete(keys[])` up to 1,000 keys per call). */
+  deleteMany?(keys: readonly string[]): Promise<void>;
   list(prefix: string): Promise<BlobListItem[]>;
+  /** Optional native multipart upload primitives (R2 Multipart Upload / Node staged part assembly). */
+  createMultipartUpload?(
+    key: string,
+    options?: { contentType?: string },
+  ): Promise<BlobMultipartHandle>;
+  uploadMultipartPart?(
+    key: string,
+    uploadId: string,
+    partNumber: number,
+    data: Uint8Array | ReadableStream<Uint8Array>,
+    options?: { size?: number },
+  ): Promise<BlobUploadedPart>;
+  completeMultipartUpload?(
+    key: string,
+    uploadId: string,
+    parts: readonly BlobUploadedPart[],
+  ): Promise<{ size: number; etag?: string }>;
+  abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
   /** Optional Node-only helper returning an existing absolute file path on disk (null if missing or remote). */
   localFilePath?(key: string): string | null;
   /** Optional Node-only helper returning the target absolute file path on disk (whether or not it exists yet). */

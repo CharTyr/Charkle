@@ -22,18 +22,25 @@
   }
 
   export interface IBlobStore {
-    put(key: string, data: Uint8Array | ReadableStream<Uint8Array>, options?: { contentType?: string }): Promise<{ size: number }>;
+    put(key: string, data: Uint8Array | ReadableStream<Uint8Array>, options?: { contentType?: string; size?: number }): Promise<{ size: number }>;
     getBytes(key: string): Promise<Uint8Array | null>;
     getStream(key: string, range?: BlobRangeRequest): Promise<BlobStreamResult | null>;
+    getConditionalStream?(key: string, options?: BlobConditionalGetOptions): Promise<BlobConditionalStreamResult | null>;
     head(key: string): Promise<BlobHeadResult | null>;
     delete(key: string): Promise<void>;
+    deleteMany?(keys: readonly string[]): Promise<void>;
     list(prefix: string): Promise<BlobListItem[]>;
+    createMultipartUpload?(key: string, options?: { contentType?: string }): Promise<BlobMultipartHandle>;
+    uploadMultipartPart?(key: string, uploadId: string, partNumber: number, data: Uint8Array | ReadableStream<Uint8Array>, options?: { size?: number }): Promise<BlobUploadedPart>;
+    completeMultipartUpload?(key: string, uploadId: string, parts: readonly BlobUploadedPart[]): Promise<{ size: number; etag?: string }>;
+    abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
     localFilePath?(key: string): string | null;
     targetFilePath?(key: string): string;
   }
   ```
 - Worker entrypoint (`web/packages/worker/src/index.ts`, `library-do.ts`):
-  - Routes `/api` and `/api/*` into `env.CHARKLE_LIBRARY.idFromName(env.CHARKLE_LIBRARY_ID || 'default')`.
+  - Offloads authenticated media reads (`GET/HEAD /api/v1/media/:id/thumbnail/:tier`, `/api/v1/media/:id/original`) and chunked multipart part writes (`PUT /api/v1/uploads/multipart/:sessionID/part/:partNumber`) directly to `env.MEDIA_BUCKET` in the stateless outer Worker after sub-millisecond DO RPC auth/descriptor verification (`resolveEdgeMediaRead`, `authorizeEdgeMultipartPart`), falling back to `CharkleLibraryDO.fetch` only when an uncached original requires remote sync download.
+  - Routes all other `/api` and `/api/*` paths into `env.CHARKLE_LIBRARY.idFromName(env.CHARKLE_LIBRARY_ID || 'default')`.
   - Routes all other paths to `env.ASSETS.fetch(request)` (Static Assets SPA).
 
 ### 3. Contracts
@@ -42,9 +49,11 @@
   - `exec()` MUST split multi-statement SQL scripts cleanly while ignoring semicolons inside quotes/comments and skipping Node-only `PRAGMA` statements.
   - `get()` / `all()` MUST normalize returned `ArrayBuffer` BLOB columns into `Uint8Array`.
   - `transaction()` MUST guard nested calls against `workerd` `transactionSync` re-entrancy and recover cleanly on error.
-- **R2 Streaming (`web/packages/worker/src/r2-blob.ts`)**:
-  - `getStream(key, range)` MUST support native HTTP `206 Partial Content` Range reads with accurate `{ start, end, total }`.
-  - `list(prefix)` MUST paginate across truncated R2 cursors and return sorted results.
+- **R2 Streaming, Single-Call Reads, `blob_index` & Multipart Uploads (`web/packages/worker/src/r2-blob.ts`, `web/packages/server/src/media/media-pipeline.ts`)**:
+  - `getConditionalStream(key, { range, ifNoneMatch })` MUST resolve `200`, `206` (offset/length & suffix ranges), `304`, and `416` in ONE single `R2Bucket.get()` call (zero prior `head()` probes).
+  - SQLite Schema v4 `blob_index` tracks exact `original` / `grid520` / `preview1400` keys and byte sizes so hydrated libraries perform ZERO Class A `list()` calls on uploads, deletes, cache stats, or background LRU eviction (`skipStats: true`), and self-heal if an object is externally removed.
+  - Unknown-length `ReadableStream` uploads exceeding part threshold stream via bounded-memory (`<= 8 MiB`) R2 Multipart Upload with automatic `abort()` on failure; large browser uploads (`> 16 MiB`) automatically use 8 MiB chunked multipart upload (`/api/v1/uploads/multipart/*`) to bypass Cloudflare's 100 MB Worker request limit.
+  - `deleteMany(keys)` MUST batch up to 1,000 keys into a single `R2Bucket.delete(keys[])` call; `list(prefix)` MUST paginate across truncated R2 cursors and return sorted results.
 - **Build-Time Bundled ZIPs (`web/packages/worker/scripts/pack-zips.mjs`)**:
   - Pre-packs `packages/extension/` (excluding `tests/`, `node_modules/`, dotfiles) and `figma-plugin/` (excluding `ui-template.html`, dotfiles) into `packages/worker/src/generated/bundles.ts` (gitignored).
   - Always regenerate via `npm run cf:pack` before Worker typecheck/tests/deploy.
