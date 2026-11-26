@@ -58,6 +58,17 @@ import {
   type MoodboardProposal,
   type MoodboardSummary,
   type OcrDiagnostics,
+  type PinterestAccount,
+  type PinterestBatchImportReport,
+  type PinterestBoard,
+  type PinterestBoardImportDestination,
+  type PinterestBoardImportProgress,
+  type PinterestBoardsImportReport,
+  type PinterestFeedPage,
+  type PinterestFeedSource,
+  type PinterestPin,
+  type PinterestPinDetailResult,
+  type PinterestTrayImportProgress,
   type QuickJumpMatch,
   type RebuildIndexResultDto,
   type ScoredAsset,
@@ -127,6 +138,9 @@ export interface CharkleEventHandlers {
   onUpdatePhase?: (phase: string) => void;
   onMainCheckUpdates?: () => void;
   onGDirectInstallProgress?: (progress: GDirectInstallProgress) => void;
+  onPinterestAuthChanged?: (autoCloseLogin: boolean) => void;
+  onPinterestTrayImportProgress?: (progress: PinterestTrayImportProgress) => void;
+  onPinterestBoardImportProgress?: (progress: PinterestBoardImportProgress) => void;
 }
 
 export interface CharkleTransport {
@@ -340,6 +354,38 @@ export interface CharkleTransport {
   installAndRelaunchUpdate(installerPath: string): Promise<void>;
   openUpdateInstaller(installerPath: string): Promise<void>;
   revealUpdateInstaller(installerPath: string): Promise<void>;
+
+  // Pinterest Infinite Spatial Browser, Collection Tray & Board Batch Import
+  pinterestOpenLoginWindow(): Promise<void>;
+  pinterestCloseLoginWindow(): Promise<void>;
+  pinterestCheckSession(): Promise<PinterestAccount | null>;
+  pinterestSignOut(): Promise<void>;
+  pinterestFetchFeed(
+    source: PinterestFeedSource,
+    bookmark?: string | null,
+    pageSize?: number,
+  ): Promise<PinterestFeedPage>;
+  pinterestFetchBoards(username: string): Promise<PinterestBoard[]>;
+  pinterestFetchPinDetail(pin: PinterestPin): Promise<PinterestPinDetailResult>;
+  pinterestFetchSimilarPins(
+    pin: PinterestPin,
+    bookmark?: string | null,
+    pageSize?: number,
+  ): Promise<PinterestFeedPage>;
+  pinterestExistingImportedPinIds(): Promise<string[]>;
+  pinterestImportPins(
+    pins: PinterestPin[],
+    targetFolderId: string | null,
+    extraTags: string[],
+    skipDuplicates?: boolean,
+  ): Promise<PinterestBatchImportReport>;
+  pinterestImportBoards(
+    boards: PinterestBoard[],
+    destination: PinterestBoardImportDestination,
+    extraTags: string[],
+    skipDuplicates?: boolean,
+  ): Promise<PinterestBoardsImportReport>;
+  pinterestCancelBoardImport(): Promise<void>;
 
   // Live Events
   subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void>;
@@ -1016,6 +1062,90 @@ export class TauriTransport implements CharkleTransport {
     return invoke('reveal_update_installer', { installerPath });
   }
 
+  pinterestOpenLoginWindow(): Promise<void> {
+    return invoke('pinterest_open_login_window');
+  }
+
+  pinterestCloseLoginWindow(): Promise<void> {
+    return invoke('pinterest_close_login_window');
+  }
+
+  pinterestCheckSession(): Promise<PinterestAccount | null> {
+    return invoke('pinterest_check_session');
+  }
+
+  pinterestSignOut(): Promise<void> {
+    return invoke('pinterest_sign_out');
+  }
+
+  pinterestFetchFeed(
+    source: PinterestFeedSource,
+    bookmark?: string | null,
+    pageSize?: number,
+  ): Promise<PinterestFeedPage> {
+    return invoke('pinterest_fetch_feed', {
+      source,
+      bookmark: bookmark ?? null,
+      pageSize: pageSize ?? 32,
+    });
+  }
+
+  pinterestFetchBoards(username: string): Promise<PinterestBoard[]> {
+    return invoke('pinterest_fetch_boards', { username });
+  }
+
+  pinterestFetchPinDetail(pin: PinterestPin): Promise<PinterestPinDetailResult> {
+    return invoke('pinterest_fetch_pin_detail', { pin });
+  }
+
+  pinterestFetchSimilarPins(
+    pin: PinterestPin,
+    bookmark?: string | null,
+    pageSize?: number,
+  ): Promise<PinterestFeedPage> {
+    return invoke('pinterest_fetch_similar_pins', {
+      pin,
+      bookmark: bookmark ?? null,
+      pageSize: pageSize ?? 28,
+    });
+  }
+
+  pinterestExistingImportedPinIds(): Promise<string[]> {
+    return invoke('pinterest_existing_imported_pin_ids');
+  }
+
+  pinterestImportPins(
+    pins: PinterestPin[],
+    targetFolderId: string | null,
+    extraTags: string[],
+    skipDuplicates = true,
+  ): Promise<PinterestBatchImportReport> {
+    return invoke('pinterest_import_pins', {
+      pins,
+      targetFolderId,
+      extraTags,
+      skipDuplicates,
+    });
+  }
+
+  pinterestImportBoards(
+    boards: PinterestBoard[],
+    destination: PinterestBoardImportDestination,
+    extraTags: string[],
+    skipDuplicates = true,
+  ): Promise<PinterestBoardsImportReport> {
+    return invoke('pinterest_import_boards', {
+      boards,
+      destination,
+      extraTags,
+      skipDuplicates,
+    });
+  }
+
+  pinterestCancelBoardImport(): Promise<void> {
+    return invoke('pinterest_cancel_board_import');
+  }
+
   async subscribeEvents(handlers: CharkleEventHandlers): Promise<() => void> {
     let disposed = false;
     const unsubs: UnlistenFn[] = [];
@@ -1189,6 +1319,27 @@ export class TauriTransport implements CharkleTransport {
       registrations.push(() =>
         listen<GDirectInstallProgress>('gdirect:install-progress', (e) => {
           if (!disposed) handlers.onGDirectInstallProgress?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onPinterestAuthChanged) {
+      registrations.push(() =>
+        listen<boolean>('pinterest:auth-changed', (e) => {
+          if (!disposed) handlers.onPinterestAuthChanged?.(Boolean(e.payload));
+        }),
+      );
+    }
+    if (handlers.onPinterestTrayImportProgress) {
+      registrations.push(() =>
+        listen<PinterestTrayImportProgress>('pinterest:tray-import-progress', (e) => {
+          if (!disposed) handlers.onPinterestTrayImportProgress?.(e.payload);
+        }),
+      );
+    }
+    if (handlers.onPinterestBoardImportProgress) {
+      registrations.push(() =>
+        listen<PinterestBoardImportProgress>('pinterest:board-import-progress', (e) => {
+          if (!disposed) handlers.onPinterestBoardImportProgress?.(e.payload);
         }),
       );
     }
@@ -2959,7 +3110,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   async getSystemDiagnostics(): Promise<SystemDiagnosticsDto> {
     return {
-      appVersion: '1.4.0',
+      appVersion: '1.4.1',
       schemaVersion: 2,
       dataDir: '%LOCALAPPDATA%\\Charkle',
       databasePath: '%LOCALAPPDATA%\\Charkle\\Library.sqlite3',
@@ -3080,7 +3231,7 @@ export class InMemoryMockTransport implements CharkleTransport {
 
   // Native GitHub Releases Updater mock state
   private mockUpdatePrefs: UpdatePreferencesDto = {
-    currentVersion: '1.4.0',
+    currentVersion: '1.4.1',
     autoCheckUpdates: true,
     lastUpdateCheckAtMs: null,
     skippedVersion: null,
@@ -3500,6 +3651,288 @@ export class InMemoryMockTransport implements CharkleTransport {
       mergedMetadataCount,
       updatedBoardCount,
     };
+  }
+
+  // MARK: - Pinterest Mock State & Methods (Vitest / Browser Preview)
+  public mockPinterestAccount: PinterestAccount | null = {
+    id: 'mock-pin-user-1',
+    username: 'studio_charkle',
+    fullName: 'Studio Charkle',
+    avatarURL: null,
+    email: null,
+  };
+  public mockPinterestBoards: PinterestBoard[] = [
+    {
+      id: 'mock-board-1',
+      name: 'Editorial / Type',
+      urlPath: '/studio_charkle/editorial-type/',
+      description: 'Typography & editorial grids',
+      pinCount: 24,
+      coverImageURL: makeSvgDataUrl('#252B36', '#E07A5F', 'Editorial', 320, 240),
+      isSecret: false,
+      ownerUsername: 'studio_charkle',
+    },
+    {
+      id: 'mock-board-2',
+      name: 'Spatial Packaging',
+      urlPath: '/studio_charkle/spatial-packaging/',
+      description: 'Tactile packaging & ceramics',
+      pinCount: 16,
+      coverImageURL: makeSvgDataUrl('#2F3E3A', '#D4A373', 'Packaging', 320, 240),
+      isSecret: false,
+      ownerUsername: 'studio_charkle',
+    },
+  ];
+  public mockPinterestPins: PinterestPin[] = Array.from({ length: 18 }, (_, idx) => {
+    const w = 800;
+    const h = idx % 3 === 0 ? 1200 : idx % 3 === 1 ? 800 : 620;
+    const palette = ['#264653', '#2A9D8F', '#8D5B4C', '#3D405B', '#6B705C', '#4A4E69'];
+    const bg = palette[idx % palette.length];
+    const svgUrl = makeSvgDataUrl(bg, '#F4A261', `Pin ${idx + 1}`, w, h);
+    return {
+      id: `900000${100 + idx}`,
+      title: `Pinterest 灵感样本 ${idx + 1}`,
+      description: `视觉构图与色彩层次参考样本 #${idx + 1}`,
+      authorName: idx % 2 === 0 ? 'Atelier Nord' : 'Studio Sol',
+      authorUsername: idx % 2 === 0 ? 'atelier_nord' : 'studio_sol',
+      authorAvatarURL: null,
+      boardName: idx % 2 === 0 ? 'Editorial / Type' : 'Spatial Packaging',
+      boardID: idx % 2 === 0 ? 'mock-board-1' : 'mock-board-2',
+      domain: 'pinterest.com',
+      linkURL: `https://example.com/ref/${idx + 1}`,
+      pinPageURL: `https://www.pinterest.com/pin/900000${100 + idx}/`,
+      originalURL: svgUrl,
+      previewURL: svgUrl,
+      thumbnailURL: svgUrl,
+      videoURL: null,
+      pixelWidth: w,
+      pixelHeight: h,
+      dominantColorHex: bg,
+    };
+  });
+  public mockPinterestBoardImportCancelled = false;
+
+  async pinterestOpenLoginWindow(): Promise<void> {
+    if (!this.mockPinterestAccount) {
+      this.mockPinterestAccount = {
+        id: 'mock-pin-user-1',
+        username: 'studio_charkle',
+        fullName: 'Studio Charkle',
+        avatarURL: null,
+        email: null,
+      };
+    }
+  }
+
+  async pinterestCloseLoginWindow(): Promise<void> {}
+
+  async pinterestCheckSession(): Promise<PinterestAccount | null> {
+    return this.mockPinterestAccount;
+  }
+
+  async pinterestSignOut(): Promise<void> {
+    this.mockPinterestAccount = null;
+  }
+
+  async pinterestFetchFeed(
+    source: PinterestFeedSource,
+    bookmark?: string | null,
+    _pageSize?: number,
+  ): Promise<PinterestFeedPage> {
+    if (bookmark === 'page-2') {
+      return {
+        pins: [],
+        nextBookmark: null,
+        hasMore: false,
+        sourceDescription: 'mock',
+      };
+    }
+    let filtered = this.mockPinterestPins;
+    if (source.kind === 'search') {
+      const q = source.query.trim().toLowerCase();
+      filtered = filtered.filter(
+        (p) =>
+          p.title.toLowerCase().includes(q) ||
+          p.description.toLowerCase().includes(q) ||
+          (p.boardName ?? '').toLowerCase().includes(q),
+      );
+      if (filtered.length === 0) filtered = this.mockPinterestPins.slice(0, 6);
+    } else if (source.kind === 'board') {
+      filtered = filtered.filter((p) => p.boardID === source.board.id);
+    } else if (source.kind === 'similar') {
+      filtered = filtered.filter((p) => p.id !== source.seedPin.id);
+    }
+    return {
+      pins: filtered,
+      nextBookmark: null,
+      hasMore: false,
+      sourceDescription: source.kind,
+    };
+  }
+
+  async pinterestFetchBoards(_username: string): Promise<PinterestBoard[]> {
+    return [...this.mockPinterestBoards];
+  }
+
+  async pinterestFetchPinDetail(pin: PinterestPin): Promise<PinterestPinDetailResult> {
+    const similarPins = this.mockPinterestPins.filter((p) => p.id !== pin.id).slice(0, 8);
+    return {
+      pin,
+      similarPins,
+      nextSimilarBookmark: null,
+      hasMoreSimilar: false,
+    };
+  }
+
+  async pinterestFetchSimilarPins(
+    pin: PinterestPin,
+    _bookmark?: string | null,
+    _pageSize?: number,
+  ): Promise<PinterestFeedPage> {
+    return {
+      pins: this.mockPinterestPins.filter((p) => p.id !== pin.id).slice(0, 6),
+      nextBookmark: null,
+      hasMore: false,
+      sourceDescription: 'similar',
+    };
+  }
+
+  async pinterestExistingImportedPinIds(): Promise<string[]> {
+    const ids: string[] = [];
+    for (const a of this.assets) {
+      if (a.isTrashed || !a.sourceURL) continue;
+      const m = a.sourceURL.match(/pinterest\.[^/]+\/pin\/(\d{6,})/i);
+      if (m) ids.push(m[1]);
+    }
+    return ids;
+  }
+
+  async pinterestImportPins(
+    pins: PinterestPin[],
+    targetFolderId: string | null,
+    extraTags: string[],
+    skipDuplicates = true,
+  ): Promise<PinterestBatchImportReport> {
+    const existing = new Set(skipDuplicates ? await this.pinterestExistingImportedPinIds() : []);
+    const importedAssets: AssetRecord[] = [];
+    const skippedDuplicatePinIDs: string[] = [];
+
+    for (const pin of pins) {
+      if (skipDuplicates && existing.has(pin.id)) {
+        skippedDuplicatePinIDs.push(pin.id);
+        continue;
+      }
+      const id = makeUuid();
+      const now = msToCocoaSeconds(Date.now());
+      const tags = Array.from(
+        new Set(['Pinterest', ...(pin.boardName ? [pin.boardName] : []), ...extraTags]),
+      );
+      const record: AssetRecord = {
+        id,
+        contentHash: `pin-${pin.id}`,
+        folderID: targetFolderId,
+        mediaKind: 'image',
+        mimeType: 'image/png',
+        title: pin.title || `Pinterest ${pin.id}`,
+        fileName: `pinterest_${pin.id}.png`,
+        notes: pin.description,
+        tags,
+        suggestedTags: [],
+        rating: 0,
+        pixelWidth: pin.pixelWidth || 800,
+        pixelHeight: pin.pixelHeight || 1000,
+        fileSizeBytes: 120_000,
+        dominantColors: [],
+        waveformPeaks: [],
+        sourceURL: pin.pinPageURL,
+        sourceDomain: 'pinterest.com',
+        pinnedOffline: true,
+        isLocalOriginalCached: true,
+        isTrashed: false,
+        createdAt: now,
+        updatedAt: now,
+        updatedHLC: Date.now(),
+      };
+      this.assets.unshift(record);
+      if (pin.previewURL) this.thumbs.set(id, pin.previewURL);
+      importedAssets.push(record);
+      existing.add(pin.id);
+    }
+
+    return {
+      importedAssets,
+      skippedDuplicatePinIDs,
+      failedPinIDs: [],
+      errors: [],
+    };
+  }
+
+  async pinterestImportBoards(
+    boards: PinterestBoard[],
+    destination: PinterestBoardImportDestination,
+    extraTags: string[],
+    skipDuplicates = true,
+  ): Promise<PinterestBoardsImportReport> {
+    this.mockPinterestBoardImportCancelled = false;
+    const createdOrReusedFolderIDs: string[] = [];
+    let parentId: string | null = null;
+
+    if (destination.kind === 'existingFolder') {
+      parentId = destination.folderID;
+    } else if (destination.kind === 'pinterestRootFolder') {
+      const existingRoot = this.folders.find(
+        (f) => !f.parentID && f.name.toLowerCase() === 'pinterest',
+      );
+      const root = existingRoot ?? (await this.createFolder('Pinterest', null));
+      parentId = root.id;
+      createdOrReusedFolderIDs.push(root.id);
+    }
+
+    let importedAssetCount = 0;
+    let skippedDuplicateCount = 0;
+
+    for (const board of boards) {
+      if (this.mockPinterestBoardImportCancelled) {
+        return {
+          createdOrReusedFolderIDs,
+          importedAssetCount,
+          skippedDuplicateCount,
+          failedPinCount: 0,
+          errors: [],
+          wasCancelled: true,
+        };
+      }
+      const cleanName = board.name.replace(/\//g, '·').replace(/:/g, '-').slice(0, 64);
+      const existingSub = this.folders.find(
+        (f) => (f.parentID ?? null) === parentId && f.name.toLowerCase() === cleanName.toLowerCase(),
+      );
+      const targetFolder = existingSub ?? (await this.createFolder(cleanName, parentId));
+      createdOrReusedFolderIDs.push(targetFolder.id);
+
+      const boardPins = this.mockPinterestPins.filter((p) => p.boardID === board.id);
+      const pinsToImport = boardPins.length > 0 ? boardPins : this.mockPinterestPins.slice(0, 2);
+      const res = await this.pinterestImportPins(
+        pinsToImport,
+        targetFolder.id,
+        [board.name, ...extraTags],
+        skipDuplicates,
+      );
+      importedAssetCount += res.importedAssets.length;
+      skippedDuplicateCount += res.skippedDuplicatePinIDs.length;
+    }
+
+    return {
+      createdOrReusedFolderIDs,
+      importedAssetCount,
+      skippedDuplicateCount,
+      failedPinCount: 0,
+      errors: [],
+      wasCancelled: false,
+    };
+  }
+
+  async pinterestCancelBoardImport(): Promise<void> {
+    this.mockPinterestBoardImportCancelled = true;
   }
 
   /** Helper for tests inspecting smart folder evaluation. */

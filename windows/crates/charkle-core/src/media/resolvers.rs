@@ -1542,12 +1542,22 @@ impl XPostURLParser {
             || h.ends_with(".fbcdn.net")
     }
 
+    /// Returns `true` if `host` belongs to Pinterest's official media CDN (`*.pinimg.com`).
+    pub fn is_pinterest_media_host(host: Option<&str>) -> bool {
+        let Some(raw) = host else {
+            return false;
+        };
+        let h = raw.trim().to_ascii_lowercase();
+        h == "pinimg.com" || h.ends_with(".pinimg.com")
+    }
+
     /// Strict HTTPS CDN host allowlist for the local `/proxy-social` image cache proxy.
     pub fn is_allowed_social_proxy_host(host: Option<&str>) -> bool {
         if XiaohongshuURLParser::is_xiaohongshu_media_host(host)
             || Self::is_x_media_host(host)
             || Self::is_pixiv_media_host(host)
             || Self::is_instagram_media_host(host)
+            || Self::is_pinterest_media_host(host)
         {
             return true;
         }
@@ -2148,6 +2158,9 @@ impl SocialPostResolver {
         let host = url.host_str();
         if XPostURLParser::is_pixiv_media_host(host) {
             return Some("https://www.pixiv.net/");
+        }
+        if XPostURLParser::is_pinterest_media_host(host) {
+            return Some("https://www.pinterest.com/");
         }
         if XiaohongshuURLParser::is_xiaohongshu_media_host(host) {
             return Some(XIAOHONGSHU_REFERER);

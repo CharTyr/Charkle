@@ -766,6 +766,7 @@ export const SidebarView: React.FC = () => {
     const isRecentActive = isDestEqual(destination, { type: 'recent' });
     const isMoodboardActive =
       destination.type === 'moodboardsHome' || destination.type === 'moodboard';
+    const isPinterestActive = destination.type === 'pinterest';
     const isTrashActive = isDestEqual(destination, { type: 'trash' });
     const isTagActive = destination.type === 'tag';
 
@@ -896,6 +897,24 @@ export const SidebarView: React.FC = () => {
                   style="duotone"
                   size={18}
                   isActive={isMoodboardActive}
+                />
+              </button>
+            </Tooltip>
+
+            <Tooltip content="Pinterest 无限空间" side="right">
+              <button
+                type="button"
+                aria-label="Pinterest 无限空间"
+                data-testid="sidebar-pinterest-rail-btn"
+                onClick={() => setDestination({ type: 'pinterest' })}
+                className={railBtnClass(isPinterestActive)}
+              >
+                {isPinterestActive && <SidebarSelectionIndicator />}
+                <CharkleIcon
+                  name="ai-spark"
+                  style="duotone"
+                  size={18}
+                  isActive={isPinterestActive}
                 />
               </button>
             </Tooltip>
@@ -1253,6 +1272,24 @@ export const SidebarView: React.FC = () => {
               onClick={() => setDestination({ type: 'trash' })}
             />
             </nav>
+          </section>
+
+          <div className="h-px bg-[var(--win-stroke-divider)] mx-1.5" />
+
+          {/* Section: Pinterest Infinite Exploration Space */}
+          <section className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-between px-2 pb-0.5">
+              <span className="text-[11px] font-semibold tracking-[0.02em] text-[var(--text-tertiary)]">
+                灵感发现
+              </span>
+            </div>
+            <NavRow
+              iconName="ai-spark"
+              label="Pinterest 空间"
+              dataAttrs={{ 'data-testid': 'sidebar-pinterest-nav-btn' }}
+              active={destination.type === 'pinterest'}
+              onClick={() => setDestination({ type: 'pinterest' })}
+            />
           </section>
 
           <div className="h-px bg-[var(--win-stroke-divider)] mx-1.5" />

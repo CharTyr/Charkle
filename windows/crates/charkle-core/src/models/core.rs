@@ -1585,6 +1585,8 @@ pub struct AssetBatchPatch {
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_description: Option<String>,
+    #[serde(rename = "sourceURL", default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<i32>,
     #[serde(default)]

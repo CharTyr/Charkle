@@ -2891,6 +2891,7 @@ impl CharkleExternalAgentService {
                 .get("ai_description")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
+            source_url: None,
             folder_assignment,
             add_tags: string_array_arg(args.get("add_tags")),
             remove_tags: string_array_arg(args.get("remove_tags")),

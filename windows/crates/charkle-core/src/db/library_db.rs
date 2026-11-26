@@ -2221,6 +2221,19 @@ impl LibraryDatabase {
                         Some(clean.to_string())
                     };
                 }
+                if let Some(ref raw_source_url) = patch.source_url {
+                    let clean = raw_source_url.trim();
+                    if clean.is_empty() {
+                        asset.source_url = None;
+                        asset.source_domain = None;
+                    } else {
+                        asset.source_url = Some(clean.to_string());
+                        asset.source_domain = url::Url::parse(clean)
+                            .ok()
+                            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                            .map(|h| h.strip_prefix("www.").unwrap_or(&h).to_string());
+                    }
+                }
                 if let Some(rating) = patch.rating {
                     asset.rating = rating.clamp(0, 5);
                 }

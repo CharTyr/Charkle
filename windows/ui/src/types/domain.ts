@@ -179,7 +179,9 @@ export function resolveSocialMediaUrl(
       host === 'fbcdn.net' ||
       host.endsWith('.fbcdn.net') ||
       host === 'pximg.net' ||
-      host.endsWith('.pximg.net')
+      host.endsWith('.pximg.net') ||
+      host === 'pinimg.com' ||
+      host.endsWith('.pinimg.com')
     ) {
       return `http://charkle-media.localhost/proxy-social?url=${encodeURIComponent(trimmed)}`;
     }
@@ -1020,6 +1022,7 @@ export type SidebarDestination =
   | { type: 'inbox' }
   | { type: 'moodboardsHome' }
   | { type: 'moodboard'; id: string }
+  | { type: 'pinterest' }
   | { type: 'untagged' }
   | { type: 'recent' }
   | { type: 'trash' }
@@ -1595,4 +1598,106 @@ export interface DeduplicationCleanupResult {
   reclaimedBytes: number;
   mergedMetadataCount: number;
   updatedBoardCount: number;
+}
+
+// MARK: - Pinterest v1.4.1 Contracts
+
+export interface PinterestAccount {
+  id: string;
+  username: string;
+  fullName: string;
+  avatarURL?: string | null;
+  email?: string | null;
+}
+
+export interface PinterestBoard {
+  id: string;
+  name: string;
+  urlPath: string;
+  description?: string | null;
+  pinCount: number;
+  coverImageURL?: string | null;
+  isSecret: boolean;
+  ownerUsername?: string | null;
+}
+
+export interface PinterestPin {
+  id: string;
+  title: string;
+  description: string;
+  authorName?: string | null;
+  authorUsername?: string | null;
+  authorAvatarURL?: string | null;
+  boardName?: string | null;
+  boardID?: string | null;
+  domain?: string | null;
+  linkURL?: string | null;
+  pinPageURL: string;
+  originalURL?: string | null;
+  previewURL?: string | null;
+  thumbnailURL?: string | null;
+  videoURL?: string | null;
+  pixelWidth: number;
+  pixelHeight: number;
+  dominantColorHex?: string | null;
+}
+
+export type PinterestFeedSource =
+  | { kind: 'home' }
+  | { kind: 'search'; query: string }
+  | { kind: 'board'; board: PinterestBoard }
+  | { kind: 'similar'; seedPin: PinterestPin };
+
+export interface PinterestFeedPage {
+  pins: PinterestPin[];
+  nextBookmark?: string | null;
+  hasMore: boolean;
+  sourceDescription: string;
+}
+
+export interface PinterestPinDetailResult {
+  pin: PinterestPin;
+  similarPins: PinterestPin[];
+  nextSimilarBookmark?: string | null;
+  hasMoreSimilar: boolean;
+}
+
+export interface PinterestBatchImportReport {
+  importedAssets: AssetRecord[];
+  skippedDuplicatePinIDs: string[];
+  failedPinIDs: string[];
+  errors: string[];
+}
+
+export type PinterestBoardImportDestination =
+  | { kind: 'pinterestRootFolder' }
+  | { kind: 'libraryRoot' }
+  | { kind: 'existingFolder'; folderID: string };
+
+export interface PinterestBoardImportProgress {
+  totalBoards: number;
+  completedBoards: number;
+  currentBoardName: string;
+  currentBoardIndex: number;
+  currentBoardPinCount: number;
+  currentBoardProcessedPins: number;
+  importedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  phaseMessage: string;
+}
+
+export interface PinterestBoardsImportReport {
+  createdOrReusedFolderIDs: string[];
+  importedAssetCount: number;
+  skippedDuplicateCount: number;
+  failedPinCount: number;
+  errors: string[];
+  wasCancelled: boolean;
+}
+
+export interface PinterestTrayImportProgress {
+  completed: number;
+  total: number;
+  currentTitle: string;
 }

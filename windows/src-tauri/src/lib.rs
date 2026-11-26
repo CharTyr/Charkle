@@ -9,6 +9,7 @@
 pub mod commands;
 pub mod desktop;
 pub mod events;
+pub mod pinterest_bridge;
 pub mod protocol;
 pub mod web_snapshot;
 
@@ -348,11 +349,18 @@ pub fn run() {
             });
 
             let updater = Arc::new(UpdaterRuntimeState::load(&data_dir));
+            let pinterest = Arc::new(pinterest_bridge::PinterestSessionBridge::new(
+                app.handle().clone(),
+                data_dir.clone(),
+            ));
+            let pinterest_board_import_cancel = Arc::new(AtomicBool::new(false));
 
             app.manage(AppState {
                 engine: Arc::clone(&engine),
                 extension_bridge,
                 updater,
+                pinterest,
+                pinterest_board_import_cancel,
                 data_dir,
                 usage_store,
                 capture_frames: Arc::new(CaptureFrameStore::default()),
@@ -556,6 +564,19 @@ pub fn run() {
             commands::updater::install_and_relaunch_update,
             commands::updater::open_update_installer,
             commands::updater::reveal_update_installer,
+            // Pinterest Infinite Spatial Browser, Collection Tray & Board Batch Import
+            commands::pinterest::pinterest_open_login_window,
+            commands::pinterest::pinterest_close_login_window,
+            commands::pinterest::pinterest_check_session,
+            commands::pinterest::pinterest_sign_out,
+            commands::pinterest::pinterest_fetch_feed,
+            commands::pinterest::pinterest_fetch_boards,
+            commands::pinterest::pinterest_fetch_pin_detail,
+            commands::pinterest::pinterest_fetch_similar_pins,
+            commands::pinterest::pinterest_existing_imported_pin_ids,
+            commands::pinterest::pinterest_import_pins,
+            commands::pinterest::pinterest_import_boards,
+            commands::pinterest::pinterest_cancel_board_import,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Charkle desktop application")
@@ -575,6 +596,7 @@ pub fn run() {
             }
             tauri::RunEvent::Exit => {
                 if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.pinterest.destroy_all_windows();
                     let bridge = Arc::clone(&state.extension_bridge);
                     tauri::async_runtime::block_on(async move {
                         let _ = bridge.stop().await;

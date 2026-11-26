@@ -105,6 +105,7 @@ export function buildCriteriaForDestination(
     case 'smartFolder':
     case 'moodboardsHome':
     case 'moodboard':
+    case 'pinterest':
       break;
   }
 

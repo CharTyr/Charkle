@@ -18,6 +18,7 @@ import { JumpAnywhereModal } from './features/jump/JumpAnywhereModal';
 import { MoodboardGeneratorModal } from './features/moodboard/MoodboardGeneratorModal';
 import { MoodboardsHome } from './features/moodboard/MoodboardsHome';
 import { OnboardingStudio } from './features/onboarding/OnboardingStudio';
+import { PinterestWorkspace } from './features/pinterest/PinterestWorkspace';
 import { QuickLookOverlay } from './features/quicklook/QuickLookOverlay';
 import { SettingsOverlay } from './features/settings/SettingsOverlay';
 import { SidebarView } from './features/sidebar/SidebarView';
@@ -38,6 +39,7 @@ import {
   useCoordinatorStore,
   useLibraryStore,
   useMoodboardStore,
+  usePinterestStore,
   useSyncAIStore,
 } from './stores';
 import { buildFolderTree, flattenFolderTree } from './types/domain';
@@ -600,6 +602,15 @@ export const App: React.FC = () => {
         onGDirectInstallProgress: (progress) => {
           useSyncAIStore.getState().setGDirectInstallProgress(progress);
         },
+        onPinterestAuthChanged: (autoCloseLogin) => {
+          void usePinterestStore.getState().handleAuthChangedEvent(autoCloseLogin);
+        },
+        onPinterestTrayImportProgress: (progress) => {
+          usePinterestStore.getState().handleTrayImportProgressEvent(progress);
+        },
+        onPinterestBoardImportProgress: (progress) => {
+          usePinterestStore.getState().handleBoardImportProgressEvent(progress);
+        },
       })
       .then((fn) => {
         unlisten = fn;
@@ -707,6 +718,9 @@ export const App: React.FC = () => {
       void fetchBoards();
       return;
     }
+    if (destination.type === 'pinterest') {
+      return;
+    }
     void refreshAll(destination);
   }, [destination, refreshAll, fetchBoards]);
 
@@ -805,7 +819,9 @@ export const App: React.FC = () => {
 
       const hasPrimaryModifiers = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
       const inMoodboard =
-        coord.destination.type === 'moodboardsHome' || coord.destination.type === 'moodboard';
+        coord.destination.type === 'moodboardsHome' ||
+        coord.destination.type === 'moodboard' ||
+        coord.destination.type === 'pinterest';
 
       // Suspend background workspace shortcuts while Quick Look is active
       if (coord.quickLookAssetId) return;
@@ -1029,9 +1045,11 @@ export const App: React.FC = () => {
       // When Smart Deduplication modal is open without Quick Look, don't capture Space for background gallery
       if (coord.dedupOpen) return;
 
-      // Case 2: Quick Look is CLOSED -> Moodboard owns Space (Hold = Pan, Tap = Quick Look)
+      // Case 2: Quick Look is CLOSED -> Moodboard & Pinterest own Space / canvas interactions
       const inMoodboard =
-        coord.destination.type === 'moodboardsHome' || coord.destination.type === 'moodboard';
+        coord.destination.type === 'moodboardsHome' ||
+        coord.destination.type === 'moodboard' ||
+        coord.destination.type === 'pinterest';
       if (inMoodboard) return;
       if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
 
@@ -1138,7 +1156,8 @@ export const App: React.FC = () => {
 
   const isMoodboardView =
     destination.type === 'moodboardsHome' || destination.type === 'moodboard';
-  const showMainInspector = inspectorOpen && !isMoodboardView;
+  const isPinterestView = destination.type === 'pinterest';
+  const showMainInspector = inspectorOpen && !isMoodboardView && !isPinterestView;
   const { sidebarEffectiveWidth, inspectorEffectiveWidth } = resolveEffectivePaneWidths({
     windowWidth,
     sidebarOpen,
@@ -1229,7 +1248,13 @@ export const App: React.FC = () => {
 
         <div className="charkle-gallery-surface rounded-tl-[8px] flex-1 min-w-0 min-h-0 flex overflow-hidden bg-[var(--bg-gallery)]">
           <div className="flex-1 min-w-0 min-h-0 h-full flex overflow-hidden">
-            {isMoodboardView ? <MoodboardsHome /> : <GalleryView />}
+            {isPinterestView ? (
+              <PinterestWorkspace />
+            ) : isMoodboardView ? (
+              <MoodboardsHome />
+            ) : (
+              <GalleryView />
+            )}
           </div>
 
           {showMainInspector && (

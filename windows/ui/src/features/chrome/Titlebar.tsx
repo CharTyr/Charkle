@@ -287,6 +287,17 @@ export const Titlebar: React.FC = () => {
           </nav>
         )}
 
+        {destination.type === 'pinterest' && (
+          <div
+            data-tauri-drag-region="false"
+            className="flex items-center gap-1.5 min-w-0 overflow-hidden"
+          >
+            <span className="text-[12.5px] font-medium text-[var(--text-primary)] truncate">
+              Pinterest 空间
+            </span>
+          </div>
+        )}
+
         {destination.type === 'moodboard' && activeMoodboardTitle && (
           <div
             data-tauri-drag-region="false"

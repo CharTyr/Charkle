@@ -5,6 +5,7 @@ pub mod folders;
 pub mod media;
 pub mod moodboard;
 pub mod native;
+pub mod pinterest;
 pub mod query;
 pub mod settings;
 pub mod sync;
@@ -27,11 +28,14 @@ use uuid::Uuid;
 
 use crate::commands::updater::UpdaterRuntimeState;
 use crate::desktop::{CaptureFrameStore, HotkeyConfig, ShelfSettings};
+use crate::pinterest_bridge::PinterestSessionBridge;
 
 pub struct AppState {
     pub engine: Arc<LiveCharkleEngine>,
     pub extension_bridge: Arc<LocalExtensionBridgeServer>,
     pub updater: Arc<UpdaterRuntimeState>,
+    pub pinterest: Arc<PinterestSessionBridge>,
+    pub pinterest_board_import_cancel: Arc<AtomicBool>,
     pub data_dir: PathBuf,
     pub usage_store: Arc<CloudAIUsageStore>,
     pub capture_frames: Arc<CaptureFrameStore>,
