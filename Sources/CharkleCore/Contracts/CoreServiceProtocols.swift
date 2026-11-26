@@ -121,10 +121,14 @@ public protocol CharkleEngineProtocol: Sendable {
     func runGDirectMount(path: String?) async throws -> GDirectEnvironmentSnapshot
     func runGDirectUnmount() async throws -> GDirectEnvironmentSnapshot
     func importGoogleOAuthSecret(from url: URL) async throws
+    func importGoogleOAuthData(_ data: Data) async throws
     func importGoogleOAuthFromGDirect() async throws
     func hasGoogleOAuthClientConfig() async -> Bool
     func saveGoogleOAuthClientConfig(clientID: String, clientSecret: String) async throws
     func signInGoogleDrive() async throws -> DriveAccountInfo
+    func signInGoogleDrive(
+        presentAuthSession: @Sendable (URL, String) async throws -> URL
+    ) async throws -> DriveAccountInfo
     func signOutGoogleDrive() async throws
     func hasWebDAVPassword() async -> Bool
     func saveWebDAVPassword(_ password: String) async throws
@@ -132,6 +136,13 @@ public protocol CharkleEngineProtocol: Sendable {
     func migrateLibraryStorage(to targetConfig: DriveSyncConfig, webDAVPassword: String?) async throws -> StorageMigrationReport
     func listGoogleDriveSharedFolders() async throws -> [RemoteDriveFile]
     func syncNow() async throws -> SyncReport
+    func syncBackend(id: UUID) async throws -> SyncReport
+    func probeICloudDriveAvailability() async -> ICloudDriveAvailability
+    func saveBackendWebDAVPassword(_ password: String, for backendID: UUID) async throws
+    func hasBackendWebDAVPassword(for backendID: UUID) async -> Bool
+    func saveICloudBookmark(_ bookmarkData: Data?, displayPath: String, for backendID: UUID) async throws
+    func hasICloudBookmark(for backendID: UUID) async -> Bool
+    func testBackendConnection(_ profile: SyncBackendProfile, webDAVPassword: String?) async throws -> DriveAccountInfo
 
     // MARK: - First-Launch Curated Demo
     func seedSampleLibraryIfEmpty() async throws -> Bool
@@ -223,6 +234,46 @@ public extension CharkleEngineProtocol {
             throw LibraryDatabaseError("请先选择要测试的云端 AI 服务。")
         }
         return "AI 服务连接正常"
+    }
+
+    func importGoogleOAuthData(_ data: Data) async throws {
+        throw DriveTransportError.notConfigured("当前引擎不支持导入 OAuth 凭据数据。")
+    }
+
+    func signInGoogleDrive(
+        presentAuthSession: @Sendable (URL, String) async throws -> URL
+    ) async throws -> DriveAccountInfo {
+        try await signInGoogleDrive()
+    }
+
+    func syncBackend(id: UUID) async throws -> SyncReport {
+        try await syncNow()
+    }
+
+    func probeICloudDriveAvailability() async -> ICloudDriveAvailability {
+        ICloudDriveTransport.probeAvailability()
+    }
+
+    func saveBackendWebDAVPassword(_ password: String, for backendID: UUID) async throws {
+        try await saveWebDAVPassword(password)
+    }
+
+    func hasBackendWebDAVPassword(for backendID: UUID) async -> Bool {
+        await hasWebDAVPassword()
+    }
+
+    func saveICloudBookmark(_ bookmarkData: Data?, displayPath: String, for backendID: UUID) async throws {}
+
+    func hasICloudBookmark(for backendID: UUID) async -> Bool {
+        false
+    }
+
+    func testBackendConnection(_ profile: SyncBackendProfile, webDAVPassword: String?) async throws -> DriveAccountInfo {
+        let single = profile.toSingleBackendConfig(inheriting: await syncConfig())
+        if profile.mode == .webDAV {
+            return try await testWebDAVConnection(config: single, password: webDAVPassword)
+        }
+        return DriveAccountInfo(email: profile.locationSummary, source: profile.mode.localizedLabel)
     }
 }
 

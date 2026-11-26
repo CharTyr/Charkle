@@ -258,6 +258,15 @@ public nonisolated enum SocialPostResolver {
         return "url:\(trimmed.lowercased())"
     }
 
+    private static let avatarSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpMaximumConnectionsPerHost = 6
+        config.timeoutIntervalForRequest = 4
+        config.timeoutIntervalForResource = 5
+        config.urlCache = nil
+        return URLSession(configuration: config)
+    }()
+
     /// Downloads the author's profile avatar (upgrading tiny `_normal` X avatars to `_400x400` when applicable)
     /// for crisp circular compositing on social post gallery thumbnails.
     public static func fetchAvatarImage(from rawURL: String?) async -> CGImage? {
@@ -270,15 +279,9 @@ public nonisolated enum SocialPostResolver {
         }
         candidates.append(trimmed)
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 6
-        config.timeoutIntervalForResource = 8
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-
         for candidate in candidates {
             guard let url = URL(string: candidate), WebBookmark.isSafeRemoteFetchURL(url) else { continue }
-            var req = URLRequest(url: url, timeoutInterval: 6)
+            var req = URLRequest(url: url, timeoutInterval: 4)
             if XiaohongshuURLParser.isXiaohongshuMediaHost(url.host()) {
                 req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
                 req.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
@@ -286,7 +289,7 @@ public nonisolated enum SocialPostResolver {
                 req.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
             }
             req.setValue("image/webp,image/png,image/jpeg,image/*", forHTTPHeaderField: "Accept")
-            guard let (data, response) = try? await session.data(for: req),
+            guard let (data, response) = try? await avatarSession.data(for: req),
                   let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
                   let finalURL = http.url, WebBookmark.isSafeRemoteFetchURL(finalURL),

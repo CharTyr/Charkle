@@ -1,4 +1,8 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import CoreFoundation
 import CoreGraphics
 import Darwin
@@ -977,8 +981,12 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
 
     static func canCaptureInCurrentProcess() -> Bool {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return false }
+        #if canImport(AppKit)
         guard let app = NSApp else { return false }
         return app.activationPolicy() != .prohibited
+        #else
+        return !Bundle.main.bundlePath.hasSuffix(".appex")
+        #endif
     }
 
     static func capture(url: URL, timeoutSeconds: Double = 6.5) async -> WebPageSnapshotResult? {
@@ -1010,7 +1018,7 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
             prefs.allowsContentJavaScript = true
             config.defaultWebpagePreferences = prefs
 
-            let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+            let frame = CGRect(x: 0, y: 0, width: 1280, height: 800)
             let wv = WKWebView(frame: frame, configuration: config)
             wv.navigationDelegate = self
             wv.customUserAgent =
@@ -1089,8 +1097,15 @@ private final class WebPageSnapshotter: NSObject, WKNavigationDelegate {
         snapConfig.snapshotWidth = 1280
 
         do {
-            let nsImage = try await wv.takeSnapshot(configuration: snapConfig)
-            guard let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil),
+            let platformImage = try await wv.takeSnapshot(configuration: snapConfig)
+            #if canImport(AppKit)
+            let snapshotCGImage = platformImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            #elseif canImport(UIKit)
+            let snapshotCGImage = platformImage.cgImage
+            #else
+            let snapshotCGImage: CGImage? = nil
+            #endif
+            guard let cgImage = snapshotCGImage,
                   !Self.isVisuallyBlank(cgImage) else {
                 finish(with: nil)
                 return

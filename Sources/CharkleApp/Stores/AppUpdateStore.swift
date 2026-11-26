@@ -68,9 +68,9 @@ public final class AppUpdateStore {
     ) {
         self.updater = updater
         self.preferences = preferences
-        let versionString = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0"
-        self.currentVersion = CharkleSemanticVersion(parsing: versionString) ?? CharkleSemanticVersion(major: 1, minor: 3, patch: 0)
-        self.currentBuildNumber = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "9"
+        let versionString = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
+        self.currentVersion = CharkleSemanticVersion(parsing: versionString) ?? CharkleSemanticVersion(major: 1, minor: 4, patch: 0)
+        self.currentBuildNumber = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "10"
         self.autoCheckUpdates = preferences.loadAutoCheckUpdates()
         self.lastUpdateCheckAt = preferences.loadLastUpdateCheckAt()
         self.skippedVersion = preferences.loadSkippedVersion()

@@ -1,4 +1,6 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import Foundation
 import ImageIO
 import os
@@ -132,6 +134,12 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     ? remote
                     : "\(MountedVolumeTransport.pathIDPrefix)\(rootPrefix)/\(relFolderPath)"
                 try store.setState("local.delete.folder." + id.uuidString, resolvedRemote)
+                try store.setState("deleted.folder.drive." + resolvedRemote, true)
+                if resolvedRemote != remote {
+                    try store.setState("deleted.folder.drive." + remote, true)
+                }
+            } else if let remote = folder.driveFolderID, !remote.isEmpty {
+                try store.setState("deleted.folder.drive." + remote, true)
             }
             try store.record(.deleteFolder(id, driveID: mounted ? nil : folder.driveFolderID))
         }
@@ -1315,13 +1323,45 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
         async let avatarTask = SocialPostResolver.fetchAvatarImage(from: resolved.metadata.authorAvatarURL)
 
+        let primaryMediaURL = resolved.primaryMediaDownloadURL
+        let primaryKind = resolved.primaryMediaKind
+        let primaryThumbURL = resolved.primaryThumbnailURL
+        let handleTag = resolved.metadata.authorHandle
+
+        // Fetch primary media and (for videos) poster thumbnail concurrently with avatar;
+        // for photos used solely to composite the ~700px social card, prefer Twitter's fast `large` size over 10MB `orig`.
+        async let primaryFileTask: URL? = {
+            guard let mediaURL = primaryMediaURL, let kind = primaryKind else { return nil }
+            let item = XPostMedia(kind: kind, url: mediaURL, thumbnailURL: primaryThumbURL)
+            return await XPostResolver.downloadMedia(
+                item,
+                to: stagingDir,
+                baseName: "Social-\(handleTag)",
+                preferLargePreview: kind == .photo,
+                fastTimeout: true
+            )
+        }()
+        async let parallelVideoThumbTask: URL? = {
+            guard let kind = primaryKind, (kind == .video || kind == .gif),
+                  let thumbURL = primaryThumbURL else { return nil }
+            let thumbItem = XPostMedia(kind: .photo, url: thumbURL)
+            return await XPostResolver.downloadMedia(
+                thumbItem,
+                to: stagingDir,
+                baseName: "SocialThumb-\(handleTag)",
+                preferLargePreview: true,
+                fastTimeout: true
+            )
+        }()
+
+        let (primaryFile, parallelThumbFile, authorAvatar) = await (primaryFileTask, parallelVideoThumbTask, avatarTask)
+
         var downloadedVideoFile: URL?
         var embeddedPoster: CGImage?
         var mediaFailed = false
 
-        if let mediaURL = resolved.primaryMediaDownloadURL, let kind = resolved.primaryMediaKind {
-            let item = XPostMedia(kind: kind, url: mediaURL, thumbnailURL: resolved.primaryThumbnailURL)
-            if let file = await XPostResolver.downloadMedia(item, to: stagingDir, baseName: "Social-\(resolved.metadata.authorHandle)") {
+        if let kind = primaryKind {
+            if let file = primaryFile {
                 if kind == .video || kind == .gif {
                     downloadedVideoFile = file
                 } else {
@@ -1331,17 +1371,24 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                 mediaFailed = true
             }
         }
-        if embeddedPoster == nil, let thumbURL = resolved.primaryThumbnailURL {
+        if embeddedPoster == nil, let thumbFile = parallelThumbFile {
+            embeddedPoster = MediaPipeline.raster(thumbFile)?.poster
+        }
+        if embeddedPoster == nil, let thumbURL = primaryThumbURL, parallelThumbFile == nil, thumbURL != primaryMediaURL {
             let thumbItem = XPostMedia(kind: .photo, url: thumbURL)
-            if let thumbFile = await XPostResolver.downloadMedia(thumbItem, to: stagingDir, baseName: "SocialThumb-\(resolved.metadata.authorHandle)") {
+            if let thumbFile = await XPostResolver.downloadMedia(
+                thumbItem,
+                to: stagingDir,
+                baseName: "SocialThumbFallback-\(handleTag)",
+                preferLargePreview: true,
+                fastTimeout: true
+            ) {
                 embeddedPoster = MediaPipeline.raster(thumbFile)?.poster
             }
         }
         if embeddedPoster == nil, let videoFile = downloadedVideoFile {
             embeddedPoster = await MediaPipeline.videoPosterFrame(videoFile)
         }
-
-        let authorAvatar = await avatarTask
 
         var meta = resolved.metadata
         meta.mediaFetchFailed = mediaFailed
@@ -1361,9 +1408,25 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             )
         }
 
+        let extraUserNotes: String? = {
+            guard case .webURL(_, _, let suppliedNotes) = fallbackInput,
+                  let trimmed = suppliedNotes?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty,
+                  trimmed != meta.originalURL,
+                  trimmed != ref.canonicalURL.absoluteString,
+                  !meta.bodyText.contains(trimmed) else {
+                return nil
+            }
+            return trimmed
+        }()
+
         prepared.asset.mediaKind = .webBookmark
         prepared.asset.title = resolved.shortTitle
-        prepared.asset.notes = meta.bodyText
+        if let extraUserNotes {
+            prepared.asset.notes = meta.bodyText.isEmpty ? extraUserNotes : "\(extraUserNotes)\n\n\(meta.bodyText)"
+        } else {
+            prepared.asset.notes = meta.bodyText
+        }
         prepared.asset.ocrText = meta.bodyText.isEmpty ? prepared.asset.ocrText : meta.bodyText
         prepared.asset.sourceURL = meta.originalURL
         prepared.asset.sourceDomain = ref.canonicalURL.host() ?? defaultSocialDomain(for: meta.platform)
@@ -2159,11 +2222,33 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             return path
         }) { return url }
         let config = await syncConfig()
-        let allowLocal = config.mode == .localOnly && !config.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let transport = try await transport(for: config, allowLocalFolder: allowLocal)
-        let result = try await driveSync.downloadOriginal(for: assetID, using: transport)
-        _ = try await evict(keeping: [assetID])
-        return result
+        let orderedBackends = config.enabledBackends.sorted { ($0.isPrimary ? 0 : 1) < ($1.isPrimary ? 0 : 1) }
+        var lastError: Error?
+        for profile in orderedBackends {
+            let allowLocal = profile.mode == .localOnly && !profile.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            do {
+                let backendTransport = try await transport(for: profile, baseConfig: config, allowLocalFolder: allowLocal)
+                let remoteOverride: String?
+                if profile.isPrimary {
+                    remoteOverride = nil
+                } else {
+                    let map: [String: String] = (try? await database.state("backend.remoteAssets.\(profile.id.uuidString)")) ?? [:]
+                    guard let mappedID = map[assetID.uuidString] else { continue }
+                    remoteOverride = mappedID
+                }
+                let result = try await driveSync.downloadOriginal(
+                    for: assetID,
+                    using: backendTransport,
+                    remoteFileIDOverride: remoteOverride
+                )
+                _ = try await evict(keeping: [assetID])
+                return result
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError { throw lastError }
+        throw DriveTransportError.fileNotFound(assetID.uuidString)
     }
 
     public func cacheStats() async -> CacheStats {
@@ -2180,27 +2265,41 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     private func canEvictCloudOriginals() async -> Bool {
         let config = await syncConfig()
-        if config.mode == .localOnly {
+        let cloudBackends = config.enabledCloudBackends
+        if cloudBackends.isEmpty {
             return false
         }
         if injectedTransport != nil {
             return true
         }
-        switch config.mode {
-        case .localOnly:
-            return false
-        case .webDAV:
-            return !config.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .gdirectMount:
-            return GDirectIntegration.isMountActive(at: config.mountPath)
-                || GDirectIntegration.activeLoopbackNFSMountPath() != nil
-        case .directAPIWithGDirect:
-            if await oauth.hasStoredToken() {
-                return true
+        for profile in cloudBackends {
+            switch profile.mode {
+            case .localOnly:
+                continue
+            case .iCloudDrive:
+                if await hasICloudBookmark(for: profile.id)
+                    || !profile.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || ICloudDriveTransport.probeAvailability(containerIdentifier: profile.iCloudContainerIdentifier).hasAutomaticPath {
+                    return true
+                }
+            case .webDAV:
+                if !profile.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return true
+                }
+            case .gdirectMount:
+                if GDirectIntegration.isMountActive(at: profile.mountPath)
+                    || GDirectIntegration.activeLoopbackNFSMountPath() != nil {
+                    return true
+                }
+            case .directAPIWithGDirect:
+                if await oauth.hasStoredToken()
+                    || GDirectIntegration.isMountActive(at: profile.mountPath)
+                    || GDirectIntegration.activeLoopbackNFSMountPath() != nil {
+                    return true
+                }
             }
-            return GDirectIntegration.isMountActive(at: config.mountPath)
-                || GDirectIntegration.activeLoopbackNFSMountPath() != nil
         }
+        return false
     }
 
     private func evict(keeping: Set<UUID>) async throws -> CacheStats {
@@ -2543,9 +2642,13 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             reconsent: reconsent,
             switchAccount: switchAccount,
             openBrowser: { url in
+                #if canImport(AppKit)
                 await MainActor.run {
                     _ = NSWorkspace.shared.open(url)
                 }
+                #else
+                _ = url
+                #endif
             }
         )
         var config = await aiConfig()
@@ -3276,18 +3379,29 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     }
 
     public func saveSyncConfig(_ config: DriveSyncConfig) async throws {
-        try Self.validatePathSegments(config.rootFolderName)
-        if !config.webDAVRemotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            try Self.validatePathSegments(config.webDAVRemotePath)
-        }
         var value = config
-        value.sharedFolderURLOrID = config.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !value.sharedFolderURLOrID.isEmpty, value.resolvedSharedFolderID == nil {
-            throw DriveTransportError.invalidResponse("共享目录格式无效，请粘贴完整的 Google Drive 文件夹链接（含 /folders/…）或目录 ID。")
+        if !value.backends.isEmpty {
+            value.synchronizePrimaryFields()
         }
+        for profile in value.resolvedBackends {
+            try Self.validatePathSegments(profile.rootFolderName)
+            if !profile.iCloudFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try Self.validatePathSegments(profile.iCloudFolderName)
+            }
+            if !profile.webDAVRemotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try Self.validatePathSegments(profile.webDAVRemotePath)
+            }
+            let trimmedShared = profile.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedShared.isEmpty, DriveSyncConfig.extractGoogleDriveFolderID(from: trimmedShared) == nil {
+                throw DriveTransportError.invalidResponse("共享目录格式无效，请粘贴完整的 Google Drive 文件夹链接（含 /folders/…）或目录 ID。")
+            }
+        }
+        value.sharedFolderURLOrID = value.sharedFolderURLOrID.trimmingCharacters(in: .whitespacesAndNewlines)
         value.autoSyncIntervalSeconds = max(0, config.autoSyncIntervalSeconds)
         try await database.setState("driveConfig", value)
         cachedGDirectAccounts = nil
+        let refreshedStatuses = await mergedBackendStatuses(for: value)
+        await driveSync.updateBackendStatuses(refreshedStatuses, activeMode: value.mode)
         await refreshAutoSync(config: value)
     }
 
@@ -3340,10 +3454,50 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
             } else if status.account?.source != "gdirect mount" {
                 status.account = nil
             }
+        case .iCloudDrive:
+            let avail = ICloudDriveTransport.probeAvailability(containerIdentifier: config.primaryBackend.iCloudContainerIdentifier)
+            let hasBookmark = await hasICloudBookmark(for: config.primaryBackend.id)
+            if hasBookmark || !config.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || avail.hasAutomaticPath {
+                status.account = DriveAccountInfo(
+                    email: config.primaryBackend.locationSummary,
+                    displayName: "iCloud Drive",
+                    source: "iCloud Drive"
+                )
+            } else if status.account?.source == "iCloud Drive" {
+                status.account = nil
+            }
         case .webDAV, .localOnly:
             break
         }
+        status.backendStatuses = await mergedBackendStatuses(for: config, liveStatuses: status.backendStatuses)
         return status
+    }
+
+    private func mergedBackendStatuses(
+        for config: DriveSyncConfig,
+        liveStatuses: [SyncBackendStatus] = []
+    ) async -> [SyncBackendStatus] {
+        let persisted: [SyncBackendStatus] = (try? await database.state("backendSyncStatuses")) ?? []
+        let byID = Dictionary(
+            (persisted + liveStatuses).map { ($0.backendID, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        return config.resolvedBackends.map { profile in
+            var entry = byID[profile.id] ?? SyncBackendStatus(
+                backendID: profile.id,
+                name: profile.name,
+                mode: profile.mode,
+                isEnabled: profile.isEnabled,
+                isPrimary: profile.isPrimary,
+                locationSummary: profile.locationSummary
+            )
+            entry.name = profile.name
+            entry.mode = profile.mode
+            entry.isEnabled = profile.isEnabled
+            entry.isPrimary = profile.isPrimary
+            entry.locationSummary = profile.locationSummary
+            return entry
+        }
     }
 
     public func probeGDirectEnvironment() async -> GDirectEnvironmentSnapshot {
@@ -3383,6 +3537,8 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
 
     public func importGoogleOAuthSecret(from url: URL) async throws { try await oauth.importClientSecret(from: url) }
 
+    public func importGoogleOAuthData(_ data: Data) async throws { try await oauth.importClientSecretData(data) }
+
     public func importGoogleOAuthFromGDirect() async throws {
         let exported = try await GDirectIntegration.exportOAuthClient()
         try await oauth.saveClientConfig(exported)
@@ -3400,12 +3556,33 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         guard let config = try await oauth.resolvedConfig() else {
             throw DriveTransportError.notConfigured("请先按照 gdirect 教程配置 Google 登录凭据，或从本机 gdirect 一键导入。")
         }
+        #if canImport(AppKit)
         _ = try await oauth.authorizeInteractive(config: config) { url in
             await MainActor.run { _ = NSWorkspace.shared.open(url) }
         }
         await MainActor.run {
             NSApp.activate(ignoringOtherApps: true)
         }
+        return try await finishGoogleDriveSignIn()
+        #else
+        throw DriveTransportError.notConfigured("iOS / iPadOS 请使用原生系统授权会话登录 Google Drive。")
+        #endif
+    }
+
+    public func signInGoogleDrive(
+        presentAuthSession: @Sendable (URL, String) async throws -> URL
+    ) async throws -> DriveAccountInfo {
+        guard let config = try await oauth.resolvedConfig() else {
+            throw DriveTransportError.notConfigured("请先配置 Google iOS OAuth Client ID 或导入 Google Cloud 凭据文件。")
+        }
+        _ = try await oauth.authorizeWithCustomRedirect(
+            config: config,
+            presentAuthSession: presentAuthSession
+        )
+        return try await finishGoogleDriveSignIn()
+    }
+
+    private func finishGoogleDriveSignIn() async throws -> DriveAccountInfo {
         var currentConfig = await syncConfig()
         if currentConfig.mode == .localOnly || currentConfig.mode == .gdirectMount {
             currentConfig.mode = .directAPIWithGDirect
@@ -3615,33 +3792,248 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         return try await direct.listSharedFolders()
     }
 
+    public func probeICloudDriveAvailability() async -> ICloudDriveAvailability {
+        ICloudDriveTransport.probeAvailability()
+    }
+
+    private static func webDAVPasswordKey(for backendID: UUID) -> String {
+        if backendID == SyncBackendProfile.legacyPrimaryID {
+            return Self.webDAVPasswordKey
+        }
+        return "webdav.password.\(backendID.uuidString)"
+    }
+
+    public func saveBackendWebDAVPassword(_ password: String, for backendID: UUID) async throws {
+        let key = Self.webDAVPasswordKey(for: backendID)
+        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try intelligence.keychain.delete(key)
+        } else {
+            try intelligence.keychain.save(Data(trimmed.utf8), for: key)
+        }
+        if backendID == SyncBackendProfile.legacyPrimaryID {
+            cachedWebDAVPassword = trimmed.isEmpty ? nil : trimmed
+            hasLoadedWebDAVPassword = true
+        }
+    }
+
+    public func hasBackendWebDAVPassword(for backendID: UUID) async -> Bool {
+        let key = Self.webDAVPasswordKey(for: backendID)
+        if intelligence.keychain.exists(key) { return true }
+        if backendID != SyncBackendProfile.legacyPrimaryID {
+            return false
+        }
+        return await hasWebDAVPassword()
+    }
+
+    private func readBackendWebDAVPassword(for backendID: UUID) throws -> String {
+        let key = Self.webDAVPasswordKey(for: backendID)
+        if let data = try? intelligence.keychain.read(key),
+           let decoded = String(data: data, encoding: .utf8),
+           !decoded.isEmpty {
+            return decoded
+        }
+        return try readWebDAVPassword()
+    }
+
+    public func saveICloudBookmark(_ bookmarkData: Data?, displayPath: String, for backendID: UUID) async throws {
+        let stateKey = "icloud.bookmark.\(backendID.uuidString)"
+        try await database.setState(stateKey, bookmarkData)
+        var config = await syncConfig()
+        var list = config.resolvedBackends
+        if let idx = list.firstIndex(where: { $0.id == backendID }) {
+            list[idx].iCloudCustomFolderPath = displayPath
+            config.backends = list
+            config.synchronizePrimaryFields()
+            try await saveSyncConfig(config)
+        } else if config.mode == .iCloudDrive {
+            config.iCloudCustomFolderPath = displayPath
+            try await saveSyncConfig(config)
+        }
+    }
+
+    public func hasICloudBookmark(for backendID: UUID) async -> Bool {
+        let stateKey = "icloud.bookmark.\(backendID.uuidString)"
+        let data: Data? = try? await database.state(stateKey)
+        return data != nil
+    }
+
+    public func testBackendConnection(
+        _ profile: SyncBackendProfile,
+        webDAVPassword: String?
+    ) async throws -> DriveAccountInfo {
+        let base = await syncConfig()
+        let pwdOverride = webDAVPassword?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let backendTransport = try await transport(
+            for: profile,
+            baseConfig: base,
+            allowLocalFolder: true,
+            webDAVPasswordOverride: (pwdOverride?.isEmpty == false) ? pwdOverride : nil
+        )
+        return try await backendTransport.accountInfo()
+    }
+
+    public func syncBackend(id: UUID) async throws -> SyncReport {
+        guard !isMigrating else {
+            throw DriveTransportError.notConfigured("正在执行素材库迁移，请等待迁移完成后再同步。")
+        }
+        if let syncTask { return try await syncTask.value }
+        let config = await syncConfig()
+        guard let profile = config.resolvedBackends.first(where: { $0.id == id }) else {
+            throw DriveTransportError.notConfigured("未找到指定的同步后端。")
+        }
+        let multiCount = config.enabledBackends.count
+        let task = Task {
+            try await self.runSingleBackendSync(
+                profile: profile,
+                baseConfig: config,
+                deferOpPruning: multiCount > 1,
+                progressPrefix: "[\(profile.name)]"
+            )
+        }
+        syncTask = task
+        defer { syncTask = nil }
+        return try await task.value
+    }
+
     public func syncNow() async throws -> SyncReport {
         guard !isMigrating else {
             throw DriveTransportError.notConfigured("正在执行素材库迁移，请等待迁移完成后再同步。")
         }
         if let syncTask { return try await syncTask.value }
         let config = await syncConfig()
-        if config.mode == .localOnly && config.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let enabled = config.enabledBackends.sorted { ($0.isPrimary ? 0 : 1) < ($1.isPrimary ? 0 : 1) }
+        if enabled.isEmpty { return SyncReport() }
+        if enabled.count == 1,
+           enabled[0].mode == .localOnly,
+           enabled[0].localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return SyncReport()
         }
-        // Another caller may have started while we waited for the configuration read.
         guard !isMigrating else {
             throw DriveTransportError.notConfigured("正在执行素材库迁移，请等待迁移完成后再同步。")
         }
         if let syncTask { return try await syncTask.value }
-        let task = Task {
-            let transport = try await self.transport(for: config, allowLocalFolder: true)
-            let report = try await driveSync.sync(using: transport, config: config, allowLocalFolderSync: config.mode == .localOnly)
-            if transport is DirectAPITransport, let account = await driveSync.status().account {
-                try? await database.setState("googleDirectAccount", account)
+
+        let task = Task { () throws -> SyncReport in
+            let isMulti = enabled.count > 1
+            var statuses = await self.mergedBackendStatuses(for: config)
+            var aggregated = SyncReport()
+            var discoveredIDSet = Set<UUID>()
+            var firstError: Error?
+            var succeededCount = 0
+            let start = ContinuousClock.now
+
+            for (index, profile) in enabled.enumerated() {
+                let prefix = isMulti ? "[\(index + 1)/\(enabled.count) \(profile.name)]" : nil
+                if let sIdx = statuses.firstIndex(where: { $0.backendID == profile.id }) {
+                    statuses[sIdx].phase = .scanning
+                    statuses[sIdx].lastError = nil
+                    statuses[sIdx].currentDetail = "正在同步…"
+                }
+                if isMulti {
+                    await driveSync.updateBackendStatuses(
+                        statuses,
+                        activeMode: profile.mode,
+                        phase: .scanning,
+                        detail: "\(prefix ?? "") 正在连接…"
+                    )
+                }
+
+                do {
+                    let report = try await self.runSingleBackendSync(
+                        profile: profile,
+                        baseConfig: config,
+                        deferOpPruning: isMulti,
+                        progressPrefix: prefix
+                    )
+                    succeededCount += 1
+                    aggregated.uploadedOps += report.uploadedOps
+                    aggregated.downloadedOps += report.downloadedOps
+                    aggregated.discoveredRemoteAssets += report.discoveredRemoteAssets
+                    for id in report.discoveredAssetIDs where discoveredIDSet.insert(id).inserted {
+                        aggregated.discoveredAssetIDs.append(id)
+                    }
+                    aggregated.updatedBoards += report.updatedBoards
+                    aggregated.reconciledRenames += report.reconciledRenames
+
+                    let latestStatus = await driveSync.status()
+                    if let sIdx = statuses.firstIndex(where: { $0.backendID == profile.id }) {
+                        statuses[sIdx].phase = .idle
+                        statuses[sIdx].lastSyncedAt = Date()
+                        statuses[sIdx].lastError = nil
+                        statuses[sIdx].currentDetail = nil
+                        statuses[sIdx].progressFraction = nil
+                        if profile.isPrimary, let acc = latestStatus.account {
+                            statuses[sIdx].account = acc
+                        }
+                    }
+                } catch {
+                    if firstError == nil { firstError = error }
+                    if let sIdx = statuses.firstIndex(where: { $0.backendID == profile.id }) {
+                        statuses[sIdx].phase = .error(error.localizedDescription)
+                        statuses[sIdx].lastError = error.localizedDescription
+                        statuses[sIdx].currentDetail = error.localizedDescription
+                        statuses[sIdx].progressFraction = nil
+                    }
+                    if !isMulti {
+                        try? await database.setState("backendSyncStatuses", statuses)
+                        await driveSync.updateBackendStatuses(
+                            statuses,
+                            phase: .error(error.localizedDescription),
+                            detail: error.localizedDescription,
+                            lastError: .some(error.localizedDescription)
+                        )
+                        throw error
+                    }
+                }
             }
-            if config.mode != .localOnly {
+
+            // In multi-backend mode, prune `sync_ops` only through the minimum op cursor safely uploaded by ALL enabled backends.
+            if isMulti && succeededCount == enabled.count {
+                var cursors: [Int64] = []
+                for profile in enabled {
+                    let c: Int64 = (try? await database.state("backend.opCursor.\(profile.id.uuidString)")) ?? 0
+                    cursors.append(c)
+                }
+                if let safeMin = cursors.min(), safeMin > 0 {
+                    try? await database.acknowledgeOps(through: safeMin)
+                }
+            }
+
+            try? await database.setState("backendSyncStatuses", statuses)
+
+            if succeededCount == 0, let firstError {
+                await driveSync.updateBackendStatuses(
+                    statuses,
+                    phase: .error(firstError.localizedDescription),
+                    detail: firstError.localizedDescription,
+                    lastError: .some(firstError.localizedDescription)
+                )
+                throw firstError
+            }
+
+            let partialErr = firstError?.localizedDescription
+            await driveSync.updateBackendStatuses(
+                statuses,
+                activeMode: config.primaryBackend.mode,
+                phase: .idle,
+                detail: nil,
+                progress: nil,
+                lastError: .some(partialErr),
+                markSyncedNow: true
+            )
+
+            if !config.enabledCloudBackends.isEmpty {
                 _ = try await self.evict(keeping: [])
             }
-            if !report.discoveredAssetIDs.isEmpty {
+
+            let duration = start.duration(to: .now).components
+            aggregated.durationSeconds = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
+
+            if !aggregated.discoveredAssetIDs.isEmpty {
                 let ai = await self.aiConfig()
                 if ai.autoAnalyzeOnImport, ai.provider != .disabled {
-                    let discoveredIDs = report.discoveredAssetIDs
+                    let discoveredIDs = aggregated.discoveredAssetIDs
                     Task { [weak engine = self] in
                         guard let engine else { return }
                         if let enriched = try? await engine.enrichAssetsWithCloudAI(ids: discoveredIDs), !enriched.isEmpty {
@@ -3659,23 +4051,94 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
                     }
                 }
             }
-            if report.hasVisibleLibraryChanges {
+            if aggregated.hasVisibleLibraryChanges {
                 NotificationCenter.default.post(
                     name: CharkleSyncNotifications.didCompleteSync,
                     object: nil,
                     userInfo: [
-                        CharkleSyncNotifications.discoveredCountKey: report.discoveredRemoteAssets,
-                        CharkleSyncNotifications.downloadedOpsKey: report.downloadedOps,
-                        CharkleSyncNotifications.reconciledRenamesKey: report.reconciledRenames,
-                        CharkleSyncNotifications.updatedBoardsKey: report.updatedBoards
+                        CharkleSyncNotifications.discoveredCountKey: aggregated.discoveredRemoteAssets,
+                        CharkleSyncNotifications.downloadedOpsKey: aggregated.downloadedOps,
+                        CharkleSyncNotifications.reconciledRenamesKey: aggregated.reconciledRenames,
+                        CharkleSyncNotifications.updatedBoardsKey: aggregated.updatedBoards
                     ]
                 )
             }
-            return report
+            return aggregated
         }
         syncTask = task
         defer { syncTask = nil }
         return try await task.value
+    }
+
+    private func runSingleBackendSync(
+        profile: SyncBackendProfile,
+        baseConfig: DriveSyncConfig,
+        deferOpPruning: Bool,
+        progressPrefix: String?
+    ) async throws -> SyncReport {
+        let singleConfig = profile.toSingleBackendConfig(inheriting: baseConfig)
+        let backendTransport = try await self.transport(
+            for: profile,
+            baseConfig: baseConfig,
+            allowLocalFolder: true
+        )
+        let report = try await driveSync.sync(
+            using: backendTransport,
+            config: singleConfig,
+            allowLocalFolderSync: profile.mode == .localOnly,
+            options: SyncExecutionOptions(
+                backendID: profile.id,
+                isPrimaryBackend: profile.isPrimary,
+                deferOpPruning: deferOpPruning,
+                progressPrefix: progressPrefix
+            )
+        )
+        if backendTransport is DirectAPITransport, let account = await driveSync.status().account {
+            try? await database.setState("googleDirectAccount", account)
+        }
+        return report
+    }
+
+    private func transport(
+        for profile: SyncBackendProfile,
+        baseConfig: DriveSyncConfig,
+        allowLocalFolder: Bool = false,
+        webDAVPasswordOverride: String? = nil
+    ) async throws -> any DriveTransport {
+        if let injectedTransport, profile.isPrimary {
+            return injectedTransport
+        }
+        switch profile.mode {
+        case .iCloudDrive:
+            let bookmarkKey = "icloud.bookmark.\(profile.id.uuidString)"
+            let bookmarkData: Data? = try? await database.state(bookmarkKey)
+            return try ICloudDriveTransport.make(
+                folderName: profile.iCloudFolderName,
+                customFolderPath: profile.iCloudCustomFolderPath,
+                containerIdentifier: profile.iCloudContainerIdentifier,
+                bookmarkData: bookmarkData
+            )
+        case .webDAV:
+            let password: String
+            if let override = webDAVPasswordOverride, !override.isEmpty {
+                password = override
+            } else {
+                password = try readBackendWebDAVPassword(for: profile.id)
+            }
+            return try WebDAVTransport(
+                serverURL: profile.webDAVServerURL,
+                username: profile.webDAVUsername,
+                password: password,
+                remotePath: profile.webDAVRemotePath
+            )
+        default:
+            let single = profile.toSingleBackendConfig(inheriting: baseConfig)
+            return try await transport(
+                for: single,
+                allowLocalFolder: allowLocalFolder,
+                webDAVPasswordOverride: webDAVPasswordOverride
+            )
+        }
     }
 
     private func transport(
@@ -3685,6 +4148,14 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
     ) async throws -> any DriveTransport {
         if let injectedTransport { return injectedTransport }
         switch config.mode {
+        case .iCloudDrive:
+            let bookmarkData: Data? = try? await database.state("icloud.bookmark.\(config.primaryBackend.id.uuidString)")
+            return try ICloudDriveTransport.make(
+                folderName: config.iCloudFolderName,
+                customFolderPath: config.iCloudCustomFolderPath,
+                containerIdentifier: config.primaryBackend.iCloudContainerIdentifier,
+                bookmarkData: bookmarkData
+            )
         case .localOnly:
             guard allowLocalFolder else {
                 throw DriveTransportError.notConfigured("当前为纯本地保存模式。")
@@ -3800,20 +4271,31 @@ public final actor LiveCharkleEngine: CharkleEngineProtocol {
         guard await syncConfig() == config else { return }
         autoSyncTask?.cancel()
         autoSyncTask = nil
-        guard config.mode != .localOnly, config.autoSyncIntervalSeconds > 0 else { return }
+        guard !config.enabledCloudBackends.isEmpty, config.autoSyncIntervalSeconds > 0 else { return }
         if injectedTransport == nil {
-            switch config.mode {
-            case .localOnly: return
-            case .directAPIWithGDirect:
-                let hasCharkleToken = await oauth.hasStoredToken()
-                let hasActiveGDirectMount = GDirectIntegration.isMountActive(at: config.mountPath)
-                    || GDirectIntegration.activeLoopbackNFSMountPath() != nil
-                guard hasCharkleToken || hasActiveGDirectMount else { return }
-            case .webDAV:
-                guard !config.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            case .gdirectMount:
-                guard GDirectIntegration.isMountActive(at: config.mountPath) else { return }
+            var anyReady = false
+            for profile in config.enabledCloudBackends {
+                switch profile.mode {
+                case .localOnly:
+                    continue
+                case .iCloudDrive:
+                    if await hasICloudBookmark(for: profile.id)
+                        || !profile.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || ICloudDriveTransport.probeAvailability(containerIdentifier: profile.iCloudContainerIdentifier).hasAutomaticPath {
+                        anyReady = true
+                    }
+                case .directAPIWithGDirect:
+                    let hasCharkleToken = await oauth.hasStoredToken()
+                    let hasActiveGDirectMount = GDirectIntegration.isMountActive(at: profile.mountPath)
+                        || GDirectIntegration.activeLoopbackNFSMountPath() != nil
+                    if hasCharkleToken || hasActiveGDirectMount { anyReady = true }
+                case .webDAV:
+                    if !profile.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { anyReady = true }
+                case .gdirectMount:
+                    if GDirectIntegration.isMountActive(at: profile.mountPath) { anyReady = true }
+                }
             }
+            guard anyReady else { return }
         }
         guard await syncConfig() == config, autoSyncTask == nil else { return }
         let interval = config.autoSyncIntervalSeconds

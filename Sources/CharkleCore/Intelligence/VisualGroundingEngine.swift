@@ -1,7 +1,7 @@
-import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 
 /// Ensures every image sent to TypeSafe strictly obeys `280 <= width, height <= 1568`
 /// and upright standard JPEG encoding (avoiding HTTP 400 dimension rejections).
@@ -69,10 +69,7 @@ public nonisolated enum TypeSafeImagePreparer: Sendable {
         ctx.draw(cgImage, in: CGRect(x: originX, y: originY, width: drawW, height: drawH))
 
         guard let normalized = ctx.makeImage(),
-              let jpeg = NSBitmapImageRep(cgImage: normalized).representation(
-                using: .jpeg,
-                properties: [.compressionFactor: compression]
-              ) else {
+              let jpeg = encodeJPEG(normalized, compression: compression) else {
             return nil
         }
 
@@ -100,6 +97,24 @@ public nonisolated enum TypeSafeImagePreparer: Sendable {
         compression: Double = 0.86
     ) -> Data? {
         prepare(from: cgImage, targetLongSide: targetLongSide, compression: compression)?.jpegData
+    }
+
+    private static func encodeJPEG(_ cgImage: CGImage, compression: Double) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else {
+            return nil
+        }
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: max(0.0, min(1.0, compression))
+        ]
+        CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 
     /// Infers the normalized unpadded content rect if `imageData` was letterboxed by `TypeSafeImagePreparer`

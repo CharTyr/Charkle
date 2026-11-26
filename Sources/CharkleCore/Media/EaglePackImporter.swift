@@ -772,6 +772,7 @@ public nonisolated enum EaglePackImporter {
     // MARK: - Safe ZIP Validation & Extraction
 
     private static func listZipEntries(at zipURL: URL) throws -> [String] {
+        #if os(macOS)
         let result = try runProcess(
             executablePath: "/usr/bin/unzip",
             arguments: ["-Z", "-1", zipURL.path]
@@ -782,6 +783,9 @@ public nonisolated enum EaglePackImporter {
             )
         }
         return result.stdout.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        #else
+        throw EaglePackImportError.extractionFailed("当前平台暂不支持直接解压 .eaglepack 压缩归档，请在桌面端导入后通过云端同步。")
+        #endif
     }
 
     private static func validateZipEntries(at zipURL: URL) throws {
@@ -804,6 +808,7 @@ public nonisolated enum EaglePackImporter {
     }
 
     private static func extractArchive(at archiveURL: URL, to destinationDir: URL) throws {
+        #if os(macOS)
         let result = try runProcess(
             executablePath: "/usr/bin/ditto",
             arguments: ["-x", "-k", "--norsrc", "--noextattr", archiveURL.path, destinationDir.path]
@@ -812,8 +817,12 @@ public nonisolated enum EaglePackImporter {
             let detail = !result.stderr.isEmpty ? result.stderr : (!result.stdout.isEmpty ? result.stdout : "exit \(result.exitCode)")
             throw EaglePackImportError.extractionFailed(detail)
         }
+        #else
+        throw EaglePackImportError.extractionFailed("当前平台暂不支持直接解压 .eaglepack 压缩归档，请在桌面端导入后通过云端同步。")
+        #endif
     }
 
+    #if os(macOS)
     private static func runProcess(
         executablePath: String,
         arguments: [String]
@@ -853,4 +862,5 @@ public nonisolated enum EaglePackImporter {
             String(data: errBox.data, encoding: .utf8) ?? ""
         )
     }
+    #endif
 }

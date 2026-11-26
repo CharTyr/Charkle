@@ -829,12 +829,29 @@ public final actor LibraryDatabase {
         }
     }
 
+    func pendingOps<T: Decodable>(afterSeq: Int64, as type: T.Type, limit: Int) throws -> [(Int64, T)] {
+        try connection.query(
+            "SELECT seq,payload FROM sync_ops WHERE seq>? ORDER BY seq LIMIT ?",
+            [.integer(afterSeq), .integer(Int64(limit))]
+        ) {
+            try ($0.integer(0), decode(type, $0, column: 1))
+        }
+    }
+
     func acknowledgeOps(through seq: Int64) throws {
         try connection.execute("DELETE FROM sync_ops WHERE seq<=?", [.integer(seq)])
     }
 
     func pendingOpCount() throws -> Int {
         Int(try connection.query("SELECT COUNT(*) FROM sync_ops") { $0.integer(0) }.first ?? 0)
+    }
+
+    func pendingOpCount(afterSeq: Int64) throws -> Int {
+        Int(try connection.query("SELECT COUNT(*) FROM sync_ops WHERE seq>?", [.integer(afterSeq)]) { $0.integer(0) }.first ?? 0)
+    }
+
+    func maxPendingOpSeq() throws -> Int64 {
+        try connection.query("SELECT COALESCE(MAX(seq), 0) FROM sync_ops") { $0.integer(0) }.first ?? 0
     }
 
     func clearMigrationSyncState() throws {
@@ -844,6 +861,7 @@ public final actor LibraryDatabase {
             WHERE key LIKE 'remote.%'
                OR key LIKE 'local.delete.%'
                OR key LIKE 'deleted.drive.%'
+               OR key LIKE 'deleted.folder.%'
                OR key LIKE 'clock.%'
                OR key LIKE 'projection.%'
             """)

@@ -43,9 +43,13 @@ public nonisolated enum XPostURLParser {
         // Supported path shapes:
         // /<handle>/status/<id>[/photo/1]
         // /<handle>/statuses/<id>
+        // /<handle>/article/<id>
         // /i/web/status/<id>
         // /i/status/<id>
-        guard let statusIndex = segments.firstIndex(where: { $0.lowercased() == "status" || $0.lowercased() == "statuses" }),
+        guard let statusIndex = segments.firstIndex(where: {
+            let lower = $0.lowercased()
+            return lower == "status" || lower == "statuses" || lower == "article"
+        }),
               statusIndex + 1 < segments.count else {
             return nil
         }
@@ -234,11 +238,46 @@ public nonisolated struct ResolvedXPost: Equatable, Sendable {
 /// Fetches full X/Twitter post metadata & media URLs via FxTwitter / VxTwitter public JSON APIs
 /// and downloads attached high-resolution photos, GIFs, and MP4 videos locally.
 public nonisolated enum XPostResolver {
+    private static let apiSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpMaximumConnectionsPerHost = 6
+        config.timeoutIntervalForRequest = 6
+        config.timeoutIntervalForResource = 8
+        config.urlCache = nil
+        return URLSession(configuration: config)
+    }()
+
+    private static let redirectDelegate = SafeMediaRedirectDelegate()
+
+    private static let mediaSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpMaximumConnectionsPerHost = 6
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 45
+        config.urlCache = nil
+        return URLSession(configuration: config, delegate: redirectDelegate, delegateQueue: nil)
+    }()
+
+    /// Hedged parallel X post resolution: prefers FxTwitter, and automatically launches VxTwitter
+    /// after a short 650ms hedge (or immediately on FxTwitter failure), returning the first valid result.
     public static func resolve(_ ref: XPostReference) async -> ResolvedXPost? {
-        if let fx = await fetchFxTwitter(ref) {
-            return fx
+        await withTaskGroup(of: ResolvedXPost?.self) { group in
+            group.addTask {
+                await fetchFxTwitter(ref)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(650))
+                if Task.isCancelled { return nil }
+                return await fetchVxTwitter(ref)
+            }
+            while let result = await group.next() {
+                if let resolved = result {
+                    group.cancelAll()
+                    return resolved
+                }
+            }
+            return nil
         }
-        return await fetchVxTwitter(ref)
     }
 
     @concurrent
@@ -246,12 +285,17 @@ public nonisolated enum XPostResolver {
         _ item: XPostMedia,
         to directory: URL,
         baseName: String,
-        referer: URL? = nil
+        referer: URL? = nil,
+        preferLargePreview: Bool = false,
+        fastTimeout: Bool = false
     ) async -> URL? {
         let candidateURLs: [URL] = {
             var list: [URL] = []
-            if item.kind == .photo, let highRes = upgradedTwitterImageURL(item.url), highRes != item.url {
-                list.append(highRes)
+            if item.kind == .photo {
+                let targetQuality = preferLargePreview ? "large" : "orig"
+                if let upgraded = upgradedTwitterImageURL(item.url, nameValue: targetQuality), upgraded != item.url {
+                    list.append(upgraded)
+                }
             }
             list.append(item.url)
             if let thumb = item.thumbnailURL, thumb != item.url {
@@ -260,7 +304,8 @@ public nonisolated enum XPostResolver {
             return list
         }()
 
-        let maxBytes: Int64 = item.kind == .photo ? 35_000_000 : 160_000_000
+        let maxBytes: Int64 = item.kind == .photo ? 35_000_000 : (fastTimeout ? 32_000_000 : 160_000_000)
+        let requestTimeout: TimeInterval = fastTimeout ? 10 : 15
 
         for url in candidateURLs {
             if let saved = await downloadSingle(
@@ -269,6 +314,7 @@ public nonisolated enum XPostResolver {
                 to: directory,
                 baseName: baseName,
                 maxBytes: maxBytes,
+                requestTimeout: requestTimeout,
                 referer: referer
             ) {
                 return saved
@@ -488,17 +534,11 @@ public nonisolated enum XPostResolver {
     // MARK: - Networking Helpers
 
     private static func fetchJSONData(from url: URL) async -> Data? {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 8
-        config.timeoutIntervalForResource = 10
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-
-        var request = URLRequest(url: url, timeoutInterval: 8)
+        var request = URLRequest(url: url, timeoutInterval: 6)
         request.setValue("Charkle/1.0 (+https://charkle.app)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        guard let (data, response) = try? await session.data(for: request),
+        guard let (data, response) = try? await apiSession.data(for: request),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) else {
             return nil
@@ -558,18 +598,13 @@ public nonisolated enum XPostResolver {
         to directory: URL,
         baseName: String,
         maxBytes: Int64,
+        requestTimeout: TimeInterval = 15,
         referer: URL? = nil
     ) async -> URL? {
         guard WebBookmark.isSafeRemoteFetchURL(url),
               isAcceptableMediaResponse(mimeType: nil, url: url) else { return nil }
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 45
-        let delegate = SafeMediaRedirectDelegate()
-        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
 
-        var request = URLRequest(url: url, timeoutInterval: 15)
+        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         let hostLower = url.host()?.lowercased() ?? ""
         let browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15"
         if hostLower == "i.pximg.net" || hostLower.hasSuffix(".pximg.net") || hostLower == "pximg.net" {
@@ -591,7 +626,7 @@ public nonisolated enum XPostResolver {
             }
         }
 
-        guard let (tempURL, response) = try? await session.download(for: request),
+        guard let (tempURL, response) = try? await mediaSession.download(for: request),
               let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) else {
             return nil
@@ -622,16 +657,16 @@ public nonisolated enum XPostResolver {
         }
     }
 
-    private static func upgradedTwitterImageURL(_ url: URL) -> URL? {
+    private static func upgradedTwitterImageURL(_ url: URL, nameValue: String = "orig") -> URL? {
         guard let host = url.host()?.lowercased(), host.contains("twimg.com"),
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url
         }
         var items = components.queryItems ?? []
         if let idx = items.firstIndex(where: { $0.name == "name" }) {
-            items[idx] = URLQueryItem(name: "name", value: "orig")
+            items[idx] = URLQueryItem(name: "name", value: nameValue)
         } else {
-            items.append(URLQueryItem(name: "name", value: "orig"))
+            items.append(URLQueryItem(name: "name", value: nameValue))
         }
         components.queryItems = items
         return components.url

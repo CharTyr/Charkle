@@ -93,6 +93,12 @@ struct DeletedAssetFingerprint: Codable, Hashable, Sendable {
     let deletedAt: Date
 }
 
+struct DeletedFolderFingerprint: Codable, Hashable, Sendable {
+    let folderID: UUID
+    let normalizedPath: String
+    let deletedAt: Date
+}
+
 nonisolated struct SyncClocks: Codable, Sendable {
     private var clocks: [String: SyncStamp] = [:]
 
@@ -282,7 +288,26 @@ extension LibraryDatabase {
         case .asset(let delta):
             let key = "clock.asset." + delta.id.uuidString
             var clocks: SyncClocks = try state(key) ?? SyncClocks()
-            guard !clocks.deleted else { return }
+            if clocks.deleted {
+                // Even when a delete op arrived before an older create/bind op from another device,
+                // harvest its driveFileID and contentHash so reconciliation never resurrects a deleted file.
+                if let driveID = Self.decodeNonEmptyStringField(delta.fields["driveFileID"]) {
+                    try setState("deleted.drive." + driveID, true)
+                }
+                if let hash = Self.decodeNonEmptyStringField(delta.fields["contentHash"]),
+                   try state("deleted.content." + hash, as: DeletedAssetFingerprint.self) == nil {
+                    let deletedName = Self.decodeNonEmptyStringField(delta.fields["fileName"]) ?? ""
+                    let fp = DeletedAssetFingerprint(
+                        assetID: delta.id,
+                        sha256: hash,
+                        md5: nil,
+                        fileName: deletedName,
+                        deletedAt: date
+                    )
+                    try setState("deleted.content." + hash, fp)
+                }
+                return
+            }
             let current = try asset(id: delta.id) ?? AssetRecord(
                 id: delta.id, title: "", fileName: "", isLocalOriginalCached: false, createdAt: date, updatedAt: date
             )
@@ -336,24 +361,45 @@ extension LibraryDatabase {
         case .folder(var folder):
             let key = "clock.folder." + folder.id.uuidString
             var clocks: SyncClocks = try state(key) ?? SyncClocks()
-            guard !clocks.deleted, clocks.accept(stamp, key: "value") else { return }
+            if clocks.deleted {
+                // Harvest remote folder ID even if `.deleteFolder` replayed before `.folder`.
+                if let driveID = folder.driveFolderID, !driveID.isEmpty {
+                    try setState("deleted.folder.drive." + driveID, true)
+                }
+                if let normPath = try? normalizedFolderPath(for: folder), !normPath.isEmpty,
+                   try state("deleted.folder.path." + normPath, as: DeletedFolderFingerprint.self) == nil {
+                    let fp = DeletedFolderFingerprint(folderID: folder.id, normalizedPath: normPath, deletedAt: date)
+                    try setState("deleted.folder.path." + normPath, fp)
+                }
+                return
+            }
+            guard clocks.accept(stamp, key: "value") else { return }
             let current = try self.folder(id: folder.id)
             if folder.driveFolderID?.hasPrefix("mounted-") == true { folder.driveFolderID = current?.driveFolderID }
             if folder.driveFolderID == nil { folder.driveFolderID = current?.driveFolderID }
             folder.assetCount = 0
             try put(folder)
             try setState(key, clocks)
+            if let normPath = try? normalizedFolderPath(for: folder), !normPath.isEmpty,
+               let priorDeleted = try state("deleted.folder.path." + normPath, as: DeletedFolderFingerprint.self),
+               priorDeleted.deletedAt <= date {
+                try setState("deleted.folder.path." + normPath, Optional<DeletedFolderFingerprint>.none)
+            }
         case .deleteAsset(let id, let driveID):
             let existingAsset = try asset(id: id)
-            let knownID = existingAsset?.driveFileID ?? driveID
-            if let knownID { try setState("deleted.drive." + knownID, true) }
+            if let existingRemote = existingAsset?.driveFileID, !existingRemote.isEmpty {
+                try setState("deleted.drive." + existingRemote, true)
+            }
+            if let driveID, !driveID.isEmpty {
+                try setState("deleted.drive." + driveID, true)
+            }
             if let existingAsset, !existingAsset.contentHash.isEmpty {
                 let fp = DeletedAssetFingerprint(
                     assetID: id,
                     sha256: existingAsset.contentHash,
                     md5: nil,
                     fileName: existingAsset.fileName,
-                    deletedAt: Date()
+                    deletedAt: date
                 )
                 try setState("deleted.content." + existingAsset.contentHash, fp)
             }
@@ -367,7 +413,18 @@ extension LibraryDatabase {
             try tombstone("board", id: id, stamp: stamp)
             try removeBoard(id)
             try markProjection("boards", id: id)
-        case .deleteFolder(let id, _):
+        case .deleteFolder(let id, let driveID):
+            let existingFolder = try folder(id: id)
+            if let existingRemote = existingFolder?.driveFolderID, !existingRemote.isEmpty {
+                try setState("deleted.folder.drive." + existingRemote, true)
+            }
+            if let driveID, !driveID.isEmpty {
+                try setState("deleted.folder.drive." + driveID, true)
+            }
+            if let existingFolder, let normPath = try? normalizedFolderPath(for: existingFolder), !normPath.isEmpty {
+                let fp = DeletedFolderFingerprint(folderID: id, normalizedPath: normPath, deletedAt: date)
+                try setState("deleted.folder.path." + normPath, fp)
+            }
             try tombstone("folder", id: id, stamp: stamp)
             try removeFolder(id)
         case .vector(let id, let vector):
@@ -393,6 +450,32 @@ extension LibraryDatabase {
                 try setState(key, Optional<[SyncOperation]>.none)
             }
         }
+    }
+
+    private static func decodeNonEmptyStringField(_ data: Data?) -> String? {
+        guard let data,
+              let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let text = obj as? String,
+              !text.isEmpty else {
+            return nil
+        }
+        return text
+    }
+
+    private func normalizedFolderPath(for folder: FolderRecord) throws -> String {
+        var parts: [String] = []
+        var cursor: FolderRecord? = folder
+        var visited = Set<UUID>()
+        while let current = cursor, visited.insert(current.id).inserted {
+            let trimmed = current.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !trimmed.isEmpty { parts.append(trimmed) }
+            if let pid = current.parentID {
+                cursor = try self.folder(id: pid)
+            } else {
+                cursor = nil
+            }
+        }
+        return parts.reversed().joined(separator: "/")
     }
 
     private func storeDeferredVector(_ vector: AssetVector, id: UUID, stamp: SyncStamp) throws {

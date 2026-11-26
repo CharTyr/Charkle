@@ -165,11 +165,19 @@ public nonisolated enum ExternalAgentNotifier {
         if let summary, !summary.isEmpty {
             info["summary"] = summary
         }
+        #if os(macOS)
         DistributedNotificationCenter.default().postNotificationName(
             libraryChangedNotification,
             object: nil,
             userInfo: info,
             deliverImmediately: true
         )
+        #else
+        NotificationCenter.default.post(
+            name: libraryChangedNotification,
+            object: nil,
+            userInfo: info
+        )
+        #endif
     }
 }

@@ -3,6 +3,25 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+public struct SyncExecutionOptions: Sendable {
+    public var backendID: UUID?
+    public var isPrimaryBackend: Bool
+    public var deferOpPruning: Bool
+    public var progressPrefix: String?
+
+    public init(
+        backendID: UUID? = nil,
+        isPrimaryBackend: Bool = true,
+        deferOpPruning: Bool = false,
+        progressPrefix: String? = nil
+    ) {
+        self.backendID = backendID
+        self.isPrimaryBackend = isPrimaryBackend
+        self.deferOpPruning = deferOpPruning
+        self.progressPrefix = progressPrefix
+    }
+}
+
 public final actor DriveSyncEngine {
     private let database: LibraryDatabase
     private let media: MediaPipeline
@@ -14,6 +33,7 @@ public final actor DriveSyncEngine {
         return encoder
     }()
     private var currentStatus = SyncStatus()
+    private var activeProgressPrefix: String? = nil
     private var running = false
     private var originalDownloads: [UUID: Task<URL, Error>] = [:]
     private var lastStatusBroadcastAt: ContinuousClock.Instant?
@@ -32,7 +52,11 @@ public final actor DriveSyncEngine {
     ) {
         let phaseChanged = phase.map { $0 != currentStatus.phase } ?? false
         if let phase { currentStatus.phase = phase }
-        currentStatus.currentDetail = detail
+        if let prefix = activeProgressPrefix, let detail, !detail.isEmpty {
+            currentStatus.currentDetail = "\(prefix) \(detail)"
+        } else {
+            currentStatus.currentDetail = detail
+        }
         currentStatus.progressFraction = progress.map { min(1.0, max(0.0, $0)) }
 
         let now = ContinuousClock.now
@@ -99,20 +123,57 @@ public final actor DriveSyncEngine {
         try? await database.setState("lastSyncStatus", currentStatus)
     }
 
+    func updateBackendStatuses(
+        _ statuses: [SyncBackendStatus],
+        activeMode: DriveTransportMode? = nil,
+        phase: SyncPhase? = nil,
+        detail: String? = nil,
+        progress: Double? = nil,
+        lastError: String?? = nil,
+        markSyncedNow: Bool = false
+    ) async {
+        currentStatus.backendStatuses = statuses
+        if let activeMode { currentStatus.activeMode = activeMode }
+        if let phase { currentStatus.phase = phase }
+        if let detail { currentStatus.currentDetail = detail }
+        if let progress { currentStatus.progressFraction = min(1.0, max(0.0, progress)) }
+        if let lastError { currentStatus.lastError = lastError }
+        if markSyncedNow { currentStatus.lastSyncedAt = Date() }
+        currentStatus.pendingOpCount = (try? await database.pendingOpCount()) ?? currentStatus.pendingOpCount
+        try? await database.setState("lastSyncStatus", currentStatus)
+        broadcastCurrentStatus()
+    }
+
     public func sync(
         using transport: any DriveTransport,
         config: DriveSyncConfig,
         allowLocalFolderSync: Bool = false,
-        quietErrors: Bool = false
+        quietErrors: Bool = false,
+        options: SyncExecutionOptions = .init()
     ) async throws -> SyncReport {
         if config.mode == .localOnly && !allowLocalFolderSync { return SyncReport() }
         guard !running else { throw DriveTransportError.notConfigured("当前已有同步任务正在运行，请稍候。") }
         running = true
-        defer { running = false }
+        activeProgressPrefix = options.progressPrefix
+        defer {
+            running = false
+            activeProgressPrefix = nil
+        }
+
+        if !options.isPrimaryBackend {
+            return try await syncSecondaryBackend(
+                using: transport,
+                config: config,
+                options: options,
+                quietErrors: quietErrors
+            )
+        }
+
         currentStatus.activeMode = config.mode
         currentStatus.lastError = nil
         updateProgress(phase: .scanning, detail: "正在连接\(config.mode.localizedLabel)…", progress: 0.04, forceBroadcast: true)
         let start = ContinuousClock.now
+        let opCursorKey = options.backendID.map { "backend.opCursor.\($0.uuidString)" }
         do {
             let sharedRootID = config.mode == .directAPIWithGDirect ? config.resolvedSharedFolderID : nil
             let rootPath = Self.resolvedRootPath(for: config)
@@ -122,13 +183,17 @@ public final actor DriveSyncEngine {
             let (account, layoutResult) = try await (accountTask, layoutTask)
             currentStatus.account = account
             let layout = layoutResult.layout
-            let scope = "remote." + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
+            let scopePrefix: String = {
+                if let bid = options.backendID, bid != SyncBackendProfile.legacyPrimaryID {
+                    return "remote.backend.\(bid.uuidString)."
+                }
+                return "remote."
+            }()
+            let scope = scopePrefix + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
 
             var report = SyncReport()
             updateProgress(phase: .downloading(completed: 0, total: 0), detail: "正在并行拉取元数据与目录结构…", progress: 0.12, forceBroadcast: true)
 
-            // Run independent read-only cloud discovery concurrently:
-            // manifest verification + thumbnail directory listing + folder inventory crawl + parallel ops pull.
             async let manifestTask: Void = updateManifest(layout, existingManifest: layoutResult.manifestFile, scope: scope, transport: transport)
             async let remoteThumbnailsTask: [String: RemoteDriveFile] = {
                 guard config.syncThumbnails else { return [:] }
@@ -145,17 +210,12 @@ public final actor DriveSyncEngine {
             report.downloadedOps += pulled.count
             var changedBoards = pulled.boards
             if pulled.count > 0 {
-                // Immediately surface folders, tags, titles, dimensions, dominant colors, and moodboards in the UI
-                // before waiting on full directory crawls, thumbnails, or any original downloads.
                 notifyProgressiveMetadata(hasBoards: !changedBoards.isEmpty)
             }
 
             try await manifestTask
             let remoteThumbnails = try await remoteThumbnailsTask
 
-            // Stage 2 (Thumbnail-First Fast Hydration): download missing remote thumbnails BEFORE reconcile's
-            // heavy original downloads, uploads, or pinned-original fetches, ordered newest-first so the
-            // visible gallery fills with crisp imagery within seconds on a fresh install.
             var prefetchedThumbnailStamps: [String: String]?
             if config.syncThumbnails && !remoteThumbnails.isEmpty {
                 prefetchedThumbnailStamps = try await downloadMissingRemoteThumbnails(
@@ -168,7 +228,14 @@ public final actor DriveSyncEngine {
                 )
             }
 
-            let pending = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
+            let cursorSeq: Int64 = if options.deferOpPruning, let opCursorKey {
+                (try? await database.state(opCursorKey, as: Int64.self)) ?? 0
+            } else {
+                0
+            }
+            let pending = options.deferOpPruning
+                ? try await database.pendingOps(afterSeq: cursorSeq, as: SyncOperation.self, limit: 10_000)
+                : try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
             currentStatus.pendingOpCount = pending.count
             updateProgress(phase: .scanning, detail: "正在比对云端与本地目录…", progress: 0.46, forceBroadcast: true)
             let inventory = try await inventoryTask
@@ -207,6 +274,12 @@ public final actor DriveSyncEngine {
                     }
                     inventoryMutated = true
                 }
+                if !uploadResult.removedFolders.isEmpty {
+                    for removedFolderID in uploadResult.removedFolders {
+                        savedFiles.removeValue(forKey: removedFolderID)
+                    }
+                    inventoryMutated = true
+                }
                 if !uploadResult.renamedPrefixes.isEmpty {
                     savedFiles = Self.applyingRenamedPrefixes(uploadResult.renamedPrefixes, to: savedFiles)
                     inventoryMutated = true
@@ -216,8 +289,9 @@ public final actor DriveSyncEngine {
                     try await database.setState(scope + ".inventory", state)
                 }
             }
-            // Physical uploads & folder renames can enqueue Drive identity bindings (assets and folders). Each shard has an immutable name.
-            let ready = try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
+            let ready = options.deferOpPruning
+                ? try await database.pendingOps(afterSeq: cursorSeq, as: SyncOperation.self, limit: 10_000)
+                : try await database.pendingOps(as: SyncOperation.self, limit: 10_000)
             var publishable: [(Int64, SyncOperation)] = []
             let cutoff = pending.last?.0 ?? 0
             for row in ready {
@@ -247,10 +321,22 @@ public final actor DriveSyncEngine {
             }
             if !publishable.isEmpty {
                 updateProgress(phase: .uploading(completed: 0, total: publishable.count), detail: "正在上传同步日志…", progress: 0.82, forceBroadcast: true)
-                report.uploadedOps = try await pushOps(publishable, to: transport, layout: layout, syncEmbeddings: config.syncEmbeddings)
+                report.uploadedOps = try await pushOps(
+                    publishable,
+                    to: transport,
+                    layout: layout,
+                    syncEmbeddings: config.syncEmbeddings,
+                    deferOpPruning: options.deferOpPruning,
+                    cursorKey: opCursorKey
+                )
                 pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
                 report.downloadedOps += pulled.count
                 changedBoards.formUnion(pulled.boards)
+            } else if options.deferOpPruning, let opCursorKey {
+                let latestSeq = (try? await database.maxPendingOpSeq()) ?? cursorSeq
+                if latestSeq > cursorSeq {
+                    try? await database.setState(opCursorKey, latestSeq)
+                }
             }
 
             updateProgress(phase: .merging, detail: "正在同步情绪板与缩略图…", progress: 0.88, forceBroadcast: true)
@@ -301,23 +387,317 @@ public final actor DriveSyncEngine {
         }
     }
 
-    public func downloadOriginal(for assetID: UUID, using transport: any DriveTransport) async throws -> URL {
+    /// Non-clobbering bidirectional mirror sync for simultaneously connected secondary backends
+    /// (e.g. iCloud Drive or WebDAV running alongside primary Google Drive).
+    /// Keeps its own per-backend remote folder/asset ID maps and op cursor so primary `driveFileID` bindings
+    /// are never overwritten and local changes fan out cleanly across all enabled backends.
+    private func syncSecondaryBackend(
+        using transport: any DriveTransport,
+        config: DriveSyncConfig,
+        options: SyncExecutionOptions,
+        quietErrors: Bool
+    ) async throws -> SyncReport {
+        let backendID = options.backendID ?? UUID()
+        let start = ContinuousClock.now
+        let opCursorKey = "backend.opCursor.\(backendID.uuidString)"
+        let remoteAssetsKey = "backend.remoteAssets.\(backendID.uuidString)"
+        let remoteFoldersKey = "backend.remoteFolders.\(backendID.uuidString)"
+
+        updateProgress(phase: .scanning, detail: "正在连接\(config.mode.localizedLabel)…", progress: 0.08, forceBroadcast: true)
+        do {
+            let sharedRootID = config.mode == .directAPIWithGDirect ? config.resolvedSharedFolderID : nil
+            let rootPath = Self.resolvedRootPath(for: config)
+            async let accountTask = transport.accountInfo()
+            async let layoutTask = makeLayout(using: transport, rootPath: rootPath, sharedRootID: sharedRootID)
+            let (account, layoutResult) = try await (accountTask, layoutTask)
+            let layout = layoutResult.layout
+            let scope = "remote.backend.\(backendID.uuidString)." + DriveFiles.stableUUID("\(transport.displayName):\(account.email):\(layout.root)").uuidString
+
+            var report = SyncReport()
+            try await updateManifest(layout, existingManifest: layoutResult.manifestFile, scope: scope, transport: transport)
+
+            // 1. Pull remote metadata ops & missing thumbnails from this secondary backend
+            updateProgress(phase: .downloading(completed: 0, total: 0), detail: "拉取增量元数据与缩略图…", progress: 0.20, forceBroadcast: true)
+            var pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
+            report.downloadedOps += pulled.count
+            var changedBoards = pulled.boards
+            if pulled.count > 0 {
+                notifyProgressiveMetadata(hasBoards: !changedBoards.isEmpty)
+            }
+
+            let remoteThumbnails: [String: RemoteDriveFile] = if config.syncThumbnails {
+                Self.keyedByNameStatic(try await transport.listFiles(inFolderID: layout.thumbnails))
+            } else { [:] }
+            var prefetchedThumbnailStamps: [String: String]?
+            if config.syncThumbnails && !remoteThumbnails.isEmpty {
+                prefetchedThumbnailStamps = try await downloadMissingRemoteThumbnails(
+                    files: remoteThumbnails,
+                    dirty: nil,
+                    scope: scope,
+                    transport: transport,
+                    progressStart: 0.25,
+                    progressSpan: 0.15
+                )
+            }
+
+            // 2. Mirror active folder hierarchy into this secondary backend using isolated remote folder IDs
+            var remoteFolders: [String: String] = (try? await database.state(remoteFoldersKey)) ?? [:]
+            var remoteAssets: [String: String] = (try? await database.state(remoteAssetsKey)) ?? [:]
+
+            let allFolders = try await database.fetchFolders()
+            let foldersByID = Dictionary(uniqueKeysWithValues: allFolders.map { ($0.id, $0) })
+            let existingAssetIDs = try await database.existingAssetIDs()
+
+            // 2a. Propagate permanent asset deletions to this secondary backend so deleted files never linger or resurrect
+            var staleSecondaryAssetKeys: [(key: String, remoteID: String)] = []
+            for (assetIDStr, remoteFileID) in remoteAssets {
+                guard let uuid = UUID(uuidString: assetIDStr) else {
+                    staleSecondaryAssetKeys.append((assetIDStr, remoteFileID))
+                    continue
+                }
+                if !existingAssetIDs.contains(uuid) {
+                    staleSecondaryAssetKeys.append((assetIDStr, remoteFileID))
+                }
+            }
+            if !staleSecondaryAssetKeys.isEmpty {
+                let trashConcurrency = Self.concurrencyLimit(for: transport, directDefault: 4)
+                _ = try await Self.runBounded(items: staleSecondaryAssetKeys, maxConcurrent: trashConcurrency) { item in
+                    if Self.isRemoteIDCompatible(item.remoteID, with: transport) {
+                        try await Self.trashIfPresentStatic(item.remoteID, transport: transport)
+                    }
+                }
+                for item in staleSecondaryAssetKeys {
+                    remoteAssets.removeValue(forKey: item.key)
+                }
+            }
+
+            // 2b. Propagate deleted folders to this secondary backend (deepest-first, only when empty)
+            var staleSecondaryFolderKeys: [(key: String, remoteID: String)] = []
+            for (folderIDStr, remoteFolderID) in remoteFolders {
+                guard let uuid = UUID(uuidString: folderIDStr), foldersByID[uuid] != nil else {
+                    staleSecondaryFolderKeys.append((folderIDStr, remoteFolderID))
+                    continue
+                }
+            }
+            if !staleSecondaryFolderKeys.isEmpty {
+                let compatibleFolderIDs = staleSecondaryFolderKeys
+                    .map(\.remoteID)
+                    .filter { Self.isRemoteIDCompatible($0, with: transport) }
+                _ = try await Self.trashEmptyFoldersDeepestFirst(
+                    compatibleFolderIDs,
+                    inventoryFiles: [:],
+                    transport: transport
+                )
+                for item in staleSecondaryFolderKeys {
+                    remoteFolders.removeValue(forKey: item.key)
+                }
+            }
+
+            updateProgress(phase: .uploading(completed: 0, total: allFolders.count), detail: "同步目录结构…", progress: 0.45, forceBroadcast: true)
+            for folder in allFolders {
+                _ = try await ensureSecondaryFolder(
+                    folder.id,
+                    foldersByID: foldersByID,
+                    layoutRoot: layout.root,
+                    transport: transport,
+                    remoteFolders: &remoteFolders
+                )
+            }
+
+            // 3. Mirror locally cached active assets onto this secondary backend without clobbering primary driveFileID
+            let activeAssets = try await database.fetchAssets(matching: FilterCriteria(includeTrashed: false))
+            var parentListingCache: [String: [RemoteDriveFile]] = [:]
+            let unmappedCached = activeAssets.filter { asset in
+                remoteAssets[asset.id.uuidString] == nil && media.cachedOriginal(for: asset) != nil
+            }
+            if !unmappedCached.isEmpty {
+                let total = unmappedCached.count
+                for (index, asset) in unmappedCached.enumerated() {
+                    guard let localURL = media.cachedOriginal(for: asset) else { continue }
+                    let targetParentID: String = if let fid = asset.folderID {
+                        try await ensureSecondaryFolder(
+                            fid,
+                            foldersByID: foldersByID,
+                            layoutRoot: layout.root,
+                            transport: transport,
+                            remoteFolders: &remoteFolders
+                        )
+                    } else {
+                        layout.inbox
+                    }
+                    let existingFiles: [RemoteDriveFile]
+                    if let cached = parentListingCache[targetParentID] {
+                        existingFiles = cached
+                    } else {
+                        let listed = (try? await transport.listFiles(inFolderID: targetParentID)) ?? []
+                        parentListingCache[targetParentID] = listed
+                        existingFiles = listed
+                    }
+
+                    let safeName = DriveFiles.sanitizedFileName(asset.fileName)
+                    let shortID = String(asset.id.uuidString.lowercased().prefix(8))
+                    if let match = existingFiles.first(where: { !$0.isFolder && ($0.name == safeName || $0.name.lowercased().contains(shortID)) }) {
+                        remoteAssets[asset.id.uuidString] = match.id
+                        continue
+                    }
+
+                    let uploadedName: String
+                    if existingFiles.contains(where: { $0.name.caseInsensitiveCompare(safeName) == .orderedSame }) {
+                        let base = (safeName as NSString).deletingPathExtension
+                        let ext = (safeName as NSString).pathExtension
+                        uploadedName = ext.isEmpty ? "\(base) (\(shortID))" : "\(base) (\(shortID)).\(ext)"
+                    } else {
+                        uploadedName = safeName
+                    }
+
+                    let mime = DriveFiles.mimeType(for: localURL)
+                    let uploaded = try await transport.uploadFile(
+                        from: localURL,
+                        name: uploadedName,
+                        mimeType: mime,
+                        parentID: targetParentID,
+                        existingFileID: nil
+                    )
+                    remoteAssets[asset.id.uuidString] = uploaded.id
+                    parentListingCache[targetParentID, default: []].append(uploaded)
+
+                    let frac = 0.50 + 0.25 * (Double(index + 1) / Double(max(1, total)))
+                    updateProgress(
+                        phase: .uploading(completed: index + 1, total: total),
+                        detail: "镜像素材 (\(index + 1)/\(total))",
+                        progress: frac
+                    )
+                }
+            }
+
+            try await database.setState(remoteFoldersKey, remoteFolders)
+            try await database.setState(remoteAssetsKey, remoteAssets)
+
+            // 4. Push local metadata/board ops after this backend's cursor (excluding primary-only driveFileID bindings)
+            let cursorSeq: Int64 = (try? await database.state(opCursorKey, as: Int64.self)) ?? 0
+            let pendingAfterCursor = try await database.pendingOps(afterSeq: cursorSeq, as: SyncOperation.self, limit: 10_000)
+            let secondaryOps = pendingAfterCursor.filter { row in
+                switch row.1.change {
+                case .asset(let delta):
+                    let isPrimaryBindingOnly = row.1.projectLocation == false
+                        && delta.fields["driveFileID"] != nil
+                        && delta.fields.keys.allSatisfy { $0 == "driveFileID" || $0 == "fileName" }
+                        && delta.tagsAdded.isEmpty
+                        && delta.tagsRemoved.isEmpty
+                    return !isPrimaryBindingOnly
+                case .folder:
+                    return row.1.projectLocation != false
+                default:
+                    return true
+                }
+            }
+            if !secondaryOps.isEmpty {
+                updateProgress(phase: .uploading(completed: 0, total: secondaryOps.count), detail: "上传同步日志…", progress: 0.78, forceBroadcast: true)
+                report.uploadedOps = try await pushOps(
+                    secondaryOps,
+                    to: transport,
+                    layout: layout,
+                    syncEmbeddings: config.syncEmbeddings,
+                    deferOpPruning: true,
+                    cursorKey: opCursorKey
+                )
+                pulled = try await pullOps(layout, from: transport, scope: scope, syncEmbeddings: config.syncEmbeddings)
+                report.downloadedOps += pulled.count
+                changedBoards.formUnion(pulled.boards)
+            }
+            if let lastSeq = pendingAfterCursor.last?.0, lastSeq > cursorSeq {
+                try await database.setState(opCursorKey, lastSeq)
+            }
+
+            // 5. Mirror boards, thumbnails, and search embeddings
+            updateProgress(phase: .merging, detail: "同步情绪板与缩略图…", progress: 0.88, forceBroadcast: true)
+            try await writeBoards(layout, transport: transport, scope: scope, changedBoards: changedBoards)
+            if config.syncThumbnails {
+                try await syncThumbnails(
+                    layout,
+                    transport: transport,
+                    scope: scope,
+                    prefetchedRemoteFiles: remoteThumbnails,
+                    knownStamps: prefetchedThumbnailStamps
+                )
+            }
+            if config.syncEmbeddings {
+                try await writeEmbeddings(layout, transport: transport)
+            }
+
+            report.updatedBoards = changedBoards.count
+            let duration = start.duration(to: .now).components
+            report.durationSeconds = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
+            return report
+        } catch {
+            if !quietErrors, !(error is CancellationError) {
+                updateProgress(phase: .error(error.localizedDescription), detail: error.localizedDescription, progress: nil, forceBroadcast: true)
+            }
+            throw error
+        }
+    }
+
+    private func ensureSecondaryFolder(
+        _ folderID: UUID,
+        foldersByID: [UUID: FolderRecord],
+        layoutRoot: String,
+        transport: any DriveTransport,
+        remoteFolders: inout [String: String],
+        visited: Set<UUID> = []
+    ) async throws -> String {
+        if let cached = remoteFolders[folderID.uuidString] {
+            return cached
+        }
+        guard !visited.contains(folderID), let folder = foldersByID[folderID] else {
+            return layoutRoot
+        }
+        var nextVisited = visited
+        nextVisited.insert(folderID)
+        let parentRemoteID: String = if let parentID = folder.parentID {
+            try await ensureSecondaryFolder(
+                parentID,
+                foldersByID: foldersByID,
+                layoutRoot: layoutRoot,
+                transport: transport,
+                remoteFolders: &remoteFolders,
+                visited: nextVisited
+            )
+        } else {
+            layoutRoot
+        }
+        let safeName = DriveFiles.sanitizedFileName(folder.name)
+        let remote = try await transport.findOrCreateFolder(named: safeName, parentID: parentRemoteID)
+        remoteFolders[folderID.uuidString] = remote.id
+        return remote.id
+    }
+
+    public func downloadOriginal(
+        for assetID: UUID,
+        using transport: any DriveTransport,
+        remoteFileIDOverride: String? = nil
+    ) async throws -> URL {
         if let inFlight = originalDownloads[assetID] { return try await inFlight.value }
-        let task = Task { try await copyOriginal(for: assetID, using: transport) }
+        let task = Task { try await copyOriginal(for: assetID, using: transport, remoteFileIDOverride: remoteFileIDOverride) }
         originalDownloads[assetID] = task
         defer { originalDownloads.removeValue(forKey: assetID) }
         return try await task.value
     }
 
-    private func copyOriginal(for assetID: UUID, using transport: any DriveTransport) async throws -> URL {
-        guard let asset = try await database.asset(id: assetID), let remote = asset.driveFileID else {
+    private func copyOriginal(
+        for assetID: UUID,
+        using transport: any DriveTransport,
+        remoteFileIDOverride: String? = nil
+    ) async throws -> URL {
+        guard let asset = try await database.asset(id: assetID),
+              let remote = remoteFileIDOverride ?? asset.driveFileID else {
             throw DriveTransportError.fileNotFound(assetID.uuidString)
         }
         let target = media.staging.appending(path: "original-" + assetID.uuidString)
         try await transport.downloadFile(fileID: remote, to: target)
         defer { try? FileManager.default.removeItem(at: target) }
         return try await database.transaction { [media] store in
-            guard var current = try store.asset(id: assetID), current.driveFileID == remote else {
+            guard var current = try store.asset(id: assetID),
+                  (remoteFileIDOverride != nil || current.driveFileID == remote) else {
                 throw DriveTransportError.fileNotFound(assetID.uuidString)
             }
             let url = try media.installOriginal(target, for: current)
@@ -388,6 +768,14 @@ public final actor DriveSyncEngine {
         switch config.mode {
         case .webDAV:
             return config.webDAVRemotePath
+        case .iCloudDrive:
+            let custom = config.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !custom.isEmpty {
+                let url = URL(fileURLWithPath: (custom as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+                return url.lastPathComponent.isEmpty ? "Charkle" : url.lastPathComponent
+            }
+            let cleaned = config.iCloudFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleaned.isEmpty ? "Charkle" : cleaned
         case .localOnly:
             let url = URL(fileURLWithPath: (config.localLibraryPath as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
             return url.lastPathComponent.isEmpty ? "Charkle" : url.lastPathComponent
@@ -536,10 +924,42 @@ public final actor DriveSyncEngine {
     private func pullOps(_ layout: Layout, from transport: any DriveTransport, scope: String,
                          syncEmbeddings: Bool) async throws -> (count: Int, boards: Set<UUID>) {
         let device = try await database.deviceID()
-        let files = try await transport.listFiles(inFolderID: layout.ops).compactMap(LogFile.init)
-            .filter { $0.device != device }.sorted { ($0.device, $0.end, $0.file.id) < ($1.device, $1.end, $1.file.id) }
+        let rawFiles = try await transport.listFiles(inFolderID: layout.ops).compactMap(LogFile.init)
+            .filter { $0.device != device }
         var cursors: [String: Int64] = try await database.state(scope + ".deviceCursors") ?? [:]
-        let pendingEntries = files.filter { $0.end > (cursors[$0.device] ?? 0) }
+
+        // Keep each device's shards strictly ascending by `end`, while interleaving across devices
+        // in chronological `modifiedTime` order so multi-device create/delete logs replay causally.
+        let groupedByDevice = Dictionary(grouping: rawFiles.filter { $0.end > (cursors[$0.device] ?? 0) }, by: \.device)
+        let queues: [[LogFile]] = groupedByDevice.keys.sorted().map { dev in
+            groupedByDevice[dev, default: []].sorted { ($0.end, $0.file.id) < ($1.end, $1.file.id) }
+        }
+        var queueOffsets = Array(repeating: 0, count: queues.count)
+        var pendingEntries: [LogFile] = []
+        pendingEntries.reserveCapacity(rawFiles.count)
+        while true {
+            var bestQueue: Int?
+            var bestKey: (Date, String, Int64, String)?
+            for i in queues.indices {
+                let offset = queueOffsets[i]
+                guard offset < queues[i].count else { continue }
+                let candidate = queues[i][offset]
+                let key = (candidate.file.modifiedTime ?? .distantPast, candidate.device, candidate.end, candidate.file.id)
+                if let currentBest = bestKey {
+                    if key < currentBest {
+                        bestKey = key
+                        bestQueue = i
+                    }
+                } else {
+                    bestKey = key
+                    bestQueue = i
+                }
+            }
+            guard let chosen = bestQueue else { break }
+            pendingEntries.append(queues[chosen][queueOffsets[chosen]])
+            queueOffsets[chosen] += 1
+        }
+
         var downloaded = 0
         var boards = Set<UUID>()
 
@@ -547,8 +967,8 @@ public final actor DriveSyncEngine {
             let concurrency = Self.concurrencyLimit(for: transport, directDefault: 10)
             let totalShards = pendingEntries.count
             var completedShards = 0
-            // Download unseen op shards in bounded parallel chunks (keeps memory small & HTTP/2 saturated),
-            // then validate and apply strictly in deterministic `(device, end, file.id)` order inside batched transactions.
+            // Download unseen op shards in bounded parallel chunks, then sort operations by global
+            // HLC `(stamp.time, stamp.device, seq)` and commit each chunk + cursor update atomically.
             let chunkSize = 40
             for chunkStart in stride(from: 0, to: totalShards, by: chunkSize) {
                 try Task.checkCancellation()
@@ -576,13 +996,13 @@ public final actor DriveSyncEngine {
                 }.sorted { $0.index < $1.index }
 
                 var pendingBatch: [(device: String, line: LogLine)] = []
-                pendingBatch.reserveCapacity(400)
+                pendingBatch.reserveCapacity(512)
                 var chunkBoards = Set<UUID>()
 
                 for shard in downloadedChunk {
                     let previous = cursors[shard.entry.device] ?? 0
                     let unseen = shard.lines.filter { $0.seq > previous }
-                    cursors[shard.entry.device] = shard.entry.end
+                    cursors[shard.entry.device] = max(previous, shard.entry.end)
                     for line in unseen {
                         pendingBatch.append((device: shard.entry.device, line: line))
                         switch line.operation.change {
@@ -597,22 +1017,17 @@ public final actor DriveSyncEngine {
                     }
                     downloaded += unseen.count
                     completedShards += 1
-                    if pendingBatch.count >= 400 {
-                        let batch = pendingBatch
-                        pendingBatch.removeAll(keepingCapacity: true)
-                        let updatedCursors = cursors
-                        try await database.transaction { store in
-                            for item in batch {
-                                if case .vector = item.line.operation.change, !syncEmbeddings {
-                                    try store.setState("disabled.vector.\(item.device).\(item.line.seq)", item.line.operation)
-                                } else {
-                                    try store.apply(item.line.operation)
-                                }
-                            }
-                            try store.setState(scope + ".deviceCursors", updatedCursors)
-                        }
-                    }
                 }
+
+                // Apply cross-device ops in global causal HLC order inside ONE atomic transaction
+                // together with the chunk's updated cursors so a crash never skips unapplied ops.
+                pendingBatch.sort { lhs, rhs in
+                    let lStamp = lhs.line.operation.stamp
+                    let rStamp = rhs.line.operation.stamp
+                    if lStamp != rStamp { return lStamp < rStamp }
+                    return (lhs.device, lhs.line.seq) < (rhs.device, rhs.line.seq)
+                }
+
                 if pendingBatch.isEmpty {
                     let updatedCursors = cursors
                     try await database.setState(scope + ".deviceCursors", updatedCursors)
@@ -652,8 +1067,14 @@ public final actor DriveSyncEngine {
         return (downloaded, boards)
     }
 
-    private func pushOps(_ operations: [(Int64, SyncOperation)], to transport: any DriveTransport,
-                         layout: Layout, syncEmbeddings: Bool) async throws -> Int {
+    private func pushOps(
+        _ operations: [(Int64, SyncOperation)],
+        to transport: any DriveTransport,
+        layout: Layout,
+        syncEmbeddings: Bool,
+        deferOpPruning: Bool = false,
+        cursorKey: String? = nil
+    ) async throws -> Int {
         guard !operations.isEmpty else { return 0 }
         let device = try await database.deviceID()
         let known = keyedByName(try await transport.listFiles(inFolderID: layout.ops))
@@ -693,7 +1114,11 @@ public final actor DriveSyncEngine {
                 }
                 uploaded += bytes.split(separator: 0x0A).count
             }
-            try await database.acknowledgeOps(through: end)
+            if deferOpPruning, let cursorKey {
+                try await database.setState(cursorKey, end)
+            } else {
+                try await database.acknowledgeOps(through: end)
+            }
             let doneOps = min(operations.count, start + 200)
             let opRatio = 0.82 + 0.05 * (Double(doneOps) / Double(max(1, operations.count)))
             updateProgress(
@@ -1215,8 +1640,91 @@ public final actor DriveSyncEngine {
         catch DriveTransportError.httpError(statusCode: 403, message: _) { }
     }
 
+    /// Ensures a remote file/folder identifier belongs to the active transport before issuing
+    /// remote move/trash API calls (prevents cross-backend path IDs from hitting Google Drive API v3).
+    private nonisolated static func isRemoteIDCompatible(_ id: String, with transport: any DriveTransport) -> Bool {
+        guard !id.isEmpty else { return false }
+        if transport is MountedVolumeTransport {
+            return id.hasPrefix("mounted-")
+        }
+        if transport is ICloudDriveTransport {
+            return id.hasPrefix(ICloudDriveTransport.pathIDPrefix)
+        }
+        if transport is WebDAVTransport {
+            return !id.hasPrefix("mounted-") && !id.hasPrefix(ICloudDriveTransport.pathIDPrefix)
+        }
+        return !id.hasPrefix("mounted-")
+            && !id.hasPrefix(ICloudDriveTransport.pathIDPrefix)
+            && !id.contains("/")
+    }
+
+    /// Trashes empty remote folders deepest-child-first across multiple passes so deleting nested
+    /// folder trees cleanly removes children before their parents without ever deleting non-empty folders.
+    private nonisolated static func trashEmptyFoldersDeepestFirst(
+        _ folderIDs: [String],
+        inventoryFiles: [String: RemoteDriveFile],
+        transport: any DriveTransport
+    ) async throws -> Set<String> {
+        let unique = Array(Set(folderIDs)).filter { isRemoteIDCompatible($0, with: transport) }
+        guard !unique.isEmpty else { return [] }
+
+        func depth(of id: String) -> Int {
+            var count = 0
+            var cursor = id
+            var visited = Set<String>()
+            while visited.insert(cursor).inserted,
+                  let parent = inventoryFiles[cursor]?.parents.first,
+                  !parent.isEmpty {
+                count += 1
+                cursor = parent
+            }
+            if count == 0 {
+                count = id.split(separator: "/").count
+            }
+            return count
+        }
+
+        var remaining = unique.sorted { lhs, rhs in
+            let ld = depth(of: lhs)
+            let rd = depth(of: rhs)
+            if ld != rd { return ld > rd }
+            return lhs > rhs
+        }
+
+        var trashed = Set<String>()
+        let maxPasses = min(12, max(1, remaining.count))
+        for _ in 0..<maxPasses where !remaining.isEmpty {
+            var nextRemaining: [String] = []
+            var progress = false
+            for id in remaining {
+                try Task.checkCancellation()
+                do {
+                    let children = try await transport.listFiles(inFolderID: id)
+                    if children.isEmpty {
+                        try await trashIfPresentStatic(id, transport: transport)
+                        trashed.insert(id)
+                        progress = true
+                    } else {
+                        nextRemaining.append(id)
+                    }
+                } catch DriveTransportError.fileNotFound {
+                    trashed.insert(id)
+                    progress = true
+                } catch DriveTransportError.httpError(statusCode: 404, message: _) {
+                    trashed.insert(id)
+                    progress = true
+                } catch DriveTransportError.httpError(statusCode: 403, message: _) {
+                    // Shared folder without delete permission: skip cleanly without aborting sync.
+                }
+            }
+            remaining = nextRemaining
+            if !progress { break }
+        }
+        return trashed
+    }
+
     private nonisolated static func concurrencyLimit(for transport: any DriveTransport, directDefault: Int) -> Int {
-        if transport is MountedVolumeTransport { return 2 }
+        if transport is MountedVolumeTransport || transport is ICloudDriveTransport { return 2 }
         if transport is WebDAVTransport { return min(3, directDefault) }
         return directDefault
     }
@@ -1335,12 +1843,6 @@ public final actor DriveSyncEngine {
         }
     }
 
-    private func trashIfPresent(_ id: String, transport: any DriveTransport) async throws {
-        do { try await transport.trashFile(fileID: id) }
-        catch DriveTransportError.fileNotFound { }
-        catch DriveTransportError.httpError(statusCode: 404, message: _) { }
-        catch DriveTransportError.httpError(statusCode: 403, message: _) { }
-    }
 }
 
 extension DriveSyncEngine {
@@ -1568,6 +2070,7 @@ extension DriveSyncEngine {
         var pendingMoves = Set<UUID>()
         var pendingFolders = Set<UUID>()
         var pendingDeletedDriveIDs = Set<String>()
+        var pendingDeletedFolderDriveIDs = Set<String>()
         for (_, op) in pending {
             switch op.change {
             case .asset(let delta) where delta.touchesLocation && op.projectLocation != false:
@@ -1575,49 +2078,111 @@ extension DriveSyncEngine {
             case .folder(let folder) where op.projectLocation != false:
                 pendingFolders.insert(folder.id)
             case .deleteAsset(let id, let driveID):
-                if let driveID {
+                if let driveID, !driveID.isEmpty {
                     pendingDeletedDriveIDs.insert(driveID)
                 }
                 if isMountedTransport,
                    let local = try? await database.state("local.delete.asset." + id.uuidString, as: String.self) {
                     pendingDeletedDriveIDs.insert(local)
                 }
+            case .deleteFolder(let id, let driveID):
+                if let driveID, !driveID.isEmpty {
+                    pendingDeletedFolderDriveIDs.insert(driveID)
+                }
+                if isMountedTransport,
+                   let local = try? await database.state("local.delete.folder." + id.uuidString, as: String.self) {
+                    pendingDeletedFolderDriveIDs.insert(local)
+                }
             default: break
             }
         }
 
         // Only clear stale mounted-path deletion markers when actively syncing MountedVolumeTransport
-        // and the file is confirmed absent from the mounted filesystem (and not pending deletion).
+        // and the item is confirmed absent from the mounted filesystem (and not pending deletion).
         if isMountedTransport {
             let activeFileIDs = Set(update.current.files.keys)
             let deletedMarkers: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.drive." + MountedVolumeTransport.pathIDPrefix, as: Bool.self)) ?? []
-            if !deletedMarkers.isEmpty {
-                let markersToClear = deletedMarkers.compactMap { key, _ -> String? in
-                    let remoteID = String(key.dropFirst("deleted.drive.".count))
-                    guard !activeFileIDs.contains(remoteID), !pendingDeletedDriveIDs.contains(remoteID) else { return nil }
-                    return key
+            let deletedFolderMarkers: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.folder.drive." + MountedVolumeTransport.pathIDPrefix, as: Bool.self)) ?? []
+            var markersToClear: [String] = []
+            for (key, _) in deletedMarkers {
+                let remoteID = String(key.dropFirst("deleted.drive.".count))
+                if !activeFileIDs.contains(remoteID), !pendingDeletedDriveIDs.contains(remoteID) {
+                    markersToClear.append(key)
                 }
-                if !markersToClear.isEmpty {
-                    try? await database.transaction { store in
-                        for key in markersToClear {
-                            try store.setState(key, Optional<Bool>.none)
-                        }
+            }
+            for (key, _) in deletedFolderMarkers {
+                let remoteID = String(key.dropFirst("deleted.folder.drive.".count))
+                if !activeFileIDs.contains(remoteID), !pendingDeletedFolderDriveIDs.contains(remoteID) {
+                    markersToClear.append(key)
+                }
+            }
+            if !markersToClear.isEmpty {
+                let toClear = markersToClear
+                try? await database.transaction { store in
+                    for key in toClear {
+                        try store.setState(key, Optional<Bool>.none)
                     }
                 }
             }
         }
 
-        // Batch all remote folder reconciliations into a single SQLite transaction (instead of 1 transaction per folder).
-        let folderIDs: [String: UUID] = try await database.transaction { [pendingFolders, layout] store -> [String: UUID] in
+        let deletedFolderDriveEntries: [(String, Bool)] = (try? await database.states(withPrefix: "deleted.folder.drive.", as: Bool.self)) ?? []
+        var deletedFolderDriveIDs = Set<String>()
+        for (key, value) in deletedFolderDriveEntries where value {
+            deletedFolderDriveIDs.insert(String(key.dropFirst("deleted.folder.drive.".count)))
+        }
+        let deletedFolderPathEntries: [(String, DeletedFolderFingerprint)] = (try? await database.states(withPrefix: "deleted.folder.path.", as: DeletedFolderFingerprint.self)) ?? []
+        var deletedFolderPaths: [String: DeletedFolderFingerprint] = [:]
+        deletedFolderPaths.reserveCapacity(deletedFolderPathEntries.count)
+        for (key, fp) in deletedFolderPathEntries {
+            deletedFolderPaths[String(key.dropFirst("deleted.folder.path.".count))] = fp
+        }
+
+        var removedFileIDs = Set<String>()
+        var deletedRemoteFoldersToClean: [(id: String, persistMarker: Bool)] = []
+
+        // Batch all remote folder reconciliations into a single SQLite transaction (instead of 1 transaction per folder),
+        // skipping any folder previously deleted in Charkle so a fresh install never resurrects deleted folders.
+        let folderReconcileResult: (map: [String: UUID], skippedPending: [String], skippedDeleted: [(id: String, persistMarker: Bool)]) = try await database.transaction { [pendingFolders, pendingDeletedFolderDriveIDs, deletedFolderDriveIDs, deletedFolderPaths, layout] store in
             var map: [String: UUID] = [:]
+            var remotePathByID: [String: String] = [:]
+            var skippedPending: [String] = []
+            var skippedDeleted: [(id: String, persistMarker: Bool)] = []
             var folders = try store.fetchFolders()
             map.reserveCapacity(update.orderedFolders.count)
             for file in update.orderedFolders where file.id != layout.inbox {
-                let parent = file.parents.first.flatMap { map[$0] }
+                let parentRemoteID = file.parents.first
+                let normalizedName = file.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let remoteNormPath: String = {
+                    if let pid = parentRemoteID, let parentPath = remotePathByID[pid], !parentPath.isEmpty {
+                        return parentPath + "/" + normalizedName
+                    }
+                    return normalizedName
+                }()
+                remotePathByID[file.id] = remoteNormPath
+
+                if pendingDeletedFolderDriveIDs.contains(file.id) {
+                    skippedPending.append(file.id)
+                    continue
+                }
+                if deletedFolderDriveIDs.contains(file.id) {
+                    skippedDeleted.append((file.id, false))
+                    continue
+                }
+                let parent = parentRemoteID.flatMap { map[$0] }
                 let found = folders.firstIndex(where: { $0.driveFolderID == file.id })
                     ?? folders.firstIndex(where: { $0.parentID == parent && $0.name == file.name })
+                if found == nil,
+                   let deletedPathFP = deletedFolderPaths[remoteNormPath],
+                   deletedPathFP.deletedAt >= (file.modifiedTime ?? .distantPast).addingTimeInterval(-5) {
+                    skippedDeleted.append((file.id, true))
+                    continue
+                }
                 let id = found.map { folders[$0].id } ?? DriveFiles.stableUUID("folder:" + file.id)
-                if try store.isTombstoned("folder", id: id) { continue }
+                if try store.isTombstoned("folder", id: id) {
+                    skippedDeleted.append((file.id, true))
+                    continue
+                }
                 let sortOrder = folders.count
                 var folder = try store.folder(id: id) ?? FolderRecord(id: id, name: file.name, parentID: parent, sortOrder: sortOrder)
                 let before = folder
@@ -1644,7 +2209,17 @@ extension DriveSyncEngine {
                 map[file.id] = folder.id
                 if let found { folders[found] = folder } else { folders.append(folder) }
             }
-            return map
+            return (map, skippedPending, skippedDeleted)
+        }
+        let folderIDs = folderReconcileResult.map
+        for id in folderReconcileResult.skippedPending {
+            removedFileIDs.insert(id)
+        }
+        for item in folderReconcileResult.skippedDeleted {
+            removedFileIDs.insert(item.id)
+            if Self.isRemoteIDCompatible(item.id, with: transport) {
+                deletedRemoteFoldersToClean.append(item)
+            }
         }
 
         let thumbnails: [String: RemoteDriveFile]
@@ -1657,7 +2232,6 @@ extension DriveSyncEngine {
         var discoveredIDs: [UUID] = []
         var renames = 0
         var deferredFileIDs = Set<String>()
-        var removedFileIDs = Set<String>()
 
         // Preload bindings, assets, and deletion/hidden marker prefixes in 4 bulk reads
         // instead of issuing O(N) individual SQLite queries during fresh-install reconciliation.
@@ -1718,8 +2292,7 @@ extension DriveSyncEngine {
                 continue
             }
             if deletedDriveIDs.contains(file.id) {
-                let compatibleWithTransport = isMountedTransport ? file.id.hasPrefix("mounted-") : !file.id.hasPrefix("mounted-")
-                if compatibleWithTransport {
+                if Self.isRemoteIDCompatible(file.id, with: transport) {
                     remoteTrashFromDeleted.append((file.id, false))
                 }
                 removedFileIDs.insert(file.id)
@@ -1742,12 +2315,26 @@ extension DriveSyncEngine {
             }
             let changedContent = Self.contentChanged(before: previous, after: file)
             if let existing, !changedContent || previous == nil {
-                // Only enqueue a SQLite location update if fileName, folderID, or hidden-trash restoration actually differs.
-                if !pendingMoves.contains(existing.id), (previous != file || (existing.folderID == nil && folderID != nil)) {
+                // Only enqueue a SQLite location update if a genuinely newer Drive-side rename/move
+                // or hidden-trash restoration occurred. On a fresh install (`previous == nil`), trust
+                // authoritative `.charkle/ops/` metadata instead of reverting trashed/moved items.
+                if !pendingMoves.contains(existing.id) {
                     let remoteName = Self.originalName(file)
-                    let nameNeedsUpdate = previous?.name != file.name && existing.fileName != remoteName
-                    let folderNeedsUpdate = previous?.parents != file.parents && existing.folderID != folderID
                     let unhideNeedsUpdate = remoteHiddenIDs.contains(file.id)
+                    let nameNeedsUpdate: Bool
+                    let folderNeedsUpdate: Bool
+                    if let previous {
+                        nameNeedsUpdate = previous.name != file.name && existing.fileName != remoteName
+                        folderNeedsUpdate = previous.parents != file.parents && existing.folderID != folderID
+                    } else if !existing.isTrashed,
+                              let remoteModified = file.modifiedTime,
+                              remoteModified > existing.updatedAt.addingTimeInterval(2) {
+                        nameNeedsUpdate = existing.fileName != remoteName
+                        folderNeedsUpdate = existing.folderID != folderID && (folderID != nil || existing.folderID == nil)
+                    } else {
+                        nameNeedsUpdate = false
+                        folderNeedsUpdate = false
+                    }
                     if nameNeedsUpdate || folderNeedsUpdate || unhideNeedsUpdate {
                         locationUpdates.append(PendingLocationUpdate(
                             assetID: existing.id,
@@ -1963,6 +2550,29 @@ extension DriveSyncEngine {
             }
         }
 
+        // After both Phase 1 and Phase 2 have trashed any deleted remote files, safely clean up
+        // leftover deleted remote folders (deepest-first, strictly only when empty).
+        if !deletedRemoteFoldersToClean.isEmpty {
+            let trashedFolderIDs = try await Self.trashEmptyFoldersDeepestFirst(
+                deletedRemoteFoldersToClean.map(\.id),
+                inventoryFiles: update.current.files,
+                transport: transport
+            )
+            let persistIDs = deletedRemoteFoldersToClean
+                .filter { $0.persistMarker && trashedFolderIDs.contains($0.id) }
+                .map(\.id)
+            if !persistIDs.isEmpty {
+                try? await database.transaction { store in
+                    for folderID in persistIDs {
+                        try store.setState("deleted.folder.drive." + folderID, true)
+                    }
+                }
+            }
+            for folderID in trashedFolderIDs {
+                removedFileIDs.insert(folderID)
+            }
+        }
+
         for (id, gone) in update.previous where update.current.files[id] == nil && !gone.isFolder {
             guard let assetID = linked[id], !pendingMoves.contains(assetID) else { continue }
             try await database.transaction { store in
@@ -2018,15 +2628,37 @@ extension DriveSyncEngine {
             if let existing = job.existing {
                 matching = existing
             } else {
-                let matches = try await database.assets(contentHash: hash.sha256).filter {
+                let sameHashAssets = try await database.assets(contentHash: hash.sha256)
+                let primaryMatches = sameHashAssets.filter {
                     ($0.driveFileID == nil && $0.fileName == filename && $0.folderID == job.folderID)
                         || ($0.driveFileID.map { current.files[$0] == nil } == true)
                 }
-                if matches.count == 1 {
-                    matching = matches.first
+                if primaryMatches.count == 1 {
+                    matching = primaryMatches.first
                 } else {
-                    let exactLocation = matches.filter { $0.fileName == filename && $0.folderID == job.folderID }
-                    matching = exactLocation.count == 1 ? exactLocation.first : nil
+                    let exactLocation = primaryMatches.filter { $0.fileName == filename && $0.folderID == job.folderID }
+                    if exactLocation.count == 1 {
+                        matching = exactLocation.first
+                    } else {
+                        // Also bind unbound local records (e.g., synced via gdirectMount or soft-trashed when a
+                        // folder was deleted) whose fileName or conflict-suffixed name matches, so a fresh install
+                        // never resurrects a soft-trashed asset as a brand-new live copy.
+                        let unbound = sameHashAssets.filter { $0.driveFileID == nil }
+                        let byNameOrConflict = unbound.filter { candidate in
+                            if candidate.fileName.caseInsensitiveCompare(filename) == .orderedSame { return true }
+                            let short = String(candidate.id.uuidString.prefix(8)).lowercased()
+                            let stem = (candidate.fileName as NSString).deletingPathExtension
+                            let candidateExt = (candidate.fileName as NSString).pathExtension
+                            let alt = candidateExt.isEmpty ? "\(stem)-\(short)" : "\(stem)-\(short).\(candidateExt)"
+                            return alt.caseInsensitiveCompare(filename) == .orderedSame
+                        }
+                        if byNameOrConflict.count == 1 {
+                            matching = byNameOrConflict.first
+                        } else {
+                            let unboundTrashed = unbound.filter(\.isTrashed)
+                            matching = unboundTrashed.count == 1 ? unboundTrashed.first : nil
+                        }
+                    }
                 }
             }
             if matching == nil,
@@ -2102,7 +2734,7 @@ extension DriveSyncEngine {
                 result.pinnedOffline = current.pinnedOffline
                 if current.title != matching.title { result.title = current.title }
                 if current.fileName != matching.fileName { result.fileName = current.fileName }
-                if current.folderID != matching.folderID { result.folderID = current.folderID }
+                if current.folderID != matching.folderID || current.isTrashed { result.folderID = current.folderID }
             }
             result.ocrText = result.ocrText ?? analysis.ocrText
             if let temporary {
@@ -2122,7 +2754,7 @@ extension DriveSyncEngine {
     }
 
     private func uploadPhysical(for operations: [SyncOperation], layout: Layout, transport: any DriveTransport,
-                                scope: String) async throws -> (removedFiles: Set<String>, renamedPrefixes: [(old: String, new: String)]) {
+                                scope: String) async throws -> (removedFiles: Set<String>, removedFolders: Set<String>, renamedPrefixes: [(old: String, new: String)]) {
         var changedFolders = Set<UUID>()
         var movedAssets = Set<UUID>()
         var visitedAssets = Set<UUID>()
@@ -2197,7 +2829,21 @@ extension DriveSyncEngine {
                 }
                 continue
             }
-            guard asset.driveFileID == nil || asset.driveFileID?.hasPrefix("mounted-") == true,
+            if movedAssets.contains(id),
+               let remoteID = asset.driveFileID,
+               Self.isRemoteIDCompatible(remoteID, with: transport) {
+                moveJobs.append(MoveJob(
+                    assetID: id,
+                    remoteID: remoteID,
+                    oldParent: nil,
+                    newParent: parent,
+                    newName: asset.fileName
+                ))
+                continue
+            }
+            guard asset.driveFileID == nil
+                    || asset.driveFileID?.hasPrefix("mounted-") == true
+                    || asset.driveFileID?.hasPrefix(ICloudDriveTransport.pathIDPrefix) == true,
                   let url = media.cachedOriginal(for: asset) else { continue }
             pendingUploads.append(PendingUploadAsset(asset: asset, parent: parent, localURL: url))
             parentsToList.insert(parent)
@@ -2208,13 +2854,19 @@ extension DriveSyncEngine {
         // 1. Execute remote renames/moves in bounded parallel
         if !moveJobs.isEmpty {
             let movedResults = try await Self.runBounded(items: moveJobs, maxConcurrent: apiConcurrency) { job -> (UUID, String)? in
-                let moved = try await transport.moveFile(
-                    fileID: job.remoteID,
-                    fromParentID: job.oldParent,
-                    toParentID: job.newParent,
-                    newName: job.newName
-                )
-                return moved.id != job.remoteID ? (job.assetID, moved.id) : nil
+                do {
+                    let moved = try await transport.moveFile(
+                        fileID: job.remoteID,
+                        fromParentID: job.oldParent,
+                        toParentID: job.newParent,
+                        newName: job.newName
+                    )
+                    return moved.id != job.remoteID ? (job.assetID, moved.id) : nil
+                } catch DriveTransportError.fileNotFound {
+                    return nil
+                } catch DriveTransportError.httpError(statusCode: 404, message: _) {
+                    return nil
+                }
             }
             let updatedIDs = movedResults.compactMap { $0 }
             if !updatedIDs.isEmpty {
@@ -2284,7 +2936,7 @@ extension DriveSyncEngine {
                     }
                 }
                 if let candidate, unbound {
-                    try await bindUploadedAsset(asset: asset, uploaded: candidate)
+                    _ = try await bindUploadedAsset(asset: asset, uploaded: candidate, transport: transport)
                     alreadyBoundCount += 1
                     continue
                 }
@@ -2339,8 +2991,10 @@ extension DriveSyncEngine {
 
                     while let (asset, uploaded) = try await group.next() {
                         enqueue(&group)
-                        try await bindUploadedAsset(asset: asset, uploaded: uploaded)
-                        listings[uploaded.parents.first ?? layout.inbox, default: []].append(uploaded)
+                        let deletedInFlight = try await bindUploadedAsset(asset: asset, uploaded: uploaded, transport: transport)
+                        if !deletedInFlight {
+                            listings[uploaded.parents.first ?? layout.inbox, default: []].append(uploaded)
+                        }
                         completed += 1
                         let uploadRatio = 0.62 + 0.19 * (Double(completed) / Double(max(1, totalWork)))
                         updateProgress(
@@ -2353,39 +3007,43 @@ extension DriveSyncEngine {
             }
         }
 
-        let isMountedTransport = transport is MountedVolumeTransport
-        let compatibleRemovedFiles = removedFiles.filter { id in
-            isMountedTransport ? id.hasPrefix("mounted-") : !id.hasPrefix("mounted-")
-        }
+        let compatibleRemovedFiles = removedFiles.filter { Self.isRemoteIDCompatible($0, with: transport) }
         if !compatibleRemovedFiles.isEmpty {
             _ = try await Self.runBounded(items: Array(compatibleRemovedFiles), maxConcurrent: apiConcurrency) { id -> String in
                 try await Self.trashIfPresentStatic(id, transport: transport)
                 return id
             }
         }
-        let compatibleRemovedFolders = removedFolders.filter { id in
-            isMountedTransport ? id.hasPrefix("mounted-") : !id.hasPrefix("mounted-")
-        }
-        for id in compatibleRemovedFolders {
-            do {
-                if try await transport.listFiles(inFolderID: id).isEmpty { try await trashIfPresent(id, transport: transport) }
-            } catch DriveTransportError.fileNotFound { }
-            catch DriveTransportError.httpError(statusCode: 404, message: _) { }
-        }
-        return (compatibleRemovedFiles, renamedPrefixes)
+        let trashedFolders = try await Self.trashEmptyFoldersDeepestFirst(
+            Array(removedFolders),
+            inventoryFiles: effectiveInventoryFiles,
+            transport: transport
+        )
+        return (compatibleRemovedFiles, trashedFolders, renamedPrefixes)
     }
 
-    private func bindUploadedAsset(asset: AssetRecord, uploaded: RemoteDriveFile) async throws {
-        try await database.transaction { store in
+    @discardableResult
+    private func bindUploadedAsset(
+        asset: AssetRecord,
+        uploaded: RemoteDriveFile,
+        transport: any DriveTransport
+    ) async throws -> Bool {
+        let deletedInFlight: Bool = try await database.transaction { store in
             guard var current = try store.asset(id: asset.id) else {
-                // An in-flight deletion must be able to finish trashing the uploaded original.
+                // An in-flight deletion must trash the uploaded original and prevent resurrection.
+                try store.setState("deleted.drive." + uploaded.id, true)
                 try store.record(.deleteAsset(asset.id, driveID: uploaded.id))
-                return
+                return true
             }
             current.driveFileID = uploaded.id
             if current.fileName == asset.fileName { current.fileName = uploaded.name }
             _ = try store.saveAssetLocally(current, projectLocation: false)
+            return false
         }
+        if deletedInFlight, Self.isRemoteIDCompatible(uploaded.id, with: transport) {
+            try? await Self.trashIfPresentStatic(uploaded.id, transport: transport)
+        }
+        return deletedInFlight
     }
 
     private nonisolated static func uploadWithConflictRetry(
@@ -2455,7 +3113,7 @@ extension DriveSyncEngine {
         } else {
             result = try await transport.findOrCreateFolder(named: folder.name, parentID: parent)
         }
-        let isPathBasedTransport = (transport is WebDAVTransport) || (transport is MountedVolumeTransport)
+        let isPathBasedTransport = (transport is WebDAVTransport) || (transport is MountedVolumeTransport) || (transport is ICloudDriveTransport)
         let renamedPrefix: (old: String, new: String)? = isPathBasedTransport ? movedFromKnown.map { ($0, result.id) } : nil
         try await database.transaction { store in
             if var current = try store.folder(id: id), current.driveFolderID != result.id {

@@ -9,6 +9,7 @@ public final class SyncAndAIStore {
 
     public var syncConfig: DriveSyncConfig = DriveSyncConfig()
     public var syncStatus: SyncStatus = SyncStatus()
+    public var iCloudAvailability: ICloudDriveAvailability = ICloudDriveAvailability()
     public var gdirectSnapshot: GDirectEnvironmentSnapshot = GDirectEnvironmentSnapshot()
     public var aiConfig: AIProviderConfig = AIProviderConfig()
     public var aiUsage: CloudAIUsageSummary = CloudAIUsageStore.shared.snapshot()
@@ -156,6 +157,7 @@ public final class SyncAndAIStore {
     public func loadAll() async {
         async let cfg = engine.syncConfig()
         async let status = engine.syncStatus()
+        async let icloud = engine.probeICloudDriveAvailability()
         async let gd = engine.probeGDirectEnvironment()
         async let ai = engine.aiConfig()
         async let stats = engine.cacheStats()
@@ -165,8 +167,8 @@ public final class SyncAndAIStore {
         async let tsCfg = engine.typeSafeConfig()
         async let tsHasKey = engine.hasStoredTypeSafeKey()
 
-        let (sCfg, sStatus, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV, chatGPT, loadedTS, loadedTSKey) = await (
-            cfg, status, gd, ai, stats, oauthConfigured, webdavPwd, gptSession, tsCfg, tsHasKey
+        let (sCfg, sStatus, icloudAvail, gdSnap, aiCfg, cStats, hasOAuth, hasWebDAV, chatGPT, loadedTS, loadedTSKey) = await (
+            cfg, status, icloud, gd, ai, stats, oauthConfigured, webdavPwd, gptSession, tsCfg, tsHasKey
         )
         let loadedAgentCfg = ExternalAgentConfigStore.load()
         let loadedUsage = CloudAIUsageStore.shared.snapshot()
@@ -174,6 +176,7 @@ public final class SyncAndAIStore {
 
         if syncConfig != sCfg { syncConfig = sCfg }
         if syncStatus != sStatus { syncStatus = sStatus }
+        if iCloudAvailability != icloudAvail { iCloudAvailability = icloudAvail }
         if gdirectSnapshot != gdSnap { gdirectSnapshot = gdSnap }
         if aiConfig != aiCfg { aiConfig = aiCfg }
         if typeSafeConfig != loadedTS { typeSafeConfig = loadedTS }
@@ -444,7 +447,7 @@ public final class SyncAndAIStore {
     public func syncQuietlyIfReady() async -> SyncReport? {
         guard !isBusy, !isMigrating, !isSyncingNow, !isQuietSyncInFlight else { return nil }
         let cfg = await engine.syncConfig()
-        guard cfg.mode != .localOnly else { return nil }
+        guard !cfg.enabledCloudBackends.isEmpty else { return nil }
         isQuietSyncInFlight = true
         defer { isQuietSyncInFlight = false }
         let previousStatus = syncStatus
@@ -461,6 +464,126 @@ public final class SyncAndAIStore {
             } else {
                 syncStatus = latest
             }
+            return nil
+        }
+    }
+
+    // MARK: - Multi-Backend & iCloud Drive Management
+
+    @discardableResult
+    public func upsertBackend(
+        _ profile: SyncBackendProfile,
+        webDAVPassword: String? = nil,
+        iCloudBookmarkData: Data? = nil
+    ) async -> Bool {
+        errorMessage = nil
+        do {
+            var next = syncConfig
+            var list = next.resolvedBackends
+            if let idx = list.firstIndex(where: { $0.id == profile.id }) {
+                list[idx] = profile
+            } else {
+                var added = profile
+                if list.isEmpty || (list.count == 1 && list[0].mode == .localOnly && profile.mode.isCloudBacked) {
+                    added.isPrimary = true
+                    for i in list.indices { list[i].isPrimary = false }
+                }
+                list.append(added)
+            }
+            next.backends = list
+            next.synchronizePrimaryFields()
+            if profile.mode == .webDAV, let webDAVPassword, !webDAVPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try await engine.saveBackendWebDAVPassword(webDAVPassword, for: profile.id)
+                hasWebDAVPassword = await engine.hasWebDAVPassword()
+            }
+            if profile.mode == .iCloudDrive, let iCloudBookmarkData {
+                try await engine.saveICloudBookmark(iCloudBookmarkData, displayPath: profile.iCloudCustomFolderPath, for: profile.id)
+            }
+            try await engine.saveSyncConfig(next)
+            syncConfig = await engine.syncConfig()
+            syncStatus = await engine.syncStatus()
+            statusMessage = "已保存同步后端「\(profile.name)」"
+            return true
+        } catch {
+            statusMessage = nil
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    public func removeBackend(id: UUID) async {
+        var next = syncConfig
+        var list = next.resolvedBackends
+        guard list.count > 1 else {
+            errorMessage = "至少需要保留一个存储后端。"
+            return
+        }
+        list.removeAll { $0.id == id }
+        next.backends = list
+        next.synchronizePrimaryFields()
+        await saveSyncConfig(next, quiet: false)
+    }
+
+    public func setBackendEnabled(id: UUID, enabled: Bool) async {
+        var next = syncConfig
+        var list = next.resolvedBackends
+        guard let idx = list.firstIndex(where: { $0.id == id }) else { return }
+        list[idx].isEnabled = enabled
+        next.backends = list
+        next.synchronizePrimaryFields()
+        await saveSyncConfig(next, quiet: true)
+    }
+
+    public func setPrimaryBackend(id: UUID) async {
+        var next = syncConfig
+        var list = next.resolvedBackends
+        guard list.contains(where: { $0.id == id }) else { return }
+        for idx in list.indices {
+            list[idx].isPrimary = (list[idx].id == id)
+            if list[idx].id == id { list[idx].isEnabled = true }
+        }
+        next.backends = list
+        next.synchronizePrimaryFields()
+        await saveSyncConfig(next, quiet: false)
+    }
+
+    @discardableResult
+    public func testBackendConnection(_ profile: SyncBackendProfile, webDAVPassword: String? = nil) async -> Bool {
+        beginBusy()
+        defer { endBusy() }
+        errorMessage = nil
+        do {
+            let info = try await engine.testBackendConnection(profile, webDAVPassword: webDAVPassword)
+            statusMessage = "「\(profile.name)」连接正常：\(info.email)"
+            return true
+        } catch {
+            statusMessage = nil
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    public func syncBackend(id: UUID) async -> SyncReport? {
+        guard !isSyncingNow, !isMigrating else { return nil }
+        isSyncingNow = true
+        beginBusy()
+        defer {
+            isSyncingNow = false
+            endBusy()
+        }
+        errorMessage = nil
+        do {
+            let report = try await engine.syncBackend(id: id)
+            lastSyncReport = report
+            syncStatus = await engine.syncStatus()
+            cacheStats = await engine.cacheStats()
+            statusMessage = "单后端同步完成 · ↑ \(report.uploadedOps) / ↓ \(report.downloadedOps)"
+            return report
+        } catch {
+            statusMessage = nil
+            errorMessage = error.localizedDescription
+            syncStatus = await engine.syncStatus()
             return nil
         }
     }

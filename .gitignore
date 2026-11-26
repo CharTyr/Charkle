@@ -7,6 +7,13 @@ dist/
 *.xcworkspace/
 Resources/GoogleOAuthClient.json
 
+# iOS / iPadOS Client
+ios/build/
+ios/DerivedData/
+ios/**/GoogleOAuthClient*.json
+ios/**/GoogleOAuthClient*.plist
+ios/**/GoogleService-Info.plist
+
 # Windows Client (Tauri v2 + Rust Core + React UI)
 windows/target/
 windows/src-tauri/target/

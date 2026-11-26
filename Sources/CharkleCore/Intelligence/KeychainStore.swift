@@ -3,8 +3,12 @@ import Security
 
 public nonisolated struct KeychainStore: Sendable {
     private let service: String
+    private let accessGroup: String?
 
-    public init(service: String = "com.charkle.app.secrets") { self.service = service }
+    public init(service: String = "com.charkle.app.secrets", accessGroup: String? = nil) {
+        self.service = service
+        self.accessGroup = accessGroup
+    }
 
     public func exists(_ key: String) -> Bool {
         var query = selector(key)
@@ -53,12 +57,25 @@ public nonisolated struct KeychainStore: Sendable {
     }
 
     private func selector(_ key: String) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key]
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key
+        ]
+        if let accessGroup, !accessGroup.isEmpty {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
     }
 
     private func check(_ status: OSStatus) throws {
         guard status == errSecSuccess else {
-            throw LibraryDatabaseError(SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status).")
+            #if os(macOS)
+            let message = SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status)."
+            #else
+            let message = "Keychain error \(status)."
+            #endif
+            throw LibraryDatabaseError(message)
         }
     }
 }

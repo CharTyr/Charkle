@@ -262,6 +262,175 @@ struct DriveSyncTests {
         #expect(assetsA.first { $0.fileName == "external-collab.png" }?.rating == 5)
     }
 
+    @Test("Fresh install never resurrects deleted folders, permanently deleted assets, cross-device out-of-order deletes, or soft-trashed assets")
+    func freshInstallNeverResurrectsDeletedItems() async throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transport = InMemoryDriveTransport()
+        // Force Creator deviceID ("ffff...") > Deleter deviceID ("0000...") to test out-of-order cross-device replay!
+        let creator = try BackendFixture.makeEngine(dir.appending(path: "Creator"), transport: transport)
+        let deleter = try BackendFixture.makeEngine(dir.appending(path: "Deleter"), transport: transport)
+        try await creator.database.setState("deviceID", "ffffffffffffffffffffffffffffffff")
+        try await deleter.database.setState("deviceID", "00000000000000000000000000000000")
+        try await creator.saveSyncConfig(BackendFixture.syncConfig())
+        try await deleter.saveSyncConfig(BackendFixture.syncConfig())
+
+        // 1. Creator creates nested folders Parent/Child, a lingering deleted folder, and 3 distinct assets
+        let parent = try await creator.createFolder(name: "Parent", parentID: nil)
+        let child = try await creator.createFolder(name: "Child", parentID: parent.id)
+        let orphanFolder = try await creator.createFolder(name: "GhostFolder", parentID: nil)
+        let keep = try #require(try await creator.ingest(
+            [.imageData(try BackendFixture.artwork("#2E6F95"), suggestedName: "keep.png", sourceURL: nil)],
+            targetFolderID: nil,
+            targetBoardID: nil
+        ).first)
+        let permDel = try #require(try await creator.ingest(
+            [.imageData(try BackendFixture.artwork("#B84A39"), suggestedName: "perm-del.png", sourceURL: nil)],
+            targetFolderID: child.id,
+            targetBoardID: nil
+        ).first)
+        let softTrash = try #require(try await creator.ingest(
+            [.imageData(try BackendFixture.artwork("#4D7C5B"), suggestedName: "soft-trash.png", sourceURL: nil)],
+            targetFolderID: child.id,
+            targetBoardID: nil
+        ).first)
+        let leftoverAsset = try #require(try await creator.ingest(
+            [.imageData(try BackendFixture.artwork("#9E7740"), suggestedName: "leftover-del.png", sourceURL: nil)],
+            targetFolderID: orphanFolder.id,
+            targetBoardID: nil
+        ).first)
+        _ = try await creator.syncNow()
+
+        // Capture remote IDs for verifying physical cleanup and injecting simulated leftover remote items
+        let leftoverRemoteFileID = try #require(try await creator.fetchAsset(id: leftoverAsset.id)?.driveFileID)
+        let orphanRemoteFolderID = try #require(try await creator.fetchFolders().first { $0.id == orphanFolder.id }?.driveFolderID)
+        let leftoverPayload = try BackendFixture.artwork("#9E7740")
+
+        // 2. Deleter pulls everything, then deletes nested folders (Parent + Child), permanently deletes permDel,
+        //    soft-trashes softTrash (moving it to Inbox), and deletes orphanFolder + leftoverAsset.
+        _ = try await deleter.syncNow()
+        _ = try await deleter.updateAssets(AssetBatchPatch(assetIDs: [softTrash.id], folderAssignment: .inbox, isTrashed: true))
+        try await deleter.permanentlyDeleteAssets(ids: [permDel.id, leftoverAsset.id])
+        try await deleter.deleteFolder(id: child.id)
+        try await deleter.deleteFolder(id: parent.id)
+        try await deleter.deleteFolder(id: orphanFolder.id)
+        _ = try await deleter.syncNow()
+
+        // Verify deepest-first physical deletion removed Parent, Child, and GhostFolder from Drive!
+        let root = try await transport.findOrCreateFolder(named: "Charkle", parentID: "root")
+        let rootChildrenAfterDelete = try await transport.listFiles(inFolderID: root.id)
+        #expect(!rootChildrenAfterDelete.contains(where: { $0.name == "Parent" }))
+        #expect(!rootChildrenAfterDelete.contains(where: { $0.name == "GhostFolder" }))
+
+        // 3. Simulate a legacy/403/network-glitch leftover deleted folder & deleted file STILL sitting on Drive
+        //    (using the exact previously deleted remote IDs, plus a duplicate-content leftover copy in a deleted folder)
+        let ghostDirStillOnDrive = try await transport.findOrCreateFolder(named: "GhostFolder", parentID: root.id)
+        _ = try await transport.uploadData(
+            leftoverPayload,
+            name: "leftover-del.png",
+            mimeType: "image/png",
+            parentID: ghostDirStillOnDrive.id,
+            existingFileID: nil
+        )
+        #expect(!leftoverRemoteFileID.isEmpty)
+        #expect(!orphanRemoteFolderID.isEmpty)
+
+        // 4. Fresh Install (Device C) connects to Drive and syncs!
+        let freshDevice = try BackendFixture.makeEngine(dir.appending(path: "FreshInstall"), transport: transport)
+        try await freshDevice.saveSyncConfig(BackendFixture.syncConfig())
+        let freshReport = try await freshDevice.syncNow()
+
+        // Verify ZERO deleted folders resurrected and ZERO permanently deleted assets resurrected!
+        let freshFolders = try await freshDevice.fetchFolders()
+        #expect(freshFolders.isEmpty)
+
+        let freshLiveAssets = try await freshDevice.fetchAssets(matching: FilterCriteria(includeTrashed: false))
+        #expect(freshLiveAssets.map(\.id) == [keep.id])
+
+        let freshTrashedAssets = try await freshDevice.fetchAssets(matching: FilterCriteria(onlyTrashed: true))
+        #expect(freshTrashedAssets.map(\.id) == [softTrash.id])
+
+        // Verify self-healing cleaned up the leftover file & empty GhostFolder on Drive and pushed zero resurrection ops
+        let rootChildrenAfterFresh = try await transport.listFiles(inFolderID: root.id)
+        #expect(!rootChildrenAfterFresh.contains(where: { $0.name == "GhostFolder" }))
+        #expect(freshReport.discoveredRemoteAssets == 0)
+        #expect(freshReport.uploadedOps == 0)
+
+        // A second sync stays completely steady (idempotent)
+        let secondReport = try await freshDevice.syncNow()
+        #expect(secondReport.discoveredRemoteAssets == 0)
+        #expect(secondReport.uploadedOps == 0)
+    }
+
+    @Test("Fresh install suppresses nil-driveID mounted deletions and keeps unbound soft-trashed assets in Trash")
+    func freshInstallHandlesNilDriveIDDeletionsAndUnboundTrashed() async throws {
+        let dir = try BackendFixture.directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let transport = InMemoryDriveTransport()
+        let root = try await transport.findOrCreateFolder(named: "Charkle", parentID: "root")
+        let inbox = try await transport.findOrCreateFolder(named: "Inbox", parentID: root.id)
+        let staleFolder = try await transport.findOrCreateFolder(named: "MountedDeleted", parentID: root.id)
+
+        // Pre-place two physical files on Drive (as if uploaded earlier via gdirectMount where ops lack Google Drive IDs)
+        let deletedPNG = try BackendFixture.artwork("#AA3344")
+        let trashedPNG = try BackendFixture.artwork("#336699")
+        _ = try await transport.uploadData(deletedPNG, name: "mounted-del.png", mimeType: "image/png", parentID: staleFolder.id, existingFileID: nil)
+        _ = try await transport.uploadData(trashedPNG, name: "mounted-trash.png", mimeType: "image/png", parentID: staleFolder.id, existingFileID: nil)
+
+        // Device A writes ops with driveFileID == nil & driveFolderID == nil (matching gdirectMount behavior),
+        // permanently deletes mounted-del.png, soft-trashes mounted-trash.png (moving to Inbox), and deletes MountedDeleted.
+        let deviceA = try BackendFixture.makeEngine(dir.appending(path: "DeviceA"), transport: transport)
+        try await deviceA.saveSyncConfig(BackendFixture.syncConfig())
+        let folderA = try await deviceA.createFolder(name: "MountedDeleted", parentID: nil)
+        let imported = try await deviceA.ingest(
+            [
+                .imageData(deletedPNG, suggestedName: "mounted-del.png", sourceURL: nil),
+                .imageData(trashedPNG, suggestedName: "mounted-trash.png", sourceURL: nil)
+            ],
+            targetFolderID: folderA.id,
+            targetBoardID: nil
+        )
+        let delAsset = imported[0]
+        let trashAsset = imported[1]
+        _ = try await deviceA.updateAssets(AssetBatchPatch(assetIDs: [trashAsset.id], folderAssignment: .inbox, isTrashed: true))
+        try await deviceA.permanentlyDeleteAssets(ids: [delAsset.id])
+        try await deviceA.deleteFolder(id: folderA.id)
+
+        // Push ONLY the ops shard directly (simulating a mount device whose remote delete didn't run on Drive)
+        let meta = try await transport.findOrCreateFolder(named: ".charkle", parentID: root.id)
+        let opsDir = try await transport.findOrCreateFolder(named: "ops", parentID: meta.id)
+        let devID = try await deviceA.database.deviceID()
+        let pendingOps = try await deviceA.database.pendingOps(as: SyncOperation.self, limit: 500)
+        struct RawLogLine: Encodable { let seq: Int64; let operation: SyncOperation }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var bytes = Data()
+        for (seq, op) in pendingOps {
+            bytes.append(try encoder.encode(RawLogLine(seq: seq, operation: op)))
+            bytes.append(0x0A)
+        }
+        let lastSeq = try #require(pendingOps.last?.0)
+        _ = try await transport.uploadData(bytes, name: "ops-\(devID)-\(lastSeq).jsonl", mimeType: "application/x-ndjson", parentID: opsDir.id, existingFileID: nil)
+        #expect(!inbox.id.isEmpty)
+
+        // Fresh install (Device B) connects via Direct API
+        let deviceB = try BackendFixture.makeEngine(dir.appending(path: "DeviceB"), transport: transport)
+        try await deviceB.saveSyncConfig(BackendFixture.syncConfig())
+        _ = try await deviceB.syncNow()
+
+        // 1. Deleted folder must NOT be resurrected
+        #expect(try await deviceB.fetchFolders().isEmpty)
+        // 2. Permanently deleted asset must NOT be resurrected AND soft-trashed asset must NOT duplicate into live gallery
+        let liveB = try await deviceB.fetchAssets(matching: FilterCriteria(includeTrashed: false))
+        #expect(liveB.isEmpty)
+        let trashedB = try await deviceB.fetchAssets(matching: FilterCriteria(onlyTrashed: true))
+        #expect(trashedB.count == 1)
+        #expect(trashedB.first?.id == trashAsset.id)
+        #expect(trashedB.first?.isTrashed == true)
+    }
+
     private struct Pair {
         let directory: URL
         let a: LiveCharkleEngine

@@ -27,8 +27,9 @@ extension MediaPipeline {
             let pinnedFiles = files.filter { pinned.contains($0.id) }
             let pinnedBytes = pinnedFiles.reduce(Int64(0)) { $0 + $1.bytes }
 
-            // Never evict local originals in .localOnly mode or when cloud recovery is unavailable.
-            let evictionAllowed = evict && canEvictCloudOriginals && syncCfg?.mode != .localOnly && totalSize > budget
+            // Never evict local originals in pure local mode or when cloud recovery is unavailable.
+            let hasCloudBackend = syncCfg.map { !$0.enabledCloudBackends.isEmpty } ?? false
+            let evictionAllowed = evict && canEvictCloudOriginals && hasCloudBackend && totalSize > budget
             var toRemove: [(id: UUID, url: URL, bytes: Int64)] = []
             if evictionAllowed {
                 let recoverable = Set(try store.assetDriveBindings().map { $0.1 })

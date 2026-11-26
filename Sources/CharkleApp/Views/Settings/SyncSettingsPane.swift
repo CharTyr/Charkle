@@ -18,6 +18,9 @@ public struct SyncSettingsPane: View {
     @State private var webDAVDraftUsername: String = ""
     @State private var webDAVDraftRemotePath: String = "/Charkle"
     @State private var webDAVPasswordInput: String = ""
+    @State private var editingBackend: SyncBackendProfile? = nil
+    @State private var isCreatingNewBackend: Bool = false
+    @State private var backendWebDAVPasswordDraft: String = ""
     @FocusState private var isRootFolderFieldFocused: Bool
     @FocusState private var isSharedFolderFieldFocused: Bool
 
@@ -26,21 +29,35 @@ public struct SyncSettingsPane: View {
         self.syncAndAI = syncAndAI
     }
 
+    private var hasGoogleBackend: Bool {
+        draftConfig.resolvedBackends.contains { $0.mode == .directAPIWithGDirect || $0.mode == .gdirectMount }
+    }
+
+    private var hasICloudBackend: Bool {
+        draftConfig.resolvedBackends.contains { $0.mode == .iCloudDrive }
+    }
+
+    private var hasWebDAVBackend: Bool {
+        draftConfig.resolvedBackends.contains { $0.mode == .webDAV }
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if draftConfig.mode == .localOnly {
+            if draftConfig.enabledCloudBackends.isEmpty && draftConfig.resolvedBackends.count <= 1 && draftConfig.mode == .localOnly {
                 localOnboardingSection
             } else {
                 liveSyncStatusSection
+                connectedBackendsSection
 
-                switch draftConfig.mode {
-                case .directAPIWithGDirect, .gdirectMount:
+                if hasGoogleBackend {
                     googleDriveAccountSection
                     googleSharedCollaborationSection
-                case .webDAV:
+                }
+                if hasICloudBackend {
+                    iCloudDriveInfoSection
+                }
+                if hasWebDAVBackend && draftConfig.resolvedBackends.count == 1 {
                     webDAVAccountSection
-                case .localOnly:
-                    EmptyView()
                 }
 
                 syncPreferencesSection
@@ -58,6 +75,9 @@ public struct SyncSettingsPane: View {
         }
         .sheet(isPresented: $showWebDAVConfigSheet) {
             webDAVEditorSheet
+        }
+        .sheet(item: $editingBackend) { profile in
+            backendProfileEditorSheet(initial: profile)
         }
     }
 
@@ -111,6 +131,31 @@ public struct SyncSettingsPane: View {
             SettingsCardDivider()
 
             SettingsRow(
+                title: "iCloud Drive 云同步",
+                subtitle: "免配置 OAuth · 直接通过苹果 iCloud Drive 与 iPhone / iPad / 多台 Mac 自动双向同步"
+            ) {
+                Button("启用 iCloud Drive") {
+                    draftConfig.mode = .iCloudDrive
+                    draftConfig.backends = [
+                        SyncBackendProfile(
+                            id: SyncBackendProfile.legacyPrimaryID,
+                            name: "iCloud Drive",
+                            mode: .iCloudDrive,
+                            isEnabled: true,
+                            isPrimary: true,
+                            iCloudFolderName: draftConfig.iCloudFolderName
+                        )
+                    ]
+                    draftConfig.synchronizePrimaryFields()
+                    persistIfReady()
+                }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+                .fixedSize()
+            }
+
+            SettingsCardDivider()
+
+            SettingsRow(
                 title: "WebDAV 云盘",
                 subtitle: "兼容坚果云、Nextcloud、群晖 NAS、Alist 等任意标准 WebDAV 服务"
             ) {
@@ -120,6 +165,212 @@ public struct SyncSettingsPane: View {
                 .buttonStyle(SettingsSecondaryButtonStyle())
                 .fixedSize()
             }
+        }
+    }
+
+    // MARK: - Multi-Backend Simultaneous Connections Section
+
+    private var connectedBackendsSection: some View {
+        let profiles = draftConfig.resolvedBackends
+        let statusByID = Dictionary(uniqueKeysWithValues: syncAndAI.syncStatus.backendStatuses.map { ($0.backendID, $0) })
+
+        return SettingsSection("已连接的同步后端（支持同时连接多个）") {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(profiles.enumerated()), id: \.element.id) { idx, profile in
+                    if idx > 0 {
+                        SettingsCardDivider()
+                    }
+                    backendRow(profile: profile, status: statusByID[profile.id], totalCount: profiles.count)
+                }
+
+                SettingsCardDivider()
+
+                HStack(spacing: 10) {
+                    Menu {
+                        Button("iCloud Drive", systemImage: "icloud") {
+                            openNewBackendSheet(mode: .iCloudDrive)
+                        }
+                        Button("Google Drive", systemImage: "externaldrive.badge.icloud") {
+                            openNewBackendSheet(mode: .directAPIWithGDirect)
+                        }
+                        Button("WebDAV 云盘", systemImage: "server.rack") {
+                            openNewBackendSheet(mode: .webDAV)
+                        }
+                        Button("本地镜像文件夹", systemImage: "folder") {
+                            openNewBackendSheet(mode: .localOnly)
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 13))
+                            Text("添加同步后端…")
+                                .font(.system(size: 12.5, weight: .semibold))
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+
+                    Spacer()
+
+                    Text("同时启用多个后端时，所有素材、文件夹与情绪板将自动双向镜像到每个后端。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private func backendRow(profile: SyncBackendProfile, status: SyncBackendStatus?, totalCount: Int) -> some View {
+        let isBusy = syncAndAI.isBusy || (status?.isSyncing == true)
+        let dotColor: Color = {
+            if !profile.isEnabled { return .secondary.opacity(0.45) }
+            if let status {
+                if case .error = status.phase { return SettingsPalette.destructiveInk(for: colorScheme) }
+                if status.isSyncing { return SettingsPalette.warningInk(for: colorScheme) }
+                if status.lastSyncedAt != nil { return SettingsPalette.positiveInk(for: colorScheme) }
+            }
+            return .secondary
+        }()
+        let subtitle: String = {
+            if !profile.isEnabled { return "已暂停 · \(profile.locationSummary)" }
+            if let err = status?.lastError, !err.isEmpty { return "异常：\(err)" }
+            if let syncedAt = status?.lastSyncedAt {
+                return "\(profile.locationSummary) · 上次同步 \(SettingsHelpers.relativeTimeText(syncedAt))"
+            }
+            return profile.locationSummary
+        }()
+
+        return HStack(spacing: 11) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(SettingsPalette.subtleFill(for: colorScheme))
+                    .frame(width: 34, height: 34)
+                Image(systemName: backendSymbol(for: profile.mode))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(profile.isEnabled ? .primary : .secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Circle().fill(dotColor).frame(width: 7, height: 7)
+                    Text(profile.name)
+                        .font(.system(size: 13, weight: .semibold))
+                    if profile.isPrimary {
+                        SettingsStatusBadge("主后端", tint: SettingsPalette.positiveInk(for: colorScheme))
+                    } else {
+                        SettingsStatusBadge("并行镜像", tint: .secondary)
+                    }
+                }
+                Text(subtitle)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(status?.lastError != nil ? SettingsPalette.destructiveInk(for: colorScheme) : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            Toggle("", isOn: Binding(
+                get: { profile.isEnabled },
+                set: { enabled in
+                    Task { await syncAndAI.setBackendEnabled(id: profile.id, enabled: enabled) }
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            Button("编辑") {
+                isCreatingNewBackend = false
+                backendWebDAVPasswordDraft = ""
+                editingBackend = profile
+            }
+            .buttonStyle(SettingsSecondaryButtonStyle())
+            .fixedSize()
+
+            Menu {
+                Button("立即同步此后端", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { _ = await syncAndAI.syncBackend(id: profile.id) }
+                }
+                .disabled(!profile.isEnabled || isBusy)
+
+                if !profile.isPrimary {
+                    Button("设为主后端", systemImage: "star") {
+                        Task { await syncAndAI.setPrimaryBackend(id: profile.id) }
+                    }
+                }
+
+                if totalCount > 1 {
+                    Divider()
+                    Button("移除此后端", systemImage: "trash", role: .destructive) {
+                        Task { await syncAndAI.removeBackend(id: profile.id) }
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var iCloudDriveInfoSection: some View {
+        let avail = syncAndAI.iCloudAvailability
+        return SettingsSection("iCloud Drive 状态") {
+            SettingsRow(
+                title: avail.hasAutomaticPath ? "本机 iCloud Drive 已就绪" : "请确认系统已开启 iCloud Drive",
+                subtitle: avail.systemCloudDocsPath.map { "目录：\($0) · 与 iPhone / iPad「文件 → iCloud Drive」完全互通" }
+                    ?? (avail.ubiquityDocumentsPath ?? "请在系统设置 → Apple ID → iCloud 中开启 iCloud 云盘，或在后端编辑中手动指定目录")
+            ) {
+                if let primaryICloud = draftConfig.resolvedBackends.first(where: { $0.mode == .iCloudDrive }) {
+                    Button("测试 iCloud") {
+                        Task { _ = await syncAndAI.testBackendConnection(primaryICloud) }
+                    }
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .fixedSize()
+                    .disabled(syncAndAI.isBusy)
+                }
+            }
+        }
+    }
+
+    private func backendProfileEditorSheet(initial: SyncBackendProfile) -> some View {
+        DesktopBackendEditorSheetView(
+            initial: initial,
+            isNew: isCreatingNewBackend,
+            syncAndAI: syncAndAI,
+            onDismiss: { editingBackend = nil }
+        )
+    }
+
+    private func openNewBackendSheet(mode: DriveTransportMode) {
+        isCreatingNewBackend = true
+        backendWebDAVPasswordDraft = ""
+        let count = draftConfig.resolvedBackends.filter { $0.mode == mode }.count
+        let defaultName = count == 0 ? mode.localizedLabel : "\(mode.localizedLabel) \(count + 1)"
+        editingBackend = SyncBackendProfile(
+            name: defaultName,
+            mode: mode,
+            isEnabled: true,
+            isPrimary: false
+        )
+    }
+
+    private func backendSymbol(for mode: DriveTransportMode) -> String {
+        switch mode {
+        case .iCloudDrive: "icloud"
+        case .directAPIWithGDirect: "externaldrive.badge.icloud"
+        case .gdirectMount: "externaldrive.connected.to.line.below"
+        case .webDAV: "server.rack"
+        case .localOnly: "folder"
         }
     }
 
@@ -764,5 +1015,177 @@ public struct SyncSettingsPane: View {
         }
         if let err = status.lastError, !err.isEmpty { return err }
         return "目标：\(draftConfig.activeStorageLocationSummary)"
+    }
+}
+
+private struct DesktopBackendEditorSheetView: View {
+    let isNew: Bool
+    let syncAndAI: SyncAndAIStore
+    let onDismiss: () -> Void
+
+    @State private var draft: SyncBackendProfile
+    @State private var webDAVPassword: String = ""
+
+    init(initial: SyncBackendProfile, isNew: Bool, syncAndAI: SyncAndAIStore, onDismiss: @escaping () -> Void) {
+        self._draft = State(initialValue: initial)
+        self.isNew = isNew
+        self.syncAndAI = syncAndAI
+        self.onDismiss = onDismiss
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: draft.mode == .iCloudDrive ? "icloud" : "externaldrive.connected.to.line.below")
+                    .font(.system(size: 18))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isNew ? "添加同步后端" : "编辑同步后端")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("所有已启用的后端会在同步时并行镜像文件夹、原图、缩略图与情绪板")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            SettingsSheetFeedbackBanner(syncAndAI: syncAndAI)
+
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("后端名称")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    TextField("例如：iCloud Drive / 家庭 NAS", text: $draft.name)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                if isNew {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("后端类型")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $draft.mode) {
+                            Text("iCloud Drive").tag(DriveTransportMode.iCloudDrive)
+                            Text("Google Drive").tag(DriveTransportMode.directAPIWithGDirect)
+                            Text("WebDAV").tag(DriveTransportMode.webDAV)
+                            Text("本地目录").tag(DriveTransportMode.localOnly)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                    }
+                }
+
+                switch draft.mode {
+                case .iCloudDrive:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("iCloud Drive 文件夹名（自动映射至 iCloud Drive / 目录名）")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        TextField("Charkle", text: $draft.iCloudFolderName)
+                            .textFieldStyle(.roundedBorder)
+
+                        Text("或指定自定义 iCloud Drive 文件夹路径（可选）")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            TextField("留空自动使用系统 iCloud Drive / \(draft.iCloudFolderName.isEmpty ? "Charkle" : draft.iCloudFolderName)", text: $draft.iCloudCustomFolderPath)
+                                .textFieldStyle(.roundedBorder)
+                            Button("选择…") {
+                                let initial = draft.iCloudCustomFolderPath.isEmpty
+                                    ? (ICloudDriveTransport.macOSCloudDocsURL()?.path ?? NSHomeDirectory())
+                                    : draft.iCloudCustomFolderPath
+                                if let picked = SettingsHelpers.pickLocalDirectory(initialPath: initial) {
+                                    draft.iCloudCustomFolderPath = picked
+                                }
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                            .fixedSize()
+                        }
+                    }
+
+                case .directAPIWithGDirect, .gdirectMount:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Google Drive 目录路径")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        TextField("Charkle 或 Design/Charkle", text: $draft.rootFolderName)
+                            .textFieldStyle(.roundedBorder)
+                        Text("共享目录链接 / ID（可选）")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        TextField("https://drive.google.com/drive/folders/…", text: $draft.sharedFolderURLOrID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                case .webDAV:
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("服务器地址（https://dav.jianguoyun.com/dav/）", text: $draft.webDAVServerURL)
+                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 8) {
+                            TextField("用户名", text: $draft.webDAVUsername)
+                                .textFieldStyle(.roundedBorder)
+                            SecureField("密码（留空保持不变）", text: $webDAVPassword)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        TextField("远端路径（/Charkle）", text: $draft.webDAVRemotePath)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                case .localOnly:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("本地镜像文件夹路径")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            TextField("~/Pictures/Charkle", text: $draft.localLibraryPath)
+                                .textFieldStyle(.roundedBorder)
+                            Button("选择…") {
+                                if let picked = SettingsHelpers.pickLocalDirectory(initialPath: draft.localLibraryPath) {
+                                    draft.localLibraryPath = picked
+                                }
+                            }
+                            .buttonStyle(SettingsSecondaryButtonStyle())
+                            .fixedSize()
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Button("取消", action: onDismiss)
+                    .buttonStyle(SettingsSecondaryButtonStyle())
+                    .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("测试连接") {
+                    let candidate = draft
+                    let pwd = webDAVPassword
+                    Task {
+                        _ = await syncAndAI.testBackendConnection(candidate, webDAVPassword: pwd.isEmpty ? nil : pwd)
+                    }
+                }
+                .buttonStyle(SettingsSecondaryButtonStyle())
+                .disabled(syncAndAI.isBusy)
+
+                Button(isNew ? "添加并保存" : "保存修改") {
+                    var finalProfile = draft
+                    if finalProfile.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        finalProfile.name = finalProfile.mode.localizedLabel
+                    }
+                    let pwd = webDAVPassword
+                    Task {
+                        if await syncAndAI.upsertBackend(finalProfile, webDAVPassword: pwd.isEmpty ? nil : pwd) {
+                            onDismiss()
+                        }
+                    }
+                }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(syncAndAI.isBusy)
+            }
+        }
+        .padding(22)
+        .frame(width: 500)
     }
 }

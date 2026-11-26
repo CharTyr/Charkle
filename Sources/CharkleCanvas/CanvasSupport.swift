@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Module metadata for CharkleCanvas.
 public struct CharkleCanvasModuleInfo: Sendable {
-    public static let version = "1.3.0"
+    public static let version = "1.4.0"
 }
 
 /// Canonical pasteboard/drag prefixes so NotchShelfController can distinguish

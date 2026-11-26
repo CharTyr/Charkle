@@ -1,0 +1,571 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000010000000000000001 /* CharkleMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000010000000000000001 /* CharkleMobileApp.swift */; };
+		A10000020000000000000001 /* MobileLibraryContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000020000000000000001 /* MobileLibraryContainer.swift */; };
+		A10000030000000000000001 /* GoogleAuthPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000030000000000000001 /* GoogleAuthPresenter.swift */; };
+		A10000040000000000000001 /* MobileTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000040000000000000001 /* MobileTheme.swift */; };
+		A10000050000000000000001 /* MobileEmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000050000000000000001 /* MobileEmptyStateView.swift */; };
+		A10000060000000000000001 /* MobileThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000060000000000000001 /* MobileThumbnailCache.swift */; };
+		A10000070000000000000001 /* MobileAppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000070000000000000001 /* MobileAppStore.swift */; };
+		A10000080000000000000001 /* RootShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000080000000000000001 /* RootShellView.swift */; };
+		A10000090000000000000001 /* SidebarNavigationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000090000000000000001 /* SidebarNavigationView.swift */; };
+		A100000A0000000000000001 /* MasonryGalleryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000A0000000000000001 /* MasonryGalleryView.swift */; };
+		A100000B0000000000000001 /* FilterBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000B0000000000000001 /* FilterBarView.swift */; };
+		A100000C0000000000000001 /* AssetDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000C0000000000000001 /* AssetDetailView.swift */; };
+		A100000D0000000000000001 /* InboxTriageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000D0000000000000001 /* InboxTriageView.swift */; };
+		A100000E0000000000000001 /* CaptureSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000E0000000000000001 /* CaptureSheetView.swift */; };
+		A100000F0000000000000001 /* GoogleDriveSyncSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000F0000000000000001 /* GoogleDriveSyncSettingsView.swift */; };
+		A10000130000000000000001 /* TabBarSwipeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000130000000000000001 /* TabBarSwipeBridge.swift */; };
+		A10000140000000000000001 /* MoodboardsListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000140000000000000001 /* MoodboardsListView.swift */; };
+		A10000150000000000000001 /* MoodboardStudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000150000000000000001 /* MoodboardStudioView.swift */; };
+		A10000100000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10000100000000000000001 /* Assets.xcassets */; };
+		A10000110000000000000001 /* CharkleCore in Frameworks */ = {isa = PBXBuildFile; productRef = D10000010000000000000001 /* CharkleCore */; };
+		A10000120000000000000001 /* CharkleShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B20000020000000000000001 /* CharkleShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A20000010000000000000001 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000200000000000000001 /* ShareViewController.swift */; };
+		A20000020000000000000001 /* MobileLibraryContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000020000000000000001 /* MobileLibraryContainer.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C10000010000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F00000010000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E20000010000000000000001;
+			remoteInfo = CharkleShareExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C20000010000000000000001 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A10000120000000000000001 /* CharkleShareExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		B10000010000000000000001 /* CharkleMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CharkleMobileApp.swift; sourceTree = "<group>"; };
+		B10000020000000000000001 /* MobileLibraryContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileLibraryContainer.swift; sourceTree = "<group>"; };
+		B10000030000000000000001 /* GoogleAuthPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleAuthPresenter.swift; sourceTree = "<group>"; };
+		B10000040000000000000001 /* MobileTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileTheme.swift; sourceTree = "<group>"; };
+		B10000050000000000000001 /* MobileEmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileEmptyStateView.swift; sourceTree = "<group>"; };
+		B10000060000000000000001 /* MobileThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileThumbnailCache.swift; sourceTree = "<group>"; };
+		B10000070000000000000001 /* MobileAppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppStore.swift; sourceTree = "<group>"; };
+		B10000080000000000000001 /* RootShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootShellView.swift; sourceTree = "<group>"; };
+		B10000090000000000000001 /* SidebarNavigationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarNavigationView.swift; sourceTree = "<group>"; };
+		B100000A0000000000000001 /* MasonryGalleryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MasonryGalleryView.swift; sourceTree = "<group>"; };
+		B100000B0000000000000001 /* FilterBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilterBarView.swift; sourceTree = "<group>"; };
+		B100000C0000000000000001 /* AssetDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssetDetailView.swift; sourceTree = "<group>"; };
+		B100000D0000000000000001 /* InboxTriageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxTriageView.swift; sourceTree = "<group>"; };
+		B100000E0000000000000001 /* CaptureSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSheetView.swift; sourceTree = "<group>"; };
+		B100000F0000000000000001 /* GoogleDriveSyncSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleDriveSyncSettingsView.swift; sourceTree = "<group>"; };
+		B10000130000000000000001 /* TabBarSwipeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabBarSwipeBridge.swift; sourceTree = "<group>"; };
+		B10000140000000000000001 /* MoodboardsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoodboardsListView.swift; sourceTree = "<group>"; };
+		B10000150000000000000001 /* MoodboardStudioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoodboardStudioView.swift; sourceTree = "<group>"; };
+		B10000100000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B10000110000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000120000000000000001 /* CharkleMobile.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CharkleMobile.entitlements; sourceTree = "<group>"; };
+		B10000200000000000000001 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		B10000210000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000220000000000000001 /* CharkleShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CharkleShareExtension.entitlements; sourceTree = "<group>"; };
+		B20000010000000000000001 /* CharkleMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CharkleMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000020000000000000001 /* CharkleShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CharkleShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C30000010000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000110000000000000001 /* CharkleCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C30000020000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		G00000010000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				G10000010000000000000001 /* CharkleMobile */,
+				G20000010000000000000001 /* CharkleShareExtension */,
+				G30000010000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		G10000010000000000000001 /* CharkleMobile */ = {
+			isa = PBXGroup;
+			children = (
+				G10000020000000000000001 /* App */,
+				G10000030000000000000001 /* DesignSystem */,
+				G10000040000000000000001 /* Stores */,
+				G10000050000000000000001 /* Views */,
+				B10000100000000000000001 /* Assets.xcassets */,
+				B10000110000000000000001 /* Info.plist */,
+				B10000120000000000000001 /* CharkleMobile.entitlements */,
+			);
+			path = CharkleMobile;
+			sourceTree = "<group>";
+		};
+		G10000020000000000000001 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				B10000010000000000000001 /* CharkleMobileApp.swift */,
+				B10000020000000000000001 /* MobileLibraryContainer.swift */,
+				B10000030000000000000001 /* GoogleAuthPresenter.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		G10000030000000000000001 /* DesignSystem */ = {
+			isa = PBXGroup;
+			children = (
+				B10000040000000000000001 /* MobileTheme.swift */,
+				B10000050000000000000001 /* MobileEmptyStateView.swift */,
+			);
+			path = DesignSystem;
+			sourceTree = "<group>";
+		};
+		G10000040000000000000001 /* Stores */ = {
+			isa = PBXGroup;
+			children = (
+				B10000060000000000000001 /* MobileThumbnailCache.swift */,
+				B10000070000000000000001 /* MobileAppStore.swift */,
+			);
+			path = Stores;
+			sourceTree = "<group>";
+		};
+		G10000050000000000000001 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B10000080000000000000001 /* RootShellView.swift */,
+				B10000090000000000000001 /* SidebarNavigationView.swift */,
+				B100000A0000000000000001 /* MasonryGalleryView.swift */,
+				B100000B0000000000000001 /* FilterBarView.swift */,
+				B100000C0000000000000001 /* AssetDetailView.swift */,
+				B100000D0000000000000001 /* InboxTriageView.swift */,
+				B100000E0000000000000001 /* CaptureSheetView.swift */,
+				B100000F0000000000000001 /* GoogleDriveSyncSettingsView.swift */,
+				B10000130000000000000001 /* TabBarSwipeBridge.swift */,
+				B10000140000000000000001 /* MoodboardsListView.swift */,
+				B10000150000000000000001 /* MoodboardStudioView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		G20000010000000000000001 /* CharkleShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				B10000200000000000000001 /* ShareViewController.swift */,
+				B10000210000000000000001 /* Info.plist */,
+				B10000220000000000000001 /* CharkleShareExtension.entitlements */,
+			);
+			path = CharkleShareExtension;
+			sourceTree = "<group>";
+		};
+		G30000010000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B20000010000000000000001 /* CharkleMobile.app */,
+				B20000020000000000000001 /* CharkleShareExtension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E10000010000000000000001 /* CharkleMobile */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E10000020000000000000001 /* Build configuration list for PBXNativeTarget "CharkleMobile" */;
+			buildPhases = (
+				C40000010000000000000001 /* Sources */,
+				C30000010000000000000001 /* Frameworks */,
+				C50000010000000000000001 /* Resources */,
+				C20000010000000000000001 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C60000010000000000000001 /* PBXTargetDependency */,
+			);
+			name = CharkleMobile;
+			packageProductDependencies = (
+				D10000010000000000000001 /* CharkleCore */,
+			);
+			productName = CharkleMobile;
+			productReference = B20000010000000000000001 /* CharkleMobile.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E20000010000000000000001 /* CharkleShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E20000020000000000000001 /* Build configuration list for PBXNativeTarget "CharkleShareExtension" */;
+			buildPhases = (
+				C40000020000000000000001 /* Sources */,
+				C30000020000000000000001 /* Frameworks */,
+				C50000020000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CharkleShareExtension;
+			productName = CharkleShareExtension;
+			productReference = B20000020000000000000001 /* CharkleShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F00000010000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					E10000010000000000000001 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+					E20000010000000000000001 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+				};
+			};
+			buildConfigurationList = F00000020000000000000001 /* Build configuration list for PBXProject "CharkleMobile" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				"zh-Hans",
+				Base,
+			);
+			mainGroup = G00000010000000000000001;
+			packageReferences = (
+				D20000010000000000000001 /* XCLocalSwiftPackageReference ".." */,
+			);
+			productRefGroup = G30000010000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E10000010000000000000001 /* CharkleMobile */,
+				E20000010000000000000001 /* CharkleShareExtension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C50000010000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000100000000000000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C50000020000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C40000010000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000010000000000000001 /* CharkleMobileApp.swift in Sources */,
+				A10000020000000000000001 /* MobileLibraryContainer.swift in Sources */,
+				A10000030000000000000001 /* GoogleAuthPresenter.swift in Sources */,
+				A10000040000000000000001 /* MobileTheme.swift in Sources */,
+				A10000050000000000000001 /* MobileEmptyStateView.swift in Sources */,
+				A10000060000000000000001 /* MobileThumbnailCache.swift in Sources */,
+				A10000070000000000000001 /* MobileAppStore.swift in Sources */,
+				A10000080000000000000001 /* RootShellView.swift in Sources */,
+				A10000090000000000000001 /* SidebarNavigationView.swift in Sources */,
+				A100000A0000000000000001 /* MasonryGalleryView.swift in Sources */,
+				A100000B0000000000000001 /* FilterBarView.swift in Sources */,
+				A100000C0000000000000001 /* AssetDetailView.swift in Sources */,
+				A100000D0000000000000001 /* InboxTriageView.swift in Sources */,
+				A100000E0000000000000001 /* CaptureSheetView.swift in Sources */,
+				A100000F0000000000000001 /* GoogleDriveSyncSettingsView.swift in Sources */,
+				A10000130000000000000001 /* TabBarSwipeBridge.swift in Sources */,
+				A10000140000000000000001 /* MoodboardsListView.swift in Sources */,
+				A10000150000000000000001 /* MoodboardStudioView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C40000020000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A20000010000000000000001 /* ShareViewController.swift in Sources */,
+				A20000020000000000000001 /* MobileLibraryContainer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C60000010000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E20000010000000000000001 /* CharkleShareExtension */;
+			targetProxy = C10000010000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		F10000010000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F10000020000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		F20000010000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = CharkleMobile/CharkleMobile.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CharkleMobile/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.4.0;
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-enable-upcoming-feature",
+					NonisolatedNonsendingByDefault,
+					"-enable-upcoming-feature",
+					InferIsolatedConformances,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.charkle.mobile;
+				PRODUCT_NAME = Charkle;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F20000020000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = CharkleMobile/CharkleMobile.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CharkleMobile/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.4.0;
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-enable-upcoming-feature",
+					NonisolatedNonsendingByDefault,
+					"-enable-upcoming-feature",
+					InferIsolatedConformances,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.charkle.mobile;
+				PRODUCT_NAME = Charkle;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		F30000010000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = CharkleShareExtension/CharkleShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CharkleShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.4.0;
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-enable-upcoming-feature",
+					NonisolatedNonsendingByDefault,
+					"-enable-upcoming-feature",
+					InferIsolatedConformances,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.charkle.mobile.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F30000020000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = CharkleShareExtension/CharkleShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 10;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CharkleShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.4.0;
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-enable-upcoming-feature",
+					NonisolatedNonsendingByDefault,
+					"-enable-upcoming-feature",
+					InferIsolatedConformances,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.charkle.mobile.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E10000020000000000000001 /* Build configuration list for PBXNativeTarget "CharkleMobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F20000010000000000000001 /* Debug */,
+				F20000020000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E20000020000000000000001 /* Build configuration list for PBXNativeTarget "CharkleShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F30000010000000000000001 /* Debug */,
+				F30000020000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F00000020000000000000001 /* Build configuration list for PBXProject "CharkleMobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F10000010000000000000001 /* Debug */,
+				F10000020000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D20000010000000000000001 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D10000010000000000000001 /* CharkleCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D20000010000000000000001 /* XCLocalSwiftPackageReference ".." */;
+			productName = CharkleCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = F00000010000000000000001 /* Project object */;
+}

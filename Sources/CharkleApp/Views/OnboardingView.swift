@@ -1586,6 +1586,7 @@ public struct OnboardingView: View {
     private var readyStep: some View {
         let storageSummary: String = switch draftSyncConfig.mode {
         case .localOnly: "纯本地文件夹"
+        case .iCloudDrive: "iCloud Drive"
         case .directAPIWithGDirect, .gdirectMount:
             syncAndAI.syncStatus.account?.email ?? "Google Drive（待登录）"
         case .webDAV:

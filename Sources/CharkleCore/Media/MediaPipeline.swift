@@ -667,8 +667,14 @@ public nonisolated struct MediaPipeline: Sendable {
         camNode.look(at: center)
         scene.rootNode.addChildNode(camNode)
         renderer.pointOfView = camNode
-        let nsImage = renderer.snapshot(atTime: 0, with: CGSize(width: 900, height: 900), antialiasingMode: .multisampling4X)
-        return nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        let snapshot = renderer.snapshot(atTime: 0, with: CGSize(width: 900, height: 900), antialiasingMode: .multisampling4X)
+        #if canImport(AppKit)
+        return snapshot.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        #elseif canImport(UIKit)
+        return snapshot.cgImage
+        #else
+        return nil
+        #endif
     }
 
     private static func audio(_ url: URL) async -> (duration: Double?, peaks: [Float]) {

@@ -3836,8 +3836,13 @@ private struct FloatingSyncStatusPill: View {
         case .idle:
             if syncAndAI.isBusy { return "同步中…" }
             let pendingSuffix = status.pendingOpCount > 0 ? " · 待传 \(status.pendingOpCount)" : ""
+            let enabledCount = syncAndAI.syncConfig.enabledBackends.count
+            if enabledCount > 1 {
+                return "多后端 (\(enabledCount))\(pendingSuffix)"
+            }
             switch syncAndAI.syncConfig.mode {
             case .localOnly: return "本地保存"
+            case .iCloudDrive: return "iCloud Drive\(pendingSuffix)"
             case .directAPIWithGDirect: return "Google Drive\(pendingSuffix)"
             case .webDAV: return "WebDAV\(pendingSuffix)"
             case .gdirectMount: return "Drive 挂载\(pendingSuffix)"

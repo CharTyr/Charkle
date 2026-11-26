@@ -1006,7 +1006,32 @@ public final class LibraryStore {
     public func resolveFinderFileURL(for assetID: UUID) async -> URL? {
         if let asset = allAssetsByID[assetID] {
             let syncCfg = await engine.syncConfig()
-            if syncCfg.mode == .localOnly {
+            if syncCfg.mode == .iCloudDrive {
+                let custom = syncCfg.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                let baseDir: URL? = if !custom.isEmpty {
+                    URL(fileURLWithPath: (custom as NSString).expandingTildeInPath, isDirectory: true)
+                } else if let cloudDocs = ICloudDriveTransport.macOSCloudDocsURL() {
+                    cloudDocs.appending(
+                        path: syncCfg.iCloudFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Charkle" : syncCfg.iCloudFolderName,
+                        directoryHint: .isDirectory
+                    )
+                } else {
+                    nil
+                }
+                if var candidate = baseDir {
+                    if let folderID = asset.folderID {
+                        for crumb in folderBreadcrumbs(for: folderID) {
+                            candidate = candidate.appending(path: crumb.name, directoryHint: .isDirectory)
+                        }
+                    } else {
+                        candidate = candidate.appending(path: "Inbox", directoryHint: .isDirectory)
+                    }
+                    candidate = candidate.appending(path: asset.fileName)
+                    if FileManager.default.fileExists(atPath: candidate.path) {
+                        return candidate
+                    }
+                }
+            } else if syncCfg.mode == .localOnly {
                 let rawRoot = syncCfg.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !rawRoot.isEmpty {
                     var candidate = URL(fileURLWithPath: (rawRoot as NSString).expandingTildeInPath, isDirectory: true)

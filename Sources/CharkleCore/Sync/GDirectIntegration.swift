@@ -12,13 +12,18 @@ public nonisolated enum GDirectIntegration {
     ] + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
 
     public static func detectBinary(named name: String = "gdirect") -> String? {
+        #if os(macOS)
         searchPath.lazy.map { $0 + "/" + name }.first(where: FileManager.default.isExecutableFile(atPath:))
+        #else
+        return nil
+        #endif
     }
 
     /// Checks active mountpoints directly from the macOS kernel mount table (`getfsstat(..., MNT_NOWAIT)`).
     /// Unlike calling `stat()`/`lstat()` on an NFS path, `MNT_NOWAIT` reads kernel memory directly
     /// and never issues a blocking NFS RPC that could trigger macOS's "服务器连接已中断" alert.
     public static func isMountActive(at path: String) -> Bool {
+        #if os(macOS)
         let expanded = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
         let stripped = expanded.hasSuffix("/") && expanded.count > 1 ? String(expanded.dropLast()) : expanded
         let candidates: Set<String> = if stripped.hasPrefix("/private/") {
@@ -45,6 +50,9 @@ public nonisolated enum GDirectIntegration {
             }
         }
         return false
+        #else
+        return false
+        #endif
     }
 
     static func statInfo(_ url: URL, followLinks: Bool = true) -> stat? {
@@ -146,6 +154,7 @@ public nonisolated enum GDirectIntegration {
 
     /// Detects any currently active loopback NFS mount (`localhost:/` or `127.0.0.1:/`) created by `gdirect` / `rclone`.
     public static func activeLoopbackNFSMountPath() -> String? {
+        #if os(macOS)
         let count = getfsstat(nil, 0, MNT_NOWAIT)
         guard count > 0 else { return nil }
         var entries = Array(repeating: statfs(), count: Int(count))
@@ -172,6 +181,9 @@ public nonisolated enum GDirectIntegration {
             }
         }
         return nil
+        #else
+        return nil
+        #endif
     }
 
     @discardableResult
@@ -235,6 +247,7 @@ public nonisolated enum GDirectIntegration {
 
     @concurrent
     static func run(_ executable: String, _ arguments: [String], timeout: Double = 12, input: Data? = nil) async throws -> Output {
+        #if os(macOS)
         let fm = FileManager.default
         let directory = fm.temporaryDirectory.appending(path: "CharkleProcess-" + UUID().uuidString)
         try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -318,5 +331,8 @@ public nonisolated enum GDirectIntegration {
                                                     stderr: error, exitCode: process.terminationStatus)
         }
         return Output(output: try Data(contentsOf: out), stderr: error)
+        #else
+        throw DriveTransportError.gdirectNotFound
+        #endif
     }
 }

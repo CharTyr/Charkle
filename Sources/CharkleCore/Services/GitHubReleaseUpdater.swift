@@ -920,6 +920,7 @@ public struct GitHubReleaseUpdater: Sendable {
 
     // MARK: - Safe DMG Mount, Staging, Info.plist & Strict Codesign Verification
 
+    #if os(macOS)
     /// Verifies SHA-256, mounts the DMG read-only (`-nobrowse`), stages `Charkle.app` via `ditto --norsrc --noextattr`,
     /// strips xattrs, validates `Info.plist` (`CFBundleIdentifier`) and `codesign --verify --deep --strict`,
     /// and guarantees DMG detachment in cleanup. Runs off the caller's actor via `@concurrent`.
@@ -1071,6 +1072,7 @@ public struct GitHubReleaseUpdater: Sendable {
     }
 
     // MARK: - Atomic Self-Update Target Eligibility & Shell-Safe Launcher
+    #endif
 
     /// Verifies whether the currently running bundle can be atomically replaced in place.
     /// Rejects bare `swift run` binaries, read-only `/Volumes/...` DMG mounts, AppTranslocation,
@@ -1188,6 +1190,7 @@ public struct GitHubReleaseUpdater: Sendable {
         """
     }
 
+    #if os(macOS)
     /// Spawns the detached `/bin/sh` helper that waits for the current PID to terminate,
     /// atomically swaps the verified staged `.app` bundle into place, cleans up staging files,
     /// and relaunches the updated app.
@@ -1258,6 +1261,7 @@ public struct GitHubReleaseUpdater: Sendable {
         let text = String(data: outputData, encoding: .utf8) ?? ""
         return ProcessOutput(terminationStatus: process.terminationStatus, output: text)
     }
+    #endif
 }
 
 // MARK: - Thread-Safe URLSessionDownloadDelegate

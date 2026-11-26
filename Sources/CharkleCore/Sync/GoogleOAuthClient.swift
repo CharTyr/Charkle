@@ -50,15 +50,68 @@ public nonisolated struct GoogleOAuthClientConfig: Codable, Equatable, Sendable 
         )
     }
 
-    /// Resolves an app-bundled Google Desktop OAuth client for zero-configuration end-user sign-in:
-    /// 1) `GoogleOAuthClient.json` in `Bundle.main` resources (embedded during release builds), or
-    /// 2) `CharkleGoogleOAuthClientID` (+ optional `CharkleGoogleOAuthClientSecret`) in `Info.plist`.
-    public static func bundledConfig() -> GoogleOAuthClientConfig? {
-        if let url = Bundle.main.url(forResource: "GoogleOAuthClient", withExtension: "json"),
-           let data = try? Data(contentsOf: url),
-           let parsed = try? parseClientSecretJSON(data) {
-            return parsed
+    /// Derives Google's RFC 8252 iOS reversed client ID custom URL scheme
+    /// (e.g. `12345-abc.apps.googleusercontent.com` -> `com.googleusercontent.apps.12345-abc`).
+    public var reversedClientIDScheme: String? {
+        let trimmed = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let suffix = ".apps.googleusercontent.com"
+        if trimmed.lowercased().hasSuffix(suffix) {
+            let prefix = String(trimmed.dropLast(suffix.count))
+            guard !prefix.isEmpty else { return nil }
+            return "com.googleusercontent.apps.\(prefix)"
         }
+        let segments = trimmed.split(separator: ".")
+        guard segments.count >= 2 else { return nil }
+        return segments.reversed().joined(separator: ".")
+    }
+
+    /// Parses either Google Cloud Console JSON (`client_secret_*.json`) or iOS Property List
+    /// (`client_secret_*.plist` / `GoogleService-Info.plist` containing `CLIENT_ID`).
+    public static func parseClientSecretData(_ data: Data) throws -> GoogleOAuthClientConfig {
+        if let json = try? parseClientSecretJSON(data) {
+            return json
+        }
+        if let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+           let clientID = (plist["CLIENT_ID"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !clientID.isEmpty {
+            return GoogleOAuthClientConfig(clientID: clientID, clientSecret: "")
+        }
+        return try parseClientSecretJSON(data)
+    }
+
+    /// Resolves an app-bundled Google OAuth client for zero-configuration end-user sign-in:
+    /// 1) Platform-specific or shared bundled `GoogleOAuthClient` JSON/plist resource, or
+    /// 2) `CharkleGoogleOAuthIOSClientID` / `CharkleGoogleOAuthClientID` in `Info.plist`.
+    public static func bundledConfig() -> GoogleOAuthClientConfig? {
+        #if os(iOS)
+        let resourceCandidates: [(name: String, ext: String)] = [
+            ("GoogleOAuthClient-iOS", "plist"),
+            ("GoogleOAuthClient-iOS", "json"),
+            ("GoogleService-Info", "plist"),
+            ("GoogleOAuthClient", "plist"),
+            ("GoogleOAuthClient", "json")
+        ]
+        #else
+        let resourceCandidates: [(name: String, ext: String)] = [
+            ("GoogleOAuthClient", "json")
+        ]
+        #endif
+        for candidate in resourceCandidates {
+            if let url = Bundle.main.url(forResource: candidate.name, withExtension: candidate.ext),
+               let data = try? Data(contentsOf: url),
+               let parsed = try? parseClientSecretData(data) {
+                return parsed
+            }
+        }
+        #if os(iOS)
+        if let iosClientID = Bundle.main.object(forInfoDictionaryKey: "CharkleGoogleOAuthIOSClientID") as? String {
+            let trimmedID = iosClientID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedID.isEmpty {
+                return GoogleOAuthClientConfig(clientID: trimmedID, clientSecret: "")
+            }
+        }
+        #endif
         if let clientID = Bundle.main.object(forInfoDictionaryKey: "CharkleGoogleOAuthClientID") as? String {
             let trimmedID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedID.isEmpty {
@@ -107,7 +160,12 @@ public actor GoogleOAuthClient {
     public func importClientSecret(from url: URL) throws {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let config = try GoogleOAuthClientConfig.parseClientSecretJSON(Data(contentsOf: url))
+        let config = try GoogleOAuthClientConfig.parseClientSecretData(Data(contentsOf: url))
+        try saveClientConfig(config)
+    }
+
+    public func importClientSecretData(_ data: Data) throws {
+        let config = try GoogleOAuthClientConfig.parseClientSecretData(data)
         try saveClientConfig(config)
     }
 
@@ -314,6 +372,81 @@ public actor GoogleOAuthClient {
 
         let token = try await exchangeAuthorizationCode(
             code: callback.code,
+            codeVerifier: codeVerifier,
+            redirectURI: redirectURI,
+            config: config
+        )
+        sessionGeneration &+= 1
+        inFlightRefresh?.cancel()
+        inFlightRefresh = nil
+        try saveToken(token)
+        return token
+    }
+
+    /// RFC 8252 native mobile (iOS / iPadOS) PKCE OAuth 2.0 flow using Google's reversed client ID
+    /// custom URL scheme (`com.googleusercontent.apps.<id>:/oauth2redirect`) with `ASWebAuthenticationSession`.
+    public func authorizeWithCustomRedirect(
+        config: GoogleOAuthClientConfig,
+        fullDriveScope: Bool = true,
+        presentAuthSession: @Sendable (URL, String) async throws -> URL
+    ) async throws -> GoogleOAuthToken {
+        guard !config.clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DriveTransportError.notConfigured("请先填写 Google iOS OAuth Client ID 或导入 Google Cloud iOS 凭据文件。")
+        }
+        guard let callbackScheme = config.reversedClientIDScheme else {
+            throw DriveTransportError.invalidResponse("无法从 Google Client ID 解析回调 Scheme，请确认填写的是完整的 *.apps.googleusercontent.com。")
+        }
+
+        let codeVerifier = Self.generateCodeVerifier()
+        let codeChallenge = Self.codeChallengeS256(for: codeVerifier)
+        let state = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let redirectURI = "\(callbackScheme):/oauth2redirect"
+
+        let scope = fullDriveScope
+            ? "https://www.googleapis.com/auth/drive"
+            : "https://www.googleapis.com/auth/drive.file"
+
+        guard var components = URLComponents(string: config.authURI),
+              components.scheme == "https", components.host == "accounts.google.com",
+              components.user == nil, components.password == nil else {
+            throw DriveTransportError.invalidResponse("Invalid Google authorization endpoint.")
+        }
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: config.clientID),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: scope),
+            URLQueryItem(name: "code_challenge", value: codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "access_type", value: "offline"),
+            URLQueryItem(name: "prompt", value: "consent"),
+            URLQueryItem(name: "state", value: state)
+        ]
+
+        guard let authURL = components.url else {
+            throw DriveTransportError.invalidResponse("无法构建 OAuth 授权链接")
+        }
+
+        let callbackURL = try await presentAuthSession(authURL, callbackScheme)
+        guard let callbackComponents = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
+            throw DriveTransportError.authenticationRequired("未收到有效的 Google 授权回调。")
+        }
+        let items = callbackComponents.queryItems ?? []
+        if let oauthError = items.first(where: { $0.name == "error" })?.value {
+            let message = oauthError == "access_denied"
+                ? "已取消 Google 账号授权。"
+                : "Google 授权失败（\(oauthError)）。"
+            throw DriveTransportError.authenticationRequired(message)
+        }
+        guard items.first(where: { $0.name == "state" })?.value == state else {
+            throw DriveTransportError.authenticationRequired("OAuth State 校验不匹配，请重试。")
+        }
+        guard let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty else {
+            throw DriveTransportError.authenticationRequired("未收到 Google 授权码，请重试。")
+        }
+
+        let token = try await exchangeAuthorizationCode(
+            code: code,
             codeVerifier: codeVerifier,
             redirectURI: redirectURI,
             config: config

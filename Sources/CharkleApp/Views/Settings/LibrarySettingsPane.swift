@@ -281,11 +281,15 @@ public struct LibrarySettingsPane: View {
     }
 
     private func storageHeadline(for config: DriveSyncConfig) -> String {
+        if config.enabledBackends.count > 1 {
+            return "多后端同时同步（\(config.enabledBackends.count) 个）"
+        }
         switch config.mode {
-        case .localOnly: "纯本地文件夹"
-        case .directAPIWithGDirect: "Google Drive 云端直连"
-        case .gdirectMount: "Google Drive（gdirect 本地挂载）"
-        case .webDAV: "WebDAV 云盘"
+        case .localOnly: return "纯本地文件夹"
+        case .iCloudDrive: return "iCloud Drive 云同步"
+        case .directAPIWithGDirect: return "Google Drive 云端直连"
+        case .gdirectMount: return "Google Drive（gdirect 本地挂载）"
+        case .webDAV: return "WebDAV 云盘"
         }
     }
 
@@ -349,8 +353,9 @@ public struct LibrarySettingsPane: View {
                     .foregroundStyle(.secondary)
                 Picker("", selection: targetModeBinding) {
                     Text("Google Drive").tag(DriveTransportMode.directAPIWithGDirect)
-                    Text("WebDAV 云盘").tag(DriveTransportMode.webDAV)
-                    Text("纯本地文件夹").tag(DriveTransportMode.localOnly)
+                    Text("iCloud Drive").tag(DriveTransportMode.iCloudDrive)
+                    Text("WebDAV").tag(DriveTransportMode.webDAV)
+                    Text("纯本地").tag(DriveTransportMode.localOnly)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
@@ -358,6 +363,18 @@ public struct LibrarySettingsPane: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 switch draftTargetConfig.mode {
+                case .iCloudDrive:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("iCloud Drive 目录名称（默认保存在 iCloud Drive / Charkle）")
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        TextField("Charkle", text: $draftTargetConfig.iCloudFolderName)
+                            .textFieldStyle(.roundedBorder)
+                        Text("与 iPhone / iPad 版 Charkle 共享同一份 iCloud Drive 文件夹，支持在「云同步」中同时叠加 Google Drive / WebDAV 多后端。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
                 case .directAPIWithGDirect, .gdirectMount:
                     VStack(alignment: .leading, spacing: 4) {
                         Text("目标 Google Drive 路径")
@@ -494,6 +511,9 @@ public struct LibrarySettingsPane: View {
         switch draftTargetConfig.mode {
         case .localOnly:
             return !draftTargetConfig.localLibraryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .iCloudDrive:
+            return !draftTargetConfig.iCloudFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !draftTargetConfig.iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .webDAV:
             return !draftTargetConfig.webDAVServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .directAPIWithGDirect, .gdirectMount:

@@ -2,6 +2,7 @@ import Foundation
 
 public enum DriveTransportMode: String, Codable, CaseIterable, Hashable, Sendable {
     case directAPIWithGDirect
+    case iCloudDrive
     case webDAV
     case gdirectMount
     case localOnly
@@ -9,10 +10,242 @@ public enum DriveTransportMode: String, Codable, CaseIterable, Hashable, Sendabl
     public var localizedLabel: String {
         switch self {
         case .directAPIWithGDirect: "Google Drive"
+        case .iCloudDrive: "iCloud Drive"
         case .webDAV: "WebDAV 云盘"
         case .gdirectMount: "gdirect 本地挂载"
         case .localOnly: "纯本地文件夹"
         }
+    }
+
+    public var isCloudBacked: Bool {
+        self != .localOnly
+    }
+}
+
+public struct ICloudDriveAvailability: Codable, Hashable, Sendable {
+    public var isUbiquityContainerAvailable: Bool
+    public var ubiquityDocumentsPath: String?
+    public var systemCloudDocsPath: String?
+    public var defaultDisplayLocation: String
+
+    public var hasAutomaticPath: Bool {
+        ubiquityDocumentsPath != nil || systemCloudDocsPath != nil
+    }
+
+    public init(
+        isUbiquityContainerAvailable: Bool = false,
+        ubiquityDocumentsPath: String? = nil,
+        systemCloudDocsPath: String? = nil,
+        defaultDisplayLocation: String = "iCloud Drive / Charkle"
+    ) {
+        self.isUbiquityContainerAvailable = isUbiquityContainerAvailable
+        self.ubiquityDocumentsPath = ubiquityDocumentsPath
+        self.systemCloudDocsPath = systemCloudDocsPath
+        self.defaultDisplayLocation = defaultDisplayLocation
+    }
+}
+
+/// Independent sync backend profile enabling simultaneous multi-backend sync
+/// (e.g. Google Drive + iCloud Drive + WebDAV connected at the same time).
+public struct SyncBackendProfile: Codable, Hashable, Identifiable, Sendable {
+    public static let legacyPrimaryID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+    public var id: UUID
+    public var name: String
+    public var mode: DriveTransportMode
+    public var isEnabled: Bool
+    public var isPrimary: Bool
+
+    // Google Drive / gdirect
+    public var rootFolderName: String
+    public var sharedFolderURLOrID: String
+    public var mountPath: String
+    public var selectedGDirectAccount: String?
+    public var useGDirectIPAcceleration: Bool
+
+    // iCloud Drive
+    public var iCloudFolderName: String
+    public var iCloudCustomFolderPath: String
+    public var iCloudContainerIdentifier: String
+
+    // WebDAV
+    public var webDAVServerURL: String
+    public var webDAVUsername: String
+    public var webDAVRemotePath: String
+
+    // Local Folder
+    public var localLibraryPath: String
+
+    public init(
+        id: UUID = UUID(),
+        name: String? = nil,
+        mode: DriveTransportMode = .directAPIWithGDirect,
+        isEnabled: Bool = true,
+        isPrimary: Bool = false,
+        rootFolderName: String = "Charkle",
+        sharedFolderURLOrID: String = "",
+        mountPath: String = NSHomeDirectory() + "/GoogleDrive",
+        selectedGDirectAccount: String? = nil,
+        useGDirectIPAcceleration: Bool = true,
+        iCloudFolderName: String = "Charkle",
+        iCloudCustomFolderPath: String = "",
+        iCloudContainerIdentifier: String = "",
+        webDAVServerURL: String = "",
+        webDAVUsername: String = "",
+        webDAVRemotePath: String = "/Charkle",
+        localLibraryPath: String = DriveSyncConfig.defaultLocalLibraryPath
+    ) {
+        self.id = id
+        self.name = (name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? name!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : mode.localizedLabel
+        self.mode = mode
+        self.isEnabled = isEnabled
+        self.isPrimary = isPrimary
+        self.rootFolderName = rootFolderName
+        self.sharedFolderURLOrID = sharedFolderURLOrID
+        self.mountPath = mountPath
+        self.selectedGDirectAccount = selectedGDirectAccount
+        self.useGDirectIPAcceleration = useGDirectIPAcceleration
+        self.iCloudFolderName = iCloudFolderName
+        self.iCloudCustomFolderPath = iCloudCustomFolderPath
+        self.iCloudContainerIdentifier = iCloudContainerIdentifier
+        self.webDAVServerURL = webDAVServerURL
+        self.webDAVUsername = webDAVUsername
+        self.webDAVRemotePath = webDAVRemotePath
+        self.localLibraryPath = localLibraryPath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, mode, isEnabled, isPrimary
+        case rootFolderName, sharedFolderURLOrID, mountPath, selectedGDirectAccount, useGDirectIPAcceleration
+        case iCloudFolderName, iCloudCustomFolderPath, iCloudContainerIdentifier
+        case webDAVServerURL, webDAVUsername, webDAVRemotePath, localLibraryPath
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        mode = try c.decodeIfPresent(DriveTransportMode.self, forKey: .mode) ?? .directAPIWithGDirect
+        let decodedName = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        name = decodedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? mode.localizedLabel : decodedName
+        isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        isPrimary = try c.decodeIfPresent(Bool.self, forKey: .isPrimary) ?? false
+        rootFolderName = try c.decodeIfPresent(String.self, forKey: .rootFolderName) ?? "Charkle"
+        sharedFolderURLOrID = try c.decodeIfPresent(String.self, forKey: .sharedFolderURLOrID) ?? ""
+        mountPath = try c.decodeIfPresent(String.self, forKey: .mountPath) ?? (NSHomeDirectory() + "/GoogleDrive")
+        selectedGDirectAccount = try c.decodeIfPresent(String.self, forKey: .selectedGDirectAccount)
+        useGDirectIPAcceleration = try c.decodeIfPresent(Bool.self, forKey: .useGDirectIPAcceleration) ?? true
+        iCloudFolderName = try c.decodeIfPresent(String.self, forKey: .iCloudFolderName) ?? "Charkle"
+        iCloudCustomFolderPath = try c.decodeIfPresent(String.self, forKey: .iCloudCustomFolderPath) ?? ""
+        iCloudContainerIdentifier = try c.decodeIfPresent(String.self, forKey: .iCloudContainerIdentifier) ?? ""
+        webDAVServerURL = try c.decodeIfPresent(String.self, forKey: .webDAVServerURL) ?? ""
+        webDAVUsername = try c.decodeIfPresent(String.self, forKey: .webDAVUsername) ?? ""
+        webDAVRemotePath = try c.decodeIfPresent(String.self, forKey: .webDAVRemotePath) ?? "/Charkle"
+        localLibraryPath = try c.decodeIfPresent(String.self, forKey: .localLibraryPath) ?? DriveSyncConfig.defaultLocalLibraryPath
+    }
+
+    public nonisolated var resolvedSharedFolderID: String? {
+        DriveSyncConfig.extractGoogleDriveFolderID(from: sharedFolderURLOrID)
+    }
+
+    public var locationSummary: String {
+        switch mode {
+        case .directAPIWithGDirect:
+            if let sharedID = resolvedSharedFolderID {
+                return "Google Drive 共享目录 (\(String(sharedID.prefix(10)))…)"
+            }
+            let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "Google Drive / \(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .iCloudDrive:
+            let custom = iCloudCustomFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !custom.isEmpty {
+                return "iCloud Drive / \(URL(fileURLWithPath: custom).lastPathComponent)"
+            }
+            let cleaned = iCloudFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "iCloud Drive / \(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .webDAV:
+            let host = URL(string: webDAVServerURL)?.host() ?? webDAVServerURL
+            let cleaned = webDAVRemotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "WebDAV (\(host.isEmpty ? "未配置" : host)) / \(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .gdirectMount:
+            let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            return "\(mountPath)/\(cleaned.isEmpty ? "Charkle" : cleaned)"
+        case .localOnly:
+            return localLibraryPath
+        }
+    }
+
+    public func toSingleBackendConfig(inheriting base: DriveSyncConfig) -> DriveSyncConfig {
+        DriveSyncConfig(
+            mode: mode,
+            rootFolderName: rootFolderName,
+            sharedFolderURLOrID: sharedFolderURLOrID,
+            mountPath: mountPath,
+            selectedGDirectAccount: selectedGDirectAccount,
+            useGDirectIPAcceleration: useGDirectIPAcceleration,
+            iCloudFolderName: iCloudFolderName,
+            iCloudCustomFolderPath: iCloudCustomFolderPath,
+            webDAVServerURL: webDAVServerURL,
+            webDAVUsername: webDAVUsername,
+            webDAVRemotePath: webDAVRemotePath,
+            localLibraryPath: localLibraryPath,
+            autoSyncIntervalSeconds: base.autoSyncIntervalSeconds,
+            syncThumbnails: base.syncThumbnails,
+            syncEmbeddings: base.syncEmbeddings,
+            backends: []
+        )
+    }
+}
+
+public struct SyncBackendStatus: Codable, Hashable, Identifiable, Sendable {
+    public var id: UUID { backendID }
+    public var backendID: UUID
+    public var name: String
+    public var mode: DriveTransportMode
+    public var isEnabled: Bool
+    public var isPrimary: Bool
+    public var phase: SyncPhase
+    public var lastSyncedAt: Date?
+    public var lastError: String?
+    public var account: DriveAccountInfo?
+    public var currentDetail: String?
+    public var progressFraction: Double?
+    public var locationSummary: String
+
+    public var isSyncing: Bool {
+        switch phase {
+        case .scanning, .uploading, .downloading, .merging: true
+        case .idle, .error: false
+        }
+    }
+
+    public init(
+        backendID: UUID,
+        name: String,
+        mode: DriveTransportMode,
+        isEnabled: Bool = true,
+        isPrimary: Bool = false,
+        phase: SyncPhase = .idle,
+        lastSyncedAt: Date? = nil,
+        lastError: String? = nil,
+        account: DriveAccountInfo? = nil,
+        currentDetail: String? = nil,
+        progressFraction: Double? = nil,
+        locationSummary: String = ""
+    ) {
+        self.backendID = backendID
+        self.name = name
+        self.mode = mode
+        self.isEnabled = isEnabled
+        self.isPrimary = isPrimary
+        self.phase = phase
+        self.lastSyncedAt = lastSyncedAt
+        self.lastError = lastError
+        self.account = account
+        self.currentDetail = currentDetail
+        self.progressFraction = progressFraction
+        self.locationSummary = locationSummary
     }
 }
 
@@ -101,6 +334,10 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
     public var mountPath: String
     public var selectedGDirectAccount: String?
     public var useGDirectIPAcceleration: Bool
+    /// iCloud Drive folder path inside the ubiquity Documents or macOS CloudDocs container (default `"Charkle"`).
+    public var iCloudFolderName: String
+    /// Optional user-selected iCloud Drive folder path (paired with a persisted security-scoped bookmark).
+    public var iCloudCustomFolderPath: String
     /// WebDAV server endpoint (e.g. `https://dav.jianguoyun.com/dav/` or `https://nas.example.com:5006`).
     public var webDAVServerURL: String
     public var webDAVUsername: String
@@ -111,6 +348,20 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
     public var autoSyncIntervalSeconds: Int
     public var syncThumbnails: Bool
     public var syncEmbeddings: Bool
+    /// Optional simultaneous multi-backend sync profiles. When empty, a single legacy primary profile is derived
+    /// from the top-level fields for full backwards compatibility.
+    public var backends: [SyncBackendProfile]
+
+    public nonisolated static var defaultLocalLibraryPath: String {
+        #if os(iOS)
+        if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            return docs.appending(path: "Charkle", directoryHint: .isDirectory).path
+        }
+        return NSHomeDirectory() + "/Documents/Charkle"
+        #else
+        return NSHomeDirectory() + "/Pictures/Charkle"
+        #endif
+    }
 
     public init(
         mode: DriveTransportMode = .directAPIWithGDirect,
@@ -119,13 +370,16 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         mountPath: String = NSHomeDirectory() + "/GoogleDrive",
         selectedGDirectAccount: String? = nil,
         useGDirectIPAcceleration: Bool = true,
+        iCloudFolderName: String = "Charkle",
+        iCloudCustomFolderPath: String = "",
         webDAVServerURL: String = "",
         webDAVUsername: String = "",
         webDAVRemotePath: String = "/Charkle",
-        localLibraryPath: String = NSHomeDirectory() + "/Pictures/Charkle",
+        localLibraryPath: String = DriveSyncConfig.defaultLocalLibraryPath,
         autoSyncIntervalSeconds: Int = 120,
         syncThumbnails: Bool = true,
-        syncEmbeddings: Bool = true
+        syncEmbeddings: Bool = true,
+        backends: [SyncBackendProfile] = []
     ) {
         self.mode = mode
         self.rootFolderName = rootFolderName
@@ -133,6 +387,8 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         self.mountPath = mountPath
         self.selectedGDirectAccount = selectedGDirectAccount
         self.useGDirectIPAcceleration = useGDirectIPAcceleration
+        self.iCloudFolderName = iCloudFolderName
+        self.iCloudCustomFolderPath = iCloudCustomFolderPath
         self.webDAVServerURL = webDAVServerURL
         self.webDAVUsername = webDAVUsername
         self.webDAVRemotePath = webDAVRemotePath
@@ -140,12 +396,14 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         self.autoSyncIntervalSeconds = autoSyncIntervalSeconds
         self.syncThumbnails = syncThumbnails
         self.syncEmbeddings = syncEmbeddings
+        self.backends = backends
     }
 
     private enum CodingKeys: String, CodingKey {
         case mode, rootFolderName, sharedFolderURLOrID, mountPath, selectedGDirectAccount, useGDirectIPAcceleration
+        case iCloudFolderName, iCloudCustomFolderPath
         case webDAVServerURL, webDAVUsername, webDAVRemotePath, localLibraryPath
-        case autoSyncIntervalSeconds, syncThumbnails, syncEmbeddings
+        case autoSyncIntervalSeconds, syncThumbnails, syncEmbeddings, backends
     }
 
     public init(from decoder: any Decoder) throws {
@@ -156,13 +414,16 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         mountPath = try c.decodeIfPresent(String.self, forKey: .mountPath) ?? (NSHomeDirectory() + "/GoogleDrive")
         selectedGDirectAccount = try c.decodeIfPresent(String.self, forKey: .selectedGDirectAccount)
         useGDirectIPAcceleration = try c.decodeIfPresent(Bool.self, forKey: .useGDirectIPAcceleration) ?? true
+        iCloudFolderName = try c.decodeIfPresent(String.self, forKey: .iCloudFolderName) ?? "Charkle"
+        iCloudCustomFolderPath = try c.decodeIfPresent(String.self, forKey: .iCloudCustomFolderPath) ?? ""
         webDAVServerURL = try c.decodeIfPresent(String.self, forKey: .webDAVServerURL) ?? ""
         webDAVUsername = try c.decodeIfPresent(String.self, forKey: .webDAVUsername) ?? ""
         webDAVRemotePath = try c.decodeIfPresent(String.self, forKey: .webDAVRemotePath) ?? "/Charkle"
-        localLibraryPath = try c.decodeIfPresent(String.self, forKey: .localLibraryPath) ?? (NSHomeDirectory() + "/Pictures/Charkle")
+        localLibraryPath = try c.decodeIfPresent(String.self, forKey: .localLibraryPath) ?? DriveSyncConfig.defaultLocalLibraryPath
         autoSyncIntervalSeconds = try c.decodeIfPresent(Int.self, forKey: .autoSyncIntervalSeconds) ?? 120
         syncThumbnails = try c.decodeIfPresent(Bool.self, forKey: .syncThumbnails) ?? true
         syncEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .syncEmbeddings) ?? true
+        backends = try c.decodeIfPresent([SyncBackendProfile].self, forKey: .backends) ?? []
     }
 
     /// Parses a Google Drive folder URL (`.../folders/<id>`, `...open?id=<id>`) or raw folder ID.
@@ -200,26 +461,86 @@ public struct DriveSyncConfig: Codable, Hashable, Sendable {
         Self.extractGoogleDriveFolderID(from: sharedFolderURLOrID)
     }
 
-    /// Clean human-readable target path summary for the currently active storage backend.
-    public var activeStorageLocationSummary: String {
-        switch mode {
-        case .directAPIWithGDirect:
-            if let sharedID = resolvedSharedFolderID {
-                let shortID = String(sharedID.prefix(10))
-                return "Google Drive 共享目录 (\(shortID)…)"
+    /// Synthesizes a normalized list of backend profiles, keeping legacy single-backend configs 100% seamless.
+    public var resolvedBackends: [SyncBackendProfile] {
+        if !backends.isEmpty {
+            if backends.contains(where: \.isPrimary) {
+                return backends
             }
-            let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-            return "Google Drive / \(cleaned.isEmpty ? "Charkle" : cleaned)"
-        case .webDAV:
-            let host = URL(string: webDAVServerURL)?.host() ?? webDAVServerURL
-            let cleaned = webDAVRemotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-            return "WebDAV (\(host.isEmpty ? "未配置" : host)) / \(cleaned.isEmpty ? "Charkle" : cleaned)"
-        case .gdirectMount:
-            let cleaned = rootFolderName.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
-            return "\(mountPath)/\(cleaned.isEmpty ? "Charkle" : cleaned)"
-        case .localOnly:
-            return localLibraryPath
+            var copy = backends
+            copy[0].isPrimary = true
+            return copy
         }
+        return [
+            SyncBackendProfile(
+                id: SyncBackendProfile.legacyPrimaryID,
+                name: mode.localizedLabel,
+                mode: mode,
+                isEnabled: true,
+                isPrimary: true,
+                rootFolderName: rootFolderName,
+                sharedFolderURLOrID: sharedFolderURLOrID,
+                mountPath: mountPath,
+                selectedGDirectAccount: selectedGDirectAccount,
+                useGDirectIPAcceleration: useGDirectIPAcceleration,
+                iCloudFolderName: iCloudFolderName,
+                iCloudCustomFolderPath: iCloudCustomFolderPath,
+                webDAVServerURL: webDAVServerURL,
+                webDAVUsername: webDAVUsername,
+                webDAVRemotePath: webDAVRemotePath,
+                localLibraryPath: localLibraryPath
+            )
+        ]
+    }
+
+    public var enabledBackends: [SyncBackendProfile] {
+        resolvedBackends.filter(\.isEnabled)
+    }
+
+    public var enabledCloudBackends: [SyncBackendProfile] {
+        enabledBackends.filter { $0.mode.isCloudBacked }
+    }
+
+    public var primaryBackend: SyncBackendProfile {
+        resolvedBackends.first(where: \.isPrimary) ?? resolvedBackends[0]
+    }
+
+    /// Mirrors the primary backend inside `backends` back to top-level fields so legacy readers remain consistent.
+    public mutating func synchronizePrimaryFields() {
+        guard !backends.isEmpty else { return }
+        let primaryIndex = backends.firstIndex(where: { $0.isPrimary && $0.isEnabled })
+            ?? backends.firstIndex(where: \.isPrimary)
+            ?? backends.firstIndex(where: \.isEnabled)
+            ?? 0
+        for idx in backends.indices {
+            backends[idx].isPrimary = (idx == primaryIndex)
+        }
+        let primary = backends[primaryIndex]
+        mode = primary.mode
+        rootFolderName = primary.rootFolderName
+        sharedFolderURLOrID = primary.sharedFolderURLOrID
+        mountPath = primary.mountPath
+        selectedGDirectAccount = primary.selectedGDirectAccount
+        useGDirectIPAcceleration = primary.useGDirectIPAcceleration
+        iCloudFolderName = primary.iCloudFolderName
+        iCloudCustomFolderPath = primary.iCloudCustomFolderPath
+        webDAVServerURL = primary.webDAVServerURL
+        webDAVUsername = primary.webDAVUsername
+        webDAVRemotePath = primary.webDAVRemotePath
+        localLibraryPath = primary.localLibraryPath
+    }
+
+    /// Clean human-readable target path summary for the currently active storage backend(s).
+    public var activeStorageLocationSummary: String {
+        let active = enabledBackends
+        if active.count > 1 {
+            let names = active.map(\.name).joined(separator: " + ")
+            return "\(names)（\(active.count) 个同步后端）"
+        }
+        if let single = active.first {
+            return single.locationSummary
+        }
+        return "未启用同步后端"
     }
 }
 
@@ -274,13 +595,15 @@ public struct SyncStatus: Codable, Hashable, Sendable {
     public var currentDetail: String?
     /// Normalized overall progress in `0.0...1.0` while syncing (`nil` when idle or indeterminate).
     public var progressFraction: Double?
+    /// Per-backend live statuses when one or more simultaneous sync backends are configured.
+    public var backendStatuses: [SyncBackendStatus]
 
     public var isSyncing: Bool {
         switch phase {
         case .scanning, .uploading, .downloading, .merging:
             return true
         case .idle, .error:
-            return false
+            return backendStatuses.contains(where: \.isSyncing)
         }
     }
 
@@ -309,7 +632,8 @@ public struct SyncStatus: Codable, Hashable, Sendable {
         activeMode: DriveTransportMode = .localOnly,
         lastError: String? = nil,
         currentDetail: String? = nil,
-        progressFraction: Double? = nil
+        progressFraction: Double? = nil,
+        backendStatuses: [SyncBackendStatus] = []
     ) {
         self.phase = phase
         self.lastSyncedAt = lastSyncedAt
@@ -319,10 +643,11 @@ public struct SyncStatus: Codable, Hashable, Sendable {
         self.lastError = lastError
         self.currentDetail = currentDetail
         self.progressFraction = progressFraction
+        self.backendStatuses = backendStatuses
     }
 
     private enum CodingKeys: String, CodingKey {
-        case phase, lastSyncedAt, pendingOpCount, account, activeMode, lastError, currentDetail, progressFraction
+        case phase, lastSyncedAt, pendingOpCount, account, activeMode, lastError, currentDetail, progressFraction, backendStatuses
     }
 
     public init(from decoder: any Decoder) throws {
@@ -335,6 +660,7 @@ public struct SyncStatus: Codable, Hashable, Sendable {
         lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
         currentDetail = try c.decodeIfPresent(String.self, forKey: .currentDetail)
         progressFraction = try c.decodeIfPresent(Double.self, forKey: .progressFraction)
+        backendStatuses = try c.decodeIfPresent([SyncBackendStatus].self, forKey: .backendStatuses) ?? []
     }
 }
 

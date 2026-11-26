@@ -828,10 +828,15 @@ private struct CharkleMenuBarContentView: View {
     let runtime: CharkleRuntime
 
     private var menuBarSyncLabel: String {
+        let enabled = runtime.syncAndAI.syncConfig.enabledBackends
+        if enabled.count > 1 {
+            return "立即同步全部后端（\(enabled.count)）"
+        }
         switch runtime.syncAndAI.syncConfig.mode {
-        case .localOnly: "立即扫描本地素材库"
-        case .webDAV: "立即同步 WebDAV"
-        case .directAPIWithGDirect, .gdirectMount: "立即同步 Google Drive"
+        case .localOnly: return "立即扫描本地素材库"
+        case .iCloudDrive: return "立即同步 iCloud Drive"
+        case .webDAV: return "立即同步 WebDAV"
+        case .directAPIWithGDirect, .gdirectMount: return "立即同步 Google Drive"
         }
     }
 

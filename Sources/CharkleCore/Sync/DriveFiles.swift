@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import UniformTypeIdentifiers
 
 nonisolated enum DriveFiles {
     static let rootID = "root"
@@ -10,6 +11,25 @@ nonisolated enum DriveFiles {
               !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw DriveTransportError.invalidResponse("Invalid Drive file name.")
         }
+    }
+
+    static func sanitizedFileName(_ raw: String) -> String {
+        let cleaned = raw
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty || cleaned == "." || cleaned == ".." {
+            return "Untitled"
+        }
+        return cleaned
+    }
+
+    static func mimeType(for url: URL) -> String {
+        let ext = url.pathExtension
+        if !ext.isEmpty, let mime = UTType(filenameExtension: ext)?.preferredMIMEType {
+            return mime
+        }
+        return "application/octet-stream"
     }
 
     static func stableUUID(_ key: String) -> UUID {

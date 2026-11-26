@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "Charkle",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v15),
+        .iOS(.v18)
     ],
     products: [
         .library(
@@ -55,7 +56,7 @@ let package = Package(
             dependencies: [
                 "CharkleCore",
                 "CharkleCanvas",
-                .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
+                .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts", condition: .when(platforms: [.macOS])),
                 .product(name: "Textual", package: "textual")
             ],
             path: "Sources/CharkleApp",
